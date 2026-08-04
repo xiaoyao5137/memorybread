@@ -35,7 +35,7 @@ except ImportError:  # 测试环境或独立调用时守卫不可用不阻断主
 
 logger = logging.getLogger(__name__)
 
-MIN_MACOS_MAJOR_FOR_OLLAMA = 14
+MIN_MACOS_MAJOR_FOR_OLLAMA = 12  # DMG 内嵌 Ollama 支持 macOS 12+
 OLLAMA_API_BASE = "http://localhost:11434"
 OLLAMA_MACOS_DOWNLOAD_URL = "https://ollama.com/download/mac"
 MODEL_ID_ALIASES = {
@@ -180,6 +180,20 @@ class ModelManager:
                 reverse=True,
             )
             for candidate in managed_candidates:
+                if candidate.is_file() and os.access(candidate, os.X_OK):
+                    return str(candidate)
+
+        # 检查 DMG 打包版本的内嵌 Ollama
+        dmg_managed_root = Path.home() / "Library" / "Application Support" / "com.memory-bread.app" / "runtime" / ".memory-bread" / "initialization" / "runtime" / "ollama"
+        if dmg_managed_root.exists():
+            dmg_candidates = sorted(
+                [
+                    *dmg_managed_root.glob("v*/runtime/bin/ollama"),
+                    *dmg_managed_root.glob("v*/runtime/ollama"),
+                ],
+                reverse=True,
+            )
+            for candidate in dmg_candidates:
                 if candidate.is_file() and os.access(candidate, os.X_OK):
                     return str(candidate)
 

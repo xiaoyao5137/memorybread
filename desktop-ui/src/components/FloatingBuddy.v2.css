@@ -436,77 +436,78 @@
 }
 
 @media (prefers-color-scheme: dark) {
+  /* 保持浅色背景，不跟随系统深色模式 */
   .floating-buddy-v2 {
-    background: rgba(28, 28, 30, 0.94);
-    border-right-color: rgba(255, 255, 255, 0.08);
-    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.28);
+    background: rgba(255, 255, 255, 0.95);
+    border-right-color: rgba(0, 0, 0, 0.08);
+    box-shadow: 4px 0 16px rgba(15, 23, 42, 0.06);
   }
 
   .buddy-sidebar-title {
-    color: #F3F4F6;
+    color: #111827;
   }
 
   .buddy-sidebar-subtitle {
-    color: #9CA3AF;
-  }
-
-  .buddy-menu-group__label {
     color: #6B7280;
   }
 
+  .buddy-menu-group__label {
+    color: #9CA3AF;
+  }
+
   .buddy-action-btn {
-    color: #f6d6a8;
+    color: #5f4633;
   }
 
   .buddy-action-btn:hover {
-    background: rgba(244, 193, 119, 0.12);
-    color: #ffe4b6;
+    background: rgba(255, 255, 255, 0.76);
+    color: #4a2f1e;
   }
 
   .buddy-action-btn--active {
-    background: linear-gradient(180deg, rgba(98, 65, 31, 0.76), rgba(67, 46, 27, 0.82));
-    color: #ffe4b6;
-    box-shadow: inset 0 0 0 1px rgba(244, 193, 119, 0.18);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(255, 246, 232, 0.72));
+    color: #4a2f1e;
+    box-shadow: inset 0 0 0 1px rgba(124, 78, 37, 0.13), 0 8px 18px rgba(84, 48, 20, 0.06);
   }
 
   .buddy-action-btn__icon .bread-icon {
-    --bread-icon-fill: rgba(255, 255, 255, 0.08);
-    --bread-icon-inner: rgba(255, 255, 255, 0.12);
-    --bread-icon-glass-edge: rgba(244, 193, 119, 0.22);
-    --bread-icon-glass-highlight: rgba(255, 255, 255, 0.18);
-    --bread-icon-line: #f6d6a8;
-    --bread-icon-accent: #d98c38;
+    --bread-icon-fill: rgba(255, 255, 255, 0.68);
+    --bread-icon-inner: rgba(255, 255, 255, 0.42);
+    --bread-icon-glass-edge: rgba(124, 78, 37, 0.18);
+    --bread-icon-glass-highlight: rgba(255, 255, 255, 0.72);
+    --bread-icon-line: #5e3c24;
+    --bread-icon-accent: #b46f2a;
   }
 
   .buddy-sidebar-footer {
-    border-top-color: rgba(255, 255, 255, 0.08);
-    background: rgba(20, 20, 21, 0.42);
+    border-top-color: rgba(78, 48, 27, 0.1);
+    background: rgba(255, 255, 255, 0.58);
   }
 
   .buddy-account-entry {
-    color: #F6D6A8;
+    color: #4b3524;
   }
 
   .buddy-account-entry__avatar {
-    background: #C07A35;
-    color: #1F1308;
+    background: #a66a32;
+    color: #fffaf4;
   }
 
   .buddy-account-entry__identity span {
-    color: #F4C177;
+    color: #7a6b5e;
   }
 
   .buddy-account-entry__identity strong {
-    color: #FFF7E8;
+    color: #3a2414;
   }
 
   .buddy-account-entry__chevron {
-    color: #F4C177;
+    color: #9a6a31;
   }
 
   .buddy-account-entry:hover,
   .buddy-account-entry--active {
-    background: rgba(244, 193, 119, 0.11);
+    background: rgba(180, 111, 42, 0.1);
   }
 
   .buddy-update-entry {
