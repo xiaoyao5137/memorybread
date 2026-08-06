@@ -280,6 +280,10 @@ static MIGRATIONS: &[(&str, &str)] = &[
         "067_integration_skill_runs",
         include_str!("migrations/067_integration_skill_runs.sql"),
     ),
+    (
+        "070_requeue_bake_output_failures",
+        include_str!("migrations/070_requeue_bake_output_failures.sql"),
+    ),
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -188,6 +188,36 @@ def test_extract_json_object_accepts_python_like_dict():
 
 
 
+def test_extract_json_object_repairs_stray_ascii_quote_in_cjk_text():
+    # 本地模型在中文语境里会把引用闭引号写成半角，导致 json.loads 误判字符串提前结束。
+    raw = (
+        '```json\n'
+        '{\n'
+        '  "knowledge": {\n'
+        '    "accepted": true,\n'
+        '    "reason": "指标“速度: 0 bytes/s”且“进度显示0/0"通常表示任务处于暂停阶段。",\n'
+        '    "payload": {"summary": "ok"}\n'
+        '  }\n'
+        '}\n'
+        '```'
+    )
+
+    parsed = _extract_json_object(raw)
+
+    assert parsed is not None
+    assert parsed["knowledge"]["accepted"] is True
+    assert "进度显示0/0" in parsed["knowledge"]["reason"]
+
+
+def test_extract_json_object_repair_keeps_valid_json_unchanged():
+    raw = '{"a": "带\\"转义引号\\"和中文的值", "b": ["x", "y"]}'
+
+    parsed = _extract_json_object(raw)
+
+    assert parsed == {"a": '带"转义引号"和中文的值', "b": ["x", "y"]}
+
+
+
 def test_extract_ollama_response_text_falls_back_to_response_field():
     response = {"response": {"text": '{"accepted": false, "reason": "rejected", "payload": null}'}}
 

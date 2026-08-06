@@ -221,7 +221,10 @@ fn load_pipeline_backlog_metrics(
                 COALESCE(SUM(failure_count >= ?1), 0),
                 COALESCE(SUM(
                     failure_count >= ?1
-                    AND last_error LIKE 'upstream error (504%'
+                    AND (
+                        last_error LIKE 'upstream error (504%'
+                        OR last_error LIKE '%code=INFERENCE_TIMEOUT%'
+                    )
                 ), 0),
                 COALESCE(SUM(
                     failure_count >= ?1
@@ -233,6 +236,7 @@ fn load_pipeline_backlog_metrics(
                 COALESCE(SUM(
                     failure_count >= ?1
                     AND last_error NOT LIKE 'upstream error (504%'
+                    AND last_error NOT LIKE '%code=INFERENCE_TIMEOUT%'
                     AND last_error NOT LIKE '%BAKE_OUTPUT_TRUNCATED%'
                     AND last_error NOT LIKE '%truncated_json%'
                 ), 0)
@@ -1070,29 +1074,56 @@ pub async fn monitor_overview(
             rusqlite::params![from_ms],
             |r| r.get(0),
         ).unwrap_or(0);
+        // 口径见 doc/监控指标口径说明.md：可处理 captures = 非敏感且至少有一种
+        // 可处理文本（ocr_text / ax_text）。早期版本误引用不存在的 is_noise /
+        // vector_status 列导致查询报错被 unwrap_or(0) 吞掉，指标恒为 0。
+        const ELIGIBLE_CAPTURE_PREDICATE: &str =
+            "ts >= ?1 AND is_sensitive = 0 AND (COALESCE(ocr_text, '') != '' OR COALESCE(ax_text, '') != '')";
         let eligible_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM captures WHERE ts >= ?1 AND (is_noise IS NULL OR is_noise = 0)",
+            &format!("SELECT COUNT(*) FROM captures WHERE {}", ELIGIBLE_CAPTURE_PREDICATE),
             rusqlite::params![from_ms],
             |r| r.get(0),
         ).unwrap_or(0);
         let vectorized_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM captures WHERE ts >= ?1 AND vector_status = 'done'",
+            &format!(
+                "SELECT COUNT(DISTINCT captures.id)
+                 FROM captures
+                 JOIN vector_index ON vector_index.capture_id = captures.id
+                 WHERE {}",
+                ELIGIBLE_CAPTURE_PREDICATE
+            ),
             rusqlite::params![from_ms],
             |r| r.get(0),
         ).unwrap_or(0);
+        // 知识化率：可处理 captures 归属到的知识条目（timeline）数量。
         let knowledge_generated_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM captures WHERE ts >= ?1 AND timeline_id IS NOT NULL",
+            &format!(
+                "SELECT COUNT(DISTINCT captures.timeline_id)
+                 FROM captures
+                 WHERE {} AND captures.timeline_id IS NOT NULL",
+                ELIGIBLE_CAPTURE_PREDICATE
+            ),
             rusqlite::params![from_ms],
             |r| r.get(0),
         ).unwrap_or(0);
-        let knowledge_linked_count = knowledge_generated_count;
+        // 知识挂载率：已成功回填 timeline_id 的可处理 capture 数量。
+        let knowledge_linked_count: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM captures WHERE {} AND timeline_id IS NOT NULL",
+                ELIGIBLE_CAPTURE_PREDICATE
+            ),
+            rusqlite::params![from_ms],
+            |r| r.get(0),
+        ).unwrap_or(0);
         let vectorization_rate = if eligible_count > 0 {
-            vectorized_count as f64 / eligible_count as f64
+            (vectorized_count as f64 / eligible_count as f64).min(1.0)
         } else { 0.0 };
         let knowledge_generation_rate = if eligible_count > 0 {
-            knowledge_generated_count as f64 / eligible_count as f64
+            (knowledge_generated_count as f64 / eligible_count as f64).min(1.0)
         } else { 0.0 };
-        let knowledge_rate = knowledge_generation_rate;
+        let knowledge_rate = if eligible_count > 0 {
+            (knowledge_linked_count as f64 / eligible_count as f64).min(1.0)
+        } else { 0.0 };
 
         let mut by_hour_stmt = conn.prepare(
             "SELECT CAST(strftime('%H', datetime(ts/1000, 'unixepoch', 'localtime')) AS INTEGER), COUNT(*)
@@ -1135,12 +1166,12 @@ pub async fn monitor_overview(
             .collect();
 
         let knowledge_today_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM timelines WHERE created_at >= datetime(?1/1000, 'unixepoch') AND summary NOT LIKE ?2",
+            "SELECT COUNT(*) FROM timelines WHERE created_at >= datetime(?1/1000, 'unixepoch') AND summary NOT LIKE ?2 AND COALESCE(is_self_generated, 0) = 0",
             rusqlite::params![today_start, fallback_noise_pattern.as_str()],
             |r| r.get(0),
         ).unwrap_or(0);
         let knowledge_period_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM timelines WHERE created_at >= datetime(?1/1000, 'unixepoch') AND summary NOT LIKE ?2",
+            "SELECT COUNT(*) FROM timelines WHERE created_at >= datetime(?1/1000, 'unixepoch') AND summary NOT LIKE ?2 AND COALESCE(is_self_generated, 0) = 0",
             rusqlite::params![from_ms, fallback_noise_pattern.as_str()],
             |r| r.get(0),
         ).unwrap_or(0);
@@ -1152,6 +1183,7 @@ pub async fn monitor_overview(
              FROM timelines
              WHERE created_at >= datetime(?2/1000, 'unixepoch')
                AND summary NOT LIKE ?3
+               AND COALESCE(is_self_generated, 0) = 0
              GROUP BY bucket ORDER BY bucket"
         )?;
         let knowledge_by_time = knowledge_by_time_stmt
@@ -1172,6 +1204,7 @@ pub async fn monitor_overview(
              FROM timelines
              WHERE created_at >= datetime(?1/1000, 'unixepoch')
                AND summary NOT LIKE ?2
+               AND COALESCE(is_self_generated, 0) = 0
              ORDER BY created_at DESC LIMIT 10"
         )?;
         let knowledge_recent = recent_knowledge_stmt

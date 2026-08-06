@@ -11,7 +11,7 @@ import re
 import time
 import urllib.request
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, List, Callable, Tuple
 from datetime import datetime
 import numpy as np
 
@@ -22,7 +22,9 @@ logger = logging.getLogger(__name__)
 # completion 撑满整个上下文窗口。
 BAKE_CONTEXT_WINDOW_TOKENS = 32768
 BAKE_NUM_PREDICT = 8192
-BAKE_RETRY_NUM_PREDICT = 4096
+# 紧凑重试虽然会压缩输入，但候选本身需要长输出的场景（截断重试）不应再
+# 被更低的输出上限二次截断；32768 上下文仍可容纳 18k 输入 + 8192 输出。
+BAKE_RETRY_NUM_PREDICT = 8192
 BAKE_PROMPT_SAFETY_TOKENS = 1024
 BAKE_INPUT_TOKEN_BUDGET = (
     BAKE_CONTEXT_WINDOW_TOKENS - BAKE_NUM_PREDICT - BAKE_PROMPT_SAFETY_TOKENS
@@ -93,6 +95,34 @@ _DOCUMENT_IDENTITY_GENERIC_TERMS = frozenset(
 # RAG 查询优先锁:model_api_server 在 RAG 调用期间持有此文件锁。
 # 时间线提炼在调 LLM 前非阻塞 acquire；拿不到则跳过本轮，让 RAG 优先完成。
 _RAG_LOCK_FILE = "/tmp/memory-bread-rag.lock"
+
+# 相似度去重的增长上限：与 background_processor 的 _TIMELINE_MAX_* 保持一致。
+# 已膨胀到上限的时间线不再作为合并候选，从源头避免宽泛主题时间线成为"垃圾桶"。
+# 上限需宽松：短时高频采集（同一 2 小时内上百条）是正常时间线，真正的异常
+# 特征是"跨天合并"，由跨度上限兜底。
+_SIMILAR_MERGE_MAX_OCCURRENCE = 200
+_SIMILAR_MERGE_MAX_MEMBER_COUNT = 500
+_SIMILAR_MERGE_MAX_SPAN_HOURS = 24.0
+# 实体重叠加分上限：堵住"实体加分把低相似度候选推过阈值"的漏洞。
+_SIMILAR_ENTITY_BONUS_MAX = 0.03
+# 相似度去重的基础阈值（作用于未含实体加分的基础余弦相似度）。
+# 历史上使用 0.72，曾导致两个措辞相近但主题不同的任务
+# （"排查 MemoryBread ID1230 低价值数据" vs "排查时间线 2148 + 创作润色死循环"，
+# 余弦相似度约 0.76）被误合并，把 21 条与主题无关的采集记录并入同一条时间线
+# （timeline 2713 脏数据）。阈值提高到 0.80，并叠加实体一致性门，避免
+# "同一项目里的不同任务"仅凭 overview 措辞相似就被并成一条时间线。
+_SIMILAR_MERGE_THRESHOLD = 0.80
+# 基础相似度达到该值时视为近乎重复的同一事件，可直接合并，不再要求实体交集。
+_SIMILAR_MERGE_NEAR_DUP_THRESHOLD = 0.86
+
+# 确定性丢弃标记：LLM 已明确判定片段无价值或提炼质量不足时返回该结构。
+# 调用方据此把 captures 标记为已消费，避免同一批低价值采集被无限重提炼；
+# 抢占/RAG 活跃/JSON 解析失败等临时性失败仍返回 None，保留重试机会。
+_DISCARDED_KEY = '_discarded'
+
+
+def discarded_knowledge(reason: str) -> Dict[str, Any]:
+    return {_DISCARDED_KEY: True, 'discard_reason': reason}
 
 
 class BakeOutputError(RuntimeError):
@@ -184,6 +214,84 @@ def _rag_is_active() -> bool:
         return True   # 拿不到锁 → RAG 正在占用 Ollama
 
 
+_JSON_STRING_CLOSERS = set(':,}] \t\r\n')
+
+
+def _repair_stray_double_quotes(text: str) -> str:
+    """修复 JSON 字符串值内部未转义的游离半角引号。
+
+    本地模型在中文语境中常生成“…内容0/0"这类开引号为全角、闭引号为
+    半角的引用文本，半角引号会被 json.loads 误判为字符串结束，导致整段
+    输出解析失败。此处按“真正的字符串闭引号后面必然跟 JSON 结构字符”
+    的启发式，把字符串内部后接正文内容的引号转义掉。
+    """
+    out: List[str] = []
+    in_string = False
+    escape = False
+    length = len(text)
+    for idx, ch in enumerate(text):
+        if in_string:
+            if escape:
+                out.append(ch)
+                escape = False
+                continue
+            if ch == '\\':
+                out.append(ch)
+                escape = True
+                continue
+            if ch == '"':
+                nxt = idx + 1
+                while nxt < length and text[nxt] in ' \t\r\n':
+                    nxt += 1
+                if nxt >= length or text[nxt] in _JSON_STRING_CLOSERS:
+                    in_string = False
+                    out.append(ch)
+                else:
+                    out.append('\\"')
+                continue
+            out.append(ch)
+            continue
+        if ch == '"':
+            in_string = True
+        out.append(ch)
+    return ''.join(out)
+
+
+def _escape_newlines_inside_json_strings(text: str) -> str:
+    """修复 LLM 在 JSON 字符串值内输出字面换行的非法 JSON。
+
+    逐字符扫描区分字符串内外，仅将字符串内的原始换行/回车/制表符
+    转义为 \\n/\\r/\\t；字符串外的格式换行保留不动。
+    """
+    out: List[str] = []
+    in_string = False
+    escape = False
+    for ch in text:
+        if in_string:
+            if escape:
+                out.append(ch)
+                escape = False
+            elif ch == '\\':
+                out.append(ch)
+                escape = True
+            elif ch == '"':
+                in_string = False
+                out.append(ch)
+            elif ch == '\n':
+                out.append('\\n')
+            elif ch == '\r':
+                out.append('\\r')
+            elif ch == '\t':
+                out.append('\\t')
+            else:
+                out.append(ch)
+        else:
+            if ch == '"':
+                in_string = True
+            out.append(ch)
+    return ''.join(out)
+
+
 def _try_parse_json_like_object(text: str) -> Optional[Dict[str, Any]]:
     if not text:
         return None
@@ -194,15 +302,22 @@ def _try_parse_json_like_object(text: str) -> Optional[Dict[str, Any]]:
 
     normalized = (
         candidate
-        .replace(""", '"')
-        .replace(""", '"')
-        .replace("'", "'")
-        .replace("'", "'")
+        .replace("“", '"')
+        .replace("”", '"')
+        .replace("‘", "'")
+        .replace("’", "'")
     )
 
     variants = [candidate]
     if normalized != candidate:
         variants.append(normalized)
+    for variant in list(variants):
+        repaired = _repair_stray_double_quotes(variant)
+        if repaired != variant:
+            variants.append(repaired)
+        newline_fixed = _escape_newlines_inside_json_strings(variant)
+        if newline_fixed != variant:
+            variants.append(newline_fixed)
 
     for variant in variants:
         for parser in (json.loads, ast.literal_eval):
@@ -381,6 +496,132 @@ def _sanitize_capture_text(raw_text: str) -> str:
     if cleaned:
         return '\n'.join(cleaned)
     return _normalize_inline_text(raw_text)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 密度感知截断（修复 timeline 2008 类丢失）
+#
+# 旧逻辑每块固定 [:800]、总量尾部硬切，导致 IM 侧边栏噪声占满配额、
+# 靠后的汇报正文被裁掉。新策略：
+# 1. 按行/句段密度给块分配配额：密集正文块 3000，噪声块 800；
+# 2. 总量超限时优先丢弃明确 UI 壳层行与连续短字孤立行；
+# 3. 仍超限时从密度最低的块开始压缩，密集正文块最后才被截。
+# 判定全部是确定性字符串统计，在 LLM 调用前完成，不增加推理负担；
+# 判定不确定时偏向不切（宁可多送噪声，不可丢正文）。
+# ─────────────────────────────────────────────────────────────────────────
+MERGE_BLOCK_QUOTA_DENSE = 3000
+MERGE_BLOCK_QUOTA_DEFAULT = 800
+MERGE_COMPRESSED_QUOTA_LOW = 250
+MERGE_TOTAL_MAX_CHARS = 6000
+MERGE_BLOCK_SEPARATOR = "\n\n---\n\n"
+
+UI_SHELL_SHORT_LINES = {
+    '消息', '话题', '发送', '换行', '搜索', '设置', '收藏', '通讯录', '工作台',
+    '联系人', '日历', '待办', '默认', '重要', '文件', '编辑', '视图', '帮助',
+    '插入', '分享', '正文', '目录',
+}
+
+_SHORT_NOISE_LINE_MAX_CHARS = 5
+_SHORT_NOISE_RUN_MIN = 5
+_SHORT_LINE_KEEP_RE = re.compile(r'[%％¥￥]|\d\.\d|\+\d')
+
+
+def _strip_pressure_noise_lines(text: str) -> str:
+    """超长压力下剔除明确 UI 噪声行与连续短字孤立行。
+
+    - 明确噪声：UI_NOISE_LINE_PATTERNS / UI_NOISE_KEYWORDS / UI_SHELL_SHORT_LINES；
+    - 连续短字孤立行：连续 ≥5 条各自 ≤5 字的行（IM 侧边栏/联系人列表形态）
+      整段剔除；含指标特征（%、¥、小数、+数字）的行不计入短行。
+    聊天中"姓名+短回复"（如 吴垚/是的）连续短行通常 <5 条，不会被误剔。
+    """
+    kept: List[str] = []
+    run: List[str] = []
+
+    def flush() -> None:
+        if len(run) < _SHORT_NOISE_RUN_MIN:
+            kept.extend(run)
+        del run[:]
+
+    for line in str(text or '').split('\n'):
+        normalized = _normalize_inline_text(line)
+        if not normalized:
+            continue
+        lowered = normalized.lower()
+        if (
+            any(p.match(normalized) for p in UI_NOISE_LINE_PATTERNS)
+            or lowered in UI_NOISE_KEYWORDS
+            or normalized in UI_SHELL_SHORT_LINES
+        ):
+            continue
+        if len(normalized) <= _SHORT_NOISE_LINE_MAX_CHARS and not _SHORT_LINE_KEEP_RE.search(normalized):
+            run.append(normalized)
+            continue
+        flush()
+        kept.append(normalized)
+    flush()
+    return '\n'.join(kept)
+
+
+def _density_aware_truncate(text: str, quota: int) -> str:
+    """单文本配额截断：先剔噪声行，再按密度分配实际保留长度。
+
+    密集正文获得完整配额；噪声为主的文本压缩到一半配额。
+    判定不确定（密度处于阈值边缘）时偏向多保留。
+    截断时优先保留数值指标密集段，避免尾部指标被切掉。
+    """
+    stripped = _strip_pressure_noise_lines(text)
+    if len(stripped) <= quota:
+        return stripped
+    from knowledge.fragment_grouper import text_density_score, DENSE_TEXT_THRESHOLD
+    density = text_density_score(stripped)
+    if density < DENSE_TEXT_THRESHOLD:
+        quota = max(200, quota // 2)
+    return _truncate_preserving_metrics(stripped, quota)
+
+
+_NUMERIC_METRIC_LINE_RE = re.compile(r'\d+(?:\.\d+)?\s*[%％倍]|\d+\.\d+')
+
+
+def _truncate_preserving_metrics(body: str, cap: int) -> str:
+    """块截断保留数值指标：在预算内保留数值指标最密集的连续段落。
+
+    汇报类正文的指标（87%、92.6、+1.99% 等）常位于块中后段，
+    纯头部硬切会整体丢失；此处用滑动窗口找到指标行数最多的
+    连续行段（指标优先，窗口可用整个 cap 预算），头部用剩余
+    空间填充上下文；指标数相同时保留覆盖更长的段落。
+    """
+    if len(body) <= cap:
+        return body
+    lines = str(body).split('\n')
+    metric_flags = [bool(_NUMERIC_METRIC_LINE_RE.search(ln)) for ln in lines]
+    if not any(metric_flags):
+        return body[:cap]
+    tail_budget = max(cap, 150)
+    best: Optional[Tuple[int, int, int, int]] = None  # (metric_count, span_chars, start, end)
+    start = 0
+    cur_chars = 0
+    cur_metrics = 0
+    for end in range(len(lines)):
+        cur_chars += len(lines[end]) + 1
+        if metric_flags[end]:
+            cur_metrics += 1
+        while start <= end and cur_chars > tail_budget:
+            cur_chars -= len(lines[start]) + 1
+            if metric_flags[start]:
+                cur_metrics -= 1
+            start += 1
+        if cur_metrics > 0:
+            key = (cur_metrics, cur_chars, start, end)
+            if best is None or (key[0], key[1]) > (best[0], best[1]):
+                best = key
+    if best is None:
+        return body[:cap]
+    _, _, w_start, w_end = best
+    window_text = '\n'.join(lines[w_start:w_end + 1])
+    if w_start == 0:
+        return window_text[:cap]
+    head_budget = max(cap - len(window_text) - 1, 0)
+    return body[:head_budget] + '\n' + window_text
 
 
 def _overview_quality_reason(overview: str, source_text: str) -> Optional[str]:
@@ -1205,6 +1446,249 @@ SYSTEM_PROMPT = """你是一个专业的工作记录提炼助手。你的任务�
 **注意**:输出必须是有效的 JSON 格式，字符串中的引号要转义，不要包含未转义的换行符。
 """
 
+DATA_FACT_CONTRACT_VERSION = "timeline-data-fact.v2"
+DATA_FACT_PROMPT = """
+
+**结构化数据事实（与上述时间线提炼在同一次输出中完成）**:
+- 顶层必须额外输出 `data_facts` 数组；没有可靠数据事实时输出空数组 `[]`。
+- 只提取已经发生或已经观测、同时包含明确数值的数据事实。计划、建议、假设、示例、UI 计数和缺少对象的裸数字不要输出。
+- `data_facts` 与工作动作判断相互独立。产品价格、套餐规格、容量、费率等参考数据即使来自被动浏览的官网，也属于可靠数据；只要存在这类事实，必须正常填写 `overview/details`，不得返回 `SKIP`、空概述或因为“未购买/未执行操作”而清空 `data_facts`。
+- 每条事实必须保留完整业务关系，不能用“AIGC”“成本”“收入”等宽泛词替代具体对象。
+- `evidence_quote` 必须逐字摘自输入采集文本；不能改写、拼接或补充输入中不存在的词。必须是原文中一段连续的子串，禁止使用 "…"、"..." 等省略号缩写；若无法截取一段连续原文同时包含对象与数值，则不要输出该事实。
+- `title` 必须同时说明具体对象和指标，不包含具体数值。
+- `statement` 是完整、可独立理解的事实句，必须包含对象、指标和值。
+- `value` 只放数字或数字范围；`unit` 使用证据中的原始单位。不要自行换算单位。
+
+提取前必须在内部依次完成以下检查，但不要输出检查过程：
+1. **事实状态**：先判断数字是已发生/已观测结果，还是目标、上限、验收条件、检查清单、预案阈值、配置建议。处在“检查清单、预案、目标、要求、应当、阈值、切换前检查”等上下文中的 `< 1%`、`CPU < 40%` 一律不是观测事实；只有原文另有“监控显示当前值为…”“实测为…”等明确观测证据时才可输出。
+2. **最近对象**：`subject` 必须是 `evidence_quote` 中离指标最近、明确命名的产品、套餐、系统、模型、资产或业务对象。不得使用浏览器窗口标题、网页宣传语、文档标题、章节名、句尾 OCR 残片或“相关核心”等不完整短语补对象。
+3. **关系完整**：套餐、版本、地区、当前/此前、按年/按月等比较维度必须保留。不得把“每用户每月 4 USD，按年计费”改写成“每年 4 USD”，也不得只挑比较中的最后一个值。
+4. **原子事实**：一条事实只表达一个对象在一个维度下的一个指标值；同一页面有多个套餐、指标或计费方式时分别输出多条事实，让相同对象和指标通过 `dimension` 聚合比较。
+5. **标题自检**：标题必须是“明确对象 + 完整指标”，不能含具体值，不能是口号、页面名、动作残句或宽泛主题。将标题、维度和值重新组合后，应能准确复述 `evidence_quote`，否则丢弃该事实。
+6. **逐字对象**：`subject` 必须从 `evidence_quote` 逐字复制，禁止翻译、扩写、同义替换或改成类别名；`title` 和 `statement` 也必须逐字包含同一个 `subject`。例如原文是 `Sync Standard`，只能使用 `Sync Standard`，不能写成“Standard套餐”“标准同步服务”；原文是 `Sync Plus`，不能写成“高级同步服务”。
+
+`data_facts` 中每个对象的固定 schema：
+{
+  "title": "具体对象 + 指标",
+  "subject": "指标所属的具体资产、产品、系统、模型或业务对象",
+  "action": "复用|优化|迁移|生成|审核等；没有动作时为空字符串",
+  "target_context": "动作作用的目标业务或场景；没有时为空字符串",
+  "dimension": "当前|此前|国内|海外等比较维度；没有时为空字符串",
+  "metric": "规范且完整的指标名",
+  "value": "数值或数值范围",
+  "unit": "原始单位；没有时为空字符串",
+  "statement": "包含完整上下文的独立事实句",
+  "evidence_quote": "输入中逐字存在的最短充分证据",
+  "confidence": "high|medium|low"
+}
+
+示例：输入“生服模特库在电商AIGC中的复用已成功合并，节省约6.28万成本”，应输出：
+{"title":"生服模特库在电商AIGC中复用的成本节省金额","subject":"生服模特库","action":"复用","target_context":"电商AIGC","dimension":"","metric":"成本节省金额","value":"6.28","unit":"万","statement":"生服模特库在电商AIGC中的复用节省约6.28万成本。","evidence_quote":"生服模特库在电商AIGC中的复用已成功合并，节省约6.28万成本","confidence":"high"}
+
+套餐示例：输入“Sync Standard $4 USD 每用户每月，按年计费；$5 USD 每用户每月，按月计费；1 GB 总存储空间”时，至少分别输出：
+- `subject=Sync Standard, metric=每用户月费, dimension=按年计费, value=4, unit=USD`
+- `subject=Sync Standard, metric=每用户月费, dimension=按月计费, value=5, unit=USD`
+- `subject=Sync Standard, metric=总存储空间, dimension=空字符串, value=1, unit=GB`
+三条事实的标题分别使用“Sync Standard 每用户月费”和“Sync Standard 总存储空间”；每条 `evidence_quote` 都必须包含对应套餐名和数值，价格事实还必须包含计费维度。其他套餐按相同方式独立输出，禁止只保留最后一个套餐或最后一个数字。
+
+正确价格事实示例：`{"title":"Sync Standard 每用户月费","subject":"Sync Standard","action":"","target_context":"","dimension":"按年计费","metric":"每用户月费","value":"4","unit":"USD","statement":"Sync Standard 按年计费时每用户月费为 4 USD。","evidence_quote":"Sync Standard $4 USD 每用户每月，按年计费","confidence":"high"}`。若无法截取一段同时包含 `subject`、维度、值和单位的原文证据，则不要输出该事实。
+"""
+
+DATA_PAGE_CONTRACT_VERSION = "timeline-data-page.v1"
+DATA_PAGE_PROMPT = """
+
+**数据页面分类（与上述时间线提炼在同一次输出中完成）**:
+- 顶层必须额外输出 `data_pages` 数组；本片段没有任何数据页面时输出空数组 `[]`。
+- 只允许对输入中明确给出「页面URL」的采集块做分类；`url` 必须逐字抄自输入中的页面URL，禁止编造、拼接、补全或修改参数。
+- 每个条目固定 schema：
+{"url": "输入中逐字存在的页面URL", "page_kind": "data_report|data_platform|data_content|none", "title": "页面标题或简短页面描述"}
+- `page_kind` 判定口径：
+  - `data_report`：呈现指标/报表/看板数据、数值会随时间更新的页面（如监控看板、经营报表、Grafana）
+  - `data_platform`：数据查询/管理平台的页面（如 GPU/资源用量一览、利用率平台）
+  - `data_content`：内容里包含可靠数据但页面本身不是报表/平台（如文档、聊天记录中的数字）
+  - `none`：页面与数据无关；不确定时一律填 `none`
+- 同一 URL 只输出一次；不要为没有 URL 的采集（桌面应用、聊天窗口等）编造 URL。
+"""
+
+_DATA_PAGE_KINDS = {"data_report", "data_platform", "data_content", "none"}
+
+# 小模型常在字符串值里直接写英文双引号导致 JSON 失效，所有提炼调用统一追加该约束
+JSON_OUTPUT_RULES = (
+    "字符串值内如需引用原文的英文双引号，必须转义为 \\\"，"
+    "或改用中文引号“”；确保输出是能被 json.loads 直接解析的合法 JSON。"
+)
+
+
+def _normalize_page_url(url: Any) -> str:
+    return str(url or "").strip().rstrip("/")
+
+
+def _validated_data_pages(raw_pages: Any, allowed_urls: set) -> List[Dict[str, Any]]:
+    """验证模型数据页面分类；只接受结构完整且 URL 逐字存在于本组采集的条目。"""
+    if not isinstance(raw_pages, list):
+        return []
+    accepted = []
+    seen = set()
+    for item in raw_pages:
+        if not isinstance(item, dict):
+            continue
+        url = _normalize_page_url(item.get("url"))
+        kind = str(item.get("page_kind") or "").strip()
+        if not url or kind not in _DATA_PAGE_KINDS:
+            continue
+        if not (url.startswith("http://") or url.startswith("https://")):
+            continue
+        if url not in allowed_urls:
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        accepted.append({
+            "url": url,
+            "page_kind": kind,
+            "title": str(item.get("title") or "").strip()[:240],
+        })
+    return accepted
+
+
+def _normalize_fact_evidence(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "")).casefold()
+
+
+def _expand_fact_evidence(source_text: str, subject: str, evidence_quote: str) -> str:
+    """将过短的逐字引文扩到最近对象；只切取原文，不生成或改写内容。"""
+    if not subject or not evidence_quote or subject in evidence_quote:
+        return evidence_quote
+    evidence_start = source_text.find(evidence_quote)
+    if evidence_start < 0:
+        return evidence_quote
+    subject_positions = [
+        match.start()
+        for match in re.finditer(re.escape(subject), source_text)
+    ]
+    if not subject_positions:
+        return evidence_quote
+    evidence_end = evidence_start + len(evidence_quote)
+    subject_start = min(
+        subject_positions,
+        key=lambda position: min(
+            abs(position - evidence_start),
+            abs(position - evidence_end),
+        ),
+    )
+    subject_end = subject_start + len(subject)
+    expanded_start = min(subject_start, evidence_start)
+    expanded_end = max(subject_end, evidence_end)
+    if expanded_end - expanded_start > 500:
+        return evidence_quote
+    return source_text[expanded_start:expanded_end]
+
+
+def _evidence_matches_source(evidence: str, source_normalized: str) -> bool:
+    """校验 evidence 是否可回证。
+
+    优先整段逐字命中；若模型输出带省略号（…/...），退化为分段按顺序
+    逐段命中原文（每段仍须逐字存在）。
+    """
+    if not evidence:
+        return False
+    if evidence in source_normalized:
+        return True
+    fragments = [
+        frag.strip() for frag in re.split(r"\.{3}|\u2026", evidence) if frag.strip()
+    ]
+    if len(fragments) < 2:
+        return False
+    cursor = 0
+    for frag in fragments:
+        pos = source_normalized.find(frag, cursor)
+        if pos == -1:
+            return False
+        cursor = pos + len(frag)
+    return True
+
+
+def _validated_data_facts(raw_facts: Any, source_text: str) -> tuple[List[Dict[str, Any]], int]:
+    """验证模型事实；不修补语义，只接受能够逐字回证的完整结构。"""
+    if not isinstance(raw_facts, list):
+        return [], int(raw_facts is not None)
+
+    source_normalized = _normalize_fact_evidence(source_text)
+    accepted: List[Dict[str, Any]] = []
+    rejected = 0
+    for raw in raw_facts[:20]:
+        if not isinstance(raw, dict):
+            rejected += 1
+            continue
+        fact = {
+            "title": _normalize_inline_text(raw.get("title")),
+            "subject": _normalize_inline_text(raw.get("subject")),
+            "action": _normalize_inline_text(raw.get("action")),
+            "target_context": _normalize_inline_text(raw.get("target_context")),
+            "dimension": _normalize_inline_text(raw.get("dimension")),
+            "metric": _normalize_inline_text(raw.get("metric")),
+            "value": _normalize_inline_text(raw.get("value")),
+            "unit": _normalize_inline_text(raw.get("unit")),
+            "statement": _normalize_inline_text(raw.get("statement")),
+            "evidence_quote": _normalize_inline_text(raw.get("evidence_quote")),
+            "confidence": _normalize_inline_text(raw.get("confidence") or "medium").lower(),
+        }
+        fact["evidence_quote"] = _expand_fact_evidence(
+            source_text,
+            fact["subject"],
+            fact["evidence_quote"],
+        )
+        required = ("title", "subject", "metric", "value", "statement", "evidence_quote")
+        if any(not fact[field] for field in required):
+            rejected += 1
+            continue
+        if fact["confidence"] not in {"low", "medium", "high"}:
+            rejected += 1
+            continue
+        if any(len(fact[field]) > limit for field, limit in (
+            ("title", 120), ("subject", 80), ("metric", 60),
+            ("value", 40), ("unit", 24), ("statement", 500), ("evidence_quote", 500),
+        )):
+            rejected += 1
+            continue
+        evidence = _normalize_fact_evidence(fact["evidence_quote"])
+        if not _evidence_matches_source(evidence, source_normalized):
+            rejected += 1
+            continue
+        title = _normalize_fact_evidence(fact["title"])
+        subject = _normalize_fact_evidence(fact["subject"])
+        metric = _normalize_fact_evidence(fact["metric"])
+        statement = _normalize_fact_evidence(fact["statement"])
+        value = _normalize_fact_evidence(fact["value"])
+        unit = _normalize_fact_evidence(fact["unit"])
+        dimension = _normalize_fact_evidence(fact["dimension"])
+        # 数字型 subject（如 "41.92%"、"2104张"、"T-2天"）是模型常见输出形态，
+        # 只要其数字 token 逐字命中 evidence 即视为可靠，不再强制要求复现在
+        # title/statement 里；非数字 subject 仍保持严格的上下文包含校验。
+        numeric_subject = any(ch.isdigit() for ch in subject)
+        subject_tokens = set(re.findall(r"[0-9][0-9:.%]*", subject))
+        numeric_subject_ok = (
+            numeric_subject
+            and bool(subject_tokens)
+            and all(t in evidence for t in subject_tokens)
+        )
+        strict_subject_ok = (
+            subject in title
+            and subject in statement
+            and subject in evidence
+        )
+        if (
+            not (numeric_subject_ok or strict_subject_ok)
+            or value not in evidence
+            or value not in statement
+            or (unit and unit not in evidence)
+            or (dimension and dimension not in evidence and dimension not in statement)
+        ):
+            rejected += 1
+            continue
+        accepted.append(fact)
+    return accepted, rejected
+
 
 class KnowledgeExtractorV2:
     """时间线提炼器 V2 - 强制使用 LLM"""
@@ -1346,7 +1830,7 @@ class KnowledgeExtractorV2:
                 "- 如果屏幕内容显示的是其他人（非该用户）的工作、他人的对话记录、别人的代码或文档，overview 中应明确说明「用户在查看他人的…」，importance 降低 1-2 分\n"
                 "- 如果无法判断内容主体，按正常流程提炼，不要猜测"
             )
-        return MERGE_SYSTEM_PROMPT + identity_clause
+        return MERGE_SYSTEM_PROMPT + DATA_FACT_PROMPT + DATA_PAGE_PROMPT + identity_clause
 
     def _build_prompt(self, capture_data: Dict[str, Any]) -> str:
         """构建提炼 prompt"""
@@ -1362,13 +1846,18 @@ class KnowledgeExtractorV2:
         )
         ocr_text = _sanitize_capture_text(raw_text)
 
-        # 限制文本长度，避免超过上下文
-        if len(ocr_text) > 2000:
-            ocr_text = ocr_text[:2000] + "..."
+        # 限制文本长度，避免超过上下文；密度感知截断：先剔噪声行，
+        # 密集正文保留完整配额，噪声为主的文本压缩更狠
+        ocr_text = _density_aware_truncate(ocr_text, 2000)
+
+        url_line = ""
+        page_url = _normalize_page_url(capture_data.get('url'))
+        if page_url:
+            url_line = f"**页面URL**:{page_url}\n"
 
         prompt = f"""**应用名称**:{app_name}
 **窗口标题**:{window_title}
-**时间戳**:{timestamp}
+{url_line}**时间戳**:{timestamp}
 **OCR 文本**:
 {ocr_text}
 
@@ -1380,7 +1869,7 @@ class KnowledgeExtractorV2:
         self,
         overview: str,
         db_conn,
-        threshold: float = 0.72,
+        threshold: float = _SIMILAR_MERGE_THRESHOLD,
         entities: Optional[List[str]] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
@@ -1391,7 +1880,8 @@ class KnowledgeExtractorV2:
         Args:
             overview: 新的概述
             db_conn: 数据库连接
-            threshold: 相似度阈值（0-1），默认 0.72
+            threshold: 相似度阈值（0-1），默认 _SIMILAR_MERGE_THRESHOLD，
+                作用于未含实体加分的基础余弦相似度
             entities: 新知识的实体列表，用于增强相似度判断
 
         Returns:
@@ -1417,7 +1907,7 @@ class KnowledgeExtractorV2:
                 logger.debug(f"合并窗口: 24小时内 (end_time={end_time}, earliest={earliest_time})")
 
             cursor = db_conn.execute(
-                f"SELECT id, overview, entities, start_time, end_time FROM timelines WHERE overview IS NOT NULL{time_filter} ORDER BY created_at DESC LIMIT 500"
+                f"SELECT id, overview, entities, start_time, end_time, occurrence_count FROM timelines WHERE overview IS NOT NULL{time_filter} ORDER BY created_at DESC LIMIT 500"
             )
             existing_entries = cursor.fetchall()
 
@@ -1433,6 +1923,7 @@ class KnowledgeExtractorV2:
             existing_entities_raw = [row[2] for row in existing_entries]
             existing_start_times = [row[3] for row in existing_entries]
             existing_end_times = [row[4] for row in existing_entries]
+            existing_occurrence_counts = [row[5] for row in existing_entries]
 
             batch_embeddings = self.embedding_model.encode(existing_overviews)
             existing_vectors = np.array([np.array(e.vector) for e in batch_embeddings])
@@ -1446,18 +1937,38 @@ class KnowledgeExtractorV2:
                     existing_vectors[valid_mask] @ new_vector
                 ) / (existing_norms[valid_mask] * new_norm)
 
-            # 5. 实体重叠增强:同名实体出现在两条知识中，相似度+0.05
+            # 5. 实体重叠增强:同名实体出现在两条知识中，小幅加分（有上限）。
+            # 加分只用于候选排序，最终是否过阈以基础相似度为准，并叠加实体一致性门。
             new_entity_set = set(e.lower() for e in (entities or []) if e)
+            base_similarities = similarities.copy()
+            entity_overlaps = np.zeros(len(existing_entries), dtype=int)
             for i, raw in enumerate(existing_entities_raw):
                 if not new_entity_set or not raw:
                     continue
                 try:
                     existing_entity_set = set(e.lower() for e in json.loads(raw) if e)
                     overlap = new_entity_set & existing_entity_set
+                    entity_overlaps[i] = len(overlap)
                     if overlap:
-                        similarities[i] += 0.05 * min(len(overlap), 2)
+                        similarities[i] += min(0.02 * len(overlap), _SIMILAR_ENTITY_BONUS_MAX)
                 except Exception:
                     pass
+
+            # 5.5 增长上限过滤：已膨胀到上限的时间线不再作为合并候选，
+            # 从源头避免宽泛主题时间线持续吞噬不相关内容（过度合并的根治）。
+            for i, occ in enumerate(existing_occurrence_counts):
+                try:
+                    occ_val = int(occ or 0)
+                except (TypeError, ValueError):
+                    occ_val = 0
+                if occ_val >= _SIMILAR_MERGE_MAX_OCCURRENCE:
+                    similarities[i] = 0
+                    continue
+                ex_start = existing_start_times[i]
+                ex_end = existing_end_times[i]
+                if ex_start and ex_end and ex_end > ex_start:
+                    if (int(ex_end) - int(ex_start)) / 3600000.0 > _SIMILAR_MERGE_MAX_SPAN_HOURS:
+                        similarities[i] = 0
 
             # 6. 连续片段保护:时间重叠或紧邻的同一事件，直接排除合并
             continuity_gap_ms = 15 * 60 * 1000
@@ -1476,13 +1987,35 @@ class KnowledgeExtractorV2:
                             max(0, start_time - existing_end),
                         )
 
-            # 7. 取相似度最高的条目
+            # 7. 取相似度最高的条目，并过"基础阈值 + 实体一致性"双重门：
+            #    - 基础相似度（不含实体加分）必须达到 threshold；
+            #    - 未达近乎重复阈值时，若新旧知识都带实体，必须至少有一个实体交集，
+            #      否则视为"同一项目里的不同任务"，拒绝把整段采集并入已有时间线。
             best_idx = int(np.argmax(similarities))
             best_sim = float(similarities[best_idx])
-            if best_sim >= threshold:
+            best_base_sim = float(base_similarities[best_idx])
+            if best_sim >= threshold and best_base_sim >= threshold:
                 entry_id = existing_ids[best_idx]
-                logger.info(f"发现相似知识条目 (ID={entry_id}, 相似度={best_sim:.2f})")
-                return entry_id
+                near_duplicate = best_base_sim >= _SIMILAR_MERGE_NEAR_DUP_THRESHOLD
+                has_existing_entities = bool(
+                    str(existing_entities_raw[best_idx] or '').strip() not in ('', '[]')
+                )
+                entity_gate_ok = (
+                    near_duplicate
+                    or not new_entity_set
+                    or not has_existing_entities
+                    or int(entity_overlaps[best_idx]) > 0
+                )
+                if entity_gate_ok:
+                    logger.info(
+                        f"发现相似知识条目 (ID={entry_id}, 相似度={best_sim:.2f}, "
+                        f"基础相似度={best_base_sim:.2f}, 实体交集={int(entity_overlaps[best_idx])})"
+                    )
+                    return entry_id
+                logger.info(
+                    "相似度合并被实体一致性门拦截: ID=%s 相似度=%.2f 但新旧知识无任何共同实体，改为新建时间线",
+                    entry_id, best_sim,
+                )
 
             return None
 
@@ -2838,17 +3371,17 @@ class KnowledgeExtractorV2:
             ) as tracker:
                 response = self._ollama_chat(
                     messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt}
+                        {"role": "system", "content": SYSTEM_PROMPT + DATA_FACT_PROMPT + DATA_PAGE_PROMPT},
+                        {"role": "user", "content": prompt + "\n\n" + JSON_OUTPUT_RULES}
                     ],
                     format="json",
-                    options={"temperature": 0.3, "num_predict": 1024},
+                    options={"temperature": 0.3, "num_predict": BAKE_NUM_PREDICT},
                 )
                 content = _extract_ollama_response_text(response)
                 tracker.set_response(response)
                 if tracker._prompt_tokens == 0:
                     tracker.set_tokens(
-                        prompt=estimate_tokens(SYSTEM_PROMPT + prompt),
+                        prompt=estimate_tokens(SYSTEM_PROMPT + DATA_FACT_PROMPT + DATA_PAGE_PROMPT + prompt),
                         completion=estimate_tokens(content),
                     )
 
@@ -2861,15 +3394,53 @@ class KnowledgeExtractorV2:
             overview = _normalize_inline_text(result.get('overview', ''))
             if overview == 'SKIP' or not overview:
                 logger.info(f"采集记录 {capture_data.get('id')} 无价值，跳过")
-                return None
+                return discarded_knowledge('no_value')
 
-            source_text = _sanitize_capture_text(capture_data.get('ocr_text') or capture_data.get('ax_text') or '')
+            source_text = _sanitize_capture_text(
+                capture_data.get('ax_text')
+                or capture_data.get('ocr_text')
+                or capture_data.get('input_text')
+                or capture_data.get('audio_text')
+                or ''
+            )
             quality_reason = _overview_quality_reason(overview, source_text)
             if quality_reason:
                 logger.info("采集记录 %s 提炼质量不足，跳过: %s", capture_data.get('id'), quality_reason)
-                return None
+                return discarded_knowledge('quality')
 
             details = result.get('details', '')
+            data_facts, rejected_data_fact_count = _validated_data_facts(
+                result.get('data_facts'),
+                source_text,
+            )
+            page_url = _normalize_page_url(capture_data.get('url'))
+            allowed_urls = {page_url} if page_url else set()
+            data_pages = _validated_data_pages(result.get('data_pages'), allowed_urls)
+
+            summary = _overview_to_summary(overview)
+            knowledge = {
+                'capture_id': capture_data['id'],
+                'summary': summary,
+                'overview': overview,
+                'details': details,
+                'entities': json.dumps(result.get('entities', []), ensure_ascii=False),
+                'category': result.get('category', '其他'),
+                'importance': result.get('importance', 3),
+                'occurrence_count': 1,
+                'observed_at': capture_data.get('ts'),
+                'event_time_start': result.get('event_time_start'),
+                'event_time_end': result.get('event_time_end'),
+                'history_view': bool(result.get('history_view', False)),
+                'content_origin': result.get('content_origin'),
+                'activity_type': result.get('activity_type'),
+                'is_self_generated': False,
+                'evidence_strength': result.get('evidence_strength'),
+                'data_fact_contract': DATA_FACT_CONTRACT_VERSION,
+                'data_facts': data_facts,
+                'data_fact_rejected_count': rejected_data_fact_count,
+                'data_page_contract': DATA_PAGE_CONTRACT_VERSION,
+                'data_pages': data_pages,
+            }
 
             # 5. 去重检查和知识合并
             if db_conn:
@@ -2905,29 +3476,10 @@ class KnowledgeExtractorV2:
                     )
                     db_conn.commit()
                     logger.info(f"知识已合并到现有条目 (ID={similar_id})")
-                    return None
+                    knowledge['_merged_timeline_id'] = similar_id
+                    return knowledge
 
             # 6. 返回结构化知识
-            summary = _overview_to_summary(overview)
-            knowledge = {
-                'capture_id': capture_data['id'],
-                'summary': summary,
-                'overview': overview,
-                'details': details,
-                'entities': json.dumps(result.get('entities', []), ensure_ascii=False),
-                'category': result.get('category', '其他'),
-                'importance': result.get('importance', 3),
-                'occurrence_count': 1,
-                'observed_at': capture_data.get('ts'),
-                'event_time_start': result.get('event_time_start'),
-                'event_time_end': result.get('event_time_end'),
-                'history_view': bool(result.get('history_view', False)),
-                'content_origin': result.get('content_origin'),
-                'activity_type': result.get('activity_type'),
-                'is_self_generated': False,
-                'evidence_strength': result.get('evidence_strength'),
-            }
-
             logger.info(f"成功提炼采集记录 {capture_data.get('id')}: {overview[:50]}...")
             return knowledge
 
@@ -2945,6 +3497,101 @@ class KnowledgeExtractorV2:
     ) -> Optional[Dict[str, Any]]:
         """异步版本（调用同步方法）"""
         return self.extract_sync(capture_data, db_conn)
+
+    def _build_merged_blocks(self, captures: List[Dict[str, Any]]) -> str:
+        """按密度感知配额构建合并提炼文本。
+
+        步骤：
+        1. 每块按行/句段密度分配配额：密集正文块 3000 字，其余 800 字；
+           正文完全相同的重复 capture（如连续同屏采集）只保留一份；
+        2. 拼接后超过总长限制时，先剔除各块中明确 UI 噪声行与连续短字孤立行；
+        3. 仍超限时按密度加权等比缩减各块（密集正文保留更多，保底 250 字），
+           截断时保留数值指标密集段；
+        4. 最终兜底才从尾部硬切（旧行为）。
+        判定全部为确定性字符串统计，不增加 LLM 调用。
+        """
+        from knowledge.fragment_grouper import text_density_score, DENSE_TEXT_THRESHOLD
+
+        entries: List[Dict[str, Any]] = []
+        seen_bodies = set()
+        for c in captures:
+            text = (
+                c.get('ax_text')
+                or c.get('ocr_text')
+                or c.get('input_text')
+                or c.get('audio_text')
+                or ''
+            )
+            sanitized_text = _sanitize_capture_text(text)
+            if not sanitized_text.strip():
+                continue
+            # 正文完全相同的重复采集（连续同屏）去重，只保留首次出现
+            if sanitized_text in seen_bodies:
+                continue
+            seen_bodies.add(sanitized_text)
+            ts_str = datetime.fromtimestamp(c['ts'] / 1000).strftime('%H:%M:%S')
+            app = c.get('app_name', '')
+            title = c.get('window_title', '')
+            # 块头部注入页面 URL / 网页标题，供 data_pages 分类逐字引用
+            page_url = _normalize_page_url(c.get('url'))
+            page_title = str(c.get('webpage_title') or '').strip()
+            page_meta = []
+            if page_title:
+                page_meta.append(f"页面标题: {page_title}")
+            if page_url:
+                page_meta.append(f"页面URL: {page_url}")
+            header = f"[{ts_str}] {app} - {title}"
+            if page_meta:
+                header += "（" + "，".join(page_meta) + "）"
+            density = text_density_score(sanitized_text)
+            quota = (
+                MERGE_BLOCK_QUOTA_DENSE
+                if density >= DENSE_TEXT_THRESHOLD
+                else MERGE_BLOCK_QUOTA_DEFAULT
+            )
+            entries.append({
+                'header': header,
+                'body': _truncate_preserving_metrics(sanitized_text, quota),
+                'density': density,
+            })
+
+        if not entries:
+            return ''
+
+        sep_len = len(MERGE_BLOCK_SEPARATOR)
+
+        def joined_len() -> int:
+            return sum(len(e['header']) + 1 + len(e['body']) for e in entries) + sep_len * (len(entries) - 1)
+
+        # 阶段2：总长超限 → 优先剔除明确 UI 噪声行与连续短字孤立行
+        if joined_len() > MERGE_TOTAL_MAX_CHARS:
+            for e in entries:
+                e['body'] = _strip_pressure_noise_lines(e['body'])
+
+        # 阶段3：仍超限 → 按密度加权等比缩减（密集正文保留更多，保底 250 字），
+        # 避免低密度块压到 250 后仍超限、密集块被尾部硬切整块丢失。
+        overhead = sum(len(e['header']) + 1 for e in entries) + sep_len * (len(entries) - 1)
+        body_budget = MERGE_TOTAL_MAX_CHARS - overhead
+        total_body_len = sum(len(e['body']) for e in entries)
+        if body_budget > 0 and total_body_len > body_budget:
+            weights = [max(e['density'], 0.05) for e in entries]
+            weight_sum = sum(weights) or 1.0
+            caps: List[int] = []
+            for e, w in zip(entries, weights):
+                share = int(body_budget * w / weight_sum)
+                caps.append(max(min(len(e['body']), share), MERGE_COMPRESSED_QUOTA_LOW))
+            for e, cap in zip(entries, caps):
+                if len(e['body']) > cap:
+                    e['body'] = _truncate_preserving_metrics(e['body'], cap)
+
+        blocks = [f"{e['header']}\n{e['body']}" for e in entries if e['body'].strip()]
+        if not blocks:
+            return ''
+        merged_text = MERGE_BLOCK_SEPARATOR.join(blocks)
+        # 阶段4：兜底尾部硬切（正常情况下不会走到这里）
+        if len(merged_text) > MERGE_TOTAL_MAX_CHARS:
+            merged_text = merged_text[:MERGE_TOTAL_MAX_CHARS] + "\n...(已截断)"
+        return merged_text
 
     def extract_merged(
         self,
@@ -2972,6 +3619,9 @@ class KnowledgeExtractorV2:
         # 单条直接走原有逻辑
         if len(captures) == 1:
             result = self.extract_sync(captures[0])
+            if result and result.get(_DISCARDED_KEY):
+                # 确定性丢弃（无价值/质量不足）：透传标记，由调用方消费掉 capture
+                return result
             if result:
                 result['capture_ids'] = json.dumps([captures[0]['id']])
                 result['start_time'] = captures[0]['ts']
@@ -2990,33 +3640,28 @@ class KnowledgeExtractorV2:
 
         try:
             logger.info("extract_merged 启动: captures=%s", len(captures))
-            # 1. 构建合并 prompt:按时间顺序拼接所有 capture 的文本
-            merged_blocks = []
-            for c in captures:
-                text = (
-                    c.get('ax_text')
-                    or c.get('ocr_text')
-                    or c.get('input_text')
-                    or c.get('audio_text')
-                    or ''
+            # 0. 先做语义分段（分段本来就要逐段调 AI 提炼），并确定性过滤
+            # 低价值分段：被丢弃的 capture 不会混进合并提炼文本，也不会写入
+            # 时间线 capture_ids（timeline 2713 类污染的另一条路径），
+            # 且不产生额外 LLM 开销。
+            segments, discarded_capture_ids, segment_data_pages = self._generate_segments(captures)
+            if discarded_capture_ids:
+                discarded_set = set(discarded_capture_ids)
+                kept_captures = [c for c in captures if c['id'] not in discarded_set]
+                logger.info(
+                    "合并提炼丢弃过滤: 剔除 %d 条低价值 captures ids=%s，保留 %d 条",
+                    len(discarded_capture_ids),
+                    discarded_capture_ids,
+                    len(kept_captures),
                 )
-                sanitized_text = _sanitize_capture_text(text)
-                if not sanitized_text.strip():
-                    continue
-                ts_str = datetime.fromtimestamp(c['ts'] / 1000).strftime('%H:%M:%S')
-                app = c.get('app_name', '')
-                title = c.get('window_title', '')
-                # 每块限制 800 字，避免单条噪声过多
-                block = f"[{ts_str}] {app} - {title}\n{sanitized_text[:800]}"
-                merged_blocks.append(block)
+                captures = kept_captures
+                if not captures:
+                    return discarded_knowledge('no_value')
 
-            if not merged_blocks:
+            # 1. 构建合并 prompt：按密度感知配额拼接所有 capture 的文本
+            merged_text = self._build_merged_blocks(captures)
+            if not merged_text:
                 return None
-
-            merged_text = "\n\n---\n\n".join(merged_blocks)
-            # 总长度限制 6000 字（约 4000 tokens）
-            if len(merged_text) > 6000:
-                merged_text = merged_text[:6000] + "\n...(已截断)"
 
             user_prompt = (
                 "以下是一段连续工作片段的采集记录，请提炼。"
@@ -3042,17 +3687,35 @@ class KnowledgeExtractorV2:
                 caller_id=f"merge:{capture_ids_str}",
             ) as tracker:
                 _sys_prompt = self._build_merge_system_prompt()
-                # 强化 JSON 输出约束:在 user prompt 中再次强调
-                enhanced_user_prompt = f"{user_prompt}\n\n**重要**:你必须且只能输出一个有效的 JSON 对象，不要输出任何其他内容、解释或 markdown 代码块。"
+                # 强化 JSON 输出约束:在 user prompt 中再次强调，并列出完整字段清单，
+                # 避免小模型在长 system prompt 下遗漏末尾的 data_facts/data_pages 契约字段
+                enhanced_user_prompt = (
+                    f"{user_prompt}\n\n**重要**:你必须且只能输出一个有效的 JSON 对象，"
+                    "不要输出任何其他内容、解释或 markdown 代码块。"
+                    "JSON 顶层必须包含全部字段:work_item, work_status, work_progress, "
+                    "overview, details, entities, category, importance, history_view, "
+                    "content_origin, activity_type, event_time_start, event_time_end, "
+                    "evidence_strength, data_facts, data_pages。"
+                    "data_facts 与 data_pages 没有内容时必须输出空数组 []，不得省略字段。"
+                    + JSON_OUTPUT_RULES
+                )
                 response = self._ollama_chat(
                     messages=[
                         {"role": "system", "content": _sys_prompt},
                         {"role": "user", "content": enhanced_user_prompt},
                     ],
                     format="json",
-                    options={"temperature": 0.3, "num_predict": 1024},
+                    options={
+                        "temperature": 0.3,
+                        "num_ctx": BAKE_CONTEXT_WINDOW_TOKENS,
+                        "num_predict": BAKE_NUM_PREDICT,
+                    },
                 )
                 content = _extract_ollama_response_text(response)
+                if response.get("done_reason") == "length":
+                    logger.warning(
+                        "合并提炼输出被 num_predict 截断，JSON 可能不完整"
+                    )
                 tracker.set_response(response)
                 if tracker._prompt_tokens == 0:
                     tracker.set_tokens(
@@ -3070,15 +3733,59 @@ class KnowledgeExtractorV2:
                 )
                 return None
 
+            # 3.1 数据契约字段缺失时的紧凑补发：小模型在长 system prompt 下可能
+            # 省略末尾的 data_facts/data_pages；同链路补一次，只回填缺失的契约
+            # 字段，不覆盖已提炼的主结果。
+            missing_contract_fields = [
+                field for field in ("data_facts", "data_pages") if field not in result
+            ]
+            if missing_contract_fields:
+                logger.info(
+                    "合并提炼输出缺少数据契约字段 %s，同链路补发一次",
+                    missing_contract_fields,
+                )
+                retry_user_prompt = (
+                    f"{user_prompt}\n\n**重要**:你必须且只能输出一个有效的 JSON 对象。"
+                    f"上一次输出缺少字段:{'、'.join(missing_contract_fields)}。"
+                    "本次 JSON 顶层必须包含全部字段:work_item, work_status, work_progress, "
+                    "overview, details, entities, category, importance, history_view, "
+                    "content_origin, activity_type, event_time_start, event_time_end, "
+                    "evidence_strength, data_facts, data_pages。"
+                    "overview/details 保持简短；data_facts 与 data_pages 没有内容时输出空数组 []。"
+                    + JSON_OUTPUT_RULES
+                )
+                try:
+                    retry_response = self._ollama_chat(
+                        messages=[
+                            {"role": "system", "content": _sys_prompt},
+                            {"role": "user", "content": retry_user_prompt},
+                        ],
+                        format="json",
+                        options={
+                            "temperature": 0.3,
+                            "num_ctx": BAKE_CONTEXT_WINDOW_TOKENS,
+                            "num_predict": BAKE_RETRY_NUM_PREDICT,
+                        },
+                    )
+                    retry_result = _extract_json_object(
+                        _extract_ollama_response_text(retry_response)
+                    )
+                    if retry_result:
+                        for field in missing_contract_fields:
+                            if field in retry_result:
+                                result[field] = retry_result[field]
+                except Exception as retry_exc:
+                    logger.warning("合并提炼数据契约补发失败: %s", retry_exc)
+
             overview = _normalize_inline_text(result.get('overview', ''))
             if not overview or overview == 'SKIP':
                 logger.warning("合并提炼未返回有效 overview，跳过本片段（不兜底）: result=%s", result)
-                return None
+                return discarded_knowledge('no_value')
 
             quality_reason = _overview_quality_reason(overview, merged_text)
             if quality_reason:
                 logger.warning("合并提炼 overview 质量不足，跳过本片段（不兜底）: reason=%s overview=%s", quality_reason, overview)
-                return None
+                return discarded_knowledge('quality')
 
             # 4. 计算片段元数据
             start_time = captures[0]['ts']
@@ -3099,9 +3806,27 @@ class KnowledgeExtractorV2:
             )
 
             summary = _overview_to_summary(overview)
+            data_facts, rejected_data_fact_count = _validated_data_facts(
+                result.get('data_facts'),
+                merged_text,
+            )
+            allowed_urls = {
+                _normalize_page_url(c.get('url'))
+                for c in captures
+                if _normalize_page_url(c.get('url'))
+            }
+            data_pages = _validated_data_pages(result.get('data_pages'), allowed_urls)
+            if not data_pages and segment_data_pages:
+                # 主调用遗漏时复用分段提炼已产出的分类结果（不新增推理），
+                # 仍按本组 capture URL 白名单再校验一次。
+                data_pages = _validated_data_pages(segment_data_pages, allowed_urls)
+                if data_pages:
+                    logger.info(
+                        "合并提炼 data_pages 由分段提炼结果兜底: %s",
+                        [p.get('url') for p in data_pages],
+                    )
 
-            # 生成语义分段
-            segments = self._generate_segments(captures)
+            # 语义分段已在步骤 0 生成（并过滤掉确定性丢弃的分段）
 
             knowledge = {
                 'capture_ids': json.dumps([c['id'] for c in captures]),
@@ -3129,7 +3854,15 @@ class KnowledgeExtractorV2:
                 'work_item': result.get('work_item'),
                 'work_status': result.get('work_status'),
                 'work_progress': result.get('work_progress'),
+                'data_fact_contract': DATA_FACT_CONTRACT_VERSION,
+                'data_facts': data_facts,
+                'data_fact_rejected_count': rejected_data_fact_count,
+                'data_page_contract': DATA_PAGE_CONTRACT_VERSION,
+                'data_pages': data_pages,
             }
+
+            if discarded_capture_ids:
+                knowledge['_discarded_capture_ids'] = discarded_capture_ids
 
             logger.info(
                 f"合并提炼完成: {len(captures)} captures → 1 knowledge, "
@@ -3144,10 +3877,21 @@ class KnowledgeExtractorV2:
             logger.error(f"合并提炼失败: {e}")
             return None
 
-    def _generate_segments(self, captures: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """生成语义分段，使用AI提炼每个分段的总结"""
+    def _generate_segments(
+        self, captures: List[Dict[str, Any]]
+    ) -> tuple:
+        """生成语义分段，使用AI提炼每个分段的总结。
+
+        Returns:
+            (segments, discarded_capture_ids, segment_data_pages)：确定性丢弃
+            （无价值/质量不足）的分段不进 segments，其 capture ids 单独返回，
+            由调用方消费；segment_data_pages 为各分段提炼已校验的数据页面，
+            供主调用产出缺失时兜底（不新增推理）。
+        """
         try:
             segments_map = {}
+            discarded_capture_ids: List[int] = []
+            segment_data_pages: List[Dict[str, Any]] = []
             for cap in captures:
                 key = f"{cap.get('app_name')}|{cap.get('window_title', '')}"
                 if key not in segments_map:
@@ -3171,16 +3915,39 @@ class KnowledgeExtractorV2:
             for idx, seg in enumerate(segments_map.values()):
                 merged_text = '\n\n'.join(seg['texts'])
                 if merged_text:
+                    # 分段内首个带 URL 的采集，透传给单条提炼以支持 data_pages 分类
+                    seg_url = ''
+                    seg_webpage_title = ''
+                    for cap in captures:
+                        if cap.get('id') in seg['capture_ids'] and _normalize_page_url(cap.get('url')):
+                            seg_url = cap.get('url') or ''
+                            seg_webpage_title = str(cap.get('webpage_title') or '')
+                            break
                     segment_capture = {
                         'id': seg['capture_ids'][0],
                         'app_name': seg['app_name'],
                         'window_title': seg['window_title'],
                         'timestamp': datetime.fromtimestamp(seg['end_ts'] / 1000).isoformat(),
                         'ocr_text': merged_text[:2000],  # 限制长度避免过长
+                        'url': seg_url,
+                        'webpage_title': seg_webpage_title,
                     }
                     logger.info(f"分段 {idx+1}/{len(segments_map)}: 调用 AI 提炼 ({len(seg['capture_ids'])} captures)")
                     extracted = self.extract_sync(segment_capture)
+                    if extracted and extracted.get(_DISCARDED_KEY):
+                        # 确定性丢弃：该分段不计入时间线成员，透传给调用方消费
+                        logger.info(
+                            "分段 %d 确定性丢弃 (reason=%s): captures=%s",
+                            idx + 1,
+                            extracted.get('discard_reason', 'unknown'),
+                            seg['capture_ids'],
+                        )
+                        discarded_capture_ids.extend(seg['capture_ids'])
+                        continue
                     summary = extracted.get('summary', '') if extracted else ''
+                    for page in (extracted.get('data_pages') or [] if extracted else []):
+                        if isinstance(page, dict):
+                            segment_data_pages.append(page)
                     logger.info(f"分段 {idx+1} AI 总结: {summary[:80]}...")
                 else:
                     summary = ''
@@ -3195,7 +3962,7 @@ class KnowledgeExtractorV2:
                     'summary': summary
                 })
             logger.info(f"语义分段生成完成: {len(segments)} segments")
-            return segments
+            return segments, discarded_capture_ids, segment_data_pages
         except Exception as e:
             logger.error(f"生成语义分段失败: {e}", exc_info=True)
-            return []
+            return [], [], []
