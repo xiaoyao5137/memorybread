@@ -6,6 +6,7 @@ import { fetchBillingBalance } from '../utils/authApi'
 import { REMOTE_CREATION_MODEL_ID, canUseRemoteCreationModel } from '../utils/modelSelection'
 import { toUserFacingError } from '../utils/userFacingError'
 import { useImeCompositionGuard } from '../hooks/useImeCompositionGuard'
+import { useConfirmDialog } from './useConfirmDialog'
 
 const SIDECAR = 'http://localhost:7071'
 
@@ -519,6 +520,7 @@ const ModelManager: React.FC = () => {
   const [modelLoadError, setModelLoadError] = useState('')
   const [configuringModel, setConfiguringModel] = useState<ModelEntry | null>(null)
   const [chattingModel, setChattingModel] = useState<ModelEntry | null>(null)
+  const { confirm: confirmDestructive, dialog: confirmDialog } = useConfirmDialog()
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set())
   const [activatingIds, setActivatingIds] = useState<Set<string>>(new Set())
   const [ollamaSetup, setOllamaSetup] = useState<OllamaSetupDetail | null>(null)
@@ -707,7 +709,7 @@ const ModelManager: React.FC = () => {
   }
 
   const handleDelete = async (model: ModelEntry) => {
-    if (!window.confirm(`确认删除“${model.name}”？删除后需要重新下载才能继续使用。`)) return
+    if (!(await confirmDestructive({ title: `删除“${model.name}”？`, description: '删除后需要重新下载才能继续使用。' }))) return
     try {
       await fetch(`${SIDECAR}/api/models/${model.id}/delete`, { method: 'DELETE' })
       await loadModels()
@@ -951,6 +953,7 @@ const ModelManager: React.FC = () => {
           onClose={() => setChattingModel(null)}
         />
       )}
+      {confirmDialog}
     </div>
   )
 }

@@ -812,7 +812,6 @@ export function useBackupMemoryPackageToCloud() {
     service_environment: 'production' | 'staging'
     access_token: string
     device_id: string
-    recovery_key_base64?: string
   }): Promise<CloudMemoryPackageBackupResult> => {
     const resp = await fetchWithLocalhostFallback(`${apiBaseUrl}/api/snapshots/cloud/backup`, {
       method: 'POST',
@@ -834,7 +833,6 @@ export function useRestoreMemoryPackageFromCloud() {
     service_environment: 'production' | 'staging'
     access_token: string
     snapshot_id: string
-    recovery_key_base64: string
     import_to_local: boolean
     dry_run?: boolean
   }): Promise<CloudMemoryPackageRestoreResult> => {
@@ -1330,6 +1328,30 @@ export function useUpdateBakeStyleConfig() {
   }, [apiBaseUrl])
 }
 
+function normalizeTimelineKeyTimestamps(value: unknown): TimelineItem['keyTimestamps'] {
+  if (!Array.isArray(value)) return undefined
+
+  return value.flatMap(segment => {
+    if (!segment || typeof segment !== 'object') return []
+
+    const raw = segment as Record<string, unknown>
+    const startTs = Number(raw.start_ts)
+    const endTs = Number(raw.end_ts)
+    if (!Number.isFinite(startTs) || !Number.isFinite(endTs)) return []
+
+    return [{
+      // 旧数据和早期演示数据可能只有时间范围与摘要。统一补成空数组，
+      // 由展示层按时间范围关联 capture，避免缺字段直接击穿 React 根节点。
+      capture_ids: Array.isArray(raw.capture_ids)
+        ? raw.capture_ids.map(Number).filter(Number.isFinite)
+        : [],
+      start_ts: startTs,
+      end_ts: endTs,
+      summary: typeof raw.summary === 'string' ? raw.summary : '',
+    }]
+  })
+}
+
 function mapKnowledgeEntryToTimeline(item: any): TimelineItem {
   return {
     id: String(item.id),
@@ -1348,7 +1370,7 @@ function mapKnowledgeEntryToTimeline(item: any): TimelineItem {
     captureIds: item.capture_ids ?? [],
     // 后端 KnowledgeEntry 通过 #[serde(rename = "keyTimestamps")] 序列化为驼峰，
     // 这里优先读驼峰键，兼容历史 snake_case 以防回退。
-    keyTimestamps: item.keyTimestamps ?? item.key_timestamps ?? undefined,
+    keyTimestamps: normalizeTimelineKeyTimestamps(item.keyTimestamps ?? item.key_timestamps),
   }
 }
 
@@ -1378,7 +1400,7 @@ function mapBakeMemory(item: any): TimelineItem {
     sopMatchScore: item.sop_match_score ?? undefined,
     sopMatchLevel: item.sop_match_level ?? undefined,
     captureIds: item.capture_ids ?? [],
-    keyTimestamps: item.keyTimestamps ?? undefined,
+    keyTimestamps: normalizeTimelineKeyTimestamps(item.keyTimestamps ?? item.key_timestamps),
   }
 }
 

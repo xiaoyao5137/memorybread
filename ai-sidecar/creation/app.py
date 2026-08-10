@@ -61,7 +61,8 @@ class GenerateRequest(BaseModel):
     usage_weight: float = 0.10
     format_weight: float = 0.10
     freshness_weight: float = 0.05
-    max_references: int = 6
+    max_references: int = Field(default=10, ge=1, le=30)
+    data_search_limit: int = Field(default=30, ge=1, le=50)
     creation_model: Optional[str] = None
     creation_api_key: Optional[str] = None
     creation_base_url: Optional[str] = None
@@ -426,5 +427,6 @@ def _options_from_request(request) -> CreationOptions:
         usage_weight=float(getattr(request, "usage_weight", 0.10)),
         format_weight=float(getattr(request, "format_weight", 0.10)),
         freshness_weight=float(getattr(request, "freshness_weight", 0.05)),
-        max_references=int(getattr(request, "max_references", 6)),
+        max_references=int(getattr(request, "max_references", 10)),
+        data_search_limit=int(getattr(request, "data_search_limit", 30)),
     )

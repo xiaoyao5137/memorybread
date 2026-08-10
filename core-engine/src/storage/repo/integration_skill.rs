@@ -227,11 +227,11 @@ impl StorageManager {
                     },
                 )
                 .optional()?;
-            if let Some((content_hash, _, _, stored_title)) = &existing {
+            if let Some((content_hash, _, timeline_id, stored_title)) = &existing {
                 if content_hash == &item.content_hash
                     && stored_title.as_deref() == Some(item.title.as_str())
                 {
-                    return Ok(ImportWriteOutcome::Unchanged);
+                    return Ok(ImportWriteOutcome::Unchanged(*timeline_id));
                 }
             }
 
@@ -286,7 +286,7 @@ impl StorageManager {
                         now,
                     ],
                 )?;
-                return Ok(ImportWriteOutcome::Updated);
+                return Ok(ImportWriteOutcome::Updated(timeline_id));
             }
 
             conn.execute(
@@ -344,7 +344,7 @@ impl StorageManager {
                     now,
                 ],
             )?;
-            Ok(ImportWriteOutcome::Created)
+            Ok(ImportWriteOutcome::Created(timeline_id))
         })
     }
 
@@ -373,21 +373,91 @@ impl StorageManager {
                     updated_at_ms DESC
                  LIMIT ?2",
             )?;
-            let rows = stmt.query_map(params![pattern, limit], |row| {
+            let rows = stmt.query_map(params![pattern, limit], integration_memory_row)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        })
+    }
+
+    pub fn integration_export_memories_by_ids(
+        &self,
+        ids: &[i64],
+    ) -> Result<Vec<Value>, StorageError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_conn(|conn| {
+            let placeholders = vec!["?"; ids.len()].join(",");
+            let sql = format!(
+                "SELECT id, summary, overview, details, category, observed_at,
+                        content_origin, updated_at_ms
+                 FROM timelines
+                 WHERE (history_view = 0 OR history_view = 1) AND id IN ({placeholders})"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let bindings = ids
+                .iter()
+                .map(|id| id as &dyn rusqlite::ToSql)
+                .collect::<Vec<_>>();
+            let rows = stmt.query_map(bindings.as_slice(), integration_memory_row)?;
+            let mut items = rows.collect::<Result<Vec<_>, _>>()?;
+            items.sort_by_key(|item| {
+                item.get("id")
+                    .and_then(Value::as_i64)
+                    .and_then(|id| ids.iter().position(|candidate| *candidate == id))
+                    .unwrap_or(usize::MAX)
+            });
+            Ok(items)
+        })
+    }
+
+    pub fn integration_list_memory_options(
+        &self,
+        query: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<Value>, StorageError> {
+        self.with_conn(|conn| {
+            let escaped_query = query
+                .trim()
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            let pattern = format!("%{escaped_query}%");
+            let mut stmt = conn.prepare(
+                "SELECT id, summary, category, observed_at
+                 FROM timelines
+                 WHERE (history_view = 0 OR history_view = 1)
+                   AND (?1 = '%%' OR summary LIKE ?1 ESCAPE '\\'
+                        OR COALESCE(overview, '') LIKE ?1 ESCAPE '\\')
+                 ORDER BY
+                    CASE WHEN summary LIKE ?1 ESCAPE '\\' THEN 0 ELSE 1 END,
+                    updated_at_ms DESC
+                 LIMIT ?2 OFFSET ?3",
+            )?;
+            let rows = stmt.query_map(params![pattern, limit as i64, offset as i64], |row| {
                 Ok(json!({
                     "id": row.get::<_, i64>(0)?,
                     "title": row.get::<_, String>(1)?,
-                    "overview": row.get::<_, Option<String>>(2)?,
-                    "content": row.get::<_, Option<String>>(3)?,
-                    "category": row.get::<_, Option<String>>(4)?.unwrap_or_else(|| "memory".to_string()),
-                    "observedAt": row.get::<_, Option<i64>>(5)?,
-                    "contentOrigin": row.get::<_, Option<String>>(6)?,
-                    "updatedAt": row.get::<_, i64>(7)?,
+                    "category": row.get::<_, Option<String>>(2)?.unwrap_or_else(|| "memory".to_string()),
+                    "observedAt": row.get::<_, Option<i64>>(3)?,
                 }))
             })?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
         })
     }
+}
+
+fn integration_memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "id": row.get::<_, i64>(0)?,
+        "title": row.get::<_, String>(1)?,
+        "overview": row.get::<_, Option<String>>(2)?,
+        "content": row.get::<_, Option<String>>(3)?,
+        "category": row.get::<_, Option<String>>(4)?.unwrap_or_else(|| "memory".to_string()),
+        "observedAt": row.get::<_, Option<i64>>(5)?,
+        "contentOrigin": row.get::<_, Option<String>>(6)?,
+        "updatedAt": row.get::<_, i64>(7)?,
+    }))
 }
 
 fn read_run_logs(
@@ -490,13 +560,13 @@ mod tests {
             storage
                 .upsert_integration_import_item("obsidian", &item)
                 .expect("first import"),
-            ImportWriteOutcome::Created
+            ImportWriteOutcome::Created(1)
         );
         assert_eq!(
             storage
                 .upsert_integration_import_item("obsidian", &item)
                 .expect("second import"),
-            ImportWriteOutcome::Unchanged
+            ImportWriteOutcome::Unchanged(1)
         );
 
         let renamed_item = ImportedKnowledgeItem {
@@ -507,7 +577,7 @@ mod tests {
             storage
                 .upsert_integration_import_item("obsidian", &renamed_item)
                 .expect("title-only update"),
-            ImportWriteOutcome::Updated
+            ImportWriteOutcome::Updated(1)
         );
         let matches = storage
             .integration_export_context("Unique integration content", 1)

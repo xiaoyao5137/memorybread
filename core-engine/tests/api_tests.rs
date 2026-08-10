@@ -15,7 +15,6 @@
 //! - POST /pii/scrub → 200 + 原文返回
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,7 +23,7 @@ use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use memory_bread_core::storage::models::{EventType, NewCapture};
 use memory_bread_core::{
-    api::{error::ApiError, state::DebugLogSpec, AppState},
+    api::{state::DebugLogSpec, AppState},
     services::bake_service::BakeService,
     storage::{NewBakeSop, NewTimeline, StorageManager},
 };
@@ -248,6 +247,89 @@ fn seed_knowledge_entry(
     .unwrap()
 }
 
+fn seed_artifact_ready_timeline(sm: &StorageManager, summary: &str, overview: &str) -> i64 {
+    let document_body = "这是一份用于验证烘焙模板与标准操作流程的完整文档正文。".repeat(12);
+    let first_capture_id = sm
+        .insert_capture(&NewCapture {
+            ts: 1_710_000_000_000,
+            app_name: Some("Chrome".to_string()),
+            app_bundle_id: Some("com.google.Chrome".to_string()),
+            win_title: Some("周报模板设计文档".to_string()),
+            event_type: EventType::Manual,
+            ax_text: Some(document_body.clone()),
+            ax_focused_role: None,
+            ax_focused_id: None,
+            ocr_text: None,
+            screenshot_path: None,
+            input_text: None,
+            is_sensitive: false,
+            pii_scrubbed: false,
+            screenshot_source: None,
+            url: Some("https://example.com/docs/weekly-report-template".to_string()),
+            webpage_title: Some("周报模板设计文档".to_string()),
+        })
+        .unwrap();
+    let second_capture_id = sm
+        .insert_capture(&NewCapture {
+            ts: 1_710_000_001_000,
+            app_name: Some("Chrome".to_string()),
+            app_bundle_id: Some("com.google.Chrome".to_string()),
+            win_title: Some("周报模板设计文档".to_string()),
+            event_type: EventType::Manual,
+            ax_text: Some(document_body),
+            ax_focused_role: None,
+            ax_focused_id: None,
+            ocr_text: None,
+            screenshot_path: None,
+            input_text: None,
+            is_sensitive: false,
+            pii_scrubbed: false,
+            screenshot_source: None,
+            url: Some("https://example.com/docs/weekly-report-template".to_string()),
+            webpage_title: Some("周报模板设计文档".to_string()),
+        })
+        .unwrap();
+
+    let timeline_id = sm
+        .insert_timeline_entry(&NewTimeline {
+            capture_id: first_capture_id,
+            summary: summary.to_string(),
+            overview: Some(overview.to_string()),
+            details: Some(serde_json::json!({"source": "integration_test"}).to_string()),
+            entities: r#"["周报","流程"]"#.to_string(),
+            category: "meeting".to_string(),
+            importance: 4,
+            occurrence_count: Some(3),
+            observed_at: Some(1_710_000_001_000),
+            event_time_start: None,
+            event_time_end: None,
+            history_view: false,
+            content_origin: Some("live_interaction".to_string()),
+            activity_type: Some("reading".to_string()),
+            is_self_generated: false,
+            evidence_strength: Some("high".to_string()),
+            capture_ids: Some(serde_json::json!([first_capture_id, second_capture_id]).to_string()),
+            start_time: None,
+            end_time: None,
+            duration_minutes: None,
+            frag_app_name: None,
+            frag_win_title: None,
+            time_range_start: None,
+            time_range_end: None,
+            key_timestamps: None,
+        })
+        .unwrap();
+    sm.with_conn(|conn| {
+        conn.execute(
+            "UPDATE captures SET timeline_id = ?1 WHERE id IN (?2, ?3)",
+            rusqlite::params![timeline_id, first_capture_id, second_capture_id],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    timeline_id
+}
+
 fn bake_rejected(reason: &str) -> serde_json::Value {
     serde_json::json!({
         "accepted": false,
@@ -325,6 +407,7 @@ fn bake_sop_artifact(summary: &str, review_status: Option<&str>) -> serde_json::
 
 async fn run_bake(
     router: axum::Router,
+    storage: &StorageManager,
     trigger_reason: &str,
 ) -> (StatusCode, serde_json::Value, String) {
     let req = Request::builder()
@@ -338,7 +421,59 @@ async fn run_bake(
         .unwrap();
     let (status, body) = oneshot(router, req).await;
     let json = serde_json::from_str(&body).unwrap_or_else(|_| serde_json::json!({ "raw": body }));
+    if status == StatusCode::OK && json["status"] == "accepted" {
+        let run_id = json["id"]
+            .as_i64()
+            .expect("accepted bake run must include id");
+        for _ in 0..200 {
+            if let Some(run) = storage.get_latest_bake_run().unwrap() {
+                if run.id == run_id && run.status != "running" {
+                    let run_json = serde_json::to_value(run).unwrap();
+                    let run_body = run_json.to_string();
+                    return (status, run_json, run_body);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("bake run {run_id} did not finish within test timeout");
+    }
     (status, json, body)
+}
+
+fn make_bake_retry_due_now(storage: &StorageManager, timeline_id: i64) {
+    storage
+        .with_conn(|conn| {
+            conn.execute(
+                "UPDATE bake_retry_state SET next_retry_at_ms = 0 WHERE timeline_id = ?1",
+                rusqlite::params![timeline_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_bake_queue_status_prevents_empty_run_creation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sm = StorageManager::open(&tmp.path().join("queue-status.db")).unwrap();
+    let state = make_bake_state(sm.clone(), "http://127.0.0.1:9".to_string());
+    let router = memory_bread_core::api::create_router(state);
+
+    let queue_request = Request::builder()
+        .uri("/api/bake/queue-status")
+        .body(Body::empty())
+        .unwrap();
+    let (queue_status, queue_body) = oneshot(router.clone(), queue_request).await;
+    assert_eq!(queue_status, StatusCode::OK, "body: {queue_body}");
+    let queue_json: serde_json::Value = serde_json::from_str(&queue_body).unwrap();
+    assert_eq!(queue_json["actionable_count"], 0);
+    assert!(queue_json["recommended_retry_after_ms"].as_i64().unwrap() > 0);
+
+    let (run_status, run_json, run_body) = run_bake(router, &sm, "knowledge_background").await;
+    assert_eq!(run_status, StatusCode::OK, "body: {run_body}");
+    assert_eq!(run_json["status"], "skipped");
+    assert_eq!(run_json["reason"], "no actionable bake candidates");
+    assert!(sm.get_latest_bake_run().unwrap().is_none());
 }
 
 #[tokio::test]
@@ -469,7 +604,99 @@ async fn test_bake_templates_crud_flow() {
 }
 
 #[tokio::test]
-async fn test_bake_sops_list_and_adopt() {
+async fn test_bake_documents_search_matches_summary_tags_sections_and_content() {
+    let (router, _tmp) = make_test_router().await;
+
+    // 关键词只出现在摘要、标签、章节关键词和正文中，标题不含关键词
+    let create_req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/bake/documents")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{
+            "title":"GPU 指令格式与工具链说明",
+            "doc_type":"技术文档",
+            "status":"enabled",
+            "tags":["SMACT","GPU"],
+            "applicable_tasks":["creation"],
+            "sections":[{"title":"指令集","keywords":["smact","指令"],"notes":"SMACT 指令格式"}],
+            "style_phrases":[],
+            "replacement_rules":[],
+            "summary":"介绍 SMACT 指令格式",
+            "full_content":"本文描述 SMACT 的三种指令格式。",
+            "prompt_hint":null,
+            "image_assets":[],
+            "usage_count":0
+        }"#,
+        ))
+        .unwrap();
+    let (create_status, create_body) = oneshot(router.clone(), create_req).await;
+    assert_eq!(create_status, StatusCode::OK, "body: {create_body}");
+
+    // 无关文档，不应被命中
+    let create_other_req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/bake/documents")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{
+            "title":"周报模板",
+            "doc_type":"周报",
+            "status":"draft",
+            "tags":["周报"],
+            "applicable_tasks":["creation"],
+            "sections":[],
+            "style_phrases":[],
+            "replacement_rules":[],
+            "summary":"每周工作总结",
+            "full_content":null,
+            "prompt_hint":null,
+            "image_assets":[],
+            "usage_count":0
+        }"#,
+        ))
+        .unwrap();
+    let (create_other_status, create_other_body) = oneshot(router.clone(), create_other_req).await;
+    assert_eq!(
+        create_other_status,
+        StatusCode::OK,
+        "body: {create_other_body}"
+    );
+
+    // 标题不含关键词，靠摘要/标签命中
+    let search_req = Request::builder()
+        .uri("/api/bake/documents?q=SMACT")
+        .body(Body::empty())
+        .unwrap();
+    let (search_status, search_body) = oneshot(router.clone(), search_req).await;
+    assert_eq!(search_status, StatusCode::OK, "body: {search_body}");
+    let search_json: serde_json::Value = serde_json::from_str(&search_body).unwrap();
+    assert_eq!(search_json["total"].as_i64().unwrap(), 1);
+    assert_eq!(search_json["items"][0]["title"], "GPU 指令格式与工具链说明");
+
+    // 小写关键词应通过章节关键词命中（大小写不敏感）
+    let lower_req = Request::builder()
+        .uri("/api/bake/documents?q=smact")
+        .body(Body::empty())
+        .unwrap();
+    let (lower_status, lower_body) = oneshot(router.clone(), lower_req).await;
+    assert_eq!(lower_status, StatusCode::OK, "body: {lower_body}");
+    let lower_json: serde_json::Value = serde_json::from_str(&lower_body).unwrap();
+    assert_eq!(lower_json["total"].as_i64().unwrap(), 1);
+
+    // 仅出现在正文中的关键词也应命中
+    let content_req = Request::builder()
+        .uri("/api/bake/documents?q=%E4%B8%89%E7%A7%8D%E6%8C%87%E4%BB%A4%E6%A0%BC%E5%BC%8F")
+        .body(Body::empty())
+        .unwrap();
+    let (content_status, content_body) = oneshot(router, content_req).await;
+    assert_eq!(content_status, StatusCode::OK, "body: {content_body}");
+    let content_json: serde_json::Value = serde_json::from_str(&content_body).unwrap();
+    assert_eq!(content_json["total"].as_i64().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test_bake_sops_list_and_detail() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("test.db");
     let sm = StorageManager::open(&db).unwrap();
@@ -499,15 +726,14 @@ async fn test_bake_sops_list_and_adopt() {
     let list_json: serde_json::Value = serde_json::from_str(&list_body).unwrap();
     assert_eq!(list_json["items"].as_array().unwrap().len(), 1);
 
-    let adopt_req = Request::builder()
-        .method(Method::POST)
-        .uri(format!("/api/bake/sops/{sop_id}/adopt"))
+    let detail_req = Request::builder()
+        .uri(format!("/api/bake/sops/{sop_id}"))
         .body(Body::empty())
         .unwrap();
-    let (adopt_status, adopt_body) = oneshot(router, adopt_req).await;
-    assert_eq!(adopt_status, StatusCode::OK, "body: {adopt_body}");
-    let adopt_json: serde_json::Value = serde_json::from_str(&adopt_body).unwrap();
-    assert_eq!(adopt_json["status"], "confirmed");
+    let (detail_status, detail_body) = oneshot(router, detail_req).await;
+    assert_eq!(detail_status, StatusCode::OK, "body: {detail_body}");
+    let detail_json: serde_json::Value = serde_json::from_str(&detail_body).unwrap();
+    assert_eq!(detail_json["status"], "candidate");
 }
 
 #[tokio::test]
@@ -575,8 +801,7 @@ async fn test_bake_templates_bucket_filter_separates_pending_and_extracted() {
     let (pending_status, pending_body) = oneshot(router.clone(), pending_req).await;
     assert_eq!(pending_status, StatusCode::OK, "body: {pending_body}");
     let pending_json: serde_json::Value = serde_json::from_str(&pending_body).unwrap();
-    assert_eq!(pending_json["items"].as_array().unwrap().len(), 1);
-    assert_eq!(pending_json["items"][0]["title"], "候选模板");
+    assert!(pending_json["items"].as_array().unwrap().is_empty());
 
     let extracted_req = Request::builder()
         .uri("/api/bake/documents?bucket=extracted")
@@ -585,8 +810,15 @@ async fn test_bake_templates_bucket_filter_separates_pending_and_extracted() {
     let (extracted_status, extracted_body) = oneshot(router, extracted_req).await;
     assert_eq!(extracted_status, StatusCode::OK, "body: {extracted_body}");
     let extracted_json: serde_json::Value = serde_json::from_str(&extracted_body).unwrap();
-    assert_eq!(extracted_json["items"].as_array().unwrap().len(), 1);
-    assert_eq!(extracted_json["items"][0]["title"], "已提炼模板");
+    assert_eq!(extracted_json["items"].as_array().unwrap().len(), 2);
+    let titles = extracted_json["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["title"].as_str())
+        .collect::<Vec<_>>();
+    assert!(titles.contains(&"候选模板"));
+    assert!(titles.contains(&"已提炼模板"));
 }
 
 #[tokio::test]
@@ -635,8 +867,7 @@ async fn test_bake_sops_bucket_filter_separates_pending_and_extracted() {
     let (pending_status, pending_body) = oneshot(router.clone(), pending_req).await;
     assert_eq!(pending_status, StatusCode::OK, "body: {pending_body}");
     let pending_json: serde_json::Value = serde_json::from_str(&pending_body).unwrap();
-    assert_eq!(pending_json["items"].as_array().unwrap().len(), 1);
-    assert_eq!(pending_json["items"][0]["status"], "candidate");
+    assert!(pending_json["items"].as_array().unwrap().is_empty());
 
     let extracted_req = Request::builder()
         .uri("/api/bake/sops?bucket=extracted")
@@ -645,8 +876,15 @@ async fn test_bake_sops_bucket_filter_separates_pending_and_extracted() {
     let (extracted_status, extracted_body) = oneshot(router, extracted_req).await;
     assert_eq!(extracted_status, StatusCode::OK, "body: {extracted_body}");
     let extracted_json: serde_json::Value = serde_json::from_str(&extracted_body).unwrap();
-    assert_eq!(extracted_json["items"].as_array().unwrap().len(), 1);
-    assert_eq!(extracted_json["items"][0]["status"], "confirmed");
+    assert_eq!(extracted_json["items"].as_array().unwrap().len(), 2);
+    let statuses = extracted_json["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["status"].as_str())
+        .collect::<Vec<_>>();
+    assert!(statuses.contains(&"candidate"));
+    assert!(statuses.contains(&"confirmed"));
 }
 
 #[tokio::test]
@@ -655,13 +893,7 @@ async fn test_bake_pipeline_chain_from_memory_to_knowledge_template_and_sop() {
     let db = tmp.path().join("test.db");
     let sm = StorageManager::open(&db).unwrap();
 
-    seed_knowledge_entry(
-        &sm,
-        "meeting",
-        "周报写作需求讨论",
-        "讨论周报标准化产出流程",
-        serde_json::json!({}),
-    );
+    seed_artifact_ready_timeline(&sm, "周报写作需求讨论", "讨论周报标准化产出流程");
 
     let sidecar_url = spawn_bake_sidecar(vec![make_bake_response(
         bake_knowledge_artifact("链路知识", None),
@@ -669,7 +901,7 @@ async fn test_bake_pipeline_chain_from_memory_to_knowledge_template_and_sop() {
         bake_sop_artifact("链路 SOP", None),
     )])
     .await;
-    let router = memory_bread_core::api::create_router(make_bake_state(sm, sidecar_url));
+    let router = memory_bread_core::api::create_router(make_bake_state(sm.clone(), sidecar_url));
 
     let init_req = Request::builder()
         .method(Method::POST)
@@ -680,9 +912,10 @@ async fn test_bake_pipeline_chain_from_memory_to_knowledge_template_and_sop() {
     let (init_status, init_body) = oneshot(router.clone(), init_req).await;
     assert_eq!(init_status, StatusCode::OK, "body: {init_body}");
     let init_json: serde_json::Value = serde_json::from_str(&init_body).unwrap();
-    assert_eq!(init_json["created_count"], 1);
+    assert_eq!(init_json["created_count"], 0);
+    assert_eq!(init_json["skipped_count"], 1);
 
-    let (run_status, run_json, run_body) = run_bake(router.clone(), "manual_debug").await;
+    let (run_status, run_json, run_body) = run_bake(router.clone(), &sm, "manual_debug").await;
     assert_eq!(run_status, StatusCode::OK, "body: {run_body}");
     assert_eq!(run_json["knowledge_created_count"], 1);
     assert_eq!(run_json["document_created_count"], 1);
@@ -706,7 +939,7 @@ async fn test_bake_pipeline_chain_from_memory_to_knowledge_template_and_sop() {
     let templates_json: serde_json::Value = serde_json::from_str(&templates_body).unwrap();
     let template_item = &templates_json["items"][0];
     assert_eq!(templates_json["items"].as_array().unwrap().len(), 1);
-    assert_eq!(template_item["title"], "链路模板");
+    assert_eq!(template_item["title"], "周报模板设计文档");
     assert!(template_item["source_memory_ids"].as_array().unwrap().len() >= 1);
     assert!(template_item["sections"].as_array().unwrap().len() >= 2);
 
@@ -756,7 +989,7 @@ async fn test_bake_memories_promote_and_ignore_flow() {
             "last_visited_at": "2026-04-07 10:00"
         }),
     );
-    let router = memory_bread_core::api::create_router(make_bake_state(sm, sidecar_url));
+    let router = memory_bread_core::api::create_router(make_bake_state(sm.clone(), sidecar_url));
 
     let preview_req = Request::builder()
         .uri(format!("/api/bake/memories/{memory_id}/preview"))
@@ -807,7 +1040,7 @@ async fn test_bake_memories_promote_and_ignore_flow() {
         "body: {promote_sop_body}"
     );
     let promote_sop_json: serde_json::Value = serde_json::from_str(&promote_sop_body).unwrap();
-    assert_eq!(promote_sop_json["status"], "candidate");
+    assert_eq!(promote_sop_json["status"], "auto_created");
 
     let ignore_req = Request::builder()
         .method(Method::POST)
@@ -827,7 +1060,7 @@ async fn test_bake_memories_promote_and_ignore_flow() {
     assert_eq!(overview_status, StatusCode::OK, "body: {overview_body}");
     let overview_json: serde_json::Value = serde_json::from_str(&overview_body).unwrap();
     assert_eq!(overview_json["template_count"], 1);
-    assert_eq!(overview_json["memory_count"], 1);
+    assert_eq!(overview_json["memory_count"], 2);
     assert_eq!(overview_json["knowledge_count"], 0);
 }
 
@@ -916,7 +1149,7 @@ async fn test_bake_overview_counts_only_bake_knowledge() {
     let (status, body) = oneshot(router, req).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(json["memory_count"], 2);
+    assert_eq!(json["memory_count"], 3);
     assert_eq!(json["knowledge_count"], 1);
 }
 
@@ -981,9 +1214,10 @@ async fn test_bake_memories_init_is_idempotent() {
     let (first_status, first_body) = oneshot(router.clone(), first_req).await;
     assert_eq!(first_status, StatusCode::OK, "body: {first_body}");
     let first_json: serde_json::Value = serde_json::from_str(&first_body).unwrap();
-    assert_eq!(first_json["created_count"], 1);
-    assert_eq!(first_json["articles"].as_array().unwrap().len(), 1);
-    assert_eq!(first_json["memories"].as_array().unwrap().len(), 1);
+    assert_eq!(first_json["created_count"], 0);
+    assert_eq!(first_json["skipped_count"], 1);
+    assert!(first_json["articles"].as_array().unwrap().is_empty());
+    assert!(first_json["memories"].as_array().unwrap().is_empty());
 
     let second_req = Request::builder()
         .method(Method::POST)
@@ -1012,26 +1246,20 @@ async fn test_bake_run_pipeline_creates_only_template() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("test.db");
     let sm = StorageManager::open(&db).unwrap();
-    seed_knowledge_entry(
-        &sm,
-        "meeting",
-        "适合沉淀模板的候选",
-        "应只落模板",
-        serde_json::json!({}),
-    );
+    seed_artifact_ready_timeline(&sm, "适合沉淀模板的候选", "应只落模板");
     let sidecar_url = spawn_bake_sidecar(vec![make_bake_response(
         bake_rejected("not_a_knowledge"),
         bake_template_artifact("周报模板", Some("candidate")),
         bake_rejected("not_a_sop"),
     )])
     .await;
-    let router = memory_bread_core::api::create_router(make_bake_state(sm, sidecar_url));
+    let router = memory_bread_core::api::create_router(make_bake_state(sm.clone(), sidecar_url));
 
-    let (status, run_json, run_body) = run_bake(router.clone(), "manual_debug").await;
+    let (status, run_json, run_body) = run_bake(router.clone(), &sm, "manual_debug").await;
     assert_eq!(status, StatusCode::OK, "body: {run_body}");
     assert_eq!(run_json["processed_episode_count"], 1);
     assert_eq!(run_json["auto_created_count"], 1);
-    assert_eq!(run_json["candidate_count"], 1);
+    assert_eq!(run_json["candidate_count"], 0);
     assert_eq!(run_json["discarded_count"], 2);
     assert_eq!(run_json["knowledge_created_count"], 0);
     assert_eq!(run_json["document_created_count"], 1);
@@ -1054,7 +1282,7 @@ async fn test_bake_run_pipeline_creates_only_template() {
     assert_eq!(templates_status, StatusCode::OK, "body: {templates_body}");
     let templates_json: serde_json::Value = serde_json::from_str(&templates_body).unwrap();
     assert_eq!(templates_json["items"].as_array().unwrap().len(), 1);
-    assert_eq!(templates_json["items"][0]["title"], "周报模板");
+    assert_eq!(templates_json["items"][0]["title"], "周报模板设计文档");
 
     let sops_req = Request::builder()
         .uri("/api/bake/sops")
@@ -1073,8 +1301,8 @@ async fn test_bake_run_pipeline_creates_only_template() {
     assert_eq!(memories_status, StatusCode::OK, "body: {memories_body}");
     let memories_json: serde_json::Value = serde_json::from_str(&memories_body).unwrap();
     assert_eq!(memories_json["memories"].as_array().unwrap().len(), 1);
-    assert_eq!(memories_json["memories"][0]["template_match_score"], 0.89);
-    assert_eq!(memories_json["memories"][0]["template_match_level"], "high");
+    assert!(memories_json["memories"][0]["template_match_score"].is_null());
+    assert!(memories_json["memories"][0]["template_match_level"].is_null());
     assert!(memories_json["memories"][0]["knowledge_match_score"].is_null());
     assert!(memories_json["memories"][0]["knowledge_match_level"].is_null());
     assert!(memories_json["memories"][0]["sop_match_score"].is_null());
@@ -1086,26 +1314,20 @@ async fn test_bake_run_pipeline_creates_only_sop() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("test.db");
     let sm = StorageManager::open(&db).unwrap();
-    seed_knowledge_entry(
-        &sm,
-        "meeting",
-        "适合沉淀 SOP 的候选",
-        "应只落 SOP",
-        serde_json::json!({}),
-    );
+    seed_artifact_ready_timeline(&sm, "适合沉淀 SOP 的候选", "应只落 SOP");
     let sidecar_url = spawn_bake_sidecar(vec![make_bake_response(
         bake_rejected("not_a_knowledge"),
         bake_rejected("not_a_template"),
         bake_sop_artifact("标准操作流程", Some("candidate")),
     )])
     .await;
-    let router = memory_bread_core::api::create_router(make_bake_state(sm, sidecar_url));
+    let router = memory_bread_core::api::create_router(make_bake_state(sm.clone(), sidecar_url));
 
-    let (status, run_json, run_body) = run_bake(router.clone(), "manual_debug").await;
+    let (status, run_json, run_body) = run_bake(router.clone(), &sm, "manual_debug").await;
     assert_eq!(status, StatusCode::OK, "body: {run_body}");
     assert_eq!(run_json["processed_episode_count"], 1);
     assert_eq!(run_json["auto_created_count"], 1);
-    assert_eq!(run_json["candidate_count"], 1);
+    assert_eq!(run_json["candidate_count"], 0);
     assert_eq!(run_json["discarded_count"], 2);
     assert_eq!(run_json["knowledge_created_count"], 0);
     assert_eq!(run_json["document_created_count"], 0);
@@ -1148,8 +1370,8 @@ async fn test_bake_run_pipeline_creates_only_sop() {
     assert_eq!(memories_status, StatusCode::OK, "body: {memories_body}");
     let memories_json: serde_json::Value = serde_json::from_str(&memories_body).unwrap();
     assert_eq!(memories_json["memories"].as_array().unwrap().len(), 1);
-    assert_eq!(memories_json["memories"][0]["sop_match_score"], 0.93);
-    assert_eq!(memories_json["memories"][0]["sop_match_level"], "high");
+    assert!(memories_json["memories"][0]["sop_match_score"].is_null());
+    assert!(memories_json["memories"][0]["sop_match_level"].is_null());
     assert!(memories_json["memories"][0]["knowledge_match_score"].is_null());
     assert!(memories_json["memories"][0]["knowledge_match_level"].is_null());
     assert!(memories_json["memories"][0]["template_match_score"].is_null());
@@ -1174,15 +1396,15 @@ async fn test_bake_run_pipeline_creates_only_knowledge_and_updates_overview() {
         bake_rejected("not_a_sop"),
     )])
     .await;
-    let router = memory_bread_core::api::create_router(make_bake_state(sm, sidecar_url));
+    let router = memory_bread_core::api::create_router(make_bake_state(sm.clone(), sidecar_url));
 
-    let (run_status, run_json, run_body) = run_bake(router.clone(), "manual_debug").await;
+    let (run_status, run_json, run_body) = run_bake(router.clone(), &sm, "manual_debug").await;
     assert_eq!(run_status, StatusCode::OK, "body: {run_body}");
     assert_eq!(run_json["status"], "completed");
     assert_eq!(run_json["trigger_reason"], "manual_debug");
     assert_eq!(run_json["processed_episode_count"], 1);
     assert_eq!(run_json["auto_created_count"], 1);
-    assert_eq!(run_json["candidate_count"], 1);
+    assert_eq!(run_json["candidate_count"], 0);
     assert_eq!(run_json["discarded_count"], 2);
     assert_eq!(run_json["knowledge_created_count"], 1);
     assert_eq!(run_json["document_created_count"], 0);
@@ -1198,9 +1420,9 @@ async fn test_bake_run_pipeline_creates_only_knowledge_and_updates_overview() {
     assert_eq!(overview_json["template_count"], 0);
     assert_eq!(overview_json["memory_count"], 1);
     assert_eq!(overview_json["knowledge_count"], 1);
-    assert_eq!(overview_json["pending_candidates"], 1);
+    assert_eq!(overview_json["pending_candidates"], 0);
     assert_eq!(overview_json["auto_created_today"], 1);
-    assert_eq!(overview_json["candidate_today"], 1);
+    assert_eq!(overview_json["candidate_today"], 0);
     assert_eq!(overview_json["discarded_today"], 2);
     assert_eq!(overview_json["last_bake_run_status"], "completed");
     assert_eq!(overview_json["last_trigger_reason"], "manual_debug");
@@ -1221,7 +1443,10 @@ async fn test_bake_run_pipeline_creates_only_knowledge_and_updates_overview() {
     assert_eq!(knowledge_status, StatusCode::OK, "body: {knowledge_body}");
     let knowledge_json: serde_json::Value = serde_json::from_str(&knowledge_body).unwrap();
     assert_eq!(knowledge_json["items"].as_array().unwrap().len(), 1);
-    assert_eq!(knowledge_json["items"][0]["summary"], "提炼后的知识");
+    assert_eq!(
+        knowledge_json["items"][0]["summary"],
+        "提炼后的知识 overview"
+    );
 
     let templates_req = Request::builder()
         .uri("/api/bake/documents")
@@ -1249,13 +1474,10 @@ async fn test_bake_run_pipeline_creates_only_knowledge_and_updates_overview() {
     assert_eq!(memories_status, StatusCode::OK, "body: {memories_body}");
     let memories_json: serde_json::Value = serde_json::from_str(&memories_body).unwrap();
     assert_eq!(memories_json["memories"].as_array().unwrap().len(), 1);
-    assert_eq!(memories_json["memories"][0]["source_knowledge_id"], "1");
+    assert!(memories_json["memories"][0]["source_knowledge_id"].is_null());
     assert_eq!(memories_json["memories"][0]["status"], "candidate");
-    assert_eq!(memories_json["memories"][0]["knowledge_match_score"], 0.91);
-    assert_eq!(
-        memories_json["memories"][0]["knowledge_match_level"],
-        "high"
-    );
+    assert!(memories_json["memories"][0]["knowledge_match_score"].is_null());
+    assert!(memories_json["memories"][0]["knowledge_match_level"].is_null());
     assert!(memories_json["memories"][0]["template_match_score"].is_null());
     assert!(memories_json["memories"][0]["template_match_level"].is_null());
     assert!(memories_json["memories"][0]["sop_match_score"].is_null());
@@ -1280,9 +1502,9 @@ async fn test_bake_overview_recent_activity_highlights_knowledge_background_runs
         bake_rejected("not_a_sop"),
     )])
     .await;
-    let router = memory_bread_core::api::create_router(make_bake_state(sm, sidecar_url));
+    let router = memory_bread_core::api::create_router(make_bake_state(sm.clone(), sidecar_url));
 
-    let (run_status, _, run_body) = run_bake(router.clone(), "knowledge_background").await;
+    let (run_status, _, run_body) = run_bake(router.clone(), &sm, "knowledge_background").await;
     assert_eq!(run_status, StatusCode::OK, "body: {run_body}");
 
     let overview_req = Request::builder()
@@ -1301,17 +1523,11 @@ async fn test_bake_overview_recent_activity_highlights_knowledge_background_runs
 }
 
 #[tokio::test]
-async fn test_bake_run_pipeline_demotes_inconsistent_auto_created_scores_to_candidate() {
+async fn test_bake_run_pipeline_keeps_all_accepted_artifacts_auto_created() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("test.db");
     let sm = StorageManager::open(&db).unwrap();
-    seed_knowledge_entry(
-        &sm,
-        "meeting",
-        "周报模板流程沉淀",
-        "沉淀步骤化标准方案",
-        serde_json::json!({}),
-    );
+    seed_artifact_ready_timeline(&sm, "周报模板流程沉淀", "沉淀步骤化标准方案");
 
     let sidecar_url = spawn_bake_sidecar(vec![make_bake_response(
         serde_json::json!({
@@ -1374,9 +1590,9 @@ async fn test_bake_run_pipeline_demotes_inconsistent_auto_created_scores_to_cand
         }),
     )])
     .await;
-    let router = memory_bread_core::api::create_router(make_bake_state(sm, sidecar_url));
+    let router = memory_bread_core::api::create_router(make_bake_state(sm.clone(), sidecar_url));
 
-    let (run_status, _run_json, run_body) = run_bake(router.clone(), "manual_debug").await;
+    let (run_status, _run_json, run_body) = run_bake(router.clone(), &sm, "manual_debug").await;
     assert_eq!(run_status, StatusCode::OK, "body: {run_body}");
 
     let knowledge_req = Request::builder()
@@ -1390,7 +1606,7 @@ async fn test_bake_run_pipeline_demotes_inconsistent_auto_created_scores_to_cand
         .as_str()
         .or_else(|| knowledge_json["items"][0]["reviewStatus"].as_str())
         .unwrap();
-    assert_eq!(knowledge_review_status, "candidate");
+    assert_eq!(knowledge_review_status, "auto_created");
 
     let templates_req = Request::builder()
         .uri("/api/bake/documents")
@@ -1403,7 +1619,7 @@ async fn test_bake_run_pipeline_demotes_inconsistent_auto_created_scores_to_cand
         .as_str()
         .or_else(|| templates_json["items"][0]["reviewStatus"].as_str())
         .unwrap();
-    assert_eq!(template_review_status, "candidate");
+    assert_eq!(template_review_status, "auto_created");
 
     let sops_req = Request::builder()
         .uri("/api/bake/sops")
@@ -1417,7 +1633,7 @@ async fn test_bake_run_pipeline_demotes_inconsistent_auto_created_scores_to_cand
         .or_else(|| sops_json["items"][0]["reviewStatus"].as_str())
         .or_else(|| sops_json["items"][0]["status"].as_str())
         .unwrap();
-    assert_eq!(sop_review_status, "candidate");
+    assert_eq!(sop_review_status, "auto_created");
 }
 
 #[tokio::test]
@@ -1425,42 +1641,32 @@ async fn test_bake_run_pipeline_is_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("test.db");
     let sm = StorageManager::open(&db).unwrap();
-    seed_knowledge_entry(
-        &sm,
-        "meeting",
-        "周报模板流程沉淀",
-        "沉淀步骤化标准方案",
-        serde_json::json!({}),
-    );
+    seed_artifact_ready_timeline(&sm, "周报模板流程沉淀", "沉淀步骤化标准方案");
     let sidecar_url = spawn_bake_sidecar(vec![make_bake_response(
         bake_knowledge_artifact("第一次提炼知识", None),
         bake_template_artifact("第一次模板", Some("candidate")),
         bake_sop_artifact("第一次 SOP", Some("candidate")),
     )])
     .await;
-    let router = memory_bread_core::api::create_router(make_bake_state(sm, sidecar_url));
+    let router = memory_bread_core::api::create_router(make_bake_state(sm.clone(), sidecar_url));
 
-    let (first_status, first_json, first_body) = run_bake(router.clone(), "manual_debug").await;
+    let (first_status, first_json, first_body) =
+        run_bake(router.clone(), &sm, "manual_debug").await;
     assert_eq!(first_status, StatusCode::OK, "body: {first_body}");
     assert_eq!(first_json["status"], "completed");
     assert_eq!(first_json["processed_episode_count"], 1);
     assert_eq!(first_json["auto_created_count"], 3);
-    assert_eq!(first_json["candidate_count"], 1);
+    assert_eq!(first_json["candidate_count"], 0);
     assert_eq!(first_json["discarded_count"], 0);
     assert_eq!(first_json["knowledge_created_count"], 1);
     assert_eq!(first_json["document_created_count"], 1);
     assert_eq!(first_json["sop_created_count"], 1);
 
-    let (second_status, second_json, second_body) = run_bake(router.clone(), "manual_debug").await;
+    let (second_status, second_json, second_body) =
+        run_bake(router.clone(), &sm, "manual_debug").await;
     assert_eq!(second_status, StatusCode::OK, "body: {second_body}");
-    assert_eq!(second_json["status"], "completed");
-    assert_eq!(second_json["processed_episode_count"], 0);
-    assert_eq!(second_json["auto_created_count"], 0);
-    assert_eq!(second_json["candidate_count"], 0);
-    assert_eq!(second_json["discarded_count"], 0);
-    assert_eq!(second_json["knowledge_created_count"], 0);
-    assert_eq!(second_json["document_created_count"], 0);
-    assert_eq!(second_json["sop_created_count"], 0);
+    assert_eq!(second_json["status"], "skipped");
+    assert_eq!(second_json["reason"], "no actionable bake candidates");
 
     let knowledge_req = Request::builder()
         .uri("/api/bake/knowledge")
@@ -1517,14 +1723,14 @@ async fn test_bake_run_pipeline_rejected_candidate_advances_watermark() {
         bake_rejected("no_sop"),
     )])
     .await;
-    let router = memory_bread_core::api::create_router(make_bake_state(sm, sidecar_url));
+    let router = memory_bread_core::api::create_router(make_bake_state(sm.clone(), sidecar_url));
 
-    let (status, run_json, run_body) = run_bake(router.clone(), "manual_debug").await;
+    let (status, run_json, run_body) = run_bake(router.clone(), &sm, "manual_debug").await;
     assert_eq!(status, StatusCode::OK, "body: {run_body}");
     assert_eq!(run_json["status"], "completed");
     assert_eq!(run_json["processed_episode_count"], 1);
     assert_eq!(run_json["auto_created_count"], 0);
-    assert_eq!(run_json["candidate_count"], 1);
+    assert_eq!(run_json["candidate_count"], 0);
     assert_eq!(run_json["discarded_count"], 3);
     assert_eq!(run_json["knowledge_created_count"], 0);
     assert_eq!(run_json["document_created_count"], 0);
@@ -1539,21 +1745,22 @@ async fn test_bake_run_pipeline_rejected_candidate_advances_watermark() {
     let memories_json: serde_json::Value = serde_json::from_str(&memories_body).unwrap();
     assert_eq!(memories_json["memories"].as_array().unwrap().len(), 1);
 
-    let (rerun_status, rerun_json, rerun_body) = run_bake(router, "manual_debug").await;
+    let (rerun_status, rerun_json, rerun_body) = run_bake(router, &sm, "manual_debug").await;
     assert_eq!(rerun_status, StatusCode::OK, "body: {rerun_body}");
-    assert_eq!(rerun_json["processed_episode_count"], 0);
+    assert_eq!(rerun_json["status"], "skipped");
+    assert_eq!(rerun_json["reason"], "no actionable bake candidates");
 }
 
 #[tokio::test]
-async fn test_bake_run_pipeline_malformed_json_does_not_advance_watermark() {
+async fn test_bake_run_pipeline_malformed_json_advances_fresh_watermark_and_retries() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("test.db");
     let sm = StorageManager::open(&db).unwrap();
-    seed_knowledge_entry(
+    let timeline_id = seed_knowledge_entry(
         &sm,
         "meeting",
         "第一次返回坏 JSON",
-        "失败后不应推进 watermark",
+        "失败后应推进 fresh watermark 并进入独立重试队列",
         serde_json::json!({}),
     );
     let sidecar_url = spawn_bake_sidecar(vec![
@@ -1567,18 +1774,22 @@ async fn test_bake_run_pipeline_malformed_json_does_not_advance_watermark() {
     .await;
     let service = BakeService::new(sm.clone(), sidecar_url);
 
-    let first_error = service
+    let first = service
         .run_bake_pipeline("manual_debug", 10)
         .await
-        .expect_err("损坏的 200 响应应进入候选有界重试");
-    match first_error {
-        ApiError::Upstream { status, code, .. } => {
-            assert_eq!(status, StatusCode::BAD_GATEWAY);
-            assert_eq!(code, "BAKE_SIDECAR_RESPONSE_INVALID");
-        }
-        other => panic!("unexpected error: {other}"),
-    }
-    assert!(sm.get_bake_watermark("unified").unwrap().is_none());
+        .expect("单候选损坏响应不应中断整个批次");
+    assert_eq!(first.status, "completed");
+    assert_eq!(first.processed_episode_count, 1);
+    assert_eq!(first.knowledge_created_count, 0);
+    assert!(sm.get_bake_watermark("unified").unwrap().is_some());
+    let retry = sm.get_bake_retry_state(timeline_id).unwrap().unwrap();
+    assert_eq!(retry.failure_count, 1);
+    assert_eq!(
+        retry.last_error_code.as_deref(),
+        Some("BAKE_SIDECAR_RESPONSE_INVALID")
+    );
+
+    make_bake_retry_due_now(&sm, timeline_id);
 
     let second = service
         .run_bake_pipeline("manual_debug", 10)
@@ -1587,6 +1798,7 @@ async fn test_bake_run_pipeline_malformed_json_does_not_advance_watermark() {
     assert_eq!(second.processed_episode_count, 1);
     assert_eq!(second.knowledge_created_count, 1);
     assert_eq!(sm.count_bake_knowledge().unwrap(), 1);
+    assert!(sm.get_bake_retry_state(timeline_id).unwrap().is_none());
 }
 
 #[tokio::test]
@@ -1594,7 +1806,7 @@ async fn test_bake_run_pipeline_bounds_unstructured_5xx_and_advances_watermark()
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("test.db");
     let sm = StorageManager::open(&db).unwrap();
-    seed_knowledge_entry(
+    let timeline_id = seed_knowledge_entry(
         &sm,
         "meeting",
         "sidecar 失败映射",
@@ -1610,25 +1822,27 @@ async fn test_bake_run_pipeline_bounds_unstructured_5xx_and_advances_watermark()
         ),
     ])
     .await;
-    let service = BakeService::new(sm, sidecar_url);
+    let service = BakeService::new(sm.clone(), sidecar_url);
 
     for attempt in 1..=2 {
-        let error = service
+        let run = service
             .run_bake_pipeline("manual_debug", 10)
             .await
-            .expect_err("前两次裸 502 应进入有界重试");
-        match error {
-            ApiError::Upstream {
-                status,
-                code,
-                message,
-            } => {
-                assert_eq!(status, StatusCode::BAD_GATEWAY, "attempt={attempt}");
-                assert_eq!(code, "BAKE_UNCLASSIFIED_UPSTREAM_ERROR");
-                assert!(!message.contains("provider-model"));
-            }
-            other => panic!("attempt={attempt} unexpected error: {other}"),
-        }
+            .expect("单候选裸 502 不应中断整个批次");
+        assert_eq!(run.status, "completed", "attempt={attempt}");
+        assert_eq!(run.processed_episode_count, 1, "attempt={attempt}");
+        assert_eq!(run.discarded_count, 0, "attempt={attempt}");
+        let retry = sm.get_bake_retry_state(timeline_id).unwrap().unwrap();
+        assert_eq!(retry.failure_count, attempt, "attempt={attempt}");
+        assert_eq!(
+            retry.last_error_code.as_deref(),
+            Some("BAKE_UNCLASSIFIED_UPSTREAM_ERROR")
+        );
+        assert!(!retry
+            .last_error
+            .unwrap_or_default()
+            .contains("provider-model"));
+        make_bake_retry_due_now(&sm, timeline_id);
     }
 
     let terminal = service
@@ -2006,7 +2220,9 @@ async fn test_query_sidecar_error_response_returns_502() {
         .unwrap();
     let (status, body) = oneshot(router, req).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "body: {body}");
-    assert!(body.contains("502 Bad Gateway"), "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["error"], "BAD_GATEWAY");
+    assert_eq!(json["message"], "boom");
 }
 
 #[tokio::test]

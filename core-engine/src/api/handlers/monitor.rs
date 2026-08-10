@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     api::{error::ApiError, state::AppState},
     capture::engine::{ocr_backfill_metrics_snapshot, OcrBackfillMetricsSnapshot},
-    services::bake_service::MAX_BAKE_RETRY_FAILURES,
+    services::bake_service::{BAKE_GENERATION_VERSION, MAX_BAKE_RETRY_FAILURES},
+    storage::{models_bake::BakeQueueStatusRecord, repo::bake_run::load_bake_production_events},
 };
 
 const SELF_GENERATED_APP_KEYWORDS: [&str; 2] = ["memory-bread", "记忆面包"];
@@ -67,6 +68,7 @@ fn load_pipeline_backlog_metrics(
     conn: &rusqlite::Connection,
     now_ms: i64,
     capture_enabled: bool,
+    queue_status: &BakeQueueStatusRecord,
 ) -> Result<PipelineBacklogMetrics, rusqlite::Error> {
     let app_not_like = build_not_like_clause("c.app_name", &SELF_GENERATED_APP_KEYWORDS);
     let win_not_like = build_not_like_clause("c.win_title", &SELF_GENERATED_WINDOW_KEYWORDS);
@@ -89,170 +91,20 @@ fn load_pipeline_backlog_metrics(
             Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
         })?;
 
-    // This predicate mirrors BakeService::is_high_value_candidate and its
-    // candidate timestamp (timeline update or latest member capture).  The
-    // watermark excludes candidates already visited and intentionally
-    // discarded; substantive document captures are included even when their
-    // importance/evidence metadata is still weak.
-    let pending_bake_sql = r#"
-        WITH pending AS (
-            SELECT
-                t.id,
-                MAX(
-                    COALESCE(t.updated_at_ms, 0),
-                    COALESCE(
-                        (SELECT MAX(c2.ts) FROM captures c2 WHERE c2.timeline_id = t.id),
-                        0
-                    )
-                ) AS candidate_ts
-            FROM timelines t
-            LEFT JOIN bake_retry_state r ON r.timeline_id = t.id
-            WHERE t.category NOT IN (
-                    'bake_article', 'bake_knowledge', 'bake_sop', 'legacy_bake_candidate'
-                  )
-              AND t.is_self_generated = 0
-              AND COALESCE(r.failure_count, 0) < ?1
-              AND (
-                    t.importance >= 4
-                 OR t.user_verified = 1
-                 OR t.history_view = 1
-                 OR (
-                        t.evidence_strength IN ('high', 'medium')
-                    AND (
-                           t.activity_type IN (
-                               'coding', 'reading', 'reviewing_history', 'document_reference'
-                           )
-                        OR t.content_origin IN ('historical_content', 'live_interaction')
-                    )
-                 )
-                 OR EXISTS (
-                    SELECT 1
-                    FROM captures dc
-                    WHERE dc.timeline_id = t.id
-                      AND (
-                           LOWER(COALESCE(dc.url, '')) LIKE '%docs.corp%'
-                        OR LOWER(COALESCE(dc.url, '')) LIKE '%/docs/%'
-                        OR LOWER(COALESCE(dc.url, '')) LIKE '%docs.google%'
-                        OR LOWER(COALESCE(dc.url, '')) LIKE '%/document/%'
-                        OR LOWER(COALESCE(dc.url, '')) LIKE '%yuque.com%'
-                        OR LOWER(COALESCE(dc.url, '')) LIKE '%feishu.cn/docx%'
-                        OR LOWER(COALESCE(dc.url, '')) LIKE '%feishu.cn/wiki%'
-                        OR LOWER(COALESCE(dc.url, '')) LIKE '%notion.so%'
-                        OR LOWER(COALESCE(dc.url, '')) LIKE '%confluence%'
-                        OR LOWER(COALESCE(dc.url, '')) LIKE '%/wiki/%'
-                        OR LOWER(COALESCE(dc.url, '')) LIKE '%shimo.im%'
-                        OR LOWER(COALESCE(dc.url, '')) LIKE '%/d/home/%'
-                        OR LOWER(COALESCE(dc.url, '')) LIKE '%/s/home/%'
-                        OR LOWER(COALESCE(dc.url, '')) LIKE '%/k/home/%'
-                      )
-                      AND LENGTH(
-                            REPLACE(
-                                REPLACE(
-                                    COALESCE(dc.ax_text, '') || COALESCE(dc.ocr_text, ''),
-                                    ' ',
-                                    ''
-                                ),
-                                char(10),
-                                ''
-                            )
-                          ) >= 200
-                 )
-              )
-              AND NOT EXISTS (
-                    SELECT 1 FROM bake_knowledge bk WHERE bk.timeline_id = t.id
-              )
-              AND NOT EXISTS (
-                    SELECT 1 FROM bake_sops bs WHERE bs.timeline_id = t.id
-              )
-              AND NOT EXISTS (
-                    SELECT 1
-                    FROM bake_documents bd
-                    WHERE bd.deleted_at IS NULL
-                      AND (
-                           (
-                               json_valid(COALESCE(bd.source_memory_ids, '[]'))
-                               AND EXISTS (
-                                   SELECT 1 FROM json_each(bd.source_memory_ids)
-                                   WHERE CAST(json_each.value AS TEXT) = CAST(t.id AS TEXT)
-                               )
-                           )
-                        OR (
-                               json_valid(COALESCE(bd.source_episode_ids, '[]'))
-                               AND EXISTS (
-                                   SELECT 1 FROM json_each(bd.source_episode_ids)
-                                   WHERE CAST(json_each.value AS TEXT) = CAST(t.id AS TEXT)
-                               )
-                           )
-                      )
-              )
-              AND MAX(
-                    COALESCE(t.updated_at_ms, 0),
-                    COALESCE(
-                        (SELECT MAX(c4.ts) FROM captures c4 WHERE c4.timeline_id = t.id),
-                        0
-                    )
-                  ) > COALESCE(
-                        (
-                            SELECT MAX(last_processed_ts)
-                            FROM bake_watermarks
-                            WHERE pipeline_name = 'unified'
-                        ),
-                        0
-                      )
-        )
-        SELECT COUNT(*), MIN(candidate_ts) FROM pending
-    "#;
-    let (pending_bake_count, oldest_pending_bake_at_ms) = conn.query_row(
-        pending_bake_sql,
-        rusqlite::params![MAX_BAKE_RETRY_FAILURES],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
-    )?;
-
-    let (
-        bake_retry_pending_count,
-        bake_retry_exhausted_count,
-        bake_timeout_failure_count,
-        bake_truncated_failure_count,
-        bake_other_failure_count,
-    ) = conn
+    // 消化速率：取最近 6 小时已完成 run 的候选处理量折算每小时吞吐，
+    // 给监控页展示积压预计清空时间；速率过低时 ETA 不可信，返回 None。
+    const BAKE_DRAIN_WINDOW_MS: i64 = 6 * 60 * 60 * 1000;
+    let bake_drain_window_hours = (BAKE_DRAIN_WINDOW_MS / (60 * 60 * 1000)) as f64;
+    let bake_drain_processed_in_window: i64 = conn
         .query_row(
-            "SELECT
-                COALESCE(SUM(failure_count < ?1), 0),
-                COALESCE(SUM(failure_count >= ?1), 0),
-                COALESCE(SUM(
-                    failure_count >= ?1
-                    AND (
-                        last_error LIKE 'upstream error (504%'
-                        OR last_error LIKE '%code=INFERENCE_TIMEOUT%'
-                    )
-                ), 0),
-                COALESCE(SUM(
-                    failure_count >= ?1
-                    AND (
-                        last_error LIKE '%BAKE_OUTPUT_TRUNCATED%'
-                        OR last_error LIKE '%truncated_json%'
-                    )
-                ), 0),
-                COALESCE(SUM(
-                    failure_count >= ?1
-                    AND last_error NOT LIKE 'upstream error (504%'
-                    AND last_error NOT LIKE '%code=INFERENCE_TIMEOUT%'
-                    AND last_error NOT LIKE '%BAKE_OUTPUT_TRUNCATED%'
-                    AND last_error NOT LIKE '%truncated_json%'
-                ), 0)
-             FROM bake_retry_state",
-            rusqlite::params![MAX_BAKE_RETRY_FAILURES],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
+            "SELECT COALESCE(SUM(processed_episode_count), 0)
+             FROM bake_runs
+             WHERE completed_at IS NOT NULL AND completed_at >= ?1",
+            rusqlite::params![now_ms - BAKE_DRAIN_WINDOW_MS],
+            |row| row.get(0),
         )
-        .unwrap_or((0, 0, 0, 0, 0));
+        .unwrap_or(0);
+    let bake_drain_rate_per_hour = bake_drain_processed_in_window as f64 / bake_drain_window_hours;
     let running_bake_count = conn
         .query_row(
             "SELECT COUNT(*) FROM bake_runs
@@ -269,13 +121,6 @@ fn load_pipeline_backlog_metrics(
             |row| row.get(0),
         )
         .unwrap_or(0);
-    let bake_watermark_updated_at_ms = conn
-        .query_row(
-            "SELECT MAX(updated_at) FROM bake_watermarks WHERE pipeline_name = 'unified'",
-            [],
-            |row| row.get::<_, Option<i64>>(0),
-        )
-        .unwrap_or(None);
     let latest_bake_status = conn
         .query_row(
             "SELECT status FROM bake_runs ORDER BY started_at DESC, id DESC LIMIT 1",
@@ -303,6 +148,31 @@ fn load_pipeline_backlog_metrics(
             },
         )
         .unwrap_or((0, 0, 0));
+    // 调度、预检、监控统一使用 Core 队列快照；上面的历史 SQL 暂保留用于兼容
+    // 旧库诊断字段，但不再决定对外的库存和重试数量。
+    let pending_bake_count = queue_status.pending_count;
+    let oldest_pending_bake_at_ms = match (
+        queue_status.oldest_fresh_at_ms,
+        queue_status.oldest_retry_at_ms,
+    ) {
+        (Some(fresh), Some(retry)) => Some(fresh.min(retry)),
+        (Some(fresh), None) => Some(fresh),
+        (None, Some(retry)) => Some(retry),
+        (None, None) => None,
+    };
+    let bake_retry_pending_count = queue_status
+        .retry_ready_count
+        .saturating_add(queue_status.retry_delayed_count);
+    let bake_retry_exhausted_count = queue_status.dead_letter_count;
+    let bake_timeout_failure_count = queue_status.retry_timeout_count;
+    let bake_truncated_failure_count = queue_status.retry_output_count;
+    let bake_other_failure_count = queue_status.retry_other_count;
+    let bake_watermark_updated_at_ms = queue_status.watermark_updated_at_ms;
+    let bake_eta_ms = if pending_bake_count > 0 && bake_drain_rate_per_hour >= 0.5 {
+        Some(((pending_bake_count as f64 / bake_drain_rate_per_hour) * 3_600_000.0) as i64)
+    } else {
+        None
+    };
     let bake_stalled = is_bake_pipeline_stalled(
         capture_enabled,
         now_ms,
@@ -310,19 +180,33 @@ fn load_pipeline_backlog_metrics(
         oldest_pending_bake_at_ms,
         bake_watermark_updated_at_ms,
     );
-    let recent_bake_runs_unhealthy =
-        recent_bake_run_count >= 3 && recent_bake_failed_count + recent_bake_deferred_count >= 3;
+    let bake_scheduler_mismatch =
+        queue_status.actionable_count > 0 && queue_status.recent_no_progress_count >= 3;
+    let recent_bake_runs_unhealthy = recent_bake_run_count >= 3
+        && (recent_bake_failed_count + recent_bake_deferred_count >= 3
+            || queue_status.recent_no_progress_count >= 3);
 
     Ok(PipelineBacklogMetrics {
         pending_extraction_count,
         oldest_pending_extraction_at_ms,
         pending_bake_count,
         oldest_pending_bake_at_ms,
+        bake_drain_rate_per_hour,
+        bake_eta_ms,
         bake_retry_pending_count,
+        bake_fresh_pending_count: queue_status.fresh_count,
+        bake_retry_ready_count: queue_status.retry_ready_count,
+        bake_retry_delayed_count: queue_status.retry_delayed_count,
+        bake_actionable_count: queue_status.actionable_count,
         bake_retry_exhausted_count,
         bake_timeout_failure_count,
         bake_truncated_failure_count,
         bake_other_failure_count,
+        bake_upstream_failure_count: queue_status.retry_upstream_count,
+        bake_recent_no_progress_count: queue_status.recent_no_progress_count,
+        bake_next_retry_at_ms: queue_status.next_retry_at_ms,
+        bake_recommended_retry_after_ms: queue_status.recommended_retry_after_ms,
+        bake_scheduler_mismatch,
         running_bake_count,
         stale_bake_run_count,
         bake_watermark_updated_at_ms,
@@ -779,13 +663,26 @@ pub struct KnowledgeFlow {
     /// 全量库存：已有 timeline、尚未生成任一 bake 产物的高价值候选。
     pub pending_bake_count: i64,
     pub oldest_pending_bake_at_ms: Option<i64>,
+    /// 最近 6 小时折算的烘焙消化速率（候选/小时）。
+    pub bake_drain_rate_per_hour: f64,
+    /// 按当前速率预计清空积压所需时长；速率不可信时为 None。
+    pub bake_eta_ms: Option<i64>,
     /// 已失败但仍在有界退避重试范围内的候选。
     pub bake_retry_pending_count: i64,
+    pub bake_fresh_pending_count: i64,
+    pub bake_retry_ready_count: i64,
+    pub bake_retry_delayed_count: i64,
+    pub bake_actionable_count: i64,
     /// 达到最大尝试次数、需要人工关注的候选。
     pub bake_retry_exhausted_count: i64,
     pub bake_timeout_failure_count: i64,
     pub bake_truncated_failure_count: i64,
     pub bake_other_failure_count: i64,
+    pub bake_upstream_failure_count: i64,
+    pub bake_recent_no_progress_count: i64,
+    pub bake_next_retry_at_ms: Option<i64>,
+    pub bake_recommended_retry_after_ms: i64,
+    pub bake_scheduler_mismatch: bool,
     pub running_bake_count: i64,
     pub stale_bake_run_count: i64,
     pub by_time: Vec<KnowledgeTimePoint>,
@@ -804,11 +701,22 @@ struct PipelineBacklogMetrics {
     oldest_pending_extraction_at_ms: Option<i64>,
     pending_bake_count: i64,
     oldest_pending_bake_at_ms: Option<i64>,
+    bake_drain_rate_per_hour: f64,
+    bake_eta_ms: Option<i64>,
     bake_retry_pending_count: i64,
+    bake_fresh_pending_count: i64,
+    bake_retry_ready_count: i64,
+    bake_retry_delayed_count: i64,
+    bake_actionable_count: i64,
     bake_retry_exhausted_count: i64,
     bake_timeout_failure_count: i64,
     bake_truncated_failure_count: i64,
     bake_other_failure_count: i64,
+    bake_upstream_failure_count: i64,
+    bake_recent_no_progress_count: i64,
+    bake_next_retry_at_ms: Option<i64>,
+    bake_recommended_retry_after_ms: i64,
+    bake_scheduler_mismatch: bool,
     running_bake_count: i64,
     stale_bake_run_count: i64,
     bake_watermark_updated_at_ms: Option<i64>,
@@ -952,6 +860,10 @@ pub async fn monitor_overview(
     let token_bucket_ms = trend_bucket_ms(range_ms);
     let knowledge_bucket_ms = knowledge_bucket_ms(range_ms);
     let fallback_noise_pattern = format!("{}%", FALLBACK_NOISE_OVERVIEW_PREFIX);
+    let bake_queue_status = state
+        .storage
+        .get_bake_queue_status(MAX_BAKE_RETRY_FAILURES)
+        .unwrap_or_default();
 
     let mut overview = state.storage.with_conn_async(move |conn| {
         let db_size_bytes = conn.query_row("PRAGMA page_count", [], |r| r.get::<_, i64>(0)).unwrap_or(0)
@@ -1175,8 +1087,13 @@ pub async fn monitor_overview(
             rusqlite::params![from_ms, fallback_noise_pattern.as_str()],
             |r| r.get(0),
         ).unwrap_or(0);
-        let backlog =
-            load_pipeline_backlog_metrics(conn, now_ms, capture_enabled).unwrap_or_default();
+        let backlog = load_pipeline_backlog_metrics(
+            conn,
+            now_ms,
+            capture_enabled,
+            &bake_queue_status,
+        )
+        .unwrap_or_default();
 
         let mut knowledge_by_time_stmt = conn.prepare(
             "SELECT (CAST(strftime('%s', created_at) AS INTEGER) * 1000 / ?1) * ?1 + ?1/2 as bucket, COUNT(*)
@@ -1328,11 +1245,22 @@ pub async fn monitor_overview(
                 oldest_pending_extraction_at_ms: backlog.oldest_pending_extraction_at_ms,
                 pending_bake_count: backlog.pending_bake_count,
                 oldest_pending_bake_at_ms: backlog.oldest_pending_bake_at_ms,
+                bake_drain_rate_per_hour: backlog.bake_drain_rate_per_hour,
+                bake_eta_ms: backlog.bake_eta_ms,
                 bake_retry_pending_count: backlog.bake_retry_pending_count,
+                bake_fresh_pending_count: backlog.bake_fresh_pending_count,
+                bake_retry_ready_count: backlog.bake_retry_ready_count,
+                bake_retry_delayed_count: backlog.bake_retry_delayed_count,
+                bake_actionable_count: backlog.bake_actionable_count,
                 bake_retry_exhausted_count: backlog.bake_retry_exhausted_count,
                 bake_timeout_failure_count: backlog.bake_timeout_failure_count,
                 bake_truncated_failure_count: backlog.bake_truncated_failure_count,
                 bake_other_failure_count: backlog.bake_other_failure_count,
+                bake_upstream_failure_count: backlog.bake_upstream_failure_count,
+                bake_recent_no_progress_count: backlog.bake_recent_no_progress_count,
+                bake_next_retry_at_ms: backlog.bake_next_retry_at_ms,
+                bake_recommended_retry_after_ms: backlog.bake_recommended_retry_after_ms,
+                bake_scheduler_mismatch: backlog.bake_scheduler_mismatch,
                 running_bake_count: backlog.running_bake_count,
                 stale_bake_run_count: backlog.stale_bake_run_count,
                 by_time: knowledge_by_time,
@@ -1637,11 +1565,22 @@ pub struct ExtractionLiveResponse {
     pub oldest_pending_extraction_at_ms: Option<i64>,
     pub pending_bake_count: i64,
     pub oldest_pending_bake_at_ms: Option<i64>,
+    pub bake_drain_rate_per_hour: f64,
+    pub bake_eta_ms: Option<i64>,
     pub bake_retry_pending_count: i64,
+    pub bake_fresh_pending_count: i64,
+    pub bake_retry_ready_count: i64,
+    pub bake_retry_delayed_count: i64,
+    pub bake_actionable_count: i64,
     pub bake_retry_exhausted_count: i64,
     pub bake_timeout_failure_count: i64,
     pub bake_truncated_failure_count: i64,
     pub bake_other_failure_count: i64,
+    pub bake_upstream_failure_count: i64,
+    pub bake_recent_no_progress_count: i64,
+    pub bake_next_retry_at_ms: Option<i64>,
+    pub bake_recommended_retry_after_ms: i64,
+    pub bake_scheduler_mismatch: bool,
     pub running_bake_count: i64,
     pub stale_bake_run_count: i64,
     pub bake_watermark_updated_at_ms: Option<i64>,
@@ -1664,11 +1603,17 @@ pub async fn monitor_extraction_live(
     let capture_enabled = state.is_capture_enabled();
     let from_ms = now_ms - query_range_ms(&params);
     let fallback_noise_pattern = format!("{}%", FALLBACK_NOISE_OVERVIEW_PREFIX);
+    let bake_queue_status = state
+        .storage
+        .get_bake_queue_status(MAX_BAKE_RETRY_FAILURES)
+        .unwrap_or_default();
+    let bake_queue_status_for_refresh = bake_queue_status.clone();
     let (mut backlog, recent) = state
         .storage
         .with_conn_async(move |conn| {
             let backlog =
-                load_pipeline_backlog_metrics(conn, now_ms, capture_enabled).unwrap_or_default();
+                load_pipeline_backlog_metrics(conn, now_ms, capture_enabled, &bake_queue_status)
+                    .unwrap_or_default();
 
             let mut stmt = conn.prepare(
                 "SELECT id,
@@ -1718,6 +1663,7 @@ pub async fn monitor_extraction_live(
                             conn,
                             now_ms,
                             capture_enabled,
+                            &bake_queue_status_for_refresh,
                         )?)
                     })
                     .await?;
@@ -1738,11 +1684,22 @@ pub async fn monitor_extraction_live(
         oldest_pending_extraction_at_ms: backlog.oldest_pending_extraction_at_ms,
         pending_bake_count: backlog.pending_bake_count,
         oldest_pending_bake_at_ms: backlog.oldest_pending_bake_at_ms,
+        bake_drain_rate_per_hour: backlog.bake_drain_rate_per_hour,
+        bake_eta_ms: backlog.bake_eta_ms,
         bake_retry_pending_count: backlog.bake_retry_pending_count,
+        bake_fresh_pending_count: backlog.bake_fresh_pending_count,
+        bake_retry_ready_count: backlog.bake_retry_ready_count,
+        bake_retry_delayed_count: backlog.bake_retry_delayed_count,
+        bake_actionable_count: backlog.bake_actionable_count,
         bake_retry_exhausted_count: backlog.bake_retry_exhausted_count,
         bake_timeout_failure_count: backlog.bake_timeout_failure_count,
         bake_truncated_failure_count: backlog.bake_truncated_failure_count,
         bake_other_failure_count: backlog.bake_other_failure_count,
+        bake_upstream_failure_count: backlog.bake_upstream_failure_count,
+        bake_recent_no_progress_count: backlog.bake_recent_no_progress_count,
+        bake_next_retry_at_ms: backlog.bake_next_retry_at_ms,
+        bake_recommended_retry_after_ms: backlog.bake_recommended_retry_after_ms,
+        bake_scheduler_mismatch: backlog.bake_scheduler_mismatch,
         running_bake_count: backlog.running_bake_count,
         stale_bake_run_count: backlog.stale_bake_run_count,
         by_time: Vec::new(),
@@ -1766,11 +1723,22 @@ pub async fn monitor_extraction_live(
         oldest_pending_extraction_at_ms: backlog.oldest_pending_extraction_at_ms,
         pending_bake_count: backlog.pending_bake_count,
         oldest_pending_bake_at_ms: backlog.oldest_pending_bake_at_ms,
+        bake_drain_rate_per_hour: backlog.bake_drain_rate_per_hour,
+        bake_eta_ms: backlog.bake_eta_ms,
         bake_retry_pending_count: backlog.bake_retry_pending_count,
+        bake_fresh_pending_count: backlog.bake_fresh_pending_count,
+        bake_retry_ready_count: backlog.bake_retry_ready_count,
+        bake_retry_delayed_count: backlog.bake_retry_delayed_count,
+        bake_actionable_count: backlog.bake_actionable_count,
         bake_retry_exhausted_count: backlog.bake_retry_exhausted_count,
         bake_timeout_failure_count: backlog.bake_timeout_failure_count,
         bake_truncated_failure_count: backlog.bake_truncated_failure_count,
         bake_other_failure_count: backlog.bake_other_failure_count,
+        bake_upstream_failure_count: backlog.bake_upstream_failure_count,
+        bake_recent_no_progress_count: backlog.bake_recent_no_progress_count,
+        bake_next_retry_at_ms: backlog.bake_next_retry_at_ms,
+        bake_recommended_retry_after_ms: backlog.bake_recommended_retry_after_ms,
+        bake_scheduler_mismatch: backlog.bake_scheduler_mismatch,
         running_bake_count: backlog.running_bake_count,
         stale_bake_run_count: backlog.stale_bake_run_count,
         bake_watermark_updated_at_ms: backlog.bake_watermark_updated_at_ms,
@@ -2766,6 +2734,10 @@ pub async fn monitor_pipeline_dag(
         .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
     let pending_from_ms = now_ms - DAG_TIMELINE_PENDING_WINDOW_MS;
+    let bake_queue_status = state
+        .storage
+        .get_bake_queue_status(MAX_BAKE_RETRY_FAILURES)
+        .unwrap_or_default();
 
     // 1. 实时提炼状态（sidecar）
     let mut tmp_flow = KnowledgeFlow {
@@ -2776,11 +2748,22 @@ pub async fn monitor_pipeline_dag(
         oldest_pending_extraction_at_ms: None,
         pending_bake_count: 0,
         oldest_pending_bake_at_ms: None,
+        bake_drain_rate_per_hour: 0.0,
+        bake_eta_ms: None,
         bake_retry_pending_count: 0,
+        bake_fresh_pending_count: 0,
+        bake_retry_ready_count: 0,
+        bake_retry_delayed_count: 0,
+        bake_actionable_count: 0,
         bake_retry_exhausted_count: 0,
         bake_timeout_failure_count: 0,
         bake_truncated_failure_count: 0,
         bake_other_failure_count: 0,
+        bake_upstream_failure_count: 0,
+        bake_recent_no_progress_count: 0,
+        bake_next_retry_at_ms: None,
+        bake_recommended_retry_after_ms: 0,
+        bake_scheduler_mismatch: false,
         running_bake_count: 0,
         stale_bake_run_count: 0,
         by_time: Vec::new(),
@@ -2882,7 +2865,7 @@ pub async fn monitor_pipeline_dag(
                 LEFT JOIN bake_retry_state r ON r.timeline_id = t.id
                 WHERE t.category NOT IN ('bake_article', 'bake_knowledge', 'bake_sop', 'legacy_bake_candidate')
                   AND t.is_self_generated = 0
-                  AND COALESCE(r.failure_count, 0) < 1
+                  AND COALESCE(r.failure_count, 0) < 3
                   AND (
                       t.importance >= 4
                       OR t.user_verified = 1
@@ -2941,13 +2924,14 @@ pub async fn monitor_pipeline_dag(
                             )
                         )
                   )
-                  AND MAX(
+                  AND (
+                    MAX(
                         COALESCE(t.updated_at_ms, 0),
                         COALESCE(
                             (SELECT MAX(c4.ts) FROM captures c4 WHERE c4.timeline_id = t.id),
                             0
                         )
-                      ) > COALESCE(
+                    ) > COALESCE(
                             (
                                 SELECT MAX(last_processed_ts)
                                 FROM bake_watermarks
@@ -2955,6 +2939,8 @@ pub async fn monitor_pipeline_dag(
                             ),
                             0
                           )
+                    OR COALESCE(r.failure_count, 0) > 0
+                  )
                 ORDER BY ts_ms ASC
                 LIMIT ?1";
             let mut stmt = conn.prepare(timeline_pending_sql)?;
@@ -2988,7 +2974,9 @@ pub async fn monitor_pipeline_dag(
                 .collect();
             drop(stmt);
 
-            // 按下游产出表的 created_at（文本格式 YYYY-MM-DD）过滤今日，反映真实的今日 bake 产量
+            // 按下游产出表的 created_at 过滤今日，反映真实的今日 bake 产量。
+            // 注意 bake_knowledge/bake_sops 的 created_at 是文本 'YYYY-MM-DD HH:MM:SS'，
+            // 用 date() 归一化后比较；bake_documents 是毫秒 INTEGER，需 /1000 转 unixepoch。
             let timeline_completed_today: i64 = conn
                 .query_row(
                     "SELECT COUNT(DISTINCT t.id)
@@ -2997,18 +2985,18 @@ pub async fn monitor_pipeline_dag(
                          EXISTS (
                              SELECT 1 FROM bake_knowledge bk
                              WHERE bk.timeline_id = t.id
-                               AND bk.created_at >= ?1
+                               AND date(bk.created_at) >= date(?1)
                          )
                          OR EXISTS (
                              SELECT 1 FROM bake_sops bs
                              WHERE bs.timeline_id = t.id
-                               AND bs.created_at >= ?1
+                               AND date(bs.created_at) >= date(?1)
                          )
                          OR EXISTS (
                              SELECT 1 FROM bake_documents bd
                              WHERE bd.deleted_at IS NULL
                                AND bd.source_episode_ids LIKE '%' || t.id || '%'
-                               AND bd.created_at >= ?1
+                               AND date(bd.created_at / 1000, 'unixepoch') >= date(?1)
                          )
                      )",
                     rusqlite::params![day_start_str],
@@ -3016,34 +3004,38 @@ pub async fn monitor_pipeline_dag(
                 )
                 .unwrap_or(0);
 
+            // 产物“今日完成”统一读取持久化生产事件：自动提炼按 bake run 的
+            // 完成计数，手工产物按首次创建补入。这样合并到既有资产仍会计入，
+            // 普通 updated_at 维护刷新则不会误报。
+            let today_production = load_bake_production_events(conn, day_start_ms)?;
+            let knowledge_completed_today = today_production
+                .iter()
+                .map(|event| event.knowledge_count)
+                .sum();
+            let document_completed_today = today_production
+                .iter()
+                .map(|event| event.document_count)
+                .sum();
+            let sop_completed_today = today_production
+                .iter()
+                .map(|event| event.sop_count)
+                .sum();
+
             // ── knowledge ─────────────────────────────────────────────────
-            let (_, _, knowledge_completed_today) =
-                load_candidate_stage(
-                    conn,
-                    "bake_knowledge",
-                    pending_from_ms,
-                    day_start_ms,
-                )?;
+            let _ = load_candidate_stage(
+                conn,
+                "bake_knowledge",
+                pending_from_ms,
+                day_start_ms,
+            )?;
 
             // ── sop ───────────────────────────────────────────────────────
-            let (_, _, sop_completed_today) =
-                load_candidate_stage(
-                    conn,
-                    "bake_sop",
-                    pending_from_ms,
-                    day_start_ms,
-                )?;
-
-            // ── document ──────────────────────────────────────────────────
-            let document_completed_today: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM bake_documents
-                     WHERE deleted_at IS NULL
-                       AND COALESCE(updated_at, created_at) >= ?1",
-                    rusqlite::params![day_start_ms],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
+            let _ = load_candidate_stage(
+                conn,
+                "bake_sop",
+                pending_from_ms,
+                day_start_ms,
+            )?;
 
             // ── data ──────────────────────────────────────────────────────
             // 只统计已经生成快照的数据项；仅识别出报表 URL、尚未采集正文的来源
@@ -3077,8 +3069,13 @@ pub async fn monitor_pipeline_dag(
 
             // 首页与 DAG 使用同一份库存口径。上面的列表查询只返回若干条
             // 用于抽屉展示；节点数字来自与实际 bake 候选一致的全量统计。
-            let backlog =
-                load_pipeline_backlog_metrics(conn, now_ms, capture_enabled).unwrap_or_default();
+            let backlog = load_pipeline_backlog_metrics(
+                conn,
+                now_ms,
+                capture_enabled,
+                &bake_queue_status,
+            )
+            .unwrap_or_default();
             let capture_pending_count = backlog.pending_extraction_count;
             let timeline_pending_count = backlog.pending_bake_count;
             let bake_watermark_lag_ms = backlog
@@ -3345,14 +3342,34 @@ fn load_candidate_stage(
         .collect();
     drop(stmt);
 
+    // 今日完成与记忆页「记忆生产历程」同口径：按 created_at（今日新建）统计，
+    // 并排除总览页不再展示的旧版自动产物。
+    // 不能用 updated_at_ms —— 后台任务会批量刷新历史条目的更新时间，
+    // 会把大量历史记录误算成今日完成；也不按 user_verified 过滤，
+    // 产物落库即算完成，与 pending（待确认）指标解耦。
     let completed_today: i64 = conn
         .query_row(
             &format!(
                 "SELECT COUNT(*) FROM {table}
-                 WHERE user_verified = 1
-                   AND COALESCE(updated_at_ms, {ts_expr}) >= ?1"
+                 WHERE {ts_expr} >= ?1
+                   AND NOT (
+                       COALESCE(
+                           json_extract(
+                               CASE WHEN json_valid(content) THEN content ELSE '{{}}' END,
+                               '$.creation_mode'
+                           ),
+                           ''
+                       ) = 'auto'
+                       AND COALESCE(
+                           json_extract(
+                               CASE WHEN json_valid(content) THEN content ELSE '{{}}' END,
+                               '$.generation_version'
+                           ),
+                           ''
+                       ) = ?2
+                   )"
             ),
-            rusqlite::params![day_start_ms],
+            rusqlite::params![day_start_ms, BAKE_GENERATION_VERSION],
             |r| r.get(0),
         )
         .unwrap_or(0);
@@ -3394,6 +3411,65 @@ mod tests {
 
         assert_eq!(load_data_completed_today(&conn, 2000).unwrap(), 2);
         assert_eq!(load_data_completed_today(&conn, 3000).unwrap(), 0);
+    }
+
+    #[test]
+    fn candidate_stage_completed_today_counts_created_not_updated() {
+        // 今日完成必须按 created_at 统计：历史条目被后台任务刷新 updated_at_ms
+        // 不能被算进今日完成，与记忆页「记忆生产历程」口径保持一致。
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE bake_knowledge (
+                id INTEGER PRIMARY KEY,
+                title TEXT,
+                summary TEXT,
+                content TEXT,
+                user_verified INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT,
+                created_at_ms INTEGER,
+                updated_at_ms INTEGER
+             );",
+        )
+        .unwrap();
+        // 今日新建（应计入）
+        conn.execute(
+            "INSERT INTO bake_knowledge (id, title, summary, user_verified, created_at, created_at_ms, updated_at_ms)
+             VALUES (1, '今日新建', '', 1, '2026-08-07 09:00:00', 3000, 3100)",
+            [],
+        )
+        .unwrap();
+        // 历史创建、今日被刷新 updated_at_ms（不应计入）
+        conn.execute(
+            "INSERT INTO bake_knowledge (id, title, summary, user_verified, created_at, created_at_ms, updated_at_ms)
+             VALUES (2, '历史被刷新', '', 1, '2026-08-06 09:00:00', 2000, 3200)",
+            [],
+        )
+        .unwrap();
+        // 今日新建但未确认（同样计入完成，与 pending 指标解耦）
+        conn.execute(
+            "INSERT INTO bake_knowledge (id, title, summary, user_verified, created_at, created_at_ms, updated_at_ms)
+             VALUES (3, '今日未确认', '', 0, '2026-08-07 10:00:00', 3300, 3300)",
+            [],
+        )
+        .unwrap();
+        // 今日旧版自动产物（总览页不展示，监控也不应多算）
+        conn.execute(
+            "INSERT INTO bake_knowledge (
+                 id, title, summary, content, user_verified,
+                 created_at, created_at_ms, updated_at_ms
+             ) VALUES (
+                 4, '旧版自动产物', '',
+                 '{\"creation_mode\":\"auto\",\"generation_version\":\"bake-v1\"}',
+                 1, '2026-08-07 11:00:00', 3400, 3400
+             )",
+            [],
+        )
+        .unwrap();
+
+        let (pending, _, completed_today) =
+            load_candidate_stage(&conn, "bake_knowledge", 0, 2500).unwrap();
+        assert_eq!(pending, 1);
+        assert_eq!(completed_today, 2);
     }
 
     #[test]

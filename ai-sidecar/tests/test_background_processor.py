@@ -3,7 +3,13 @@ import json
 import sqlite3
 import time
 
-from background_processor import BackgroundProcessor, _is_self_generated_capture
+from background_processor import (
+    BackgroundProcessor,
+    _is_self_generated_capture,
+    _TIMELINE_MAX_MEMBER_COUNT,
+    _TIMELINE_MAX_OCCURRENCE_COUNT,
+    _TIMELINE_MAX_SPAN_HOURS,
+)
 from knowledge.fragment_grouper import FragmentGrouper
 
 
@@ -293,8 +299,10 @@ class _ImmediateQueue:
 class _SimilarExtractor:
     def __init__(self, similar_id: int) -> None:
         self.similar_id = similar_id
+        self.extract_calls = 0
 
     def extract_merged(self, captures, preempt_check=None):
+        self.extract_calls += 1
         capture_ids = [capture["id"] for capture in captures]
         return {
             "capture_ids": json.dumps(capture_ids),
@@ -443,6 +451,50 @@ def test_similar_merge_allows_same_document_and_syncs_capture_ids(tmp_path, monk
     assert linked_timeline == 1
     assert json.loads(capture_ids) == [1, 2]
     assert end_time == 2000
+
+
+def test_forced_cross_batch_merge_still_runs_model_extraction(tmp_path, monkeypatch) -> None:
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    doc_a = "https://docs.corp.kuaishou.com/k/home/docA/fcAAAAAA"
+    conn = sqlite3.connect(db_path)
+    _seed_timeline(conn, doc_a)
+    conn.execute(
+        """
+        INSERT INTO captures (id, ts, app_name, win_title, ocr_text, ax_text, timeline_id, url, webpage_title)
+        VALUES (2, 2000, 'Chrome', 'Doc A', '包含6.28万成本节省的新片段', '', NULL, ?, 'Doc A')
+        """,
+        (doc_a,),
+    )
+    conn.commit()
+    conn.close()
+
+    extractor = _SimilarExtractor(999)
+    processor = BackgroundProcessor(db_path=db_path)
+    monkeypatch.setattr(processor, "_get_knowledge_extractor", lambda: extractor)
+    monkeypatch.setattr(processor, "_process_knowledge_vectorization", _skip_vectorization)
+    monkeypatch.setattr("inference_queue.get_global_queue", lambda: _ImmediateQueue())
+
+    ok = asyncio.run(processor._process_capture_group(
+        [{
+            "id": 2,
+            "ts": 2000,
+            "app_name": "Chrome",
+            "window_title": "Doc A",
+            "ocr_text": "包含6.28万成本节省的新片段",
+            "ax_text": "",
+            "url": doc_a,
+        }],
+        merge_timeline_id=1,
+    ))
+
+    conn = sqlite3.connect(db_path)
+    linked_timeline = conn.execute("SELECT timeline_id FROM captures WHERE id = 2").fetchone()[0]
+    conn.close()
+
+    assert ok is True
+    assert extractor.extract_calls == 1
+    assert linked_timeline == 1
 
 
 def test_similar_merge_rejects_empty_document_url(tmp_path, monkeypatch) -> None:
@@ -663,6 +715,11 @@ def test_trigger_unified_bake_pipeline_posts_to_core(tmp_path, monkeypatch) -> N
         return _StubResponse()
 
     monkeypatch.setenv("CORE_ENGINE_URL", "http://127.0.0.1:7070")
+    monkeypatch.setattr(processor, "_get_bake_queue_status", lambda: {
+        "capture_enabled": True,
+        "actionable_count": 2,
+        "recommended_retry_after_ms": 0,
+    })
     monkeypatch.setattr(processor, "_all_inference_queues_idle", lambda: True)
     monkeypatch.setattr("background_processor.urllib_request.urlopen", _fake_urlopen)
 
@@ -709,6 +766,11 @@ def test_trigger_unified_bake_pipeline_accepts_battery_limits(tmp_path, monkeypa
         return _StubResponse()
 
     monkeypatch.setattr("background_processor.urllib_request.urlopen", _fake_urlopen)
+    monkeypatch.setattr(processor, "_get_bake_queue_status", lambda: {
+        "capture_enabled": True,
+        "actionable_count": 1,
+        "recommended_retry_after_ms": 0,
+    })
     monkeypatch.setattr(processor, "_all_inference_queues_idle", lambda: True)
 
     result = asyncio.run(
@@ -748,6 +810,11 @@ def test_trigger_unified_bake_pipeline_does_not_treat_skipped_200_as_started(
         "background_processor.urllib_request.urlopen",
         lambda request, timeout=0: _StubResponse(),
     )
+    monkeypatch.setattr(processor, "_get_bake_queue_status", lambda: {
+        "capture_enabled": True,
+        "actionable_count": 1,
+        "recommended_retry_after_ms": 0,
+    })
     monkeypatch.setattr(processor, "_all_inference_queues_idle", lambda: True)
 
     result = asyncio.run(
@@ -769,6 +836,11 @@ def test_trigger_unified_bake_pipeline_defers_while_inference_is_busy(
     db_path = str(tmp_path / "captures.db")
     _init_db(db_path)
     processor = BackgroundProcessor(db_path=db_path)
+    monkeypatch.setattr(processor, "_get_bake_queue_status", lambda: {
+        "capture_enabled": True,
+        "actionable_count": 1,
+        "recommended_retry_after_ms": 0,
+    })
     monkeypatch.setattr(processor, "_all_inference_queues_idle", lambda: False)
 
     result = asyncio.run(
@@ -813,82 +885,140 @@ def test_battery_backlog_keeps_rate_limited_batch_size(tmp_path) -> None:
     assert processor._timeline_batch_limit(profile, 500) == 4
 
 
-def test_periodic_bake_check_excludes_permanent_failures(tmp_path) -> None:
+def test_periodic_bake_check_uses_core_queue_status_as_single_source(tmp_path, monkeypatch) -> None:
     db_path = str(tmp_path / "captures.db")
     _init_db(db_path)
-    conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
-        ALTER TABLE timelines ADD COLUMN user_verified INTEGER NOT NULL DEFAULT 0;
-        CREATE TABLE bake_retry_state (
-            timeline_id INTEGER PRIMARY KEY,
-            failure_count INTEGER NOT NULL,
-            last_error TEXT,
-            last_failed_at_ms INTEGER NOT NULL
-        );
-        CREATE TABLE bake_knowledge (timeline_id INTEGER);
-        CREATE TABLE bake_sops (timeline_id INTEGER);
-        CREATE TABLE bake_documents (
-            deleted_at INTEGER,
-            source_episode_ids TEXT
-        );
-        INSERT INTO captures (id, ts, app_name, win_title, ax_text, timeline_id)
-        VALUES (1, 1000, 'Chrome', '文档', '正文', 1);
-        INSERT INTO timelines (
-            id, capture_id, summary, category, importance, is_self_generated,
-            history_view, created_at_ms, updated_at_ms
-        )
-        VALUES (1, 1, '候选', '文档', 5, 0, 0, 1000, 1000);
-        INSERT INTO bake_retry_state
-        VALUES (1, 3, 'terminal payload error', 1000);
-        """
-    )
-    conn.commit()
-    conn.close()
-
     processor = BackgroundProcessor(db_path=db_path)
+    monkeypatch.setattr(processor, "_get_bake_queue_status", lambda: {
+        "capture_enabled": True,
+        "actionable_count": 0,
+        "dead_letter_count": 1,
+    })
     assert processor._has_pending_bake_timelines() is False
 
-    conn = sqlite3.connect(db_path)
-    conn.execute("UPDATE bake_retry_state SET failure_count = 1")
-    conn.commit()
-    conn.close()
+    monkeypatch.setattr(processor, "_get_bake_queue_status", lambda: {
+        "capture_enabled": True,
+        "actionable_count": 1,
+        "dead_letter_count": 0,
+    })
     assert processor._has_pending_bake_timelines() is True
 
 
-def test_recent_deferred_bake_run_applies_bounded_backoff(tmp_path) -> None:
+def test_periodic_bake_check_runs_before_long_capture_batch(tmp_path, monkeypatch) -> None:
     db_path = str(tmp_path / "captures.db")
     _init_db(db_path)
-    now_ms = int(time.time() * 1000)
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        """
-        CREATE TABLE bake_runs (
-            id INTEGER PRIMARY KEY,
-            status TEXT NOT NULL,
-            started_at INTEGER NOT NULL,
-            completed_at INTEGER
-        )
-        """
-    )
-    conn.execute(
-        "INSERT INTO bake_runs (id, status, started_at, completed_at) VALUES (1, 'deferred', ?, ?)",
-        (now_ms - 10_000, now_ms - 5_000),
-    )
-    conn.commit()
-    conn.close()
-
     processor = BackgroundProcessor(db_path=db_path)
-    assert 0 < processor._deferred_bake_backoff_remaining_ms() <= 120_000
+    events = []
 
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        "UPDATE bake_runs SET completed_at = ? WHERE id = 1",
-        (now_ms - 121_000,),
+    profile = type(
+        "_Profile",
+        (),
+        {
+            "mode": "charging",
+            "saving_enabled": True,
+            "on_external_power": True,
+            "battery_percent": 100.0,
+            "allow_background_extraction": True,
+            "timeline_interval_secs": 30,
+            "timeline_batch_size": 20,
+            "bake_interval_secs": 30,
+            "bake_limit": 10,
+            "bake_concurrency": 1,
+        },
+    )()
+
+    async def _fake_periodic_bake(*, limit, max_concurrency):
+        events.append(("bake", limit, max_concurrency))
+        processor.running = False
+        return {"triggered": True, "run_id": 44}
+
+    async def _fake_process_batch(**kwargs):
+        events.append(("capture_batch", kwargs["limit"]))
+        processor.running = False
+        return {"processed_count": 0, "bake_trigger": {"triggered": False}}
+
+    async def _noop_async(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(processor, "_enforce_runtime_guard", lambda reason: None)
+    monkeypatch.setattr(processor, "_drain_vector_deletion_queue", lambda: None)
+    monkeypatch.setattr(
+        processor,
+        "_audit_vector_consistency",
+        lambda: {"available": False},
     )
-    conn.commit()
-    conn.close()
-    assert processor._deferred_bake_backoff_remaining_ms() == 0
+    monkeypatch.setattr(processor, "backfill_bake_document_vectors", _noop_async)
+    monkeypatch.setattr(processor, "_capture_and_extraction_enabled", lambda: True)
+    monkeypatch.setattr(processor.energy_policy, "current_profile", lambda **kwargs: profile)
+    monkeypatch.setattr(processor, "_count_unprocessed_captures", lambda: 100)
+    monkeypatch.setattr(processor, "_maybe_trigger_periodic_bake", _fake_periodic_bake)
+    monkeypatch.setattr(processor, "_process_batch", _fake_process_batch)
+    monkeypatch.setattr(processor, "_trigger_data_extraction", _noop_async)
+    monkeypatch.setattr("background_processor.asyncio.sleep", _noop_async)
+
+    asyncio.run(processor.run())
+
+    assert events == [("bake", 10, 1)]
+
+
+def test_trigger_unified_bake_pipeline_skips_core_backoff_before_model_queue(
+    tmp_path, monkeypatch
+) -> None:
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    idle_check = lambda: (_ for _ in ()).throw(AssertionError("不应检查模型队列"))
+    monkeypatch.setattr(processor, "_all_inference_queues_idle", idle_check)
+    monkeypatch.setattr(processor, "_get_bake_queue_status", lambda: {
+        "capture_enabled": True,
+        "actionable_count": 0,
+        "recommended_retry_after_ms": 180_000,
+    })
+
+    result = asyncio.run(processor._trigger_unified_bake_pipeline(10, force=True))
+
+    assert result["triggered"] is False
+    assert result["reason"] == "no_actionable_bake_candidate"
+    assert result["retry_after_ms"] == 180_000
+
+
+def test_trigger_unified_bake_pipeline_ignores_retry_hint_when_work_is_actionable(
+    tmp_path, monkeypatch
+) -> None:
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    posted = {"count": 0}
+
+    class _StubResponse:
+        def read(self):
+            return b'{"id":"44","status":"accepted"}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_urlopen(request, timeout=0):
+        posted["count"] += 1
+        return _StubResponse()
+
+    monkeypatch.setattr(processor, "_get_bake_queue_status", lambda: {
+        "capture_enabled": True,
+        "actionable_count": 378,
+        "recent_no_progress_count": 5,
+        "recommended_retry_after_ms": 240_000,
+    })
+    monkeypatch.setattr(processor, "_has_active_bake_run", lambda: False)
+    monkeypatch.setattr(processor, "_all_inference_queues_idle", lambda: True)
+    monkeypatch.setattr("background_processor.urllib_request.urlopen", _fake_urlopen)
+
+    result = asyncio.run(processor._trigger_unified_bake_pipeline(10, force=True))
+
+    assert posted["count"] == 1
+    assert result["triggered"] is True
+    assert result["run_id"] == "44"
 
 
 def test_battery_idle_check_requires_local_and_model_api_queues_idle(
@@ -996,3 +1126,594 @@ def test_document_metadata_fallback_requires_substantive_body() -> None:
 
     assert applied is False
     assert knowledge == {"category": "其他", "importance": 2}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 过度合并防护：时间线增长上限守卫（针对 ID 2148 类脏数据的根治）
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_timeline_accepts_merge_growth_guard(tmp_path) -> None:
+    """直接验证增长上限守卫的三类拦截条件。"""
+    db_path = str(tmp_path / "guard.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    conn = sqlite3.connect(db_path)
+
+    def _upsert(occurrence: int, capture_ids: str, start: int, end: int) -> None:
+        conn.execute("DELETE FROM timelines WHERE id = 1")
+        conn.execute(
+            "INSERT INTO timelines (id, capture_id, summary, occurrence_count, "
+            "capture_ids, start_time, end_time) VALUES (1, 1, 't', ?, ?, ?, ?)",
+            (occurrence, capture_ids, start, end),
+        )
+        conn.commit()
+
+    # 正常的小时间线：允许合并
+    _upsert(1, '[1]', 1000, 1100)
+    assert processor._timeline_accepts_merge(conn, 1, 3) is True
+
+    # 合并次数达到上限：拒绝
+    _upsert(_TIMELINE_MAX_OCCURRENCE_COUNT, '[1]', 1000, 1100)
+    assert processor._timeline_accepts_merge(conn, 1, 1) is False
+
+    # 成员数将超上限：拒绝
+    many_ids = json.dumps(list(range(1, _TIMELINE_MAX_MEMBER_COUNT + 1)))
+    _upsert(2, many_ids, 1000, 1100)
+    assert processor._timeline_accepts_merge(conn, 1, 1) is False
+
+    # 时间跨度超上限：拒绝
+    span_ms = int((_TIMELINE_MAX_SPAN_HOURS + 1) * 3600000)
+    _upsert(2, '[1]', 1000, 1000 + span_ms)
+    assert processor._timeline_accepts_merge(conn, 1, 1) is False
+
+    conn.close()
+
+
+def _seed_plain_timeline(
+    conn: sqlite3.Connection, occurrence_count: int, entities_json: str = "[]"
+) -> int:
+    """构造一条非文档类型的时间线（无 URL），模拟宽泛主题的代码/聊天时间线。"""
+    conn.execute(
+        "INSERT INTO captures (id, ts, app_name, win_title, ocr_text, ax_text, "
+        "timeline_id, url) VALUES (1, 1000, 'ChatGPT', 'ChatGPT', 'seed', '', 1, NULL)"
+    )
+    conn.execute(
+        """
+        INSERT INTO timelines (
+            id, capture_id, summary, overview, details, entities, category, importance,
+            occurrence_count, capture_ids, start_time, end_time, time_range_start,
+            time_range_end, observed_at, content_origin, activity_type,
+            evidence_strength, created_at_ms, updated_at_ms
+        )
+        VALUES (1, 1, '设计架构', '设计 MemoryBread 架构', 'old', ?, '代码', 4,
+                ?, '[1]', 1000, 1100, 1000, 1100, 1100, NULL, NULL, NULL, 1000, 1000)
+        """,
+        (entities_json, occurrence_count),
+    )
+    conn.commit()
+    return 1
+
+
+def _run_plain_group_merge(db_path: str, monkeypatch) -> None:
+    processor = BackgroundProcessor(db_path=db_path)
+    monkeypatch.setattr(processor, "_get_knowledge_extractor", lambda: _SimilarExtractor(1))
+    monkeypatch.setattr(processor, "_process_knowledge_vectorization", _skip_vectorization)
+    monkeypatch.setattr("inference_queue.get_global_queue", lambda: _ImmediateQueue())
+
+    asyncio.run(processor._process_capture_group([
+        {
+            "id": 2,
+            "ts": 2000,
+            "app_name": "ChatGPT",
+            "window_title": "ChatGPT",
+            "ocr_text": "新的无关内容",
+            "ax_text": "",
+            "url": None,
+        }
+    ]))
+
+
+def test_overgrown_timeline_forces_new_timeline(tmp_path, monkeypatch) -> None:
+    """已达合并次数上限的时间线，新的相似片段应新建时间线而非继续合并。"""
+    db_path = str(tmp_path / "overgrown.db")
+    _init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    _seed_plain_timeline(conn, _TIMELINE_MAX_OCCURRENCE_COUNT)
+    conn.execute(
+        "INSERT INTO captures (id, ts, app_name, win_title, ocr_text, ax_text, "
+        "timeline_id, url) VALUES (2, 2000, 'ChatGPT', 'ChatGPT', '新的无关内容', '', NULL, NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    _run_plain_group_merge(db_path, monkeypatch)
+
+    conn = sqlite3.connect(db_path)
+    linked = conn.execute("SELECT timeline_id FROM captures WHERE id = 2").fetchone()[0]
+    timeline_count = conn.execute("SELECT COUNT(*) FROM timelines").fetchone()[0]
+    ids1 = conn.execute("SELECT capture_ids, occurrence_count FROM timelines WHERE id = 1").fetchone()
+    conn.close()
+
+    # 新片段落入新时间线，原时间线不被继续吞噬
+    assert linked != 1
+    assert timeline_count == 2
+    assert json.loads(ids1[0]) == [1]
+    assert ids1[1] == _TIMELINE_MAX_OCCURRENCE_COUNT
+
+
+def test_small_plain_timeline_still_merges(tmp_path, monkeypatch) -> None:
+    """回归保障：未达上限的小时间线仍能正常合并，守卫不误伤。"""
+    db_path = str(tmp_path / "small.db")
+    _init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    _seed_plain_timeline(conn, 1)
+    conn.execute(
+        "INSERT INTO captures (id, ts, app_name, win_title, ocr_text, ax_text, "
+        "timeline_id, url) VALUES (2, 2000, 'ChatGPT', 'ChatGPT', '相关内容', '', NULL, NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    _run_plain_group_merge(db_path, monkeypatch)
+
+    conn = sqlite3.connect(db_path)
+    linked = conn.execute("SELECT timeline_id FROM captures WHERE id = 2").fetchone()[0]
+    timeline_count = conn.execute("SELECT COUNT(*) FROM timelines").fetchone()[0]
+    ids1, occ1 = conn.execute("SELECT capture_ids, occurrence_count FROM timelines WHERE id = 1").fetchone()
+    conn.close()
+
+    assert linked == 1
+    assert timeline_count == 1
+    assert json.loads(ids1) == [1, 2]
+    assert occ1 == 2
+
+
+# ---------------------------------------------------------------------------
+# data_pages 分类搭车时间线推理：_register_timeline_data_pages
+# ---------------------------------------------------------------------------
+
+
+class _FakeRegisteredResponse:
+    def __init__(self, body: dict) -> None:
+        self._body = json.dumps(body).encode("utf-8")
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def _data_pages_knowledge(pages: list) -> dict:
+    return {
+        "data_page_contract": "timeline-data-page.v1",
+        "data_pages": pages,
+        "observed_at": 1700000000000,
+    }
+
+
+def _gpu_capture_group() -> list:
+    return [
+        {
+            "id": 21603,
+            "ts": 1700000000000,
+            "app_name": "Google Chrome",
+            "window_title": "电商GPU信息平台 - GPU使用情况一览",
+            "url": "https://kwaishop-sre.corp.example.com/kwaishop/gpu/info",
+            "webpage_title": "电商GPU信息平台 - GPU使用情况一览",
+        }
+    ]
+
+
+def test_register_data_pages_posts_in_group_report_url(tmp_path, monkeypatch) -> None:
+    """模型输出含本组 URL 的 data_report 页面时，注册请求携带完整契约字段。"""
+    import background_processor as bp
+
+    requests_seen = []
+
+    def _fake_urlopen(request, timeout=None):
+        requests_seen.append((request, timeout))
+        return _FakeRegisteredResponse({"status": "registered", "source_id": 9, "created": True})
+
+    monkeypatch.setattr(bp.urllib_request, "urlopen", _fake_urlopen)
+    processor = BackgroundProcessor(db_path=str(tmp_path / "pages.db"))
+    knowledge = _data_pages_knowledge([
+        {
+            "url": "https://kwaishop-sre.corp.example.com/kwaishop/gpu/info",
+            "page_kind": "data_report",
+            "title": "电商GPU信息平台",
+        }
+    ])
+
+    processor._register_timeline_data_pages(2160, knowledge, _gpu_capture_group())
+
+    assert len(requests_seen) == 1
+    request, _ = requests_seen[0]
+    assert request.full_url.endswith("/api/data/sources/discovered")
+    payload = json.loads(request.data.decode("utf-8"))
+    assert payload["capture_id"] == 21603
+    assert payload["timeline_id"] == 2160
+    assert payload["page_kind"] == "data_report"
+    assert payload["url"] == "https://kwaishop-sre.corp.example.com/kwaishop/gpu/info"
+
+
+def test_register_data_pages_rejects_hallucinated_url(tmp_path, monkeypatch) -> None:
+    """URL 不在本组 capture 集合（模型幻觉）时不发起注册请求。"""
+    import background_processor as bp
+
+    def _fail_urlopen(request, timeout=None):
+        raise AssertionError("幻觉 URL 不应发起注册请求")
+
+    monkeypatch.setattr(bp.urllib_request, "urlopen", _fail_urlopen)
+    processor = BackgroundProcessor(db_path=str(tmp_path / "pages.db"))
+    knowledge = _data_pages_knowledge([
+        {
+            "url": "https://not-in-group.example.com/dashboard",
+            "page_kind": "data_report",
+            "title": "幻觉页面",
+        }
+    ])
+
+    processor._register_timeline_data_pages(2160, knowledge, _gpu_capture_group())
+
+
+def test_register_data_pages_skips_data_content_and_missing_contract(tmp_path, monkeypatch) -> None:
+    """data_content 走 data_facts 通道不注册；缺契约版本时不动作。"""
+    import background_processor as bp
+
+    def _fail_urlopen(request, timeout=None):
+        raise AssertionError("data_content / 无契约不应发起注册请求")
+
+    monkeypatch.setattr(bp.urllib_request, "urlopen", _fail_urlopen)
+    processor = BackgroundProcessor(db_path=str(tmp_path / "pages.db"))
+
+    content_only = _data_pages_knowledge([
+        {
+            "url": "https://kwaishop-sre.corp.example.com/kwaishop/gpu/info",
+            "page_kind": "data_content",
+            "title": "含数据的普通页面",
+        }
+    ])
+    processor._register_timeline_data_pages(2160, content_only, _gpu_capture_group())
+
+    no_contract = _data_pages_knowledge([
+        {
+            "url": "https://kwaishop-sre.corp.example.com/kwaishop/gpu/info",
+            "page_kind": "data_report",
+            "title": "缺契约",
+        }
+    ])
+    no_contract.pop("data_page_contract")
+    processor._register_timeline_data_pages(2160, no_contract, _gpu_capture_group())
+
+
+def test_register_data_pages_survives_core_engine_outage(tmp_path, monkeypatch) -> None:
+    """core-engine 接口不可用时仅告警，不抛出异常打断时间线主流程。"""
+    import background_processor as bp
+
+    def _down_urlopen(request, timeout=None):
+        raise ConnectionError("core engine down")
+
+    monkeypatch.setattr(bp.urllib_request, "urlopen", _down_urlopen)
+    processor = BackgroundProcessor(db_path=str(tmp_path / "pages.db"))
+    knowledge = _data_pages_knowledge([
+        {
+            "url": "https://kwaishop-sre.corp.example.com/kwaishop/gpu/info",
+            "page_kind": "data_platform",
+            "title": "电商GPU信息平台",
+        }
+    ])
+
+    # 不抛异常即为主流程容错通过
+    processor._register_timeline_data_pages(2160, knowledge, _gpu_capture_group())
+
+
+def test_validated_data_pages_accepts_in_group_urls_only() -> None:
+    """提炼层校验：只接受结构完整、http(s) 且逐字存在于本组采集的条目。"""
+    from knowledge.extractor_v2 import _validated_data_pages
+
+    allowed = {"https://gpu.example.com/info"}
+    accepted = _validated_data_pages(
+        [
+            {"url": "https://gpu.example.com/info", "page_kind": "data_report", "title": "GPU"},
+            {"url": "https://ghost.example.com/x", "page_kind": "data_report", "title": "幻觉"},
+            {"url": "https://gpu.example.com/info", "page_kind": "wrong_kind", "title": "非法类型"},
+            {"url": "javascript:alert(1)", "page_kind": "data_report", "title": "非http"},
+            "not-a-dict",
+        ],
+        allowed,
+    )
+    assert accepted == [
+        {"url": "https://gpu.example.com/info", "page_kind": "data_report", "title": "GPU"}
+    ]
+    assert _validated_data_pages(
+        [{"url": "https://gpu.example.com/info", "page_kind": "data_report", "title": ""}],
+        set(),
+    ) == []
+
+
+def test_merged_blocks_expose_page_url_for_classification() -> None:
+    """合并块头部与单条 prompt 均注入页面 URL，模型才能逐字引用。"""
+    from knowledge.extractor_v2 import (
+        DATA_PAGE_PROMPT,
+        MERGE_SYSTEM_PROMPT,
+        _normalize_page_url,
+    )
+
+    assert "data_pages" in DATA_PAGE_PROMPT
+    assert "data_report" in DATA_PAGE_PROMPT
+    assert "data_platform" in DATA_PAGE_PROMPT
+    assert "data_content" in DATA_PAGE_PROMPT
+    assert "页面URL" in DATA_PAGE_PROMPT
+    # 规范化去掉尾部斜杠，保证模型输出与 capture URL 可比对
+    assert _normalize_page_url(" https://gpu.example.com/info/ ") == "https://gpu.example.com/info"
+    assert MERGE_SYSTEM_PROMPT  # 主 prompt 保留不变
+
+
+class _DiscardingExtractor:
+    """模拟提炼器确定性丢弃（SKIP/无价值/质量不足）的场景。"""
+
+    def extract_merged(self, captures, preempt_check=None):
+        return {"_discarded": True, "discard_reason": "no_value"}
+
+
+def test_discarded_captures_consumed_into_hidden_sink(tmp_path, monkeypatch) -> None:
+    """确定性丢弃的 captures 必须被标记已处理，不再无限重提炼。
+
+    旧行为：提炼返回 None，captures.timeline_id 保持 NULL，每轮调度反复拉起。
+    新行为：挂到隐藏的低价值回收时间线（is_self_generated=1，UI 不展示）。
+    """
+    db_path = str(tmp_path / "discarded.db")
+    _init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO captures (id, ts, app_name, win_title, ocr_text, ax_text, "
+        "timeline_id, url) VALUES (5, 5000, 'Amphetamine', 'Amphetamine', '☕', '', NULL, NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    processor = BackgroundProcessor(db_path=db_path)
+    monkeypatch.setattr(processor, "_get_knowledge_extractor", lambda: _DiscardingExtractor())
+    monkeypatch.setattr("inference_queue.get_global_queue", lambda: _ImmediateQueue())
+
+    handled = asyncio.run(processor._process_capture_group([
+        {
+            "id": 5,
+            "ts": 5000,
+            "app_name": "Amphetamine",
+            "window_title": "Amphetamine",
+            "ocr_text": "☕",
+            "ax_text": "",
+            "url": None,
+        }
+    ]))
+
+    conn = sqlite3.connect(db_path)
+    linked = conn.execute("SELECT timeline_id FROM captures WHERE id = 5").fetchone()[0]
+    sink = conn.execute(
+        "SELECT id, is_self_generated, overview FROM timelines WHERE summary = ?",
+        ("低价值采集回收",),
+    ).fetchone()
+    conn.close()
+
+    assert handled is True
+    assert sink is not None
+    assert linked == sink[0]
+    assert sink[1] == 1          # 隐藏，UI/bake 查询带 is_self_generated=0 过滤
+    assert sink[2] is None       # overview 为空，不会被相似度合并命中
+
+
+def test_discarded_sink_reused_not_duplicated(tmp_path, monkeypatch) -> None:
+    """多次丢弃复用同一条回收时间线，不重复创建。"""
+    db_path = str(tmp_path / "discarded2.db")
+    _init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    for cid in (5, 6):
+        conn.execute(
+            "INSERT INTO captures (id, ts, app_name, win_title, ocr_text, ax_text, "
+            "timeline_id, url) VALUES (?, ?, 'Amphetamine', 'Amphetamine', '☕', '', NULL, NULL)",
+            (cid, cid * 1000),
+        )
+    conn.commit()
+    conn.close()
+
+    processor = BackgroundProcessor(db_path=db_path)
+    monkeypatch.setattr(processor, "_get_knowledge_extractor", lambda: _DiscardingExtractor())
+    monkeypatch.setattr("inference_queue.get_global_queue", lambda: _ImmediateQueue())
+
+    for cid in (5, 6):
+        asyncio.run(processor._process_capture_group([
+            {
+                "id": cid,
+                "ts": cid * 1000,
+                "app_name": "Amphetamine",
+                "window_title": "Amphetamine",
+                "ocr_text": "☕",
+                "ax_text": "",
+                "url": None,
+            }
+        ]))
+
+    conn = sqlite3.connect(db_path)
+    sink_count = conn.execute(
+        "SELECT COUNT(*) FROM timelines WHERE summary = ?", ("低价值采集回收",)
+    ).fetchone()[0]
+    ids = [
+        row[0]
+        for row in conn.execute(
+            "SELECT timeline_id FROM captures WHERE id IN (5, 6)"
+        ).fetchall()
+    ]
+    conn.close()
+
+    assert sink_count == 1
+    assert ids[0] == ids[1]
+    assert ids[0] is not None
+
+
+class _MixedGroupExtractor(_SimilarExtractor):
+    """模拟同组混合高/低价值：提炼产出里带 _discarded_capture_ids。"""
+
+    def __init__(self) -> None:
+        super().__init__(similar_id=None)
+
+    def extract_merged(self, captures, preempt_check=None):
+        knowledge = {
+            "capture_ids": json.dumps([6]),
+            "summary": "万擎平台稳定性设计",
+            "overview": "整理万擎平台稳定性设计与调度策略",
+            "details": "有效内容",
+            "entities": json.dumps([]),
+            "category": "其他",
+            "importance": 3,
+            "occurrence_count": 1,
+            "start_time": captures[0]["ts"],
+            "end_time": captures[-1]["ts"],
+            "duration_minutes": 0,
+            "time_range_start": captures[0]["ts"],
+            "time_range_end": captures[-1]["ts"],
+            "key_timestamps": json.dumps([]),
+            "frag_app_name": captures[-1].get("app_name"),
+            "frag_win_title": captures[-1].get("window_title"),
+            "observed_at": captures[-1]["ts"],
+            "content_origin": None,
+            "activity_type": None,
+            "is_self_generated": False,
+            "evidence_strength": None,
+            "_discarded_capture_ids": [5],
+        }
+        return knowledge
+
+
+def test_mixed_group_discarded_captures_excluded_from_timeline(tmp_path, monkeypatch) -> None:
+    """同组混入低价值 capture 时：丢弃的进回收时间线，不写进新时间线成员。
+
+    复现 24059（Amphetamine 菜单截图）与真实工作 capture 同组提炼后
+    被一起写进真实时间线成员的污染路径。
+    """
+    db_path = str(tmp_path / "mixed.db")
+    _init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO captures (id, ts, app_name, win_title, ocr_text, ax_text, "
+        "timeline_id, url) VALUES (5, 5000, 'Amphetamine', 'Amphetamine', '☕', '', NULL, NULL)"
+    )
+    conn.execute(
+        "INSERT INTO captures (id, ts, app_name, win_title, ocr_text, ax_text, "
+        "timeline_id, url) VALUES (6, 6000, 'Qoder', 'Quest', '真实工作内容', '', NULL, NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    processor = BackgroundProcessor(db_path=db_path)
+    monkeypatch.setattr(processor, "_get_knowledge_extractor", lambda: _MixedGroupExtractor())
+    monkeypatch.setattr(processor, "_process_knowledge_vectorization", _skip_vectorization)
+    monkeypatch.setattr("inference_queue.get_global_queue", lambda: _ImmediateQueue())
+
+    asyncio.run(processor._process_capture_group([
+        {
+            "id": 5,
+            "ts": 5000,
+            "app_name": "Amphetamine",
+            "window_title": "Amphetamine",
+            "ocr_text": "☕",
+            "ax_text": "",
+            "url": None,
+        },
+        {
+            "id": 6,
+            "ts": 6000,
+            "app_name": "Qoder",
+            "window_title": "Quest",
+            "ocr_text": "真实工作内容",
+            "ax_text": "",
+            "url": None,
+        },
+    ]))
+
+    conn = sqlite3.connect(db_path)
+    link5 = conn.execute("SELECT timeline_id FROM captures WHERE id = 5").fetchone()[0]
+    link6 = conn.execute("SELECT timeline_id FROM captures WHERE id = 6").fetchone()[0]
+    sink = conn.execute(
+        "SELECT id, is_self_generated FROM timelines WHERE summary = ?",
+        ("低价值采集回收",),
+    ).fetchone()
+    real = conn.execute(
+        "SELECT id, capture_ids FROM timelines WHERE summary != ?",
+        ("低价值采集回收",),
+    ).fetchone()
+    conn.close()
+
+    assert sink is not None and sink[1] == 1
+    assert link5 == sink[0]          # 丢弃 capture 进隐藏回收时间线
+    assert real is not None
+    assert link6 == real[0]          # 有效 capture 正常成线
+    assert json.loads(real[1]) == [6]  # 时间线成员不含被丢弃的 capture
+
+
+def test_similarity_merge_blocked_when_entities_disjoint(tmp_path, monkeypatch) -> None:
+    """实体一致性守卫：新旧知识实体零交集时拒绝合并，避免"同项目不同任务"互串。
+
+    复现 timeline 2713 脏数据场景：两个措辞相近但主题不同的排查任务
+    被相似度去重误合并，导致大量无关采集记录并入同一时间线。
+    """
+    db_path = str(tmp_path / "disjoint.db")
+    _init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    _seed_plain_timeline(conn, 1, entities_json='["MemoryBread", "ID1230"]')
+    conn.execute(
+        "INSERT INTO captures (id, ts, app_name, win_title, ocr_text, ax_text, "
+        "timeline_id, url) VALUES (2, 2000, 'ChatGPT', 'ChatGPT', '另一个任务的内容', '', NULL, NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    _run_plain_group_merge(db_path, monkeypatch)
+
+    conn = sqlite3.connect(db_path)
+    linked = conn.execute("SELECT timeline_id FROM captures WHERE id = 2").fetchone()[0]
+    timeline_count = conn.execute("SELECT COUNT(*) FROM timelines").fetchone()[0]
+    ids1, occ1 = conn.execute(
+        "SELECT capture_ids, occurrence_count FROM timelines WHERE id = 1"
+    ).fetchone()
+    conn.close()
+
+    # 新知识实体 [万擎, SLO] 与已有 [MemoryBread, ID1230] 零交集 → 新建时间线
+    assert linked != 1
+    assert timeline_count == 2
+    assert json.loads(ids1) == [1]
+    assert occ1 == 1
+
+
+def test_similarity_merge_allowed_when_entities_overlap(tmp_path, monkeypatch) -> None:
+    """实体有交集时守卫不误伤，相似度合并正常进行。"""
+    db_path = str(tmp_path / "overlap.db")
+    _init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    _seed_plain_timeline(conn, 1, entities_json='["万擎", "SLO"]')
+    conn.execute(
+        "INSERT INTO captures (id, ts, app_name, win_title, ocr_text, ax_text, "
+        "timeline_id, url) VALUES (2, 2000, 'ChatGPT', 'ChatGPT', '相关内容', '', NULL, NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    _run_plain_group_merge(db_path, monkeypatch)
+
+    conn = sqlite3.connect(db_path)
+    linked = conn.execute("SELECT timeline_id FROM captures WHERE id = 2").fetchone()[0]
+    timeline_count = conn.execute("SELECT COUNT(*) FROM timelines").fetchone()[0]
+    ids1, occ1 = conn.execute(
+        "SELECT capture_ids, occurrence_count FROM timelines WHERE id = 1"
+    ).fetchone()
+    conn.close()
+
+    assert linked == 1
+    assert timeline_count == 1
+    assert json.loads(ids1) == [1, 2]
+    assert occ1 == 2

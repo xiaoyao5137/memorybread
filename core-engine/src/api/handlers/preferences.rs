@@ -119,6 +119,7 @@ pub async fn run_capture_cleanup_now(
         let captures_dir = screenshot_captures_dir();
         let (deleted_count, deleted_screenshot_count, freed_bytes) =
             storage.run_old_captures_cleanup(cutoff, &captures_dir)?;
+        storage.delete_capture_attempts_before(cutoff)?;
         Ok::<_, crate::storage::StorageError>((
             retention_days,
             deleted_count,
@@ -145,6 +146,32 @@ pub async fn update_preference(
     if key.is_empty() {
         return Err(ApiError::BadRequest("key 不能为空".into()));
     }
+    let capture_interval = if key == "privacy.capture_interval_sec" {
+        let value = body
+            .value
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| ApiError::BadRequest("采集间隔必须是 5–120 秒之间的整数".into()))?;
+        if !(5..=120).contains(&value) {
+            return Err(ApiError::BadRequest(
+                "采集间隔必须是 5–120 秒之间的整数".into(),
+            ));
+        }
+        Some(value)
+    } else {
+        None
+    };
+    let keyboard_signal_enabled = if key == "privacy.keyboard_capture" {
+        match body.value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Some(true),
+            "false" | "0" | "no" | "off" => Some(false),
+            _ => {
+                return Err(ApiError::BadRequest("键盘活动信号开关必须是布尔值".into()));
+            }
+        }
+    } else {
+        None
+    };
 
     let key_clone = key.clone();
     let value_clone = body.value.clone();
@@ -161,6 +188,13 @@ pub async fn update_preference(
     })
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))??;
+
+    if let Some(interval_secs) = capture_interval {
+        state.update_capture_interval(interval_secs);
+    }
+    if let Some(enabled) = keyboard_signal_enabled {
+        state.update_keyboard_signal_enabled(enabled);
+    }
 
     Ok(Json(UpdatePreferenceResponse {
         key: record.key,

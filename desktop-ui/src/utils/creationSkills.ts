@@ -2,7 +2,7 @@ import { fetchWithLocalhostFallback } from '../hooks/useApi'
 import { serviceEnvironmentHeaders } from '../store/useAppStore'
 import { OFFLINE_CREATION_SKILL_CATEGORIES } from '../data/creationSkillCategories'
 
-export type CreationSkillSourceKind = 'creation_history' | 'bake_document' | 'market' | 'imported'
+export type CreationSkillSourceKind = 'creation_history' | 'bake_document' | 'market' | 'imported' | 'manual'
 
 export interface CreationSkillSource {
   kind: CreationSkillSourceKind
@@ -19,7 +19,6 @@ export interface CreationSkillContent {
   titleStyle: string
   textStyle: string
   diagramStyle: string
-  structurePattern: string[]
   writingGuidelines: string[]
   distinctiveSections?: CreationSkillDistinctiveSection[]
   sectionHeadings: CreationSkillSectionHeadings
@@ -43,6 +42,8 @@ export interface CreationSkillExecutionStep {
   agents: string[]
   skills: string[]
   tools: string[]
+  /** 默认 true；只控制是否保留网页截图，不影响 AX/DOM 数据读取。 */
+  retainWebpageScreenshot?: boolean
 }
 
 export interface CreationSkillDistinctiveSection {
@@ -57,7 +58,6 @@ export interface CreationSkillSectionHeadings {
   titleStyle: string
   textStyle: string
   diagramStyle: string
-  structurePattern: string
   writingGuidelines: string
 }
 
@@ -66,7 +66,6 @@ export interface CreationSkillFieldExamples {
   titleStyle: string[]
   textStyle: string[]
   diagramStyle: string[]
-  structurePattern: string[]
   writingGuidelines: string[]
 }
 
@@ -165,8 +164,26 @@ export interface CreationSkillMarketQuery {
 }
 
 const parseError = async (response: Response, fallback: string) => {
-  const payload = await response.json().catch(() => null)
-  return payload?.error?.message || payload?.message || fallback
+  const text = await response.text().catch(() => '')
+  const trimmed = text.trim()
+  if (trimmed) {
+    try {
+      const payload = JSON.parse(trimmed)
+      const message = payload?.error?.message
+        || payload?.message
+        || (typeof payload?.error === 'string' ? payload.error : '')
+      if (message) return String(message)
+    } catch {
+      const missingField = trimmed.match(/missing field `([^`]+)`/)
+      if (missingField) return `请求缺少必需字段 ${missingField[1]}，请刷新页面后重试`
+      if (/invalid type/i.test(trimmed)) return '请求字段类型不正确，请刷新页面后重试'
+      if (/failed to deserialize the json body/i.test(trimmed)) return '请求内容格式不正确，请刷新页面后重试'
+      if (/expected request with `content-type/i.test(trimmed)) return '请求类型不正确，需要 application/json'
+      if (/request body (limit|size)/i.test(trimmed)) return '请求内容过大，请精简技能包或示例文档后重试'
+      if (trimmed.length > 0 && trimmed.length <= 120) return trimmed
+    }
+  }
+  return `${fallback}（服务返回 HTTP ${response.status}，请稍后重试）`
 }
 
 const CREATION_SKILL_ANALYSIS_RETRY_DELAY_MS = 750
@@ -201,7 +218,6 @@ export const DEFAULT_CREATION_SKILL_SECTION_HEADINGS: CreationSkillSectionHeadin
   titleStyle: '标题设计风格',
   textStyle: '行文设计思路',
   diagramStyle: '图片生成方式',
-  structurePattern: '内部章节推进信息',
   writingGuidelines: '话术表达风格',
 }
 
@@ -210,7 +226,6 @@ export const DEFAULT_CREATION_SKILL_FIELD_EXAMPLES: CreationSkillFieldExamples =
   titleStyle: ['现状与约束', '方案如何落到执行'],
   textStyle: ['先界定适用范围，再沿“现状 → 判断 → 动作 → 验证”逐层收束。'],
   diagramStyle: ['PlantUML 活动图：主流程纵向排列，跨角色动作放入对应泳道。'],
-  structurePattern: ['背景与目标 → 现状与约束 → 方案设计 → 实施计划 → 风险与验证'],
   writingGuidelines: ['需要说明的是，目标对象只覆盖已经确认的适用范围。'],
 }
 
@@ -332,6 +347,7 @@ function defaultCreationSkillExecutionSteps(
     agents: [],
     skills: [],
     tools: ['memory_search'],
+    retainWebpageScreenshot: true,
   }]
   if (/行业|市场|竞品|研究|调研|政策|趋势/.test(text)) {
     steps.push({
@@ -342,6 +358,7 @@ function defaultCreationSkillExecutionSteps(
       agents: ['industry_research_agent'],
       skills: [],
       tools: ['internet_search'],
+      retainWebpageScreenshot: true,
     })
   }
   if (/数据|指标|统计|趋势|成本|收益|测算|分析/.test(text)) {
@@ -353,6 +370,7 @@ function defaultCreationSkillExecutionSteps(
       agents: ['data_analysis_agent'],
       skills: [],
       tools: ['data_search', 'webpage_scrape'],
+      retainWebpageScreenshot: true,
     })
   }
   if (/方案|架构|设计|规划|建设|实施/.test(text)) {
@@ -364,6 +382,7 @@ function defaultCreationSkillExecutionSteps(
       agents: ['solution_design_agent'],
       skills: [],
       tools: /架构|流程|链路|交互|模块/.test(text) ? ['plantuml_diagram'] : [],
+      retainWebpageScreenshot: true,
     })
   }
   steps.push(
@@ -375,6 +394,7 @@ function defaultCreationSkillExecutionSteps(
       agents: ['chapter_design_agent'],
       skills: [],
       tools: [],
+      retainWebpageScreenshot: true,
     },
     {
       id: 'draft-document',
@@ -384,6 +404,7 @@ function defaultCreationSkillExecutionSteps(
       agents: ['document_writer_agent'],
       skills: [],
       tools: [],
+      retainWebpageScreenshot: true,
     },
     {
       id: 'review-delivery',
@@ -393,6 +414,7 @@ function defaultCreationSkillExecutionSteps(
       agents: ['quality_review_agent'],
       skills: [],
       tools: [],
+      retainWebpageScreenshot: true,
     },
   )
   return steps
@@ -440,7 +462,7 @@ function mapExecutionSteps(
         .replace(/[^a-z0-9_-]+/g, '-')
         .replace(/^-|-$/g, '')
         .slice(0, 80)
-      const step = {
+      const step: CreationSkillExecutionStep = {
         id: id || `step-${index + 1}`,
         title: String(item?.title || '').trim(),
         objective: String(item?.objective || '').trim(),
@@ -448,8 +470,12 @@ function mapExecutionSteps(
         agents: resources(item?.agents, allowedAgents),
         skills: resources(item?.skills),
         tools: resources(item?.tools, allowedTools),
+        retainWebpageScreenshot: item?.retainWebpageScreenshot
+          ?? item?.retain_webpage_screenshot
+          ?? true,
       }
-      return step.title && step.objective && step.output ? step : null
+      // 步骤目标与产出已合并为“执行动作”，产出允许为空。
+      return step.title && step.objective ? step : null
     }).filter((step): step is CreationSkillExecutionStep => Boolean(step))
     : []
   return steps.length ? steps.slice(0, 12) : defaultCreationSkillExecutionSteps(title, evidence)
@@ -631,7 +657,6 @@ export async function importCodexSkillPackage(
     titleStyle: '遵循 SKILL.md 中的标题与输出要求。',
     textStyle: metadata.instructions || '严格遵循 SKILL.md 中定义的工作流与输出要求。',
     diagramStyle: '仅在 SKILL.md 或引用文件明确要求时生成图示。',
-    structurePattern: ['读取 SKILL.md', '按需读取引用文件', '设计章节蓝图', '执行技能工作流', '核对输出要求'],
     writingGuidelines: ['优先遵循 SKILL.md；引用其他文件时使用技能根目录相对路径。'],
     distinctiveSections: [],
     sectionHeadings: { ...DEFAULT_CREATION_SKILL_SECTION_HEADINGS },
@@ -767,8 +792,7 @@ ${skill.executionSteps.map((step, index) => `### ${index + 1}. ${step.title}
 
 ${step.objective}
 
-- 产出：${step.output}
-- Agent：${step.agents.join('、') || '无'}
+${step.output.trim() ? `- 产出：${step.output}\n` : ''}- Agent：${step.agents.join('、') || '无'}
 - Skill：${step.skills.join('、') || '无'}
 - Tool：${step.tools.join('、') || '无'}`).join('\n\n')}
 
@@ -851,10 +875,6 @@ function coerceCreationSkillStringItem(value: unknown, key = '') {
         const pattern = read('pattern')
         if (pattern) return `${level ? `${level}：` : ''}采用“${pattern}”的标题骨架`
       }
-      if (key === 'structure_pattern') {
-        const role = read('role') || read('section') || read('title')
-        if (role) return role
-      }
     }
     return text
   }
@@ -875,7 +895,6 @@ function coerceCreationSkillStringItem(value: unknown, key = '') {
       ? `${level ? `${level}：` : ''}采用“${pattern}”的标题骨架${boundary ? `；${boundary}` : ''}`
       : ''
   }
-  if (key === 'structure_pattern') return first('role', 'section', 'title', 'name', '章节角色', '内容')
   if (key === 'writing_guidelines') {
     const phrase = first('phrase', 'term', 'wording', '短语', '话术')
     const usage = first('role', 'usage', 'effect', '作用', '说明')
@@ -1008,11 +1027,6 @@ function mapCreationSkillAnalysis(data: any, source: CreationSkillSource): Creat
     titleStyle: commonTitles.join('；'),
     textStyle: mergeCreationSkillTextStyle(data.text_style, fallback.textStyle),
     diagramStyle: mergeCreationSkillDiagramStyle(data.diagram_style, fallback.diagramStyle),
-    structurePattern: Array.isArray(data.structure_pattern)
-      ? data.structure_pattern
-        .map((item: unknown) => coerceCreationSkillStringItem(item, 'structure_pattern'))
-        .filter(Boolean)
-      : fallback.structurePattern,
     writingGuidelines: mergeCreationSkillWritingGuidelines(
       data.writing_guidelines,
       fallback.writingGuidelines,
@@ -1344,12 +1358,12 @@ export function marketCreationSkillToLocalInput(
       agents: [...step.agents],
       skills: [...step.skills],
       tools: [...step.tools],
+      retainWebpageScreenshot: step.retainWebpageScreenshot !== false,
     })),
     commonTitles: [...skill.commonTitles],
     titleStyle: skill.titleStyle,
     textStyle: skill.textStyle,
     diagramStyle: skill.diagramStyle,
-    structurePattern: [...skill.structurePattern],
     writingGuidelines: [...skill.writingGuidelines],
     distinctiveSections: [...(skill.distinctiveSections || [])].map(section => ({
       ...section,
@@ -1371,7 +1385,7 @@ export async function publishCreationSkill(
   skill: Omit<LocalCreationSkill, 'id' | 'createdAt' | 'updatedAt'>,
   published: boolean,
 ): Promise<{ id: string; published: boolean }> {
-  if (!skill.categoryId) throw new Error('请选择第四级具体文档类型')
+  if (!skill.categoryId) throw new Error('技能当前为“私有”类目，请先选择非私有的创作类目再发布到市场')
   if (!published && !skill.cloudSkillId) throw new Error('未发布的本地技能草稿不会上传')
   const response = await fetch(
     `${adminApiBaseUrl}/v1/creation-skills${skill.cloudSkillId ? `/${skill.cloudSkillId}` : ''}`,
@@ -1400,7 +1414,6 @@ export async function publishCreationSkill(
           title_style: skill.titleStyle,
           text_style: skill.textStyle,
           diagram_style: skill.diagramStyle,
-          structure_pattern: skill.structurePattern,
           writing_guidelines: skill.writingGuidelines,
           distinctive_sections: skill.distinctiveSections || [],
           section_headings: {
@@ -1408,7 +1421,6 @@ export async function publishCreationSkill(
             title_style: DEFAULT_CREATION_SKILL_SECTION_HEADINGS.titleStyle,
             text_style: DEFAULT_CREATION_SKILL_SECTION_HEADINGS.textStyle,
             diagram_style: DEFAULT_CREATION_SKILL_SECTION_HEADINGS.diagramStyle,
-            structure_pattern: DEFAULT_CREATION_SKILL_SECTION_HEADINGS.structurePattern,
             writing_guidelines: DEFAULT_CREATION_SKILL_SECTION_HEADINGS.writingGuidelines,
           },
           field_examples: {
@@ -1416,7 +1428,6 @@ export async function publishCreationSkill(
             title_style: skill.fieldExamples.titleStyle,
             text_style: skill.fieldExamples.textStyle,
             diagram_style: skill.fieldExamples.diagramStyle,
-            structure_pattern: skill.fieldExamples.structurePattern,
             writing_guidelines: skill.fieldExamples.writingGuidelines,
           },
           example_document: skill.exampleDocument,
@@ -1496,7 +1507,6 @@ export function suggestCreationSkillCategory(
     analysis.title,
     analysis.summary,
     ...analysis.commonTitles,
-    ...analysis.structurePattern,
     ...analysis.suggestedCategoryKeywords,
   ].filter(Boolean).join('\n').toLowerCase()
   const leaves = categories.filter(item => item.level === 4)
@@ -1661,7 +1671,7 @@ export function buildCreationSkillInstruction(
     ].filter(Boolean).join('\n')
     const workflowContext = skill.executionSteps.map((step, stepIndex) => [
       `步骤 ${stepIndex + 1}｜${step.title}：${step.objective}`,
-      `产出：${step.output}`,
+      step.output.trim() ? `产出：${step.output}` : '',
       step.agents.length ? `可调用 Agent：${step.agents.join('、')}` : '',
       step.skills.length ? `可调用 Skill：${step.skills.join('、')}` : '',
       step.tools.length ? `可调用 Tool：${step.tools.join('、')}` : '',
@@ -1758,7 +1768,6 @@ export function buildClientCreationSkillFallback(
     titleStyle: commonTitles.join('；'),
     textStyle: describeClientWritingFlow(resolvedStructure, styleContent),
     diagramStyle,
-    structurePattern: resolvedStructure,
     writingGuidelines,
     distinctiveSections: clientDistinctiveSections(styleContent),
     sectionHeadings: { ...DEFAULT_CREATION_SKILL_SECTION_HEADINGS },
@@ -1767,7 +1776,6 @@ export function buildClientCreationSkillFallback(
       titleStyle: [...headingExamples],
       textStyle: [clientFlowExample(resolvedStructure, styleContent)],
       diagramStyle: [clientDiagramExample(diagramStyle)],
-      structurePattern: [resolvedStructure.join(' → ')],
       writingGuidelines: phraseExamples,
     },
     exampleDocument: clientFallbackExampleDocument(rawHeadings),
@@ -2300,12 +2308,12 @@ function serializeLocalSkill(skill: Omit<LocalCreationSkill, 'id' | 'createdAt' 
       agents: step.agents,
       skills: step.skills,
       tools: step.tools,
+      retain_webpage_screenshot: step.retainWebpageScreenshot !== false,
     })),
     common_titles: skill.commonTitles,
     title_style: skill.titleStyle,
     text_style: skill.textStyle,
     diagram_style: skill.diagramStyle,
-    structure_pattern: skill.structurePattern,
     writing_guidelines: skill.writingGuidelines,
     distinctive_sections: (skill.distinctiveSections || []).map(section => ({
       title: section.title,
@@ -2318,7 +2326,6 @@ function serializeLocalSkill(skill: Omit<LocalCreationSkill, 'id' | 'createdAt' 
       title_style: DEFAULT_CREATION_SKILL_SECTION_HEADINGS.titleStyle,
       text_style: DEFAULT_CREATION_SKILL_SECTION_HEADINGS.textStyle,
       diagram_style: DEFAULT_CREATION_SKILL_SECTION_HEADINGS.diagramStyle,
-      structure_pattern: DEFAULT_CREATION_SKILL_SECTION_HEADINGS.structurePattern,
       writing_guidelines: DEFAULT_CREATION_SKILL_SECTION_HEADINGS.writingGuidelines,
     },
     field_examples: {
@@ -2326,7 +2333,6 @@ function serializeLocalSkill(skill: Omit<LocalCreationSkill, 'id' | 'createdAt' 
       title_style: skill.fieldExamples.titleStyle,
       text_style: skill.fieldExamples.textStyle,
       diagram_style: skill.fieldExamples.diagramStyle,
-      structure_pattern: skill.fieldExamples.structurePattern,
       writing_guidelines: skill.fieldExamples.writingGuidelines,
     },
     example_document: skill.exampleDocument,
@@ -2378,18 +2384,13 @@ function mapLocalSkill(item: any): LocalCreationSkill {
     textStyle: legacyContent
       ? legacyDefaults.textStyle
       : hasSerializedSkillObjectItems(item)
-        ? repairStoredCreationSkillTextStyle(item.text_style, item.structure_pattern)
+        ? repairStoredCreationSkillTextStyle(item.text_style)
         : item.text_style || '',
     diagramStyle: legacyContent
       ? legacyDefaults.diagramStyle
       : hasSerializedSkillObjectItems(item)
         ? repairStoredCreationSkillDiagramStyle(item.diagram_style)
         : item.diagram_style || '',
-    structurePattern: legacyContent
-      ? legacyDefaults.structurePattern
-      : (Array.isArray(item.structure_pattern) ? item.structure_pattern : [])
-        .map((value: unknown) => coerceCreationSkillStringItem(value, 'structure_pattern'))
-        .filter(Boolean),
     writingGuidelines: legacyContent
       ? legacyDefaults.writingGuidelines
       : hasSerializedSkillObjectItems(item)
@@ -2438,20 +2439,14 @@ function repairStoredCreationSkillTitle(item: any) {
 function hasSerializedSkillObjectItems(item: any) {
   return [
     ...(Array.isArray(item?.common_titles) ? item.common_titles : []),
-    ...(Array.isArray(item?.structure_pattern) ? item.structure_pattern : []),
     ...(Array.isArray(item?.field_examples?.common_titles) ? item.field_examples.common_titles : []),
   ].some(value => typeof value === 'string' && /^\{\s*['"][^'"]+['"]\s*:/u.test(value.trim()))
 }
 
-function repairStoredCreationSkillTextStyle(value: unknown, rawStructure: unknown) {
+function repairStoredCreationSkillTextStyle(value: unknown) {
   const text = String(value || '').trim()
   if (text.length >= 400) return text
-  const structure = (Array.isArray(rawStructure) ? rawStructure : [])
-    .map(item => coerceCreationSkillStringItem(item, 'structure_pattern'))
-    .filter(Boolean)
-  const route = structure.length
-    ? structure.slice(0, 6).join(' → ')
-    : '目标与范围 → 核心判断 → 方案展开 → 验证与后续'
+  const route = '目标与范围 → 核心判断 → 方案展开 → 验证与后续'
   const supplement = `执行配方：开篇先界定核心对象、适用范围与目标，让读者在进入细节前知道文档要解决什么。章节沿“${route}”推进，标题直接预告下一节承担的内容职责。段内先给判断，再补形成判断的依据、影响边界和具体落法；只有并列动作、条件或结果需要快速比较时才切成列表，并让列表项保持同一语法起点。章节之间依靠因果、递进或范围变化自然承接，不堆叠模板连接词。阅读密度上，一个段落只承担一个主判断；定义、例外和行动要求分别成段，避免把多个逻辑转折压进同一句。结尾回看开篇目标，以可观察结果、责任边界和下一步动作收束，不重复摘要，也不新增前文没有论证的结论。不可迁移项：只复刻标题句法、信息顺序和语气，不复制来源中的专名、事实、日期、指标或业务判断；缺少证据的图示和结论也不能为了形式完整而补造。交付前逐节检查标题是否回应正文、判断是否带依据、并列项是否同构、后续动作是否可执行，并检查术语前后一致。`
   return text ? `${text}\n\n${supplement}` : supplement
 }
@@ -2516,14 +2511,11 @@ function mapMarketSkill(item: any): CreationSkillMarketItem {
         .filter(Boolean),
     titleStyle: String(content.title_style || ''),
     textStyle: hasSerializedSkillObjectItems(content)
-      ? repairStoredCreationSkillTextStyle(content.text_style, content.structure_pattern)
+      ? repairStoredCreationSkillTextStyle(content.text_style)
       : String(content.text_style || ''),
     diagramStyle: hasSerializedSkillObjectItems(content)
       ? repairStoredCreationSkillDiagramStyle(content.diagram_style)
       : String(content.diagram_style || ''),
-    structurePattern: (Array.isArray(content.structure_pattern) ? content.structure_pattern : [])
-      .map((value: unknown) => coerceCreationSkillStringItem(value, 'structure_pattern'))
-      .filter(Boolean),
     writingGuidelines: hasSerializedSkillObjectItems(content)
       ? repairStoredCreationSkillWritingGuidelines(content.writing_guidelines)
       : (Array.isArray(content.writing_guidelines) ? content.writing_guidelines : [])
@@ -2561,7 +2553,6 @@ function buildLegacyGeneralizedContent(title: string) {
     titleStyle: '子标题采用短名词结构，同层级保持相同词序和相近长度。',
     textStyle: '沿“目标与约束 → 方案与依据 → 风险与验证”推进；短段落先给判断，再补充适用范围和落法。',
     diagramStyle: '源记录没有保留图示证据，默认不生成图片；确需补图时使用 PlantUML，并只画正文已说明的对象、边界与关系。',
-    structurePattern: ['背景与目标', '约束与设计原则', '总体方案', '实施计划', '风险与验证', '结论与后续'],
     writingGuidelines: [
       '习惯用“需要”直接声明必要动作或约束。',
       '习惯用“明确”要求把对象、范围和责任说具体。',
@@ -2593,7 +2584,6 @@ function mapFieldExamples(item: any): CreationSkillFieldExamples {
     titleStyle: normalize(item?.title_style, DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.titleStyle, 'title_style'),
     textStyle: normalize(item?.text_style, DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.textStyle, 'text_style'),
     diagramStyle: normalize(item?.diagram_style, DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.diagramStyle, 'diagram_style'),
-    structurePattern: normalize(item?.structure_pattern, DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.structurePattern, 'structure_pattern'),
     writingGuidelines: normalize(item?.writing_guidelines, DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.writingGuidelines, 'writing_guidelines'),
   }
 }
@@ -2628,7 +2618,6 @@ function cloneFieldExamples(examples: CreationSkillFieldExamples): CreationSkill
     titleStyle: [...examples.titleStyle],
     textStyle: [...examples.textStyle],
     diagramStyle: [...examples.diagramStyle],
-    structurePattern: [...examples.structurePattern],
     writingGuidelines: [...examples.writingGuidelines],
   }
 }

@@ -151,7 +151,7 @@
   overflow: hidden;
   border-bottom: 0;
   border-left: 0;
-  background: #fffdf9;
+  background: #fff;
   display: flex;
   flex-direction: column;
   scrollbar-width: thin;
@@ -292,6 +292,12 @@
   margin-top: auto;
 }
 
+.creation-workspace .creation-prompt-skill-shell .mention-highlight-field__mirror {
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .creation-workspace .creation-skill-picker {
   top: auto;
   bottom: calc(100% + 6px);
@@ -420,6 +426,8 @@
 }
 
 .creation-agent-event__icon {
+  position: relative;
+  isolation: isolate;
   width: 23px;
   height: 23px;
   border: 1px solid #e0d7cc;
@@ -428,6 +436,67 @@
   color: #7f6e61;
   display: grid;
   place-items: center;
+}
+
+.creation-agent-event.is-running .creation-agent-event__icon {
+  border-color: #dcb98f;
+  background: #fffaf3;
+  color: #8d5b31;
+  box-shadow: 0 3px 10px rgba(164, 93, 34, .09);
+}
+
+.creation-agent-event__activity {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 7px;
+  height: 7px;
+  border: 2px solid #faf7f2;
+  border-radius: 50%;
+  background: #c97935;
+  box-sizing: content-box;
+}
+
+.creation-agent-event__activity::before {
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  background: rgba(201, 121, 53, .28);
+  content: '';
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .creation-agent-event__activity {
+    animation: creation-activity-breathe 1.8s cubic-bezier(.4, 0, .2, 1) infinite;
+  }
+
+  .creation-agent-event__activity::before {
+    animation: creation-activity-ring 1.8s cubic-bezier(.2, .7, .3, 1) infinite;
+  }
+}
+
+@keyframes creation-activity-breathe {
+  0%, 100% {
+    opacity: .72;
+    transform: scale(.88);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes creation-activity-ring {
+  0% {
+    opacity: .68;
+    transform: scale(.7);
+  }
+
+  72%, 100% {
+    opacity: 0;
+    transform: scale(2.15);
+  }
 }
 
 .creation-agent-event__icon.is-tool {
@@ -767,6 +836,8 @@
   aspect-ratio: 16 / 9;
   overflow: hidden;
   background: linear-gradient(135deg, #f1ebe4, #fbf8f4);
+  display: block;
+  color: inherit;
 }
 
 .creation-browser-preview__viewport img {
@@ -1223,6 +1294,7 @@ h6.creation-latest-change {
 @media (prefers-reduced-motion: reduce) {
   .creation-chat-shell *,
   .creation-agent-trace * {
+    animation: none !important;
     scroll-behavior: auto !important;
     transition: none !important;
   }

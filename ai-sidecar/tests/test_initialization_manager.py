@@ -148,6 +148,62 @@ def test_completed_state_is_gated_again_when_a_required_component_disappears(mon
     assert state["error_code"] == "INITIALIZATION_COMPONENT_MISSING"
 
 
+def test_transient_engine_outage_keeps_completed_state_within_grace_window(monkeypatch, tmp_path):
+    manager = InitializationManager(base_dir=tmp_path)
+    completed = manager._new_state("normal")
+    completed.update({"state": "completed", "progress": 100})
+    completed["quality_gate"]["passed"] = True
+    manager._save_state(completed)
+    monkeypatch.setattr(manager, "_completed_state_still_valid", lambda _mode: False)
+    monkeypatch.setattr(manager, "_components_genuinely_missing", lambda _mode: False)
+
+    state = manager.get_status()
+
+    assert state["state"] == "completed"
+    assert state["error_code"] is None
+
+
+def test_persistent_engine_outage_demotes_after_grace_window(monkeypatch, tmp_path):
+    manager = InitializationManager(base_dir=tmp_path)
+    completed = manager._new_state("normal")
+    completed.update({"state": "completed", "progress": 100})
+    completed["quality_gate"]["passed"] = True
+    manager._save_state(completed)
+    monkeypatch.setattr(manager, "_completed_state_still_valid", lambda _mode: False)
+    monkeypatch.setattr(manager, "_components_genuinely_missing", lambda _mode: False)
+
+    manager.get_status()
+    manager._invalid_since["normal"] = time.monotonic() - 1000
+
+    state = manager.get_status()
+
+    assert state["state"] == "interrupted"
+    assert state["error_code"] == "INITIALIZATION_COMPONENT_MISSING"
+
+
+def test_interrupted_state_recovers_when_components_become_valid_again(monkeypatch, tmp_path):
+    manager = InitializationManager(base_dir=tmp_path)
+    interrupted = manager._empty_state("normal")
+    interrupted.update(
+        {
+            "state": "interrupted",
+            "error_code": "INITIALIZATION_COMPONENT_MISSING",
+            "can_retry": True,
+        }
+    )
+    manager._save_state(interrupted)
+    monkeypatch.setattr(manager, "_completed_state_still_valid", lambda _mode: True)
+
+    state = manager.get_status()
+
+    assert state["state"] == "completed"
+    assert state["progress"] == 100
+    assert state["error_code"] is None
+    assert state["quality_gate"]["passed"] is True
+    persisted = json.loads(manager.normal_state_path.read_text(encoding="utf-8"))
+    assert persisted["state"] == "completed"
+
+
 def test_normal_initialization_migrates_gui_runtime_to_managed_cli(monkeypatch, tmp_path):
     manager = InitializationManager(base_dir=tmp_path)
     running = {"value": True}

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { Cloud, FolderOpen, HardDriveDownload, LockKeyhole, LogIn, ShieldCheck } from 'lucide-react'
+import { ChevronRight, Cloud, FolderOpen, HardDriveDownload, LockKeyhole, LogIn, ShieldCheck } from 'lucide-react'
 import {
   useBackupMemoryPackageToCloud,
   useExportMemoryPackage,
@@ -21,6 +21,21 @@ const tableLabels: Record<string, string> = {
   bake_documents: '文档',
   bake_document_sections: '文档章节',
   bake_sops: '操作',
+  creation_skills: '本地 Skill',
+  data_sources: '数据记录',
+  data_snapshots: '数据快照',
+  data_source_links: '数据来源关系',
+}
+
+const importDetailTabs: Record<string, { windowMode: 'knowledge' } | { windowMode: 'bake'; bakeTab: 'templates' | 'knowledge' | 'sop' | 'data' }> = {
+  timelines: { windowMode: 'knowledge' },
+  bake_knowledge: { windowMode: 'bake', bakeTab: 'knowledge' },
+  bake_documents: { windowMode: 'bake', bakeTab: 'templates' },
+  bake_document_sections: { windowMode: 'bake', bakeTab: 'templates' },
+  bake_sops: { windowMode: 'bake', bakeTab: 'sop' },
+  data_sources: { windowMode: 'bake', bakeTab: 'data' },
+  data_snapshots: { windowMode: 'bake', bakeTab: 'data' },
+  data_source_links: { windowMode: 'bake', bakeTab: 'data' },
 }
 
 const formatBytes = (bytes: number) => {
@@ -49,7 +64,7 @@ const importReportRows = (report: MemoryPackageImportReport | null) => {
 }
 
 type MemoryPackageBusy = 'export' | 'import' | 'cloud-backup' | 'cloud-restore' | null
-type CloudBackupAccessState = 'signed-out' | 'unavailable' | 'available'
+type CloudBackupAccessState = 'signed-out' | 'available'
 type CloudSnapshotsStatus = 'idle' | 'loading' | 'ready' | 'error'
 interface MemoryBackupNotice {
   message: string
@@ -63,25 +78,17 @@ interface MemoryBackupCardProps {
   cloudSnapshotsStatus: CloudSnapshotsStatus
   cloudSnapshotsError: string | null
   selectedCloudSnapshotId: string
-  recoveryKey: string
-  generatedRecoveryKey: string | null
   lastImportReport: MemoryPackageImportReport | null
   importFileInputRef: React.RefObject<HTMLInputElement>
   onExport: () => void
   onImportClick: () => void
   onImportFile: (file?: File | null) => void
   onOpenAccount: () => void
-  onRecoveryKeyChange: (value: string) => void
   onCloudSnapshotChange: (value: string) => void
   onRefreshCloudSnapshots: () => void
   onBackupToCloud: () => void
   onRestoreFromCloud: () => void
-}
-
-const cloudAccessLabels: Record<CloudBackupAccessState, string> = {
-  'signed-out': '未登录',
-  unavailable: '暂未开通',
-  available: '云端可用',
+  onOpenImportDetails?: (tableName: string) => void
 }
 
 export const MemoryBackupCard: React.FC<MemoryBackupCardProps> = ({
@@ -91,19 +98,17 @@ export const MemoryBackupCard: React.FC<MemoryBackupCardProps> = ({
   cloudSnapshotsStatus,
   cloudSnapshotsError,
   selectedCloudSnapshotId,
-  recoveryKey,
-  generatedRecoveryKey,
   lastImportReport,
   importFileInputRef,
   onExport,
   onImportClick,
   onImportFile,
   onOpenAccount,
-  onRecoveryKeyChange,
   onCloudSnapshotChange,
   onRefreshCloudSnapshots,
   onBackupToCloud,
   onRestoreFromCloud,
+  onOpenImportDetails,
 }) => {
   const isBusy = busy !== null
   const cloudListLoading = cloudSnapshotsStatus === 'loading'
@@ -112,8 +117,7 @@ export const MemoryBackupCard: React.FC<MemoryBackupCardProps> = ({
     <BakeCard className="bake-memory-package-card">
       <BakeSectionHeader
         title="记忆备份"
-        subtitle="备份时间线、知识、文档和操作记录；原始截图不会包含在记忆包中。"
-        right={<BakePill text={cloudAccessLabels[accessState]} />}
+        right={accessState === 'signed-out' ? <BakePill text="未登录" /> : undefined}
       />
 
       <div className="bake-memory-package-grid">
@@ -129,7 +133,7 @@ export const MemoryBackupCard: React.FC<MemoryBackupCardProps> = ({
           </div>
           <div className="bake-actions bake-actions--secondary bake-memory-package-actions">
             <BakeButton compact primary disabled={isBusy} onClick={onExport}>
-              {busy === 'export' ? '正在导出...' : '导出备份'}
+              {busy === 'export' ? '正在导出...' : '导出记忆包'}
             </BakeButton>
             <BakeButton compact disabled={isBusy} onClick={onImportClick}>
               {busy === 'import' ? '正在导入...' : '导入记忆包'}
@@ -152,7 +156,7 @@ export const MemoryBackupCard: React.FC<MemoryBackupCardProps> = ({
             </span>
             <div>
               <div id="cloud-backup-title" className="bake-memory-package-group__title">云端备份</div>
-              <div className="bake-muted">跨设备保存加密记忆包，需要账户权限。</div>
+              <div className="bake-muted">跨设备传输加密记忆包，每个账号默认 50MB。</div>
             </div>
           </div>
 
@@ -172,42 +176,14 @@ export const MemoryBackupCard: React.FC<MemoryBackupCardProps> = ({
             </div>
           )}
 
-          {accessState === 'unavailable' && (
-            <div className="bake-memory-package-access-state">
-              <span className="bake-memory-package-access-state__icon" aria-hidden>
-                <LockKeyhole size={19} />
-              </span>
-              <div className="bake-memory-package-access-state__body">
-                <strong>当前账户暂未开通云端备份</strong>
-                <span>你仍可使用本机备份；账户开通后，这里会显示云端操作。</span>
-              </div>
-              <BakeButton compact onClick={onOpenAccount}>查看账户</BakeButton>
-            </div>
-          )}
-
           {accessState === 'available' && (
             <div className="bake-memory-package-cloud">
               <div className="bake-memory-package-privacy-note">
                 <ShieldCheck size={16} aria-hidden />
-                <span>记忆包会先在本机加密再上传，云端无法读取内容；恢复密钥只由你保管。</span>
+                <span>记忆包会先在本机加密再上传，备份与恢复无需设置密钥。</span>
               </div>
 
               <div className="bake-memory-package-fields">
-                <label className="bake-form-field bake-memory-package-key">
-                  <span className="bake-filter-label">恢复密钥</span>
-                  <input
-                    className="bake-input"
-                    type="password"
-                    aria-label="恢复密钥"
-                    autoComplete="off"
-                    spellCheck={false}
-                    value={recoveryKey}
-                    onChange={(event) => onRecoveryKeyChange(event.target.value)}
-                    placeholder="留空时自动生成"
-                  />
-                  <span className="bake-memory-package-field-help">备份时可留空；恢复时请输入对应密钥。</span>
-                </label>
-
                 <div className="bake-form-field bake-memory-package-select">
                   <span className="bake-filter-label">云端备份</span>
                   {cloudSnapshotsStatus === 'idle' && (
@@ -267,23 +243,16 @@ export const MemoryBackupCard: React.FC<MemoryBackupCardProps> = ({
         </div>
       </div>
 
-      {generatedRecoveryKey && (
-        <div className="bake-memory-package-generated-key" role="status">
-          <div>
-            <strong>请立即保存本次恢复密钥</strong>
-            <span>MemoryBread 不会上传这把密钥，遗失后无法恢复该云端备份。</span>
-          </div>
-          <input className="bake-input" aria-label="本次恢复密钥" readOnly value={generatedRecoveryKey} />
-        </div>
-      )}
-
       {lastImportReport && (
         <div className="bake-memory-package-report" aria-label="记忆包导入结果">
-          {importReportRows(lastImportReport).map(row => (
-            <span key={row.name}>
-              {row.label} 新增 {row.inserted} / 跳过 {row.skipped}
-            </span>
-          ))}
+          {importReportRows(lastImportReport).map(row => {
+            const content = `${row.label} 新增 ${row.inserted} / 更新 ${row.updated} / 跳过 ${row.skipped}`
+            return importDetailTabs[row.name] && row.inserted + row.updated > 0 ? (
+              <button key={row.name} type="button" onClick={() => onOpenImportDetails?.(row.name)} aria-label={`查看${row.label}导入明细`}>
+                {content}<ChevronRight size={13} aria-hidden />
+              </button>
+            ) : <span key={row.name}>{content}</span>
+          })}
         </div>
       )}
     </BakeCard>
@@ -296,8 +265,6 @@ const MemoryBackupSection: React.FC = () => {
     serviceEnvironment,
     authToken,
     currentUser,
-    accountType,
-    cloudSubscription,
     setWindowMode,
     setBakeMemoryOffset,
   } = useAppStore()
@@ -313,8 +280,6 @@ const MemoryBackupSection: React.FC = () => {
   const [cloudSnapshotsStatus, setCloudSnapshotsStatus] = useState<CloudSnapshotsStatus>('idle')
   const [cloudSnapshotsError, setCloudSnapshotsError] = useState<string | null>(null)
   const [selectedCloudSnapshotId, setSelectedCloudSnapshotId] = useState('')
-  const [recoveryKey, setRecoveryKey] = useState('')
-  const [generatedRecoveryKey, setGeneratedRecoveryKey] = useState<string | null>(null)
   const [lastImportReport, setLastImportReport] = useState<MemoryPackageImportReport | null>(null)
   const cloudSnapshotsRequestSeqRef = useRef(0)
   const importFileInputRef = useRef<HTMLInputElement | null>(null)
@@ -323,20 +288,8 @@ const MemoryBackupSection: React.FC = () => {
     setStatusNotice({ message, exportPath })
   }, [])
 
-  const hasCloudMemoryAccess = Boolean(
-    authToken &&
-    currentUser &&
-    (
-      accountType !== 'user' ||
-      currentUser.roles.some(role => role !== 'user') ||
-      cloudSubscription?.status === 'active'
-    ),
-  )
-  const cloudBackupAccessState: CloudBackupAccessState = !authToken || !currentUser
-    ? 'signed-out'
-    : hasCloudMemoryAccess
-      ? 'available'
-      : 'unavailable'
+  const isSignedIn = Boolean(authToken && currentUser)
+  const cloudBackupAccessState: CloudBackupAccessState = isSignedIn ? 'available' : 'signed-out'
 
   const ensureCloudDevice = async () => {
     if (!authToken) throw new Error('请先登录账户')
@@ -389,8 +342,24 @@ const MemoryBackupSection: React.FC = () => {
     }
   }
 
+  const handleOpenImportDetails = (tableName: string) => {
+    const target = importDetailTabs[tableName]
+    if (!target) return
+    if (target.windowMode === 'knowledge') {
+      useAppStore.setState({
+        windowMode: 'knowledge',
+        repositoryTab: 'memory',
+        repositoryMemoryFocusId: null,
+        selectedMemoryId: null,
+        bakeMemoryOffset: 0,
+      })
+      return
+    }
+    useAppStore.setState({ windowMode: 'bake', bakeTab: target.bakeTab })
+  }
+
   const loadCloudSnapshots = useCallback(async (announceResult: boolean) => {
-    if (!authToken || !hasCloudMemoryAccess) return
+    if (!authToken || !isSignedIn) return
     const requestSeq = cloudSnapshotsRequestSeqRef.current + 1
     cloudSnapshotsRequestSeqRef.current = requestSeq
     setCloudSnapshotsStatus('loading')
@@ -411,36 +380,29 @@ const MemoryBackupSection: React.FC = () => {
       setCloudSnapshotsError(message)
       if (announceResult) setStatusMessage(message)
     }
-  }, [adminApiBaseUrl, authToken, hasCloudMemoryAccess, setStatusMessage])
+  }, [adminApiBaseUrl, authToken, isSignedIn, setStatusMessage])
 
   useEffect(() => {
-    if (!authToken || !hasCloudMemoryAccess) {
+    if (!authToken || !isSignedIn) {
       cloudSnapshotsRequestSeqRef.current += 1
       setCloudSnapshots([])
       setSelectedCloudSnapshotId('')
       setCloudSnapshotsStatus('idle')
       setCloudSnapshotsError(null)
-      setRecoveryKey('')
-      setGeneratedRecoveryKey(null)
       return
     }
     void loadCloudSnapshots(false)
     return () => {
       cloudSnapshotsRequestSeqRef.current += 1
     }
-  }, [authToken, hasCloudMemoryAccess, loadCloudSnapshots])
+  }, [authToken, isSignedIn, loadCloudSnapshots])
 
   const handleBackupMemoryPackageToCloud = async () => {
-    if (!authToken) {
+    if (!authToken || !isSignedIn) {
       setStatusMessage('请先登录账户')
       return
     }
-    if (!hasCloudMemoryAccess) {
-      setStatusMessage('当前账号无云端记忆包权限')
-      return
-    }
     setMemoryPackageBusy('cloud-backup')
-    setGeneratedRecoveryKey(null)
     try {
       const deviceId = await ensureCloudDevice()
       const result = await backupMemoryPackageToCloud({
@@ -448,12 +410,7 @@ const MemoryBackupSection: React.FC = () => {
         service_environment: serviceEnvironment,
         access_token: authToken,
         device_id: deviceId,
-        recovery_key_base64: recoveryKey.trim() || undefined,
       })
-      if (result.generated_recovery_key_base64) {
-        setGeneratedRecoveryKey(result.generated_recovery_key_base64)
-        setRecoveryKey(result.generated_recovery_key_base64)
-      }
       setCloudSnapshots(prev => [result.snapshot, ...prev.filter(item => item.id !== result.snapshot.id)])
       setSelectedCloudSnapshotId(result.snapshot.id)
       setCloudSnapshotsStatus('ready')
@@ -475,10 +432,6 @@ const MemoryBackupSection: React.FC = () => {
       setStatusMessage('请选择云端记忆包')
       return
     }
-    if (!recoveryKey.trim()) {
-      setStatusMessage('请输入恢复密钥')
-      return
-    }
     setMemoryPackageBusy('cloud-restore')
     setLastImportReport(null)
     try {
@@ -487,7 +440,6 @@ const MemoryBackupSection: React.FC = () => {
         service_environment: serviceEnvironment,
         access_token: authToken,
         snapshot_id: selectedCloudSnapshotId,
-        recovery_key_base64: recoveryKey.trim(),
         import_to_local: true,
         dry_run: false,
       })
@@ -523,19 +475,17 @@ const MemoryBackupSection: React.FC = () => {
         cloudSnapshotsStatus={cloudSnapshotsStatus}
         cloudSnapshotsError={cloudSnapshotsError}
         selectedCloudSnapshotId={selectedCloudSnapshotId}
-        recoveryKey={recoveryKey}
-        generatedRecoveryKey={generatedRecoveryKey}
         lastImportReport={lastImportReport}
         importFileInputRef={importFileInputRef}
         onExport={() => void handleExportMemoryPackage()}
         onImportClick={() => importFileInputRef.current?.click()}
         onImportFile={(file) => void handleImportMemoryPackageFile(file)}
         onOpenAccount={() => setWindowMode('account')}
-        onRecoveryKeyChange={setRecoveryKey}
         onCloudSnapshotChange={setSelectedCloudSnapshotId}
         onRefreshCloudSnapshots={() => void loadCloudSnapshots(true)}
         onBackupToCloud={() => void handleBackupMemoryPackageToCloud()}
         onRestoreFromCloud={() => void handleRestoreMemoryPackageFromCloud()}
+        onOpenImportDetails={handleOpenImportDetails}
       />
     </section>
   )

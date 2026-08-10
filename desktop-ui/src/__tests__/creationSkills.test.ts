@@ -144,7 +144,6 @@ const localSkill: Omit<LocalCreationSkill, 'id' | 'createdAt' | 'updatedAt'> = {
   titleStyle: '结论先行，标题带明确对象。',
   textStyle: '短段落配合约束、方案和取舍。',
   diagramStyle: '统一配色并标注边界与数据流向。',
-  structurePattern: ['背景与目标', '架构方案', '风险与演进'],
   writingGuidelines: ['每个决策写明原因', '敏感数据使用占位符'],
   distinctiveSections: [{
     title: '定义先行的概念建立',
@@ -158,7 +157,6 @@ const localSkill: Omit<LocalCreationSkill, 'id' | 'createdAt' | 'updatedAt'> = {
     titleStyle: [...DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.titleStyle],
     textStyle: [...DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.textStyle],
     diagramStyle: [...DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.diagramStyle],
-    structurePattern: [...DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.structurePattern],
     writingGuidelines: [...DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.writingGuidelines],
   },
   exampleDocument: DEFAULT_CREATION_SKILL_EXAMPLE_DOCUMENT,
@@ -187,6 +185,9 @@ describe('技能云端发布边界', () => {
         deliverables: localSkill.skillDescription.deliverables,
       })
       expect(body.content.execution_steps).toEqual(localSkill.executionSteps)
+      expect(body.content).not.toHaveProperty('structure_pattern')
+      expect(body.content.section_headings).not.toHaveProperty('structure_pattern')
+      expect(body.content.field_examples).not.toHaveProperty('structure_pattern')
       expect(body).not.toHaveProperty('source_id')
       expect(body).not.toHaveProperty('source_kind')
       expect(body).not.toHaveProperty('document_content')
@@ -271,14 +272,14 @@ describe('技能云端发布边界', () => {
               title_style: localSkill.titleStyle,
               text_style: localSkill.textStyle,
               diagram_style: localSkill.diagramStyle,
-              structure_pattern: localSkill.structurePattern,
+              structure_pattern: ['旧章节结构不应继续进入客户端模型'],
               writing_guidelines: localSkill.writingGuidelines,
               section_headings: {
                 common_titles: localSkill.sectionHeadings.commonTitles,
                 title_style: localSkill.sectionHeadings.titleStyle,
                 text_style: localSkill.sectionHeadings.textStyle,
                 diagram_style: localSkill.sectionHeadings.diagramStyle,
-                structure_pattern: localSkill.sectionHeadings.structurePattern,
+                structure_pattern: '旧章节结构标题',
                 writing_guidelines: localSkill.sectionHeadings.writingGuidelines,
               },
               field_examples: {
@@ -286,7 +287,7 @@ describe('技能云端发布边界', () => {
                 title_style: localSkill.fieldExamples.titleStyle,
                 text_style: localSkill.fieldExamples.textStyle,
                 diagram_style: localSkill.fieldExamples.diagramStyle,
-                structure_pattern: localSkill.fieldExamples.structurePattern,
+                structure_pattern: ['旧章节结构示例'],
                 writing_guidelines: localSkill.fieldExamples.writingGuidelines,
               },
               example_document: localSkill.exampleDocument,
@@ -379,7 +380,7 @@ describe('技能本地生成与类目容错', () => {
     expect(analysis.analysisMode).toBe('client_heuristic_fallback')
     expect(analysis.fallbackReason).toBe('analysis_request_failed')
     expect(analysis.title).toContain('技术架构设计')
-    expect(analysis.structurePattern).toEqual(['背景与目标', '总体方案', '实施计划'])
+    expect(analysis).not.toHaveProperty('structurePattern')
     expect(analysis.titleStyle).not.toBe('')
     expect(analysis.diagramStyle).not.toBe('')
     expect(analysis.commonTitles.join('')).not.toContain('订单中心')
@@ -508,7 +509,9 @@ describe('技能本地生成与类目容错', () => {
     expect(analysis.fieldExamples.commonTitles.join(' ')).not.toContain('目标对象 目标对象')
     expect(analysis.fieldExamples.commonTitles).toContain('从业务视角看，协作工作台的角色与边界')
     expect(analysis.commonTitles[0]).toContain('一级标题：采用“')
-    expect(analysis.structurePattern[0]).toBe('先定义核心对象，再说明核心目标')
+    expect(analysis).not.toHaveProperty('structurePattern')
+    expect(analysis.sectionHeadings).not.toHaveProperty('structurePattern')
+    expect(analysis.fieldExamples).not.toHaveProperty('structurePattern')
     expect(JSON.stringify(analysis)).not.toContain('[object Object]')
     expect(analysis.distinctiveSections?.[0].title).toBe('定义先行')
     expect(analysis.commonTitles.length).toBeGreaterThanOrEqual(4)
@@ -536,7 +539,7 @@ describe('技能本地生成与类目容错', () => {
         title_style: DEFAULT_CREATION_SKILL_SECTION_HEADINGS.titleStyle,
         text_style: DEFAULT_CREATION_SKILL_SECTION_HEADINGS.textStyle,
         diagram_style: DEFAULT_CREATION_SKILL_SECTION_HEADINGS.diagramStyle,
-        structure_pattern: DEFAULT_CREATION_SKILL_SECTION_HEADINGS.structurePattern,
+        structure_pattern: '旧章节结构标题',
         writing_guidelines: DEFAULT_CREATION_SKILL_SECTION_HEADINGS.writingGuidelines,
       },
       field_examples: {
@@ -544,7 +547,7 @@ describe('技能本地生成与类目容错', () => {
         title_style: DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.titleStyle,
         text_style: DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.textStyle,
         diagram_style: DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.diagramStyle,
-        structure_pattern: DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.structurePattern,
+        structure_pattern: ['旧章节结构示例'],
         writing_guidelines: DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.writingGuidelines,
       },
       example_document: DEFAULT_CREATION_SKILL_EXAMPLE_DOCUMENT,
@@ -619,7 +622,6 @@ describe('技能本地生成与类目容错', () => {
       titleStyle: '结论先行。',
       textStyle: '正式。',
       diagramStyle: '架构图。',
-      structurePattern: ['背景', '总体架构'],
       writingGuidelines: [],
       sectionHeadings: { ...DEFAULT_CREATION_SKILL_SECTION_HEADINGS },
       fieldExamples: DEFAULT_CREATION_SKILL_FIELD_EXAMPLES,
@@ -652,7 +654,6 @@ describe('技能本地生成与类目容错', () => {
       titleStyle: '规范、明确。',
       textStyle: '按临床阶段说明。',
       diagramStyle: '使用诊疗流程图。',
-      structurePattern: ['适用范围', '诊疗流程', '质量指标'],
       writingGuidelines: [],
       sectionHeadings: { ...DEFAULT_CREATION_SKILL_SECTION_HEADINGS },
       fieldExamples: DEFAULT_CREATION_SKILL_FIELD_EXAMPLES,
@@ -858,7 +859,7 @@ describe('技能本地生成与类目容错', () => {
         title_style: ["{'level': '一级标题', 'pattern': '# [核心主题] + OS/整体技术方案'}"],
         text_style: DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.textStyle,
         diagram_style: DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.diagramStyle,
-        structure_pattern: DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.structurePattern,
+        structure_pattern: ['旧章节结构示例'],
         writing_guidelines: DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.writingGuidelines,
       },
       example_document: DEFAULT_CREATION_SKILL_EXAMPLE_DOCUMENT,
@@ -872,14 +873,15 @@ describe('技能本地生成与类目容错', () => {
     const [skill] = await listLocalCreationSkills('http://127.0.0.1:7070')
 
     expect(skill.commonTitles[0]).toBe('一级标题：采用“# [核心主题] + OS/整体技术方案”的标题骨架')
-    expect(skill.structurePattern[0]).toBe('先定义核心对象，再说明核心目标')
+    expect(skill).not.toHaveProperty('structurePattern')
+    expect(skill.sectionHeadings).not.toHaveProperty('structurePattern')
+    expect(skill.fieldExamples).not.toHaveProperty('structurePattern')
     expect(skill.fieldExamples.commonTitles[0]).not.toContain("{'level':")
     expect(skill.title).toBe('运行平台整体技术方案')
     expect(skill.textStyle.length).toBeGreaterThanOrEqual(400)
     expect(skill.textStyle).toContain('交付前逐节检查')
     expect(skill.diagramStyle.length).toBeGreaterThanOrEqual(400)
     expect(skill.writingGuidelines.join('').length).toBeGreaterThanOrEqual(400)
-    expect(skill.sectionHeadings.structurePattern).toBe('内部章节推进信息')
     expect(skill.skillDescription.purpose).toBe('适合技术方案写作。')
     expect(skill.skillDescription.documentTypes).toEqual(['运行平台整体技术方案'])
     expect(skill.executionSteps.map(step => step.id)).toEqual([
@@ -890,5 +892,6 @@ describe('技能本地生成与类目容错', () => {
       'review-delivery',
     ])
     expect(skill.executionSteps[0].tools).toEqual(['memory_search'])
+    expect(skill.executionSteps.every(step => step.retainWebpageScreenshot === true)).toBe(true)
   })
 })

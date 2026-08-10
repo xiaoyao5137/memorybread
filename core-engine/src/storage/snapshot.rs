@@ -65,6 +65,11 @@ const EXCLUDED_TABLES: &[&str] = &[
     "designs_fts",
     "episodic_memories_fts",
     "knowledge_fts",
+    "timelines_fts",
+    "timelines_fts_config",
+    "timelines_fts_data",
+    "timelines_fts_docsize",
+    "timelines_fts_idx",
     "vector_index",
     "system_metrics",
     "llm_usage_logs",
@@ -110,7 +115,7 @@ const ASSET_TABLES: &[AssetTableSpec] = &[
     },
     AssetTableSpec {
         name: "data_snapshots",
-        identity_columns: &["id"],
+        identity_columns: &["source_id", "period_key"],
     },
     AssetTableSpec {
         name: "data_source_links",
@@ -327,6 +332,9 @@ impl StorageManager {
             report.capture_refs = import_capture_refs(&tx, &snapshot.capture_refs)?;
 
             for table in &snapshot.tables {
+                if is_data_asset_table(&table.name) {
+                    continue;
+                }
                 if !is_allowed_asset_table(&table.name) {
                     report.tables.push(TableImportReport {
                         name: table.name.clone(),
@@ -353,6 +361,38 @@ impl StorageManager {
                     "privacy_filters" => upsert_privacy_filters(&tx, table)?,
                     "creation_skills" => upsert_creation_skills(&tx, table)?,
                     _ => insert_or_ignore_table(&tx, table)?,
+                };
+                report.tables.push(table_report);
+            }
+
+            let mut source_id_map = BTreeMap::new();
+            for table_name in ["data_sources", "data_snapshots", "data_source_links"] {
+                let Some(table) = snapshot
+                    .tables
+                    .iter()
+                    .find(|table| table.name == table_name)
+                else {
+                    continue;
+                };
+                if !table_exists(&tx, table_name)? {
+                    report.tables.push(TableImportReport {
+                        name: table.name.clone(),
+                        incoming: table.rows.len(),
+                        skipped: table.rows.len(),
+                        ..Default::default()
+                    });
+                    continue;
+                }
+
+                let table_report = match table_name {
+                    "data_sources" => {
+                        let (table_report, imported_source_ids) = upsert_data_sources(&tx, table)?;
+                        source_id_map = imported_source_ids;
+                        table_report
+                    }
+                    "data_snapshots" => upsert_data_snapshots(&tx, table, &source_id_map)?,
+                    "data_source_links" => upsert_data_source_links(&tx, table, &source_id_map)?,
+                    _ => unreachable!(),
                 };
                 report.tables.push(table_report);
             }
@@ -683,7 +723,6 @@ fn upsert_creation_skills(
             "title_style",
             "text_style",
             "diagram_style",
-            "structure_pattern",
             "writing_guidelines",
             "distinctive_sections",
             "section_headings",
@@ -708,7 +747,6 @@ fn upsert_creation_skills(
             "title_style",
             "text_style",
             "diagram_style",
-            "structure_pattern",
             "writing_guidelines",
             "distinctive_sections",
             "section_headings",
@@ -724,12 +762,273 @@ fn upsert_creation_skills(
     )
 }
 
+fn upsert_data_sources(
+    conn: &Connection,
+    table: &TableSnapshot,
+) -> Result<(TableImportReport, BTreeMap<i64, i64>), StorageError> {
+    let report = upsert_by_unique_where(
+        conn,
+        table,
+        "canonical_key",
+        &[
+            "canonical_key",
+            "title",
+            "source_kind",
+            "source_url",
+            "access_mode",
+            "refresh_policy",
+            "realtime_level",
+            "source_app_name",
+            "source_window_title",
+            "tags",
+            "first_seen_at",
+            "last_seen_at",
+            "last_collected_at",
+            "last_success_at",
+            "last_error_code",
+            "status",
+            "created_at",
+            "updated_at",
+            "deleted_at",
+        ],
+        &[
+            "title",
+            "source_kind",
+            "source_url",
+            "access_mode",
+            "refresh_policy",
+            "realtime_level",
+            "source_app_name",
+            "source_window_title",
+            "tags",
+            "first_seen_at",
+            "last_seen_at",
+            "last_collected_at",
+            "last_success_at",
+            "last_error_code",
+            "status",
+            "updated_at",
+            "deleted_at",
+        ],
+        Some("excluded.updated_at >= data_sources.updated_at"),
+    )?;
+
+    let mut source_id_map = BTreeMap::new();
+    let mut stmt = conn.prepare("SELECT id FROM data_sources WHERE canonical_key = ?1")?;
+    for row in &table.rows {
+        let (Some(source_id), Some(canonical_key)) =
+            (json_i64(row, "id"), json_string(row, "canonical_key"))
+        else {
+            continue;
+        };
+        if let Some(imported_id) = stmt
+            .query_row(params![canonical_key], |row| row.get::<_, i64>(0))
+            .optional()?
+        {
+            source_id_map.insert(source_id, imported_id);
+        }
+    }
+
+    Ok((report, source_id_map))
+}
+
+fn upsert_data_snapshots(
+    conn: &Connection,
+    table: &TableSnapshot,
+    source_id_map: &BTreeMap<i64, i64>,
+) -> Result<TableImportReport, StorageError> {
+    let (mut remapped, missing_sources) = remap_data_source_ids(table, source_id_map);
+    for column in [
+        "period_granularity",
+        "period_key",
+        "period_start_at",
+        "period_end_at",
+    ] {
+        if !remapped.columns.iter().any(|existing| existing == column) {
+            remapped.columns.push(column.to_string());
+        }
+    }
+    const WEEK_MILLIS: i64 = 7 * 24 * 60 * 60 * 1000;
+    const FIRST_MONDAY_MILLIS: i64 = 4 * 24 * 60 * 60 * 1000;
+    for row in &mut remapped.rows {
+        if row
+            .get("period_key")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+        {
+            continue;
+        }
+        let observed_at = json_i64(row, "observed_at")
+            .or_else(|| json_i64(row, "collected_at"))
+            .unwrap_or_default();
+        let start_at = (observed_at - FIRST_MONDAY_MILLIS).div_euclid(WEEK_MILLIS) * WEEK_MILLIS
+            + FIRST_MONDAY_MILLIS;
+        row.insert("period_granularity".to_string(), Value::from("week"));
+        row.insert(
+            "period_key".to_string(),
+            Value::from(format!("week:{start_at}")),
+        );
+        row.insert("period_start_at".to_string(), Value::from(start_at));
+        row.insert(
+            "period_end_at".to_string(),
+            Value::from(start_at + WEEK_MILLIS - 1),
+        );
+    }
+    let mut report = upsert_by_unique_columns_where(
+        conn,
+        &remapped,
+        &["source_id", "period_key"],
+        &[
+            "source_id",
+            "period_granularity",
+            "period_key",
+            "period_start_at",
+            "period_end_at",
+            "collected_at",
+            "observed_at",
+            "collector",
+            "content_text",
+            "structured_data",
+            "content_hash",
+            "freshness_ttl_seconds",
+            "provenance",
+            "source_capture_ids",
+            "source_timeline_ids",
+            "status",
+            "created_at",
+        ],
+        &[
+            "collected_at",
+            "observed_at",
+            "period_granularity",
+            "period_start_at",
+            "period_end_at",
+            "collector",
+            "content_text",
+            "structured_data",
+            "content_hash",
+            "freshness_ttl_seconds",
+            "provenance",
+            "source_capture_ids",
+            "source_timeline_ids",
+            "status",
+            "created_at",
+        ],
+        Some(
+            "COALESCE(excluded.observed_at, excluded.collected_at) >= \
+             COALESCE(data_snapshots.observed_at, data_snapshots.collected_at)",
+        ),
+    )?;
+    report.incoming = table.rows.len();
+    report.skipped += missing_sources;
+    Ok(report)
+}
+
+fn upsert_data_source_links(
+    conn: &Connection,
+    table: &TableSnapshot,
+    source_id_map: &BTreeMap<i64, i64>,
+) -> Result<TableImportReport, StorageError> {
+    let (remapped, missing_sources) = remap_data_source_ids(table, source_id_map);
+    let mut report = upsert_by_unique_where(
+        conn,
+        &remapped,
+        "source_ref_key",
+        &[
+            "source_id",
+            "source_ref_key",
+            "capture_id",
+            "timeline_id",
+            "link_kind",
+            "observed_at",
+            "created_at",
+        ],
+        &[
+            "source_id",
+            "capture_id",
+            "timeline_id",
+            "link_kind",
+            "observed_at",
+        ],
+        Some("excluded.observed_at >= data_source_links.observed_at"),
+    )?;
+    report.incoming = table.rows.len();
+    report.skipped += missing_sources;
+    Ok(report)
+}
+
+fn remap_data_source_ids(
+    table: &TableSnapshot,
+    source_id_map: &BTreeMap<i64, i64>,
+) -> (TableSnapshot, usize) {
+    let mut rows = Vec::with_capacity(table.rows.len());
+    let mut missing_sources = 0;
+    for row in &table.rows {
+        let Some(source_id) = json_i64(row, "source_id") else {
+            missing_sources += 1;
+            continue;
+        };
+        let Some(imported_source_id) = source_id_map.get(&source_id) else {
+            missing_sources += 1;
+            continue;
+        };
+        let mut remapped = row.clone();
+        remapped.insert("source_id".to_string(), Value::from(*imported_source_id));
+        rows.push(remapped);
+    }
+    (
+        TableSnapshot {
+            name: table.name.clone(),
+            identity_columns: table.identity_columns.clone(),
+            columns: table.columns.clone(),
+            rows,
+        },
+        missing_sources,
+    )
+}
+
 fn upsert_by_unique(
     conn: &Connection,
     table: &TableSnapshot,
     unique_column: &str,
     wanted_columns: &[&str],
     update_columns: &[&str],
+) -> Result<TableImportReport, StorageError> {
+    upsert_by_unique_where(
+        conn,
+        table,
+        unique_column,
+        wanted_columns,
+        update_columns,
+        None,
+    )
+}
+
+fn upsert_by_unique_where(
+    conn: &Connection,
+    table: &TableSnapshot,
+    unique_column: &str,
+    wanted_columns: &[&str],
+    update_columns: &[&str],
+    update_condition: Option<&str>,
+) -> Result<TableImportReport, StorageError> {
+    upsert_by_unique_columns_where(
+        conn,
+        table,
+        &[unique_column],
+        wanted_columns,
+        update_columns,
+        update_condition,
+    )
+}
+
+fn upsert_by_unique_columns_where(
+    conn: &Connection,
+    table: &TableSnapshot,
+    unique_columns: &[&str],
+    wanted_columns: &[&str],
+    update_columns: &[&str],
+    update_condition: Option<&str>,
 ) -> Result<TableImportReport, StorageError> {
     let existing_columns = table_columns(conn, &table.name)?;
     let insert_columns = wanted_columns
@@ -741,7 +1040,10 @@ fn upsert_by_unique(
         .map(|column| column.to_string())
         .collect::<Vec<_>>();
 
-    if !insert_columns.iter().any(|column| column == unique_column) {
+    if unique_columns
+        .iter()
+        .any(|unique| !insert_columns.iter().any(|column| column == unique))
+    {
         return Ok(TableImportReport {
             name: table.name.clone(),
             incoming: table.rows.len(),
@@ -757,12 +1059,27 @@ fn upsert_by_unique(
         .collect::<Vec<_>>()
         .join(", ");
     let conflict = if update_clause.is_empty() {
-        format!("ON CONFLICT({unique_column}) DO NOTHING")
+        format!("ON CONFLICT({}) DO NOTHING", unique_columns.join(", "))
     } else {
-        format!("ON CONFLICT({unique_column}) DO UPDATE SET {update_clause}")
+        let condition = update_condition
+            .map(|condition| format!(" WHERE {condition}"))
+            .unwrap_or_default();
+        format!(
+            "ON CONFLICT({}) DO UPDATE SET {update_clause}{condition}",
+            unique_columns.join(", ")
+        )
     };
     let sql = insert_sql("INSERT", &table.name, &insert_columns, Some(&conflict));
-    let exists_sql = format!("SELECT 1 FROM {} WHERE {} = ?1", table.name, unique_column);
+    let exists_sql = format!(
+        "SELECT 1 FROM {} WHERE {}",
+        table.name,
+        unique_columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| format!("{column} = ?{}", index + 1))
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    );
     let mut stmt = conn.prepare(&sql)?;
     let mut report = TableImportReport {
         name: table.name.clone(),
@@ -771,16 +1088,19 @@ fn upsert_by_unique(
     };
 
     for row in &table.rows {
-        let Some(unique_value) = row.get(unique_column) else {
+        let unique_values = unique_columns
+            .iter()
+            .filter_map(|column| row.get(*column))
+            .map(json_to_sql_value)
+            .collect::<Vec<_>>();
+        if unique_values.len() != unique_columns.len() {
             report.skipped += 1;
             continue;
-        };
+        }
         let existed = conn
-            .query_row(
-                &exists_sql,
-                params![json_to_sql_value(unique_value)],
-                |_| Ok(()),
-            )
+            .query_row(&exists_sql, params_from_iter(unique_values.iter()), |_| {
+                Ok(())
+            })
             .optional()?
             .is_some();
         let values = values_for_columns(row, &insert_columns);
@@ -835,6 +1155,13 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool, StorageError> {
 
 fn is_allowed_asset_table(table: &str) -> bool {
     ASSET_TABLES.iter().any(|spec| spec.name == table)
+}
+
+fn is_data_asset_table(table: &str) -> bool {
+    matches!(
+        table,
+        "data_sources" | "data_snapshots" | "data_source_links"
+    )
 }
 
 fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, StorageError> {
@@ -919,6 +1246,17 @@ mod tests {
                     [],
                 )?;
                 conn.execute(
+                    "INSERT INTO bake_sops (
+                        id, timeline_id, title, summary, content, detailed_content,
+                        entities, importance, source_capture_ids
+                     )
+                     VALUES (
+                        10, 7, '发布检查操作', '发布前完成检查', '检查版本与变更记录',
+                        '1. 检查版本号\n2. 检查变更记录', '[]', 4, '[42]'
+                     )",
+                    [],
+                )?;
+                conn.execute(
                     "INSERT INTO bake_documents (
                         id, title, doc_type, status, tags, applicable_tasks,
                         source_memory_ids, source_capture_ids, source_episode_ids,
@@ -937,13 +1275,12 @@ mod tests {
                     "INSERT INTO creation_skills (
                         client_skill_key, source_kind, source_id, title, summary,
                         common_titles, title_style, text_style, diagram_style,
-                        structure_pattern, writing_guidelines, distinctive_sections, package_files,
+                        writing_guidelines, distinctive_sections, package_files,
                         published, created_at, updated_at
                      ) VALUES (
                         'snapshot-skill-1', 'bake_document', '11', '架构文档写作法',
                         '用于验证本地 Skill 快照恢复。', '[\"总体架构设计\"]', '结论先行。',
-                        '正式、克制。', '标注系统边界。', '[\"背景\",\"方案\"]',
-                        '[\"写明技术取舍\"]',
+                        '正式、克制。', '标注系统边界。', '[\"写明技术取舍\"]',
                         '[{\"title\":\"定义先行\",\"description\":\"先建立共同概念。\",\"guidance\":\"先解释对象，再说明边界。\",\"examples\":[\"协作入口连接任务与结果证据。\"]}]',
                         '[{\"path\":\"SKILL.md\",\"media_type\":\"text/markdown\",\"content_base64\":\"IyBTa2lsbA==\",\"size_bytes\":7}]',
                         0, 1700000000000, 1700000000000
@@ -1046,6 +1383,16 @@ mod tests {
                 .map_err(StorageError::Sqlite)
             })
             .unwrap();
+        let restored_sop: (String, String) = target
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT title, detailed_content FROM bake_sops WHERE id = 10",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(StorageError::Sqlite)
+            })
+            .unwrap();
         let capture_text: Option<String> = target
             .with_conn(|conn| {
                 conn.query_row("SELECT ax_text FROM captures WHERE id = 42", [], |row| {
@@ -1065,6 +1412,8 @@ mod tests {
 
         assert_eq!(timeline_count, 1);
         assert_eq!(knowledge_count, 1);
+        assert_eq!(restored_sop.0, "发布检查操作");
+        assert!(restored_sop.1.contains("检查变更记录"));
         assert_eq!(count_table(&target, "data_sources"), 1);
         assert_eq!(count_table(&target, "data_snapshots"), 1);
         assert_eq!(count_table(&target, "data_source_links"), 1);
@@ -1076,6 +1425,105 @@ mod tests {
         assert!(capture_text.is_none());
         assert!(first.capture_refs.inserted >= 1);
         assert_eq!(second.capture_refs.skipped, 1);
+    }
+
+    #[test]
+    fn asset_snapshot_remaps_data_assets_when_local_ids_are_occupied() {
+        let source = StorageManager::open_in_memory().unwrap();
+        seed_assets(&source);
+        let snapshot = source.export_asset_snapshot().unwrap();
+
+        let target = StorageManager::open_in_memory().unwrap();
+        target
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO data_sources (
+                        id, canonical_key, title, source_kind, access_mode,
+                        refresh_policy, realtime_level, first_seen_at, last_seen_at,
+                        status, created_at, updated_at
+                     ) VALUES (
+                        91, 'work:existing-local-source', '本机已有数据', 'work_memory',
+                        'memory_only', 'never', 'observed', 1700000001000, 1700000001000,
+                        'active', 1700000001000, 1700000001000
+                     )",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let first = target.import_asset_snapshot(&snapshot, false).unwrap();
+        let imported_source_id: i64 = target
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT id FROM data_sources
+                     WHERE canonical_key = 'report:https://bi.example.com/dashboard'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::Sqlite)
+            })
+            .unwrap();
+        let imported_snapshot_content: String = target
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT content_text FROM data_snapshots WHERE source_id = ?1",
+                    params![imported_source_id],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::Sqlite)
+            })
+            .unwrap();
+        assert_eq!(imported_snapshot_content, "本周订单 1200");
+
+        target
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE data_snapshots
+                     SET collected_at = 1700000002000, observed_at = 1700000002000,
+                         content_text = '本机更新数据', content_hash = 'local-newer-hash'
+                     WHERE source_id = ?1",
+                    params![imported_source_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let second = target.import_asset_snapshot(&snapshot, false).unwrap();
+        let (snapshot_content, link_source_id): (String, i64) = target
+            .with_conn(|conn| {
+                let snapshot_content = conn.query_row(
+                    "SELECT content_text FROM data_snapshots WHERE source_id = ?1",
+                    params![imported_source_id],
+                    |row| row.get(0),
+                )?;
+                let link_source_id = conn.query_row(
+                    "SELECT source_id FROM data_source_links
+                     WHERE source_ref_key = 'capture:42:active_url:test'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                Ok((snapshot_content, link_source_id))
+            })
+            .unwrap();
+
+        assert_ne!(imported_source_id, 91);
+        assert_eq!(snapshot_content, "本机更新数据");
+        assert_eq!(link_source_id, imported_source_id);
+        assert_eq!(count_table(&target, "data_sources"), 2);
+        assert_eq!(count_table(&target, "data_snapshots"), 1);
+        assert_eq!(count_table(&target, "data_source_links"), 1);
+        assert!(first
+            .tables
+            .iter()
+            .any(|table| table.name == "data_sources" && table.inserted == 1));
+        assert!(second
+            .tables
+            .iter()
+            .any(|table| table.name == "data_sources" && table.updated == 1));
+        assert!(second
+            .tables
+            .iter()
+            .any(|table| table.name == "data_snapshots" && table.skipped == 1));
     }
 
     #[test]
@@ -1110,6 +1558,18 @@ mod tests {
         assert_eq!(
             count_table(&target, "bake_documents"),
             summary_count(&export.manifest, "bake_documents")
+        );
+        assert_eq!(
+            count_table(&target, "data_sources"),
+            summary_count(&export.manifest, "data_sources")
+        );
+        assert_eq!(
+            count_table(&target, "data_snapshots"),
+            summary_count(&export.manifest, "data_snapshots")
+        );
+        assert_eq!(
+            count_table(&target, "data_source_links"),
+            summary_count(&export.manifest, "data_source_links")
         );
         assert_eq!(
             count_table(&target, "captures"),

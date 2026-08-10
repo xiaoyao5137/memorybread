@@ -74,9 +74,51 @@ def _looks_like_document_capture(capture: dict) -> bool:
     return bool(lowered) and any(marker in lowered for marker in _DOC_TITLE_MARKERS)
 
 
+def _content_document_identity(capture: dict) -> Optional[str]:
+    """无 URL 内容文档的身份标识（去 URL 化的文档通道）。
+
+    文档不只存在于浏览器：本地办公应用（Word/Excel/PPT/记事本）与 IM 里的
+    密集长正文同样是文档。满足以下条件时返回 "app::窗口标题" 形式的稳定身份：
+    1. app 属于办公/笔记/IM 类应用；
+    2. 正文为密集长文本（行/句段密度判定）；
+    3. 窗口标题非空（作为文档名，如群名、文件名）。
+    不满足时返回 None。本函数只做身份判定，不改变分组边界。
+    """
+    app_raw = str(capture.get('app_name') or '')
+    app = app_raw.lower()
+    if not any(k in app for k in _CONTENT_DOC_APP_KEYWORDS):
+        return None
+    title = str(
+        capture.get('window_title')
+        or capture.get('win_title')
+        or ''
+    ).strip()
+    if not title:
+        return None
+    text = str(
+        capture.get('ax_text')
+        or capture.get('ocr_text')
+        or capture.get('input_text')
+        or capture.get('audio_text')
+        or ''
+    )
+    if not is_dense_long_text(text):
+        return None
+    return f"{app}::{title.lower()}"
+
+
 _HISTORY_APP_KEYWORDS = (
     'wechat', 'wecom', 'feishu', 'slack', 'teams', 'discord',
     'telegram', 'imessage', 'messages', 'gemini', 'claude', 'chatgpt',
+)
+
+# 内容文档（无 URL）来源应用：本地办公套件、笔记/文本类、IM。
+# 文档不应强依赖浏览器 URL：Word/Excel/PPT/记事本/IM 里的长正文同样是文档。
+_CONTENT_DOC_APP_KEYWORDS = (
+    'word', 'excel', 'powerpoint', 'wps', 'pages', 'numbers', 'keynote',
+    'notion', 'obsidian', 'typora', 'textedit', '备忘录', 'notes',
+    'wechat', '微信', 'wecom', '企业微信', 'feishu', '飞书', 'slack',
+    'teams', 'dingtalk', '钉钉', 'discord', 'telegram', 'kim',
 )
 
 _HISTORY_TEXT_PATTERNS = (
@@ -105,6 +147,63 @@ STOP_WORDS = {
 }
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# 文本密度判定（句段/行双口径）
+#
+# 采集文本的实际结构：ax_text 来自无障碍树，无换行且空格随机插入；
+# ocr_text 的换行是控件宽度硬换行而非语义行。因此密度判定不能只按行，
+# 必须同时提供"压缩空白后按标点切句段"的口径，两者取最大值。
+# ─────────────────────────────────────────────────────────────────────────
+_SENTENCE_SPLIT_RE = re.compile(r'[。；！？!?;]')
+_DENSE_LONG_LINE_MIN_CHARS = 20    # 长句段/长行阈值
+DENSE_TEXT_THRESHOLD = 0.30        # 长文字符占比达到该值视为密集正文
+LONG_DENSE_MIN_CHARS = 400         # 密集正文的最小实质字符数
+
+
+def text_density_score(text: str) -> float:
+    """文本中"长文"字符占比（0-1），三种口径取最大值。
+
+    - 行口径：适配 OCR（有换行，统计 ≥20 字行的字符占比）；
+    - 句段口径：压缩空白后按 。；！？ 切段（仅在确实切出多段时生效，
+      否则无标点文本会被整段误判为长文）；
+    - 空白块口径：压缩后按空白切块，适配 AX（无换行无标点、
+      但存在自然空格的文本）与 OCR 长行。
+    """
+    raw = str(text or '')
+    if not raw.strip():
+        return 0.0
+    long_line_chars = 0
+    for line in raw.split('\n'):
+        stripped = line.strip()
+        if len(stripped) >= _DENSE_LONG_LINE_MIN_CHARS:
+            long_line_chars += len(stripped)
+    compact = ' '.join(raw.split())
+    seg_chars = 0
+    segments = _SENTENCE_SPLIT_RE.split(compact)
+    if len(segments) >= 2:
+        for seg in segments:
+            seg_stripped = seg.strip()
+            if len(seg_stripped) >= _DENSE_LONG_LINE_MIN_CHARS:
+                seg_chars += len(seg_stripped)
+    chunk_chars = 0
+    for chunk in compact.split(' '):
+        if len(chunk) >= _DENSE_LONG_LINE_MIN_CHARS:
+            chunk_chars += len(chunk)
+    total = max(1, len(compact))
+    return float(max(long_line_chars, seg_chars, chunk_chars)) / float(total)
+
+
+def is_dense_long_text(text: str) -> bool:
+    """是否为"密集长正文"：实质字符数达标且长文占比达标。
+
+    判定不确定（处于阈值边缘）时偏向 False，调用方应配兜底逻辑。
+    """
+    compact_len = len(' '.join(str(text or '').split()))
+    if compact_len < LONG_DENSE_MIN_CHARS:
+        return False
+    return text_density_score(text) >= DENSE_TEXT_THRESHOLD
+
+
 class FragmentGrouper:
     """
     将连续的 captures 分组为工作片段。
@@ -121,6 +220,10 @@ class FragmentGrouper:
     SAME_TASK_THRESHOLD = 0.65  # 高于此值：同一件事
     DIFF_TASK_THRESHOLD = 0.40  # 低于此值：不同的事
     SAME_TASK_THRESHOLD_SOFT = 0.72  # 间隔较长时的更高阈值
+    # 跨应用、跨窗口或跨页面时，不能再使用已被当前组“主题中心”污染后的
+    # 相似度直接放行。只有新旧两帧本身近乎重复，才有足够证据认为这是
+    # 同一任务在不同工具间延续；否则先切开，后续仍可由时间线去重合并。
+    CROSS_SURFACE_NEAR_DUP_THRESHOLD = 0.80
     MIN_GROUP_WAIT = 3          # 至少积累3条才开始处理，避免切断进行中的任务
 
     def __init__(self, embedding_model=None):
@@ -167,6 +270,28 @@ class FragmentGrouper:
                 current_group = [curr]
                 current_vectors = [vectors[i]] if vectors else []
                 continue
+
+            # 规则1.6：工作表面切换门禁。
+            #
+            # timeline 3194 的根因是：杭州天气先与 Kim 的通用 UI 词进入模糊区，
+            # 随后组主题向量被 ChatGPT 的固定侧栏持续强化，最终使完全无关的
+            # Kim、天气、GPU 页面都被“组主题相似度”吸入同一片段。跨表面时改用
+            # 相邻两帧的直接相似度，并要求近乎重复；无向量时无法证明连续性，
+            # 直接切开。误切可在后续语义去重恢复，误并会不可逆污染时间线。
+            if self._surface_changed(prev, curr):
+                direct_similarity = (
+                    self._cosine_similarity(vectors[i], vectors[i - 1])
+                    if vectors else 0.0
+                )
+                if direct_similarity < self.CROSS_SURFACE_NEAR_DUP_THRESHOLD:
+                    logger.info(
+                        "工作表面切换切片: prev_id=%s curr_id=%s direct_similarity=%.3f",
+                        prev.get('id'), curr.get('id'), direct_similarity,
+                    )
+                    groups.append(current_group)
+                    current_group = [curr]
+                    current_vectors = [vectors[i]] if vectors else []
+                    continue
 
             # 规则2/3/4：语义判断
             if vectors:
@@ -243,6 +368,47 @@ class FragmentGrouper:
 
         # 普通组遇到已知文档或 URL 为空的文档型 capture，都先切出独立片段。
         return curr_doc is not None or _looks_like_document_capture(curr)
+
+    @staticmethod
+    def _surface_changed(previous: dict, current: dict) -> bool:
+        """相邻采集是否切换了可辨认的工作表面。
+
+        应用不同是确定的表面切换；同一应用下，非空 URL 或窗口标题发生变化
+        也视为切换。空标题不作为证据，避免采集能力短暂缺失导致误切。
+        """
+        previous_app = str(previous.get('app_name') or '').strip().casefold()
+        current_app = str(current.get('app_name') or '').strip().casefold()
+        if previous_app and current_app and previous_app != current_app:
+            return True
+
+        def normalized_url(value: object) -> str:
+            raw = str(value or '').strip()
+            if not raw:
+                return ''
+            try:
+                parsed = urlparse(raw)
+                # 页内锚点只是同一页面的阅读位置，不是工作表面切换。
+                raw = parsed._replace(fragment='').geturl()
+            except Exception:
+                pass
+            return raw.rstrip('/').casefold()
+
+        previous_url = normalized_url(previous.get('url'))
+        current_url = normalized_url(current.get('url'))
+        if previous_url or current_url:
+            return previous_url != current_url
+
+        previous_title = str(
+            previous.get('window_title') or previous.get('win_title') or ''
+        ).strip().casefold()
+        current_title = str(
+            current.get('window_title') or current.get('win_title') or ''
+        ).strip().casefold()
+        return bool(
+            previous_title
+            and current_title
+            and previous_title != current_title
+        )
 
     def _batch_encode(self, captures: list[dict]) -> Optional[list]:
         """批量向量化所有 captures"""
@@ -347,20 +513,20 @@ class FragmentGrouper:
         new_capture: dict,
     ) -> bool:
         """
-        模糊区域辅助判断：
-        1. 应用回归：新 capture 的 app 在当前片段中出现过（来回切换场景）
-        2. 关键词重叠：新 capture 与片段近期内容有2个以上关键词重叠
+        模糊区域辅助判断（语义相似度落在 DIFF/SAME 阈值之间时才会调用）：
+        1. 长正文保护：新 capture 是密集长正文时，只在与组内内容关键词重叠
+           ≥2（同一正文的延续，如连续滚动截图）时允许合并，否则强制独立成组，
+           避免汇报/文档正文被其他主题稀释（timeline 2008 教训）；
+        2. 关键词重叠 ≥2 → 合并；
+        3. 应用回归降级为弱信号：仅在有关键词重叠时才作为合并依据，
+           不再一票放行。
+        模糊区存疑时偏向切开：误切可在检索/日记阶段恢复，误并稀释不可恢复。
         """
         # 历史回看与实时互动切换时强制切片，避免时间语义混片
         if self._history_mode_changed(current_group, new_capture):
             return False
 
-        # 1. 应用回归
-        group_apps = {c.get('app_name') for c in current_group if c.get('app_name')}
-        if new_capture.get('app_name') in group_apps:
-            return True
-
-        # 2. 关键词重叠（只看最近5条，避免早期内容干扰）
+        # 关键词重叠（只看最近5条，避免早期内容干扰）
         recent_text = ' '.join(
             self._capture_text(c)
             for c in current_group[-5:]
@@ -369,8 +535,17 @@ class FragmentGrouper:
 
         group_kw = self._extract_keywords(recent_text)
         new_kw = self._extract_keywords(new_text)
+        overlap = len(group_kw & new_kw)
 
-        if len(group_kw & new_kw) >= 2:
+        if is_dense_long_text(new_text):
+            return overlap >= 2
+
+        if overlap >= 2:
+            return True
+
+        # 应用回归 + 关键词弱重叠：仅作为弱证据，单独的应用回归不再放行
+        group_apps = {c.get('app_name') for c in current_group if c.get('app_name')}
+        if overlap >= 1 and new_capture.get('app_name') in group_apps:
             return True
 
         return False

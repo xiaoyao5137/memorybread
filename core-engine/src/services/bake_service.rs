@@ -1,14 +1,19 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 use axum::http::StatusCode;
+use chrono::{Local, TimeZone, Utc};
 use futures::StreamExt;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::api::error::ApiError;
-use crate::storage::document_identity::canonical_document_identity;
+use crate::storage::document_identity::{
+    canonical_document_identity, canonical_document_source_title, is_generic_document_source_title,
+};
 use crate::storage::models::CaptureRecord;
+use crate::storage::repo::bake_run::{load_bake_production_events, BakeProductionEventRecord};
 use crate::storage::{
     now_ms, BakeActivityRecord, BakeDocumentRecord, BakeKnowledgeRecord, BakeMemorySourceRecord,
     BakeOverviewRecord, BakeRunRecord, DataSourceRecord, NewBakeDocument, NewBakeKnowledge,
@@ -20,7 +25,7 @@ const CATEGORY_BAKE_ARTICLE: &str = "bake_article";
 const CATEGORY_BAKE_SOP: &str = "bake_sop";
 const CATEGORY_BAKE_KNOWLEDGE: &str = "bake_knowledge";
 const UNIFIED_BAKE_PIPELINE_NAME: &str = "unified";
-const BAKE_GENERATION_VERSION: &str = "bake-v1";
+pub(crate) const BAKE_GENERATION_VERSION: &str = "bake-v1";
 // sidecar 对普通输入使用 180 秒、>=20K 长输入使用 300 秒运行时预算。
 // Core 多留 10 秒用于接收 504 和连接收尾，不能先断开后留下幽灵推理。
 const BAKE_SIDECAR_TIMEOUT_SECS: u64 = 310;
@@ -330,6 +335,9 @@ pub struct BakeExtractRequest {
     pub trigger_reason: String,
     /// 已记录的失败次数。sidecar 可据此在重试时启用更紧凑的结构化输出策略。
     pub retry_attempt: i64,
+    /// 上一次失败的稳定错误码，用于选择针对性的重试预算和提示词。
+    #[serde(default)]
+    pub retry_error_code: Option<String>,
     pub candidate: BakeExtractCandidatePayload,
 }
 
@@ -337,6 +345,10 @@ pub struct BakeExtractRequest {
 pub struct BakeExtractCandidatePayload {
     pub source_timeline_id: i64,
     pub source_capture_id: i64,
+    /// 当前时间线实际关联的采集记录数。操作提炼至少需要两帧；旧请求缺失时按 0
+    /// 处理，由 sidecar 保守降级为单帧。
+    #[serde(default)]
+    pub source_capture_count: i64,
     pub timeline_category: String,
     pub summary: String,
     pub overview: Option<String>,
@@ -586,8 +598,12 @@ impl BakeService {
             capture_audio_text: capture.audio_text,
             capture_url: None,
             capture_webpage_title: None,
+            preferred_source_title: None,
             url_aggregated_text: None,
             url_aggregated_capture_count: 0,
+            retry_failure_count: 0,
+            retry_error_code: None,
+            retry_next_at_ms: 0,
         };
 
         self.extract_candidate(trigger_reason, &candidate).await
@@ -651,6 +667,35 @@ impl BakeService {
                         .unwrap_or_default()
                         .to_lowercase()
                         .contains(&query_lower)
+                    || item
+                        .summary
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&query_lower)
+                    || item
+                        .full_content
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&query_lower)
+                    || item
+                        .tags
+                        .iter()
+                        .any(|tag| tag.to_lowercase().contains(&query_lower))
+                    || item.sections.iter().any(|section| {
+                        section.title.to_lowercase().contains(&query_lower)
+                            || section
+                                .notes
+                                .as_deref()
+                                .unwrap_or_default()
+                                .to_lowercase()
+                                .contains(&query_lower)
+                            || section
+                                .keywords
+                                .iter()
+                                .any(|keyword| keyword.to_lowercase().contains(&query_lower))
+                    })
             });
         }
 
@@ -756,10 +801,19 @@ impl BakeService {
         let records = self.storage.list_timelines_by_category(CATEGORY_BAKE_SOP)?;
         let filtered_records = if let Some(query) = filter.q.as_deref() {
             let query_lower = query.to_lowercase();
+            // FTS5 预筛：bake_sops_fts 候选可用时先收窄到候选 ID，再做内存 contains 校验；
+            // FTS 不可用（表缺失/候选为空/被截断）时为 None，回退原有全量过滤。
+            let fts_ids: Option<HashSet<i64>> = self
+                .storage
+                .bake_sop_fts_candidate_ids(query)
+                .map(|ids| ids.into_iter().collect());
             records
                 .into_iter()
                 .filter(|record| {
-                    is_current_bake_entry(record)
+                    fts_ids
+                        .as_ref()
+                        .map_or(true, |ids| ids.contains(&record.id))
+                        && is_current_bake_entry(record)
                         && matches_entry_bucket(record, filter.bucket)
                         && filter
                             .from_ts
@@ -1442,38 +1496,25 @@ impl BakeService {
             .as_ref()
             .map(|item| item.last_processed_ts)
             .unwrap_or(0);
+        let initial_watermark_ts = max_processed_ts;
 
-        let candidates = self
+        let scan_limit = limit.saturating_mul(6).max(limit);
+        let mut fresh_candidates = self.storage.list_bake_memory_fresh_candidates(
+            max_processed_ts,
+            scan_limit,
+            MAX_BAKE_RETRY_FAILURES,
+        )?;
+        let retry_candidates = self
             .storage
-            .list_bake_memory_init_candidates_with_max_failures(
-                max_processed_ts,
-                limit.saturating_mul(6).max(limit),
-                MAX_BAKE_RETRY_FAILURES,
-            )?;
-
-        // 增量查询：只针对本批候选的 timeline_id 集合查已有 knowledge/sop，
-        // 避免全量拉取 500 条导致随数据增长内存和时间开销膨胀。
-        let candidate_timeline_ids: Vec<i64> = candidates.iter().map(|c| c.timeline.id).collect();
-        let mut existing_knowledge_sources = self
-            .storage
-            .find_existing_knowledge_timeline_ids(&candidate_timeline_ids)
-            .map_err(|e| ApiError::Internal(format!("查询已有 knowledge 失败: {e}")))?;
-        let mut existing_sop_sources = self
-            .storage
-            .find_existing_sop_timeline_ids(&candidate_timeline_ids)
-            .map_err(|e| ApiError::Internal(format!("查询已有 sop 失败: {e}")))?;
+            .list_bake_memory_retry_candidates(scan_limit, MAX_BAKE_RETRY_FAILURES)?;
 
         // Watermark 自动回退：如果 watermark 已超过所有现有 timeline 的 updated_at_ms，
         // 导致候选列表为空（真正有 pending 的情况下），则把 watermark 重置为 0 重新扫描全量。
         // 修复：同时检查 knowledge / sop / document 三类，避免 document 候选被误判为"无 pending"。
-        let candidates = if candidates.is_empty() && max_processed_ts > 0 {
-            let probe = self
-                .storage
-                .list_bake_memory_init_candidates_with_max_failures(
-                    0,
-                    1,
-                    MAX_BAKE_RETRY_FAILURES,
-                )?;
+        if fresh_candidates.is_empty() && retry_candidates.is_empty() && max_processed_ts > 0 {
+            let probe =
+                self.storage
+                    .list_bake_memory_fresh_candidates(0, 1, MAX_BAKE_RETRY_FAILURES)?;
             let probe_ids: Vec<i64> = probe.iter().map(|c| c.timeline.id).collect();
             let probe_knowledge = self
                 .storage
@@ -1494,39 +1535,47 @@ impl BakeService {
                     max_processed_ts
                 );
                 max_processed_ts = 0;
-                let full = self
-                    .storage
-                    .list_bake_memory_init_candidates_with_max_failures(
-                        0,
-                        limit.saturating_mul(6).max(limit),
-                        MAX_BAKE_RETRY_FAILURES,
-                    )?;
-                // 重新增量查询覆盖全量候选
-                let full_ids: Vec<i64> = full.iter().map(|c| c.timeline.id).collect();
-                existing_knowledge_sources = self
-                    .storage
-                    .find_existing_knowledge_timeline_ids(&full_ids)
-                    .unwrap_or_default();
-                existing_sop_sources = self
-                    .storage
-                    .find_existing_sop_timeline_ids(&full_ids)
-                    .unwrap_or_default();
-                full
-            } else {
-                candidates
+                fresh_candidates = self.storage.list_bake_memory_fresh_candidates(
+                    0,
+                    scan_limit,
+                    MAX_BAKE_RETRY_FAILURES,
+                )?;
             }
-        } else {
-            candidates
-        };
+        }
+
+        // 两条 lane 分开查询、按 4:1 交错。旧重试不再占满 LIMIT，也不会因
+        // watermark 已越过自身而被丢弃；新任务和重试任务都能持续取得配额。
+        let candidates =
+            merge_bake_candidate_lanes(fresh_candidates, retry_candidates, scan_limit, run_id);
+
+        // 增量查询：只针对本批候选的 timeline_id 集合查已有 knowledge/sop，
+        // 避免全量拉取 500 条导致随数据增长内存和时间开销膨胀。
+        let candidate_timeline_ids: Vec<i64> = candidates.iter().map(|c| c.timeline.id).collect();
+        let mut existing_knowledge_sources = self
+            .storage
+            .find_existing_knowledge_timeline_ids(&candidate_timeline_ids)
+            .map_err(|e| ApiError::Internal(format!("查询已有 knowledge 失败: {e}")))?;
+        let mut existing_sop_sources = self
+            .storage
+            .find_existing_sop_timeline_ids(&candidate_timeline_ids)
+            .map_err(|e| ApiError::Internal(format!("查询已有 sop 失败: {e}")))?;
 
         // 候选严格按 updated_at_ms 顺序执行。Skip 与 Extract 处于同一有序队列，
         // watermark 只能在对应项真正完成后推进，不能先跨过仍在推理的候选。
         enum BakeWorkItem {
-            Skip(i64),
+            Skip {
+                timeline_id: i64,
+                candidate_ts: i64,
+                clear_retry: bool,
+            },
             Extract(BakeMemorySourceRecord),
         }
         enum BakeWorkResult {
-            Skipped(i64),
+            Skipped {
+                timeline_id: i64,
+                candidate_ts: i64,
+                clear_retry: bool,
+            },
             Extracted(
                 BakeMemorySourceRecord,
                 Result<BakeExtractResponse, ApiError>,
@@ -1566,7 +1615,7 @@ impl BakeService {
                 }
             }
 
-            if candidate_ts <= max_processed_ts {
+            if candidate_ts <= max_processed_ts && candidate.retry_failure_count == 0 {
                 continue;
             }
             if !is_high_value_candidate(&candidate) {
@@ -1581,7 +1630,25 @@ impl BakeService {
                     candidate.timeline.is_self_generated,
                     is_substantive_document_candidate(&candidate),
                 );
-                work_queue.push(BakeWorkItem::Skip(candidate_ts));
+                work_queue.push(BakeWorkItem::Skip {
+                    timeline_id: candidate.timeline.id,
+                    candidate_ts,
+                    clear_retry: candidate.retry_failure_count > 0,
+                });
+                continue;
+            }
+            // 指纹预筛：候选源文本与已烘焙内容完全一致，且可能产出的产物类型
+            // 都已有同指纹产物时，再调 LLM 只会得到 no_change，直接跳过并推进水位。
+            if self.candidate_fully_covered_by_fingerprints(&candidate) {
+                tracing::info!(
+                    "bake skip: timeline_id={} reason=fingerprint_unchanged",
+                    candidate.timeline.id,
+                );
+                work_queue.push(BakeWorkItem::Skip {
+                    timeline_id: candidate.timeline.id,
+                    candidate_ts,
+                    clear_retry: candidate.retry_failure_count > 0,
+                });
                 continue;
             }
             if let Some(document_url) = substantive_document_url(&candidate) {
@@ -1591,7 +1658,11 @@ impl BakeService {
                         candidate.timeline.id,
                         document_url,
                     );
-                    work_queue.push(BakeWorkItem::Skip(candidate_ts));
+                    work_queue.push(BakeWorkItem::Skip {
+                        timeline_id: candidate.timeline.id,
+                        candidate_ts,
+                        clear_retry: candidate.retry_failure_count > 0,
+                    });
                     continue;
                 }
             }
@@ -1612,7 +1683,15 @@ impl BakeService {
             let reason = trigger_reason_owned.clone();
             async move {
                 match work_item {
-                    BakeWorkItem::Skip(ts) => BakeWorkResult::Skipped(ts),
+                    BakeWorkItem::Skip {
+                        timeline_id,
+                        candidate_ts,
+                        clear_retry,
+                    } => BakeWorkResult::Skipped {
+                        timeline_id,
+                        candidate_ts,
+                        clear_retry,
+                    },
                     BakeWorkItem::Extract(candidate) => {
                         tracing::info!(
                             "bake process: timeline_id={} importance={} evidence={:?} activity={:?} category={} summary_head={:?}",
@@ -1643,7 +1722,14 @@ impl BakeService {
 
         while let Some(work_result) = work_stream.next().await {
             let (candidate, extract_result) = match work_result {
-                BakeWorkResult::Skipped(candidate_ts) => {
+                BakeWorkResult::Skipped {
+                    timeline_id,
+                    candidate_ts,
+                    clear_retry,
+                } => {
+                    if clear_retry {
+                        self.storage.clear_bake_retry_failure(timeline_id)?;
+                    }
                     let next = max_processed_ts.max(candidate_ts);
                     if next != max_processed_ts {
                         max_processed_ts = next;
@@ -1665,20 +1751,36 @@ impl BakeService {
                     }
                     let count = self
                         .storage
-                        .bump_bake_retry_failure(
+                        .bump_bake_retry_failure_with_code(
                             candidate.timeline.id,
                             &bake_retry_failure_summary(&err),
+                            bake_retry_error_code(&err),
                         )
                         .unwrap_or(0);
                     if is_retryable_bake_candidate_error(&err) && count < MAX_BAKE_RETRY_FAILURES {
+                        // 单候选超时/输出非法不应中断整批：推进 watermark 越过它，
+                        // 继续处理后续候选。该候选保留在 bake_retry_state，由候选
+                        // 查询的重试分支在后续 run 重新捞回，直到成功或达到上限。
                         tracing::warn!(
-                            "bake extract deferred for bounded retry: timeline_id={} failure_count={} max_failures={} err={}",
+                            "bake extract deferred for bounded retry: timeline_id={} failure_count={} max_failures={} watermark_advancing=true err={}",
                             candidate.timeline.id,
                             count,
                             MAX_BAKE_RETRY_FAILURES,
                             err
                         );
-                        return Err(err);
+                        let next = max_processed_ts.max(candidate.timeline.updated_at_ms);
+                        if next != max_processed_ts {
+                            max_processed_ts = next;
+                            self.storage
+                                .upsert_bake_watermark(UNIFIED_BAKE_PIPELINE_NAME, next)?;
+                        }
+                        processed_episode_count += 1;
+                        let _ = self.storage.update_bake_run_progress(
+                            run_id,
+                            initial_candidate_count,
+                            processed_episode_count,
+                        );
+                        continue;
                     }
                     tracing::error!(
                         "bake extract permanently failed after bounded retry: timeline_id={} failure_count={} timeout={} err={}",
@@ -1725,9 +1827,10 @@ impl BakeService {
                     }
                     let count = self
                         .storage
-                        .bump_bake_retry_failure(
+                        .bump_bake_retry_failure_with_code(
                             candidate.timeline.id,
                             &bake_retry_failure_summary(&err),
+                            bake_retry_error_code(&err),
                         )
                         .unwrap_or(0);
                     if is_retryable_bake_candidate_error(&err) && count < MAX_BAKE_RETRY_FAILURES {
@@ -1738,7 +1841,19 @@ impl BakeService {
                             MAX_BAKE_RETRY_FAILURES,
                             err
                         );
-                        return Err(err);
+                        let next = max_processed_ts.max(candidate.timeline.updated_at_ms);
+                        if next != max_processed_ts {
+                            max_processed_ts = next;
+                            self.storage
+                                .upsert_bake_watermark(UNIFIED_BAKE_PIPELINE_NAME, next)?;
+                        }
+                        processed_episode_count += 1;
+                        let _ = self.storage.update_bake_run_progress(
+                            run_id,
+                            initial_candidate_count,
+                            processed_episode_count,
+                        );
+                        continue;
                     }
                     tracing::error!(
                         "bake persist permanently failed after bounded retry: timeline_id={} failure_count={} timeout={} err={}",
@@ -1790,9 +1905,17 @@ impl BakeService {
 
         let completed_at = now_ms();
         let latency_ms = completed_at.saturating_sub(started_at);
+        let final_status = if processed_episode_count == 0
+            && metadata_refresh_count == 0
+            && max_processed_ts == initial_watermark_ts
+        {
+            "no_op"
+        } else {
+            "completed"
+        };
         self.storage.complete_bake_run(
             run_id,
-            "completed",
+            final_status,
             completed_at,
             processed_episode_count,
             auto_created_count,
@@ -1816,12 +1939,10 @@ impl BakeService {
         candidate: &BakeMemorySourceRecord,
     ) -> Result<BakeExtractResponse, ApiError> {
         let url = format!("{}/bake/extract", self.sidecar_url);
-        let retry_attempt = self
-            .storage
-            .get_bake_retry_failure_count(candidate.timeline.id)?;
         let request_body = BakeExtractRequest {
             trigger_reason: trigger_reason.to_string(),
-            retry_attempt,
+            retry_attempt: candidate.retry_failure_count,
+            retry_error_code: candidate.retry_error_code.clone(),
             candidate: map_extract_candidate_payload(candidate),
         };
 
@@ -2576,12 +2697,18 @@ impl BakeService {
             update.source_app_name = candidate.capture_app_name.clone();
             changed = true;
         }
-        if update
-            .source_win_title
-            .as_deref()
-            .is_none_or(is_generic_document_source_title)
-        {
-            if let Some(source_title) = document_source_title(candidate) {
+        if let Some(source_title) = document_source_title(candidate) {
+            // 真实来源标题晚于首帧到达时，纠正首帧留下的“知识库/未命名文档”。
+            // 只替换确定性占位名，不覆盖已有的有效标题。
+            if is_generic_document_source_title(&update.title) {
+                update.title = source_title.clone();
+                changed = true;
+            }
+            if update
+                .source_win_title
+                .as_deref()
+                .is_none_or(is_generic_document_source_title)
+            {
                 if update.source_win_title.as_deref() != Some(source_title.as_str()) {
                     update.source_win_title = Some(source_title);
                     changed = true;
@@ -2601,6 +2728,16 @@ impl BakeService {
         existing_sources: &mut std::collections::HashSet<i64>,
     ) -> Result<CandidatePersistResult, ApiError> {
         let source_capture_ids = collect_source_capture_id_strings(&self.storage, candidate)?;
+        // 最终写入守卫：即使旧 sidecar、异常模型响应或其他调用方把单帧候选
+        // 判为 accepted，也绝不允许它落成“操作”。多帧是操作资产的存储不变量。
+        if source_capture_ids.len() < 2 {
+            tracing::info!(
+                "bake sop discard: timeline_id={} reason=insufficient_multi_capture_evidence source_capture_count={}",
+                candidate.timeline.id,
+                source_capture_ids.len(),
+            );
+            return Ok(CandidatePersistResult::discarded());
+        }
         let source_fingerprint = artifact_source_fingerprint(candidate);
         if let Some(existing_id) = source_fingerprint
             .as_deref()
@@ -2788,14 +2925,12 @@ impl BakeService {
         let latest_run = self.storage.get_latest_bake_run()?;
         let memory_count = self.storage.count_timelines(None)?;
         let data_sources = self.storage.list_data_sources(None, 5000, 0)?.0;
+        let production_events = self
+            .storage
+            .with_conn(|conn| load_bake_production_events(conn, 0))?;
         let data_count = data_sources.len() as i64;
-        let inventory_trend = build_inventory_trend(
-            &memory_entries,
-            &knowledge_entries,
-            &templates,
-            &sop_entries,
-            &data_sources,
-        );
+        let inventory_trend =
+            build_inventory_trend(&memory_entries, &data_sources, &production_events);
 
         let pending_candidates = 0;
 
@@ -2926,6 +3061,40 @@ impl BakeService {
             .and_then(|capture| normalize_optional_url(capture.url));
         Ok(map_memory_record(record, capture_url))
     }
+
+    /// 指纹预筛：候选源文本指纹已命中所有可能产出的产物类型时返回 true。
+    ///
+    /// knowledge / sop 需已有同指纹产物；document 仅在候选满足自动建档证据
+    /// 时才要求同指纹文档存在。查询失败时保守返回 false，退回 LLM 提炼。
+    fn candidate_fully_covered_by_fingerprints(&self, candidate: &BakeMemorySourceRecord) -> bool {
+        let fingerprint = match artifact_source_fingerprint(candidate) {
+            Some(value) => value,
+            None => return false,
+        };
+        let knowledge_hit = self
+            .storage
+            .find_bake_artifact_by_source_fingerprint("knowledge", &fingerprint)
+            .map(|v| v.is_some())
+            .unwrap_or(false);
+        if !knowledge_hit {
+            return false;
+        }
+        let sop_hit = self
+            .storage
+            .find_bake_artifact_by_source_fingerprint("sop", &fingerprint)
+            .map(|v| v.is_some())
+            .unwrap_or(false);
+        if !sop_hit {
+            return false;
+        }
+        if !document_evidence(candidate).allows_auto_create {
+            return true;
+        }
+        self.storage
+            .find_bake_document_id_by_source_fingerprint(&fingerprint)
+            .map(|v| v.is_some())
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2986,9 +3155,11 @@ impl CandidatePersistResult {
 fn map_extract_candidate_payload(
     candidate: &BakeMemorySourceRecord,
 ) -> BakeExtractCandidatePayload {
+    let source_capture_count = source_capture_id_strings(candidate).len() as i64;
     BakeExtractCandidatePayload {
         source_timeline_id: candidate.timeline.id,
         source_capture_id: candidate.timeline.capture_id,
+        source_capture_count,
         timeline_category: candidate.timeline.category.clone(),
         summary: candidate.timeline.summary.clone(),
         overview: candidate.timeline.overview.clone(),
@@ -3011,7 +3182,9 @@ fn map_extract_candidate_payload(
         capture_input_text: candidate.capture_input_text.clone(),
         capture_audio_text: candidate.capture_audio_text.clone(),
         capture_url: candidate.capture_url.clone(),
-        capture_webpage_title: candidate.capture_webpage_title.clone(),
+        // sidecar 也消费成员帧选出的可靠标题，避免模型继续被主帧占位名误导。
+        capture_webpage_title: document_source_title(candidate)
+            .or_else(|| candidate.capture_webpage_title.clone()),
         url_aggregated_text: candidate.url_aggregated_text.clone(),
         url_aggregated_capture_count: candidate.url_aggregated_capture_count,
         document_evidence: document_evidence(candidate),
@@ -3063,6 +3236,13 @@ fn bake_retry_failure_summary(error: &ApiError) -> String {
     }
 }
 
+fn bake_retry_error_code(error: &ApiError) -> &str {
+    match error {
+        ApiError::Upstream { code, .. } => code,
+        _ => "BAKE_INTERNAL_ERROR",
+    }
+}
+
 fn is_retryable_bake_candidate_error(error: &ApiError) -> bool {
     matches!(
         error,
@@ -3095,6 +3275,32 @@ fn is_bake_candidate_timeout(error: &ApiError) -> bool {
             ..
         }
     )
+}
+
+fn merge_bake_candidate_lanes(
+    fresh: Vec<BakeMemorySourceRecord>,
+    retry: Vec<BakeMemorySourceRecord>,
+    limit: usize,
+    run_id: i64,
+) -> Vec<BakeMemorySourceRecord> {
+    let mut fresh = std::collections::VecDeque::from(fresh);
+    let mut retry = std::collections::VecDeque::from(retry);
+    let mut merged = Vec::with_capacity(limit.min(fresh.len().saturating_add(retry.len())));
+
+    for slot in 0..limit {
+        let prefer_retry = (run_id.saturating_add(slot as i64)).rem_euclid(5) == 0;
+        let candidate = if prefer_retry {
+            retry.pop_front().or_else(|| fresh.pop_front())
+        } else {
+            fresh.pop_front().or_else(|| retry.pop_front())
+        };
+        if let Some(candidate) = candidate {
+            merged.push(candidate);
+        } else {
+            break;
+        }
+    }
+    merged
 }
 
 fn parse_bake_knowledge_payload(
@@ -3335,86 +3541,24 @@ fn document_source_title(candidate: &BakeMemorySourceRecord) -> Option<String> {
         return None;
     }
     candidate
-        .capture_webpage_title
+        .preferred_source_title
         .as_deref()
         .and_then(|title| {
             canonical_document_source_title(title, candidate.capture_app_name.as_deref())
+        })
+        .or_else(|| {
+            candidate
+                .capture_webpage_title
+                .as_deref()
+                .and_then(|title| {
+                    canonical_document_source_title(title, candidate.capture_app_name.as_deref())
+                })
         })
         .or_else(|| {
             candidate.capture_win_title.as_deref().and_then(|title| {
                 canonical_document_source_title(title, candidate.capture_app_name.as_deref())
             })
         })
-}
-
-fn canonical_document_source_title(value: &str, app_name: Option<&str>) -> Option<String> {
-    let mut title = value
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_string();
-    if title.is_empty() {
-        return None;
-    }
-
-    // 窗口标题经常带浏览器/编辑器后缀；去掉这些 UI 后缀后才能稳定识别同一文档。
-    loop {
-        let lowered = title.to_lowercase();
-        let suffix = [
-            " - google chrome",
-            " - microsoft edge",
-            " - safari",
-            " - firefox",
-            " - arc",
-            " - microsoft word",
-            " - word",
-            " - visual studio code",
-            " - cursor",
-            " - pages",
-        ]
-        .into_iter()
-        .find(|suffix| lowered.ends_with(suffix));
-        let Some(suffix) = suffix else {
-            break;
-        };
-        title.truncate(title.len().saturating_sub(suffix.len()));
-        title = title.trim().to_string();
-    }
-
-    if title.is_empty()
-        || app_name.is_some_and(|app| title.eq_ignore_ascii_case(app.trim()))
-        || is_generic_document_source_title(&title)
-    {
-        None
-    } else {
-        Some(title)
-    }
-}
-
-fn is_generic_document_source_title(value: &str) -> bool {
-    let normalized = value.trim().to_lowercase();
-    normalized.chars().count() < 3
-        || matches!(
-            normalized.as_str(),
-            "docs"
-                | "document"
-                | "文档"
-                | "云文档"
-                | "在线文档"
-                | "untitled"
-                | "无标题"
-                | "google chrome"
-                | "microsoft edge"
-                | "safari"
-                | "firefox"
-                | "microsoft word"
-                | "word"
-                | "pages"
-                | "kim"
-                | "chatgpt"
-                | "snip"
-        )
 }
 
 fn sanitize_generated_document_title(value: &str) -> String {
@@ -4168,9 +4312,13 @@ fn document_evidence(candidate: &BakeMemorySourceRecord) -> BakeDocumentEvidence
         .as_deref()
         .is_some_and(looks_like_document_url);
     let has_document_page_title = candidate
-        .capture_webpage_title
+        .preferred_source_title
         .as_deref()
         .is_some_and(looks_like_document_title)
+        || candidate
+            .capture_webpage_title
+            .as_deref()
+            .is_some_and(looks_like_document_title)
         || candidate
             .capture_win_title
             .as_deref()
@@ -4193,12 +4341,14 @@ fn document_evidence(candidate: &BakeMemorySourceRecord) -> BakeDocumentEvidence
     .sum();
     let body_char_count = aggregated_body_char_count.max(capture_body_char_count);
     let has_substantive_document_body = body_char_count >= MIN_DOCUMENT_CHARS;
-    let has_meaningful_native_title = candidate
-        .capture_win_title
-        .as_deref()
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .is_some_and(|title| !title.eq_ignore_ascii_case(app_name.trim()));
+    let has_meaningful_native_title = [
+        candidate.preferred_source_title.as_deref(),
+        candidate.capture_webpage_title.as_deref(),
+        candidate.capture_win_title.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|title| canonical_document_source_title(title, Some(app_name)).is_some());
 
     let is_code_editor = is_code_editor_app(app_name);
     let kind = if !has_substantive_document_body || source_surface == BakeSourceSurface::Chat {
@@ -4357,21 +4507,19 @@ fn looks_like_document_url(url: &str) -> bool {
 
 fn build_inventory_trend(
     memories: &[TimelineRecord],
-    knowledge_entries: &[TimelineRecord],
-    documents: &[BakeDocumentRecord],
-    sops: &[TimelineRecord],
     data_sources: &[DataSourceRecord],
+    production_events: &[BakeProductionEventRecord],
 ) -> Vec<BakeInventoryTrendBucketPayload> {
-    const DAY_MS: i64 = 86_400_000;
-    const MAX_BUCKETS: i64 = 8;
+    // 运营台趋势图支持 7/30/90 天范围：最近 90 天必须按天分桶，
+    // 否则多日桶会被 UI 整体归到桶起始日，造成单日吞吐失真（
+    // 如把一周产出堆到某一天，其余天显示为 0）。
+    const DAILY_WINDOW_DAYS: i64 = 90;
 
     let timestamps = memories
         .iter()
         .map(|record| record.created_at_ms)
-        .chain(knowledge_entries.iter().map(|record| record.created_at_ms))
-        .chain(documents.iter().map(|record| record.created_at))
-        .chain(sops.iter().map(|record| record.created_at_ms))
         .chain(data_sources.iter().map(|record| record.created_at))
+        .chain(production_events.iter().map(|event| event.occurred_at_ms))
         .filter(|ts| *ts > 0)
         .collect::<Vec<_>>();
 
@@ -4382,57 +4530,98 @@ fn build_inventory_trend(
         return Vec::new();
     };
 
-    let start_day = (min_ts / DAY_MS) * DAY_MS;
-    let end_day = (max_ts / DAY_MS) * DAY_MS;
-    let total_days = ((end_day - start_day) / DAY_MS + 1).max(1);
-    let bucket_count = total_days.min(MAX_BUCKETS).max(1);
-    let days_per_bucket = ((total_days + bucket_count - 1) / bucket_count).max(1);
-    let bucket_ms = days_per_bucket * DAY_MS;
+    // 监控页的“今日完成”按本地自然日计算，这里必须使用同一天界。
+    // 之前直接用 Unix 毫秒整除会以 UTC 0 点分桶，例如上海时间 00:00-08:00
+    // 生成的产物会被记忆页算到前一天。
+    let Some(start_day) = local_day_start_ms(min_ts) else {
+        return Vec::new();
+    };
+    let Some(end_day) = local_day_start_ms(max_ts) else {
+        return Vec::new();
+    };
+    let daily_start_day = add_local_days(end_day, -(DAILY_WINDOW_DAYS - 1)).max(start_day);
 
-    (0..bucket_count)
-        .map(|index| {
-            let start_ts = start_day + index * bucket_ms;
-            let raw_end_ts = if index == bucket_count - 1 {
-                i64::MAX
-            } else {
-                start_ts + bucket_ms
-            };
-            BakeInventoryTrendBucketPayload {
-                label: format_trend_bucket_label(start_ts, bucket_ms),
-                start_ts,
-                end_ts: if raw_end_ts == i64::MAX {
-                    start_ts + bucket_ms - 1
-                } else {
-                    raw_end_ts - 1
-                },
-                memory_count: count_records_in_bucket(
-                    memories.iter().map(|record| record.created_at_ms),
-                    start_ts,
-                    raw_end_ts,
-                ),
-                data_count: count_records_in_bucket(
-                    data_sources.iter().map(|record| record.created_at),
-                    start_ts,
-                    raw_end_ts,
-                ),
-                knowledge_count: count_records_in_bucket(
-                    knowledge_entries.iter().map(|record| record.created_at_ms),
-                    start_ts,
-                    raw_end_ts,
-                ),
-                template_count: count_records_in_bucket(
-                    documents.iter().map(|record| record.created_at),
-                    start_ts,
-                    raw_end_ts,
-                ),
-                sop_count: count_records_in_bucket(
-                    sops.iter().map(|record| record.created_at_ms),
-                    start_ts,
-                    raw_end_ts,
-                ),
-            }
-        })
-        .collect()
+    let make_bucket = |start_ts: i64, end_exclusive_ts: i64| BakeInventoryTrendBucketPayload {
+        label: format_trend_bucket_label(start_ts, end_exclusive_ts),
+        start_ts,
+        end_ts: end_exclusive_ts - 1,
+        memory_count: count_records_in_bucket(
+            memories.iter().map(|record| record.created_at_ms),
+            start_ts,
+            end_exclusive_ts,
+        ),
+        data_count: count_records_in_bucket(
+            data_sources.iter().map(|record| record.created_at),
+            start_ts,
+            end_exclusive_ts,
+        ),
+        knowledge_count: sum_production_events_in_bucket(
+            production_events,
+            start_ts,
+            end_exclusive_ts,
+            |event| event.knowledge_count,
+        ),
+        template_count: sum_production_events_in_bucket(
+            production_events,
+            start_ts,
+            end_exclusive_ts,
+            |event| event.document_count,
+        ),
+        sop_count: sum_production_events_in_bucket(
+            production_events,
+            start_ts,
+            end_exclusive_ts,
+            |event| event.sop_count,
+        ),
+    };
+
+    let mut buckets: Vec<BakeInventoryTrendBucketPayload> = Vec::new();
+    // 早期数据按周聚合（桶边界裁切到每日窗口起点，避免与每日桶重复计数）。
+    let mut cursor = start_day;
+    while cursor < daily_start_day {
+        let bucket_end = add_local_days(cursor, 7).min(daily_start_day);
+        buckets.push(make_bucket(cursor, bucket_end));
+        cursor = bucket_end;
+    }
+    // 最近窗口按本地自然日分桶。
+    let mut day = daily_start_day;
+    while day <= end_day {
+        let next_day = add_local_days(day, 1);
+        buckets.push(make_bucket(day, next_day));
+        day = next_day;
+    }
+    buckets
+}
+
+fn local_day_start_ms(timestamp_ms: i64) -> Option<i64> {
+    let local = chrono::DateTime::<Utc>::from_timestamp_millis(timestamp_ms)?.with_timezone(&Local);
+    let midnight = local.date_naive().and_hms_opt(0, 0, 0)?;
+    Local
+        .from_local_datetime(&midnight)
+        .earliest()
+        .map(|value| value.timestamp_millis())
+}
+
+fn add_local_days(day_start_ms: i64, days: i64) -> i64 {
+    let Some(local) = chrono::DateTime::<Utc>::from_timestamp_millis(day_start_ms)
+        .map(|value| value.with_timezone(&Local))
+    else {
+        return day_start_ms;
+    };
+    let Some(date) = local
+        .date_naive()
+        .checked_add_signed(chrono::Duration::days(days))
+    else {
+        return day_start_ms;
+    };
+    let Some(midnight) = date.and_hms_opt(0, 0, 0) else {
+        return day_start_ms;
+    };
+    Local
+        .from_local_datetime(&midnight)
+        .earliest()
+        .map(|value| value.timestamp_millis())
+        .unwrap_or(day_start_ms)
 }
 
 fn count_records_in_bucket<I>(timestamps: I, start_ts: i64, end_ts: i64) -> i64
@@ -4444,18 +4633,36 @@ where
         .count() as i64
 }
 
-fn format_trend_bucket_label(start_ts: i64, bucket_ms: i64) -> String {
-    let Some(start) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(start_ts) else {
+fn sum_production_events_in_bucket<F>(
+    events: &[BakeProductionEventRecord],
+    start_ts: i64,
+    end_ts: i64,
+    count: F,
+) -> i64
+where
+    F: Fn(&BakeProductionEventRecord) -> i64,
+{
+    events
+        .iter()
+        .filter(|event| event.occurred_at_ms >= start_ts && event.occurred_at_ms < end_ts)
+        .map(count)
+        .sum()
+}
+
+fn format_trend_bucket_label(start_ts: i64, end_exclusive_ts: i64) -> String {
+    let Some(start) = chrono::DateTime::<Utc>::from_timestamp_millis(start_ts)
+        .map(|value| value.with_timezone(&Local))
+    else {
         return "未知".to_string();
     };
-    if bucket_ms <= 86_400_000 {
-        return start.format("%Y-%m-%d").to_string();
-    }
-
-    let end_ts = start_ts + bucket_ms - 86_400_000;
-    let Some(end) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(end_ts) else {
+    let Some(end) = chrono::DateTime::<Utc>::from_timestamp_millis(end_exclusive_ts - 1)
+        .map(|value| value.with_timezone(&Local))
+    else {
         return start.format("%Y-%m-%d").to_string();
     };
+    if start.date_naive() == end.date_naive() {
+        return start.format("%Y-%m-%d").to_string();
+    }
     format!("{}-{}", start.format("%Y-%m-%d"), end.format("%Y-%m-%d"))
 }
 
@@ -4886,7 +5093,7 @@ mod tests {
             data_source_for_trend(first_day + DAY_MS + 1_000),
         ];
 
-        let buckets = build_inventory_trend(&[], &[], &[], &[], &data_sources);
+        let buckets = build_inventory_trend(&[], &data_sources, &[]);
 
         assert_eq!(
             buckets.iter().map(|bucket| bucket.data_count).sum::<i64>(),
@@ -4898,6 +5105,99 @@ mod tests {
                 && bucket.template_count == 0
                 && bucket.sop_count == 0
         }));
+    }
+
+    #[test]
+    fn test_inventory_trend_uses_local_midnight_like_monitor_today() {
+        let local_midnight = Local
+            .with_ymd_and_hms(2026, 8, 8, 0, 0, 0)
+            .earliest()
+            .unwrap()
+            .timestamp_millis();
+        let data_sources = vec![
+            data_source_for_trend(local_midnight - 1),
+            data_source_for_trend(local_midnight + 1),
+        ];
+
+        let buckets = build_inventory_trend(&[], &data_sources, &[]);
+
+        let previous_day = buckets
+            .iter()
+            .find(|bucket| bucket.label == "2026-08-07")
+            .unwrap();
+        let current_day = buckets
+            .iter()
+            .find(|bucket| bucket.label == "2026-08-08")
+            .unwrap();
+        assert_eq!(previous_day.data_count, 1);
+        assert_eq!(current_day.data_count, 1);
+        assert_eq!(current_day.start_ts, local_midnight);
+    }
+
+    #[test]
+    fn test_inventory_trend_uses_daily_buckets_for_recent_window() {
+        let newest_day = Local
+            .with_ymd_and_hms(2027, 1, 15, 0, 0, 0)
+            .earliest()
+            .unwrap()
+            .timestamp_millis();
+        let data_sources = vec![
+            data_source_for_trend(newest_day + 1_000),
+            data_source_for_trend(add_local_days(newest_day, -1) + 1_000),
+            // 90 天窗口之外的早期数据落入周聚合桶，不与每日桶重叠。
+            data_source_for_trend(add_local_days(newest_day, -120) + 1_000),
+        ];
+
+        let buckets = build_inventory_trend(&[], &data_sources, &[]);
+
+        assert_eq!(
+            buckets.iter().map(|bucket| bucket.data_count).sum::<i64>(),
+            3
+        );
+        // 最近两天各自独立成桶，不再被多日桶合并到起始日。
+        let recent: Vec<&BakeInventoryTrendBucketPayload> = buckets
+            .iter()
+            .filter(|bucket| bucket.start_ts >= add_local_days(newest_day, -1))
+            .collect();
+        assert_eq!(recent.len(), 2);
+        assert!(recent.iter().all(|bucket| bucket.data_count == 1));
+        assert!(recent
+            .iter()
+            .all(|bucket| bucket.end_ts + 1 == add_local_days(bucket.start_ts, 1)));
+        // 早期周聚合桶裁切在每日窗口起点之前，不与每日桶重叠计数。
+        let daily_start_day = add_local_days(newest_day, -89);
+        let early: Vec<&BakeInventoryTrendBucketPayload> = buckets
+            .iter()
+            .filter(|bucket| bucket.start_ts < daily_start_day)
+            .collect();
+        assert!(!early.is_empty());
+        assert!(early.iter().all(|bucket| bucket.end_ts < daily_start_day));
+        assert_eq!(early.iter().map(|bucket| bucket.data_count).sum::<i64>(), 1);
+    }
+
+    #[test]
+    fn test_inventory_trend_counts_merged_artifact_on_production_day() {
+        let production_day = Local
+            .with_ymd_and_hms(2026, 8, 10, 0, 0, 0)
+            .earliest()
+            .unwrap()
+            .timestamp_millis();
+        let events = vec![BakeProductionEventRecord {
+            occurred_at_ms: production_day + 17 * 60 * 60 * 1000,
+            knowledge_count: 0,
+            document_count: 1,
+            sop_count: 0,
+        }];
+
+        let buckets = build_inventory_trend(&[], &[], &events);
+
+        let today = buckets
+            .iter()
+            .find(|bucket| bucket.label == "2026-08-10")
+            .unwrap();
+        assert_eq!(today.template_count, 1);
+        assert_eq!(today.knowledge_count, 0);
+        assert_eq!(today.sop_count, 0);
     }
 
     #[test]
@@ -5318,6 +5618,62 @@ mod tests {
     }
 
     #[test]
+    fn test_reliable_later_source_title_repairs_existing_placeholder_title() {
+        let service = make_service();
+        let capture_id = seed_capture(
+            &service,
+            1_710_000_000_000,
+            "Google Chrome",
+            "商业化大模型例行压测介绍 - 云文档 - Google Chrome",
+        );
+        let timeline_id = seed_knowledge(&service, "文档", capture_id, 4, 2);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.capture_app_name = Some("Google Chrome".to_string());
+        candidate.capture_win_title =
+            Some("商业化大模型例行压测介绍 - 云文档 - Google Chrome".to_string());
+        candidate.capture_webpage_title = Some("知识库".to_string());
+        candidate.preferred_source_title = Some("商业化大模型例行压测介绍 - 云文档".to_string());
+        candidate.capture_url =
+            Some("https://docs.corp.kuaishou.com/k/home/space/document-id".to_string());
+        candidate.capture_ax_text = Some("压测文档正文".repeat(80));
+
+        let payload = parse_bake_document_payload(
+            json!({
+                "name": "知识库",
+                "full_content": "压测文档正文"
+            }),
+            &candidate,
+        )
+        .unwrap();
+        let mut document = build_bake_document(
+            &candidate,
+            &payload,
+            "auto_created",
+            &[capture_id.to_string()],
+        )
+        .unwrap();
+        document.title = "知识库".to_string();
+        document.source_win_title = Some("知识库".to_string());
+        let document_id = service.storage.insert_bake_document(&document).unwrap();
+        let existing = service
+            .storage
+            .get_bake_document(document_id)
+            .unwrap()
+            .unwrap();
+
+        let (updated, changed) = service
+            .document_with_merged_source_metadata(&candidate, &existing)
+            .unwrap();
+
+        assert!(changed);
+        assert_eq!(updated.title, "商业化大模型例行压测介绍 - 云文档");
+        assert_eq!(
+            updated.source_win_title.as_deref(),
+            Some("商业化大模型例行压测介绍 - 云文档")
+        );
+    }
+
+    #[test]
     fn test_title_fallback_accepts_missing_url_but_rejects_different_urls() {
         assert!(document_urls_compatible_for_title_match(
             None,
@@ -5504,9 +5860,85 @@ mod tests {
             capture_audio_text: None,
             capture_url: None,
             capture_webpage_title: None,
+            preferred_source_title: None,
             url_aggregated_text: None,
             url_aggregated_capture_count: 0,
+            retry_failure_count: 0,
+            retry_error_code: None,
+            retry_next_at_ms: 0,
         }
+    }
+
+    #[test]
+    fn test_extract_candidate_contract_reports_source_capture_count() {
+        let service = make_service();
+        let primary = seed_capture(&service, 1_710_000_000_000, "Code", "开始排查");
+        let timeline_id = seed_knowledge(&service, "coding", primary, 4, 1);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.timeline.capture_ids = Some(format!("[{},{}]", primary, primary + 1));
+
+        let payload = map_extract_candidate_payload(&candidate);
+
+        assert_eq!(payload.source_capture_count, 2);
+    }
+
+    #[test]
+    fn test_merge_bake_candidate_lanes_reserves_retry_quota_without_starving_fresh() {
+        let service = make_service();
+        let capture_id = seed_capture(&service, 1_710_000_000_000, "Code", "候选");
+        let timeline_id = seed_knowledge(&service, "coding", capture_id, 4, 1);
+        let template = make_candidate(&service, timeline_id);
+        let fresh = (0..60)
+            .map(|offset| {
+                let mut candidate = template.clone();
+                candidate.timeline.id = 1_000 + offset;
+                candidate
+            })
+            .collect::<Vec<_>>();
+        let retry = (0..60)
+            .map(|offset| {
+                let mut candidate = template.clone();
+                candidate.timeline.id = 2_000 + offset;
+                candidate.retry_failure_count = 1;
+                candidate.retry_error_code = Some("BAKE_OUTPUT_INVALID".to_string());
+                candidate
+            })
+            .collect::<Vec<_>>();
+
+        let merged = merge_bake_candidate_lanes(fresh, retry, 10, 0);
+        let retry_count = merged
+            .iter()
+            .filter(|candidate| candidate.retry_failure_count > 0)
+            .count();
+        assert_eq!(merged.len(), 10);
+        assert_eq!(retry_count, 2);
+        assert_eq!(merged[0].retry_failure_count, 1);
+        assert_eq!(merged[5].retry_failure_count, 1);
+    }
+
+    #[test]
+    fn test_persist_sop_rejects_single_capture_even_when_sidecar_accepts() {
+        let service = make_service();
+        let capture_id = seed_capture(&service, 1_710_000_000_000, "Code", "单帧设置页");
+        let timeline_id = seed_knowledge(&service, "coding", capture_id, 4, 1);
+        let candidate = make_candidate(&service, timeline_id);
+        let extraction = BakeArtifactExtraction {
+            accepted: true,
+            reason: None,
+            payload: Some(json!({
+                "summary": "模型推测的单帧 SOP",
+                "steps": ["打开设置", "修改选项", "保存"]
+            })),
+        };
+        let mut existing_sources = std::collections::HashSet::new();
+
+        let result = service
+            .persist_sop_artifact(None, &candidate, "test", &extraction, &mut existing_sources)
+            .expect("单帧守卫不应返回错误");
+
+        assert_eq!(result.discarded_count, 1);
+        assert_eq!(result.sop_created_count, 0);
+        assert_eq!(service.storage.count_bake_sops().unwrap(), 0);
     }
 
     #[test]
@@ -5833,6 +6265,14 @@ mod tests {
         let second_capture = seed_capture(&service, 1_710_000_010_000, "Code", "第二次采集");
         let first_timeline = seed_knowledge(&service, "meeting", first_capture, 4, 1);
         let second_timeline = seed_knowledge(&service, "meeting", second_capture, 4, 1);
+        let first_followup = seed_capture(&service, 1_710_000_001_000, "Code", "第一次验证");
+        let second_followup = seed_capture(&service, 1_710_000_011_000, "Code", "第二次验证");
+        link_captures_to_timeline(&service, first_timeline, &[first_capture, first_followup]);
+        link_captures_to_timeline(
+            &service,
+            second_timeline,
+            &[second_capture, second_followup],
+        );
         let first = make_candidate(&service, first_timeline);
         let second = make_candidate(&service, second_timeline);
 
@@ -5901,5 +6341,75 @@ mod tests {
             .find_existing_sop_timeline_ids(&[second_timeline])
             .unwrap()
             .contains(&second_timeline));
+    }
+
+    fn sop_filter_with_query(query: &str) -> BakeListFilter {
+        BakeListFilter {
+            q: Some(query.to_string()),
+            bucket: None,
+            from_ts: None,
+            to_ts: None,
+            limit: 10,
+            offset: 0,
+            sort: BakeListSort::Recent,
+        }
+    }
+
+    fn seed_sops(service: &BakeService) -> i64 {
+        let capture_id = seed_capture(service, 1_710_000_000_000, "Chrome", "SOP 页面");
+        // insert_timeline_entry 对 bake_sop 返回 bake_sops 行 id；
+        // SOP 列表的可搜索字段来自 bake_sops 表，因此直接更新 bake_sops 行
+        let hit_sop_id = seed_knowledge(service, CATEGORY_BAKE_SOP, capture_id, 3, 1);
+        let other_sop_id = seed_knowledge(service, CATEGORY_BAKE_SOP, capture_id, 3, 1);
+        service
+            .storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE bake_sops SET title = '无关概览', summary = '无关摘要', content = '{}'
+                     WHERE id = ?1",
+                    rusqlite::params![other_sop_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        hit_sop_id
+    }
+
+    #[test]
+    fn test_list_sops_paginated_query_prefilter_results_match_contains() {
+        let service = make_service();
+        let hit_id = seed_sops(&service);
+
+        let page = service
+            .list_sops_paginated(sop_filter_with_query("知识摘要"))
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, hit_id.to_string());
+    }
+
+    #[test]
+    fn test_list_sops_paginated_query_falls_back_without_fts() {
+        let service = make_service();
+        let hit_id = seed_sops(&service);
+        service
+            .storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "DROP TRIGGER IF EXISTS bake_sops_fts_insert;
+                     DROP TRIGGER IF EXISTS bake_sops_fts_update;
+                     DROP TRIGGER IF EXISTS bake_sops_fts_delete;
+                     DROP TABLE IF EXISTS bake_sops_fts;",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let page = service
+            .list_sops_paginated(sop_filter_with_query("知识摘要"))
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, hit_id.to_string());
     }
 }

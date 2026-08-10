@@ -5,12 +5,13 @@ use std::{
 };
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State},
     http::StatusCode,
     Json,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::{
     api::{
@@ -49,7 +50,6 @@ pub struct CreationSkillAnalysis {
     pub title_style: String,
     pub text_style: String,
     pub diagram_style: String,
-    pub structure_pattern: Vec<String>,
     #[serde(default)]
     pub writing_guidelines: Vec<String>,
     #[serde(default)]
@@ -393,29 +393,89 @@ pub async fn get_creation_skill(
         .ok_or_else(|| ApiError::NotFound("技能不存在".into()))
 }
 
+const CREATION_SKILL_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+
+/// 手工读取并解析请求体，保证任何解析失败都返回带具体原因的 JSON 错误，
+/// 而不是 axum 默认的纯文本拒绝响应（前端无法展示原因）。
+async fn parse_skill_json(request: Request) -> Result<UpsertCreationSkill, ApiError> {
+    let content_type = request
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    if !content_type.starts_with("application/json") {
+        return Err(ApiError::BadRequest(
+            "保存技能需要发送 application/json 请求体".into(),
+        ));
+    }
+    let bytes = axum::body::to_bytes(request.into_body(), CREATION_SKILL_BODY_LIMIT_BYTES)
+        .await
+        .map_err(|error| {
+            ApiError::BadRequest(format!("技能请求体过大或读取失败（上限 16 MB）: {error}"))
+        })?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        ApiError::BadRequest(format!("技能内容格式不正确，无法解析请求体: {error}"))
+    })
+}
+
+fn skill_storage_error(endpoint: &str, error: &crate::storage::StorageError) -> ApiError {
+    tracing::error!("{endpoint} 写入技能失败: {error}");
+    let message = error.to_string();
+    let hint = if message.contains("CHECK constraint failed: source_kind") {
+        "：当前版本数据库表还不支持该来源类型，请更新应用后重试"
+    } else if message.contains("CHECK constraint failed") {
+        "：字段取值不符合存储约束，请检查技能状态与来源类型"
+    } else {
+        "：本地数据库写入失败"
+    };
+    ApiError::Internal(format!("保存技能失败{hint}（{message}）"))
+}
+
 pub async fn save_creation_skill(
     State(state): State<Arc<AppState>>,
-    Json(skill): Json<UpsertCreationSkill>,
+    request: Request,
 ) -> Result<(StatusCode, Json<CreationSkillRecord>), ApiError> {
-    validate_persisted_source(&skill.source_kind, &skill.source_id)?;
-    validate_skill_input(&skill)?;
-    let saved = state.storage.upsert_creation_skill(&skill)?;
+    let skill = parse_skill_json(request).await?;
+    validate_persisted_source(&skill.source_kind, &skill.source_id)
+        .map_err(|error| log_skill_validation("POST /api/creation/skills", &skill, error))?;
+    validate_skill_input(&skill)
+        .map_err(|error| log_skill_validation("POST /api/creation/skills", &skill, error))?;
+    let saved = state
+        .storage
+        .upsert_creation_skill(&skill)
+        .map_err(|error| skill_storage_error("POST /api/creation/skills", &error))?;
     Ok((StatusCode::CREATED, Json(saved)))
 }
 
 pub async fn update_creation_skill(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
-    Json(mut skill): Json<UpsertCreationSkill>,
+    request: Request,
 ) -> Result<Json<CreationSkillRecord>, ApiError> {
     let existing = state
         .storage
         .get_creation_skill(id)?
         .ok_or_else(|| ApiError::NotFound("技能不存在".into()))?;
-    validate_persisted_source(&skill.source_kind, &skill.source_id)?;
+    let mut skill = parse_skill_json(request).await?;
+    validate_persisted_source(&skill.source_kind, &skill.source_id)
+        .map_err(|error| log_skill_validation("PUT /api/creation/skills/:id", &skill, error))?;
     skill.client_skill_key = existing.client_skill_key;
-    validate_skill_input(&skill)?;
-    Ok(Json(state.storage.upsert_creation_skill(&skill)?))
+    validate_skill_input(&skill)
+        .map_err(|error| log_skill_validation("PUT /api/creation/skills/:id", &skill, error))?;
+    state
+        .storage
+        .upsert_creation_skill(&skill)
+        .map(Json)
+        .map_err(|error| skill_storage_error("PUT /api/creation/skills/:id", &error))
+}
+
+fn log_skill_validation(endpoint: &str, skill: &UpsertCreationSkill, error: ApiError) -> ApiError {
+    warn!(
+        "技能保存校验失败: endpoint={endpoint} key={} source_kind={} status={} reason={error}",
+        skill.client_skill_key, skill.source_kind, skill.status
+    );
+    error
 }
 
 pub async fn delete_creation_skill(
@@ -439,77 +499,160 @@ pub async fn delete_creation_skill(
 }
 
 fn validate_skill_input(skill: &UpsertCreationSkill) -> Result<(), ApiError> {
-    let valid_list = |items: &[String], min: usize, max: usize, item_max: usize| {
-        items.len() >= min
-            && items.len() <= max
-            && items
-                .iter()
-                .all(|item| !item.trim().is_empty() && item.trim().chars().count() <= item_max)
+    let bad = |reason: &str| Err(ApiError::BadRequest(reason.to_string()));
+
+    fn list_issue(items: &[String], min: usize, max: usize, item_max: usize) -> Option<String> {
+        if items.len() < min {
+            return Some(format!("至少需要 {min} 条"));
+        }
+        if items.len() > max {
+            return Some(format!(
+                "最多 {max} 条，当前 {count} 条",
+                count = items.len()
+            ));
+        }
+        for item in items {
+            let trimmed = item.trim();
+            if trimmed.is_empty() {
+                return Some("存在空条目".to_string());
+            }
+            if trimmed.chars().count() > item_max {
+                return Some(format!("单条超过 {item_max} 个字符"));
+            }
+        }
+        None
+    }
+    let require_list = |items: &[String], min: usize, max: usize, item_max: usize, name: &str| {
+        list_issue(items, min, max, item_max).map(|issue| format!("{name}{issue}"))
     };
-    if skill.client_skill_key.trim().is_empty()
-        || skill.client_skill_key.chars().count() > 80
-        || skill.title.trim().is_empty()
-        || skill.title.trim().chars().count() > 80
-        || skill.summary.trim().is_empty()
-        || skill.summary.trim().chars().count() > 400
-        || !valid_list(&skill.common_titles, 1, 12, 80)
-        || skill.title_style.trim().is_empty()
-        || skill.title_style.trim().chars().count() > 1_200
-        || skill.text_style.trim().is_empty()
-        || skill.text_style.trim().chars().count() > 2_000
-        || skill.diagram_style.trim().is_empty()
-        || skill.diagram_style.trim().chars().count() > 1_200
-        || !valid_list(&skill.structure_pattern, 1, 16, 160)
-        || !valid_list(&skill.writing_guidelines, 0, 16, 240)
-        || !valid_distinctive_sections(&skill.distinctive_sections)
-        || !valid_skill_description(&skill.skill_description)
-        || !valid_execution_steps(&skill.execution_steps)
-        || !matches!(
-            skill.section_headings.common_titles.as_str(),
-            "标题设计风格" | "这类文档标题通常怎么命名"
-        )
-        || skill.section_headings.title_style.trim().is_empty()
-        || skill.section_headings.title_style.trim().chars().count() > 120
-        || skill.section_headings.text_style.trim().is_empty()
-        || skill.section_headings.text_style.trim().chars().count() > 120
-        || skill.section_headings.diagram_style.trim().is_empty()
-        || skill.section_headings.diagram_style.trim().chars().count() > 120
-        || skill.section_headings.structure_pattern.trim().is_empty()
-        || skill
-            .section_headings
-            .structure_pattern
-            .trim()
-            .chars()
-            .count()
-            > 120
-        || skill.section_headings.writing_guidelines.trim().is_empty()
-        || skill
-            .section_headings
-            .writing_guidelines
-            .trim()
-            .chars()
-            .count()
-            > 120
-        || !valid_list(&skill.field_examples.common_titles, 1, 6, 240)
-        || !valid_list(&skill.field_examples.title_style, 1, 6, 500)
-        || !valid_list(&skill.field_examples.text_style, 1, 6, 500)
-        || !valid_list(&skill.field_examples.diagram_style, 1, 6, 500)
-        || !valid_list(&skill.field_examples.structure_pattern, 1, 6, 500)
-        || !valid_list(&skill.field_examples.writing_guidelines, 1, 6, 500)
-        || skill.example_document.trim().chars().count() < 100
-        || skill.example_document.trim().chars().count() > 12_000
-        || !matches!(skill.status.as_str(), "draft" | "saved")
-        || (skill.installed && skill.status != "saved")
-        || (skill.published && skill.status != "saved")
+    let require_text = |value: &str, max: usize, name: &str| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Some(format!("{name}不能为空"));
+        }
+        if trimmed.chars().count() > max {
+            return Some(format!(
+                "{name}超过 {max} 个字符，当前 {count} 个字符",
+                count = trimmed.chars().count()
+            ));
+        }
+        None
+    };
+    // 创作配方与示例文档在界面上允许留空；有内容时仍受长度上限约束。
+    let optional_text = |value: &str, max: usize, name: &str| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if trimmed.chars().count() > max {
+            return Some(format!(
+                "{name}超过 {max} 个字符，当前 {count} 个字符",
+                count = trimmed.chars().count()
+            ));
+        }
+        None
+    };
+
+    if skill.client_skill_key.trim().is_empty() {
+        return bad("技能标识不能为空");
+    }
+    if skill.client_skill_key.chars().count() > 80 {
+        return bad("技能标识超过 80 个字符");
+    }
+    if let Some(reason) = require_text(&skill.title, 80, "技能标题") {
+        return bad(&reason);
+    }
+    if let Some(reason) = require_text(&skill.summary, 400, "技能简介") {
+        return bad(&reason);
+    }
+    if let Some(reason) = require_list(&skill.common_titles, 0, 12, 80, "章节标题示例") {
+        return bad(&reason);
+    }
+    if let Some(reason) = optional_text(&skill.title_style, 1_200, "标题句式示例") {
+        return bad(&reason);
+    }
+    if let Some(reason) = optional_text(&skill.text_style, 2_000, "行文思路示例") {
+        return bad(&reason);
+    }
+    if let Some(reason) = optional_text(&skill.diagram_style, 1_200, "图示风格示例") {
+        return bad(&reason);
+    }
+    if let Some(reason) = require_list(&skill.writing_guidelines, 0, 16, 240, "惯用话术示例")
     {
-        return Err(ApiError::BadRequest("技能内容不完整或超过长度限制".into()));
+        return bad(&reason);
     }
+    if let Some(reason) = distinctive_sections_issue(&skill.distinctive_sections) {
+        return bad(&reason);
+    }
+    if let Some(reason) = skill_description_issue(&skill.skill_description) {
+        return bad(&reason);
+    }
+    if let Some(reason) = execution_steps_issue(&skill.execution_steps) {
+        return bad(&reason);
+    }
+    if !matches!(
+        skill.section_headings.common_titles.as_str(),
+        "标题设计风格" | "这类文档标题通常怎么命名"
+    ) {
+        return bad("章节标题设计类型取值不正确");
+    }
+    let headings = &skill.section_headings;
+    if let Some(reason) = require_text(&headings.title_style, 120, "章节标题设计·标题句式")
+    {
+        return bad(&reason);
+    }
+    if let Some(reason) = require_text(&headings.text_style, 120, "章节标题设计·行文思路")
+    {
+        return bad(&reason);
+    }
+    if let Some(reason) = require_text(&headings.diagram_style, 120, "章节标题设计·图示风格")
+    {
+        return bad(&reason);
+    }
+    if let Some(reason) = require_text(&headings.writing_guidelines, 120, "章节标题设计·惯用话术")
+    {
+        return bad(&reason);
+    }
+    let examples = &skill.field_examples;
+    if let Some(reason) = require_list(&examples.common_titles, 0, 6, 240, "字段示例·章节标题")
+    {
+        return bad(&reason);
+    }
+    if let Some(reason) = require_list(&examples.title_style, 0, 6, 500, "字段示例·标题句式")
+    {
+        return bad(&reason);
+    }
+    if let Some(reason) = require_list(&examples.text_style, 0, 6, 500, "字段示例·行文思路")
+    {
+        return bad(&reason);
+    }
+    if let Some(reason) = require_list(&examples.diagram_style, 0, 6, 500, "字段示例·图示风格")
+    {
+        return bad(&reason);
+    }
+    if let Some(reason) = require_list(&examples.writing_guidelines, 0, 6, 500, "字段示例·惯用话术")
+    {
+        return bad(&reason);
+    }
+    // 完整示例文档允许留空；有内容时保持 100 到 12000 个字符区间。
+    let example_len = skill.example_document.trim().chars().count();
+    if example_len > 0 && example_len < 100 {
+        return bad("完整示例文档需要在 100 到 12000 个字符之间，当前内容过短");
+    }
+    if example_len > 12_000 {
+        return bad("完整示例文档需要在 100 到 12000 个字符之间，当前内容过长");
+    }
+    if !matches!(skill.status.as_str(), "draft" | "saved") {
+        return bad("技能状态只能是 draft 或 saved");
+    }
+    if skill.installed && skill.status != "saved" {
+        return bad("技能需要先保存（status=saved）才能安装");
+    }
+    if skill.published && skill.status != "saved" {
+        return bad("技能需要先保存（status=saved）才能发布");
+    }
+
     validate_package_files(skill)?;
-    if skill.source_kind != "imported" && contains_private_skill_marker(skill) {
-        return Err(ApiError::BadRequest(
-            "技能内容或示例仍包含具体组织线索、日期或指标，请改写为通用表达".into(),
-        ));
-    }
     if skill.published
         && (skill
             .cloud_skill_id
@@ -518,11 +661,137 @@ fn validate_skill_input(skill: &UpsertCreationSkill) -> Result<(), ApiError> {
             .is_empty()
             || skill.category_id.as_deref().unwrap_or_default().is_empty())
     {
-        return Err(ApiError::BadRequest(
-            "已公开技能需要关联云端标识和第四级类目".into(),
-        ));
+        return bad("已公开技能需要关联云端标识和第四级类目");
     }
     Ok(())
+}
+
+fn distinctive_sections_issue(sections: &[CreationSkillDistinctiveSection]) -> Option<String> {
+    if sections.len() > 6 {
+        return Some(format!(
+            "特色章节最多 6 个，当前 {count} 个",
+            count = sections.len()
+        ));
+    }
+    for (index, section) in sections.iter().enumerate() {
+        let position = index + 1;
+        if section.title.trim().is_empty() || section.title.trim().chars().count() > 80 {
+            return Some(format!("特色章节 {position} 的标题需要为 1 到 80 个字符"));
+        }
+        if section.description.trim().is_empty()
+            || section.description.trim().chars().count() > 1_200
+        {
+            return Some(format!("特色章节 {position} 的说明需要为 1 到 1200 个字符"));
+        }
+        if section.guidance.trim().is_empty() || section.guidance.trim().chars().count() > 1_200 {
+            return Some(format!(
+                "特色章节 {position} 的写法指引需要为 1 到 1200 个字符"
+            ));
+        }
+        if section.examples.is_empty() || section.examples.len() > 6 {
+            return Some(format!("特色章节 {position} 需要 1 到 6 条仿写示例"));
+        }
+        if section
+            .examples
+            .iter()
+            .any(|example| example.trim().is_empty() || example.trim().chars().count() > 800)
+        {
+            return Some(format!(
+                "特色章节 {position} 的仿写示例需要为 1 到 800 个字符"
+            ));
+        }
+    }
+    None
+}
+
+fn skill_description_issue(description: &CreationSkillDescription) -> Option<String> {
+    let legacy_empty = description.purpose.trim().is_empty()
+        && description.document_types.is_empty()
+        && description.problems.is_empty()
+        && description.domains.is_empty()
+        && description.deliverables.is_empty();
+    if legacy_empty {
+        return None;
+    }
+    if description.purpose.trim().is_empty() || description.purpose.trim().chars().count() > 1_200 {
+        return Some("技能用途说明需要为 1 到 1200 个字符".to_string());
+    }
+    if let Some(issue) = simple_list_issue(&description.document_types, 1, 12, 120) {
+        return Some(format!("适用文档类型{issue}"));
+    }
+    if let Some(issue) = simple_list_issue(&description.problems, 1, 12, 240) {
+        return Some(format!("解决的问题{issue}"));
+    }
+    if let Some(issue) = simple_list_issue(&description.domains, 0, 12, 120) {
+        return Some(format!("适用领域{issue}"));
+    }
+    if let Some(issue) = simple_list_issue(&description.deliverables, 1, 12, 240) {
+        return Some(format!("交付物{issue}"));
+    }
+    None
+}
+
+fn simple_list_issue(items: &[String], min: usize, max: usize, item_max: usize) -> Option<String> {
+    if items.len() < min {
+        return Some(format!("至少需要 {min} 条"));
+    }
+    if items.len() > max {
+        return Some(format!("最多 {max} 条"));
+    }
+    if items
+        .iter()
+        .any(|item| item.trim().is_empty() || item.trim().chars().count() > item_max)
+    {
+        return Some(format!("单条需要为 1 到 {item_max} 个字符"));
+    }
+    None
+}
+
+fn execution_steps_issue(steps: &[CreationSkillExecutionStep]) -> Option<String> {
+    if steps.is_empty() {
+        return None;
+    }
+    if steps.len() > 12 {
+        return Some(format!(
+            "执行步骤最多 12 步，当前 {count} 步",
+            count = steps.len()
+        ));
+    }
+    for (index, step) in steps.iter().enumerate() {
+        let position = index + 1;
+        if !valid_identifier(&step.id) {
+            return Some(format!(
+                "执行步骤 {position} 的标识只能包含小写字母、数字、下划线和连字符，且不超过 80 个字符"
+            ));
+        }
+        if step.title.trim().is_empty() || step.title.trim().chars().count() > 80 {
+            return Some(format!("执行步骤 {position} 的标题需要为 1 到 80 个字符"));
+        }
+        if step.objective.trim().is_empty() || step.objective.trim().chars().count() > 500 {
+            return Some(format!(
+                "执行步骤 {position} 的执行动作需要为 1 到 500 个字符"
+            ));
+        }
+        // 步骤目标与产出在界面上合并为“执行动作”单字段，产出兼容为空。
+        if step.output.trim().chars().count() > 240 {
+            return Some(format!("执行步骤 {position} 的步骤产出不能超过 240 个字符"));
+        }
+        if let Some(issue) = simple_list_issue(&step.agents, 0, 8, 80) {
+            return Some(format!("执行步骤 {position} 引用的 Agent {issue}"));
+        }
+        if let Some(issue) = simple_list_issue(&step.skills, 0, 8, 80) {
+            return Some(format!("执行步骤 {position} 引用的 Skill {issue}"));
+        }
+        if let Some(issue) = simple_list_issue(&step.tools, 0, 8, 80) {
+            return Some(format!("执行步骤 {position} 引用的 Tool {issue}"));
+        }
+        if step.agents.len() + step.tools.len() > 4 {
+            return Some(format!(
+                "执行步骤 {position} 引用的 Agent 与 Tool 总数不能超过 4 个"
+            ));
+        }
+    }
+    None
 }
 
 fn valid_skill_description(description: &CreationSkillDescription) -> bool {
@@ -546,7 +815,7 @@ fn valid_execution_steps(steps: &[CreationSkillExecutionStep]) -> bool {
                 valid_identifier(&step.id)
                     && valid_text(&step.title, 1, 80)
                     && valid_text(&step.objective, 1, 500)
-                    && valid_text(&step.output, 1, 240)
+                    && valid_text(&step.output, 0, 240)
                     && valid_string_list(&step.agents, 0, 8, 80)
                     && valid_string_list(&step.skills, 0, 8, 80)
                     && valid_string_list(&step.tools, 0, 8, 80)
@@ -720,113 +989,6 @@ fn frontmatter_value(content: &str, key: &str) -> Option<String> {
     None
 }
 
-fn contains_private_skill_marker(skill: &UpsertCreationSkill) -> bool {
-    let values = [
-        skill.title.as_str(),
-        skill.summary.as_str(),
-        skill.title_style.as_str(),
-        skill.text_style.as_str(),
-        skill.diagram_style.as_str(),
-        skill.example_document.as_str(),
-        skill.section_headings.common_titles.as_str(),
-        skill.section_headings.title_style.as_str(),
-        skill.section_headings.text_style.as_str(),
-        skill.section_headings.diagram_style.as_str(),
-        skill.section_headings.structure_pattern.as_str(),
-        skill.section_headings.writing_guidelines.as_str(),
-    ]
-    .into_iter()
-    .chain(skill.common_titles.iter().map(String::as_str))
-    .chain(skill.structure_pattern.iter().map(String::as_str))
-    .chain(skill.writing_guidelines.iter().map(String::as_str))
-    .chain(std::iter::once(skill.skill_description.purpose.as_str()))
-    .chain(
-        skill
-            .skill_description
-            .document_types
-            .iter()
-            .map(String::as_str),
-    )
-    .chain(skill.skill_description.problems.iter().map(String::as_str))
-    .chain(skill.skill_description.domains.iter().map(String::as_str))
-    .chain(
-        skill
-            .skill_description
-            .deliverables
-            .iter()
-            .map(String::as_str),
-    )
-    .chain(skill.execution_steps.iter().flat_map(|step| {
-        [
-            step.title.as_str(),
-            step.objective.as_str(),
-            step.output.as_str(),
-        ]
-    }))
-    .chain(skill.distinctive_sections.iter().flat_map(|section| {
-        [
-            section.title.as_str(),
-            section.description.as_str(),
-            section.guidance.as_str(),
-        ]
-        .into_iter()
-        .chain(section.examples.iter().map(String::as_str))
-    }))
-    .chain(
-        skill
-            .field_examples
-            .common_titles
-            .iter()
-            .map(String::as_str),
-    )
-    .chain(skill.field_examples.title_style.iter().map(String::as_str))
-    .chain(skill.field_examples.text_style.iter().map(String::as_str))
-    .chain(
-        skill
-            .field_examples
-            .diagram_style
-            .iter()
-            .map(String::as_str),
-    )
-    .chain(
-        skill
-            .field_examples
-            .structure_pattern
-            .iter()
-            .map(String::as_str),
-    )
-    .chain(
-        skill
-            .field_examples
-            .writing_guidelines
-            .iter()
-            .map(String::as_str),
-    );
-    values.into_iter().any(|value| {
-        contains_named_private_marker(value) || value.chars().any(|ch| ch.is_ascii_digit())
-    })
-}
-
-fn contains_named_private_marker(value: &str) -> bool {
-    if value.contains("有限责任公司") || value.contains("股份有限公司") {
-        return true;
-    }
-    const MARKERS: &[&str] = &["事业群", "事业部", "研发中心", "产品部", "项目组", "工作组"];
-    const GENERIC_PREFIXES: &[&str] = &[
-        "跨", "多", "多个", "各", "相关", "某", "示例", "通用", "不同", "该", "由", "与", "和",
-        "及", "为", "在", "向", "对", "于",
-    ];
-    MARKERS.iter().any(|marker| {
-        value.match_indices(marker).any(|(index, _)| {
-            let prefix = value[..index].trim_end();
-            !prefix.is_empty()
-                && !GENERIC_PREFIXES
-                    .iter()
-                    .any(|generic| prefix.ends_with(generic))
-        })
-    })
-}
-
 fn validate_source(source_kind: &str, source_id: &str) -> Result<(), ApiError> {
     if !matches!(source_kind, "creation_history" | "bake_document") {
         return Err(ApiError::BadRequest("技能来源类型不受支持".into()));
@@ -840,7 +1002,7 @@ fn validate_source(source_kind: &str, source_id: &str) -> Result<(), ApiError> {
 fn validate_persisted_source(source_kind: &str, source_id: &str) -> Result<(), ApiError> {
     if !matches!(
         source_kind,
-        "creation_history" | "bake_document" | "market" | "imported"
+        "creation_history" | "bake_document" | "market" | "imported" | "manual"
     ) {
         return Err(ApiError::BadRequest("技能来源类型不受支持".into()));
     }
@@ -857,7 +1019,6 @@ fn validate_analysis(analysis: &CreationSkillAnalysis) -> Result<(), ApiError> {
         || analysis.title_style.trim().is_empty()
         || analysis.text_style.trim().is_empty()
         || analysis.diagram_style.trim().is_empty()
-        || analysis.structure_pattern.is_empty()
         || !valid_distinctive_sections(&analysis.distinctive_sections)
         || !valid_skill_description(&analysis.skill_description)
         || !valid_execution_steps(&analysis.execution_steps)
@@ -870,11 +1031,6 @@ fn validate_analysis(analysis: &CreationSkillAnalysis) -> Result<(), ApiError> {
         || analysis.section_headings.diagram_style.trim().is_empty()
         || analysis
             .section_headings
-            .structure_pattern
-            .trim()
-            .is_empty()
-        || analysis
-            .section_headings
             .writing_guidelines
             .trim()
             .is_empty()
@@ -882,7 +1038,6 @@ fn validate_analysis(analysis: &CreationSkillAnalysis) -> Result<(), ApiError> {
         || analysis.field_examples.title_style.is_empty()
         || analysis.field_examples.text_style.is_empty()
         || analysis.field_examples.diagram_style.is_empty()
-        || analysis.field_examples.structure_pattern.is_empty()
         || analysis.field_examples.writing_guidelines.is_empty()
         || analysis.example_document.trim().chars().count() < 100
     {
@@ -938,7 +1093,6 @@ mod tests {
             "title_style": "标题直接说明章节角色。",
             "text_style": "先界定范围，再说明方案与验证。",
             "diagram_style": "仅在关系复杂时使用流程图。",
-            "structure_pattern": ["背景与目标", "方案设计", "验证与验收"],
             "section_headings": CreationSkillSectionHeadings::default(),
             "field_examples": CreationSkillFieldExamples::default(),
             "example_document": "示例正文".repeat(30),
@@ -1024,6 +1178,7 @@ mod tests {
         assert!(validate_source("market", "3").is_err());
         assert!(validate_source("capture", "3").is_err());
         assert!(validate_persisted_source("market", "3").is_ok());
+        assert!(validate_persisted_source("manual", "manual-1").is_ok());
     }
 
     #[test]
@@ -1040,6 +1195,7 @@ mod tests {
             ],
             skills: vec![],
             tools: vec!["memory_search".into(), "internet_search".into()],
+            retain_webpage_screenshot: true,
         };
         assert!(!valid_execution_steps(&[step.clone()]));
         step.agents.pop();
@@ -1060,7 +1216,6 @@ mod tests {
             title_style: "结论先行。".into(),
             text_style: "正式、克制。".into(),
             diagram_style: "标注系统边界。".into(),
-            structure_pattern: vec!["背景".into(), "方案".into()],
             writing_guidelines: vec![],
             distinctive_sections: vec![],
             section_headings: CreationSkillSectionHeadings::default(),
@@ -1091,7 +1246,6 @@ mod tests {
             title_style: "Follow SKILL.md.".into(),
             text_style: "Follow SKILL.md.".into(),
             diagram_style: "Follow SKILL.md.".into(),
-            structure_pattern: vec!["Read SKILL.md".into()],
             writing_guidelines: vec!["Follow the package instructions.".into()],
             distinctive_sections: vec![CreationSkillDistinctiveSection {
                 title: "Definition first".into(),

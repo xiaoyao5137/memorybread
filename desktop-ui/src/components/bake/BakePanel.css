@@ -702,20 +702,45 @@ button.bake-list-item.bake-list-item--active {
   .bake-split-list-detail > .bake-memory-list-card,
   .bake-split-list-detail > .bake-knowledge-list-card,
   .bake-split-list-detail > .bake-capture-list-card {
-    align-self: stretch;
+    align-self: start;
     display: flex;
     flex-direction: column;
-    height: 100%;
+    height: auto;
   }
 
   .bake-split-list-detail > .bake-memory-list-card > .bake-list,
   .bake-split-list-detail > .bake-knowledge-list-card > .bake-list,
   .bake-split-list-detail > .bake-capture-list-card > .bake-list {
-    flex: 1 1 0;
-    min-height: min(68vh, 760px);
-    max-height: none;
+    flex: 0 1 auto;
+    min-height: 0;
+    max-height: min(68vh, 760px);
     grid-auto-rows: max-content;
     align-content: start;
+  }
+}
+
+/* 采集记录页：列表与详情各自固定高度并独立滚动，
+   避免切换选中时详情高度变化带动列表容器高度变化，导致列表滚动锚点跳动 */
+.bake-split-list-detail--capture {
+  align-items: start;
+}
+
+.bake-split-list-detail--capture > .bake-capture-detail-card {
+  width: 100%;
+  max-height: calc(min(68vh, 760px) + 150px);
+  overflow-y: auto;
+}
+
+@media (min-width: 769px) {
+  .bake-split-list-detail--capture > .bake-capture-list-card {
+    align-self: start;
+    height: auto;
+  }
+
+  .bake-split-list-detail--capture > .bake-capture-list-card > .bake-list {
+    flex: 0 1 auto;
+    min-height: 0;
+    max-height: min(68vh, 760px);
   }
 }
 
@@ -793,8 +818,15 @@ button.bake-list-item.bake-list-item--active {
 }
 
 .bake-memory-detail__action-copy {
-  display: grid;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+.bake-memory-detail__action-copy .bake-btn {
+  min-width: 96px;
+  max-width: 100%;
 }
 
 .bake-memory-detail__stats {
@@ -1081,13 +1113,27 @@ button.bake-list-item.bake-list-item--active {
   gap: 8px;
 }
 
-.bake-memory-package-report span {
+.bake-memory-package-report span,
+.bake-memory-package-report button {
   padding: 6px 9px;
   border-radius: 999px;
   background: rgba(191, 122, 58, 0.1);
   color: #6f3e17;
   font-size: 12px;
   font-weight: 600;
+}
+
+.bake-memory-package-report button {
+  border: 1px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+}
+
+.bake-memory-package-report button:hover {
+  border-color: rgba(191, 122, 58, 0.32);
+  background: rgba(191, 122, 58, 0.16);
 }
 
 .bake-stat-chip--button {
@@ -1395,6 +1441,16 @@ button.bake-list-item.bake-list-item--active {
   min-width: 76px;
 }
 
+.bake-pagination .bake-btn--compact {
+  min-height: 34px;
+}
+
+.bake-pagination .bake-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+  background: #F8F9FB;
+}
+
 .bake-pagination__right {
   margin-left: auto;
   flex-wrap: wrap;
@@ -1402,7 +1458,27 @@ button.bake-list-item.bake-list-item--active {
 }
 
 .bake-pagination__field {
+  position: relative;
   white-space: nowrap;
+}
+
+.bake-pagination__field::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: 13px;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid #6E6E73;
+  border-bottom: 1.5px solid #6E6E73;
+  pointer-events: none;
+  transform: translateY(-68%) rotate(45deg);
+  transition: border-color 160ms ease;
+}
+
+.bake-pagination__field:hover::after,
+.bake-pagination__field:focus-within::after {
+  border-color: #007AFF;
 }
 
 .bake-pagination__summary-group {
@@ -1419,11 +1495,62 @@ button.bake-list-item.bake-list-item--active {
 
 .bake-pagination__select {
   width: 92px;
+  height: 34px;
+  padding: 0 30px 0 12px;
+  appearance: none;
+  -webkit-appearance: none;
+  border-color: rgba(0, 0, 0, 0.1);
+  background: #F8F9FB;
+  color: #1F2937;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.78), 0 1px 2px rgba(17, 24, 39, 0.04);
+  transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
 }
 
 .bake-pagination__input {
   width: 72px;
+  height: 34px;
+  padding: 0 10px;
+  appearance: textfield;
+  -moz-appearance: textfield;
+  border-color: rgba(0, 0, 0, 0.1);
+  background: #FFFFFF;
+  color: #1F2937;
   text-align: center;
+  font-size: 12px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  box-shadow: inset 0 1px 2px rgba(17, 24, 39, 0.04);
+  transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+}
+
+.bake-pagination__input::-webkit-inner-spin-button,
+.bake-pagination__input::-webkit-outer-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+
+.bake-pagination__input::placeholder {
+  color: #9CA3AF;
+  opacity: 1;
+}
+
+.bake-pagination__select:hover,
+.bake-pagination__input:hover {
+  border-color: rgba(0, 122, 255, 0.34);
+  background-color: #FFFFFF;
+}
+
+.bake-pagination__select:focus-visible,
+.bake-pagination__input:focus-visible {
+  outline: none;
+  border-color: #007AFF;
+  background-color: #FFFFFF;
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.18);
 }
 
 .bake-capture-detail__text,
@@ -1579,7 +1706,8 @@ button.bake-list-item.bake-list-item--active {
 
 .bake-data-table {
   width: 100%;
-  min-width: 620px;
+  max-width: 100%;
+  table-layout: auto;
   border-collapse: collapse;
   color: #1F2937;
   font-size: 12px;
@@ -1592,6 +1720,7 @@ button.bake-list-item.bake-list-item--active {
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
   text-align: left;
   vertical-align: top;
+  overflow-wrap: anywhere;
 }
 
 .bake-data-table thead th {
@@ -1602,7 +1731,6 @@ button.bake-list-item.bake-list-item--active {
   font-size: 10px;
   font-weight: 750;
   letter-spacing: 0.03em;
-  white-space: nowrap;
 }
 
 .bake-data-table tbody th {
@@ -1619,7 +1747,6 @@ button.bake-list-item.bake-list-item--active {
   color: #A15C19;
   font-variant-numeric: tabular-nums;
   font-weight: 800;
-  white-space: nowrap;
 }
 
 .bake-data-table-note {
@@ -1730,8 +1857,27 @@ button.bake-list-item.bake-list-item--active {
   align-items: stretch;
 }
 
+.bake-capture-detail__meta-grid--single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .bake-capture-detail__meta-card {
   min-width: 0;
+}
+
+.bake-capture-detail__debug-card {
+  display: grid;
+  gap: 12px;
+}
+
+.bake-capture-detail__debug-section {
+  display: grid;
+  gap: 4px;
+}
+
+.bake-capture-detail__debug-section + .bake-capture-detail__debug-section {
+  padding-top: 12px;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
 }
 
 .bake-capture-detail__type-stack {
@@ -1765,6 +1911,7 @@ button.bake-list-item.bake-list-item--active {
 .bake-capture-detail__screenshot-image {
   width: 100%;
   max-height: min(52vh, 560px);
+  aspect-ratio: 16 / 10;
   object-fit: contain;
   border-radius: 12px;
   border: 1px solid rgba(0, 0, 0, 0.08);
@@ -2035,16 +2182,22 @@ button.bake-list-item.bake-list-item--active {
     justify-content: space-between;
   }
 
-  .bake-pagination__select,
-  .bake-pagination__input {
-    width: 100%;
+  .bake-pagination__select {
+    width: min(100%, 180px);
   }
 
-  .bake-actions,
-  .bake-actions--primary,
-  .bake-actions--secondary,
-  .bake-memory-detail__action-copy {
-    grid-template-columns: 1fr;
+  .bake-pagination__jump .bake-pagination__input {
+    min-width: 0;
+    width: auto;
+    flex: 1 1 96px;
+  }
+
+  .bake-pagination__controls .bake-btn {
+    flex: 1 1 0;
+  }
+
+  .bake-pagination__jump .bake-btn {
+    min-width: 64px;
   }
 }
 
@@ -2232,8 +2385,13 @@ button.bake-list-item.bake-list-item--active {
   .bake-section-title,
   .bake-list-item__title,
   .bake-stat-value,
-  .bake-kv__title {
+  .bake-kv__title,
+  .bake-capture-detail__type-primary {
     color: #F3F4F6;
+  }
+
+  .bake-capture-detail__debug-section + .bake-capture-detail__debug-section {
+    border-top-color: rgba(255, 255, 255, 0.08);
   }
 
   .bake-subtitle,
@@ -2303,6 +2461,37 @@ button.bake-list-item.bake-list-item--active {
     background: #2C2C2E;
     color: #F3F4F6;
     border-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .bake-pagination__field::after {
+    border-color: #A1A1AA;
+  }
+
+  .bake-pagination__field:hover::after,
+  .bake-pagination__field:focus-within::after {
+    border-color: #0A84FF;
+  }
+
+  .bake-pagination__select,
+  .bake-pagination__input,
+  .bake-pagination .bake-btn:disabled {
+    background: #232326;
+    border-color: rgba(255, 255, 255, 0.1);
+    color: #F3F4F6;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 1px 2px rgba(0, 0, 0, 0.18);
+  }
+
+  .bake-pagination__select:hover,
+  .bake-pagination__input:hover,
+  .bake-pagination__select:focus-visible,
+  .bake-pagination__input:focus-visible {
+    background-color: #2C2C2E;
+    border-color: rgba(10, 132, 255, 0.6);
+  }
+
+  .bake-pagination__select:focus-visible,
+  .bake-pagination__input:focus-visible {
+    box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.22);
   }
 
   .bake-memory-package-card .bake-btn--primary {

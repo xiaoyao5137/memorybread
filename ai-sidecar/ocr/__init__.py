@@ -9,11 +9,24 @@ ai-sidecar OCR 模块
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 from .engine          import OcrEngine
-from .worker          import OcrWorker
 from .backends.base   import OcrBackend, OcrBox, OcrOutput
 from .backends.paddle import PaddleBackend
 from .backends.vision import AppleVisionBackend
+
+if TYPE_CHECKING:
+    from .worker import OcrWorker
+
+
+def __getattr__(name: str) -> Any:
+    """按需加载 IPC Worker，避免纯 OCR 调用被 IPC 运行时依赖阻断。"""
+    if name == "OcrWorker":
+        from .worker import OcrWorker
+
+        return OcrWorker
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "OcrEngine",

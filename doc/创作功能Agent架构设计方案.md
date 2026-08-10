@@ -11,9 +11,9 @@
 - 创作 Agent 维护目标、验收条件、环境、动态计划和执行游标；
 - 数据分析、行业调研、方案设计、章节设计、文档撰写、质量审校和五类专项润色 Agent 各自只负责一个专业结果；
 - 记忆搜索、互联网检索、数据检索与网页爬取 Tool 为 Agent 提供可追溯证据；
-- 已安装的技能同时提供触发描述、执行工作流和风格指纹；首个命中 Skill 的有序步骤可以编排受控 Agent、已启用 Tool 和本轮协同 Skill；
+- 已安装的技能同时提供触发描述、执行工作流和风格指纹；命中 Skill 的有序步骤可以编排其明确声明的受控 Agent、已启用 Tool 和本轮协同 Skill；
 - 每次 Agent、Tool、Skill 完成后都会把结果写回环境、递增目标修订号，再由创作 Agent 执行或插入下一步；
-- 初稿前先由章节设计 Agent 生成章节蓝图；初稿后质量审校输出结构化问题，Harness 按问题动态追加依赖、专项润色与再次质检，最多自动优化三轮；
+- 没有明确 Skill 时，初稿前先由章节设计 Agent 生成章节蓝图，初稿后质量审校输出结构化问题，Harness 按问题动态追加依赖、专项润色与再次质检，最多自动优化三轮；明确 Skill 时只执行 Skill 步骤中声明的 Agent/Tool，`data_search` 命中实时报表时仅补齐同一步的 `webpage_scrape` 采集依赖；
 - 会话把首轮完整要求固化为 `root_request`；客户端遗漏上下文时，Core 也会按 `session_id` 从本地历史恢复原始需求、最近文档和对话；
 - 后续“补充、修改、删除”会先形成可解释的编辑意图，再由 Writer 在完整文档上下文中判断所有受影响位置；目标章节只是线索，目录、摘要、编号、交叉引用、方案、计划、风险和验收可在同一轮联动修订；
 - 修订完成后由 Sidecar 计算逐行差异，Patch 同时记录新增、修改、删除的章节与行号，页面据此标出本轮改动；
@@ -117,16 +117,16 @@ flowchart LR
 | 数据分析 Agent | 数据型文档，或指令包含数据、指标、分析、统计、趋势、成本或收益 | 数据检索与网页刷新结果、目标、资料、现有文档 | `data_analysis` | 核对口径、周期、采集时间和 `can_use`，给出结论与证据缺口，不编造数字 |
 | 行业调研 Agent | 开启互联网检索或任务需要最新信息 | Web Tool 结果、目标 | `industry_research` | 结论保留来源 URL，标出待核验信息 |
 | 方案设计 Agent | 指令或文档类型包含方案、架构、PRD、设计、规划、建设 | 约束、参考、分析、Skill | `solution_design` | 明确边界、关键决策、组件、步骤、风险和验证 |
-| 章节设计 Agent | 首次创作，位于首个 Writer 之前 | 目标、读者、文档类型、证据、Skill | `chapter_design` | 每章包含目的、问题、证据、形式和完成标准 |
-| 文档撰写 Agent | 每轮必选 | 原始需求、编辑意图、完整现有文档、分析结论 | `document` 和 `last_document_patch` | 首轮输出完整 Markdown；后续输出联动修订后的完整 Markdown |
-| 质量审校 Agent | 每次文档完成后必选 | 文档、修订基线、目标和验收条件 | `quality_review`、`quality_issues` | 输出布尔指标、问题代码、目标 Agent、证据和依赖能力 |
+| 章节设计 Agent | 通用首次创作，或明确 Skill 的步骤显式声明 | 目标、读者、文档类型、证据、Skill | `chapter_design` | 每章包含目的、问题、证据、形式和完成标准 |
+| 文档撰写 Agent | 通用创作每轮必选；明确 Skill 仅在步骤显式声明时调用 | 原始需求、编辑意图、完整现有文档、分析结论 | `document` 和 `last_document_patch` | 首轮输出完整 Markdown；后续输出联动修订后的完整 Markdown |
+| 质量审校 Agent | 通用创作文档完成后必选；明确 Skill 仅在步骤显式声明时调用 | 文档、修订基线、目标和验收条件 | `quality_review`、`quality_issues` | 输出布尔指标、问题代码、目标 Agent、证据和依赖能力 |
 | 去 AI 味 Agent | 命中模板词、机械衔接、装饰性引号或长句堆叠 | 完整文档、风格信号、Skill 语气 | 完整 Markdown 与 Patch | 表达自然且事实、来源、语义强度不变 |
 | 细节润色 Agent | 章节过短、存在占位或观点缺少依据与动作 | 完整文档、短章节、证据与分析 | 完整 Markdown 与 Patch | 补齐对象、边界、依据、动作、结果或验证 |
 | 表格润色 Agent | 表格结构损坏，或比较型内容缺少表格 | 完整文档、表格问题 | 完整 Markdown 与 Patch | 输出列数一致的标准 Markdown 表格 |
 | 字体润色 Agent | 长文没有重点，或粗体覆盖过多 | 完整文档、强调密度 | 完整 Markdown 与 Patch | 只对关键结论、数字、风险和行动项使用 `**重点**` |
 | 图片润色 Agent | 架构、流程、状态或时序关系缺少图示 | 完整文档、PlantUML 约束 | 完整 Markdown 与 Patch | 输出正文已有对象组成的 PlantUML 或 Mermaid 代码图 |
 
-质量审校不再只给“通过/失败”。每个问题都声明 `code`、`severity`、`agent_id`、`evidence` 和 `required_capabilities`。Harness 先动态激活匹配的已应用 Skill，再补齐 Tool/Agent 依赖，随后按内容与形式顺序调用专项 Agent，最后再次质检。Skill 激活会产生可观察的 `skill.completed` 事件，并把能力标签、问题代码和质量轮次写回环境。自动质量优化最多三轮；正文缺失、结构缺失或修订无差异只允许一次 Writer 重试；全局仍以 64 步防止失控循环。
+通用创作链路的质量审校不再只给“通过/失败”。每个问题都声明 `code`、`severity`、`agent_id`、`evidence` 和 `required_capabilities`。Harness 再补齐 Tool/Agent 依赖，随后按内容与形式顺序调用专项 Agent，最后再次质检。明确 Skill 的链路不执行这套动态补齐，除非 Skill 步骤本身声明对应 Agent/Tool；`data_search` 命中实时报表后的 `webpage_scrape` 是取得当前快照的受控采集依赖，不视为通用质量链路扩展。自动质量优化最多三轮；正文缺失、结构缺失或修订无差异只允许一次 Writer 重试；全局仍以 64 步防止失控循环。
 
 ### 4.2 为什么保留确定性创作 Agent
 
@@ -203,10 +203,10 @@ ToolResult {
 
 1. 用户通过 `@Skill` 显式选择或客户端自动匹配的已安装 Skill 进入 `selected_skills`；
    - 自动匹配同时比较 `skill_description` 的能力目标、文档类型、问题、领域和交付物，不再只依赖标题与简介；
-2. 创作 Agent 再依据用户本轮要求和文档类型匹配一个最相关的内置模板 Skill；
+2. 存在已安装 Skill 时不再叠加隐式内置模板；只有没有明确 Skill 时才可按用户要求和文档类型匹配一个内置模板；
 3. 按 Skill ID 去重，当前单轮最多使用 4 个 Skill；
-4. Skill 完成后，把能力描述、执行步骤、结构、规则、简介和来源写入 `applied_skills`；
-5. 文档撰写 Agent 读取所有已应用 Skill，但事实内容仍必须来自用户、现有文档或 Tool 证据。
+4. Skill 完成后，把能力描述、执行步骤、写作规则、简介和来源写入 `applied_skills`；
+5. Skill 声明文档撰写 Agent 时由它读取已应用 Skill；否则由创作 Agent 完成每个步骤并组装文档。事实内容仍必须来自用户、现有文档或 Tool 证据。
 
 ### 6.4 可执行 Skill 工作流
 
@@ -224,16 +224,16 @@ SkillExecutionStep {
 }
 ```
 
-Creation Agent 只使用首个命中 Skill 作为主工作流，避免多个完整工作流相互交叉。规划规则如下：
+明确 Skill 的工作流按提交顺序执行，且不会与通用创作链路混合。规划规则如下：
 
 1. 客户端先从主 Skill 的 `skills[]` 引用解析本机已安装 Skill，连同显式选择/自动命中的 Skill 一起提交；运行时再把它们写入环境，使风格和协同 Skill 在专业分析前可见；
 2. 按主工作流的声明顺序遍历步骤，跳过未知 Agent/Tool；
 3. Tool 只有同时位于步骤声明和用户 `enabled_tools` 中才会进入计划；
 4. 步骤目标、预期产出和协同 Skill 会随计划项进入检索查询或专业 Agent 提示；
 5. 同一步内的重复资源去重，但同一 Agent/Tool 可以在不同步骤再次执行，以支持“初查 → 复核”等真实流程；
-6. 没有 Agent/Tool 的逻辑步骤仍生成可观察的 Skill 步骤事件，并把目标、产出和协同 Skill 写回环境；
-7. 若工作流没有文档撰写或质量审校，运行时自动追加收口步骤；首次创作还会把章节设计 Agent 统一放在首个 Writer 之前；
-8. 没有 `execution_steps` 的旧 Skill 继续使用原有意图启发式计划。
+6. 没有 Agent/Tool 的逻辑步骤由创作 Agent 自己执行，生成可观察的步骤结果，并按 Skill 顺序组装成 Markdown；
+7. 运行时不自动追加章节设计、文档撰写、质量审校、专项润色、路由模型推荐或数据分析 Agent；只有步骤显式声明的子 Agent 才会触发。步骤声明的 `data_search` 命中实时报表时，可在同一步追加 `webpage_scrape` 采集依赖；
+8. 没有 `execution_steps` 的明确 Skill 由创作 Agent 单独执行，不进入通用启发式子 Agent 计划。
 
 因此 Skill 本身仍不绕过 Creation Agent 直接执行模型或访问网络；它声明的是可审计的计划配方，真正执行仍受能力注册表、用户开关、每步资源上限、全局六十四步上限和现有事件协议约束。
 
@@ -367,7 +367,8 @@ while cursor < plan.length and steps < 64:
 | 指令或文档类型包含方案、架构、PRD、设计、规划、建设 | 方案设计 Agent |
 | 命中已安装 Skill | 对应市场/个人 Skill |
 | 命中内置模板触发词 | 得分最高的模板 Skill |
-| 首次创作 | 创作 Agent；首个文档撰写 Agent 前强制加入章节设计 Agent；文档完成后加入质量审校 Agent |
+| 通用首次创作（无明确 Skill） | 创作 Agent；首个文档撰写 Agent 前加入章节设计 Agent；文档完成后加入质量审校 Agent |
+| 明确 Skill | 严格按 `execution_steps` 调用声明的 Tool/Agent；`data_search` 命中实时报表时同一步补充 `webpage_scrape`；未声明资源的步骤由创作 Agent 执行并组装 |
 | 质检发现正文或结构硬失败 | 最多一次文档撰写 Agent，再次质量审校 |
 | 质检发现章节细节不足 | 细节润色 Agent；数据型问题可先追加数据检索或数据分析 |
 | 质检发现表格缺失或损坏 | 表格润色 Agent |
@@ -484,8 +485,8 @@ sequenceDiagram
 1. 用户输入目标，可附加文件并通过 `@` 选择 Skill；
 2. 点击“开始创作”；
 3. 页面逐条展示 Agent、Tool、Skill 执行情况；
-4. 章节设计 Agent 先写入章节蓝图，文档撰写 Agent 再流式生成或完整替换初稿；
-5. 质量审校把可执行问题交回 Harness，按需完成专项润色并再次质检；
+4. 通用创作由章节设计 Agent 先写入章节蓝图，再由文档撰写 Agent 生成初稿；明确 Skill 则严格依序执行内部步骤；
+5. 通用创作的质量审校把可执行问题交回 Harness，按需完成专项润色并再次质检；明确 Skill 只有内部步骤声明质量 Agent 时才执行审校；
 6. 通过或达到循环预算后保存会话、文档、轨迹、目标和参考资料。
 
 ### 11.2 后续轮次

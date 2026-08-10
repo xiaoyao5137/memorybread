@@ -1,15 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
-import { AtSign, Bot, Check, ChevronDown, ChevronRight, CloudOff, CloudUpload, Copy, ExternalLink, Eye, FileText, Image, Library, Loader2, MessageSquarePlus, PackageCheck, PackagePlus, Paperclip, Pencil, Search, Send, Sparkles, Square, Store, Trash2, Upload, Wrench, X } from 'lucide-react'
+import { AtSign, Bot, Check, ChevronDown, ChevronRight, CloudOff, CloudUpload, Copy, ExternalLink, Eye, FileCode2, FileText, Image, Library, Loader2, MessageSquarePlus, PackageCheck, PackagePlus, Paperclip, Pencil, Plus, Search, Send, Sparkles, Square, Store, Trash2, Upload, Wrench, X } from 'lucide-react'
 import { serviceEnvironmentHeaders, useAppStore } from '../store/useAppStore'
 import type { CreationAgentEvent, CreationChatMessage, CreationDataReferenceItem, CreationReferenceItem, CreationReferencePreview } from '../store/useAppStore'
 import { fetchWithLocalhostFallback } from '../hooks/useApi'
 import { useImeCompositionGuard } from '../hooks/useImeCompositionGuard'
+import { MentionHighlightTextarea } from './MentionHighlightField'
 import { getUserDisplayName } from '../utils/accountDisplay'
 import { fetchBillingBalance } from '../utils/authApi'
+import { createOptionalCloudRequestSignal, optionalCloudIsReachable } from '../utils/optionalCloud'
 import { CREATION_MODEL_DEFS, LOCAL_CREATION_MODEL_ID, REMOTE_CREATION_MODEL_ID, canUseRemoteCreationModel, getEffectiveCreationModelId, getModelDisplayName } from '../utils/modelSelection'
 import { buildAttachmentMetadata, buildAttachmentPrompt, filesToAttachments, formatAttachmentSize, type UserAttachment } from '../utils/attachments'
-import { toUserFacingError } from '../utils/userFacingError'
+import { toLocalApiError, toUserFacingError } from '../utils/userFacingError'
 import {
   buildCreationSkillInstruction,
   categoryPathFor,
@@ -42,11 +44,13 @@ import CreationSkillDetail, {
 import CreationToolsPanel from './CreationToolsPanel'
 import { HistoryPagination, HistorySearch } from './HistoryBrowserControls'
 import {
+  creationToolResultLimits,
   enabledCreationToolIds,
   loadCreationTools,
   saveCreationTools,
   setCreationToolEnabled,
   setCreationToolInstalled,
+  setCreationToolResultLimit,
   type CreationToolId,
 } from '../utils/creationTools'
 import type { DataSnapshot, DataSource } from '../types'
@@ -123,14 +127,6 @@ const defaultPrompt = '请生成一份“数据治理平台建设方案”，参
 const HISTORY_PAGE_SIZE = 20
 const SKILL_MARKET_PAGE_SIZE = 18
 const MAX_CONVERSATION_MESSAGES = 60
-const DOCUMENT_MUTATION_AGENT_IDS = new Set([
-  'document_writer_agent',
-  'anti_ai_style_agent',
-  'detail_polish_agent',
-  'table_polish_agent',
-  'typography_polish_agent',
-  'image_polish_agent',
-])
 
 const intentOperationForRun = (
   events: CreationAgentEvent[],
@@ -371,17 +367,39 @@ const normalizeDataReferences = (value: unknown): CreationDataReferenceItem[] =>
       freshness_class: String(source.freshness_class || ''),
       refresh_required: source.refresh_required === true,
       can_use: source.can_use !== false,
+      ...(source.evidence_status
+        ? { evidence_status: String(source.evidence_status) }
+        : {}),
+      ...(source.evidence_reason
+        ? { evidence_reason: String(source.evidence_reason) }
+        : {}),
+      ...(source.unavailable_reason
+        ? { unavailable_reason: String(source.unavailable_reason) }
+        : {}),
     }]
   })
 }
 
+const isDataReferenceEvent = (event: CreationAgentEvent) => (
+  event.type === 'tool.completed'
+  && ['data_search', 'webpage_scrape'].includes(event.actor?.id || '')
+  && Array.isArray(event.environment_patch?.data_sources)
+)
+
+const mergeDataReferences = (
+  ...referenceGroups: CreationDataReferenceItem[][]
+): CreationDataReferenceItem[] => {
+  const referencesBySourceId = new Map<number, CreationDataReferenceItem>()
+  referenceGroups.forEach(references => {
+    references.forEach(reference => referencesBySourceId.set(reference.source_id, reference))
+  })
+  return [...referencesBySourceId.values()]
+}
+
 const dataReferencesFromEvents = (events: CreationAgentEvent[]) => {
-  const latest = [...events].reverse().find(event => (
-    event.type === 'tool.completed'
-    && event.actor?.id === 'data_search'
-    && Array.isArray(event.environment_patch?.data_sources)
-  ))
-  return normalizeDataReferences(latest?.environment_patch?.data_sources)
+  return mergeDataReferences(...events
+    .filter(isDataReferenceEvent)
+    .map(event => normalizeDataReferences(event.environment_patch?.data_sources)))
 }
 
 interface DataMetricRow {
@@ -770,6 +788,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const [skillEditor, setSkillEditor] = useState<{ source?: CreationSkillSource; initialSkill?: LocalCreationSkill } | null>(null)
   const [skillDetail, setSkillDetail] = useState<CreationSkillDetailData | null>(null)
   const [skillDetailMarketItem, setSkillDetailMarketItem] = useState<CreationSkillMarketItem | null>(null)
+  const [skillDetailFocusFiles, setSkillDetailFocusFiles] = useState(false)
   const [skillPendingDelete, setSkillPendingDelete] = useState<LocalCreationSkill | null>(null)
   const [deletingSkillId, setDeletingSkillId] = useState<number | null>(null)
   const [uploadingSkillPackage, setUploadingSkillPackage] = useState(false)
@@ -800,6 +819,10 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     () => enabledCreationToolIds(creationTools),
     [creationTools],
   )
+  const toolResultLimits = useMemo(
+    () => creationToolResultLimits(creationTools),
+    [creationTools],
+  )
   const memorySearchEnabled = enabledToolIds.includes('memory_search')
   const internetSearchEnabled = enabledToolIds.includes('internet_search')
 
@@ -819,6 +842,10 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
 
   const handleToggleTool = (id: CreationToolId, enabled: boolean) => {
     updateCreationTools(current => setCreationToolEnabled(current, id, enabled))
+  }
+
+  const handleToolResultLimitChange = (id: CreationToolId, resultLimit: number) => {
+    updateCreationTools(current => setCreationToolResultLimit(current, id, resultLimit))
   }
 
   const startTimer = () => {
@@ -1116,7 +1143,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       setLocalSkills(await listLocalCreationSkills(apiBaseUrl))
     } catch (err) {
       setLocalSkills([])
-      setSkillsError(toUserFacingError(err, '技能加载失败'))
+      setSkillsError(toLocalApiError(err, '技能加载失败'))
     } finally {
       setSkillsLoading(false)
     }
@@ -1175,19 +1202,6 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     return () => { cancelled = true }
   }, [apiBaseUrl, currentDocumentSource])
 
-  const openCurrentDocumentSkill = () => {
-    if (!generatedContent.trim()) return
-    setSkillEditor({
-      source: currentDocumentSource || {
-        kind: 'creation_history',
-        id: `unsaved-${Date.now()}`,
-        title: prompt.trim() || docType || '创作文档',
-        content: generatedContent,
-        docType,
-      },
-    })
-  }
-
   const handleSkillSaved = (skill: LocalCreationSkill) => {
     setLocalSkills(prev => [skill, ...prev.filter(item => item.id !== skill.id)])
     if (currentDocumentSource?.kind === skill.sourceKind && currentDocumentSource.id === skill.sourceId) {
@@ -1208,7 +1222,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       setSkillLibraryView('mine')
       showLocalSkillDetail(saved)
     } catch (err) {
-      setSkillsError(toUserFacingError(err, '上传技能包失败'))
+      setSkillsError(toLocalApiError(err, '上传技能包失败'))
     } finally {
       setUploadingSkillPackage(false)
     }
@@ -1225,13 +1239,17 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       const saved = await saveLocalCreationSkill(apiBaseUrl, { ...input, installed: !skill.installed }, id)
       handleSkillSaved(saved)
     } catch (err) {
-      setSkillsError(toUserFacingError(err, skill.installed ? '卸载技能失败' : '安装技能失败'))
+      setSkillsError(toLocalApiError(err, skill.installed ? '卸载技能失败' : '安装技能失败'))
     }
   }
 
   const handlePublishSkill = async (skill: LocalCreationSkill, published: boolean) => {
     if (skill.status !== 'saved') {
       setSkillsError('请先打开草稿并保存技能，再发布到市场。')
+      return
+    }
+    if (published && !skill.categoryId) {
+      setSkillsError('技能当前为“私有”类目，请先编辑技能并选择非私有的创作类目，再发布到市场。')
       return
     }
     if (!authToken || !currentUser) {
@@ -1288,24 +1306,27 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     }
   }
 
-  const showLocalSkillDetail = (skill: LocalCreationSkill) => {
+  const showLocalSkillDetail = (skill: LocalCreationSkill, focusFiles = false) => {
     const path = categoryPathFor(OFFLINE_CREATION_SKILL_CATEGORIES, skill.categoryId)
       .map(item => item.name)
     setSkillDetailMarketItem(null)
     setSkillDetail(localSkillDetail(skill, path))
+    setSkillDetailFocusFiles(focusFiles)
   }
 
-  const showMarketSkillDetail = (skill: CreationSkillMarketItem) => {
+  const showMarketSkillDetail = (skill: CreationSkillMarketItem, focusFiles = false) => {
     const installed = localSkills.some(item =>
       item.cloudSkillId === skill.id && item.installed,
     )
     setSkillDetailMarketItem(skill)
     setSkillDetail(marketSkillDetail(skill, installed))
+    setSkillDetailFocusFiles(focusFiles)
   }
 
   const closeSkillDetail = useCallback(() => {
     setSkillDetail(null)
     setSkillDetailMarketItem(null)
+    setSkillDetailFocusFiles(false)
   }, [])
 
   useEffect(() => {
@@ -1336,7 +1357,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       setCurrentDocumentSkills(prev => prev.filter(item => item.id !== skill.id))
       setSkillPendingDelete(null)
     } catch (err) {
-      setSkillsError(toUserFacingError(err, '删除技能失败'))
+      setSkillsError(toLocalApiError(err, '删除技能失败'))
     } finally {
       setDeletingSkillId(null)
     }
@@ -1383,7 +1404,9 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const handlePromptChange = (value: string, caret: number | null) => {
     setPrompt(value)
     const beforeCaret = value.slice(0, caret ?? value.length)
-    const mention = beforeCaret.match(/@([^@\n]{0,48})$/)
+    // 查询词不允许空白：选中技能后插入的文本带尾随空格，若正则允许空白，
+    // 已完成的 @提及会被误判为进行中的查询，导致继续打字时选择器反复弹出。
+    const mention = beforeCaret.match(/@([^\s@\n]{0,48})$/)
     setSkillPickerOpen(Boolean(mention))
     setSkillQuery(mention?.[1] || '')
   }
@@ -1392,9 +1415,11 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     const textarea = promptInputRef.current
     const caret = textarea?.selectionStart ?? prompt.length
     const beforeCaret = prompt.slice(0, caret)
-    const mentionStart = beforeCaret.lastIndexOf('@')
-    const nextPrompt = `${mentionStart >= 0 ? beforeCaret.slice(0, mentionStart) : beforeCaret}@${skill.title} ${prompt.slice(caret)}`
-    const nextCaret = (mentionStart >= 0 ? mentionStart : beforeCaret.length) + skill.title.length + 2
+    // 与触发正则保持一致：只回溯不含空白的查询段，避免误吞正文里的其它 @。
+    const mentionMatch = beforeCaret.match(/@([^\s@\n]{0,48})$/)
+    const mentionStart = mentionMatch ? beforeCaret.length - mentionMatch[0].length : beforeCaret.length
+    const nextPrompt = `${beforeCaret.slice(0, mentionStart)}@${skill.title} ${prompt.slice(caret)}`
+    const nextCaret = mentionStart + skill.title.length + 2
     setPrompt(nextPrompt)
     setSkillPickerOpen(false)
     setSkillQuery('')
@@ -1428,14 +1453,32 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       return
     }
     let cancelled = false
-    fetchBillingBalance(adminApiBaseUrl, authToken)
-      .then(balance => {
+    let refreshing = false
+    const lifecycleController = new AbortController()
+    const refreshBalance = async () => {
+      if (cancelled || refreshing || !optionalCloudIsReachable()) return
+      refreshing = true
+      const request = createOptionalCloudRequestSignal(lifecycleController.signal)
+      try {
+        const balance = await fetchBillingBalance(adminApiBaseUrl, authToken, request.signal)
         if (!cancelled) setCloudBalance(balance)
-      })
-      .catch(() => {
+      } catch {
         if (!cancelled) setCloudBalance(null)
-      })
-    return () => { cancelled = true }
+      } finally {
+        request.dispose()
+        refreshing = false
+      }
+    }
+    const useLocalModelOffline = () => setCloudBalance(null)
+    void refreshBalance()
+    window.addEventListener('online', refreshBalance)
+    window.addEventListener('offline', useLocalModelOffline)
+    return () => {
+      cancelled = true
+      lifecycleController.abort()
+      window.removeEventListener('online', refreshBalance)
+      window.removeEventListener('offline', useLocalModelOffline)
+    }
   }, [adminApiBaseUrl, authToken, currentUser, setCloudBalance])
 
   useEffect(() => {
@@ -1467,7 +1510,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       usage_weight: usageWeight / 100,
       format_weight: formatWeight / 100,
       freshness_weight: freshnessWeight / 100,
-      max_references: 6,
+      max_references: toolResultLimits.memorySearch,
+      data_search_limit: toolResultLimits.dataSearch,
       attachments: buildAttachmentMetadata(attachments),
       ...(activeCreationModelId === LOCAL_CREATION_MODEL_ID && activeModel ? {
         creation_model: LOCAL_CREATION_MODEL_ID,
@@ -1629,13 +1673,11 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     titleDesignStyle: skill.commonTitles,
     writingDesign: skill.textStyle,
     imageGeneration: skill.diagramStyle,
-    structurePattern: skill.structurePattern,
     voiceStyle: skill.writingGuidelines,
     fieldExamples: {
       titleDesignStyle: skill.fieldExamples.commonTitles,
       writingDesign: skill.fieldExamples.textStyle,
       imageGeneration: skill.fieldExamples.diagramStyle,
-      structurePattern: skill.fieldExamples.structurePattern,
       voiceStyle: skill.fieldExamples.writingGuidelines,
     },
     exampleDocument: skill.exampleDocument,
@@ -1727,13 +1769,6 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
         data: { evidence: event.data?.evidence },
       }
     }
-    if (event.type === 'tool.completed' && event.actor?.id === 'data_search') {
-      setDataReferences(normalizeDataReferences(event.environment_patch?.data_sources))
-    }
-    if (event.type === 'tool.completed' && event.actor?.id === 'data_search') {
-      setLegacyDataReferencesRecovered(false)
-      setDataReferences(normalizeDataReferences(event.environment_patch?.data_sources))
-    }
     if (event.type === 'run.completed') {
       return {
         ...base,
@@ -1758,7 +1793,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       return { ...base, data: { previews } }
     }
     if (event.type === 'tool.completed' || event.type === 'tool.failed') {
-      const dataSources = event.type === 'tool.completed' && event.actor?.id === 'data_search'
+      const dataSources = isDataReferenceEvent(event)
         ? normalizeDataReferences(event.environment_patch?.data_sources)
         : []
       return {
@@ -1851,7 +1886,9 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     }
     if (
       event.type === 'agent.started'
-      && DOCUMENT_MUTATION_AGENT_IDS.has(String(event.actor?.id || ''))
+      // 润色类 Agent 只是局部重写相关细节，完成后以 document.patch.applied 局部生效；
+      // 不清空已展示文档，避免用户误以为整篇在重新生成。
+      && event.actor?.id === 'document_writer_agent'
     ) {
       phase.document = ''
     }
@@ -1881,6 +1918,14 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     if (event.type === 'intent.interpreted') {
       const restoredRoot = String(event.data?.root_request || '').trim()
       if (restoredRoot) setRootRequest(restoredRoot)
+    }
+    if (isDataReferenceEvent(event)) {
+      setLegacyDataReferencesRecovered(false)
+      const currentReferences = useAppStore.getState().creationDraft.dataReferences
+      setDataReferences(mergeDataReferences(
+        currentReferences,
+        normalizeDataReferences(event.environment_patch?.data_sources),
+      ))
     }
     if (event.type === 'model.request') {
       const messages = event.data?.messages
@@ -2068,7 +2113,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       ))
     const intentOperation = intentOperationForRun(state.agentEvents, latestCompletedRunId)
     const isInitialCreation = intentOperation === 'create_document'
-    const documentPatch = !isInitialCreation && latestDocumentEvent?.type === 'document.patch.applied'
+    const documentPatch = latestDocumentEvent?.type === 'document.patch.applied'
       ? latestDocumentEvent.data?.patch
       : null
     const editOperation = String(
@@ -2422,12 +2467,14 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   )
   const canDisplayLatestMutation = latestRunCompleted
     || (!isGenerating && !latestRunHasLifecycle)
-  const latestDocumentMutation = canDisplayLatestMutation && !latestRunIsInitialCreation
+  // 首版创作 run 内的润色 patch 也展示局部改动；仅排除首版的整篇 document.replaced。
+  const latestDocumentMutation = canDisplayLatestMutation
     ? [...agentEvents]
       .reverse()
       .find(item => (
         ['document.patch.applied', 'document.replaced'].includes(item.type)
         && (!latestAgentRunId || item.run_id === latestAgentRunId)
+        && !(latestRunIsInitialCreation && item.type === 'document.replaced')
       ))
     : undefined
   const latestDocumentPatch = latestDocumentMutation?.type === 'document.patch.applied'
@@ -2594,19 +2641,6 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                       </span>
                       <span className="creation-history__preview">{item.preview}</span>
                     </button>
-                    <button
-                      className="creation-history__skill-action"
-                      type="button"
-                      onClick={() => setSkillEditor({ source: {
-                        kind: 'creation_history',
-                        id: String(item.id),
-                        title: item.prompt,
-                        content: item.fullContent,
-                        docType: item.docType,
-                      } })}
-                    >
-                      <Sparkles size={14} /> 沉淀技能
-                    </button>
                   </article>
                 ))}
               </div>
@@ -2653,6 +2687,13 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
               </div>
               {skillLibraryView === 'mine' && (
                 <>
+                  <button
+                    type="button"
+                    onClick={() => setSkillEditor({})}
+                    title="手工录入一份新技能"
+                  >
+                    <Plus size={14} /> 新建技能
+                  </button>
                   <input
                     ref={skillPackageInputRef}
                     className="creation-skill-package-input"
@@ -2717,7 +2758,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
               {skillsLoading && localSkills.length === 0 ? (
                 <div className="history-browser__state"><Loader2 className="spin" size={17} /> 正在加载技能…</div>
               ) : localSkills.length === 0 ? (
-                <div className="creation-skill-library__empty"><Library size={32} /><strong>还没有技能</strong><span>可以从创作记录沉淀、上传 Codex 技能包，或去市场安装一份。</span><button type="button" onClick={() => setSkillLibraryView('market')}>浏览技能市场</button></div>
+                <div className="creation-skill-library__empty"><Library size={32} /><strong>还没有技能</strong><span>可以手工新建、上传 Codex 技能包，或去市场安装一份。</span><div className="creation-skill-library__empty-actions"><button type="button" onClick={() => setSkillEditor({})}>新建技能</button><button type="button" onClick={() => setSkillLibraryView('market')}>浏览技能市场</button></div></div>
               ) : (
                 <div className="creation-skill-library__grid">
                   {localSkills.map(skill => {
@@ -2727,7 +2768,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                       <article key={skill.id}>
                         <div className="creation-skill-library__status-row">
                           <div className="creation-skill-library__status">
-                            {fromMarket ? '来自市场' : imported ? '手工上传' : skill.published ? '已发布' : skill.status === 'draft' ? '草稿' : '已保存'}
+                            {fromMarket ? '来自市场' : imported ? '手工上传' : skill.sourceKind === 'manual' ? '手工新建' : skill.published ? '已发布' : skill.status === 'draft' ? '草稿' : '已保存'}
                           </div>
                           <span className={skill.installed ? 'is-installed' : ''}>{skill.installed ? '已安装' : '未安装'}</span>
                         </div>
@@ -2742,7 +2783,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                         <div className="creation-skill-library__meta">
                           {imported
                             ? `${skill.packageFiles?.length || 0} 个文件 · Codex 兼容`
-                            : `${skill.commonTitles.length} 个标题 · ${skill.structurePattern.length} 个章节`}
+                            : `${skill.executionSteps.length} 个步骤 · ${skill.commonTitles.length} 个标题规则`}
                         </div>
                         <footer className={fromMarket ? 'is-compact' : ''}>
                           <button
@@ -2757,6 +2798,13 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                           </button>
                           <button type="button" onClick={() => showLocalSkillDetail(skill)}>
                             <Eye size={14} /> 查看详情
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => showLocalSkillDetail(skill, true)}
+                            title="查看这份技能的源文件"
+                          >
+                            <FileCode2 size={14} /> 源文件
                           </button>
                           {!fromMarket && !imported && (
                             <>
@@ -2835,6 +2883,13 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                             </button>
                             <button
                               type="button"
+                              onClick={() => showMarketSkillDetail(skill, true)}
+                              title="查看这份技能的源文件"
+                            >
+                              <FileCode2 size={14} /> 源文件
+                            </button>
+                            <button
+                              type="button"
                               className={installed ? 'is-installed' : ''}
                               disabled={installingMarketSkillId === skill.id}
                               onClick={() => void handleInstallMarketSkill(skill)}
@@ -2881,6 +2936,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
           onInstall={handleInstallTool}
           onUninstall={handleUninstallTool}
           onToggle={handleToggleTool}
+          onResultLimitChange={handleToolResultLimitChange}
         />
       ) : (
         <main
@@ -2979,9 +3035,10 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
               </div>
             )}
             <div className="creation-prompt-skill-shell">
-              <textarea
+              <MentionHighlightTextarea
                 ref={promptInputRef}
                 value={prompt}
+                mentionLabels={installedSkills.map(skill => skill.title)}
                 onChange={(event) => handlePromptChange(event.target.value, event.target.selectionStart)}
                 onCompositionStart={promptImeGuard.onCompositionStart}
                 onCompositionEnd={promptImeGuard.onCompositionEnd}
@@ -3158,9 +3215,6 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                   <button onClick={handleCopy} disabled={!generatedContent} style={compactButtonStyle}>
                     <Copy size={15} />
                     {copySuccess ? '已复制' : '复制'}
-                  </button>
-                  <button onClick={openCurrentDocumentSkill} disabled={!generatedContent || isGenerating} style={compactButtonStyle}>
-                    <Sparkles size={15} /> 沉淀技能
                   </button>
                 </div>
               </div>
@@ -3346,6 +3400,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
         <CreationSkillDetail
           skill={skillDetail}
           onClose={closeSkillDetail}
+          focusFiles={skillDetailFocusFiles}
           primaryAction={skillDetailMarketItem
             ? {
               label: skillDetail.installed ? '卸载技能' : '安装技能',
@@ -3451,6 +3506,7 @@ const harnessDecisionReasonLabels: Record<string, string> = {
   quality_gate_passed: '质量要求已满足',
   quality_cycle_budget_exhausted: '已达到自动优化上限',
   quality_issues_detected: '发现可继续优化的问题',
+  quality_issues_deferred: '已尝试自动修复但仍有遗留，保留当前版本',
   hard_failure_retry_exhausted: '完整文档重试后仍有阻断问题',
 }
 
@@ -3524,16 +3580,20 @@ const AgentExecutionTrace = ({
                     className={`creation-agent-event is-${displayStatus}`}
                     key={group.key}
                   >
-                    <span className={`creation-agent-event__icon is-${actorEvent.actor?.kind || 'agent'}`}>
-                      {displayStatus === 'running'
-                        ? <Loader2 size={13} className="spin" />
-                        : displayStatus === 'completed'
+                    <span
+                      className={`creation-agent-event__icon is-${actorEvent.actor?.kind || 'agent'}`}
+                      aria-hidden="true"
+                    >
+                      {displayStatus === 'completed'
                           ? <Check size={13} />
                           : actorEvent.actor?.kind === 'tool'
                             ? <Wrench size={13} />
                             : actorEvent.actor?.kind === 'skill'
                               ? <Sparkles size={13} />
                               : <Bot size={13} />}
+                      {displayStatus === 'running' && (
+                        <span className="creation-agent-event__activity" />
+                      )}
                     </span>
                     <span>
                       <strong>
@@ -3682,12 +3742,18 @@ const BrowserPreviewCard = ({
     : status === 'failed'
       ? '采集未完成'
       : status === 'rejected'
-        ? '证据待核验'
+        ? '证据未通过'
         : '后台采集中'
 
   return (
     <figure className={`creation-browser-preview is-${status}`}>
-      <div className="creation-browser-preview__viewport">
+      <a
+        className="creation-browser-preview__viewport"
+        href={imageUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        title={isRunning ? '查看当前页面画面' : '打开完整网页长截图'}
+      >
         {!loaded && (
           <span className="creation-browser-preview__loading">
             {isRunning ? <Loader2 size={15} className="spin" /> : <Eye size={15} />}
@@ -3702,12 +3768,12 @@ const BrowserPreviewCard = ({
           className={loaded ? 'is-loaded' : ''}
         />
         <span className="creation-browser-preview__live">{statusLabel}</span>
-      </div>
+      </a>
       <figcaption>
         <strong>{preview.title || '实时数据页面'}</strong>
         <span>
           {preview.browser ? `${preview.browser} · ` : ''}
-          不切换前台窗口
+          {status === 'completed' ? '完整长图 · 点击查看' : '不切换前台窗口'}
         </span>
       </figcaption>
     </figure>
@@ -4004,11 +4070,21 @@ const dataSourceKindLabels: Record<string, string> = {
 }
 
 const dataFreshnessLabels: Record<string, string> = {
-  fresh: '当前可用',
   recent: '近期数据',
   stale: '建议刷新',
   historical: '历史数据',
   missing: '待采集',
+  unverified: '证据未通过',
+  superseded: '已由即时数据替代',
+}
+
+const dataEvidenceReasonLabels: Record<string, string> = {
+  ocr_failed: '截图文字识别失败',
+  no_verified_metric: '截图中未识别到可核验指标',
+  dom_ocr_mismatch: '页面数据与截图文字不一致',
+  screenshot_missing: '未生成证据截图',
+  screenshot_unreadable: '证据截图无法读取',
+  evidence_missing: '缺少可核验的页面证据',
 }
 
 const DataReferenceRow = ({
@@ -4022,6 +4098,24 @@ const DataReferenceRow = ({
 }) => {
   const snapshot = source?.latest_snapshot
   const presentation = snapshot ? presentDataSnapshot(snapshot) : null
+  const evidenceUnavailable = ['rejected', 'failed'].includes(item.evidence_status || '')
+  const superseded = item.unavailable_reason === 'superseded_by_live_report'
+  const availabilityLabel = item.can_use
+    ? ''
+    : superseded
+      ? '已被即时数据替代'
+      : evidenceUnavailable
+        ? '证据未通过'
+        : '暂不可用'
+  const freshnessLabel = superseded
+    ? '已由本轮即时报表替代'
+    : evidenceUnavailable
+      ? item.evidence_status === 'failed' ? '即时采集失败' : '已采集，证据未通过'
+      : item.refresh_required
+        ? '需要刷新'
+        : item.freshness_class === 'fresh'
+          ? ''
+          : dataFreshnessLabels[item.freshness_class] || item.freshness_class || '时效未知'
 
   return (
     <article className="creation-data-reference-row">
@@ -4030,15 +4124,18 @@ const DataReferenceRow = ({
           <span>数据来源 #{item.source_id}</span>
           <strong>{source?.title || item.title}</strong>
         </div>
-        <span className={item.can_use ? 'is-available' : 'is-unavailable'}>
-          {item.can_use ? '可用于创作' : '暂不可用'}
-        </span>
+        {availabilityLabel && <span className="is-unavailable">{availabilityLabel}</span>}
       </div>
       <div className="creation-data-reference-row__meta">
         <span>{dataSourceKindLabels[item.source_kind] || item.source_kind || '数据来源'}</span>
-        <span>{item.refresh_required ? '需要刷新' : dataFreshnessLabels[item.freshness_class] || item.freshness_class || '时效未知'}</span>
+        {freshnessLabel && <span>{freshnessLabel}</span>}
         {snapshot && <span>数据时间 {formatDataTimestamp(snapshot.observed_at ?? snapshot.collected_at)}</span>}
       </div>
+      {evidenceUnavailable && (
+        <div className="creation-data-reference-row__state">
+          {dataEvidenceReasonLabels[item.evidence_reason || ''] || '本次页面证据没有通过校验'}，该快照不会用于本轮创作。
+        </div>
+      )}
       {loading ? (
         <div className="creation-data-reference-row__state">正在读取具体数据…</div>
       ) : presentation && snapshot ? (

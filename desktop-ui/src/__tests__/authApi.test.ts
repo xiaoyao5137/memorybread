@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   authenticateWithPassword,
+  confirmPasswordReset,
   completeCloudSnapshotUpload,
   fetchCloudDevices,
   fetchCloudMessages,
   fetchCloudSnapshots,
   markAllCloudMessagesRead,
   markCloudMessageRead,
+  sendEmailVerificationCode,
+  sendPasswordResetCode,
   upsertCloudDevice,
   updateUserProfile,
 } from '../utils/authApi'
@@ -53,6 +56,8 @@ describe('cloud device and snapshot API', () => {
       ' 烘焙师土豆 ',
       ' 土豆 ',
       ' 记忆面包科技 ',
+      '019c2c7e-706e-7a91-a61a-cd2a582cbb51',
+      ' 123456 ',
     )
 
     expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:8080/v1/auth/register', {
@@ -67,7 +72,82 @@ describe('cloud device and snapshot API', () => {
         username: '烘焙师土豆',
         nickname: '土豆',
         company_name: '记忆面包科技',
+        email_verification: {
+          challenge_id: '019c2c7e-706e-7a91-a61a-cd2a582cbb51',
+          code: '123456',
+        },
       }),
+    })
+  })
+
+  it('requests an email registration challenge with the selected environment', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
+      data: {
+        challenge_id: '019c2c7e-706e-7a91-a61a-cd2a582cbb51',
+        retry_after_seconds: 60,
+        expires_in_seconds: 600,
+      },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(sendEmailVerificationCode(
+      'http://127.0.0.1:8080',
+      'xiaomai@example.com',
+    )).resolves.toMatchObject({ retry_after_seconds: 60, expires_in_seconds: 600 })
+
+    expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:8080/v1/auth/email/send-code', {
+      method: 'POST',
+      headers: {
+        'X-MemoryBread-Environment': 'production',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ email: 'xiaomai@example.com' }),
+    })
+  })
+
+  it('sends and confirms a password reset with the selected environment', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        data: {
+          challenge_id: '019c2c7e-706e-7a91-a61a-cd2a582cbb61',
+          retry_after_seconds: 60,
+          expires_in_seconds: 600,
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse({ data: { ok: true } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const challenge = await sendPasswordResetCode(
+      'http://127.0.0.1:8080',
+      'phone',
+      '13800138000',
+    )
+    await expect(confirmPasswordReset('http://127.0.0.1:8080', {
+      challenge_id: challenge.challenge_id,
+      channel: 'phone',
+      identifier: '13800138000',
+      code: '123456',
+      new_password: 'MemoryBread@2026!',
+    })).resolves.toEqual({ ok: true })
+
+    expect(fetchMock.mock.calls[0]).toEqual([
+      'http://127.0.0.1:8080/v1/auth/password-reset/send-code',
+      {
+        method: 'POST',
+        headers: {
+          'X-MemoryBread-Environment': 'production',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ channel: 'phone', identifier: '13800138000' }),
+      },
+    ])
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('http://127.0.0.1:8080/v1/auth/password-reset/confirm')
+    expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))).toEqual({
+      challenge_id: challenge.challenge_id,
+      channel: 'phone',
+      identifier: '13800138000',
+      code: '123456',
+      new_password: 'MemoryBread@2026!',
     })
   })
 

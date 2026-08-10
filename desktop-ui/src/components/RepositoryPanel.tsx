@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { Network } from 'lucide-react'
 import {
   useDeleteBakeCapture,
   useDeleteBakeMemory,
+  useFetchDataSources,
   useFetchBakeMemory,
   useFetchBakeMemories,
   useFetchBakeCaptureDetail,
@@ -24,14 +26,27 @@ import type {
   SopCandidate,
   TimelineItem,
 } from '../types'
-import BakeCaptureTab, { parseDateInputToMs } from './bake/BakeCaptureTab'
+import BakeCaptureTab, { captureNeedsTextRefresh, parseDateInputToMs } from './bake/BakeCaptureTab'
 import BakeHeader from './bake/BakeHeader'
+import BakeMemoryGraph from './bake/BakeMemoryGraph'
+import type { MemoryGraphAssets } from './bake/memoryGraph'
 import { BakeButton, BakeCard, BakePill, BakeSectionHeader } from './bake/BakeShared'
 import './bake/BakePanel.css'
 
 const getFallbackOffsetAfterRemoval = (currentCount: number, offset: number, limit: number) => (
   currentCount <= 1 && offset > 0 ? Math.max(0, offset - limit) : offset
 )
+
+const CAPTURE_TEXT_REFRESH_INTERVAL_MS = 2_000
+const GRAPH_ASSET_LIMIT = 100
+
+const emptyGraphAssets: MemoryGraphAssets = {
+  knowledge: [],
+  documents: [],
+  operations: [],
+  data: [],
+  totals: {},
+}
 
 type PendingDeletion = {
   kind: 'memory' | 'capture'
@@ -109,6 +124,7 @@ const RepositoryPanel: React.FC = () => {
   const fetchKnowledgeDetail = useFetchBakeKnowledgeDetail()
   const fetchSops = useFetchBakeSops()
   const fetchSop = useFetchBakeSop()
+  const fetchDataSources = useFetchDataSources()
   const [memories, setMemories] = useState<TimelineItem[]>([])
   const [memoryTotal, setMemoryTotal] = useState(0)
   const [captureItems, setCaptureItems] = useState<BakeCaptureItem[]>([])
@@ -131,6 +147,11 @@ const RepositoryPanel: React.FC = () => {
   const [draftCaptureTo, setDraftCaptureTo] = useState(repositoryCaptureTo)
   const [pendingDeletion, setPendingDeletion] = useState<PendingDeletion | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
+  const [graphOpen, setGraphOpen] = useState(false)
+  const [graphAssets, setGraphAssets] = useState<MemoryGraphAssets>(emptyGraphAssets)
+  const [graphLoading, setGraphLoading] = useState(false)
+  const [graphError, setGraphError] = useState<string | null>(null)
+  const [graphRevision, setGraphRevision] = useState(0)
   const memoryRequestSeqRef = useRef(0)
   const captureRequestSeqRef = useRef(0)
 
@@ -246,9 +267,37 @@ const RepositoryPanel: React.FC = () => {
       setCaptureDetail(null)
       return
     }
-    void fetchCaptureDetail(selectedCaptureId).then(setCaptureDetail).catch((error) => {
-      setStatusMessage(toUserFacingError(error, '采集记录详情加载失败'))
-    })
+
+    let cancelled = false
+    let refreshTimer: number | null = null
+    let isInitialRequest = true
+
+    const loadCaptureDetail = async () => {
+      try {
+        const item = await fetchCaptureDetail(selectedCaptureId)
+        if (cancelled) return
+
+        setCaptureDetail(item)
+        if (captureNeedsTextRefresh(item)) {
+          refreshTimer = window.setTimeout(() => {
+            refreshTimer = null
+            void loadCaptureDetail()
+          }, CAPTURE_TEXT_REFRESH_INTERVAL_MS)
+        }
+      } catch (error) {
+        if (!cancelled && isInitialRequest) {
+          setStatusMessage(toUserFacingError(error, '采集记录详情加载失败'))
+        }
+      } finally {
+        isInitialRequest = false
+      }
+    }
+
+    void loadCaptureDetail()
+    return () => {
+      cancelled = true
+      if (refreshTimer != null) window.clearTimeout(refreshTimer)
+    }
   }, [fetchCaptureDetail, repositoryTab, selectedCaptureId])
 
   useEffect(() => {
@@ -269,6 +318,43 @@ const RepositoryPanel: React.FC = () => {
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [isDeleting, pendingDeletion])
+
+  useEffect(() => {
+    if (!graphOpen || repositoryTab !== 'memory') return
+    let cancelled = false
+    setGraphLoading(true)
+    setGraphError(null)
+
+    void Promise.allSettled([
+      fetchKnowledge({ sort: 'heat', limit: GRAPH_ASSET_LIMIT, offset: 0 }),
+      fetchTemplates({ limit: GRAPH_ASSET_LIMIT, offset: 0 }),
+      fetchSops({ limit: GRAPH_ASSET_LIMIT, offset: 0 }),
+      fetchDataSources({ limit: GRAPH_ASSET_LIMIT, offset: 0 }),
+    ]).then(([knowledgeResult, templatesResult, sopsResult, dataResult]) => {
+      if (cancelled) return
+      const failedRequests = [knowledgeResult, templatesResult, sopsResult, dataResult]
+        .filter(result => result.status === 'rejected').length
+      setGraphAssets({
+        knowledge: knowledgeResult.status === 'fulfilled' ? knowledgeResult.value.items : [],
+        documents: templatesResult.status === 'fulfilled' ? templatesResult.value.items : [],
+        operations: sopsResult.status === 'fulfilled' ? sopsResult.value.items : [],
+        data: dataResult.status === 'fulfilled' ? dataResult.value.items : [],
+        totals: {
+          knowledge: knowledgeResult.status === 'fulfilled' ? knowledgeResult.value.total : 0,
+          document: templatesResult.status === 'fulfilled' ? templatesResult.value.total : 0,
+          operation: sopsResult.status === 'fulfilled' ? sopsResult.value.total : 0,
+          data: dataResult.status === 'fulfilled' ? dataResult.value.total : 0,
+        },
+      })
+      if (failedRequests === 4) setGraphError('本地资产暂时无法读取，请稍后重新加载。')
+    }).catch(() => {
+      if (!cancelled) setGraphError('本地资产暂时无法读取，请稍后重新加载。')
+    }).finally(() => {
+      if (!cancelled) setGraphLoading(false)
+    })
+
+    return () => { cancelled = true }
+  }, [fetchDataSources, fetchKnowledge, fetchSops, fetchTemplates, graphOpen, graphRevision, repositoryTab])
 
   useEffect(() => {
     setDraftMemoryQuery(repositoryMemoryQuery)
@@ -621,76 +707,89 @@ const RepositoryPanel: React.FC = () => {
         </div>
       )}
       {statusMessage && <div className="bake-inline-message">{statusMessage}</div>}
-      <section className="bake-tabs bake-tabs--scroll">
-        {tabs.map(tab => (
-          <BakeButton key={tab.key} active={repositoryTab === tab.key} onClick={() => handleRepositoryTabChange(tab.key)}>
-            {tab.label}
-          </BakeButton>
-        ))}
-      </section>
-
-      {repositoryTab === 'memory' && (
-        <>
-          <form
-            className="bake-list-toolbar bake-list-toolbar--repository"
-            onSubmit={(event) => {
-              event.preventDefault()
-              handleSearchMemories()
-            }}
+      <div className="bake-tabs-shell">
+        <section className="bake-tabs bake-tabs--scroll">
+          {tabs.map(tab => (
+            <BakeButton key={tab.key} active={repositoryTab === tab.key} onClick={() => handleRepositoryTabChange(tab.key)}>
+              {tab.label}
+            </BakeButton>
+          ))}
+        </section>
+        {repositoryTab === 'memory' && (
+          <button
+            type="button"
+            className="bake-graph-toggle"
+            aria-pressed={graphOpen}
+            aria-label={graphOpen ? '关闭记忆图谱' : '展开记忆图谱'}
+            onClick={() => setGraphOpen(current => !current)}
           >
-            <div className="bake-list-toolbar__repository">
-              <div className="bake-list-toolbar__repository-row bake-list-toolbar__repository-row--search">
-                <label className="bake-form-field bake-filter-field bake-filter-field--search">
-                  <span className="bake-filter-label">关键词</span>
-                  <input
-                    className="bake-input"
-                    value={draftMemoryQuery}
-                    onChange={(event) => setDraftMemoryQuery(event.target.value)}
-                    placeholder="搜索时间线标题、摘要或详情"
-                  />
-                </label>
-                <div className="bake-list-toolbar__repository-actions bake-list-toolbar__repository-actions--search">
-                  <BakeButton compact primary type="submit">搜索</BakeButton>
+            <Network size={15} />
+            <span>记忆图谱</span>
+          </button>
+        )}
+      </div>
+
+      <div className={`bake-graph-workspace ${graphOpen && repositoryTab === 'memory' ? 'bake-graph-workspace--open' : ''}`.trim()}>
+        <div className="bake-tab-content">
+        {repositoryTab === 'memory' && (
+          <>
+            <form
+              className="bake-list-toolbar bake-list-toolbar--repository"
+              onSubmit={(event) => {
+                event.preventDefault()
+                handleSearchMemories()
+              }}
+            >
+              <div className="bake-list-toolbar__repository">
+                <div className="bake-list-toolbar__repository-row bake-list-toolbar__repository-row--search">
+                  <label className="bake-form-field bake-filter-field bake-filter-field--search">
+                    <span className="bake-filter-label">关键词</span>
+                    <input
+                      className="bake-input"
+                      value={draftMemoryQuery}
+                      onChange={(event) => setDraftMemoryQuery(event.target.value)}
+                      placeholder="搜索时间线标题、摘要或详情"
+                    />
+                  </label>
+                  <div className="bake-list-toolbar__repository-actions bake-list-toolbar__repository-actions--search">
+                    <BakeButton compact primary type="submit">搜索</BakeButton>
+                  </div>
+                </div>
+                <div className="bake-list-toolbar__repository-row bake-list-toolbar__repository-row--dates">
+                  <label className="bake-form-field bake-filter-field">
+                    <span className="bake-filter-label">开始日期</span>
+                    <input
+                      className="bake-input"
+                      type="date"
+                      value={draftMemoryFrom}
+                      onChange={(event) => setDraftMemoryFrom(event.target.value)}
+                    />
+                  </label>
+                  <label className="bake-form-field bake-filter-field">
+                    <span className="bake-filter-label">结束日期</span>
+                    <input
+                      className="bake-input"
+                      type="date"
+                      value={draftMemoryTo}
+                      onChange={(event) => setDraftMemoryTo(event.target.value)}
+                    />
+                  </label>
+                  <div className="bake-list-toolbar__repository-actions bake-list-toolbar__repository-actions--secondary">
+                    {(draftMemoryQuery || draftMemoryFrom || draftMemoryTo || repositoryMemoryQuery || repositoryMemoryFrom || repositoryMemoryTo || repositoryMemoryFocusId) && (
+                      <BakeButton compact onClick={handleClearMemoryFilters}>清除筛选</BakeButton>
+                    )}
+                  </div>
                 </div>
               </div>
-              <div className="bake-list-toolbar__repository-row bake-list-toolbar__repository-row--dates">
-                <label className="bake-form-field bake-filter-field">
-                  <span className="bake-filter-label">开始日期</span>
-                  <input
-                    className="bake-input"
-                    type="date"
-                    value={draftMemoryFrom}
-                    onChange={(event) => setDraftMemoryFrom(event.target.value)}
-                  />
-                </label>
-                <label className="bake-form-field bake-filter-field">
-                  <span className="bake-filter-label">结束日期</span>
-                  <input
-                    className="bake-input"
-                    type="date"
-                    value={draftMemoryTo}
-                    onChange={(event) => setDraftMemoryTo(event.target.value)}
-                  />
-                </label>
-                <div className="bake-list-toolbar__repository-actions bake-list-toolbar__repository-actions--secondary">
-                  {(draftMemoryQuery || draftMemoryFrom || draftMemoryTo || repositoryMemoryQuery || repositoryMemoryFrom || repositoryMemoryTo || repositoryMemoryFocusId) && (
-                    <BakeButton compact onClick={handleClearMemoryFilters}>清除筛选</BakeButton>
-                  )}
-                </div>
+            </form>
+
+            {memoryFilterPills.length > 0 && (
+              <div className="bake-filter-summary">
+                {memoryFilterPills.map(item => <BakePill key={item} text={item} />)}
               </div>
-            </div>
-          </form>
-
-          {memoryFilterPills.length > 0 && (
-            <div className="bake-filter-summary">
-              {memoryFilterPills.map(item => <BakePill key={item} text={item} />)}
-            </div>
-          )}
-
-        </>
-      )}
-
-      <div className="bake-tab-content">
+            )}
+          </>
+        )}
         {repositoryTab === 'memory' && (
           <div className="bake-split-list-detail bake-split-list-detail--memories-fixed">
             <BakeCard className="bake-memory-list-card bake-memory-list-card--fixed">
@@ -735,6 +834,7 @@ const RepositoryPanel: React.FC = () => {
                         <select
                           className="bake-input bake-pagination__select"
                           value={String(repositoryMemoryLimit)}
+                          aria-label="每页条数"
                           onChange={(event) => setRepositoryMemoryLimit(Number(event.target.value))}
                         >
                           {[10, 20, 50, 100].map(option => (
@@ -752,6 +852,7 @@ const RepositoryPanel: React.FC = () => {
                           value={memoryPageInput}
                           onChange={(event) => setMemoryPageInput(event.target.value)}
                           placeholder={String(memoryPage)}
+                          aria-label="跳转页码"
                         />
                         <span className="bake-muted">页</span>
                         <BakeButton
@@ -803,11 +904,16 @@ const RepositoryPanel: React.FC = () => {
                     const items = segments.length > 0 ? segments.map(seg => {
                       const minDate = new Date(seg.start_ts)
                       const maxDate = new Date(seg.end_ts)
+                      const segmentCaptureIds = seg.capture_ids.length > 0
+                        ? seg.capture_ids
+                        : memoryCaptures
+                          .filter(capture => capture.ts >= seg.start_ts && capture.ts <= seg.end_ts)
+                          .map(capture => capture.id)
                       const itemTimeRange = seg.start_ts === seg.end_ts
                         ? `${minDate.getHours()}:${String(minDate.getMinutes()).padStart(2, '0')}`
                         : `${minDate.getHours()}:${String(minDate.getMinutes()).padStart(2, '0')}-${maxDate.getHours()}:${String(maxDate.getMinutes()).padStart(2, '0')}`
                       return {
-                        ids: seg.capture_ids,
+                        ids: segmentCaptureIds,
                         itemTimeRange,
                         summary: seg.summary
                       }
@@ -967,6 +1073,17 @@ const RepositoryPanel: React.FC = () => {
             onDeleteCapture={(id) => setPendingDeletion({ kind: 'capture', id })}
             canGoBack={Boolean(captureBackTarget)}
             onGoBack={handleCaptureGoBack}
+          />
+        )}
+        </div>
+        {graphOpen && repositoryTab === 'memory' && (
+          <BakeMemoryGraph
+            assets={graphAssets}
+            loading={graphLoading}
+            error={graphError}
+            mode="dock"
+            onClose={() => setGraphOpen(false)}
+            onRetry={() => setGraphRevision(current => current + 1)}
           />
         )}
       </div>

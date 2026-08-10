@@ -6,7 +6,8 @@ use std::time::Duration;
 use memory_bread_core::{
     api::{server::start_server, state::AppState},
     capture::{
-        start_context_watcher, start_listener, CaptureConfig, CaptureEngine, ListenerConfig,
+        start_context_watcher, start_input_signal_listener, start_listener,
+        start_signal_aggregator, CaptureConfig, CaptureEngine, ListenerConfig,
     },
     monitor::{ResourceMonitor, SystemPressureState},
     scheduler::Scheduler,
@@ -97,6 +98,15 @@ async fn run_capture_cleanup_loop(storage: StorageManager) {
             }
         }
 
+        match storage.delete_capture_attempts_before(cutoff) {
+            Ok(deleted) => {
+                tracing::info!(retention_days, deleted, "采集尝试审计自动清理完成");
+            }
+            Err(error) => {
+                tracing::warn!(retention_days, %error, "采集尝试审计自动清理失败");
+            }
+        }
+
         tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
     }
 }
@@ -128,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("启动采集引擎...");
     let capture_config = CaptureConfig::default();
     let (tx, rx) = mpsc::channel(100);
+    let (signal_tx, signal_rx) = mpsc::channel(256);
     let capture_engine = CaptureEngine::new(storage.clone(), capture_config);
 
     // 在后台运行采集引擎
@@ -145,16 +156,38 @@ async fn main() -> anyhow::Result<()> {
     listener_config.interval_secs = interval_secs;
     listener_config.enabled = state.capture_enabled.clone();
     listener_config.system_pressure = system_pressure.clone();
+    listener_config.schedule = state.capture_schedule.clone();
+    listener_config.audit_storage = Some(storage.clone());
     let context_enabled = listener_config.enabled.clone();
     let context_system_pressure = system_pressure.clone();
+    let context_audit_storage = Some(storage.clone());
     let periodic_tx = tx.clone();
+    let aggregated_tx = tx.clone();
 
     tokio::spawn(async move {
         start_listener(listener_config, periodic_tx).await;
     });
 
     tokio::spawn(async move {
-        start_context_watcher(context_enabled, context_system_pressure, tx).await;
+        start_signal_aggregator(signal_rx, aggregated_tx).await;
+    });
+
+    let input_capture_enabled = state.capture_enabled.clone();
+    let keyboard_signal_enabled = state.keyboard_signal_enabled.clone();
+    start_input_signal_listener(
+        input_capture_enabled,
+        keyboard_signal_enabled,
+        signal_tx.clone(),
+    );
+
+    tokio::spawn(async move {
+        start_context_watcher(
+            context_enabled,
+            context_system_pressure,
+            context_audit_storage,
+            signal_tx,
+        )
+        .await;
     });
 
     // 启动资源监控器

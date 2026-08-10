@@ -1995,11 +1995,13 @@ def extract_bake():
                 scope='candidate',
                 status=400,
             )
+        retry_error_code = str(data.get('retry_error_code') or '').strip() or None
         logger.info(
-            "bake extract request start source_timeline_id=%s trigger_reason=%s retry_attempt=%s",
+            "bake extract request start source_timeline_id=%s trigger_reason=%s retry_attempt=%s retry_error_code=%s",
             source_timeline_id,
             trigger_reason,
             retry_attempt,
+            retry_error_code,
         )
         extractor = get_bake_extractor()
         estimated_prompt_tokens = extractor.estimate_bake_bundle_prompt_tokens(candidate)
@@ -2018,6 +2020,7 @@ def extract_bake():
                     candidate,
                     preempt_check=current_task_preempt_requested,
                     retry_attempt=retry_attempt,
+                    retry_error_code=retry_error_code,
                 ),
                 timeout=inference_timeout,
                 lane=LANE_P2_BAKE,

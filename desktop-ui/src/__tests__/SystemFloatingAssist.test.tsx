@@ -14,6 +14,11 @@ import {
   readInteractionSettings,
 } from '../utils/interactionSettings'
 
+const cloudMocks = vi.hoisted(() => ({
+  fetchAchievementProfile: vi.fn(),
+  fetchBillingBalance: vi.fn(),
+}))
+
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn().mockResolvedValue(undefined),
 }))
@@ -29,7 +34,9 @@ vi.mock('../hooks/useApi', () => ({
 }))
 
 vi.mock('../utils/authApi', () => ({
-  fetchBillingBalance: vi.fn().mockResolvedValue(null),
+  ACHIEVEMENTS_CHANGED_KEY: 'memorybread.achievements.changed',
+  fetchAchievementProfile: cloudMocks.fetchAchievementProfile,
+  fetchBillingBalance: cloudMocks.fetchBillingBalance,
 }))
 
 const mockedInvoke = vi.mocked(invoke)
@@ -143,6 +150,7 @@ const installMemoryLocalStorage = () => {
 
 beforeEach(() => {
   vi.useFakeTimers()
+  Object.defineProperty(window.navigator, 'onLine', { configurable: true, value: true })
   Object.defineProperty(window, 'requestAnimationFrame', {
     value: (callback: FrameRequestCallback) => {
       callback(Date.now())
@@ -167,6 +175,10 @@ beforeEach(() => {
     contexts: [],
     output_truncated: false,
   } as any)
+  cloudMocks.fetchAchievementProfile.mockReset()
+  cloudMocks.fetchAchievementProfile.mockResolvedValue({ badges: [], equipped: {} })
+  cloudMocks.fetchBillingBalance.mockReset()
+  cloudMocks.fetchBillingBalance.mockResolvedValue(null)
 })
 
 afterEach(() => {
@@ -177,6 +189,29 @@ afterEach(() => {
 })
 
 describe('SystemFloatingAssist', () => {
+  it('离线启动时直接显示本地悬浮助手且不读取云端账户增强', () => {
+    useAppStore.getState().setAuthSession({
+      access_token: 'mbs_offline_floating_token',
+      expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+      user: {
+        id: 'offline-floating-user',
+        username: '离线悬浮用户',
+        status: 'active',
+        roles: ['user'],
+        locale: 'zh-CN',
+        timezone: 'Asia/Shanghai',
+        created_at: new Date().toISOString(),
+      },
+    })
+    Object.defineProperty(window.navigator, 'onLine', { configurable: true, value: false })
+
+    render(<SystemFloatingAssist />)
+
+    expect(assistButton()).toBeInTheDocument()
+    expect(cloudMocks.fetchBillingBalance).not.toHaveBeenCalled()
+    expect(cloudMocks.fetchAchievementProfile).not.toHaveBeenCalled()
+  })
+
   it('闲置态渲染面包人角色且不再使用旧图片层', () => {
     const { container } = render(<SystemFloatingAssist />)
     const button = assistButton()

@@ -23,7 +23,8 @@ use crate::{
     api::{error::ApiError, state::AppState},
     storage::{
         repo::creation_evidence::NewCreationEvidenceAsset, CreationEvidenceAssetView,
-        DataExtractionSummary, DataSearchResult, DataSourceRecord, StorageError,
+        DataExtractionSummary, DataSearchResult, DataSourceRecord, DiscoveredSourceOutcome,
+        StorageError,
     },
 };
 use uuid::Uuid;
@@ -112,6 +113,24 @@ pub struct ExtractDataRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct RegisterDiscoveredSourceRequest {
+    pub url: String,
+    pub title: Option<String>,
+    pub capture_id: i64,
+    pub timeline_id: Option<i64>,
+    pub observed_at: Option<i64>,
+    pub page_kind: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterDiscoveredSourceResponse {
+    pub status: &'static str,
+    pub reason_code: Option<&'static str>,
+    pub source_id: Option<i64>,
+    pub created: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct DataSearchRequest {
     pub query: String,
     #[serde(default)]
@@ -135,6 +154,9 @@ pub struct RefreshDataSourceRequest {
     pub browser_preference: String,
     #[serde(default)]
     pub capture_evidence: bool,
+    /// 是否额外保留网页截图；缺省开启。关闭时仍使用专用浏览器窗口和 AX/DOM。
+    #[serde(default = "default_true")]
+    pub retain_screenshot: bool,
     #[serde(default)]
     pub run_id: Option<String>,
     #[serde(default)]
@@ -292,6 +314,78 @@ pub async fn extract_data_sources(
     Ok(Json(summary))
 }
 
+/// 注册时间线推理同车输出的数据页面分类（data_report/data_platform）。
+///
+/// sidecar 已做过一轮代码校验（URL 必须真实存在于本组 capture），这里再做
+/// 服务端兜底：类型白名单、capture 存在性与敏感过滤在存储层复核。
+pub async fn register_discovered_source(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<RegisterDiscoveredSourceRequest>,
+) -> Result<Json<RegisterDiscoveredSourceResponse>, ApiError> {
+    let url = body.url.trim().to_string();
+    if url.is_empty() {
+        return Err(ApiError::BadRequest("数据源 URL 不能为空".to_string()));
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(ApiError::BadRequest("仅支持 http/https 数据源".to_string()));
+    }
+    if let Some(kind) = body.page_kind.as_deref() {
+        if !matches!(kind, "data_report" | "data_platform") {
+            return Err(ApiError::BadRequest(
+                "仅接受 data_report/data_platform 类型的数据页面".to_string(),
+            ));
+        }
+    }
+    if body.capture_id <= 0 {
+        return Err(ApiError::BadRequest("capture_id 无效".to_string()));
+    }
+    let storage = state.storage.clone();
+    let title = body.title.unwrap_or_default();
+    let capture_id = body.capture_id;
+    let timeline_id = body.timeline_id;
+    let observed_at = body.observed_at.unwrap_or(0);
+    let outcome = tokio::task::spawn_blocking(move || {
+        storage.register_discovered_report_source(
+            &url,
+            &title,
+            capture_id,
+            timeline_id,
+            observed_at,
+        )
+    })
+    .await
+    .map_err(|error| ApiError::Internal(error.to_string()))??;
+    let response = match outcome {
+        DiscoveredSourceOutcome::Registered { source_id, created } => {
+            RegisterDiscoveredSourceResponse {
+                status: "registered",
+                reason_code: None,
+                source_id: Some(source_id),
+                created: Some(created),
+            }
+        }
+        DiscoveredSourceOutcome::RejectedInvalidUrl => RegisterDiscoveredSourceResponse {
+            status: "rejected",
+            reason_code: Some("invalid_url"),
+            source_id: None,
+            created: None,
+        },
+        DiscoveredSourceOutcome::RejectedCaptureMissing => RegisterDiscoveredSourceResponse {
+            status: "rejected",
+            reason_code: Some("capture_missing"),
+            source_id: None,
+            created: None,
+        },
+        DiscoveredSourceOutcome::RejectedCaptureSensitive => RegisterDiscoveredSourceResponse {
+            status: "rejected",
+            reason_code: Some("capture_sensitive"),
+            source_id: None,
+            created: None,
+        },
+    };
+    Ok(Json(response))
+}
+
 pub async fn search_data(
     State(state): State<Arc<AppState>>,
     Json(body): Json<DataSearchRequest>,
@@ -303,7 +397,7 @@ pub async fn search_data(
     let storage = state.storage.clone();
     let need_fresh = body.need_fresh;
     let as_of_ms = body.as_of_ms.unwrap_or_else(now_ms);
-    let limit = body.limit.unwrap_or(6).clamp(1, 20);
+    let limit = body.limit.unwrap_or(30).clamp(1, 50);
     let search_query = query.clone();
     let results = tokio::task::spawn_blocking(move || {
         storage.search_data_sources(&search_query, need_fresh, as_of_ms, limit)
@@ -372,14 +466,18 @@ pub async fn refresh_data_source(
     })?;
     validate_scrape_url(&url)?;
 
+    let preview_token = evidence_capture.as_ref().map(|capture| capture.id.clone());
+    let evidence_path = evidence_capture
+        .as_ref()
+        .filter(|_| body.retain_screenshot)
+        .map(|capture| capture.full_path.clone());
     let scrape_in_browser = || {
         scrape_browser_async(
             url.clone(),
             browser_preference.clone(),
             source.source_app_name.clone(),
-            evidence_capture
-                .as_ref()
-                .map(|capture| capture.full_path.clone()),
+            preview_token.clone(),
+            evidence_path.clone(),
         )
     };
 
@@ -443,10 +541,13 @@ pub async fn refresh_data_source(
         )
     })
     .await;
-    if !matches!(snapshot_result, Ok(Ok(_))) {
-        cleanup_pending_evidence(evidence_capture.as_ref());
-        return Err(internal_scrape_error());
-    }
+    let snapshot = match snapshot_result {
+        Ok(Ok(snapshot)) => snapshot,
+        _ => {
+            cleanup_pending_evidence(evidence_capture.as_ref());
+            return Err(internal_scrape_error());
+        }
+    };
 
     let evidence = if let (Some(capture), Some(screenshot)) =
         (evidence_capture.as_ref(), result.screenshot.as_ref())
@@ -457,9 +558,9 @@ pub async fn refresh_data_source(
             run_id: capture.run_id.clone(),
             session_id: capture.session_id.clone(),
             source_id: id,
-            // 证据归属本次创作运行；数据面板的快照会被下一次采集原位覆盖，
-            // 因此不把历史证据强绑定到那条可变快照记录。
-            data_snapshot_id: None,
+            // 跨阶段快照会保留，截图证据直接绑定当次采集所属快照；
+            // 同一自然周内刷新时仍更新同一条阶段快照。
+            data_snapshot_id: Some(snapshot.id),
             source_url: result.url.clone(),
             page_title: result.title.clone(),
             captured_at: collected_at,
@@ -468,7 +569,7 @@ pub async fn refresh_data_source(
             width: screenshot.width,
             height: screenshot.height,
             content_hash: screenshot.content_hash.clone(),
-            screenshot_source: "browser_window".to_string(),
+            screenshot_source: "browser_window_segments".to_string(),
         };
         match tokio::task::spawn_blocking(move || storage.save_creation_evidence_asset(&asset))
             .await
@@ -564,6 +665,7 @@ async fn scrape_browser_async(
     url: String,
     browser_preference: String,
     source_app_name: Option<String>,
+    preview_token: Option<String>,
     evidence_path: Option<PathBuf>,
 ) -> Result<ScrapeResult, DataToolError> {
     tokio::task::spawn_blocking(move || {
@@ -571,6 +673,7 @@ async fn scrape_browser_async(
             &url,
             Some(browser_preference.as_str()),
             source_app_name.as_deref(),
+            preview_token.as_deref(),
             evidence_path.as_deref(),
         )
     })
@@ -582,11 +685,18 @@ fn scrape_with_browser(
     url: &str,
     browser_preference: Option<&str>,
     source_app_name: Option<&str>,
+    preview_token: Option<&str>,
     evidence_path: Option<&std::path::Path>,
 ) -> Result<ScrapeResult, DataToolError> {
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (url, browser_preference, source_app_name, evidence_path);
+        let _ = (
+            url,
+            browser_preference,
+            source_app_name,
+            preview_token,
+            evidence_path,
+        );
         return Err(DataToolError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "BROWSER_ATTACH_UNAVAILABLE",
@@ -601,18 +711,16 @@ fn scrape_with_browser(
         let javascript = browser_extraction_javascript();
         let readiness_javascript = browser_readiness_javascript();
         let evidence_path_string = evidence_path.map(|path| path.to_string_lossy().into_owned());
-        let output = if let (Some(evidence_path), Some(preview_token)) = (
-            evidence_path,
-            evidence_path
-                .and_then(|path| path.file_stem())
-                .and_then(|value| value.to_str()),
-        ) {
+        let (output, accessibility_text) = if let Some(preview_token) = preview_token {
             let session =
                 start_background_browser_window(adapter, url, preview_token, launched_browser)?;
             let capture_result = (|| {
                 // 页面刚进入专用窗口后先生成一次运行中预览；最终 DOM 稳定后会原子覆盖。
-                thread::sleep(Duration::from_millis(350));
-                let _ = capture_background_browser_window(adapter, &session, evidence_path);
+                if let Some(evidence_path) = evidence_path {
+                    thread::sleep(Duration::from_millis(350));
+                    let _ =
+                        capture_background_browser_window(adapter, &session, evidence_path, false);
+                }
                 let script = build_background_browser_extract_script(
                     adapter,
                     &session.apple_script_id,
@@ -620,10 +728,37 @@ fn scrape_with_browser(
                     &javascript,
                 );
                 let output = run_browser_script(&script)?;
+                let accessibility_text = if output.status.success() {
+                    let payload: Value = serde_json::from_slice(&output.stdout).unwrap_or_default();
+                    let page_title = payload
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    crate::capture::ax::extract_window_text_by_title(
+                        adapter.process_name,
+                        &session.preview_token,
+                    )
+                    .or_else(|| {
+                        crate::capture::ax::extract_window_text_by_title(
+                            adapter.process_name,
+                            page_title,
+                        )
+                    })
+                } else {
+                    None
+                };
                 if output.status.success() {
-                    capture_background_browser_window(adapter, &session, evidence_path)?;
+                    if let Some(evidence_path) = evidence_path {
+                        prepare_background_browser_window_for_capture(adapter, &session)?;
+                        thread::sleep(Duration::from_millis(500));
+                        capture_background_browser_long_screenshot(
+                            adapter,
+                            &session,
+                            evidence_path,
+                        )?;
+                    }
                 }
-                Ok::<_, DataToolError>(output)
+                Ok::<_, DataToolError>((output, accessibility_text))
             })();
             cleanup_background_browser_window(adapter, &session);
             capture_result?
@@ -636,7 +771,7 @@ fn scrape_with_browser(
                     build_safari_scrape_script(adapter, url, &readiness_javascript, &javascript)
                 }
             };
-            run_browser_script(&script)?
+            (run_browser_script(&script)?, None)
         };
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
@@ -665,8 +800,8 @@ fn scrape_with_browser(
             .and_then(Value::as_str)
             .unwrap_or("数据报表");
         let final_url = payload.get("url").and_then(Value::as_str).unwrap_or(url);
-        let content_text = payload.get("text").and_then(Value::as_str).unwrap_or("");
-        if looks_like_auth_page(title, final_url, content_text) {
+        let dom_content_text = payload.get("text").and_then(Value::as_str).unwrap_or("");
+        if looks_like_auth_page(title, final_url, dom_content_text) {
             return Err(DataToolError::new(
                 StatusCode::UNAUTHORIZED,
                 "SCRAPE_AUTH_REQUIRED",
@@ -686,10 +821,40 @@ fn scrape_with_browser(
                         .to_string();
                     screenshot
                 });
+        let ax_content_text = accessibility_text
+            .as_deref()
+            .map(|value| clip_text(value, MAX_SCRAPED_CHARS))
+            .filter(|value| accessibility_text_covers_dom(value, dom_content_text));
+        let content_text = ax_content_text.as_deref().unwrap_or(dom_content_text);
+        let mut structured_data = payload
+            .get("structured_data")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        if !structured_data.is_object() {
+            structured_data = json!({"payload": structured_data});
+        }
+        if let Some(object) = structured_data.as_object_mut() {
+            object.insert(
+                "dom_content_text".to_string(),
+                Value::String(clip_text(dom_content_text, MAX_SCRAPED_CHARS)),
+            );
+            object.insert(
+                "extraction".to_string(),
+                json!({
+                    "primary": if ax_content_text.is_some() { "accessibility" } else { "dom" },
+                    "fallback": "dom",
+                    "accessibility_char_count": ax_content_text
+                        .as_ref()
+                        .map(|value| value.chars().count())
+                        .unwrap_or(0),
+                    "dom_char_count": dom_content_text.chars().count(),
+                }),
+            );
+        }
         Ok(ScrapeResult {
             collector: "browser_attach",
             browser: Some(adapter.id),
-            interaction_mode: if screenshot.is_some() {
+            interaction_mode: if preview_token.is_some() {
                 "background_browser_window"
             } else {
                 "background_tab"
@@ -697,10 +862,7 @@ fn scrape_with_browser(
             title: clip_text(title, 240),
             url: redact_url_credentials(final_url).unwrap_or_else(|| url.to_string()),
             content_text: clip_text(content_text, MAX_SCRAPED_CHARS),
-            structured_data: payload
-                .get("structured_data")
-                .cloned()
-                .unwrap_or_else(|| json!({})),
+            structured_data,
             screenshot,
         })
     }
@@ -989,8 +1151,18 @@ fn capture_background_browser_window(
     adapter: BrowserAdapter,
     session: &BrowserWindowSession,
     path: &std::path::Path,
+    require_rendered_content: bool,
 ) -> Result<(), DataToolError> {
-    use image::{codecs::jpeg::JpegEncoder, DynamicImage};
+    let image = capture_background_browser_image(adapter, session, require_rendered_content)?;
+    write_browser_image_atomic(session, path, image)
+}
+
+#[cfg(target_os = "macos")]
+fn capture_background_browser_image(
+    adapter: BrowserAdapter,
+    session: &BrowserWindowSession,
+    require_rendered_content: bool,
+) -> Result<image::RgbaImage, DataToolError> {
     use xcap::Window;
 
     let mut last_error = String::new();
@@ -1046,27 +1218,13 @@ fn capture_background_browser_window(
         if let Some(window) = candidate {
             match window.capture_image() {
                 Ok(image) => {
-                    let parent = path.parent().ok_or_else(internal_scrape_error)?;
-                    fs::create_dir_all(parent).map_err(|_| internal_scrape_error())?;
-                    let temporary_path = parent.join(format!(
-                        ".{}.{}.tmp.jpg",
-                        session.preview_token,
-                        Uuid::new_v4()
-                    ));
-                    let file =
-                        fs::File::create(&temporary_path).map_err(|_| internal_scrape_error())?;
-                    let mut encoder = JpegEncoder::new_with_quality(BufWriter::new(file), 82);
-                    let encode_result = encoder.encode_image(&DynamicImage::ImageRgba8(image));
-                    drop(encoder);
-                    if encode_result.is_err() {
-                        let _ = fs::remove_file(&temporary_path);
-                        return Err(internal_scrape_error());
+                    if require_rendered_content && !browser_screenshot_has_rendered_content(&image)
+                    {
+                        last_error = "后台浏览器只返回了空白页面".to_string();
+                        thread::sleep(Duration::from_millis(150));
+                        continue;
                     }
-                    if fs::rename(&temporary_path, path).is_err() {
-                        let _ = fs::remove_file(&temporary_path);
-                        return Err(internal_scrape_error());
-                    }
-                    return Ok(());
+                    return Ok(image);
                 }
                 Err(error) => last_error = error.to_string(),
             }
@@ -1078,9 +1236,249 @@ fn capture_background_browser_window(
     tracing::warn!(browser = adapter.id, error = %last_error, "后台浏览器窗口截图失败");
     Err(DataToolError::new(
         StatusCode::BAD_GATEWAY,
-        "SCREENSHOT_FAILED",
-        "后台页面已读取，但缩略预览截图失败",
+        if last_error.contains("空白页面") {
+            "SCREENSHOT_BLANK"
+        } else {
+            "SCREENSHOT_FAILED"
+        },
+        if last_error.contains("空白页面") {
+            "后台页面已读取，但浏览器没有完成页面绘制"
+        } else {
+            "后台页面已读取，但缩略预览截图失败"
+        },
     ))
+}
+
+#[cfg(target_os = "macos")]
+fn write_browser_image_atomic(
+    session: &BrowserWindowSession,
+    path: &std::path::Path,
+    image: image::RgbaImage,
+) -> Result<(), DataToolError> {
+    use image::{codecs::jpeg::JpegEncoder, DynamicImage};
+
+    let parent = path.parent().ok_or_else(internal_scrape_error)?;
+    fs::create_dir_all(parent).map_err(|_| internal_scrape_error())?;
+    let temporary_path = parent.join(format!(
+        ".{}.{}.tmp.jpg",
+        session.preview_token,
+        Uuid::new_v4()
+    ));
+    let file = fs::File::create(&temporary_path).map_err(|_| internal_scrape_error())?;
+    let mut encoder = JpegEncoder::new_with_quality(BufWriter::new(file), 82);
+    let encode_result = encoder.encode_image(&DynamicImage::ImageRgba8(image));
+    drop(encoder);
+    if encode_result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(internal_scrape_error());
+    }
+    if fs::rename(&temporary_path, path).is_err() {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(internal_scrape_error());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct BrowserPageGeometry {
+    outer_height: u32,
+    inner_height: u32,
+    scroll_height: u32,
+}
+
+fn browser_scroll_positions(geometry: BrowserPageGeometry) -> Vec<u32> {
+    const MAX_SEGMENTS: usize = 20;
+    let viewport = geometry.inner_height.max(1);
+    let max_scroll = geometry.scroll_height.saturating_sub(viewport);
+    if max_scroll == 0 {
+        return vec![0];
+    }
+    let mut positions = Vec::new();
+    let mut position = 0_u32;
+    while positions.len() < MAX_SEGMENTS {
+        positions.push(position);
+        if position >= max_scroll {
+            break;
+        }
+        position = position.saturating_add(viewport).min(max_scroll);
+    }
+    if positions.last().copied() != Some(max_scroll) {
+        // 极长页面保留末屏作为边界证据；常规报表在 20 屏内会完整覆盖。
+        if positions.len() == MAX_SEGMENTS {
+            positions.pop();
+        }
+        positions.push(max_scroll);
+    }
+    positions
+}
+
+#[cfg(target_os = "macos")]
+fn capture_background_browser_long_screenshot(
+    adapter: BrowserAdapter,
+    session: &BrowserWindowSession,
+    path: &std::path::Path,
+) -> Result<(), DataToolError> {
+    use image::{imageops, Rgba, RgbaImage};
+
+    let geometry_output = run_browser_script(&build_background_browser_evaluate_script(
+        adapter,
+        &session.apple_script_id,
+        "JSON.stringify({outerHeight:Math.max(1,window.outerHeight||0),innerHeight:Math.max(1,window.innerHeight||0),scrollHeight:Math.max(document.documentElement?document.documentElement.scrollHeight:0,document.body?document.body.scrollHeight:0,window.innerHeight||0)})",
+    ))?;
+    if !geometry_output.status.success() {
+        return Err(DataToolError::new(
+            StatusCode::BAD_GATEWAY,
+            "SCREENSHOT_FAILED",
+            "无法读取网页长截图范围",
+        ));
+    }
+    let geometry: BrowserPageGeometry =
+        serde_json::from_slice(&geometry_output.stdout).map_err(|_| internal_scrape_error())?;
+    let positions = browser_scroll_positions(geometry);
+    let mut segments: Vec<(u32, RgbaImage)> = Vec::with_capacity(positions.len());
+    for position in &positions {
+        let scroll_script = format!(
+            "window.scrollTo(0,{position});JSON.stringify({{scrollY:Math.round(window.scrollY||0)}})"
+        );
+        let output = run_browser_script(&build_background_browser_evaluate_script(
+            adapter,
+            &session.apple_script_id,
+            &scroll_script,
+        ))?;
+        if !output.status.success() {
+            return Err(DataToolError::new(
+                StatusCode::BAD_GATEWAY,
+                "SCREENSHOT_FAILED",
+                "网页分段滚动失败",
+            ));
+        }
+        thread::sleep(Duration::from_millis(220));
+        segments.push((
+            *position,
+            capture_background_browser_image(adapter, session, true)?,
+        ));
+    }
+    let _ = run_browser_script(&build_background_browser_evaluate_script(
+        adapter,
+        &session.apple_script_id,
+        "window.scrollTo(0,0);JSON.stringify({scrollY:0})",
+    ));
+
+    let Some((_, first)) = segments.first() else {
+        return Err(internal_scrape_error());
+    };
+    let target_width = first.width();
+    let browser_chrome_css = geometry.outer_height.saturating_sub(geometry.inner_height);
+    let mut prepared: Vec<RgbaImage> = Vec::with_capacity(segments.len());
+    let mut previous_position = 0_u32;
+    for (index, (position, image)) in segments.into_iter().enumerate() {
+        if image.width() != target_width {
+            return Err(internal_scrape_error());
+        }
+        if index == 0 {
+            prepared.push(image);
+            previous_position = position;
+            continue;
+        }
+        let scale = image.height() as f64 / geometry.outer_height.max(1) as f64;
+        let chrome_px = (browser_chrome_css as f64 * scale).round() as u32;
+        let delta = position.saturating_sub(previous_position);
+        let overlap_css = geometry.inner_height.saturating_sub(delta);
+        let overlap_px = (overlap_css as f64 * scale).round() as u32;
+        let crop_y = chrome_px.saturating_add(overlap_px).min(image.height());
+        if crop_y < image.height() {
+            prepared.push(
+                imageops::crop_imm(&image, 0, crop_y, image.width(), image.height() - crop_y)
+                    .to_image(),
+            );
+        }
+        previous_position = position;
+    }
+    let total_height = prepared
+        .iter()
+        .fold(0_u32, |sum, image| sum.saturating_add(image.height()));
+    if total_height == 0 {
+        return Err(internal_scrape_error());
+    }
+    let mut stitched =
+        RgbaImage::from_pixel(target_width, total_height, Rgba([255, 255, 255, 255]));
+    let mut y = 0_i64;
+    for segment in prepared {
+        imageops::overlay(&mut stitched, &segment, 0, y);
+        y += i64::from(segment.height());
+    }
+    write_browser_image_atomic(session, path, stitched)
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_background_browser_window_for_capture(
+    adapter: BrowserAdapter,
+    session: &BrowserWindowSession,
+) -> Result<(), DataToolError> {
+    let output = run_browser_script(&build_background_browser_prepare_capture_script(
+        adapter,
+        &session.apple_script_id,
+    ))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(DataToolError::new(
+        StatusCode::BAD_GATEWAY,
+        "SCREENSHOT_FAILED",
+        "后台页面已读取，但无法准备截图窗口",
+    ))
+}
+
+fn browser_screenshot_has_rendered_content(image: &image::RgbaImage) -> bool {
+    if image.width() < 64 || image.height() < 64 {
+        return false;
+    }
+    let start_y = image.height() / 5;
+    let mut sampled = 0_u64;
+    let mut non_blank = 0_u64;
+    for y in (start_y..image.height()).step_by(4) {
+        for x in (0..image.width()).step_by(4) {
+            let pixel = image.get_pixel(x, y).0;
+            sampled += 1;
+            if pixel[3] > 10 && (pixel[0] < 245 || pixel[1] < 245 || pixel[2] < 245) {
+                non_blank += 1;
+            }
+        }
+    }
+    sampled > 0 && non_blank * 1_000 >= sampled * 3
+}
+
+fn accessibility_text_covers_dom(accessibility_text: &str, dom_text: &str) -> bool {
+    let normalized_ax = accessibility_text
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    if normalized_ax.chars().count() < 12 {
+        return false;
+    }
+    let mut matches = 0_usize;
+    let mut numeric_match = false;
+    for line in dom_text.lines().take(800) {
+        let normalized = line
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .flat_map(char::to_lowercase)
+            .collect::<String>();
+        let length = normalized.chars().count();
+        if !(2..=160).contains(&length) || !normalized_ax.contains(&normalized) {
+            continue;
+        }
+        matches += 1;
+        numeric_match |= normalized
+            .chars()
+            .any(|character| character.is_ascii_digit());
+        if matches >= 3 && numeric_match {
+            return true;
+        }
+    }
+    matches >= 5
 }
 
 fn applescript_window_id_literal(value: &str) -> String {
@@ -1319,6 +1717,38 @@ fn build_background_browser_extract_script(
     }
 }
 
+fn build_background_browser_evaluate_script(
+    adapter: BrowserAdapter,
+    apple_script_id: &str,
+    javascript: &str,
+) -> String {
+    let window_id = applescript_window_id_literal(apple_script_id);
+    match adapter.script_kind {
+        BrowserScriptKind::Chromium => format!(
+            r#"
+            tell application "{app_name}"
+                set target_window to first window whose id is {window_id}
+                return execute active tab of target_window javascript "{javascript}"
+            end tell
+            "#,
+            app_name = adapter.app_name,
+            window_id = window_id,
+            javascript = escape_applescript_string(javascript),
+        ),
+        BrowserScriptKind::Safari => format!(
+            r#"
+            tell application "{app_name}"
+                set target_window to first window whose id is {window_id}
+                return do JavaScript "{javascript}" in current tab of target_window
+            end tell
+            "#,
+            app_name = adapter.app_name,
+            window_id = window_id,
+            javascript = escape_applescript_string(javascript),
+        ),
+    }
+}
+
 fn build_background_browser_start_script(
     adapter: BrowserAdapter,
     url: &str,
@@ -1379,6 +1809,30 @@ fn build_background_browser_start_script(
             url = escape_applescript_string(url),
         ),
     }
+}
+
+fn build_background_browser_prepare_capture_script(
+    adapter: BrowserAdapter,
+    apple_script_id: &str,
+) -> String {
+    let window_id = applescript_window_id_literal(apple_script_id);
+    format!(
+        r#"
+        tell application "System Events"
+            set previous_front_app to name of first application process whose frontmost is true
+        end tell
+        tell application "{app_name}"
+            set index of first window whose id is {window_id} to 1
+        end tell
+        tell application "System Events"
+            try
+                set frontmost of first application process whose name is previous_front_app to true
+            end try
+        end tell
+        "#,
+        app_name = adapter.app_name,
+        window_id = window_id,
+    )
 }
 
 fn build_background_browser_cleanup_script(
@@ -1697,6 +2151,10 @@ fn default_browser_preference() -> String {
     "auto".to_string()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1814,6 +2272,12 @@ mod tests {
             &readiness_javascript,
             &javascript,
         );
+        let chromium_prepare =
+            build_background_browser_prepare_capture_script(BROWSER_ADAPTERS[0], "12345");
+        let safari_prepare = build_background_browser_prepare_capture_script(
+            *BROWSER_ADAPTERS.last().unwrap(),
+            "54321",
+        );
         let chromium_cleanup =
             build_background_browser_cleanup_script(BROWSER_ADAPTERS[0], "12345", false);
         let safari_cleanup = build_background_browser_cleanup_script(
@@ -1845,6 +2309,12 @@ mod tests {
             assert!(!script.contains("screencapture"));
             assert!(!script.contains("activate"));
         }
+        for script in [&chromium_prepare, &safari_prepare] {
+            assert!(script.contains("previous_front_app"));
+            assert!(script.contains("set index of first window whose id is"));
+            assert!(script.contains("frontmost of first application process"));
+            assert!(!script.contains("activate"));
+        }
         assert!(chromium_cleanup.contains("close first window whose id is 12345"));
         assert!(safari_cleanup.contains("close first window whose id is 54321"));
         assert!(chromium_orphan_cleanup.contains("given name of candidate_window"));
@@ -1860,6 +2330,8 @@ mod tests {
                 &safari_start,
                 &chromium_extract,
                 &safari_extract,
+                &chromium_prepare,
+                &safari_prepare,
                 &chromium_cleanup,
                 &safari_cleanup,
                 &chromium_orphan_cleanup,
@@ -1884,10 +2356,69 @@ mod tests {
     }
 
     #[test]
+    fn rendered_content_guard_rejects_blank_browser_body() {
+        use image::{Rgba, RgbaImage};
+
+        let blank = RgbaImage::from_pixel(1200, 740, Rgba([255, 255, 255, 255]));
+        assert!(!browser_screenshot_has_rendered_content(&blank));
+
+        let mut report = blank.clone();
+        for y in 220..520 {
+            for x in 160..1040 {
+                report.put_pixel(x, y, Rgba([20, 32, 58, 255]));
+            }
+        }
+        assert!(browser_screenshot_has_rendered_content(&report));
+    }
+
+    #[test]
+    fn accessibility_primary_requires_meaningful_dom_overlap() {
+        let dom = "在用项目数\n102\n总卡数（X40折算）\n1803.59\n年化总成本（万元）\n12178.4万元";
+        let ax = "项目 GPU 用量管理\n在用项目数\n102\n总卡数（X40折算）\n1803.59\n年化总成本（万元）\n12178.4万元";
+        assert!(accessibility_text_covers_dom(ax, dom));
+        assert!(!accessibility_text_covers_dom(
+            "Google Chrome\n地址和搜索栏\n后退\n刷新\n完成更新",
+            dom,
+        ));
+    }
+
+    #[test]
+    fn long_screenshot_positions_cover_regular_pages_and_keep_the_last_boundary() {
+        assert_eq!(
+            browser_scroll_positions(BrowserPageGeometry {
+                outer_height: 740,
+                inner_height: 650,
+                scroll_height: 1_800,
+            }),
+            vec![0, 650, 1_150]
+        );
+        let very_tall = browser_scroll_positions(BrowserPageGeometry {
+            outer_height: 740,
+            inner_height: 650,
+            scroll_height: 50_000,
+        });
+        assert_eq!(very_tall.first(), Some(&0));
+        assert_eq!(very_tall.last(), Some(&(50_000 - 650)));
+        assert!(very_tall.len() <= 20);
+    }
+
+    #[test]
     fn evidence_capture_reuses_a_valid_preview_id_and_rejects_invalid_values() {
         let preview_id = "2d870d80-e2a2-4424-a732-069e174f2796";
         assert_eq!(normalize_preview_id(Some(preview_id)).unwrap(), preview_id);
         assert!(normalize_preview_id(Some("../bad")).is_err());
+    }
+
+    #[test]
+    fn refresh_request_defaults_to_retaining_screenshot() {
+        let legacy: RefreshDataSourceRequest = serde_json::from_value(json!({})).unwrap();
+        assert!(legacy.retain_screenshot);
+        let disabled: RefreshDataSourceRequest = serde_json::from_value(json!({
+            "capture_evidence": true,
+            "retain_screenshot": false,
+        }))
+        .unwrap();
+        assert!(!disabled.retain_screenshot);
     }
 
     #[cfg(target_os = "macos")]
@@ -1935,6 +2466,7 @@ mod tests {
             &format!("http://{address}/dashboard"),
             Some("chrome"),
             Some("Google Chrome"),
+            Some("2d870d80-e2a2-4424-a732-069e174f2796"),
             Some(&evidence_path),
         )
         .unwrap();
@@ -1945,6 +2477,8 @@ mod tests {
         assert!(result.content_text.contains("本周订单 1200"));
         assert!(result.screenshot.is_some());
         assert!(evidence_path.is_file());
+        let (_, height) = image::image_dimensions(&evidence_path).unwrap();
+        assert!(height > 740, "长页面证据应由多个视口拼接");
         assert_eq!(browser_context(), before);
     }
 }

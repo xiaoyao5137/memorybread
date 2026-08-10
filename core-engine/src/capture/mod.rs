@@ -13,12 +13,14 @@ pub mod engine;
 pub mod filter;
 pub mod listener;
 pub mod screenshot;
+pub mod signal;
 
 pub use blacklist::BlacklistChecker;
 pub use engine::{CaptureConfig, CaptureEngine, CaptureEvent};
 pub use filter::PrivacyFilter;
-pub use listener::{start_context_watcher, start_listener, ListenerConfig};
+pub use listener::{start_context_watcher, start_listener, CaptureSchedule, ListenerConfig};
 pub use screenshot::ScreenshotResult;
+pub use signal::{start_input_signal_listener, start_signal_aggregator};
 
 use thiserror::Error;
 

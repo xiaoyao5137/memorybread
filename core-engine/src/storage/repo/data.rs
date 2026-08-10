@@ -1,19 +1,65 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::storage::{
     db::current_ts_ms,
     error::StorageError,
-    models_data::{DataExtractionSummary, DataSearchResult, DataSnapshotRecord, DataSourceRecord},
+    fts::{build_fts_or_query, split_query_terms, DEFAULT_FTS_CANDIDATE_CAP},
+    models_data::{
+        DataExtractionSummary, DataSearchResult, DataSnapshotRecord, DataSourceRecord,
+        DiscoveredSourceOutcome,
+    },
     StorageManager,
 };
 
 const REPORT_FRESH_SECONDS: i64 = 15 * 60;
 const DATA_TEXT_MAX_CHARS: usize = 80_000;
-const DATA_MEMORY_VERSION: &str = "data-memory.v11";
+const DATA_MEMORY_VERSION: &str = "data-memory.v15";
+const CURRENT_TIMELINE_DATA_FACT_VERSION: &str = "timeline-data-fact.v3";
+const DATA_PERIOD_GRANULARITY: &str = "week";
+const WEEK_MILLIS: i64 = 7 * 24 * 60 * 60 * 1000;
+const EPOCH_FIRST_MONDAY_MILLIS: i64 = 4 * 24 * 60 * 60 * 1000;
+const DATA_HISTORY_LIMIT: usize = 16;
+
+#[derive(Debug, Clone)]
+struct DataPeriodTag {
+    key: String,
+    start_at: i64,
+    end_at: i64,
+}
+
+fn weekly_period_tag(observed_at: i64) -> DataPeriodTag {
+    let offset = observed_at.saturating_sub(EPOCH_FIRST_MONDAY_MILLIS);
+    let week_index = offset.div_euclid(WEEK_MILLIS);
+    let start_at = week_index
+        .saturating_mul(WEEK_MILLIS)
+        .saturating_add(EPOCH_FIRST_MONDAY_MILLIS);
+    DataPeriodTag {
+        key: format!("week:{start_at}"),
+        start_at,
+        end_at: start_at.saturating_add(WEEK_MILLIS - 1),
+    }
+}
+
+fn attach_period_tag(value: &mut Value, period: &DataPeriodTag) {
+    if !value.is_object() {
+        *value = json!({});
+    }
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "period".to_string(),
+            json!({
+                "granularity": DATA_PERIOD_GRANULARITY,
+                "key": period.key,
+                "start_at": period.start_at,
+                "end_at": period.end_at,
+            }),
+        );
+    }
+}
 
 #[derive(Debug)]
 struct CaptureCandidate {
@@ -34,8 +80,28 @@ struct CaptureCandidate {
 #[derive(Debug)]
 struct TimelineDataContext {
     capture_ids: Vec<i64>,
+    source_urls: Vec<String>,
     observed_at: i64,
     metric_statements: Vec<Value>,
+    model_fact_contract: Option<String>,
+    model_facts: Vec<ModelDataFact>,
+    evidence_text: String,
+}
+
+#[derive(Debug, Clone)]
+struct ModelDataFact {
+    title: String,
+    subject: String,
+    action: String,
+    target_context: String,
+    dimension: String,
+    metric: String,
+    value: String,
+    unit: String,
+    statement: String,
+    evidence_quote: String,
+    confidence: String,
+    observed_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,14 +170,47 @@ impl StorageManager {
             for row in rows {
                 candidates.push(row?);
             }
+            // FTS5 预筛：data_snapshots_fts 命中快照对应的 source_id 可用时，
+            // 在加载快照文本前先收窄候选（source 级字段命中的候选保留）；
+            // FTS 不可用时返回 None，回退原有全量校验。
+            let fts_source_ids = query
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .and_then(|q| data_snapshot_fts_source_ids(conn, q));
             for record in &mut candidates {
-                let latest = latest_snapshot(conn, record)?;
-                record.latest_snapshot = latest;
+                let passes_prefilter = match &fts_source_ids {
+                    Some(ids) => {
+                        ids.contains(&record.id)
+                            || data_source_base_fields_match(record, query.unwrap_or_default())
+                    }
+                    None => true,
+                };
+                if passes_prefilter {
+                    let latest = latest_snapshot(conn, record)?;
+                    record.latest_snapshot = latest;
+                }
             }
             candidates.retain(is_presentable_data_source);
             if let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) {
                 candidates.retain(|source| data_source_matches_query(source, query));
             }
+            // 数据页展示的是最新快照的采集时间，因此默认顺序也必须使用同一字段。
+            // last_seen_at 只表示来源近期再次被识别，不能把未更新的旧快照推到前面。
+            candidates.sort_by(|left, right| {
+                let left_collected_at = left
+                    .latest_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.collected_at)
+                    .unwrap_or(i64::MIN);
+                let right_collected_at = right
+                    .latest_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.collected_at)
+                    .unwrap_or(i64::MIN);
+                right_collected_at
+                    .cmp(&left_collected_at)
+                    .then_with(|| right.id.cmp(&left.id))
+            });
             let total = candidates.len() as i64;
             let records = candidates.into_iter().skip(offset).take(limit).collect();
             Ok((records, total))
@@ -194,6 +293,7 @@ impl StorageManager {
                 .ok_or_else(|| StorageError::NotFound(format!("data source {source_id}")))?;
             let normalized_content = clip_text(content_text, DATA_TEXT_MAX_CHARS);
             let mut enriched_structured = structured_data.clone();
+            let period = weekly_period_tag(collected_at);
             let semantic_context = semantic_context_for_source(
                 &source,
                 title.map(str::trim).filter(|value| !value.is_empty()),
@@ -208,20 +308,24 @@ impl StorageManager {
             .map(semantic_view_to_json)
             .unwrap_or_else(|| rejected_semantic_view_json("no_semantic_metric"));
             merge_semantic_view(&mut enriched_structured, semantic);
+            attach_period_tag(&mut enriched_structured, &period);
             let structured_json = serde_json::to_string(&enriched_structured)?;
             let content_hash = hash_text(&format!("{normalized_content}\n{structured_json}"));
-            let provenance = json!({
+            let mut provenance = json!({
                 "collector": collector,
                 "cookie_persisted": false,
                 "local_only": true
             });
+            attach_period_tag(&mut provenance, &period);
             conn.execute(
                 "INSERT INTO data_snapshots (
-                    source_id, collected_at, observed_at, collector, content_text,
+                    source_id, collected_at, observed_at, period_granularity, period_key,
+                    period_start_at, period_end_at, collector, content_text,
                     structured_data, content_hash, freshness_ttl_seconds, provenance,
                     source_capture_ids, source_timeline_ids, status, created_at
-                 ) VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, '[]', '[]', 'success', ?2)
-                 ON CONFLICT(source_id) DO UPDATE SET
+                 ) VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                           '[]', '[]', 'success', ?2)
+                 ON CONFLICT(source_id, period_key) DO UPDATE SET
                     collected_at = excluded.collected_at,
                     observed_at = excluded.observed_at,
                     collector = excluded.collector,
@@ -237,6 +341,10 @@ impl StorageManager {
                 params![
                     source_id,
                     collected_at,
+                    DATA_PERIOD_GRANULARITY,
+                    period.key,
+                    period.start_at,
+                    period.end_at,
                     collector,
                     normalized_content,
                     structured_json,
@@ -292,6 +400,100 @@ impl StorageManager {
                 params![source_id, now],
             )?;
             Ok(changed > 0)
+        })
+    }
+
+    /// 注册时间线推理中模型分类发现的数据报表/数据平台页面。
+    ///
+    /// 与 `extract_data_candidates` 的标记快路径互补：标记未命中但模型判定为
+    /// data_report/data_platform 的页面，经 sidecar 代码校验后走这里注册为
+    /// `report_url + browser_session + on_demand` 源，供创作时浏览器实时刷新。
+    /// 拒绝条件：URL 无法规范化、capture 不存在、capture 命中敏感过滤。
+    pub fn register_discovered_report_source(
+        &self,
+        url: &str,
+        title: &str,
+        capture_id: i64,
+        timeline_id: Option<i64>,
+        observed_at: i64,
+    ) -> Result<DiscoveredSourceOutcome, StorageError> {
+        let Some(canonical) = canonical_data_url(url) else {
+            return Ok(DiscoveredSourceOutcome::RejectedInvalidUrl);
+        };
+        self.with_conn(|conn| {
+            let capture = conn
+                .query_row(
+                    "SELECT ts, is_sensitive, app_name, win_title, webpage_title
+                     FROM captures WHERE id = ?1",
+                    [capture_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((capture_ts, is_sensitive, app_name, win_title, webpage_title)) = capture
+            else {
+                return Ok(DiscoveredSourceOutcome::RejectedCaptureMissing);
+            };
+            if is_sensitive != 0 {
+                return Ok(DiscoveredSourceOutcome::RejectedCaptureSensitive);
+            }
+            let observed = if observed_at > 0 { observed_at } else { capture_ts };
+            let key = format!("report:{canonical}");
+            let existed = source_exists(conn, &key)?;
+            let fallback_title = webpage_title
+                .as_deref()
+                .or(win_title.as_deref())
+                .unwrap_or("数据来源");
+            let resolved_title = clip_text(
+                if title.trim().is_empty() {
+                    fallback_title
+                } else {
+                    title.trim()
+                },
+                240,
+            );
+            let now = current_ts_ms();
+            conn.execute(
+                "INSERT INTO data_sources (
+                    canonical_key, title, source_kind, source_url, access_mode, refresh_policy,
+                    realtime_level, source_app_name, source_window_title, tags, first_seen_at,
+                    last_seen_at, status, created_at, updated_at
+                 ) VALUES (?1, ?2, 'report_url', ?3, 'browser_session', 'on_demand', 'live',
+                           ?4, ?5, '[\"report\", \"model_classified\"]', ?6, ?6, 'active', ?7, ?7)
+                 ON CONFLICT(canonical_key) DO UPDATE SET
+                    title = CASE WHEN LENGTH(excluded.title) > LENGTH(data_sources.title)
+                                 THEN excluded.title ELSE data_sources.title END,
+                    source_url = excluded.source_url,
+                    source_app_name = COALESCE(excluded.source_app_name, data_sources.source_app_name),
+                    source_window_title = COALESCE(excluded.source_window_title, data_sources.source_window_title),
+                    last_seen_at = MAX(data_sources.last_seen_at, excluded.last_seen_at),
+                    updated_at = excluded.updated_at",
+                params![key, resolved_title, canonical, app_name, win_title, observed, now],
+            )?;
+            let source_id = source_id_for_key(conn, &key)?;
+            let ref_key = format!(
+                "capture:{}:discovered:{}:{}",
+                capture_id,
+                timeline_id.unwrap_or(0),
+                hash_text(&canonical)
+            );
+            conn.execute(
+                "INSERT OR IGNORE INTO data_source_links (
+                    source_id, source_ref_key, capture_id, timeline_id, link_kind, observed_at, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, 'active_url', ?5, ?6)",
+                params![source_id, ref_key, capture_id, timeline_id, observed, now],
+            )?;
+            Ok(DiscoveredSourceOutcome::Registered {
+                source_id,
+                created: !existed,
+            })
         })
     }
 
@@ -390,10 +592,8 @@ impl StorageManager {
                         if let Some(app_name) = candidate.app_name.as_deref() {
                             semantic_context.push_str(&format!("\napplication:{app_name}"));
                         }
-                        let views = semantic_views_from_statements(
-                            &context.metric_statements,
-                            &semantic_context,
-                        );
+                        let views =
+                            semantic_views_for_timeline_context(&context, &semantic_context);
                         if !views.is_empty() {
                             for view in views {
                                 let (created, snapshot_created) = upsert_work_memory_view(
@@ -446,11 +646,16 @@ impl StorageManager {
         let (mut sources, _) = self.list_data_sources(None, 5000, 0)?;
         let (pending, _) = self.list_pending_data_sources(None, 5000)?;
         sources.extend(pending);
+        let mut histories =
+            self.with_conn(|conn| load_snapshot_histories(conn, DATA_HISTORY_LIMIT))?;
         let terms = keyword_terms(query);
         let mut results = sources
             .into_iter()
             .filter(|source| source.status != "disabled")
-            .map(|source| score_data_source(source, query, &terms, need_fresh, as_of_ms))
+            .map(|source| {
+                let history = histories.remove(&source.id).unwrap_or_default();
+                score_data_source(source, history, query, &terms, need_fresh, as_of_ms)
+            })
             .filter(|result| result.relevance_score >= 0.12 || terms.is_empty())
             .collect::<Vec<_>>();
         results.sort_by(|left, right| {
@@ -460,9 +665,44 @@ impl StorageManager {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| right.collected_at.cmp(&left.collected_at))
         });
-        results.truncate(limit.clamp(1, 20));
+        results.truncate(limit.clamp(1, 50));
         Ok(results)
     }
+}
+
+fn load_snapshot_histories(
+    conn: &Connection,
+    per_source_limit: usize,
+) -> Result<HashMap<i64, Vec<DataSnapshotRecord>>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, source_id, collected_at, observed_at, collector, content_text,
+                structured_data, content_hash, freshness_ttl_seconds, provenance,
+                source_capture_ids, source_timeline_ids, status, period_granularity,
+                period_key, period_start_at, period_end_at
+         FROM (
+            SELECT snapshot.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY snapshot.source_id
+                       ORDER BY snapshot.period_start_at DESC, snapshot.collected_at DESC,
+                                snapshot.id DESC
+                   ) AS period_rank
+            FROM data_snapshots snapshot
+            JOIN data_sources source ON source.id = snapshot.source_id
+            WHERE source.deleted_at IS NULL AND source.status <> 'disabled'
+         ) ranked
+         WHERE period_rank <= ?1
+         ORDER BY source_id ASC, period_start_at DESC, collected_at DESC, id DESC",
+    )?;
+    let rows = stmt.query_map([per_source_limit.max(1) as i64], map_data_snapshot_row)?;
+    let mut histories: HashMap<i64, Vec<DataSnapshotRecord>> = HashMap::new();
+    for row in rows {
+        let snapshot = row?;
+        histories
+            .entry(snapshot.source_id)
+            .or_default()
+            .push(snapshot);
+    }
+    Ok(histories)
 }
 
 fn regenerate_legacy_data_memories(
@@ -470,23 +710,52 @@ fn regenerate_legacy_data_memories(
     limit: usize,
 ) -> Result<HistoricalRegenerationSummary, StorageError> {
     let mut stmt = conn.prepare(
-        "SELECT source.id
+        "WITH latest_snapshot AS (
+             SELECT snapshot.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY snapshot.source_id
+                        ORDER BY snapshot.collected_at DESC, snapshot.id DESC
+                    ) AS snapshot_rank
+             FROM data_snapshots snapshot
+         )
+         SELECT source.id
          FROM data_sources source
+         LEFT JOIN latest_snapshot snapshot
+           ON snapshot.source_id = source.id AND snapshot.snapshot_rank = 1
          WHERE source.deleted_at IS NULL
-           AND COALESCE(json_extract((
-               SELECT snapshot.structured_data
-               FROM data_snapshots snapshot
-               WHERE snapshot.source_id = source.id
-               ORDER BY snapshot.collected_at DESC, snapshot.id DESC
-               LIMIT 1
-           ), '$.extraction_version'), '') <> ?1
+           AND (
+               COALESCE(json_extract(snapshot.structured_data, '$.extraction_version'), '') <> ?1
+               OR (
+                   COALESCE(json_extract(snapshot.structured_data, '$.semantic_origin'), '') = 'legacy_parser'
+                   AND EXISTS (
+                       SELECT 1
+                       FROM json_each(COALESCE(snapshot.source_timeline_ids, '[]')) timeline_ref
+                       JOIN timeline_data_fact_runs fact_run
+                         ON fact_run.timeline_id = timeline_ref.value
+                       JOIN timeline_data_facts fact
+                         ON fact.timeline_id = timeline_ref.value
+                       WHERE fact_run.contract_version = ?2
+                         AND fact_run.accepted_count > 0
+                         AND LENGTH(TRIM(fact.value)) >= 2
+                         AND INSTR(
+                             REPLACE(LOWER(COALESCE(snapshot.content_text, '')), ' ', ''),
+                             REPLACE(LOWER(fact.value || fact.unit), ' ', '')
+                         ) > 0
+                   )
+               )
+           )
          ORDER BY source.id ASC
-         LIMIT ?2",
+         LIMIT ?3",
     )?;
     let source_ids = stmt
-        .query_map(params![DATA_MEMORY_VERSION, limit as i64], |row| {
-            row.get::<_, i64>(0)
-        })?
+        .query_map(
+            params![
+                DATA_MEMORY_VERSION,
+                CURRENT_TIMELINE_DATA_FACT_VERSION,
+                limit as i64
+            ],
+            |row| row.get::<_, i64>(0),
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     drop(stmt);
     if source_ids.is_empty() {
@@ -528,6 +797,23 @@ fn regenerate_legacy_data_memories_inner(
         let Some(snapshot) = raw_latest_snapshot(conn, *source_id)? else {
             continue;
         };
+        // 同一时间线的多个旧数据源可能在前一个 source 的多事实重建中被分别复用。
+        // 候选列表是在重建开始前一次性生成的；到这里若最新快照已升级完成，直接
+        // 记为已处理，避免再次展开同一组事实后把刚复用的 source 当重复项删除。
+        if snapshot
+            .structured_data
+            .get("extraction_version")
+            .and_then(Value::as_str)
+            == Some(DATA_MEMORY_VERSION)
+            && snapshot
+                .structured_data
+                .get("semantic_origin")
+                .and_then(Value::as_str)
+                == Some("model_structured_fact")
+        {
+            summary.regenerated_count += 1;
+            continue;
+        }
         let previous_subject = snapshot
             .structured_data
             .get("semantic_subject")
@@ -535,24 +821,59 @@ fn regenerate_legacy_data_memories_inner(
             .map(str::trim)
             .filter(|value| !value.is_empty());
         let semantic_context = semantic_context_for_source(&source, None, previous_subject);
-        let views = semantic_views_for_content(
-            &snapshot.content_text,
-            &snapshot.structured_data,
-            snapshot.observed_at,
-            &semantic_context,
-        );
         if source.source_kind == "work_memory" {
-            let best_view = views.into_iter().max_by_key(semantic_view_quality_score);
-            let Some(best_view) = best_view else {
-                persist_rejected_snapshot(conn, &snapshot)?;
-                summary.regenerated_count += 1;
-                summary.rejected_count += 1;
-                continue;
+            let linked_model_views = linked_current_model_fact_views(conn, &snapshot)?;
+            let (views, has_current_contract) = if let Some(model_views) = linked_model_views {
+                (
+                    model_views
+                        .into_iter()
+                        .filter(|view| semantic_view_matches_legacy_snapshot(&snapshot, view))
+                        .collect(),
+                    true,
+                )
+            } else {
+                (
+                    semantic_views_for_content(
+                        &snapshot.content_text,
+                        &snapshot.structured_data,
+                        snapshot.observed_at,
+                        &semantic_context,
+                    ),
+                    false,
+                )
             };
-            let merged = regenerate_work_memory_source(conn, &source, &snapshot, &[best_view])?;
+            let views = if views.iter().any(|view| {
+                view.statements.iter().any(|statement| {
+                    statement.get("fact_contract").and_then(Value::as_str)
+                        == Some(CURRENT_TIMELINE_DATA_FACT_VERSION)
+                })
+            }) {
+                views
+            } else {
+                views
+                    .into_iter()
+                    .max_by_key(semantic_view_quality_score)
+                    .into_iter()
+                    .collect()
+            };
+            if views.is_empty() {
+                if !has_current_contract {
+                    persist_rejected_snapshot(conn, &snapshot)?;
+                    summary.rejected_count += 1;
+                }
+                summary.regenerated_count += 1;
+                continue;
+            }
+            let merged = regenerate_work_memory_source(conn, &source, &snapshot, &views)?;
             summary.regenerated_count += 1;
             summary.merged_count += merged;
         } else {
+            let views = semantic_views_for_content(
+                &snapshot.content_text,
+                &snapshot.structured_data,
+                snapshot.observed_at,
+                &semantic_context,
+            );
             let semantic = views
                 .into_iter()
                 .max_by_key(|view| view.rows.len() * 100 + view.summary.chars().count().min(260));
@@ -566,6 +887,118 @@ fn regenerate_legacy_data_memories_inner(
         }
     }
     Ok(summary)
+}
+
+fn linked_current_model_fact_views(
+    conn: &Connection,
+    snapshot: &DataSnapshotRecord,
+) -> Result<Option<Vec<SemanticDataView>>, StorageError> {
+    let mut found_current_contract = false;
+    let mut views: Vec<SemanticDataView> = Vec::new();
+    for timeline_id in &snapshot.source_timeline_ids {
+        let contract = conn
+            .query_row(
+                "SELECT contract_version FROM timeline_data_fact_runs WHERE timeline_id = ?1",
+                [timeline_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if contract.as_deref() != Some(CURRENT_TIMELINE_DATA_FACT_VERSION) {
+            continue;
+        }
+        found_current_contract = true;
+
+        let mut evidence_parts = Vec::new();
+        if let Some(timeline_text) = conn
+            .query_row(
+                "SELECT TRIM(COALESCE(summary, '') || char(10) ||
+                             COALESCE(overview, '') || char(10) || COALESCE(details, ''))
+                 FROM timelines WHERE id = ?1",
+                [timeline_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .filter(|text| !text.trim().is_empty())
+        {
+            evidence_parts.push(timeline_text);
+        }
+        let mut capture_stmt = conn.prepare(
+            "SELECT TRIM(COALESCE(ax_text, '') || char(10) || COALESCE(ocr_text, '') ||
+                         char(10) || COALESCE(input_text, '') || char(10) ||
+                         COALESCE(audio_text, ''))
+             FROM captures
+             WHERE is_sensitive = 0 AND timeline_id = ?1
+             ORDER BY ts ASC, id ASC",
+        )?;
+        for capture_text in capture_stmt.query_map([timeline_id], |row| row.get::<_, String>(0))? {
+            let capture_text = capture_text?;
+            if !capture_text.trim().is_empty() {
+                evidence_parts.push(capture_text);
+            }
+        }
+
+        let mut fact_stmt = conn.prepare(
+            "SELECT title, subject, action, target_context, dimension, metric, value, unit,
+                    statement, evidence_quote, confidence, observed_at
+             FROM timeline_data_facts
+             WHERE timeline_id = ?1
+             ORDER BY id ASC",
+        )?;
+        let facts = fact_stmt
+            .query_map([timeline_id], |row| {
+                Ok(ModelDataFact {
+                    title: row.get(0)?,
+                    subject: row.get(1)?,
+                    action: row.get(2)?,
+                    target_context: row.get(3)?,
+                    dimension: row.get(4)?,
+                    metric: row.get(5)?,
+                    value: row.get(6)?,
+                    unit: row.get(7)?,
+                    statement: row.get(8)?,
+                    evidence_quote: row.get(9)?,
+                    confidence: row.get(10)?,
+                    observed_at: row.get(11)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let timeline_views = semantic_views_from_model_facts(
+            &facts,
+            &evidence_parts.join("\n"),
+            CURRENT_TIMELINE_DATA_FACT_VERSION,
+        );
+        for view in timeline_views {
+            if let Some(existing) = views
+                .iter_mut()
+                .find(|existing| existing.identity == view.identity)
+            {
+                merge_semantic_rows(&mut existing.rows, view.rows);
+                for statement in view.statements {
+                    if !existing.statements.contains(&statement) {
+                        existing.statements.push(statement);
+                    }
+                }
+                if view.latest_observed_at >= existing.latest_observed_at {
+                    existing.title = view.title;
+                    existing.summary = view.summary;
+                    existing.latest_observed_at = view.latest_observed_at;
+                }
+            } else {
+                views.push(view);
+            }
+        }
+    }
+    if found_current_contract {
+        views.sort_by(|left, right| {
+            right
+                .latest_observed_at
+                .cmp(&left.latest_observed_at)
+                .then_with(|| left.title.cmp(&right.title))
+        });
+        Ok(Some(views))
+    } else {
+        Ok(None)
+    }
 }
 
 fn semantic_view_quality_score(view: &SemanticDataView) -> usize {
@@ -594,10 +1027,15 @@ fn regenerate_work_memory_source(
     let mut first_target_snapshot_id = None;
 
     for (index, view) in views.iter().enumerate() {
+        let fallback_scope = snapshot
+            .source_timeline_ids
+            .first()
+            .map(|timeline_id| format!("timeline:{timeline_id}"))
+            .unwrap_or_else(|| format!("legacy-source:{}", source.id));
         let scope = semantic_source_scope(
             source.source_window_title.as_deref(),
             source.source_app_name.as_deref(),
-            &format!("legacy-source:{}", source.id),
+            &fallback_scope,
         );
         let identity_hash = hash_text(&format!("{scope}|{}", view.identity));
         let key = format!("memory:semantic:{DATA_MEMORY_VERSION}:{identity_hash}");
@@ -608,16 +1046,31 @@ fn regenerate_work_memory_source(
                 |row| row.get::<_, i64>(0),
             )
             .optional()?;
+        let reusable_legacy_target = if index > 0 && existing_target.is_none() {
+            reusable_linked_legacy_source(conn, source.id, &snapshot.source_timeline_ids, view)?
+        } else {
+            None
+        };
         let target_id = if index == 0 && existing_target == Some(source.id) {
             reused_legacy_source = true;
             source.id
         } else if index == 0 && existing_target.is_none() {
             conn.execute(
-                "UPDATE data_sources SET canonical_key = ?2, updated_at = ?3 WHERE id = ?1",
-                params![source.id, key, now],
+                "UPDATE data_sources
+                 SET canonical_key = ?2, title = ?3, updated_at = ?4
+                 WHERE id = ?1",
+                params![source.id, key, view.title, now],
             )?;
             reused_legacy_source = true;
             source.id
+        } else if let Some(target_id) = reusable_legacy_target {
+            conn.execute(
+                "UPDATE data_sources
+                 SET canonical_key = ?2, title = ?3, updated_at = ?4
+                 WHERE id = ?1",
+                params![target_id, key, view.title, now],
+            )?;
+            target_id
         } else {
             conn.execute(
                 "INSERT INTO data_sources (
@@ -625,13 +1078,14 @@ fn regenerate_work_memory_source(
                     refresh_policy, realtime_level, source_app_name, source_window_title,
                     tags, first_seen_at, last_seen_at, last_collected_at, last_success_at,
                     last_error_code, status, created_at, updated_at
-                 ) VALUES (?1, ?2, 'work_memory', NULL, 'memory_only', 'never', 'observed',
-                           ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 ) VALUES (?1, ?2, 'work_memory', ?3, 'memory_only', 'never', 'observed',
+                           ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(canonical_key) DO UPDATE SET
                     title = CASE
                                 WHEN excluded.last_seen_at >= data_sources.last_seen_at
                                 THEN excluded.title ELSE data_sources.title
                             END,
+                    source_url = COALESCE(excluded.source_url, data_sources.source_url),
                     source_app_name = CASE
                                 WHEN excluded.last_seen_at >= data_sources.last_seen_at
                                 THEN excluded.source_app_name ELSE data_sources.source_app_name
@@ -647,7 +1101,8 @@ fn regenerate_work_memory_source(
                     updated_at = excluded.updated_at",
                 params![
                     key,
-                    source.title,
+                    view.title,
+                    source.source_url,
                     source.source_app_name,
                     source.source_window_title,
                     serde_json::to_string(&source.tags)?,
@@ -667,6 +1122,11 @@ fn regenerate_work_memory_source(
             }
             target_id
         };
+
+        conn.execute(
+            "UPDATE data_sources SET title = ?2, updated_at = ?3 WHERE id = ?1",
+            params![target_id, view.title, now],
+        )?;
 
         if target_id != source.id {
             duplicate_data_source_links(conn, target_id, &identity_hash, &links)?;
@@ -699,6 +1159,91 @@ fn regenerate_work_memory_source(
         )?;
     }
     Ok(merged_count)
+}
+
+fn reusable_linked_legacy_source(
+    conn: &Connection,
+    current_source_id: i64,
+    timeline_ids: &[i64],
+    view: &SemanticDataView,
+) -> Result<Option<i64>, StorageError> {
+    for timeline_id in timeline_ids {
+        let mut stmt = conn.prepare(
+            "WITH latest_snapshot AS (
+                     SELECT snapshot.*,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY snapshot.source_id
+                                ORDER BY snapshot.collected_at DESC, snapshot.id DESC
+                            ) AS snapshot_rank
+                     FROM data_snapshots snapshot
+                 )
+                 SELECT source.id
+                 FROM data_sources source
+                 JOIN latest_snapshot snapshot
+                   ON snapshot.source_id = source.id AND snapshot.snapshot_rank = 1
+                 WHERE source.id <> ?1
+                   AND source.deleted_at IS NULL
+                   AND source.source_kind = 'work_memory'
+                   AND COALESCE(
+                       json_extract(snapshot.structured_data, '$.semantic_origin'), ''
+                   ) = 'legacy_parser'
+                   AND EXISTS (
+                       SELECT 1
+                       FROM json_each(COALESCE(snapshot.source_timeline_ids, '[]')) timeline_ref
+                       WHERE timeline_ref.value = ?2
+                   )
+                 ORDER BY ABS(source.id - ?1) ASC, source.id ASC",
+        )?;
+        let candidates = stmt
+            .query_map(params![current_source_id, timeline_id], |row| {
+                row.get::<_, i64>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for candidate in candidates {
+            let Some(snapshot) = raw_latest_snapshot(conn, candidate)? else {
+                continue;
+            };
+            if semantic_view_matches_legacy_snapshot(&snapshot, view) {
+                return Ok(Some(candidate));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn semantic_view_matches_legacy_snapshot(
+    snapshot: &DataSnapshotRecord,
+    view: &SemanticDataView,
+) -> bool {
+    let haystack = normalize_evidence_text(&format!(
+        "{}\n{}",
+        snapshot.content_text, snapshot.structured_data
+    ));
+    view.rows.iter().any(|row| {
+        let value = normalize_evidence_text(&row.value);
+        let metric = normalize_evidence_text(&row.metric);
+        let value_matches = (value.chars().count() >= 2 && haystack.contains(&value))
+            || numeric_tokens_hit(&value, &haystack);
+        value_matches && semantic_metric_matches_haystack(&haystack, &metric)
+    })
+}
+
+fn semantic_metric_matches_haystack(haystack: &str, metric: &str) -> bool {
+    if metric.is_empty() {
+        return false;
+    }
+    if haystack.contains(metric) {
+        return true;
+    }
+    let chars = metric.chars().collect::<Vec<_>>();
+    if chars.len() < 2 {
+        return false;
+    }
+    // 旧标题常把动作或对象塞进指标前缀（“用户设定了视频时长”），因此允许
+    // 新指标与旧正文只共享末尾的度量语义；不能用“视频/生成”等前缀重合来
+    // 判定，否则同为 15 秒的视频时长和接口耗时仍会串线。
+    let tail = chars[chars.len() - 2..].iter().collect::<String>();
+    !matches!(tail.as_str(), "任务" | "用户" | "当前" | "数据" | "结果") && haystack.contains(&tail)
 }
 
 fn load_data_source_links(
@@ -781,8 +1326,6 @@ fn upsert_regenerated_work_snapshot(
     view: &SemanticDataView,
 ) -> Result<i64, StorageError> {
     let content = clip_text(&semantic_view_content(view), DATA_TEXT_MAX_CHARS);
-    let structured = semantic_view_to_json(view.clone());
-    let content_hash = hash_text(&format!("{content}\n{structured}"));
     let observed_at = view
         .latest_observed_at
         .into_iter()
@@ -790,6 +1333,7 @@ fn upsert_regenerated_work_snapshot(
         .chain(std::iter::once(source_snapshot.collected_at))
         .max()
         .unwrap_or(source_snapshot.collected_at);
+    let period = weekly_period_tag(observed_at);
     let mut provenance = source_snapshot.provenance.clone();
     if !provenance.is_object() {
         provenance = json!({});
@@ -803,15 +1347,25 @@ fn upsert_regenerated_work_snapshot(
             "semantic_identity".to_string(),
             Value::String(view.identity.clone()),
         );
+        object.insert(
+            "semantic_subject".to_string(),
+            Value::String(view.subject.clone()),
+        );
         object.insert("history_regenerated".to_string(), Value::Bool(true));
     }
+    attach_period_tag(&mut provenance, &period);
+    let mut structured = semantic_view_to_json(view.clone());
+    attach_period_tag(&mut structured, &period);
+    let content_hash = hash_text(&format!("{content}\n{structured}"));
     conn.execute(
         "INSERT INTO data_snapshots (
-            source_id, collected_at, observed_at, collector, content_text, structured_data,
+            source_id, collected_at, observed_at, period_granularity, period_key,
+            period_start_at, period_end_at, collector, content_text, structured_data,
             content_hash, freshness_ttl_seconds, provenance, source_capture_ids,
             source_timeline_ids, status, created_at
-         ) VALUES (?1, ?2, ?3, 'memory_extract', ?4, ?5, ?6, 0, ?7, ?8, ?9, 'success', ?10)
-         ON CONFLICT(source_id) DO UPDATE SET
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'memory_extract', ?8, ?9, ?10, 0,
+                   ?11, ?12, ?13, 'success', ?14)
+         ON CONFLICT(source_id, period_key) DO UPDATE SET
             collected_at = excluded.collected_at,
             observed_at = excluded.observed_at,
             collector = excluded.collector,
@@ -829,6 +1383,10 @@ fn upsert_regenerated_work_snapshot(
             target_id,
             observed_at,
             observed_at,
+            DATA_PERIOD_GRANULARITY,
+            &period.key,
+            period.start_at,
+            period.end_at,
             content,
             structured.to_string(),
             content_hash,
@@ -839,8 +1397,9 @@ fn upsert_regenerated_work_snapshot(
         ],
     )?;
     conn.query_row(
-        "SELECT id FROM data_snapshots WHERE source_id = ?1 LIMIT 1",
-        [target_id],
+        "SELECT id FROM data_snapshots
+         WHERE source_id = ?1 AND period_key = ?2 LIMIT 1",
+        params![target_id, &period.key],
         |row| row.get::<_, i64>(0),
     )
     .map_err(Into::into)
@@ -879,30 +1438,37 @@ fn raw_latest_snapshot(
     conn.query_row(
         "SELECT id, source_id, collected_at, observed_at, collector, content_text,
                 structured_data, content_hash, freshness_ttl_seconds, provenance,
-                source_capture_ids, source_timeline_ids, status
+                source_capture_ids, source_timeline_ids, status, period_granularity,
+                period_key, period_start_at, period_end_at
          FROM data_snapshots WHERE source_id = ?1
          ORDER BY collected_at DESC, id DESC LIMIT 1",
         [source_id],
-        |row| {
-            Ok(DataSnapshotRecord {
-                id: row.get(0)?,
-                source_id: row.get(1)?,
-                collected_at: row.get(2)?,
-                observed_at: row.get(3)?,
-                collector: row.get(4)?,
-                content_text: row.get(5)?,
-                structured_data: parse_json_value(row.get::<_, String>(6)?, json!({})),
-                content_hash: row.get(7)?,
-                freshness_ttl_seconds: row.get(8)?,
-                provenance: parse_json_value(row.get::<_, String>(9)?, json!({})),
-                source_capture_ids: parse_json_i64(row.get::<_, String>(10)?),
-                source_timeline_ids: parse_json_i64(row.get::<_, String>(11)?),
-                status: row.get(12)?,
-            })
-        },
+        map_data_snapshot_row,
     )
     .optional()
     .map_err(Into::into)
+}
+
+fn map_data_snapshot_row(row: &Row<'_>) -> rusqlite::Result<DataSnapshotRecord> {
+    Ok(DataSnapshotRecord {
+        id: row.get(0)?,
+        source_id: row.get(1)?,
+        collected_at: row.get(2)?,
+        observed_at: row.get(3)?,
+        collector: row.get(4)?,
+        content_text: row.get(5)?,
+        structured_data: parse_json_value(row.get::<_, String>(6)?, json!({})),
+        content_hash: row.get(7)?,
+        freshness_ttl_seconds: row.get(8)?,
+        provenance: parse_json_value(row.get::<_, String>(9)?, json!({})),
+        source_capture_ids: parse_json_i64(row.get::<_, String>(10)?),
+        source_timeline_ids: parse_json_i64(row.get::<_, String>(11)?),
+        status: row.get(12)?,
+        period_granularity: row.get(13)?,
+        period_key: row.get(14)?,
+        period_start_at: row.get(15)?,
+        period_end_at: row.get(16)?,
+    })
 }
 
 fn load_capture_candidates(
@@ -1113,26 +1679,27 @@ fn upsert_work_memory_view(
     let identity_hash = hash_text(&format!("{scope}|{}", view.identity));
     let key = format!("memory:semantic:{DATA_MEMORY_VERSION}:{identity_hash}");
     let existed = source_exists(conn, &key)?;
-    let source_title = clip_text(
-        candidate
-            .timeline_summary
-            .as_deref()
-            .unwrap_or_else(|| candidate_title(candidate)),
-        240,
-    );
+    let source_title = clip_text(&view.title, 240);
+    let source_url = candidate
+        .url
+        .as_deref()
+        .and_then(canonical_data_url)
+        .filter(|url| !url.is_empty())
+        .or_else(|| context.source_urls.first().cloned());
     let now = current_ts_ms();
     conn.execute(
         "INSERT INTO data_sources (
-            canonical_key, title, source_kind, access_mode, refresh_policy, realtime_level,
-            source_app_name, source_window_title, tags, first_seen_at, last_seen_at,
-            status, created_at, updated_at
-         ) VALUES (?1, ?2, 'work_memory', 'memory_only', 'never', 'observed',
-                   ?3, ?4, '[\"work_memory\"]', ?5, ?5, 'active', ?6, ?6)
+            canonical_key, title, source_kind, source_url, access_mode, refresh_policy,
+            realtime_level, source_app_name, source_window_title, tags, first_seen_at,
+            last_seen_at, status, created_at, updated_at
+         ) VALUES (?1, ?2, 'work_memory', ?3, 'memory_only', 'never', 'observed',
+                   ?4, ?5, '[\"work_memory\"]', ?6, ?6, 'active', ?7, ?7)
          ON CONFLICT(canonical_key) DO UPDATE SET
             title = CASE
                         WHEN excluded.last_seen_at >= data_sources.last_seen_at
                         THEN excluded.title ELSE data_sources.title
                     END,
+            source_url = COALESCE(excluded.source_url, data_sources.source_url),
             source_app_name = CASE
                         WHEN excluded.last_seen_at >= data_sources.last_seen_at
                         THEN excluded.source_app_name ELSE data_sources.source_app_name
@@ -1147,6 +1714,7 @@ fn upsert_work_memory_view(
         params![
             key,
             source_title,
+            source_url,
             candidate.app_name,
             candidate.win_title,
             candidate.ts,
@@ -1171,22 +1739,37 @@ fn upsert_work_memory_view(
         )?;
     }
     let content = clip_text(&semantic_view_content(view), DATA_TEXT_MAX_CHARS);
-    let structured = semantic_view_to_json(view.clone());
+    let observed_at = view.latest_observed_at.unwrap_or(context.observed_at);
+    let period = weekly_period_tag(observed_at);
+    let mut structured = semantic_view_to_json(view.clone());
+    attach_period_tag(&mut structured, &period);
     let content_hash = hash_text(&format!("{content}\n{structured}"));
     let previous_hash = conn
         .query_row(
-            "SELECT content_hash FROM data_snapshots WHERE source_id = ?1 LIMIT 1",
-            [source_id],
+            "SELECT content_hash FROM data_snapshots
+             WHERE source_id = ?1 AND period_key = ?2 LIMIT 1",
+            params![source_id, &period.key],
             |row| row.get::<_, String>(0),
         )
         .optional()?;
+    let mut provenance = json!({
+        "source": "timeline",
+        "observed_at_is_lower_bound": true,
+        "semantic_subject": view.subject,
+        "semantic_identity": view.identity,
+        "semantic_scope": scope,
+        "generation_version": DATA_MEMORY_VERSION,
+    });
+    attach_period_tag(&mut provenance, &period);
     conn.execute(
         "INSERT INTO data_snapshots (
-            source_id, collected_at, observed_at, collector, content_text, structured_data,
+            source_id, collected_at, observed_at, period_granularity, period_key,
+            period_start_at, period_end_at, collector, content_text, structured_data,
             content_hash, freshness_ttl_seconds, provenance, source_capture_ids,
             source_timeline_ids, status, created_at
-         ) VALUES (?1, ?2, ?2, 'memory_extract', ?3, ?4, ?5, 0, ?6, ?7, ?8, 'success', ?9)
-         ON CONFLICT(source_id) DO UPDATE SET
+         ) VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, 'memory_extract', ?7, ?8, ?9, 0,
+                   ?10, ?11, ?12, 'success', ?13)
+         ON CONFLICT(source_id, period_key) DO UPDATE SET
             collected_at = excluded.collected_at,
             observed_at = excluded.observed_at,
             collector = excluded.collector,
@@ -1202,27 +1785,24 @@ fn upsert_work_memory_view(
          WHERE excluded.observed_at >= COALESCE(data_snapshots.observed_at, data_snapshots.collected_at)",
         params![
             source_id,
-            view.latest_observed_at.unwrap_or(context.observed_at),
+            observed_at,
+            DATA_PERIOD_GRANULARITY,
+            &period.key,
+            period.start_at,
+            period.end_at,
             content,
             structured.to_string(),
             content_hash,
-            json!({
-                "source": "timeline",
-                "observed_at_is_lower_bound": true,
-                "semantic_subject": view.subject,
-        "semantic_identity": view.identity,
-                "semantic_scope": scope,
-                "generation_version": DATA_MEMORY_VERSION,
-            })
-            .to_string(),
+            provenance.to_string(),
             serde_json::to_string(&context.capture_ids)?,
             serde_json::to_string(&vec![timeline_id])?,
             now,
         ],
     )?;
     let current_hash = conn.query_row(
-        "SELECT content_hash FROM data_snapshots WHERE source_id = ?1 LIMIT 1",
-        [source_id],
+        "SELECT content_hash FROM data_snapshots
+         WHERE source_id = ?1 AND period_key = ?2 LIMIT 1",
+        params![source_id, &period.key],
         |row| row.get::<_, String>(0),
     )?;
     let snapshot_changed = previous_hash.as_deref() != Some(current_hash.as_str());
@@ -1256,15 +1836,17 @@ fn load_timeline_data_context(
     .join("\n");
     let timeline_observed_at = candidate.timeline_updated_at_ms.unwrap_or(candidate.ts);
     let mut statements = metric_statements(&timeline_text, timeline_observed_at);
+    let mut evidence_parts = vec![timeline_text.clone()];
     let mut observed_at = if statements.is_empty() {
         0
     } else {
         timeline_observed_at
     };
     let mut capture_ids = Vec::new();
+    let mut source_urls = Vec::new();
     let mut stmt = conn.prepare(
         "SELECT c.id, c.ts, COALESCE(c.ax_text, ''), COALESCE(c.ocr_text, ''),
-                COALESCE(c.input_text, ''), COALESCE(c.audio_text, '')
+                COALESCE(c.input_text, ''), COALESCE(c.audio_text, ''), c.url
          FROM captures c
          WHERE c.is_sensitive = 0
            AND (c.timeline_id = ?1 OR c.id = (
@@ -1283,11 +1865,26 @@ fn load_timeline_data_context(
         .filter(|part| !part.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n");
-        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, text))
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            text,
+            row.get::<_, Option<String>>(6)?,
+        ))
     })?;
     for row in rows {
-        let (capture_id, capture_ts, text) = row?;
+        let (capture_id, capture_ts, text, capture_url) = row?;
         capture_ids.push(capture_id);
+        if let Some(url) = capture_url
+            .as_deref()
+            .and_then(canonical_data_url)
+            .filter(|url| !url.is_empty() && !source_urls.contains(url))
+        {
+            source_urls.push(url);
+        }
+        if !text.trim().is_empty() {
+            evidence_parts.push(text.clone());
+        }
         let mut capture_statements = metric_statements(&text, capture_ts);
         if !capture_statements.is_empty() {
             observed_at = observed_at.max(capture_ts);
@@ -1297,10 +1894,50 @@ fn load_timeline_data_context(
     capture_ids.sort_unstable();
     capture_ids.dedup();
     statements.truncate(80);
+    let model_fact_contract = conn
+        .query_row(
+            "SELECT contract_version FROM timeline_data_fact_runs WHERE timeline_id = ?1",
+            [timeline_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let mut model_facts = Vec::new();
+    if model_fact_contract.is_some() {
+        let mut fact_stmt = conn.prepare(
+            "SELECT title, subject, action, target_context, dimension, metric, value, unit,
+                    statement, evidence_quote, confidence, observed_at
+             FROM timeline_data_facts
+             WHERE timeline_id = ?1
+             ORDER BY id ASC",
+        )?;
+        let rows = fact_stmt.query_map([timeline_id], |row| {
+            Ok(ModelDataFact {
+                title: row.get(0)?,
+                subject: row.get(1)?,
+                action: row.get(2)?,
+                target_context: row.get(3)?,
+                dimension: row.get(4)?,
+                metric: row.get(5)?,
+                value: row.get(6)?,
+                unit: row.get(7)?,
+                statement: row.get(8)?,
+                evidence_quote: row.get(9)?,
+                confidence: row.get(10)?,
+                observed_at: row.get(11)?,
+            })
+        })?;
+        for row in rows {
+            model_facts.push(row?);
+        }
+    }
     Ok(TimelineDataContext {
         capture_ids,
-        observed_at,
+        source_urls,
+        observed_at: observed_at.max(timeline_observed_at),
         metric_statements: statements,
+        model_fact_contract,
+        model_facts,
+        evidence_text: evidence_parts.join("\n"),
     })
 }
 
@@ -1313,6 +1950,63 @@ fn is_presentable_data_source(source: &DataSourceRecord) -> bool {
         .get("metric_rows")
         .and_then(Value::as_array)
         .is_some_and(|rows| !rows.is_empty())
+}
+
+/// FTS5 预筛：返回 data_snapshots_fts 命中快照对应的 source_id 集合。
+///
+/// 返回 `None` 表示 FTS 不可用或候选不可靠（表缺失/查询失败/空命中/被上限截断），
+/// 调用方应回退原有全量过滤路径。
+fn data_snapshot_fts_source_ids(conn: &Connection, query: &str) -> Option<HashSet<i64>> {
+    let terms = split_query_terms(query);
+    let fts_query = build_fts_or_query(&terms)?;
+    let snapshot_ids: Vec<i64> = conn
+        .query_row(
+            "SELECT (SELECT GROUP_CONCAT(rowid) FROM data_snapshots_fts WHERE data_snapshots_fts MATCH ?1)",
+            params![fts_query],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+        .map(|joined| {
+            joined
+                .split(',')
+                .filter_map(|part| part.trim().parse::<i64>().ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if snapshot_ids.is_empty() || snapshot_ids.len() >= DEFAULT_FTS_CANDIDATE_CAP {
+        return None;
+    }
+    let placeholders = vec!["?"; snapshot_ids.len()].join(",");
+    let sql = format!("SELECT DISTINCT source_id FROM data_snapshots WHERE id IN ({placeholders})");
+    let mut stmt = conn.prepare(&sql).ok()?;
+    let binds: Vec<&dyn rusqlite::ToSql> = snapshot_ids
+        .iter()
+        .map(|id| id as &dyn rusqlite::ToSql)
+        .collect();
+    let ids = stmt
+        .query_map(binds.as_slice(), |row| row.get::<_, i64>(0))
+        .ok()?
+        .collect::<Result<HashSet<_>, _>>()
+        .ok()?;
+    Some(ids)
+}
+
+/// 仅校验数据源自身字段（标题/URL/应用名）是否包含关键词，
+/// 用于 FTS 预筛时保留未被快照索引覆盖但 source 级字段命中的候选。
+fn data_source_base_fields_match(source: &DataSourceRecord, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+    format!(
+        "{}\n{}\n{}",
+        source.title,
+        source.source_url.as_deref().unwrap_or_default(),
+        source.source_app_name.as_deref().unwrap_or_default()
+    )
+    .to_lowercase()
+    .contains(&query)
 }
 
 fn data_source_matches_query(source: &DataSourceRecord, query: &str) -> bool {
@@ -1334,6 +2028,300 @@ fn data_source_matches_query(source: &DataSourceRecord, query: &str) -> bool {
     )
     .to_lowercase()
     .contains(&query)
+}
+
+fn semantic_views_for_timeline_context(
+    context: &TimelineDataContext,
+    semantic_context: &str,
+) -> Vec<SemanticDataView> {
+    if let Some(contract) = context.model_fact_contract.as_deref() {
+        let views =
+            semantic_views_from_model_facts(&context.model_facts, &context.evidence_text, contract);
+        if !views.is_empty() || contract == CURRENT_TIMELINE_DATA_FACT_VERSION {
+            return views;
+        }
+        // v1/v2 已经产生过历史数据，继续兼容旧回退行为；v3 起由 Sidecar
+        // 聚焦补提炼负责恢复遗漏，零事实也不得再让 Rust 猜出另一套宽泛语义。
+    }
+    semantic_views_from_statements(&context.metric_statements, semantic_context)
+}
+
+fn semantic_views_from_model_facts(
+    facts: &[ModelDataFact],
+    evidence_text: &str,
+    fact_contract: &str,
+) -> Vec<SemanticDataView> {
+    let normalized_source = normalize_evidence_text(evidence_text);
+    let mut views: Vec<SemanticDataView> = Vec::new();
+    for fact in facts.iter().take(80) {
+        if !model_data_fact_is_valid(fact, &normalized_source) {
+            continue;
+        }
+        let identity = [
+            fact.subject.as_str(),
+            fact.action.as_str(),
+            fact.target_context.as_str(),
+            fact.metric.as_str(),
+        ]
+        .into_iter()
+        .map(normalize_identity_text)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(":");
+        if identity.is_empty() {
+            continue;
+        }
+        let value = if fact.unit.trim().is_empty() || fact.value.trim().ends_with(fact.unit.trim())
+        {
+            fact.value.trim().to_string()
+        } else {
+            format!("{}{}", fact.value.trim(), fact.unit.trim())
+        };
+        let row = SemanticMetricRow {
+            dimension: fact.dimension.clone(),
+            metric: fact.metric.clone(),
+            value,
+            note: String::new(),
+            statement: fact.statement.clone(),
+            observed_at: fact.observed_at,
+        };
+        let accepted_statement = json!({
+            "statement": clip_text(&fact.statement, 500),
+            "evidence_quote": clip_text(&fact.evidence_quote, 500),
+            "fact_contract": fact_contract,
+            "action": fact.action,
+            "target_context": fact.target_context,
+            "confidence": fact.confidence,
+            "observed_at": fact.observed_at,
+        });
+        if let Some(existing) = views.iter_mut().find(|view| view.identity == identity) {
+            merge_semantic_rows(&mut existing.rows, vec![row]);
+            if !existing
+                .statements
+                .iter()
+                .any(|item| item == &accepted_statement)
+            {
+                existing.statements.push(accepted_statement);
+            }
+            existing.latest_observed_at = existing.latest_observed_at.max(fact.observed_at);
+            if fact.observed_at >= existing.latest_observed_at {
+                existing.title = fact.title.clone();
+                existing.summary = fact.statement.clone();
+            }
+        } else {
+            views.push(SemanticDataView {
+                title: fact.title.clone(),
+                subject: fact.subject.clone(),
+                identity,
+                summary: fact.statement.clone(),
+                rows: vec![row],
+                statements: vec![accepted_statement],
+                latest_observed_at: fact.observed_at,
+            });
+        }
+    }
+    for view in &mut views {
+        view.title = clip_text(&view.title, 120);
+        view.summary = clip_text(&view.summary, 500);
+        view.rows.truncate(120);
+        view.statements.truncate(80);
+    }
+    views.sort_by(|left, right| {
+        right
+            .latest_observed_at
+            .cmp(&left.latest_observed_at)
+            .then_with(|| left.title.cmp(&right.title))
+    });
+    views
+}
+
+fn model_data_fact_is_valid(fact: &ModelDataFact, normalized_source: &str) -> bool {
+    let required = [
+        fact.title.as_str(),
+        fact.subject.as_str(),
+        fact.metric.as_str(),
+        fact.value.as_str(),
+        fact.statement.as_str(),
+        fact.evidence_quote.as_str(),
+    ];
+    if required.iter().any(|value| value.trim().is_empty())
+        || !matches!(fact.confidence.as_str(), "low" | "medium" | "high")
+        || fact.title.chars().count() > 120
+        || fact.subject.chars().count() > 80
+        || fact.metric.chars().count() > 60
+        || fact.value.chars().count() > 40
+        || fact.unit.chars().count() > 24
+        || fact.statement.chars().count() > 500
+        || fact.evidence_quote.chars().count() > 500
+    {
+        return false;
+    }
+    if generic_model_fact_anchor(&fact.subject)
+        && !specific_model_fact_context(&fact.target_context)
+    {
+        return false;
+    }
+    if generic_model_execution_context(&fact.target_context)
+        && (generic_model_fact_anchor(&fact.subject)
+            || model_fact_subject_is_value_like(&fact.subject, &fact.value))
+    {
+        return false;
+    }
+    let evidence = normalize_evidence_text(&fact.evidence_quote);
+    let subject = normalize_evidence_text(&fact.subject);
+    let statement = normalize_evidence_text(&fact.statement);
+    let value = normalize_evidence_text(&fact.value);
+    let unit = normalize_evidence_text(&fact.unit);
+    let dimension = normalize_evidence_text(&fact.dimension);
+    if evidence.is_empty() || !normalized_source.contains(&evidence) {
+        return false;
+    }
+    // 防幻觉底线：值以及 subject/metric/target_context 中至少一个
+    // 语义锚点必须能回证到 evidence。逐字命中失败时，允许数字
+    // token 全部命中（容忍 "87%+" vs "87%" 这类格式差异）。
+    // title/statement 是否逐字复现 subject/metric/value 属于展示结构问题，
+    // 不再作为拒绝理由（与 sidecar _validated_data_facts 口径一致）。
+    let metric = normalize_evidence_text(&fact.metric);
+    let target_context = normalize_evidence_text(&fact.target_context);
+    let subject_ok = evidence.contains(&subject) || numeric_tokens_hit(&subject, &evidence);
+    let semantic_anchor_ok = subject_ok
+        || (!metric.is_empty() && evidence.contains(&metric))
+        || (!target_context.is_empty() && evidence.contains(&target_context));
+    let value_ok = evidence.contains(&value) || numeric_tokens_hit(&value, &evidence);
+    let unit_ok = unit.is_empty() || evidence.contains(&unit);
+    let dimension_ok =
+        dimension.is_empty() || evidence.contains(&dimension) || statement.contains(&dimension);
+    semantic_anchor_ok && value_ok && unit_ok && dimension_ok
+}
+
+fn generic_model_fact_anchor(value: &str) -> bool {
+    matches!(
+        normalize_identity_text(value).as_str(),
+        "duration"
+            | "aspectratio"
+            | "width"
+            | "height"
+            | "size"
+            | "value"
+            | "参数"
+            | "生成参数"
+            | "请求参数"
+            | "配置参数"
+            | "已用时"
+            | "耗时"
+            | "总耗时"
+            | "任务耗时"
+            | "任务总耗时"
+            | "整个任务"
+            | "本次任务"
+            | "该任务"
+    )
+}
+
+fn specific_model_fact_context(value: &str) -> bool {
+    let normalized = normalize_identity_text(value);
+    normalized.chars().count() >= 6
+        && !matches!(
+            normalized.as_str(),
+            "视频参数配置"
+                | "生成参数配置"
+                | "任务处理过程"
+                | "api接口调用"
+                | "接口调用"
+                | "当前任务"
+                | "本次任务"
+                | "整个任务"
+        )
+        && !generic_model_execution_context(value)
+}
+
+fn generic_model_execution_context(value: &str) -> bool {
+    let normalized = normalize_identity_text(value);
+    [
+        "参数配置",
+        "生成控制",
+        "过程监控",
+        "接口调用",
+        "任务处理过程",
+    ]
+    .iter()
+    .any(|suffix| normalized.ends_with(suffix))
+}
+
+fn model_fact_subject_is_value_like(subject: &str, value: &str) -> bool {
+    let subject = normalize_evidence_text(subject);
+    let value = normalize_evidence_text(value);
+    let Some(value_start) = (!value.is_empty()).then(|| subject.find(&value)).flatten() else {
+        return false;
+    };
+    let value_end = value_start + value.len();
+    let residue = format!("{}{}", &subject[..value_start], &subject[value_end..]);
+    residue.chars().filter(|ch| ch.is_alphabetic()).count() <= 4
+}
+
+/// 提取字符串中的数字 token（以数字开头，后跟 0-9 : . %），与 sidecar 的
+/// `[0-9][0-9:.%]*` 正则口径保持一致。命名避开下方指标语句解析用的
+/// `numeric_tokens`（返回 NumericToken 结构体，职责不同）。
+fn fact_numeric_tokens(value: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_digit() {
+            current.push(ch);
+        } else if !current.is_empty() && matches!(ch, '.' | ':' | '%') {
+            current.push(ch);
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn numeric_tokens_hit(value: &str, evidence: &str) -> bool {
+    let tokens = fact_numeric_tokens(value);
+    !tokens.is_empty() && tokens.iter().all(|token| evidence.contains(token))
+}
+
+fn normalize_evidence_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .map(fullwidth_punct_to_halfwidth)
+        .collect()
+}
+
+/// 与 sidecar `_HALFWIDTH_SYMBOL_MAP` 保持一致：OCR 与模型输出的全角/半角
+/// 标点差异不应破坏逐字回证。
+fn fullwidth_punct_to_halfwidth(ch: char) -> char {
+    match ch {
+        '\u{FF0C}' => ',',
+        '\u{3002}' => '.',
+        '\u{FF1A}' => ':',
+        '\u{FF1B}' => ';',
+        '\u{FF01}' => '!',
+        '\u{FF1F}' => '?',
+        '\u{FF08}' => '(',
+        '\u{FF09}' => ')',
+        '\u{FF3B}' => '[',
+        '\u{FF3D}' => ']',
+        '\u{3010}' => '[',
+        '\u{3011}' => ']',
+        '\u{FF5B}' => '{',
+        '\u{FF5D}' => '}',
+        '\u{FF05}' => '%',
+        '\u{FF0B}' => '+',
+        '\u{FF0D}' => '-',
+        '\u{FF1D}' => '=',
+        '\u{FF1C}' => '<',
+        '\u{FF1E}' => '>',
+        '\u{FF04}' => '$',
+        '\u{FFE5}' => '\u{00A5}',
+        other => other,
+    }
 }
 
 fn semantic_views_from_statements(
@@ -1440,8 +2428,37 @@ fn semantic_view_is_self_contained(view: &SemanticDataView) -> bool {
 fn semantic_metric_row_is_plausible(row: &SemanticMetricRow) -> bool {
     let metric = row.metric.trim();
     let value = row.value.trim().to_lowercase();
+    let normalized_metric = normalize_identity_text(metric);
     if metric.is_empty()
         || metric.chars().count() > 36
+        // 数字前的聊天动作残片不是真正的指标名。例如“我先把 QPS 调到 1
+        // 看看”曾被截成“我先把qps”，继而直接污染数据标题。这里作为第二道
+        // 门禁，避免未来新增解析规则时重新放过同类内容。
+        || [
+            "我先把",
+            "我们先把",
+            "先把",
+            "先将",
+            "请把",
+            "请将",
+            "帮我把",
+            "帮忙把",
+            "准备把",
+            "准备将",
+            "计划把",
+            "计划将",
+            "打算把",
+            "打算将",
+            "尝试把",
+            "尝试将",
+            "试着把",
+            "试着将",
+        ]
+        .iter()
+        .any(|marker| normalized_metric.starts_with(marker))
+        || ["他们", "它们", "这些", "那些", "上述", "该项", "这项"]
+            .iter()
+            .any(|marker| normalized_metric.starts_with(marker))
         || [
             "此外",
             "还涉及",
@@ -1473,6 +2490,7 @@ fn semantic_metric_row_is_plausible(row: &SemanticMetricRow) -> bool {
             .iter()
             .any(|unit| value.contains(unit))
         && !value_is_unit_interval(&value)
+        && !value_is_colon_ratio(&value)
     {
         return false;
     }
@@ -1520,6 +2538,22 @@ fn value_is_unit_interval(value: &str) -> bool {
         .trim_start_matches(['+', '-'])
         .parse::<f64>()
         .is_ok_and(|number| (0.0..=1.0).contains(&number))
+}
+
+fn value_is_colon_ratio(value: &str) -> bool {
+    let mut parts = value.trim().split([':', '：']);
+    let Some(left) = parts.next() else {
+        return false;
+    };
+    let Some(right) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+    [left, right]
+        .iter()
+        .all(|part| part.parse::<f64>().is_ok_and(|number| number > 0.0))
 }
 
 fn merge_semantic_rows(target: &mut Vec<SemanticMetricRow>, rows: Vec<SemanticMetricRow>) {
@@ -1704,6 +2738,17 @@ fn semantic_subject(
     let normalized_statement = normalize_identity_text(statement);
     let requires_subject = rows_require_subject(rows);
 
+    // 成本、收益等结果型指标的业务对象经常位于动作短语中，而不是紧挨着
+    // 数值或“成本”二字。例如“生服模特库在电商 AIGC 中的复用……节省
+    // 6.28 万成本”。必须先恢复完整动作对象，再处理 AIGC 这类宽泛主题，
+    // 否则标题会退化成没有独立解释能力的“AIGC 成本”。
+    if let Some(outcome_subject) = explicit_outcome_subject(statement, rows) {
+        return SemanticSubject {
+            display: outcome_subject.clone(),
+            identity: outcome_subject,
+        };
+    }
+
     let is_application_resource = !rows.is_empty()
         && rows
             .iter()
@@ -1728,6 +2773,13 @@ fn semantic_subject(
                 identity: application,
             };
         }
+    }
+
+    if let Some(explicit_subject) = explicit_named_plan_subject(statement) {
+        return SemanticSubject {
+            display: explicit_subject.clone(),
+            identity: explicit_subject,
+        };
     }
 
     if let Some(explicit_subject) = explicit_product_subject(statement) {
@@ -1829,7 +2881,7 @@ fn semantic_subject(
     if rows.iter().all(|row| {
         matches!(
             canonical_identity_metric(&row.metric).as_str(),
-            "耗时" | "总耗时"
+            "耗时" | "总耗时" | "时长" | "任务耗时" | "任务总耗时"
         )
     }) {
         return SemanticSubject::default();
@@ -1844,6 +2896,15 @@ fn semantic_subject(
                 identity: source_title,
             };
         }
+    }
+
+    // 稳定产品页可为裸属性提供对象，但宽泛的时间线摘要不可以。否则同一时间线里
+    // 单独出现的“单价低”“准确率 70%”会被错误挂到整段工作摘要上。
+    if rows
+        .iter()
+        .all(|row| metric_needs_inline_subject(&row.metric))
+    {
+        return SemanticSubject::default();
     }
 
     if !semantic_context_has_document_window(semantic_context) {
@@ -1984,9 +3045,34 @@ fn explicit_product_subject(statement: &str) -> Option<String> {
     None
 }
 
+fn explicit_named_plan_subject(statement: &str) -> Option<String> {
+    let words = statement
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_')))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    for pair in words.windows(2) {
+        let tier = pair[1].to_ascii_lowercase();
+        if matches!(
+            tier.as_str(),
+            "standard" | "plus" | "basic" | "pro" | "premium" | "enterprise"
+        ) && pair[0].chars().any(|ch| ch.is_ascii_alphabetic())
+            && !pair[0].chars().all(|ch| ch.is_ascii_digit())
+        {
+            return Some(format!("{} {}", pair[0], pair[1]));
+        }
+    }
+    None
+}
+
 fn explicit_metric_subject(statement: &str, rows: &[SemanticMetricRow]) -> Option<String> {
     if rows.iter().any(|row| row.metric.contains("视频推理成本")) {
         return Some("视频推理".to_string());
+    }
+
+    if rows_require_subject(rows) {
+        if let Some(subject) = explicit_subject_before_generic_metric(statement, rows) {
+            return Some(subject);
+        }
     }
 
     let mut candidates = statement
@@ -2024,6 +3110,202 @@ fn explicit_metric_subject(statement: &str, rows: &[SemanticMetricRow]) -> Optio
         [first, second] => Some(format!("{first} 与 {second}")),
         _ => None,
     }
+}
+
+fn explicit_outcome_subject(statement: &str, rows: &[SemanticMetricRow]) -> Option<String> {
+    let has_cost_outcome = rows.iter().any(|row| row.metric.contains("成本"))
+        && ["节省", "节约", "省下", "减少", "降低", "下降"]
+            .iter()
+            .any(|marker| statement.contains(marker));
+    if !has_cost_outcome {
+        return None;
+    }
+
+    for (open, close) in [('（', '）'), ('(', ')')] {
+        let mut remainder = statement;
+        while let Some(start) = remainder.find(open) {
+            let after_open = &remainder[start + open.len_utf8()..];
+            let Some(end) = after_open.find(close) else {
+                break;
+            };
+            let candidate = trim_outcome_subject_prefix(&after_open[..end]);
+            if outcome_subject_is_reliable(&candidate) {
+                return Some(candidate);
+            }
+            remainder = &after_open[end + close.len_utf8()..];
+        }
+    }
+
+    let outcome_position = [
+        "带来节省",
+        "带来节约",
+        "节省",
+        "节约",
+        "省下",
+        "减少",
+        "降低",
+    ]
+    .iter()
+    .filter_map(|marker| statement.find(marker))
+    .min()?;
+    let outcome_prefix = statement[..outcome_position]
+        .trim_end_matches(|ch: char| ch.is_whitespace() || "，,。；;：:".contains(ch));
+    let prefix = outcome_prefix
+        .rsplit(['。', '！', '？', '；', ';', '，', ',', '：', ':'])
+        .next()
+        .unwrap_or_default();
+    let candidate = trim_outcome_subject_prefix(prefix);
+    outcome_subject_is_reliable(&candidate).then_some(candidate)
+}
+
+fn trim_outcome_subject_prefix(value: &str) -> String {
+    let mut candidate = value
+        .trim_matches(|ch: char| ch.is_whitespace() || "，,。；;：:（）()【】[]“”\"'".contains(ch))
+        .to_string();
+    loop {
+        let previous = candidate.clone();
+        for prefix in [
+            "典型场景为",
+            "典型场景",
+            "复用场景为",
+            "复用场景",
+            "例如",
+            "比如",
+            "其中",
+            "通过",
+            "如",
+        ] {
+            if let Some(stripped) = candidate.strip_prefix(prefix) {
+                candidate = stripped
+                    .trim_matches(|ch: char| ch.is_whitespace() || "：:，,".contains(ch))
+                    .to_string();
+                break;
+            }
+        }
+        if candidate == previous {
+            break;
+        }
+    }
+    for suffix in ["已成功合并", "成功合并", "已完成", "完成"] {
+        if let Some(stripped) = candidate.strip_suffix(suffix) {
+            candidate = stripped.trim().to_string();
+            break;
+        }
+    }
+    candidate = candidate
+        .replace("AIGC中", "AIGC 中")
+        .replace("AIGC场景", "AIGC 场景");
+    clip_text(&candidate, 64)
+}
+
+fn outcome_subject_is_reliable(candidate: &str) -> bool {
+    let normalized = normalize_identity_text(candidate);
+    (4..=64).contains(&candidate.chars().count())
+        && ["复用", "迁移", "替换", "优化", "合并", "共享"]
+            .iter()
+            .any(|marker| candidate.contains(marker))
+        && !["用户", "文档", "数据", "指标", "场景"]
+            .iter()
+            .any(|generic| normalized == *generic)
+}
+
+fn explicit_subject_before_generic_metric(
+    statement: &str,
+    rows: &[SemanticMetricRow],
+) -> Option<String> {
+    let numeric_start = numeric_tokens(statement)
+        .first()
+        .map(|token| token.start)
+        .unwrap_or(statement.len());
+    let metric_prefix = &statement[..numeric_start];
+    let mut markers = rows
+        .iter()
+        .flat_map(|row| {
+            [
+                canonical_metric_label(&row.metric),
+                generic_metric_family(&row.metric).unwrap_or_default(),
+            ]
+        })
+        .filter(|marker| !marker.trim().is_empty())
+        .collect::<Vec<_>>();
+    markers.sort_by_key(|marker| std::cmp::Reverse(marker.len()));
+    markers.dedup();
+    let marker_position = markers
+        .iter()
+        .filter_map(|marker| {
+            metric_prefix
+                .rfind(marker)
+                .map(|position| (position, marker.len()))
+        })
+        // “API余额”与“余额”可能同时命中；优先选择结束位置相同的完整指标，
+        // 避免把指标内部的 API 错当成归属对象。
+        .max_by_key(|(position, marker_len)| (position + marker_len, *marker_len))?;
+    let mut candidate = metric_prefix[..marker_position.0]
+        .rsplit(['。', '！', '？', '；', ';', '，', ',', '：', ':'])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    for prefix in [
+        "背景显示",
+        "数据显示",
+        "数据表明",
+        "结果显示",
+        "文档显示",
+        "文档记录",
+        "记录显示",
+        "其中",
+    ] {
+        if let Some(stripped) = candidate.strip_prefix(prefix) {
+            candidate = stripped.trim().to_string();
+        }
+    }
+
+    // 负责人、维护人等是来源上下文，不是指标归属对象。例如
+    // “冯志刚主导的阿里云 paraformer ASR 单价”应保留后半段模型对象。
+    if let Some(position) = candidate.rfind('的') {
+        let owner_clause = &candidate[..position];
+        let object_clause = candidate[position + '的'.len_utf8()..].trim();
+        if ["主导", "负责", "维护", "提供", "建设", "研发", "推出"]
+            .iter()
+            .any(|marker| owner_clause.contains(marker))
+            && object_clause.chars().count() >= 2
+        {
+            candidate = object_clause.to_string();
+        }
+    }
+    candidate = candidate
+        .trim_matches(|ch: char| {
+            ch.is_whitespace() || "，,。；;：:（）()【】[]“”\"'的".contains(ch)
+        })
+        .to_string();
+
+    let normalized = normalize_identity_text(&candidate);
+    let is_context_fragment = [
+        "用户",
+        "他们",
+        "当前",
+        "其中",
+        "此外",
+        "最后",
+        "文档",
+        "数据",
+        "指标",
+        "整个任务",
+        "本次任务",
+        "该任务",
+        "任务总",
+    ]
+    .iter()
+    .any(|prefix| normalized.starts_with(prefix))
+        || ["包含", "涉及", "提及", "记录", "显示", "看到", "指出"]
+            .iter()
+            .any(|marker| candidate.contains(marker));
+    if is_context_fragment || !(2..=48).contains(&candidate.chars().count()) {
+        return None;
+    }
+    reliable_subject_label(&candidate)
 }
 
 fn semantic_context_for_source(
@@ -2092,6 +3374,18 @@ fn reliable_subject_label(value: &str) -> Option<String> {
             .chars()
             .next()
             .is_some_and(|ch| ch.is_ascii_digit() || matches!(ch, '+' | '-'))
+        || value.chars().any(|ch| ch == '%' || ch == '％')
+        || [
+            "小于",
+            "大于",
+            "低于",
+            "高于",
+            "相关核心",
+            "等相关",
+            "http等",
+        ]
+        .iter()
+        .any(|fragment| value.to_lowercase().contains(fragment))
         || generic_metric_family(value).is_some()
     {
         None
@@ -2141,6 +3435,16 @@ fn reliable_source_title(value: &str) -> Option<String> {
         }
         if !breadcrumbs.is_empty() {
             title = breadcrumbs.join(" | ");
+        }
+    }
+    if let Some((brand, tagline)) = title.split_once(" - ") {
+        let brand = brand.trim();
+        let tagline = tagline.trim();
+        if (2..=32).contains(&brand.chars().count())
+            && tagline.chars().count() >= 4
+            && !brand.contains("文档")
+        {
+            title = brand.to_string();
         }
     }
     let normalized = normalize_identity_text(&title);
@@ -2310,7 +3614,33 @@ fn is_bare_application_resource_metric(metric: &str) -> bool {
 
 fn generic_metric_family(metric: &str) -> Option<String> {
     let identity = canonical_identity_metric(metric);
-    let family = match identity.as_str() {
+    let mut base = identity.as_str();
+    for suffix in [
+        "同比降幅",
+        "环比降幅",
+        "同比增幅",
+        "环比增幅",
+        "同比下降",
+        "环比下降",
+        "同比增长",
+        "环比增长",
+        "降幅",
+        "增幅",
+    ] {
+        if let Some(stripped) = base.strip_suffix(suffix) {
+            base = stripped;
+            break;
+        }
+    }
+    for prefix in [
+        "单个", "每个", "单位", "总体", "综合", "平均", "整体", "当前",
+    ] {
+        if let Some(stripped) = base.strip_prefix(prefix) {
+            base = stripped;
+            break;
+        }
+    }
+    let family = match base {
         "gmv" => "gmv",
         "收入" => "收入",
         "营收" => "营收",
@@ -2324,24 +3654,97 @@ fn generic_metric_family(metric: &str) -> Option<String> {
         "预算" => "预算",
         "金额" => "金额",
         "余额" | "api余额" => "余额",
+        "单价" => "单价",
+        "汇率" => "汇率",
+        "占比" => "占比",
+        "比例" => "比例",
+        "准确率" => "准确率",
+        "召回率" => "召回率",
+        "成功率" => "成功率",
+        "失败率" => "失败率",
+        "错误率" => "错误率",
+        "命中率" => "命中率",
+        "完成率" => "完成率",
+        "达成率" => "达成率",
+        "增长率" => "增长率",
+        "下降率" => "下降率",
+        "利用率" => "利用率",
+        "点击率" => "点击率",
+        "留存率" => "留存率",
         "用户数" => "用户数",
         "客户数" => "客户数",
         "内存" | "内存占用" => "内存",
         "cpu" | "cpu占用" | "cpu使用率" => "cpu",
-        "存储" | "存储占用" => "存储",
+        "存储" | "存储占用" | "存储容量" => "存储",
         "负载" => "负载",
         "容量" => "容量",
         "用量" => "用量",
-        "耗时" | "总耗时" => "耗时",
+        "延迟" => "延迟",
+        "耗时" | "总耗时" | "时长" | "任务耗时" | "任务总耗时" => "耗时",
         "token规模" | "token总量" | "token用量" => "token规模",
         "qps" => "qps",
         "pv" => "pv",
         "uv" => "uv",
         "dau" => "dau",
         "mau" => "mau",
+        "" if [
+            "同比降幅",
+            "环比降幅",
+            "同比增幅",
+            "环比增幅",
+            "同比下降",
+            "环比下降",
+            "同比增长",
+            "环比增长",
+            "降幅",
+            "增幅",
+        ]
+        .iter()
+        .any(|change| identity == *change) =>
+        {
+            "变化"
+        }
         _ => return None,
     };
     Some(family.to_string())
+}
+
+fn metric_needs_inline_subject(metric: &str) -> bool {
+    matches!(
+        generic_metric_family(metric).as_deref(),
+        Some(
+            "成本"
+                | "收入"
+                | "营收"
+                | "利润"
+                | "毛利"
+                | "销量"
+                | "销售额"
+                | "库存"
+                | "预算"
+                | "金额"
+                | "余额"
+                | "单价"
+                | "汇率"
+                | "占比"
+                | "比例"
+                | "准确率"
+                | "召回率"
+                | "成功率"
+                | "失败率"
+                | "错误率"
+                | "命中率"
+                | "完成率"
+                | "达成率"
+                | "增长率"
+                | "下降率"
+                | "利用率"
+                | "点击率"
+                | "留存率"
+                | "延迟"
+                | "变化"
+        )
+    )
 }
 
 fn display_identity_metric(metric: &str) -> String {
@@ -2453,6 +3856,7 @@ fn semantic_view_content(view: &SemanticDataView) -> String {
 fn rejected_semantic_view_json(reason: &str) -> Value {
     json!({
         "extraction_version": DATA_MEMORY_VERSION,
+        "semantic_origin": "legacy_parser",
         "title": "",
         "summary": "",
         "semantic_subject": "",
@@ -2464,8 +3868,19 @@ fn rejected_semantic_view_json(reason: &str) -> Value {
 }
 
 fn semantic_view_to_json(view: SemanticDataView) -> Value {
+    let semantic_origin = if view.statements.iter().any(|statement| {
+        statement
+            .get("fact_contract")
+            .and_then(Value::as_str)
+            .is_some()
+    }) {
+        "model_structured_fact"
+    } else {
+        "legacy_parser"
+    };
     json!({
         "extraction_version": DATA_MEMORY_VERSION,
+        "semantic_origin": semantic_origin,
         "title": view.title,
         "summary": view.summary,
         "semantic_subject": view.subject,
@@ -2550,13 +3965,16 @@ fn semantic_view_from_existing_v3(structured: &Value) -> Option<SemanticDataView
     }
     let title = structured.get("title").and_then(Value::as_str)?.trim();
     let summary = structured.get("summary").and_then(Value::as_str)?.trim();
+    let is_validated_model_fact =
+        structured.get("semantic_origin").and_then(Value::as_str) == Some("model_structured_fact");
     let raw_rows = structured.get("metric_rows")?.as_array()?;
     let rows = raw_rows
         .iter()
         .filter_map(|row| {
             let metric = row.get("metric")?.as_str()?.trim();
             let value = row.get("value")?.as_str()?.trim();
-            if !metric_is_meaningful(metric)
+            if (!(is_validated_model_fact && metric_is_subject(metric))
+                && !metric_is_meaningful(metric))
                 || value.is_empty()
                 || !value.chars().any(|ch| ch.is_ascii_digit())
             {
@@ -2712,6 +4130,7 @@ fn value_as_text(value: &Value) -> String {
 
 fn score_data_source(
     source: DataSourceRecord,
+    history: Vec<DataSnapshotRecord>,
     query: &str,
     terms: &[String],
     need_fresh: bool,
@@ -2724,8 +4143,16 @@ fn score_data_source(
     let structured_text = snapshot
         .map(|item| item.structured_data.to_string())
         .unwrap_or_default();
+    let historical_text = history
+        .iter()
+        .map(|item| format!("{}\n{}", item.content_text, item.structured_data))
+        .collect::<Vec<_>>()
+        .join("\n");
     let content_relevance = relevance_score(
-        &format!("{}\n{}\n{}", source.title, content, structured_text),
+        &format!(
+            "{}\n{}\n{}\n{}",
+            source.title, content, structured_text, historical_text
+        ),
         terms,
     );
     let identity_relevance = source_identity_score(&source, query);
@@ -2769,11 +4196,13 @@ fn score_data_source(
         content_excerpt: snapshot.map(|item| clip_text(&item.content_text, 2400)),
         structured_data: snapshot.map(|item| item.structured_data.clone()),
         provenance: snapshot.map(|item| item.provenance.clone()),
+        history,
     }
 }
 
 fn source_identity_score(source: &DataSourceRecord, query: &str) -> f64 {
     let normalized_title = normalize_identity_text(&source.title);
+    let normalized_query = normalize_identity_text(query);
     let query_lines = query
         .lines()
         .map(str::trim)
@@ -2795,6 +4224,17 @@ fn source_identity_score(source: &DataSourceRecord, query: &str) -> f64 {
             .any(|line| normalize_identity_text(line) == normalized_title)
     {
         return 0.96;
+    }
+
+    // Skill 的步骤目标通常写成自然语言，例如“获取电商GPU信息平台的最新
+    // 算力…”，而数据标题还会继续带上具体指标。稳定的数据对象前缀已经是
+    // 高强度身份信号；只接受至少 8 个字符的前缀，避免“GPU”“本周”等
+    // 短词把无关数据抬进 Top-K。
+    if normalized_title.chars().count() >= 8 && !normalized_query.is_empty() {
+        let title_prefix = normalized_title.chars().take(8).collect::<String>();
+        if normalized_query.contains(&title_prefix) {
+            return 0.84;
+        }
     }
     0.0
 }
@@ -3190,7 +4630,9 @@ fn statement_is_data_assertion(lower: &str) -> bool {
         return false;
     }
 
-    const ADVISORY_MARKERS: &[&str] = &["建议", "最好"];
+    // 配置动作中的数字常常是准备尝试的目标值，而不是已经发生或观测到的
+    // 指标。只有句子明确带有完成态/观测态证据时才允许继续解析；这覆盖群聊、
+    // 工单和会议记录里的“我先把…调到…看看”“帮我把…设为…”等通用表达。
     const CONFIGURATION_ACTIONS: &[&str] = &[
         "把",
         "将",
@@ -3200,6 +4642,7 @@ fn statement_is_data_assertion(lower: &str) -> bool {
         "设定",
         "调整",
         "调到",
+        "调至",
         "改为",
         "改成",
         "降到",
@@ -3209,6 +4652,84 @@ fn statement_is_data_assertion(lower: &str) -> bool {
         "控制在",
         "限制为",
     ];
+    const PENDING_ACTION_MARKERS: &[&str] = &[
+        "我先",
+        "我们先",
+        "先把",
+        "先将",
+        "准备",
+        "计划",
+        "打算",
+        "尝试",
+        "试着",
+        "帮我",
+        "帮忙",
+        "麻烦",
+        "能不能",
+        "是否可以",
+        "要不要",
+        "看看",
+        "试试",
+        "再看",
+        "再观察",
+        "稍后",
+        "待会",
+        "等会",
+    ];
+    const OBSERVED_STATE_MARKERS: &[&str] = &[
+        "已经",
+        "已将",
+        "已把",
+        "已设置",
+        "已调整",
+        "调整后",
+        "变更后",
+        "修改后",
+        "当前",
+        "目前",
+        "现为",
+        "实际",
+        "实测",
+        "观测",
+        "监控显示",
+        "结果显示",
+        "稳定在",
+    ];
+    let has_configuration_action = CONFIGURATION_ACTIONS
+        .iter()
+        .any(|action| lower.contains(action));
+    let is_pending_action = PENDING_ACTION_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker));
+    let has_observed_state = OBSERVED_STATE_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker));
+    if has_configuration_action && is_pending_action && !has_observed_state {
+        return false;
+    }
+
+    let is_checklist_or_threshold = [
+        "检查清单",
+        "切换前检查",
+        "预案",
+        "验收条件",
+        "准入条件",
+        "阈值",
+        "容量评估",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    let contains_threshold_expression = ['<', '>', '≤', '≥']
+        .iter()
+        .any(|marker| lower.contains(*marker))
+        || ["小于", "大于", "低于", "高于", "不超过", "不少于"]
+            .iter()
+            .any(|marker| lower.contains(marker));
+    if is_checklist_or_threshold && contains_threshold_expression && !has_observed_state {
+        return false;
+    }
+
+    const ADVISORY_MARKERS: &[&str] = &["建议", "最好"];
     !ADVISORY_MARKERS.iter().any(|advisory| {
         lower.find(advisory).is_some_and(|position| {
             let remainder = &lower[position + advisory.len()..];
@@ -3274,6 +4795,13 @@ fn normalize_semantic_rows(statement: &str, rows: &mut Vec<SemanticMetricRow>) {
         if row.metric.contains("本地模型分析") && row.metric.contains("同步耗时") {
             row.metric = "本地模型分析同步耗时".to_string();
         }
+        if row.metric == "存储"
+            && ["提供", "总存储", "存储空间", "容量"]
+                .iter()
+                .any(|marker| statement.contains(marker))
+        {
+            row.metric = "存储容量".to_string();
+        }
         if (row.value.contains('%') || row.value.contains('％'))
             && statement.to_lowercase().contains("llm")
             && statement.contains("成本浪费")
@@ -3285,6 +4813,14 @@ fn normalize_semantic_rows(statement: &str, rows: &mut Vec<SemanticMetricRow>) {
             && statement.contains("收取")
         {
             row.metric = "订单金额收费比例".to_string();
+        }
+        if row.metric.contains("成本")
+            && !row.value.contains('%')
+            && ["节省", "节约", "省下", "减少", "降低"]
+                .iter()
+                .any(|marker| statement.contains(marker))
+        {
+            row.metric = "成本节省金额".to_string();
         }
         if statement.contains("GPU成本年化减少") {
             row.metric = "GPU 成本年化节省金额".to_string();
@@ -3508,6 +5044,7 @@ fn numeric_tokens(text: &str) -> Vec<NumericToken> {
         "万张",
         "毫秒",
         "分钟",
+        "分",
         "小时",
         "人民币",
         "美元",
@@ -3584,6 +5121,45 @@ fn numeric_tokens(text: &str) -> Vec<NumericToken> {
         } else {
             unit_start + quantity_modifier.len() + unit.len()
         };
+        // 复合时长是一个不可拆分的业务值。旧解析会把“16分31秒”拆成
+        // 16（无单位）与 31秒，最终只留下 31秒。按从大到小的时间单位
+        // 吸收连续分量，同时避免把并列的两个独立耗时误并到一起。
+        if let Some(mut previous_rank) = duration_unit_rank(unit) {
+            loop {
+                let remaining = text[end..].trim_start();
+                let whitespace = text[end..].len().saturating_sub(remaining.len());
+                let digit_end = remaining
+                    .char_indices()
+                    .take_while(|(_, ch)| ch.is_ascii_digit() || matches!(ch, '.' | ','))
+                    .last()
+                    .map(|(position, ch)| position + ch.len_utf8())
+                    .unwrap_or(0);
+                if digit_end == 0 {
+                    break;
+                }
+                let unit_tail = remaining[digit_end..].trim_start();
+                let unit_whitespace = remaining[digit_end..].len().saturating_sub(unit_tail.len());
+                let Some((next_unit, next_rank)) = ["毫秒", "分钟", "小时", "分", "秒"]
+                    .iter()
+                    .filter_map(|candidate| {
+                        unit_tail.starts_with(candidate).then(|| {
+                            (
+                                *candidate,
+                                duration_unit_rank(candidate).unwrap_or_default(),
+                            )
+                        })
+                    })
+                    .max_by_key(|(candidate, _)| candidate.len())
+                else {
+                    break;
+                };
+                if next_rank >= previous_rank || next_rank == 0 {
+                    break;
+                }
+                end += whitespace + digit_end + unit_whitespace + next_unit.len();
+                previous_rank = next_rank;
+            }
+        }
         let range_tail = text[end..].trim_start();
         if matches!(range_tail.chars().next(), Some('-' | '~' | '～')) {
             let separator_len = range_tail.chars().next().map(char::len_utf8).unwrap_or(0);
@@ -3595,7 +5171,11 @@ fn numeric_tokens(text: &str) -> Vec<NumericToken> {
                 .map(|(position, current)| position + current.len_utf8())
                 .unwrap_or(0);
             if range_digits > 0 {
-                let range_unit_tail = after_separator[range_digits..].trim_start().to_lowercase();
+                let range_unit_source = &after_separator[range_digits..];
+                let range_unit_whitespace =
+                    range_unit_source.len() - range_unit_source.trim_start().len();
+                let range_unit_start = range_digits + range_unit_whitespace;
+                let range_unit_tail = after_separator[range_unit_start..].to_lowercase();
                 let range_unit = UNITS
                     .iter()
                     .filter(|candidate| range_unit_tail.starts_with(**candidate))
@@ -3605,7 +5185,7 @@ fn numeric_tokens(text: &str) -> Vec<NumericToken> {
                 if !unit.is_empty() || !range_unit.is_empty() {
                     let absolute_separator = text.len() - range_tail.len();
                     let absolute_after_separator = text.len() - after_separator.len();
-                    end = absolute_after_separator + range_digits + range_unit.len();
+                    end = absolute_after_separator + range_unit_start + range_unit.len();
                     if range_unit.is_empty() && !unit.is_empty() {
                         end = absolute_after_separator + range_digits;
                     }
@@ -3638,6 +5218,16 @@ fn numeric_tokens(text: &str) -> Vec<NumericToken> {
         }
     }
     tokens
+}
+
+fn duration_unit_rank(unit: &str) -> Option<u8> {
+    match unit.to_lowercase().as_str() {
+        "小时" => Some(4),
+        "分钟" | "分" => Some(3),
+        "秒" => Some(2),
+        "毫秒" => Some(1),
+        _ => None,
+    }
 }
 
 fn metric_for_token(
@@ -3813,6 +5403,7 @@ fn known_metric_near(text: &str, token_start: usize, max_distance: usize) -> Opt
         ("响应时间", "响应时间"),
         ("处理时长", "处理时长"),
         ("执行时长", "执行时长"),
+        ("时长", "时长"),
         ("token 总量", "Token 规模"),
         ("token总量", "Token 规模"),
         ("token 规模", "Token 规模"),
@@ -4187,6 +5778,10 @@ fn compact_contextual_metric(value: &str, known_metric: &str) -> String {
     let lower = label.to_lowercase();
     let marker = known_metric.to_lowercase();
     if let Some(position) = lower.rfind(&marker) {
+        let prefix = label[..position].trim();
+        if contextual_metric_prefix_is_narrative(prefix) {
+            return known_metric.to_string();
+        }
         let end = position + marker.len();
         if label.is_char_boundary(end) {
             label.truncate(end);
@@ -4207,6 +5802,26 @@ fn compact_contextual_metric(value: &str, known_metric: &str) -> String {
     } else {
         canonical_metric_label_exact(&label).unwrap_or(label)
     }
+}
+
+fn contextual_metric_prefix_is_narrative(prefix: &str) -> bool {
+    let normalized = normalize_identity_text(prefix);
+    [
+        "用户",
+        "随后用户",
+        "接着用户",
+        "然后用户",
+        "整个任务",
+        "本次任务",
+        "该任务",
+        "任务总",
+        "具体的生成参数",
+    ]
+    .iter()
+    .any(|marker| normalized.starts_with(&normalize_identity_text(marker)))
+        || ["配置了", "设定了", "设置了", "选择了"]
+            .iter()
+            .any(|marker| normalized.contains(&normalize_identity_text(marker)))
 }
 
 fn canonical_metric_label_exact(value: &str) -> Option<String> {
@@ -4429,27 +6044,12 @@ fn latest_snapshot(
         .query_row(
             "SELECT id, source_id, collected_at, observed_at, collector, content_text,
                 structured_data, content_hash, freshness_ttl_seconds, provenance,
-                source_capture_ids, source_timeline_ids, status
+                source_capture_ids, source_timeline_ids, status, period_granularity,
+                period_key, period_start_at, period_end_at
          FROM data_snapshots WHERE source_id = ?1
          ORDER BY collected_at DESC, id DESC LIMIT 1",
             [source.id],
-            |row| {
-                Ok(DataSnapshotRecord {
-                    id: row.get(0)?,
-                    source_id: row.get(1)?,
-                    collected_at: row.get(2)?,
-                    observed_at: row.get(3)?,
-                    collector: row.get(4)?,
-                    content_text: row.get(5)?,
-                    structured_data: parse_json_value(row.get::<_, String>(6)?, json!({})),
-                    content_hash: row.get(7)?,
-                    freshness_ttl_seconds: row.get(8)?,
-                    provenance: parse_json_value(row.get::<_, String>(9)?, json!({})),
-                    source_capture_ids: parse_json_i64(row.get::<_, String>(10)?),
-                    source_timeline_ids: parse_json_i64(row.get::<_, String>(11)?),
-                    status: row.get(12)?,
-                })
-            },
+            map_data_snapshot_row,
         )
         .optional()?;
     if let Some(snapshot) = &mut snapshot {
@@ -4574,6 +6174,52 @@ fn clip_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_numeric_ranges_with_whitespace_before_the_second_unit() {
+        let tokens = numeric_tokens("视频推理成本从 0.2元/秒降至 0.02 元/秒");
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| token.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["0.2元/秒", "0.02 元/秒"]
+        );
+
+        let range = numeric_tokens("延迟区间为 79秒 - 136 秒");
+        assert_eq!(range.len(), 1);
+        assert_eq!(range[0].value, "79秒 - 136 秒");
+    }
+
+    #[test]
+    fn keeps_compound_durations_as_one_value() {
+        let compact = numeric_tokens("任务总耗时约16分31秒");
+        assert_eq!(compact.len(), 1);
+        assert_eq!(compact[0].value, "16分31秒");
+
+        let verbose = numeric_tokens("整轮处理耗时1小时20分钟5秒");
+        assert_eq!(verbose.len(), 1);
+        assert_eq!(verbose[0].value, "1小时20分钟5秒");
+    }
+
+    #[test]
+    fn legacy_parser_rejects_narrative_parameter_and_task_fragments() {
+        for statement in [
+            "用户设定了视频时长为15秒",
+            "随后用户配置了具体的生成参数：时长设为15秒",
+            "整个任务耗时约16分31秒完成",
+            "任务总耗时约16分31秒",
+        ] {
+            let views = semantic_views_from_statements(
+                &[json!({"statement": statement, "observed_at": 1_i64})],
+                "window_title:ChatGPT\napplication:ChatGPT",
+            );
+            assert!(
+                views.is_empty(),
+                "narrative fragment must not become a data title: {statement}; views={views:?}"
+            );
+        }
+    }
 
     #[test]
     fn detects_report_urls_and_metric_statements() {
@@ -5154,6 +6800,65 @@ mod tests {
     }
 
     #[test]
+    fn keeps_explicit_object_for_generic_property_metrics() {
+        let views = semantic_views_from_statements(
+            &[json!({
+                "statement": "冯志刚主导的阿里云 paraformer ASR 单价低至 0.000016 元/秒",
+                "observed_at": 1_i64,
+            })],
+            "window_title:商业体系-AI建设资产复用方案 - 云文档",
+        );
+
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].subject, "阿里云 paraformer ASR");
+        assert_eq!(views[0].title, "阿里云 paraformer ASR 单价");
+        assert_eq!(views[0].identity, "阿里云paraformerasr|单价");
+        assert!(views[0].summary.contains("阿里云 paraformer ASR 单价"));
+        assert!(views[0].summary.contains("0.000016 元/秒"));
+    }
+
+    #[test]
+    fn rejects_generic_property_metrics_without_an_explicit_object() {
+        for statement in [
+            "单价低：0.000016元/秒",
+            "成本下降近40%",
+            "其中包含召回率60%、准确率70%",
+            "他们现在一秒钟的成本约为0.3元",
+        ] {
+            assert!(
+                semantic_views_from_statements(
+                    &[json!({"statement": statement, "observed_at": 1_i64})],
+                    "window_title:商业体系-AI建设资产复用方案 - 云文档",
+                )
+                .is_empty(),
+                "generic property should require an explicit object: {statement}"
+            );
+        }
+
+        assert!(semantic_views_from_statements(
+            &[json!({"statement": "单价低：0.000016元/秒", "observed_at": 1_i64})],
+            "用户查看了关于商业体系 AI 建设资产复用的内部文档\ntimeline_topic:用户查看了关于商业体系 AI 建设资产复用的内部文档\nwindow_title:Kim",
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn keeps_same_property_separate_for_different_explicit_objects() {
+        let paraformer = semantic_views_from_statements(
+            &[json!({"statement": "paraformer ASR 单价为0.000016元/秒"})],
+            "",
+        );
+        let nova = semantic_views_from_statements(
+            &[json!({"statement": "Nova ASR 单价为0.00002元/秒"})],
+            "",
+        );
+
+        assert_eq!(paraformer[0].title, "paraformer ASR 单价");
+        assert_eq!(nova[0].title, "Nova ASR 单价");
+        assert_ne!(paraformer[0].identity, nova[0].identity);
+    }
+
+    #[test]
     fn replaces_document_subject_with_reusable_business_scope_in_place() {
         let storage = StorageManager::open_in_memory().unwrap();
         storage
@@ -5253,6 +6958,279 @@ mod tests {
     }
 
     #[test]
+    fn keeps_the_reuse_object_in_cost_saving_titles() {
+        let statement =
+            "其中11%的场景（如生服模特库在电商AIGC中的复用）已成功合并，节省约6.28万成本";
+        let views = semantic_views_from_statements(
+            &[json!({"statement": statement, "observed_at": 1785943846089_i64})],
+            "timeline_topic:用户查阅了商业体系 AI 建设资产复用方案的云文档\nwindow_title:商业体系-AI建设资产复用方案 - 云文档",
+        );
+
+        assert_eq!(views.len(), 1);
+        let view = &views[0];
+        assert_eq!(view.subject, "生服模特库在电商AIGC 中的复用");
+        assert_eq!(view.title, "生服模特库在电商AIGC 中的复用 成本节省金额");
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].metric, "成本节省金额");
+        assert_eq!(view.rows[0].value, "6.28万");
+        assert!(view.summary.contains("生服模特库在电商AIGC 中的复用"));
+        assert!(view.summary.contains("6.28万"));
+        assert_eq!(view.identity, "生服模特库在电商aigc中的复用|成本节省金额");
+
+        let direct_outcome = semantic_views_from_statements(
+            &[json!({
+                "statement": "典型场景：生服模特库、音色库在电商AIGC场景的复用，减少电商关于模特素材的重复采买和AI生成成本约6.28万",
+                "observed_at": 1785943846089_i64,
+            })],
+            "window_title:商业体系-AI建设资产复用方案 - 云文档",
+        );
+        assert_eq!(direct_outcome.len(), 1);
+        assert_eq!(
+            direct_outcome[0].title,
+            "生服模特库、音色库在电商AIGC 场景的复用 成本节省金额"
+        );
+        assert_eq!(direct_outcome[0].rows[0].metric, "成本节省金额");
+        assert_eq!(direct_outcome[0].rows[0].value, "6.28万");
+    }
+
+    #[test]
+    fn uses_model_structured_fact_without_rewriting_its_business_context() {
+        let evidence =
+            "其中11%的场景（如生服模特库在电商AIGC中的复用）已成功合并，节省约6.28万成本";
+        let views = semantic_views_from_model_facts(
+            &[ModelDataFact {
+                title: "生服模特库在电商AIGC中复用的成本节省金额".to_string(),
+                subject: "生服模特库".to_string(),
+                action: "复用".to_string(),
+                target_context: "电商AIGC".to_string(),
+                dimension: String::new(),
+                metric: "成本节省金额".to_string(),
+                value: "6.28".to_string(),
+                unit: "万".to_string(),
+                statement: "生服模特库在电商AIGC中的复用节省约6.28万成本。".to_string(),
+                evidence_quote: evidence.to_string(),
+                confidence: "high".to_string(),
+                observed_at: Some(1_785_943_846_089),
+            }],
+            evidence,
+            CURRENT_TIMELINE_DATA_FACT_VERSION,
+        );
+
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].title, "生服模特库在电商AIGC中复用的成本节省金额");
+        assert_eq!(views[0].subject, "生服模特库");
+        assert_eq!(views[0].rows[0].metric, "成本节省金额");
+        assert_eq!(views[0].rows[0].value, "6.28万");
+        assert_eq!(
+            semantic_view_to_json(views[0].clone())["semantic_origin"],
+            "model_structured_fact"
+        );
+    }
+
+    #[test]
+    fn keeps_arbitrary_validated_model_metrics_without_domain_hint_lists() {
+        let structured = json!({
+            "extraction_version": DATA_MEMORY_VERSION,
+            "semantic_origin": "model_structured_fact",
+            "title": "服务质量概览 P95 处理延迟",
+            "summary": "服务质量概览的 P95 处理延迟为 18.6 ms",
+            "semantic_subject": "服务质量概览",
+            "semantic_identity": "服务质量概览|p95处理延迟",
+            "metric_rows": [{
+                "dimension": "当前",
+                "metric": "P95 处理延迟",
+                "value": "18.6ms",
+                "note": "",
+                "statement": "服务质量概览当前 P95 处理延迟为 18.6 ms。",
+                "observed_at": 1_i64
+            }],
+            "metric_statements": []
+        });
+
+        let view = semantic_view_from_existing_v3(&structured).expect("validated model fact");
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].metric, "P95 处理延迟");
+    }
+
+    #[test]
+    fn model_fact_generic_anchor_requires_a_specific_scene() {
+        let evidence = "duration Kling 3.0 支持 3-15 秒";
+        let generic = ModelDataFact {
+            title: "Kling 3.0 模型支持时长范围".to_string(),
+            subject: "duration".to_string(),
+            action: String::new(),
+            target_context: "视频参数配置".to_string(),
+            dimension: String::new(),
+            metric: "支持时长范围".to_string(),
+            value: "3-15".to_string(),
+            unit: "秒".to_string(),
+            statement: "Kling 3.0 支持生成视频时长3到15秒。".to_string(),
+            evidence_quote: evidence.to_string(),
+            confidence: "high".to_string(),
+            observed_at: Some(1),
+        };
+        assert!(semantic_views_from_model_facts(
+            std::slice::from_ref(&generic),
+            evidence,
+            CURRENT_TIMELINE_DATA_FACT_VERSION,
+        )
+        .is_empty());
+
+        let contextual = ModelDataFact {
+            target_context: "MemoryBread 官网首屏静音背景视频生成".to_string(),
+            ..generic
+        };
+        assert_eq!(
+            semantic_views_from_model_facts(
+                &[contextual],
+                evidence,
+                CURRENT_TIMELINE_DATA_FACT_VERSION,
+            )
+            .len(),
+            1
+        );
+
+        let execution_shell = ModelDataFact {
+            title: "vedio-aigc系统请求参数时长".to_string(),
+            subject: "15秒".to_string(),
+            action: "配置".to_string(),
+            target_context: "Kling 3.0模型生成控制".to_string(),
+            dimension: String::new(),
+            metric: "请求参数时长".to_string(),
+            value: "15".to_string(),
+            unit: "秒".to_string(),
+            statement: "vedio-aigc系统请求参数时长为15秒。".to_string(),
+            evidence_quote: "15秒 Kling 3.0模型生成控制".to_string(),
+            confidence: "high".to_string(),
+            observed_at: Some(1),
+        };
+        assert!(semantic_views_from_model_facts(
+            &[execution_shell],
+            "15秒 Kling 3.0模型生成控制",
+            CURRENT_TIMELINE_DATA_FACT_VERSION,
+        )
+        .is_empty());
+
+        let concrete_config = ModelDataFact {
+            title: "MemoryBread 官网首屏视频生成时长".to_string(),
+            subject: "MemoryBread 官网首屏视频".to_string(),
+            action: "配置".to_string(),
+            target_context: "MemoryBread 官网首屏视频参数配置".to_string(),
+            dimension: String::new(),
+            metric: "生成时长".to_string(),
+            value: "15".to_string(),
+            unit: "秒".to_string(),
+            statement: "MemoryBread 官网首屏视频生成时长为15秒。".to_string(),
+            evidence_quote: "MemoryBread 官网首屏视频已配置为15秒".to_string(),
+            confidence: "high".to_string(),
+            observed_at: Some(1),
+        };
+        assert_eq!(
+            semantic_views_from_model_facts(
+                &[concrete_config],
+                "MemoryBread 官网首屏视频已配置为15秒",
+                CURRENT_TIMELINE_DATA_FACT_VERSION,
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn current_fact_contract_never_falls_back_to_narrative_statements() {
+        let context = TimelineDataContext {
+            capture_ids: vec![1],
+            source_urls: Vec::new(),
+            observed_at: 1,
+            metric_statements: vec![json!({
+                "statement": "AIGC成本节省约6.28万",
+                "observed_at": 1,
+            })],
+            model_fact_contract: Some(CURRENT_TIMELINE_DATA_FACT_VERSION.to_string()),
+            model_facts: Vec::new(),
+            evidence_text: "AIGC成本节省约6.28万".to_string(),
+        };
+
+        assert!(semantic_views_for_timeline_context(&context, "AIGC").is_empty());
+
+        let legacy_context = TimelineDataContext {
+            capture_ids: vec![1],
+            source_urls: Vec::new(),
+            observed_at: 1,
+            metric_statements: vec![json!({
+                "statement": "AIGC成本节省约6.28万",
+                "observed_at": 1,
+            })],
+            model_fact_contract: Some("timeline-data-fact.v2".to_string()),
+            model_facts: Vec::new(),
+            evidence_text: "AIGC成本节省约6.28万".to_string(),
+        };
+        assert!(!semantic_views_for_timeline_context(&legacy_context, "AIGC").is_empty());
+
+        // 存在合法模型事实时仍优先使用模型事实，不混入语句路径产物。
+        let evidence =
+            "其中11%的场景（如生服模特库在电商AIGC中的复用）已成功合并，节省约6.28万成本";
+        let with_facts = TimelineDataContext {
+            model_facts: vec![ModelDataFact {
+                title: "成本节省金额".to_string(),
+                subject: "生服模特库".to_string(),
+                action: String::new(),
+                target_context: String::new(),
+                dimension: String::new(),
+                metric: "成本节省金额".to_string(),
+                value: "6.28".to_string(),
+                unit: "万".to_string(),
+                statement: "生服模特库复用节省约6.28万成本。".to_string(),
+                evidence_quote: evidence.to_string(),
+                confidence: "high".to_string(),
+                observed_at: Some(1),
+            }],
+            evidence_text: evidence.to_string(),
+            ..context
+        };
+        let views = semantic_views_for_timeline_context(&with_facts, "AIGC");
+        assert_eq!(views.len(), 1);
+        assert_eq!(
+            semantic_view_to_json(views[0].clone())["semantic_origin"],
+            "model_structured_fact"
+        );
+    }
+
+    #[test]
+    fn keeps_named_plan_as_subject_and_rejects_preflight_thresholds() {
+        let plan_views = semantic_views_from_statements(
+            &[
+                json!({"statement": "Sync Standard 每用户每月 4 美元，按年计费，提供 1GB 存储", "observed_at": 1_i64}),
+                json!({"statement": "Sync Plus 每用户每月 8 美元，按年计费，提供 10GB 存储及更多版本历史", "observed_at": 1_i64}),
+            ],
+            "window_title:Obsidian - 磨砺你的思维",
+        );
+        assert_eq!(plan_views.len(), 2);
+        assert!(plan_views.iter().any(|view| {
+            view.subject == "Sync Standard"
+                && view.title == "Sync Standard 存储容量"
+                && view.rows.iter().any(|row| row.value == "1GB")
+        }));
+        assert!(plan_views.iter().any(|view| {
+            view.subject == "Sync Plus"
+                && view.title == "Sync Plus 存储容量"
+                && view.rows.iter().any(|row| row.value == "10GB")
+        }));
+        assert_eq!(
+            reliable_source_title("Obsidian - 磨砺你的思维").as_deref(),
+            Some("Obsidian")
+        );
+        assert!(reliable_subject_label("率小于30%、http等相关核心").is_none());
+
+        let checklist = "涉及业务开关操作、HB2数据前置构建、数据一致性和数据补偿等方面预案整理。切换前检查清单：源机房服务正常，错误率 < 1%，P99 < 10s；HB2 机房容量评估已完成，CPU使用率 < 40%，rpc线程池使用率小于30%。";
+        assert!(semantic_views_from_statements(
+            &[json!({"statement": checklist, "observed_at": 1_i64})],
+            "window_title:电商北驰切流-基座中心预案梳理【网关-运行域】 - 云文档",
+        )
+        .is_empty());
+    }
+
+    #[test]
     fn rejects_same_metric_and_dimension_with_conflicting_values() {
         assert!(semantic_statement("整体成本为 0.2 元，整体成本为 0.3 元", None).is_none());
     }
@@ -5279,9 +7257,24 @@ mod tests {
             "truncated_json：不要把输出预算直接降到4096"
         ));
         assert!(!is_concrete_data_statement("建议把重试次数调到3次"));
+        assert!(!is_concrete_data_statement("我先把qps调到1看看"));
+        assert!(!is_concrete_data_statement("我们先将并发数设置为32试试"));
+        assert!(!is_concrete_data_statement("麻烦帮我把超时时间改成5秒"));
+        assert!(!is_concrete_data_statement("计划把缓存容量提升到8GB"));
+        assert!(!semantic_metric_row_is_plausible(&SemanticMetricRow {
+            dimension: String::new(),
+            metric: "我先把qps".to_string(),
+            value: "1".to_string(),
+            note: String::new(),
+            statement: "我先把qps调到1看看".to_string(),
+            observed_at: None,
+        }));
         assert!(!is_concrete_data_statement("内存不应超过1GB"));
         assert!(!is_concrete_data_statement("请将并发数设置为32"));
         assert!(is_concrete_data_statement("当前输出预算为4096"));
+        assert!(is_concrete_data_statement(
+            "QPS 已调整到 100，当前错误率为 0.2%"
+        ));
         assert!(is_concrete_data_statement("AI 建议采纳率为80%"));
     }
 
@@ -5436,7 +7429,7 @@ mod tests {
             })
             .count();
         println!(
-            "data-memory-v11 e2e: regenerated={} merged={} rejected={} visible_before={} visible_after={} invalid_visible={}",
+            "data-memory-v15 e2e: regenerated={} merged={} rejected={} visible_before={} visible_after={} invalid_visible={}",
             regenerated,
             merged,
             rejected,
@@ -5445,6 +7438,344 @@ mod tests {
             invalid_count,
         );
         assert_eq!(invalid_count, 0);
+    }
+
+    #[test]
+    fn upgrades_and_merges_legacy_sources_after_current_model_facts_arrive() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        let evidence = "MemoryBread 官网首页视觉与文案优化已完成，任务总耗时约16分31秒";
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO captures (
+                        id, ts, app_name, win_title, event_type, ocr_text, timeline_id
+                     ) VALUES (700, 1700000000000, 'ChatGPT', 'ChatGPT', 'auto', ?1, 500)",
+                    [evidence],
+                )?;
+                conn.execute(
+                    "INSERT INTO timelines (
+                        id, capture_id, capture_ids, summary, overview, details,
+                        observed_at, created_at_ms, updated_at_ms
+                     ) VALUES (
+                        500, 700, '[700]',
+                        '用户完成 MemoryBread 官网首页视觉与文案优化工作',
+                        'MemoryBread 官网首页视觉与文案优化已经完成。',
+                        ?1, 1700000000000, 1700000000000, 1700000000000
+                     )",
+                    [evidence],
+                )?;
+                for (id, title) in [(1_i64, "整个任务耗时"), (2_i64, "任务总耗时")] {
+                    conn.execute(
+                        "INSERT INTO data_sources (
+                            id, canonical_key, title, source_kind, access_mode, refresh_policy,
+                            realtime_level, source_app_name, source_window_title, tags,
+                            first_seen_at, last_seen_at, status, created_at, updated_at
+                         ) VALUES (
+                            ?1, ?2, ?3, 'work_memory', 'memory_only', 'never', 'observed',
+                            'ChatGPT', 'ChatGPT', '[\"work_memory\"]', 1700000000000,
+                            1700000000000, 'active', 1700000000000, 1700000000000
+                         )",
+                        params![id, format!("legacy:{id}"), title],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO data_snapshots (
+                            source_id, collected_at, observed_at, collector, content_text,
+                            structured_data, content_hash, provenance, source_capture_ids,
+                            source_timeline_ids, status, created_at
+                         ) VALUES (
+                            ?1, 1700000000000, 1700000000000, 'memory_extract',
+                            '任务总耗时约16分31秒', ?2, ?3, '{}', '[700]', '[500]',
+                            'success', 1700000000000
+                         )",
+                        params![
+                            id,
+                            json!({
+                                "extraction_version": DATA_MEMORY_VERSION,
+                                "semantic_origin": "legacy_parser",
+                                "title": title,
+                                "summary": format!("{title}：31秒"),
+                                "semantic_subject": "",
+                                "semantic_identity": title,
+                                "metric_rows": [{
+                                    "dimension": "",
+                                    "metric": title,
+                                    "value": "31秒",
+                                    "note": "",
+                                    "statement": "任务总耗时约16分31秒",
+                                    "observed_at": 1700000000000_i64
+                                }],
+                                "metric_statements": []
+                            })
+                            .to_string(),
+                            format!("legacy-hash-{id}"),
+                        ],
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO timeline_data_fact_runs (
+                        timeline_id, contract_version, accepted_count, rejected_count,
+                        created_at, updated_at
+                     ) VALUES (500, ?1, 1, 0, 1700000000000, 1700000000000)",
+                    [CURRENT_TIMELINE_DATA_FACT_VERSION],
+                )?;
+                conn.execute(
+                    "INSERT INTO timeline_data_facts (
+                        timeline_id, fact_key, title, subject, action, target_context,
+                        dimension, metric, value, unit, statement, evidence_quote,
+                        confidence, observed_at, source_capture_ids, created_at, updated_at
+                     ) VALUES (
+                        500, 'task-duration',
+                        'MemoryBread 官网首页视觉与文案优化任务耗时',
+                        'MemoryBread 官网首页视觉与文案优化', '优化', '官网首页', '',
+                        '任务耗时', '16分31秒', '',
+                        'MemoryBread 官网首页视觉与文案优化任务耗时为16分31秒。',
+                        ?1, 'high', 1700000000000, '[700]', 1700000000000, 1700000000000
+                     )",
+                    [evidence],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let summary = storage.regenerate_historical_data_memories(100).unwrap();
+        let (sources, total) = storage.list_data_sources(None, 20, 0).unwrap();
+
+        assert_eq!(summary.historical_regenerated_count, 2);
+        assert_eq!(summary.historical_merged_count, 1);
+        assert_eq!(total, 1);
+        assert_eq!(sources[0].id, 1);
+        assert_eq!(
+            sources[0].title,
+            "MemoryBread 官网首页视觉与文案优化任务耗时"
+        );
+        let structured = &sources[0].latest_snapshot.as_ref().unwrap().structured_data;
+        assert_eq!(structured["semantic_origin"], "model_structured_fact");
+        assert_eq!(structured["metric_rows"][0]["value"], "16分31秒");
+    }
+
+    #[test]
+    fn reuses_linked_legacy_sources_when_one_timeline_yields_multiple_scenes() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        let evidence = "MemoryBread 产品界面布局；生成一支15秒、16:9的动画，作为桌面软件官网首屏的静音背景视频";
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO captures (
+                        id, ts, app_name, win_title, event_type, ocr_text, timeline_id
+                     ) VALUES (700, 1700000000000, 'Chrome', '视频生成', 'auto', ?1, 500)",
+                    [evidence],
+                )?;
+                conn.execute(
+                    "INSERT INTO timelines (
+                        id, capture_id, capture_ids, summary, overview, details,
+                        observed_at, created_at_ms, updated_at_ms
+                     ) VALUES (
+                        500, 700, '[700]', '生成官网首屏静音背景视频',
+                        '为 MemoryBread 官网生成首屏视频。', ?1,
+                        1700000000000, 1700000000000, 1700000000000
+                     )",
+                    [evidence],
+                )?;
+                for (id, title, content) in [
+                    (
+                        1_i64,
+                        "用户设定了视频时长",
+                        "用户设定了视频时长为15秒，画幅比例为横屏16:9",
+                    ),
+                    (
+                        2_i64,
+                        "随后用户配置了具体的生成参数：时长设",
+                        "生成参数中的视频时长为15秒，画幅比例为横屏16:9",
+                    ),
+                    (
+                        3_i64,
+                        "SUCCEED 系统接收请求后处理耗时",
+                        "系统接收请求后处理耗时301秒，任务结果为SUCCEED",
+                    ),
+                ] {
+                    conn.execute(
+                        "INSERT INTO data_sources (
+                            id, canonical_key, title, source_kind, access_mode, refresh_policy,
+                            realtime_level, source_app_name, source_window_title, tags,
+                            first_seen_at, last_seen_at, status, created_at, updated_at
+                         ) VALUES (
+                            ?1, ?2, ?3, 'work_memory', 'memory_only', 'never', 'observed',
+                            'Chrome', '视频生成', '[\"work_memory\"]', 1700000000000,
+                            1700000000000, 'active', 1700000000000, 1700000000000
+                         )",
+                        params![id, format!("legacy:{id}"), title],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO data_snapshots (
+                            source_id, collected_at, observed_at, collector, content_text,
+                            structured_data, content_hash, provenance, source_capture_ids,
+                            source_timeline_ids, status, created_at
+                         ) VALUES (
+                            ?1, 1700000000000, 1700000000000, 'memory_extract', ?2,
+                            ?3, ?4, '{}', '[700]', '[500]', 'success', 1700000000000
+                         )",
+                        params![
+                            id,
+                            content,
+                            json!({
+                                "extraction_version": DATA_MEMORY_VERSION,
+                                "semantic_origin": "legacy_parser",
+                                "title": title,
+                                "summary": title,
+                                "semantic_subject": "",
+                                "semantic_identity": title,
+                                "metric_rows": [],
+                                "metric_statements": []
+                            })
+                            .to_string(),
+                            format!("legacy-hash-{id}"),
+                        ],
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO timeline_data_fact_runs (
+                        timeline_id, contract_version, accepted_count, rejected_count,
+                        created_at, updated_at
+                     ) VALUES (500, ?1, 2, 0, 1700000000000, 1700000000000)",
+                    [CURRENT_TIMELINE_DATA_FACT_VERSION],
+                )?;
+                for (key, title, metric, value, unit, statement) in [
+                    (
+                        "duration",
+                        "MemoryBread 官网首屏静音背景视频生成时长",
+                        "生成时长",
+                        "15",
+                        "秒",
+                        "基于 MemoryBread 产品界面布局生成的官网首屏静音背景视频时长为15秒。",
+                    ),
+                    (
+                        "aspect-ratio",
+                        "MemoryBread 官网首屏静音背景视频画幅比例",
+                        "画幅比例",
+                        "16:9",
+                        "",
+                        "基于 MemoryBread 产品界面布局生成的官网首屏静音背景视频画幅比例为16:9。",
+                    ),
+                ] {
+                    conn.execute(
+                        "INSERT INTO timeline_data_facts (
+                            timeline_id, fact_key, title, subject, action, target_context,
+                            dimension, metric, value, unit, statement, evidence_quote,
+                            confidence, observed_at, source_capture_ids, created_at, updated_at
+                         ) VALUES (
+                            500, ?1, ?2, 'MemoryBread 产品界面布局', '生成',
+                            '桌面软件官网首屏的静音背景视频', '', ?3, ?4, ?5, ?6,
+                            ?7, 'high', 1700000000000, '[700]',
+                            1700000000000, 1700000000000
+                         )",
+                        params![key, title, metric, value, unit, statement, evidence],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let summary = storage.regenerate_historical_data_memories(100).unwrap();
+        storage
+            .with_conn(|conn| {
+                for source_id in [1_i64, 2_i64] {
+                    let snapshot = raw_latest_snapshot(conn, source_id)?.unwrap();
+                    assert!(
+                        semantic_view_from_existing_v3(&snapshot.structured_data).is_some(),
+                        "source {source_id} is not self-contained: {}",
+                        snapshot.structured_data
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+        let (mut sources, total) = storage.list_data_sources(None, 20, 0).unwrap();
+        sources.sort_by_key(|source| source.id);
+
+        assert_eq!(summary.historical_regenerated_count, 2);
+        assert_eq!(summary.historical_merged_count, 0);
+        assert_eq!(total, 3);
+        assert_eq!(sources[0].id, 1);
+        assert_eq!(sources[0].title, "MemoryBread 官网首屏静音背景视频生成时长");
+        assert_eq!(sources[1].id, 2);
+        assert_eq!(sources[1].title, "MemoryBread 官网首屏静音背景视频画幅比例");
+        assert!(sources[..2].iter().all(|source| {
+            source.latest_snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.structured_data["semantic_origin"] == "model_structured_fact"
+            })
+        }));
+        assert_eq!(sources[2].id, 3);
+        assert_eq!(sources[2].title, "SUCCEED 系统接收请求后处理耗时");
+        assert_eq!(
+            sources[2].latest_snapshot.as_ref().unwrap().structured_data["semantic_origin"],
+            "legacy_parser"
+        );
+    }
+
+    #[test]
+    fn legacy_view_matching_requires_metric_signal_when_values_collide() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO data_sources (
+                        id, canonical_key, title, source_kind, access_mode, refresh_policy,
+                        realtime_level, tags, first_seen_at, last_seen_at, status,
+                        created_at, updated_at
+                     ) VALUES (
+                        1, 'legacy:api-latency', '接口响应耗时', 'work_memory',
+                        'memory_only', 'never', 'observed', '[\"work_memory\"]',
+                        1, 1, 'active', 1, 1
+                     )",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO data_snapshots (
+                        source_id, collected_at, observed_at, collector, content_text,
+                        structured_data, content_hash, provenance, source_capture_ids,
+                        source_timeline_ids, status, created_at
+                     ) VALUES (
+                        1, 1, 1, 'memory_extract', '视频生成接口响应耗时15秒',
+                        '{\"semantic_origin\":\"legacy_parser\"}', 'legacy-api', '{}',
+                        '[]', '[500]', 'success', 1
+                     )",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let snapshot = storage
+            .with_conn(|conn| raw_latest_snapshot(conn, 1))
+            .unwrap()
+            .unwrap();
+        let view_for_metric = |metric: &str| SemanticDataView {
+            title: metric.to_string(),
+            subject: "视频生成".to_string(),
+            identity: metric.to_string(),
+            summary: format!("{metric}为15秒"),
+            rows: vec![SemanticMetricRow {
+                dimension: String::new(),
+                metric: metric.to_string(),
+                value: "15秒".to_string(),
+                note: String::new(),
+                statement: format!("{metric}为15秒"),
+                observed_at: Some(1),
+            }],
+            statements: Vec::new(),
+            latest_observed_at: Some(1),
+        };
+
+        assert!(!semantic_view_matches_legacy_snapshot(
+            &snapshot,
+            &view_for_metric("视频生成时长"),
+        ));
+        assert!(semantic_view_matches_legacy_snapshot(
+            &snapshot,
+            &view_for_metric("接口响应耗时"),
+        ));
+        assert!(value_is_colon_ratio("16:9"));
+        assert!(value_is_colon_ratio("16：9"));
+        assert!(!value_is_colon_ratio("12:30:45"));
     }
 
     #[test]
@@ -5528,7 +7859,7 @@ mod tests {
             })
             .unwrap();
         println!(
-            "selected data-memory-v11 regeneration: requested={} regenerated={} merged={} rejected={}",
+            "selected data-memory-v15 regeneration: requested={} regenerated={} merged={} rejected={}",
             source_ids.len(),
             summary.regenerated_count,
             summary.merged_count,
@@ -5622,6 +7953,41 @@ mod tests {
     }
 
     #[test]
+    fn data_search_can_return_the_configured_default_of_thirty_results() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage
+            .with_conn(|conn| {
+                for id in 1..=35_i64 {
+                    conn.execute(
+                        "INSERT INTO data_sources (
+                            id, canonical_key, title, source_kind, source_url, access_mode,
+                            refresh_policy, realtime_level, tags, first_seen_at, last_seen_at,
+                            status, created_at, updated_at
+                         ) VALUES (
+                            ?1, ?2, ?3, 'report_url', ?4, 'browser_session',
+                            'on_demand', 'live', '[\"report\"]', 1, 1,
+                            'active', 1, 1
+                         )",
+                        params![
+                            id,
+                            format!("report:https://bi.example.com/metrics/{id}"),
+                            format!("经营指标看板 {id}"),
+                            format!("https://bi.example.com/metrics/{id}"),
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let results = storage
+            .search_data_sources("经营指标", false, 1_700_000_000_000, 30)
+            .unwrap();
+
+        assert_eq!(results.len(), 30);
+    }
+
+    #[test]
     fn canonical_url_keeps_filters_and_spa_route_but_drops_credentials() {
         assert_eq!(
             canonical_data_url("https://bi.example.com/report/?team=a&access_token=secret#chart")
@@ -5702,6 +8068,78 @@ mod tests {
     }
 
     #[test]
+    fn report_snapshots_deduplicate_within_week_and_keep_cross_week_history() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO data_sources (
+                        canonical_key, title, source_kind, source_url, access_mode,
+                        refresh_policy, realtime_level, first_seen_at, last_seen_at,
+                        created_at, updated_at
+                     ) VALUES (
+                        'url:https://bi.example.com/gpu', 'GPU 用量报表', 'report_url',
+                        'https://bi.example.com/gpu', 'browser_session', 'on_demand',
+                        'live', 1704067200000, 1704067200000, 1704067200000, 1704067200000
+                     )",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let week_one = 1_704_067_200_000;
+        let week_two = week_one + WEEK_MILLIS;
+        let first = storage
+            .save_data_snapshot(
+                1,
+                "browser_attach",
+                Some("GPU 用量报表"),
+                "GPU 使用量 100 卡时",
+                &json!({"metric": "GPU 使用量", "value": 100}),
+                week_one,
+            )
+            .unwrap();
+        let same_week = storage
+            .save_data_snapshot(
+                1,
+                "browser_attach",
+                Some("GPU 用量报表"),
+                "GPU 使用量 120 卡时",
+                &json!({"metric": "GPU 使用量", "value": 120}),
+                week_one + 60_000,
+            )
+            .unwrap();
+        let next_week = storage
+            .save_data_snapshot(
+                1,
+                "browser_attach",
+                Some("GPU 用量报表"),
+                "GPU 使用量 150 卡时",
+                &json!({"metric": "GPU 使用量", "value": 150}),
+                week_two,
+            )
+            .unwrap();
+
+        assert_eq!(same_week.id, first.id);
+        assert_ne!(next_week.id, first.id);
+        assert_eq!(same_week.period_granularity, "week");
+        assert_ne!(same_week.period_key, next_week.period_key);
+
+        let results = storage
+            .search_data_sources("GPU 使用量", false, week_two + 60_000, 10)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].history.len(), 2);
+        assert_eq!(results[0].history[0].content_text, "GPU 使用量 150 卡时");
+        assert_eq!(results[0].history[1].content_text, "GPU 使用量 120 卡时");
+        assert!(results[0].history.iter().all(|snapshot| {
+            snapshot.structured_data["period"]["key"] == snapshot.period_key
+                && snapshot.provenance["period"]["key"] == snapshot.period_key
+        }));
+    }
+
+    #[test]
     fn exact_report_url_participates_in_the_same_top_k_ranking() {
         let storage = StorageManager::open_in_memory().unwrap();
         storage
@@ -5748,6 +8186,133 @@ mod tests {
         assert_eq!(results[0].source_id, 1);
         assert_eq!(results[0].relevance_score, 1.0);
         assert!(results[0].refresh_required);
+    }
+
+    #[test]
+    fn skill_scoped_gpu_query_recalls_data_1617_and_its_live_report() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    r#"
+                    INSERT INTO data_sources (
+                        id, canonical_key, title, source_kind, source_url, access_mode,
+                        refresh_policy, realtime_level, tags, first_seen_at, last_seen_at,
+                        status, created_at, updated_at
+                    ) VALUES
+                        (1584, 'report:https://kwaishop.example.com/gpu/project',
+                         '电商GPU信息平台 - GPU项目用量管理', 'report_url',
+                         'https://kwaishop.example.com/gpu/project', 'browser_session',
+                         'on_demand', 'live', '["report"]', 1786168119642,
+                         1786168119642, 'active', 1786168119642, 1786168119642),
+                        (1617, 'memory:gpu-platform:total-cards',
+                         '电商GPU信息平台总卡数（X40折算）', 'work_memory',
+                         'https://kwaishop.example.com/gpu/project', 'memory_only',
+                         'never', 'observed', '["work_memory"]', 1786168119642,
+                         1786168119642, 'active', 1786168119642, 1786168119642);
+
+                    INSERT INTO data_snapshots (
+                        source_id, collected_at, observed_at, collector, content_text,
+                        structured_data, content_hash, freshness_ttl_seconds, provenance,
+                        source_capture_ids, source_timeline_ids, status, created_at
+                    ) VALUES (
+                        1617, 1786168119642, 1786168119642, 'memory_extract',
+                        '电商GPU信息平台项目总卡数为1803.59（按X40折算）。',
+                        '{"extraction_version":"data-memory.v15","title":"电商GPU信息平台总卡数（X40折算）","summary":"项目总卡数为1803.59。","semantic_subject":"电商GPU信息平台","semantic_identity":"电商gpu信息平台:总卡数","metric_rows":[{"dimension":"","metric":"总卡数","value":"1803.59(X40折算)","note":""}]}',
+                        'gpu-1617', 0, '{}', '[]', '[]', 'success', 1786168119642
+                    );
+
+                    WITH RECURSIVE distractor(n) AS (
+                        SELECT 1 UNION ALL SELECT n + 1 FROM distractor WHERE n < 8
+                    )
+                    INSERT INTO data_sources (
+                        id, canonical_key, title, source_kind, access_mode, refresh_policy,
+                        realtime_level, tags, first_seen_at, last_seen_at, status,
+                        created_at, updated_at
+                    )
+                    SELECT 2000 + n, 'memory:gpu-util:' || n,
+                           'GPU 利用率对比 ' || n, 'work_memory', 'memory_only', 'never',
+                           'observed', '["work_memory"]', 1786250000000 + n,
+                           1786250000000 + n, 'active', 1786250000000 + n,
+                           1786250000000 + n
+                    FROM distractor;
+
+                    INSERT INTO data_snapshots (
+                        source_id, collected_at, observed_at, collector, content_text,
+                        structured_data, content_hash, freshness_ttl_seconds, provenance,
+                        source_capture_ids, source_timeline_ids, status, created_at
+                    )
+                    SELECT id, 1786250000000 + id, 1786250000000 + id,
+                           'memory_extract', 'GPU 利用率历史对比',
+                           '{"metric_rows":[{"dimension":"","metric":"利用率","value":"42%","note":""}]}',
+                           'noise-' || id, 0, '{}', '[]', '[]', 'success',
+                           1786250000000 + id
+                    FROM data_sources WHERE id BETWEEN 2001 AND 2008;
+                    "#,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let results = storage
+            .search_data_sources(
+                "当前数据检索步骤：GPU算力数据\n用数据检索 Tool 获取电商GPU信息平台的最新算力、利用率、收益数据，并添加到表格中",
+                true,
+                1786254800000,
+                6,
+            )
+            .unwrap();
+
+        assert!(
+            results.iter().any(|item| item.source_id == 1617),
+            "Skill 明确指定电商GPU信息平台时必须召回数据 1617: {results:?}"
+        );
+        let report = results
+            .iter()
+            .find(|item| item.source_id == 1584)
+            .expect("同 URL 的即时报表源必须与数据 1617 一起进入 Top-K");
+        assert_eq!(report.source_kind, "report_url");
+        assert!(report.refresh_required);
+        assert!(!report.can_use);
+    }
+
+    #[test]
+    fn optional_live_gpu_skill_search_recalls_expected_data_and_refresh_source() {
+        let Ok(db_path) = std::env::var("MEMORY_BREAD_DATA_SEARCH_E2E_DB") else {
+            return;
+        };
+        let expected_id = std::env::var("MEMORY_BREAD_DATA_SEARCH_EXPECTED_ID")
+            .unwrap_or_else(|_| "1617".to_string())
+            .parse::<i64>()
+            .expect("expected data source id must be an integer");
+        let storage = StorageManager::open(std::path::Path::new(&db_path)).unwrap();
+        let results = storage
+            .search_data_sources(
+                "当前数据检索步骤：GPU算力数据\n用数据检索 Tool 获取电商GPU信息平台的最新算力、利用率、收益数据，并添加到表格中",
+                true,
+                current_ts_ms(),
+                6,
+            )
+            .unwrap();
+        let data = results
+            .iter()
+            .find(|item| item.source_id == expected_id)
+            .unwrap_or_else(|| panic!("expected data source {expected_id} in {results:?}"));
+        let canonical_url = data
+            .source_url
+            .as_deref()
+            .and_then(canonical_data_url)
+            .expect("expected data source must retain its report URL");
+        assert!(results.iter().any(|item| {
+            item.source_kind == "report_url"
+                && item.refresh_required
+                && item
+                    .source_url
+                    .as_deref()
+                    .and_then(canonical_data_url)
+                    .as_deref()
+                    == Some(canonical_url.as_str())
+        }));
     }
 
     #[test]
@@ -5811,6 +8376,11 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(matched_total, 1);
         assert_eq!(matched[0].source_kind, "work_memory");
+        assert_eq!(
+            matched[0].source_url.as_deref(),
+            Some("https://bi.example.com/dashboard/weekly"),
+            "网页采集的工作记忆数据应记录来源网址"
+        );
         assert_eq!(
             matched[0]
                 .latest_snapshot
@@ -5884,5 +8454,253 @@ mod tests {
         let (_, pending_total) = storage.list_pending_data_sources(None, 20).unwrap();
         assert_eq!(total, 0);
         assert_eq!(pending_total, 6);
+    }
+
+    fn seed_discovery_capture(storage: &StorageManager, id: i64, is_sensitive: i64) {
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO captures (
+                        id, ts, app_name, win_title, event_type, url,
+                        webpage_title, is_sensitive, pii_scrubbed
+                     ) VALUES (?1, 1700000000000, 'Google Chrome',
+                               '电商GPU信息平台 - GPU使用情况一览', 'browser_navigation',
+                               'https://kwaishop-sre.corp.example.com/kwaishop/gpu/info',
+                               '电商GPU信息平台 - GPU使用情况一览', ?2, 0)",
+                    params![id, is_sensitive],
+                )?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO timelines (
+                        id, capture_id, summary, overview, details, entities, category,
+                        importance, created_at_ms, updated_at_ms
+                     ) VALUES (
+                        2160, ?1, 'GPU 用量巡检', '电商GPU信息平台查看利用率',
+                        '', '[]', 'work', 4, 1700000000000, 1700000000000
+                     )",
+                    [id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn registers_discovered_report_source_and_is_idempotent() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        seed_discovery_capture(&storage, 21603, 0);
+
+        let url = "https://kwaishop-sre.corp.example.com/kwaishop/gpu/info?token=abc&page=2";
+        let first = storage
+            .register_discovered_report_source(url, "电商GPU信息平台", 21603, Some(2160), 0)
+            .unwrap();
+        let DiscoveredSourceOutcome::Registered { source_id, created } = first else {
+            panic!("期望注册成功，实际: {first:?}");
+        };
+        assert!(created);
+
+        // 幂等：同一 canonical URL 再注册不新建，敏感参数被规范化剔除
+        let second = storage
+            .register_discovered_report_source(url, "", 21603, Some(2160), 0)
+            .unwrap();
+        let DiscoveredSourceOutcome::Registered {
+            source_id: second_id,
+            created: second_created,
+        } = second
+        else {
+            panic!("期望幂等注册，实际: {second:?}");
+        };
+        assert_eq!(source_id, second_id);
+        assert!(!second_created);
+
+        // 新注册源尚无快照，不出现在 list_data_sources，而是进入 pending 待采集列表
+        let (_, total) = storage.list_data_sources(None, 20, 0).unwrap();
+        assert_eq!(total, 0);
+        let (pending, pending_total) = storage.list_pending_data_sources(None, 20).unwrap();
+        assert_eq!(pending_total, 1);
+        assert_eq!(pending[0].id, source_id);
+
+        let source = storage.get_data_source(source_id).unwrap().unwrap();
+        assert_eq!(source.source_kind, "report_url");
+        assert_eq!(source.access_mode, "browser_session");
+        assert_eq!(source.refresh_policy, "on_demand");
+        assert_eq!(source.realtime_level, "live");
+        assert!(source.tags.contains(&"model_classified".to_string()));
+        let canonical = source.source_url.as_deref().unwrap();
+        assert!(!canonical.contains("token="));
+        assert!(canonical.contains("page=2"));
+
+        let link_count: i64 = storage
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM data_source_links
+                     WHERE source_id = ?1 AND link_kind = 'active_url'",
+                    [source_id],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(
+            link_count, 1,
+            "同 capture + timeline 重复注册只保留一条 link"
+        );
+
+        // 另一条 capture 再命中同一页面，追加第二条 link
+        seed_discovery_capture(&storage, 21604, 0);
+        let third = storage
+            .register_discovered_report_source(url, "", 21604, Some(2160), 0)
+            .unwrap();
+        assert!(matches!(
+            third,
+            DiscoveredSourceOutcome::Registered { created: false, .. }
+        ));
+        let link_count: i64 = storage
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM data_source_links
+                     WHERE source_id = ?1 AND link_kind = 'active_url'",
+                    [source_id],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(link_count, 2, "不同 capture 各写一条 discovered link");
+    }
+
+    #[test]
+    fn rejects_discovered_source_for_missing_or_sensitive_capture() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        seed_discovery_capture(&storage, 9, 1);
+
+        let missing = storage
+            .register_discovered_report_source("https://bi.example.com/report", "", 404, None, 0)
+            .unwrap();
+        assert_eq!(missing, DiscoveredSourceOutcome::RejectedCaptureMissing);
+
+        let sensitive = storage
+            .register_discovered_report_source("https://bi.example.com/report", "", 9, None, 0)
+            .unwrap();
+        assert_eq!(sensitive, DiscoveredSourceOutcome::RejectedCaptureSensitive);
+
+        let (_, total) = storage.list_data_sources(None, 20, 0).unwrap();
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn rejects_discovered_source_with_invalid_url() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        seed_discovery_capture(&storage, 1, 0);
+
+        let outcome = storage
+            .register_discovered_report_source("not-a-url", "", 1, None, 0)
+            .unwrap();
+        assert_eq!(outcome, DiscoveredSourceOutcome::RejectedInvalidUrl);
+    }
+
+    fn seed_data_sources_for_query(storage: &StorageManager) {
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    r#"
+                    INSERT INTO data_sources (
+                        id, canonical_key, title, source_kind, access_mode, refresh_policy,
+                        realtime_level, source_app_name, source_window_title, tags,
+                        first_seen_at, last_seen_at, last_collected_at, last_success_at,
+                        status, created_at, updated_at
+                    ) VALUES
+                    (1, 'key-1', 'GPU 资源周报', 'work_memory', 'memory_only', 'never', 'observed', 'Chrome', '周报窗口', '[]', 1, 2, 2, 2, 'active', 1, 2),
+                    (2, 'key-2', '完全无关的数据源', 'work_memory', 'memory_only', 'never', 'observed', 'Chrome', '无关窗口', '[]', 1, 2, 2, 2, 'active', 1, 2),
+                    (3, 'key-3', 'GPU 成本明细', 'work_memory', 'memory_only', 'never', 'observed', 'Chrome', '明细窗口', '[]', 1, 2, 2, 2, 'active', 1, 2);
+                    INSERT INTO data_snapshots (
+                        source_id, collected_at, observed_at, collector, content_text,
+                        structured_data, content_hash, freshness_ttl_seconds, provenance,
+                        source_capture_ids, source_timeline_ids, status, created_at
+                    ) VALUES
+                    (1, 2, 2, 'memory_extract', '本周 GPU 使用率为85%', '{"extraction_version":"data-memory.v15","title":"GPU 使用率","summary":"GPU 使用率：85%","metric_rows":[{"dimension":"","metric":"GPU 使用率","value":"85%","note":"","statement":"本周 GPU 使用率为85%","observed_at":2}]}', 'h1', 0, '{}', '[]', '[]', 'success', 2),
+                    (2, 2, 2, 'memory_extract', '与搜索词毫无关系的内容，订单成功率为92%', '{"extraction_version":"data-memory.v15","title":"订单成功率","summary":"订单成功率：92%","metric_rows":[{"dimension":"","metric":"订单成功率","value":"92%","note":"","statement":"订单成功率为92%","observed_at":2}]}', 'h2', 0, '{}', '[]', '[]', 'success', 2),
+                    (3, 2, 2, 'memory_extract', '本条快照正文不含关键词，本周节省成本 1200 元', '{"extraction_version":"data-memory.v15","title":"节省成本","summary":"节省成本：1200 元","metric_rows":[{"dimension":"","metric":"节省成本","value":"1200 元","note":"","statement":"本周节省成本 1200 元","observed_at":2}]}', 'h3', 0, '{}', '[]', '[]', 'success', 2);
+                    "#,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn list_data_sources_query_prefilter_results_match_contains() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        seed_data_sources_for_query(&storage);
+
+        let (records, total) = storage.list_data_sources(Some("GPU"), 20, 0).unwrap();
+        assert_eq!(total, 2);
+        let ids: HashSet<i64> = records.iter().map(|record| record.id).collect();
+        assert_eq!(ids, HashSet::from([1, 3]));
+    }
+
+    #[test]
+    fn list_data_sources_orders_by_visible_snapshot_time() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    r#"
+                    INSERT INTO data_sources (
+                        id, canonical_key, title, source_kind, access_mode, refresh_policy,
+                        realtime_level, tags, first_seen_at, last_seen_at, status,
+                        created_at, updated_at
+                    ) VALUES
+                        (1698, 'older-snapshot-seen-later', '旧快照近期再次出现',
+                         'work_memory', 'memory_only', 'never', 'observed', '[]',
+                         100, 400, 'active', 100, 400),
+                        (1677, 'newer-snapshot-seen-earlier', '最新数据',
+                         'work_memory', 'memory_only', 'never', 'observed', '[]',
+                         200, 300, 'active', 200, 300);
+                    INSERT INTO data_snapshots (
+                        source_id, collected_at, observed_at, collector, content_text,
+                        structured_data, content_hash, freshness_ttl_seconds, provenance,
+                        source_capture_ids, source_timeline_ids, status, created_at
+                    ) VALUES
+                        (1698, 100, 100, 'memory_extract', '旧 GPU 使用率为 10%',
+                         '{"extraction_version":"data-memory.v15","title":"旧 GPU 使用率","summary":"旧 GPU 使用率为 10%","metric_rows":[{"dimension":"","metric":"GPU 使用率","value":"10%","note":"","statement":"旧 GPU 使用率为 10%","observed_at":100}]}',
+                         'older', 0, '{}', '[]', '[]', 'success', 100),
+                        (1677, 200, 200, 'memory_extract', '最新 GPU 使用率为 20%',
+                         '{"extraction_version":"data-memory.v15","title":"最新 GPU 使用率","summary":"最新 GPU 使用率为 20%","metric_rows":[{"dimension":"","metric":"GPU 使用率","value":"20%","note":"","statement":"最新 GPU 使用率为 20%","observed_at":200}]}',
+                         'newer', 0, '{}', '[]', '[]', 'success', 200);
+                    "#,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let (records, total) = storage.list_data_sources(None, 1, 0).unwrap();
+
+        assert_eq!(total, 2);
+        assert_eq!(
+            records.iter().map(|record| record.id).collect::<Vec<_>>(),
+            vec![1677]
+        );
+    }
+
+    #[test]
+    fn list_data_sources_query_falls_back_without_fts() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        seed_data_sources_for_query(&storage);
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "DROP TRIGGER IF EXISTS data_snapshots_fts_insert;
+                     DROP TRIGGER IF EXISTS data_snapshots_fts_update;
+                     DROP TRIGGER IF EXISTS data_snapshots_fts_delete;
+                     DROP TABLE IF EXISTS data_snapshots_fts;",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let (records, total) = storage.list_data_sources(Some("GPU"), 20, 0).unwrap();
+        assert_eq!(total, 2);
+        let ids: HashSet<i64> = records.iter().map(|record| record.id).collect();
+        assert_eq!(ids, HashSet::from([1, 3]));
     }
 }

@@ -31,6 +31,9 @@ BAKE_INPUT_TOKEN_BUDGET = (
 )
 BAKE_RETRY_INPUT_TOKEN_BUDGET = 18_000
 BAKE_RETRY_REPEAT_PENALTY = 1.15
+BAKE_TIMEOUT_RETRY_INPUT_TOKEN_BUDGET = 12_000
+BAKE_TIMEOUT_RETRY_NUM_PREDICT = 4096
+BAKE_TIMEOUT_RETRY_REPEAT_PENALTY = 1.20
 # estimate_tokens 对中文结构化 prompt 会低估约 20%-30%；预算判断使用保守倍率，
 # 实际用量仍以 Ollama 返回的 prompt_eval_count 为准。
 BAKE_TOKEN_ESTIMATE_SAFETY_FACTOR = 1.35
@@ -216,68 +219,63 @@ def _rag_is_active() -> bool:
 
 _JSON_STRING_CLOSERS = set(':,}] \t\r\n')
 
+# 思考块闭合标签（拼接构造，避免源码被模板处理器误伤）。
+_THINK_CLOSE_TAG = "<" + "/think>"
 
-def _repair_stray_double_quotes(text: str) -> str:
-    """修复 JSON 字符串值内部未转义的游离半角引号。
 
-    本地模型在中文语境中常生成“…内容0/0"这类开引号为全角、闭引号为
-    半角的引用文本，半角引号会被 json.loads 误判为字符串结束，导致整段
-    输出解析失败。此处按“真正的字符串闭引号后面必然跟 JSON 结构字符”
-    的启发式，把字符串内部后接正文内容的引号转义掉。
+def _json_repair_round(text: str) -> str:
+    """单遍组合修复：游离引号、字符串外过度转义、字符串内字面换行。
+
+    小模型输出的缺陷常交织出现（同一文本里既有未转义的游离引号，又有
+    字符串外 `\\"` 过度转义，还有字面换行）。拆成多个独立扫描器会互相
+    干扰，这里合并为单遍扫描：字符串内的 `\\"` 用前瞻判断真实语义，
+    后面紧跟 JSON 结构字符才是转义引号收尾，否则属于过度转义，去掉
+    反斜杠后保留为字符串内容。
+
+    注意：本函数不幂等（第一轮把游离引号转义成 `\\"`，第二轮会把
+    它们当过度转义改回去），调用方只能应用一轮，靠多策略变体覆盖
+    歧义场景，不能迭代反复应用。
     """
     out: List[str] = []
     in_string = False
-    escape = False
+    idx = 0
     length = len(text)
-    for idx, ch in enumerate(text):
+    while idx < length:
+        ch = text[idx]
         if in_string:
-            if escape:
+            if ch == '\\' and idx + 1 < length:
+                nxt = text[idx + 1]
+                if nxt == '"':
+                    j = idx + 2
+                    while j < length and text[j] in ' \t\r\n':
+                        j += 1
+                    if j >= length or text[j] in _JSON_STRING_CLOSERS:
+                        # `\"` 后接结构字符：模型想在这里结束字符串。
+                        # 合法 JSON 的字符串闭合只能是裸引号（`\"` 永远属于
+                        # 字符串内容），所以去掉多余反斜杠后用裸引号闭合。
+                        in_string = False
+                        out.append('"')
+                    else:
+                        # 过度转义：`\"` 后仍是正文，去反斜杠保内容。
+                        out.append('"')
+                    idx += 2
+                    continue
                 out.append(ch)
-                escape = False
-                continue
-            if ch == '\\':
-                out.append(ch)
-                escape = True
+                out.append(nxt)
+                idx += 2
                 continue
             if ch == '"':
-                nxt = idx + 1
-                while nxt < length and text[nxt] in ' \t\r\n':
-                    nxt += 1
-                if nxt >= length or text[nxt] in _JSON_STRING_CLOSERS:
+                j = idx + 1
+                while j < length and text[j] in ' \t\r\n':
+                    j += 1
+                if j >= length or text[j] in _JSON_STRING_CLOSERS:
                     in_string = False
                     out.append(ch)
                 else:
                     out.append('\\"')
+                idx += 1
                 continue
-            out.append(ch)
-            continue
-        if ch == '"':
-            in_string = True
-        out.append(ch)
-    return ''.join(out)
-
-
-def _escape_newlines_inside_json_strings(text: str) -> str:
-    """修复 LLM 在 JSON 字符串值内输出字面换行的非法 JSON。
-
-    逐字符扫描区分字符串内外，仅将字符串内的原始换行/回车/制表符
-    转义为 \\n/\\r/\\t；字符串外的格式换行保留不动。
-    """
-    out: List[str] = []
-    in_string = False
-    escape = False
-    for ch in text:
-        if in_string:
-            if escape:
-                out.append(ch)
-                escape = False
-            elif ch == '\\':
-                out.append(ch)
-                escape = True
-            elif ch == '"':
-                in_string = False
-                out.append(ch)
-            elif ch == '\n':
+            if ch == '\n':
                 out.append('\\n')
             elif ch == '\r':
                 out.append('\\r')
@@ -285,11 +283,312 @@ def _escape_newlines_inside_json_strings(text: str) -> str:
                 out.append('\\t')
             else:
                 out.append(ch)
-        else:
-            if ch == '"':
+            idx += 1
+            continue
+        if ch == '\\' and idx + 1 < length:
+            nxt = text[idx + 1]
+            if nxt == '"':
+                # 字符串外不存在转义语境，`\"` 还原为字符串开始的普通引号。
+                out.append('"')
                 in_string = True
-            out.append(ch)
+                idx += 2
+                continue
+            if nxt in 'nrt':
+                # 模型把 `\n` 等转义序列写在结构层当格式化空白，
+                # JSON 结构层不接受转义序列，还原为真实空白字符。
+                out.append({'n': '\n', 'r': '\r', 't': '\t'}[nxt])
+                idx += 2
+                continue
+        if ch == '"':
+            in_string = True
+        out.append(ch)
+        idx += 1
     return ''.join(out)
+
+
+def _json_repair_round_openers(text: str) -> str:
+    """宽松变体：在默认修复基础上，字符串外的 `\\"` 一律当字符串起始引号。
+
+    与 `_json_repair_round` 的区别：后者在字符串内遇到 `\\"` 后接结构
+    字符时会认为字符串闭合；当模型对整个数组元素过度转义（如
+    `[\\"creation\\", \\"planning\\"]`）时，闭合判断会提前截断字符串。
+    本变体改为：只有裸 `"` 才能闭合字符串，`\\"` 永远属于字符串内容，
+    字符串外的 `\\"` 还原为普通引号。两种口径都试，总有一种能收敛。
+    """
+    out: List[str] = []
+    in_string = False
+    idx = 0
+    length = len(text)
+    while idx < length:
+        ch = text[idx]
+        if in_string:
+            if ch == '\\' and idx + 1 < length:
+                out.append(ch)
+                out.append(text[idx + 1])
+                idx += 2
+                continue
+            if ch == '"':
+                j = idx + 1
+                while j < length and text[j] in ' \t\r\n':
+                    j += 1
+                if j >= length or text[j] in _JSON_STRING_CLOSERS:
+                    in_string = False
+                    out.append(ch)
+                else:
+                    out.append('\\"')
+                idx += 1
+                continue
+            if ch == '\n':
+                out.append('\\n')
+            elif ch == '\r':
+                out.append('\\r')
+            elif ch == '\t':
+                out.append('\\t')
+            else:
+                out.append(ch)
+            idx += 1
+            continue
+        if ch == '\\' and idx + 1 < length:
+            nxt = text[idx + 1]
+            if nxt == '"':
+                out.append('"')
+                in_string = True
+                idx += 2
+                continue
+            if nxt in 'nrt':
+                out.append({'n': '\n', 'r': '\r', 't': '\t'}[nxt])
+                idx += 2
+                continue
+        if ch == '"':
+            in_string = True
+        out.append(ch)
+        idx += 1
+    return ''.join(out)
+
+
+def _strip_trailing_commas(text: str) -> str:
+    """删除字符串外部的尾逗号（`,` 后直接跟 `}` / `]`）。
+
+    小模型常在最后一个字段后多写一个逗号，json.loads 与 ast.literal_eval
+    都不接受，需要在解析前去掉。
+    """
+    out: List[str] = []
+    in_string = False
+    escape = False
+    idx = 0
+    length = len(text)
+    while idx < length:
+        ch = text[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_string = False
+            out.append(ch)
+            idx += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            idx += 1
+            continue
+        if ch == ',':
+            nxt = idx + 1
+            while nxt < length and text[nxt] in ' \t\r\n':
+                nxt += 1
+            if nxt < length and text[nxt] in '}]':
+                idx += 1
+                continue
+        out.append(ch)
+        idx += 1
+    return ''.join(out)
+
+
+def _quote_bare_array_items(text: str) -> str:
+    """给数组内未加引号的裸文本元素补上引号（最后兑底变体）。
+
+    小模型会输出 `"steps": [1. 发布通告…\\n2. 组织人员…]` 这类裸文本
+    数组元素。仅在所有常规修复都失败后才尝试，避免误伤合法的数字数组。
+    """
+    out: List[str] = []
+    in_string = False
+    escape = False
+    stack: List[str] = []
+    expect_value = False
+    idx = 0
+    length = len(text)
+    while idx < length:
+        ch = text[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_string = False
+            out.append(ch)
+            idx += 1
+            continue
+        if ch == '"':
+            in_string = True
+            expect_value = False
+            out.append(ch)
+            idx += 1
+            continue
+        if ch in '{[':
+            stack.append(ch)
+            expect_value = (ch == '[')
+            out.append(ch)
+            idx += 1
+            continue
+        if ch in '}]':
+            if stack:
+                stack.pop()
+            expect_value = False
+            out.append(ch)
+            idx += 1
+            continue
+        if ch == ',':
+            if stack and stack[-1] == '[':
+                expect_value = True
+            out.append(ch)
+            idx += 1
+            continue
+        if ch in ' \t\r\n':
+            out.append(ch)
+            idx += 1
+            continue
+        if expect_value and stack and stack[-1] == '[':
+            # 捕获裸元素直到同层的 ',' 或 ']'（裸元素内部可能包含嵌套结构）。
+            j = idx
+            buf: List[str] = []
+            bare_in_string = False
+            bare_escape = False
+            depth = 0
+            while j < length:
+                cj = text[j]
+                if bare_in_string:
+                    if bare_escape:
+                        bare_escape = False
+                    elif cj == '\\':
+                        bare_escape = True
+                    elif cj == '"':
+                        bare_in_string = False
+                    buf.append(cj)
+                    j += 1
+                    continue
+                if cj == '"':
+                    bare_in_string = True
+                    buf.append(cj)
+                    j += 1
+                    continue
+                if cj in '{[':
+                    depth += 1
+                    buf.append(cj)
+                    j += 1
+                    continue
+                if cj in '}]':
+                    if depth > 0:
+                        depth -= 1
+                        buf.append(cj)
+                        j += 1
+                        continue
+                    break
+                if cj == ',' and depth == 0:
+                    break
+                buf.append(cj)
+                j += 1
+            item = ''.join(buf).strip()
+            if item:
+                escaped = (
+                    item.replace('\\', '\\\\')
+                    .replace('"', '\\"')
+                    .replace('\n', '\\n')
+                    .replace('\r', '\\r')
+                    .replace('\t', '\\t')
+                )
+                out.append('"' + escaped + '"')
+            idx = j
+            expect_value = False
+            continue
+        out.append(ch)
+        idx += 1
+    return ''.join(out)
+
+
+def _collect_json_repair_variants(candidate: str) -> List[str]:
+    """生成多策略修复变体，逐个交给 json.loads 尝试。
+
+    现网失败样本常同时带多种缺陷（游离引号、字面换行、`\\"` 过度转义
+    交织），且引号语义存在局部不可判定的歧义，单一启发式必有盲区。
+    因此不做迭代修复（修复函数不幂等，迭代会震荡），而是并行生成
+    多个策略变体：closer 前瞻、保留转义口径、全局去反斜杠后再修，
+    叠加全角引号归一与尾逗号清理，总有一种能收敛。
+    """
+    normalized = (
+        candidate
+        .replace("“", '"')
+        .replace("”", '"')
+        .replace("‘", "'")
+        .replace("’", "'")
+    )
+    # 模型会在同一段输出里混用 `\\n` 两字符转义序列与字面换行，甚至
+    # 输出 `\\<字面换行>`、`\\\\<字面换行>` 这类非法序列。按“反斜杠
+    # 后面紧跟字面换行”的非法程度归一：奇数个反斜杠时末尾反斜杠非法，
+    # 直接换成 `n`；偶数个反斜杠时反斜杠都已配对，字面换行本身非法，
+    # 补一对 `\\n`。归一后文本不再含字面换行歧义，后续字符串状态扫描
+    # 才不会被误读。
+    def _normalize_illegal_newline_escapes(text: str) -> str:
+        return re.sub(
+            r"\\+\n",
+            lambda m: ((m.group(0)[:-1] + "n")
+                       if len(m.group(0)) % 2 == 0
+                       else (m.group(0)[:-1] + "\\n")),
+            text,
+        )
+
+    newline_fixed = _normalize_illegal_newline_escapes(candidate)
+    bases = [candidate]
+    if normalized != candidate:
+        bases.append(normalized)
+    if newline_fixed != candidate:
+        bases.append(newline_fixed)
+        fixed_normalized = (
+            newline_fixed
+            .replace("“", '"')
+            .replace("”", '"')
+            .replace("‘", "'")
+            .replace("’", "'")
+        )
+        if fixed_normalized not in bases:
+            bases.append(fixed_normalized)
+
+    families: List[str] = []
+    for base in bases:
+        families.append(base)
+        families.append(_json_repair_round(base))
+        families.append(_json_repair_round_openers(base))
+        # 全局去掉引号前的反斜杠：专治对整个数组元素过度转义
+        # （如 `[\\"creation\\", \\"planning\\"]`）导致前瞻判断失效的场景。
+        stripped = base.replace('\\"', '"')
+        if stripped != base:
+            families.append(stripped)
+            families.append(_json_repair_round(stripped))
+
+    variants: List[str] = []
+    seen = set()
+
+    def emit(text: str) -> None:
+        for fixed in (text, _strip_trailing_commas(text)):
+            if fixed and fixed not in seen:
+                seen.add(fixed)
+                variants.append(fixed)
+
+    for family in families:
+        emit(family)
+    return variants
 
 
 def _try_parse_json_like_object(text: str) -> Optional[Dict[str, Any]]:
@@ -300,24 +599,12 @@ def _try_parse_json_like_object(text: str) -> Optional[Dict[str, Any]]:
     if not candidate:
         return None
 
-    normalized = (
-        candidate
-        .replace("“", '"')
-        .replace("”", '"')
-        .replace("‘", "'")
-        .replace("’", "'")
-    )
-
-    variants = [candidate]
-    if normalized != candidate:
-        variants.append(normalized)
-    for variant in list(variants):
-        repaired = _repair_stray_double_quotes(variant)
-        if repaired != variant:
-            variants.append(repaired)
-        newline_fixed = _escape_newlines_inside_json_strings(variant)
-        if newline_fixed != variant:
-            variants.append(newline_fixed)
+    variants = _collect_json_repair_variants(candidate)
+    # 裸数组元素补引号只作为最后兑底：会把合法数字数组变成字符串数组，
+    # 但走到这一步时输出已经无法解析，保底拿到结构化结果优于丢弃候选。
+    bare_quoted = _quote_bare_array_items(candidate)
+    if bare_quoted != candidate:
+        variants.extend(_collect_json_repair_variants(bare_quoted))
 
     for variant in variants:
         for parser in (json.loads, ast.literal_eval):
@@ -331,23 +618,8 @@ def _try_parse_json_like_object(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _extract_json_object(raw: Any) -> Optional[Dict[str, Any]]:
-    """尽量从 LLM 输出中提取第一个合法 JSON 对象。"""
-    if raw is None:
-        return None
-
-    text = str(raw).strip()
-    if not text:
-        return None
-
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-
-    parsed = _try_parse_json_like_object(text)
-    if parsed is not None:
-        return parsed
-
+def _scan_first_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """括号配对扫描，取第一个平衡的 `{...}` 片段再做容错解析。"""
     start = text.find('{')
     if start == -1:
         return None
@@ -375,6 +647,138 @@ def _extract_json_object(raw: Any) -> Optional[Dict[str, Any]]:
             if depth == 0:
                 candidate = text[start:idx + 1]
                 return _try_parse_json_like_object(candidate)
+
+    return None
+
+
+def _salvage_truncated_json(text: str) -> Optional[Dict[str, Any]]:
+    """从被截断的输出中抢救最长的可闭合前缀。
+
+    截断（done_reason=length）或重复退化会让 JSON 在半路断开。重复退化
+    场景下前缀通常已包含完整的首个产物块，把最近的完整值边界之后截断、
+    补齐未闭合括号即可得到可用结果，避免候选被误判终态。
+    """
+    candidate = str(text or '').strip()
+    if not candidate:
+        return None
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*", "", candidate)
+    start = candidate.find('{')
+    if start == -1:
+        return None
+    candidate = candidate[start:]
+
+    stack: List[str] = []
+    in_string = False
+    escape = False
+    good_positions: List[int] = []
+    for idx, ch in enumerate(candidate):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_string = False
+                if stack:
+                    good_positions.append(idx + 1)
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in '{[':
+            stack.append(ch)
+        elif ch in '}]':
+            if stack:
+                stack.pop()
+            if stack:
+                good_positions.append(idx + 1)
+
+    for position in reversed(good_positions[-6:]):
+        prefix = candidate[:position].rstrip()
+        while prefix.endswith(','):
+            prefix = prefix[:-1].rstrip()
+        # 前缀末尾如果是悬空的 `:`（键后断流），无法闭合，试更早的边界。
+        if prefix.endswith(':'):
+            continue
+        open_stack: List[str] = []
+        in_string = False
+        escape = False
+        for ch in prefix:
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == '\\':
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch in '{[':
+                open_stack.append(ch)
+            elif ch in '}]':
+                if open_stack:
+                    open_stack.pop()
+        if in_string or not open_stack:
+            continue
+        closers = ''.join('}' if c == '{' else ']' for c in reversed(open_stack))
+        parsed = _try_parse_json_like_object(prefix + closers)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _extract_json_object(raw: Any) -> Optional[Dict[str, Any]]:
+    """尽量从 LLM 输出中提取第一个合法 JSON 对象。"""
+    if raw is None:
+        return None
+
+    text = str(raw).strip()
+    if not text:
+        return None
+
+    fragments: List[str] = [text]
+    if text.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", text)
+        stripped = re.sub(r"\s*```$", "", stripped)
+        if stripped and stripped != text:
+            fragments.append(stripped)
+    # 小模型会先在 think 思考块里复述一遍 JSON，再在围栏里输出正文；
+    # think 内的裸 JSON 带字面换行会抢先命中括号扫描导致整体解析失败，
+    # 因此也要单独尝试思考块闭合标签之后的内容以及每个围栏块。
+    if _THINK_CLOSE_TAG in text:
+        tail = text.rsplit(_THINK_CLOSE_TAG, 1)[1].strip()
+        if tail:
+            fragments.append(tail)
+    for match in re.finditer(r"```(?:json)?[ \t]*\r?\n(.*?)```", text, re.S):
+        block = match.group(1).strip()
+        if block:
+            fragments.append(block)
+        if len(fragments) >= 8:
+            break
+
+    for fragment in fragments:
+        parsed = _try_parse_json_like_object(fragment)
+        if parsed is not None:
+            return parsed
+
+    for fragment in fragments:
+        parsed = _scan_first_json_object(fragment)
+        if parsed is not None:
+            return parsed
+
+    # 截断抢救同样要先修复再扫描：原始文本里的游离引号/字面换行会让
+    # 括号状态机误判字符串边界，找不到正确的闭合点。
+    salvage_candidates: List[str] = []
+    for fragment in fragments:
+        salvage_candidates.append(fragment)
+        repaired = _json_repair_round(fragment)
+        if repaired != fragment:
+            salvage_candidates.append(repaired)
+    for candidate_text in salvage_candidates:
+        parsed = _salvage_truncated_json(candidate_text)
+        if parsed is not None:
+            return parsed
 
     return None
 
@@ -667,9 +1071,15 @@ def _overview_to_summary(overview: str, max_len: int = 42) -> str:
 
 MERGE_SYSTEM_PROMPT ="""你是一个工作片段提炼助手。以下是用户在一段连续时间内的屏幕采集记录（按时间顺序），它们属于同一个工作片段。
 
-**你的任务**:将这些连续采集提炼为一个完整的工作片段知识条目。
+**你的任务**:先验证这些采集是否真的属于同一个工作任务；只有同一任务才提炼为一个完整的工作片段知识条目。
 
 **提炼规则**:
+0. **先做任务一致性判定**:
+   - 时间接近、应用相同、窗口标题相同或出现相同 UI 菜单，都不能单独证明是同一任务
+   - 切换应用本身也不能单独证明是不同任务；若不同工具中的正文明确围绕同一目标，可保持同组
+   - 若采集实际包含两个及以上互不依赖的目标（例如代码排查、天气查询、无关消息流、另一段 AI 对话），`is_coherent=false`
+   - `capture_groups` 必须把“采集ID全集”完整分区：每个 ID 恰好出现一次，不得遗漏、重复或编造；同一任务可包含不连续的采集 ID
+   - 同一任务时 `is_coherent=true`，`capture_groups` 只包含一个覆盖全部 ID 的分组
 1. 识别这段时间内用户在做的一件完整的事
 2. **从工作内容中提炼工作项**:综合分析所有帧的内容，识别用户在做哪个项目/功能的工作
    - 从代码注释、函数名、文件路径、Git commit、文档标题、聊天主题等内容中提炼
@@ -689,6 +1099,9 @@ MERGE_SYSTEM_PROMPT ="""你是一个工作片段提炼助手。以下是用户�
 
 **输出格式（JSON）**:
 {
+  "is_coherent": true,
+  "coherence_reason": "所有采集围绕同一个工作目标",
+  "capture_groups": [[101, 102, 103]],
   "work_item": "项目名或项目名-功能模块，如 'MemoryBread-时间线提炼优化'，无法识别时填 null",
   "work_status": "pending|in_progress|completed|blocked",
   "work_progress": "具体进度描述，如 '已完成核心逻辑，待集成测试'",
@@ -896,11 +1309,23 @@ BAKE_SOP_PAYLOAD_SCHEMA = {
 BAKE_BUNDLE_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
+        "classification": {
+            "type": "object",
+            "properties": {
+                "primary_type": {
+                    "type": "string",
+                    "enum": ["data", "knowledge", "document", "sop", "none"],
+                },
+                "reason": _bounded_string(400, nullable=True),
+            },
+            "required": ["primary_type", "reason"],
+            "additionalProperties": False,
+        },
         "knowledge": _artifact_response_schema(BAKE_KNOWLEDGE_PAYLOAD_SCHEMA),
         "design": _artifact_response_schema(BAKE_DESIGN_PAYLOAD_SCHEMA),
         "sop": _artifact_response_schema(BAKE_SOP_PAYLOAD_SCHEMA),
     },
-    "required": ["knowledge", "design", "sop"],
+    "required": ["classification", "knowledge", "design", "sop"],
     "additionalProperties": False,
 }
 
@@ -936,6 +1361,11 @@ BAKE_COMPACT_BUNDLE_RESPONSE_SCHEMA = _compact_payload_schema(
     BAKE_BUNDLE_RESPONSE_SCHEMA,
     string_limit=1_200,
     array_limit=8,
+)
+BAKE_TIMEOUT_BUNDLE_RESPONSE_SCHEMA = _compact_payload_schema(
+    BAKE_BUNDLE_RESPONSE_SCHEMA,
+    string_limit=800,
+    array_limit=6,
 )
 
 
@@ -1183,7 +1613,7 @@ BAKE_KNOWLEDGE_PROMPT = """类别:knowledge
 当你理解该时间线及对应采集记录描述的信息，是未来工作中会被拿来参考的事实、经验、约束、决策、结论、方法理解，或未来工作中需要参考某个设计方案的知识时，accepted=true。
 如果只是噪声或零散操作，没有形成任何可复用的知识点，就 reject。
 
-注意:knowledge / design / sop 三个类别相互独立判断，互不互斥。同一条候选可以同时被多个类别接受（事实部分进 knowledge、文档主体进 design、操作步骤进 sop），不要因为输入"看起来更像 design 或 sop"就推卸 knowledge 的判断——只要里面有可沉淀的稳定知识点，就独立 accept。
+本类别只承接以稳定解释、经验、约束、决策或结论为主要复用价值的内容。若候选的主要价值是会随时间变化的数值、指标卡、表格、查询结果或状态快照，即使页面附带字段定义、计算公式、换算说明，也不要把这些数据上下文另建为 knowledge。
 
 accepted=true 时，payload schema:
 {
@@ -1274,10 +1704,11 @@ accepted=true 时，payload schema:
 BAKE_SOP_PROMPT = """类别:sop
 
 只提炼未来遇到相同需求/问题场景时，可以参考给出行动路线建议的操作手册。
-当你理解该时间线及对应采集记录描述的信息，是在描述工作中解决一个问题或需求的行动动线、触发条件、处理路线、排查/执行步骤、检查点或验证方式时，accepted=true。
+操作必须来自同一条时间线中的至少 2 条采集记录。你需要沿着多帧上下文中已经发生的动作，归纳用户为完成一件事情实际走过的流程，而不是根据单个页面、单帧文字或界面按钮推测可能的操作。
+当 source_capture_count >= 2，且该时间线及多帧采集记录描述的信息是在解决同一个问题或需求的行动动线、触发条件、处理路线、排查/执行步骤、检查点或验证方式时，accepted=true。
 如果完全没有可复用的行动指引（纯事实陈述、纯文档阅读、纯噪声），reject。
 
-注意:knowledge / design / sop 三个类别相互独立判断，互不互斥。同一条候选既可能成为 knowledge（事实结论），也可能成为 design（文档主体），还可能成为 sop（操作步骤）。只要存在可复用的行动路线或排查步骤，就独立 accept，不要因为"输入更像 knowledge 或 design"就推卸判断。
+本类别只承接来源中确实发生或明确写出的多步行动路线。数据展示界面、文档正文和稳定结论本身都不是操作步骤。
 
 accepted=true 时，payload schema:
 {
@@ -1297,19 +1728,30 @@ accepted=true 时，payload schema:
 }
 
 约束:
+- `source_capture_count` 小于 2 时必须 reject；任何一条 capture 都不能独立成为 SOP
 - `steps` 至少 3 条，且必须是可执行动作
+- 每条步骤必须能在多帧上下文或时间线已有提炼结果中找到依据；不得把某一帧里的按钮、字段名或帮助文案串成臆造流程
 - `details` 必须是可渲染 Markdown，建议包含 `## 适用场景`、`## 行动路线`、`## 注意事项`、`## 验证方式`
 - 没有明确步骤化流程就 reject
+- 任何以指标卡、表格、查询结果或状态快照为主体的界面都属于数据证据，不等于操作流程。页面仅出现按钮、菜单、字段说明或计算规则时，不能据此自行扩写 SOP；只有来源明确记录了用户实际执行的多步动作，或正文原本就是带顺序和验证点的操作说明，才可接受
 - 如果只是经验总结或模板骨架，不要误判成 SOP"""
 
 BAKE_BUNDLE_PROMPT = f"""你在执行一次性 bake bundle 提炼。输入是一条时间线候选工作片段。
 
-你必须在同一次判断中，分别评估 knowledge、design、sop 三类稳定资产。三类互不互斥，
-但都必须保守，只基于候选证据；证据不足的类别必须 reject。
+第一步必须先判断候选的主资产类型 `classification.primary_type`，再评估稳定资产：
+- data：主要价值是会随时间变化的观测值、业务指标、价格/用量/成本、指标卡、表格、报表、查询结果或状态快照；
+- knowledge：主要价值是数字变化后仍成立的解释、经验、约束、决策或结论；
+- document：主要价值是一份成体系、可整体复用的正文；
+- sop：主要价值是来源明确记录的多步行动路线；
+- none：没有足够可复用内容。
+
+必须按候选的主导复用价值只选一个主类型，不能因为页面同时出现说明文字、公式、按钮或菜单就改变主体。数据页面上的字段定义、计算公式、换算说明通常是理解数据的上下文，不应脱离页面另建知识或操作。若 `primary_type=data`，knowledge、design、sop 必须全部 reject；数据资产已由同一提炼流水线的 `data_pages` 与 `data_facts` 承接。其余类型仍须只基于候选证据保守判断，禁止把一个主体重复沉淀到多个类别。
 
 必须拒绝把界面中渲染的历史操作记录、变更日志或动态消息流当成当前用户产出。
 
-最终只返回一个 JSON 对象，顶层固定为 knowledge、design、sop。每个子对象固定为：
+最终只返回一个 JSON 对象，顶层固定为 classification、knowledge、design、sop。classification 固定为：
+{{"primary_type":"data|knowledge|document|sop|none","reason":"一句话说明主导复用价值"}}
+每个资产子对象固定为：
 {{"accepted": true/false, "reason": "原因或 null", "payload": {{...}} 或 null}}
 
 不要输出解释、代码块或思考过程。Markdown 只能出现在类别 schema 明确允许的字符串字段中。
@@ -1334,15 +1776,23 @@ BAKE_COMPACT_BUNDLE_PROMPT = (
 - 每个 Markdown 字段只保留最有证据的要点，不复述同一段内容
 - 数组只保留最重要的项目
 - 同一个 JSON 字段只输出一次；禁止重复 key、重复段落或循环扩写
+- classification 必须只选择一个 primary_type；只有该主类型可 accepted=true
+- 另外两个资产必须 accepted=false、reason="not_primary_type"、payload=null
 - 若内容无法在限制内可靠表达，对相应类别返回 accepted=false
 """
 )
 
 MERGE_SYSTEM_PROMPT ="""你是一个工作片段提炼助手。以下是用户在一段连续时间内的屏幕采集记录（按时间顺序），它们属于同一个工作片段。
 
-**你的任务**:将这些连续采集提炼为一个完整的工作片段知识条目。
+**你的任务**:先验证这些采集是否真的属于同一个工作任务；只有同一任务才提炼为一个完整的工作片段知识条目。
 
 **提炼规则**:
+0. **先做任务一致性判定**:
+   - 时间接近、应用相同、窗口标题相同或出现相同 UI 菜单，都不能单独证明是同一任务
+   - 切换应用本身也不能单独证明是不同任务；若不同工具中的正文明确围绕同一目标，可保持同组
+   - 若采集实际包含两个及以上互不依赖的目标（例如代码排查、天气查询、无关消息流、另一段 AI 对话），`is_coherent=false`
+   - `capture_groups` 必须把“采集ID全集”完整分区：每个 ID 恰好出现一次，不得遗漏、重复或编造；同一任务可包含不连续的采集 ID
+   - 同一任务时 `is_coherent=true`，`capture_groups` 只包含一个覆盖全部 ID 的分组
 1. 识别这段时间内用户在做的一件完整的事
 2. **从工作内容中提炼工作项**:综合分析所有帧的内容，识别用户在做哪个项目/功能的工作
    - 从代码注释、函数名、文件路径、Git commit、文档标题、聊天主题等内容中提炼
@@ -1362,6 +1812,9 @@ MERGE_SYSTEM_PROMPT ="""你是一个工作片段提炼助手。以下是用户�
 
 **输出格式（JSON）**:
 {
+  "is_coherent": true,
+  "coherence_reason": "所有采集围绕同一个工作目标",
+  "capture_groups": [[101, 102, 103]],
   "work_item": "项目名或项目名-功能模块，如 'MemoryBread-时间线提炼优化'，无法识别时填 null",
   "work_status": "pending|in_progress|completed|blocked",
   "work_progress": "具体进度描述，如 '已完成核心逻辑，待集成测试'",
@@ -1446,18 +1899,21 @@ SYSTEM_PROMPT = """你是一个专业的工作记录提炼助手。你的任务�
 **注意**:输出必须是有效的 JSON 格式，字符串中的引号要转义，不要包含未转义的换行符。
 """
 
-DATA_FACT_CONTRACT_VERSION = "timeline-data-fact.v2"
+DATA_FACT_CONTRACT_VERSION = "timeline-data-fact.v3"
 DATA_FACT_PROMPT = """
 
 **结构化数据事实（与上述时间线提炼在同一次输出中完成）**:
 - 顶层必须额外输出 `data_facts` 数组；没有可靠数据事实时输出空数组 `[]`。
-- 只提取已经发生或已经观测、同时包含明确数值的数据事实。计划、建议、假设、示例、UI 计数和缺少对象的裸数字不要输出。
+- 只提取已经发生或已经观测、同时包含明确数值的数据事实。计划、建议、假设、示例、UI 计数和缺少对象的裸数字不要输出。已经实际提交执行的生成参数、已经完成的任务耗时和已经通过的验收结果属于观测事实；仍停留在输入框、计划、建议或目标中的配置不属于观测事实。
+- 先判断来源是否以结构化测量结果为主体：指标卡、汇总区、表格、报表、查询结果、价格/用量/成本或状态快照都属于数据主体。业务对象的数量和汇总值是数据；只有分页条数、按钮角标、菜单序号、步骤编号等导航或界面计数才是 UI 计数。
+- 对数据主体，优先提取顶部/总体汇总指标，再提取对象明确的明细行。按决策价值与证据完整度排序，单次最多输出 24 条；不要因为同屏存在按钮或菜单就改判为操作流程。
 - `data_facts` 与工作动作判断相互独立。产品价格、套餐规格、容量、费率等参考数据即使来自被动浏览的官网，也属于可靠数据；只要存在这类事实，必须正常填写 `overview/details`，不得返回 `SKIP`、空概述或因为“未购买/未执行操作”而清空 `data_facts`。
 - 每条事实必须保留完整业务关系，不能用“AIGC”“成本”“收入”等宽泛词替代具体对象。
-- `evidence_quote` 必须逐字摘自输入采集文本；不能改写、拼接或补充输入中不存在的词。必须是原文中一段连续的子串，禁止使用 "…"、"..." 等省略号缩写；若无法截取一段连续原文同时包含对象与数值，则不要输出该事实。
-- `title` 必须同时说明具体对象和指标，不包含具体数值。
-- `statement` 是完整、可独立理解的事实句，必须包含对象、指标和值。
-- `value` 只放数字或数字范围；`unit` 使用证据中的原始单位。不要自行换算单位。
+- `evidence_quote` 必须从输入采集文本复制粘贴，保持原始空格、标点、大小写、单位和词序；不能润色、纠错、拼接或补词。它必须是原文中一段连续的子串，禁止用省略号缩写。面对无换行的大表格，也只截取能够同时覆盖当前对象和值的最短连续片段。
+- `title` 必须同时说明具体对象、动作或目标场景和指标，不包含具体数值。不得把“用户设置了”“随后配置了”“整个任务”“任务总耗时”等叙述残片直接当标题；必须恢复它具体属于哪个产品、任务、生成内容或业务场景。
+- `statement` 是完整、可独立理解的事实句，必须包含对象、动作或目标场景、指标和值。工作语境可以帮助补全标题和独立事实句，但 `evidence_quote` 仍只能逐字复制原始采集证据。
+- `value` 只放原始数字、数字范围或复合数值；`unit` 使用证据中的原始单位。`16分31秒`、`1小时20分钟` 等复合时长必须作为一个完整 value 保留且 unit 留空，不能只取最后的 `31秒`。不要自行换算单位。
+- 同一对象、动作、目标场景、指标和数值在重复截图或“整个任务耗时/任务总耗时”等同义句中多次出现时只输出一条，不得按措辞拆成多个数据源。
 
 提取前必须在内部依次完成以下检查，但不要输出检查过程：
 1. **事实状态**：先判断数字是已发生/已观测结果，还是目标、上限、验收条件、检查清单、预案阈值、配置建议。处在“检查清单、预案、目标、要求、应当、阈值、切换前检查”等上下文中的 `< 1%`、`CPU < 40%` 一律不是观测事实；只有原文另有“监控显示当前值为…”“实测为…”等明确观测证据时才可输出。
@@ -1465,7 +1921,9 @@ DATA_FACT_PROMPT = """
 3. **关系完整**：套餐、版本、地区、当前/此前、按年/按月等比较维度必须保留。不得把“每用户每月 4 USD，按年计费”改写成“每年 4 USD”，也不得只挑比较中的最后一个值。
 4. **原子事实**：一条事实只表达一个对象在一个维度下的一个指标值；同一页面有多个套餐、指标或计费方式时分别输出多条事实，让相同对象和指标通过 `dimension` 聚合比较。
 5. **标题自检**：标题必须是“明确对象 + 完整指标”，不能含具体值，不能是口号、页面名、动作残句或宽泛主题。将标题、维度和值重新组合后，应能准确复述 `evidence_quote`，否则丢弃该事实。
-6. **逐字对象**：`subject` 必须从 `evidence_quote` 逐字复制，禁止翻译、扩写、同义替换或改成类别名；`title` 和 `statement` 也必须逐字包含同一个 `subject`。例如原文是 `Sync Standard`，只能使用 `Sync Standard`，不能写成“Standard套餐”“标准同步服务”；原文是 `Sync Plus`，不能写成“高级同步服务”。
+6. **逐字对象**：`subject` 必须从 `evidence_quote` 逐字复制，禁止翻译、扩写、同义替换或改成类别名；`title` 和 `statement` 也必须逐字包含同一个 `subject`。输出前必须再次在输入中搜索 `evidence_quote`；搜索不到就重新复制原文或丢弃该条，绝不能凭记忆重写引文。
+7. **场景完整**：配置参数和任务耗时不得使用“用户”“任务”“生成参数”等泛称作为最终语义。优先从同一采集块中的任务标题、产品名、提示词目标或完成结果恢复场景，并写入 `title`、`action`、`target_context` 和 `statement`；若仍无法说明具体场景，则不要输出该事实。
+8. **字段名和执行工具不是对象**：`duration`、`aspect_ratio`、`已用时`、`任务总耗时` 等字段名或泛称只能放在 metric/dimension，不能单独作为 subject。若证据附近只有字段名，必须结合工作语境把具体生成内容、产品任务或业务用途写入 `target_context` 和标题；模型名、系统名、`视频参数配置`、`生成控制`、`过程监控`、`API接口调用` 都只是执行环境，不算具体目标场景。
 
 `data_facts` 中每个对象的固定 schema：
 {
@@ -1475,7 +1933,7 @@ DATA_FACT_PROMPT = """
   "target_context": "动作作用的目标业务或场景；没有时为空字符串",
   "dimension": "当前|此前|国内|海外等比较维度；没有时为空字符串",
   "metric": "规范且完整的指标名",
-  "value": "数值或数值范围",
+  "value": "数值、数值范围或复合数值",
   "unit": "原始单位；没有时为空字符串",
   "statement": "包含完整上下文的独立事实句",
   "evidence_quote": "输入中逐字存在的最短充分证据",
@@ -1504,7 +1962,7 @@ DATA_PAGE_PROMPT = """
 {"url": "输入中逐字存在的页面URL", "page_kind": "data_report|data_platform|data_content|none", "title": "页面标题或简短页面描述"}
 - `page_kind` 判定口径：
   - `data_report`：呈现指标/报表/看板数据、数值会随时间更新的页面（如监控看板、经营报表、Grafana）
-  - `data_platform`：数据查询/管理平台的页面（如 GPU/资源用量一览、利用率平台）
+  - `data_platform`：数据查询/管理平台的页面（如资源用量一览、服务质量查询平台）
   - `data_content`：内容里包含可靠数据但页面本身不是报表/平台（如文档、聊天记录中的数字）
   - `none`：页面与数据无关；不确定时一律填 `none`
 - 同一 URL 只输出一次；不要为没有 URL 的采集（桌面应用、聊天窗口等）编造 URL。
@@ -1551,8 +2009,196 @@ def _validated_data_pages(raw_pages: Any, allowed_urls: set) -> List[Dict[str, A
     return accepted
 
 
+def _validated_capture_groups(
+    raw_groups: Any,
+    capture_ids: List[int],
+    minimum_groups: int = 2,
+) -> List[List[int]]:
+    """校验模型给出的任务分组是输入采集 ID 的完整、不重不漏分区。"""
+    if not isinstance(raw_groups, list) or not raw_groups:
+        return []
+
+    # 小模型偶尔会把“唯一分组”输出成 [1, 2, 3]，而不是 [[1, 2, 3]]。
+    # 这种形态只有在调用方允许单组、且 ID 仍能通过完整分区校验时才可归一化；
+    # incoherent 分支要求 minimum_groups=2，因此不会把待拆分结果误当成单组放行。
+    if all(not isinstance(item, list) for item in raw_groups):
+        raw_groups = [raw_groups]
+    if len(raw_groups) < minimum_groups:
+        return []
+
+    ordered_ids = [int(capture_id) for capture_id in capture_ids]
+    allowed = set(ordered_ids)
+    position = {capture_id: index for index, capture_id in enumerate(ordered_ids)}
+    seen = set()
+    groups: List[List[int]] = []
+
+    for raw_group in raw_groups:
+        if not isinstance(raw_group, list) or not raw_group:
+            return []
+        group: List[int] = []
+        for raw_id in raw_group:
+            if isinstance(raw_id, bool):
+                return []
+            try:
+                capture_id = int(raw_id)
+            except (TypeError, ValueError):
+                return []
+            if capture_id not in allowed or capture_id in seen:
+                return []
+            seen.add(capture_id)
+            group.append(capture_id)
+        group.sort(key=lambda capture_id: position[capture_id])
+        groups.append(group)
+
+    if seen != allowed:
+        return []
+    groups.sort(key=lambda group: min(position[capture_id] for capture_id in group))
+    return groups
+
+
+def _validated_coherent_capture_group(
+    raw_groups: Any,
+    capture_ids: List[int],
+) -> List[List[int]]:
+    """校验同任务分组，并兼容小模型只返回代表帧的扁平数组。"""
+    exact_groups = _validated_capture_groups(
+        raw_groups,
+        capture_ids,
+        minimum_groups=1,
+    )
+    if len(exact_groups) == 1:
+        return exact_groups
+
+    # is_coherent=true 已经明确表示全部输入属于一个任务。部分小模型仍会在
+    # capture_groups 中只列代表帧；仅对“合法、无重复、非空的扁平子集”扩展为
+    # 输入全集。嵌套分组、未知 ID、重复 ID 继续 fail-closed，避免掩盖歧义。
+    if not isinstance(raw_groups, list) or not raw_groups:
+        return []
+    if any(isinstance(item, list) for item in raw_groups):
+        return []
+
+    ordered_ids = [int(capture_id) for capture_id in capture_ids]
+    allowed = set(ordered_ids)
+    seen = set()
+    for raw_id in raw_groups:
+        if isinstance(raw_id, bool):
+            return []
+        try:
+            capture_id = int(raw_id)
+        except (TypeError, ValueError):
+            return []
+        if capture_id not in allowed or capture_id in seen:
+            return []
+        seen.add(capture_id)
+    return [ordered_ids]
+
+
+_HALFWIDTH_SYMBOL_MAP = {
+    '，': ',', '。': '.', '：': ':', '；': ';', '！': '!', '？': '?',
+    '（': '(', '）': ')', '［': '[', '］': ']', '【': '[', '】': ']',
+    '｛': '{', '｝': '}', '％': '%', '＋': '+', '－': '-', '＝': '=',
+    '＜': '<', '＞': '>', '＄': '$', '￥': '¥',
+}
+
+
 def _normalize_fact_evidence(value: Any) -> str:
-    return re.sub(r"\s+", "", str(value or "")).casefold()
+    normalized = re.sub(r"\s+", "", str(value or "")).casefold()
+    # OCR 与模型输出的全角/半角标点差异不应破坏逐字回证
+    for full, half in _HALFWIDTH_SYMBOL_MAP.items():
+        normalized = normalized.replace(full, half)
+    return normalized
+
+
+def _normalized_source_with_offsets(source_text: str) -> tuple[str, List[int]]:
+    """返回与证据校验一致的规范化文本，并保留到原文字符的映射。"""
+    normalized_chars: List[str] = []
+    source_offsets: List[int] = []
+    for index, char in enumerate(str(source_text or "")):
+        if char.isspace():
+            continue
+        normalized = _HALFWIDTH_SYMBOL_MAP.get(char, char).casefold()
+        for normalized_char in normalized:
+            normalized_chars.append(normalized_char)
+            source_offsets.append(index)
+    return "".join(normalized_chars), source_offsets
+
+
+def _all_substring_spans(text: str, needle: str) -> List[tuple[int, int]]:
+    if not needle:
+        return []
+    spans: List[tuple[int, int]] = []
+    cursor = 0
+    while True:
+        start = text.find(needle, cursor)
+        if start < 0:
+            break
+        spans.append((start, start + len(needle)))
+        cursor = start + 1
+    return spans
+
+
+def _realign_fact_evidence(source_text: str, fact: Dict[str, Any]) -> str:
+    """依据模型给出的语义锚点和值，从原文找回最短连续证据。
+
+    AX 大表没有可靠换行，因此不依赖行边界。该步骤不识别业务字段，也不创造
+    数值；只要求数值和至少一个对象/场景/指标锚点能在原文中邻近命中。
+    """
+    normalized_source, offsets = _normalized_source_with_offsets(source_text)
+    if not normalized_source or not offsets:
+        return str(fact.get("evidence_quote") or "")
+
+    value = _normalize_fact_evidence(fact.get("value"))
+    value_spans = _all_substring_spans(normalized_source, value)
+    if not value_spans:
+        value_tokens = re.findall(r"[0-9][0-9:.,%]*", value)
+        if value_tokens:
+            value_spans = _all_substring_spans(normalized_source, value_tokens[0])
+    if not value_spans:
+        return str(fact.get("evidence_quote") or "")
+
+    anchor_fields = ("subject", "target_context", "metric", "dimension")
+    anchors = []
+    for priority, field in enumerate(anchor_fields):
+        anchor = _normalize_fact_evidence(fact.get(field))
+        spans = _all_substring_spans(normalized_source, anchor)
+        if anchor and spans:
+            anchors.append((priority, field, anchor, spans))
+    if not anchors:
+        return str(fact.get("evidence_quote") or "")
+
+    unit = _normalize_fact_evidence(fact.get("unit"))
+    unit_spans = _all_substring_spans(normalized_source, unit) if unit else []
+    candidates: List[tuple[int, int, int, str]] = []
+    for priority, field, _anchor, anchor_spans in anchors:
+        for anchor_start, anchor_end in anchor_spans:
+            for value_start, value_end in value_spans:
+                start = min(anchor_start, value_start)
+                end = max(anchor_end, value_end)
+                if unit and unit not in normalized_source[start:end]:
+                    nearby_units = [
+                        span for span in unit_spans
+                        if max(end, span[1]) - min(start, span[0]) <= 500
+                    ]
+                    if nearby_units:
+                        unit_start, unit_end = min(
+                            nearby_units,
+                            key=lambda span: max(end, span[1]) - min(start, span[0]),
+                        )
+                        start = min(start, unit_start)
+                        end = max(end, unit_end)
+                raw_start = offsets[start]
+                raw_end = offsets[end - 1] + 1
+                if raw_end - raw_start <= 500:
+                    candidates.append((raw_start, raw_end, priority, field))
+    if not candidates:
+        return str(fact.get("evidence_quote") or "")
+    raw_start, raw_end, _priority, _field = min(
+        candidates,
+        # 优先保留具体对象/场景，只有它们无法回证时才退到
+        # 指标或维度；同一类锚点内再选最短连续原文片段。
+        key=lambda span: (span[2], span[1] - span[0]),
+    )
+    return str(source_text or "")[raw_start:raw_end]
 
 
 def _expand_fact_evidence(source_text: str, subject: str, evidence_quote: str) -> str:
@@ -1608,17 +2254,127 @@ def _evidence_matches_source(evidence: str, source_normalized: str) -> bool:
     return True
 
 
-def _validated_data_facts(raw_facts: Any, source_text: str) -> tuple[List[Dict[str, Any]], int]:
-    """验证模型事实；不修补语义，只接受能够逐字回证的完整结构。"""
+_DATA_FACT_RETRY_VALUE_RE = re.compile(
+    r"(?:\d+(?:[.,]\d+)?\s*(?:%|％|毫秒|秒|分(?:钟)?|小时|天|元|万|亿|"
+    r"usd|gb|tb|mb|kb|qps|倍|张|条|个|次|人|份|项))|"
+    r"(?:\d+\s*[:：×xX]\s*\d+)",
+    re.IGNORECASE,
+)
+_DATA_FACT_RETRY_CONTEXT_RE = re.compile(
+    r"耗时|时长|画幅|比例|分辨率|参数|配置|结果|完成|通过|成功|失败|"
+    r"成本|收入|营收|利润|gmv|利用率|准确率|召回率|错误率|延迟|"
+    r"容量|用量|总量|数量|单价|预算|余额|qps|cpu|gpu|内存|存储",
+    re.IGNORECASE,
+)
+
+
+def _data_fact_retry_needed(source_text: str) -> bool:
+    """判断主提炼遗漏事实时是否值得进行一次聚焦补提炼。
+
+    这里只决定是否追加一次受控模型调用，不直接判定事实是否成立；计划、建议、
+    UI 计数和证据回查仍由模型契约与 `_validated_data_facts` fail-closed 门禁负责。
+    """
+    text = str(source_text or "")
+    return bool(
+        _DATA_FACT_RETRY_VALUE_RE.search(text)
+        and _DATA_FACT_RETRY_CONTEXT_RE.search(text)
+    )
+
+
+def _generic_fact_anchor(value: str) -> bool:
+    normalized = re.sub(r"[\s_\-:：/]+", "", str(value or "")).casefold()
+    return normalized in {
+        "duration",
+        "aspectratio",
+        "width",
+        "height",
+        "size",
+        "value",
+        "参数",
+        "生成参数",
+        "请求参数",
+        "配置参数",
+        "已用时",
+        "耗时",
+        "总耗时",
+        "任务耗时",
+        "任务总耗时",
+        "整个任务",
+        "本次任务",
+        "该任务",
+    }
+
+
+def _specific_fact_context(value: str) -> bool:
+    normalized = re.sub(r"[\s_\-:：/]+", "", str(value or "")).casefold()
+    if len(normalized) < 6:
+        return False
+    if normalized in {
+        "视频参数配置",
+        "生成参数配置",
+        "任务处理过程",
+        "api接口调用",
+        "接口调用",
+        "当前任务",
+        "本次任务",
+        "整个任务",
+    }:
+        return False
+    # 模型/系统名加“参数配置、生成控制、过程监控”等执行壳，仍没有说明
+    # 参数最终服务于什么交付物或业务用途。此类文本看似具体，实际仍会产出
+    # “Kling 生成控制时长”一类无法脱离采集记录理解的标题。
+    return not normalized.endswith(
+        ("参数配置", "生成控制", "过程监控", "接口调用", "任务处理过程")
+    )
+
+
+def _generic_execution_context(value: str) -> bool:
+    normalized = re.sub(r"[\s_\-:：/]+", "", str(value or "")).casefold()
+    return bool(normalized) and normalized.endswith(
+        ("参数配置", "生成控制", "过程监控", "接口调用", "任务处理过程")
+    )
+
+
+def _value_like_fact_subject(subject: str, value: str) -> bool:
+    normalized_subject = _normalize_fact_evidence(subject)
+    normalized_value = _normalize_fact_evidence(value)
+    if not normalized_value or normalized_value not in normalized_subject:
+        return False
+    residue = normalized_subject.replace(normalized_value, "", 1)
+    meaningful_residue = re.sub(r"[^a-z\u4e00-\u9fff]", "", residue.casefold())
+    # `308秒`、`15秒`、`横屏16:9` 是值的展示形态，不是业务对象；
+    # `MemoryBread V2` 等带数字的命名对象保留足够多的文本语义，不会命中。
+    return len(meaningful_residue) <= 4
+
+
+def _validated_data_facts(raw_facts: Any, source_text: str, relaxed_subject: bool = False) -> tuple[List[Dict[str, Any]], int]:
+    """验证模型事实；不修补语义，只接受能够逐字回证的完整结构。
+
+    防幻觉底线只有两条：evidence 逐字回证原文、subject/value 的数字或文本
+    必须真实命中 evidence。title/statement 是否逐字复现 subject/metric/value
+    属于展示结构而非可靠性问题——小模型常输出概括式标题，强包含校验会把真
+    实数据拒掉（v2 上线后 95% 时间线 0 落库事实的根因）。
+    `relaxed_subject` 仅为历史调用兼容保留；对象回证底线不再放宽。
+    """
     if not isinstance(raw_facts, list):
         return [], int(raw_facts is not None)
 
     source_normalized = _normalize_fact_evidence(source_text)
     accepted: List[Dict[str, Any]] = []
+    accepted_keys = set()
     rejected = 0
-    for raw in raw_facts[:20]:
+    reject_reasons: Dict[str, int] = {}
+
+    def _reject(reason: str) -> None:
+        nonlocal rejected
+        rejected += 1
+        reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
+
+    # 与提示词保持一致；控制单次模型输出规模，但不再因校验层额外截断事实。
+    fact_limit = 24
+    for raw in raw_facts[:fact_limit]:
         if not isinstance(raw, dict):
-            rejected += 1
+            _reject("not_dict")
             continue
         fact = {
             "title": _normalize_inline_text(raw.get("title")),
@@ -1638,33 +2394,98 @@ def _validated_data_facts(raw_facts: Any, source_text: str) -> tuple[List[Dict[s
             fact["subject"],
             fact["evidence_quote"],
         )
+        evidence = _normalize_fact_evidence(fact["evidence_quote"])
+        subject = _normalize_fact_evidence(fact["subject"])
+        value = _normalize_fact_evidence(fact["value"])
+        unit = _normalize_fact_evidence(fact["unit"])
+        metric = _normalize_fact_evidence(fact["metric"])
+        target_context = _normalize_fact_evidence(fact["target_context"])
+        semantic_anchor_hit = any(
+            anchor and anchor in evidence
+            for anchor in (subject, target_context, metric)
+        )
+        evidence_is_sufficient = (
+            _evidence_matches_source(evidence, source_normalized)
+            and semantic_anchor_hit
+            and (not value or value in evidence or all(
+                token in evidence
+                for token in re.findall(r"[0-9][0-9:.]*", value)
+            ))
+            and (not unit or unit in evidence)
+        )
+        if not evidence_is_sufficient:
+            fact["evidence_quote"] = _realign_fact_evidence(source_text, fact)
+        evidence = _normalize_fact_evidence(fact["evidence_quote"])
+
+        # 防幻觉失败时优先降级为原文可证的结构，不因展示字段缺失丢掉数值。
+        grounded_anchors = [
+            (field, _normalize_fact_evidence(fact[field]))
+            for field in ("subject", "target_context", "metric")
+            if fact[field]
+            and _normalize_fact_evidence(fact[field]) in evidence
+        ]
+        if (
+            not grounded_anchors
+            or not fact["value"]
+            or not any(char.isdigit() for char in fact["value"])
+            or not fact["evidence_quote"]
+        ):
+            _reject("missing_grounded_anchor_or_value")
+            continue
+        grounded_subject = _normalize_fact_evidence(fact["subject"])
+        if not grounded_subject or grounded_subject not in evidence:
+            fact["subject"] = next(
+                fact[field] for field, _anchor in grounded_anchors
+            )
+        if not fact["metric"]:
+            fact["metric"] = fact["subject"]
+        if not fact["title"]:
+            fact["title"] = f"{fact['subject']} {fact['metric']}".strip()
+        if not fact["statement"]:
+            fact["statement"] = fact["evidence_quote"]
+        if fact["unit"] and _normalize_fact_evidence(fact["unit"]) not in evidence:
+            fact["unit"] = ""
+        if fact["dimension"] and _normalize_fact_evidence(fact["dimension"]) not in evidence:
+            fact["dimension"] = ""
+
+        # 字段名、任务泛称和“已用时”只能作为指标锚点，不能独自承担业务对象。
+        # 必须同时带有具体产品、工作项或目标场景，避免 duration/任务总耗时
+        # 重新变成无上下文标题。
+        if _generic_fact_anchor(fact["subject"]) and not _specific_fact_context(
+            fact["target_context"]
+        ):
+            _reject("generic_anchor_without_specific_context")
+            continue
+        if _generic_execution_context(fact["target_context"]) and (
+            _generic_fact_anchor(fact["subject"])
+            or _value_like_fact_subject(fact["subject"], fact["value"])
+        ):
+            _reject("generic_execution_context")
+            continue
+
         required = ("title", "subject", "metric", "value", "statement", "evidence_quote")
         if any(not fact[field] for field in required):
-            rejected += 1
+            _reject("missing_required_field")
             continue
         if fact["confidence"] not in {"low", "medium", "high"}:
-            rejected += 1
+            _reject("bad_confidence")
             continue
         if any(len(fact[field]) > limit for field, limit in (
             ("title", 120), ("subject", 80), ("metric", 60),
             ("value", 40), ("unit", 24), ("statement", 500), ("evidence_quote", 500),
         )):
-            rejected += 1
+            _reject("field_too_long")
             continue
         evidence = _normalize_fact_evidence(fact["evidence_quote"])
         if not _evidence_matches_source(evidence, source_normalized):
-            rejected += 1
+            _reject("evidence_not_verifiable")
             continue
-        title = _normalize_fact_evidence(fact["title"])
         subject = _normalize_fact_evidence(fact["subject"])
-        metric = _normalize_fact_evidence(fact["metric"])
-        statement = _normalize_fact_evidence(fact["statement"])
         value = _normalize_fact_evidence(fact["value"])
         unit = _normalize_fact_evidence(fact["unit"])
         dimension = _normalize_fact_evidence(fact["dimension"])
         # 数字型 subject（如 "41.92%"、"2104张"、"T-2天"）是模型常见输出形态，
-        # 只要其数字 token 逐字命中 evidence 即视为可靠，不再强制要求复现在
-        # title/statement 里；非数字 subject 仍保持严格的上下文包含校验。
+        # 只要其数字 token 逐字命中 evidence 即视为可靠。
         numeric_subject = any(ch.isdigit() for ch in subject)
         subject_tokens = set(re.findall(r"[0-9][0-9:.%]*", subject))
         numeric_subject_ok = (
@@ -1672,21 +2493,51 @@ def _validated_data_facts(raw_facts: Any, source_text: str) -> tuple[List[Dict[s
             and bool(subject_tokens)
             and all(t in evidence for t in subject_tokens)
         )
-        strict_subject_ok = (
-            subject in title
-            and subject in statement
-            and subject in evidence
-        )
-        if (
-            not (numeric_subject_ok or strict_subject_ok)
-            or value not in evidence
-            or value not in statement
-            or (unit and unit not in evidence)
-            or (dimension and dimension not in evidence and dimension not in statement)
-        ):
-            rejected += 1
+        metric = _normalize_fact_evidence(fact["metric"])
+        target_context = _normalize_fact_evidence(fact["target_context"])
+        # 至少一个语义锚点和值必须回证；其余展示字段可降级，不整条丢弃。
+        subject_ok = numeric_subject_ok or subject in evidence
+        semantic_anchor_ok = subject_ok or metric in evidence or target_context in evidence
+        # value 常带格式差异（如 "87%+" vs 原文 "87%"）：逐字命中失败时，
+        # 退化为 value 的全部数字 token 都命中 evidence 即视为可靠。
+        value_ok = value in evidence
+        if not value_ok and value:
+            value_digits = re.findall(r"[0-9][0-9:.]*", value)
+            if value_digits and all(d in evidence for d in value_digits):
+                value_ok = True
+        if not semantic_anchor_ok:
+            _reject("semantic_anchor_not_grounded")
             continue
+        if not value_ok:
+            _reject("value_not_grounded")
+            continue
+        if unit and unit not in evidence:
+            _reject("unit_not_grounded")
+            continue
+        if dimension and dimension not in evidence:
+            _reject("dimension_not_grounded")
+            continue
+        semantic_key = tuple(
+            _normalize_fact_evidence(fact[field])
+            for field in (
+                "subject",
+                "action",
+                "target_context",
+                "dimension",
+                "metric",
+                "value",
+                "unit",
+            )
+        )
+        if semantic_key in accepted_keys:
+            continue
+        accepted_keys.add(semantic_key)
         accepted.append(fact)
+    if rejected:
+        logger.info(
+            "data_facts 校验拒绝 %d/%d 条，原因分布: %s",
+            rejected, rejected + len(accepted), reject_reasons,
+        )
     return accepted, rejected
 
 
@@ -1771,6 +2622,8 @@ class KnowledgeExtractorV2:
                     final: Dict[str, Any] = {}
                     content_parts: list[str] = []
                     thinking_parts: list[str] = []
+                    accumulated_len = 0
+                    last_repetition_check = 0
                     for raw_line in response.iter_lines():
                         raise_if_preempted()
                         if not raw_line:
@@ -1784,7 +2637,21 @@ class KnowledgeExtractorV2:
                         final.update(chunk)
                         message = chunk.get("message") or {}
                         if message.get("content"):
-                            content_parts.append(str(message["content"]))
+                            piece = str(message["content"])
+                            content_parts.append(piece)
+                            accumulated_len += len(piece)
+                            # 重复退化早断：同一 160 字块出现 4 次以上说明模型陷入
+                            # 重复键循环（会把 num_predict 全部烧完），提前中止并
+                            # 交由紧凑重试的 repeat_penalty 摆脱循环。
+                            if accumulated_len >= 3000 and accumulated_len - last_repetition_check >= 1024:
+                                last_repetition_check = accumulated_len
+                                joined = "".join(content_parts)
+                                window = joined[-160:]
+                                if window.strip() and joined.count(window) >= 4:
+                                    response.close()
+                                    raise BakeOutputTruncatedError(
+                                        "本地模型输出陷入重复退化，已提前中止"
+                                    )
                         if message.get("thinking"):
                             thinking_parts.append(str(message["thinking"]))
                     final["message"] = {
@@ -1816,6 +2683,80 @@ class KnowledgeExtractorV2:
             if isinstance(exc, requests.RequestException):
                 raise BakeModelTransportError("本地模型传输失败") from exc
             raise
+
+    def _recover_missing_data_facts(
+        self,
+        source_text: str,
+        result: Dict[str, Any],
+        caller_id: str,
+    ) -> tuple[List[Dict[str, Any]], int]:
+        """主提炼遗漏数据时进行一次聚焦补提炼，仍走同一事实契约与证据门禁。"""
+        if not _data_fact_retry_needed(source_text):
+            return [], 0
+
+        context_parts = []
+        for field in ("work_item", "overview", "details"):
+            value = _normalize_inline_text(result.get(field))
+            if value and value not in context_parts:
+                context_parts.append(value)
+        context_hint = "\n".join(context_parts)
+        if len(context_hint) > 1200:
+            context_hint = context_hint[:1200]
+
+        retry_prompt = (
+            "主时间线提炼没有产出通过校验的数据事实，但原始采集包含明确数值。"
+            "请只补提炼 data_facts，不要输出时间线、知识、文档或操作对象。\n"
+            "工作语境只用于恢复标题、动作与目标场景，不能作为 evidence_quote；"
+            "evidence_quote 必须逐字复制后面的原始采集证据。已经实际提交执行的"
+            "生成参数、完成任务的耗时和验收结果属于观测事实；计划、建议和未执行"
+            "配置不属于观测事实。复合时长必须完整保留，同义句和重复截图只输出一条。\n\n"
+            f"工作语境:\n{context_hint or '未提供'}\n\n"
+            f"原始采集证据:\n{source_text}\n\n"
+            '只输出 {"data_facts": [...]}。'
+        )
+        try:
+            response = self._ollama_chat(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是结构化数据事实补提炼器。"
+                            + DATA_FACT_PROMPT.replace(
+                                "（与上述时间线提炼在同一次输出中完成）", ""
+                            )
+                        ),
+                    },
+                    {"role": "user", "content": retry_prompt},
+                ],
+                format="json",
+                options={
+                    "temperature": 0.1,
+                    "num_ctx": BAKE_CONTEXT_WINDOW_TOKENS,
+                    "num_predict": BAKE_RETRY_NUM_PREDICT,
+                    "repeat_penalty": BAKE_RETRY_REPEAT_PENALTY,
+                },
+            )
+            parsed = _extract_json_object(_extract_ollama_response_text(response))
+            if not parsed:
+                logger.warning("数据事实聚焦补提炼无法解析: caller_id=%s", caller_id)
+                return [], 0
+            facts, rejected = _validated_data_facts(
+                parsed.get("data_facts"), source_text
+            )
+            logger.info(
+                "数据事实聚焦补提炼完成: caller_id=%s accepted=%d rejected=%d",
+                caller_id,
+                len(facts),
+                rejected,
+            )
+            return facts, rejected
+        except Exception as exc:
+            logger.warning(
+                "数据事实聚焦补提炼失败，不影响时间线落库: caller_id=%s error=%s",
+                caller_id,
+                type(exc).__name__,
+            )
+            return [], 0
 
     def _build_merge_system_prompt(self) -> str:
         """构建带用户身份的 MERGE_SYSTEM_PROMPT"""
@@ -2119,13 +3060,19 @@ class KnowledgeExtractorV2:
 
         url_aggregated_text = candidate.get('url_aggregated_text') or ''
         url_aggregated_count = candidate.get('url_aggregated_capture_count') or 0
+        source_capture_count = self._source_capture_count(candidate)
         capture_url = candidate.get('capture_url') or ''
         webpage_title = candidate.get('capture_webpage_title') or ''
         url_block = ''
         if url_aggregated_text:
+            context_label = (
+                "multi_capture_context: 同一条时间线的多条采集记录，按时间顺序拼接的可见内容如下"
+                if source_capture_count >= 2
+                else "url_document_context: 同一 url 在过去被多次浏览/编辑，按时间顺序拼接的可见正文如下"
+            )
             url_block = (
-                f"\n\nurl_document_context: 同一 url 在过去被多次浏览/编辑，按时间顺序拼接的可见正文如下"
-                f"（共合并 {url_aggregated_count} 次 capture，可视为这份文档的累计可见内容）：\n"
+                f"\n\n{context_label}"
+                f"（源记录共 {source_capture_count} 帧，本段纳入 {url_aggregated_count} 帧；可直接复用时间线已有推理结果总结实际动作）：\n"
                 f"url: {capture_url}\n"
                 f"webpage_title: {webpage_title}\n"
                 f"---\n{url_aggregated_text}"
@@ -2134,6 +3081,7 @@ class KnowledgeExtractorV2:
         return (
             f"source_timeline_id: {candidate.get('source_timeline_id')}\n"
             f"source_capture_id: {candidate.get('source_capture_id')}\n"
+            f"source_capture_count: {source_capture_count}\n"
             f"timeline_category: {candidate.get('timeline_category') or ''}\n"
             f"work_item: {candidate.get('work_item') or ''}\n"
             f"work_status: {candidate.get('work_status') or ''}\n"
@@ -2160,6 +3108,18 @@ class KnowledgeExtractorV2:
             f"capture_context:\n{capture_text}"
             f"{url_block}"
         )
+
+    @staticmethod
+    def _source_capture_count(candidate: Dict[str, Any]) -> int:
+        """读取源采集帧数；旧调用未传契约字段时按单帧保守处理。"""
+        try:
+            return max(1, int(candidate.get('source_capture_count') or 1))
+        except (TypeError, ValueError):
+            return 1
+
+    @classmethod
+    def _sop_has_multiple_source_captures(cls, candidate: Dict[str, Any]) -> bool:
+        return cls._source_capture_count(candidate) >= 2
 
     @staticmethod
     def _build_document_source_text(candidate: Dict[str, Any]) -> str:
@@ -2306,6 +3266,8 @@ class KnowledgeExtractorV2:
             return None
 
         if artifact_type == 'sop':
+            if not self._sop_has_multiple_source_captures(candidate):
+                return 'insufficient_multi_capture_evidence'
             if design_hits >= 3 and candidate_design_hits >= 2 and candidate_sop_hits <= 1:
                 return 'design_like_content'
             if knowledge_hits >= 3 and sop_hits <= 1:
@@ -2405,6 +3367,16 @@ class KnowledgeExtractorV2:
 
         parsed = _extract_json_object(raw_content)
         if parsed is None:
+            # 监控日志只保留 800 字预览，定位解析失败必须拿完整原文；
+            # 失败样本量小，全文落盘到专用错误日志供离线分析。
+            _append_bake_error_log(
+                "bake LLM output unparseable",
+                caller_id=caller_id,
+                model=self.model,
+                done_reason=done_reason,
+                raw_len=len(raw_content),
+                raw_full=raw_content[:131072],
+            )
             logger.warning(
                 "bake llm raw response caller=%s raw=%s response=%s",
                 caller_id,
@@ -2543,9 +3515,15 @@ class KnowledgeExtractorV2:
                     }
 
             mismatch_reason = self._resolve_bake_artifact_mismatch_reason(artifact_type, candidate, payload)
-            if mismatch_reason and artifact_type == 'knowledge':
+            if mismatch_reason and (
+                artifact_type == 'knowledge'
+                or mismatch_reason in {
+                    'insufficient_sop_evidence',
+                    'insufficient_multi_capture_evidence',
+                }
+            ):
                 logger.info(
-                    "bake knowledge rejected as mismatch caller=%s elapsed_ms=%s reason=%s",
+                    "bake artifact rejected as mismatch caller=%s elapsed_ms=%s reason=%s",
                     caller_id,
                     elapsed_ms,
                     mismatch_reason,
@@ -2688,7 +3666,13 @@ class KnowledgeExtractorV2:
                 candidate,
                 payload,
             )
-            if mismatch_reason and artifact_type == 'knowledge':
+            if mismatch_reason and (
+                artifact_type == 'knowledge'
+                or mismatch_reason in {
+                    'insufficient_sop_evidence',
+                    'insufficient_multi_capture_evidence',
+                }
+            ):
                 return {
                     'accepted': False,
                     'reason': mismatch_reason,
@@ -3243,6 +4227,7 @@ class KnowledgeExtractorV2:
         candidate: Dict[str, Any],
         preempt_check: Optional[Callable[[], bool]] = None,
         retry_attempt: int = 0,
+        retry_error_code: Optional[str] = None,
     ) -> Dict[str, Any]:
         """用一次 LLM 调用同时提炼 knowledge/document/SOP。"""
         bundle_started_at = time.time()
@@ -3257,9 +4242,19 @@ class KnowledgeExtractorV2:
 
         retry_attempt = max(0, int(retry_attempt or 0))
         compact_retry = retry_attempt > 0
+        retry_error_code = str(retry_error_code or '').strip().upper()
+        timeout_retry = compact_retry and retry_error_code in {
+            'INFERENCE_TIMEOUT',
+            'GATEWAY_TIMEOUT',
+        }
+        input_token_budget = (
+            BAKE_TIMEOUT_RETRY_INPUT_TOKEN_BUDGET
+            if timeout_retry
+            else BAKE_RETRY_INPUT_TOKEN_BUDGET if compact_retry else BAKE_INPUT_TOKEN_BUDGET
+        )
         prepared_candidate = self._prepare_bake_bundle_candidate(
             candidate,
-            BAKE_RETRY_INPUT_TOKEN_BUDGET if compact_retry else BAKE_INPUT_TOKEN_BUDGET,
+            input_token_budget,
         )
         candidate_text = self._build_bake_candidate_text(prepared_candidate)
         user_prompt = f"候选输入如下:\n\n{candidate_text}"
@@ -3270,12 +4265,22 @@ class KnowledgeExtractorV2:
                 BAKE_COMPACT_BUNDLE_PROMPT if compact_retry else BAKE_BUNDLE_PROMPT,
                 user_prompt,
                 response_schema=(
-                    BAKE_COMPACT_BUNDLE_RESPONSE_SCHEMA
+                    BAKE_TIMEOUT_BUNDLE_RESPONSE_SCHEMA
+                    if timeout_retry
+                    else BAKE_COMPACT_BUNDLE_RESPONSE_SCHEMA
                     if compact_retry
                     else BAKE_BUNDLE_RESPONSE_SCHEMA
                 ),
-                num_predict=BAKE_RETRY_NUM_PREDICT if compact_retry else BAKE_NUM_PREDICT,
-                repeat_penalty=BAKE_RETRY_REPEAT_PENALTY if compact_retry else 1.0,
+                num_predict=(
+                    BAKE_TIMEOUT_RETRY_NUM_PREDICT
+                    if timeout_retry
+                    else BAKE_RETRY_NUM_PREDICT if compact_retry else BAKE_NUM_PREDICT
+                ),
+                repeat_penalty=(
+                    BAKE_TIMEOUT_RETRY_REPEAT_PENALTY
+                    if timeout_retry
+                    else BAKE_RETRY_REPEAT_PENALTY if compact_retry else 1.0
+                ),
             )
         except Exception as exc:
             elapsed_ms = int((time.time() - bundle_started_at) * 1000)
@@ -3300,6 +4305,12 @@ class KnowledgeExtractorV2:
 
         results: Dict[str, Dict[str, Any]] = {}
         result_meta: Dict[str, Dict[str, Any]] = {}
+        classification = parsed.get('classification')
+        primary_type = (
+            str(classification.get('primary_type') or '').strip()
+            if isinstance(classification, dict)
+            else ''
+        )
         for artifact_type in ('knowledge', 'design', 'sop'):
             artifact, artifact_meta = self._normalize_bake_artifact_result(
                 candidate,
@@ -3310,6 +4321,24 @@ class KnowledgeExtractorV2:
             )
             results[artifact_type] = artifact
             result_meta[artifact_type] = artifact_meta
+
+        primary_artifact = {
+            'knowledge': 'knowledge',
+            'document': 'design',
+            'sop': 'sop',
+        }.get(primary_type)
+        if primary_type in {'data', 'none', 'knowledge', 'document', 'sop'}:
+            for artifact_type in ('knowledge', 'design', 'sop'):
+                if artifact_type != primary_artifact and results[artifact_type].get('accepted'):
+                    results[artifact_type] = {
+                        'accepted': False,
+                        'reason': (
+                            'primary_asset_is_data'
+                            if primary_type == 'data'
+                            else 'not_primary_type'
+                        ),
+                        'payload': None,
+                    }
 
         degraded = any(
             bool(item.get('degraded')) for item in result_meta.values()
@@ -3331,6 +4360,12 @@ class KnowledgeExtractorV2:
             'knowledge': results['knowledge'],
             'design': results['design'],
             'sop': results['sop'],
+            'primary_type': primary_type or None,
+            'classification_reason': (
+                classification.get('reason')
+                if isinstance(classification, dict)
+                else None
+            ),
             'usage': meta.get('usage'),
             'model': meta.get('model') or self.model,
             'degraded': degraded,
@@ -3413,10 +4448,17 @@ class KnowledgeExtractorV2:
                 result.get('data_facts'),
                 source_text,
             )
+            if not data_facts:
+                recovered_facts, recovered_rejected = self._recover_missing_data_facts(
+                    source_text,
+                    result,
+                    f"capture:{capture_data.get('id')}",
+                )
+                data_facts = recovered_facts
+                rejected_data_fact_count += recovered_rejected
             page_url = _normalize_page_url(capture_data.get('url'))
             allowed_urls = {page_url} if page_url else set()
             data_pages = _validated_data_pages(result.get('data_pages'), allowed_urls)
-
             summary = _overview_to_summary(overview)
             knowledge = {
                 'capture_id': capture_data['id'],
@@ -3540,7 +4582,7 @@ class KnowledgeExtractorV2:
                 page_meta.append(f"页面标题: {page_title}")
             if page_url:
                 page_meta.append(f"页面URL: {page_url}")
-            header = f"[{ts_str}] {app} - {title}"
+            header = f"[采集ID:{c['id']} 时间:{ts_str}] {app} - {title}"
             if page_meta:
                 header += "（" + "，".join(page_meta) + "）"
             density = text_density_score(sanitized_text)
@@ -3663,8 +4705,11 @@ class KnowledgeExtractorV2:
             if not merged_text:
                 return None
 
+            all_capture_ids = [int(c['id']) for c in captures]
             user_prompt = (
-                "以下是一段连续工作片段的采集记录，请提炼。"
+                "以下是待校验并提炼的连续采集记录。"
+                f"采集ID全集:{json.dumps(all_capture_ids, ensure_ascii=False)}。"
+                "先判断它们是否确属同一个工作任务；若不属于，按任务返回完整分组，不要强行归纳。"
                 "输出必须是对工作内容的归纳，不允许照抄 UI 菜单词、窗口壳层词或原始 OCR 长串。\n\n"
                 f"{merged_text}"
             )
@@ -3692,7 +4737,8 @@ class KnowledgeExtractorV2:
                 enhanced_user_prompt = (
                     f"{user_prompt}\n\n**重要**:你必须且只能输出一个有效的 JSON 对象，"
                     "不要输出任何其他内容、解释或 markdown 代码块。"
-                    "JSON 顶层必须包含全部字段:work_item, work_status, work_progress, "
+                    "JSON 顶层必须包含全部字段:is_coherent, coherence_reason, capture_groups, "
+                    "work_item, work_status, work_progress, "
                     "overview, details, entities, category, importance, history_view, "
                     "content_origin, activity_type, event_time_start, event_time_end, "
                     "evidence_strength, data_facts, data_pages。"
@@ -3733,11 +4779,19 @@ class KnowledgeExtractorV2:
                 )
                 return None
 
-            # 3.1 数据契约字段缺失时的紧凑补发：小模型在长 system prompt 下可能
-            # 省略末尾的 data_facts/data_pages；同链路补一次，只回填缺失的契约
+            # 3.1 强制契约字段缺失时的紧凑补发：小模型在长 system prompt 下可能
+            # 省略末尾的任务一致性/data_facts/data_pages；同链路补一次，只回填缺失的契约
             # 字段，不覆盖已提炼的主结果。
             missing_contract_fields = [
-                field for field in ("data_facts", "data_pages") if field not in result
+                field
+                for field in (
+                    "is_coherent",
+                    "coherence_reason",
+                    "capture_groups",
+                    "data_facts",
+                    "data_pages",
+                )
+                if field not in result
             ]
             if missing_contract_fields:
                 logger.info(
@@ -3747,7 +4801,8 @@ class KnowledgeExtractorV2:
                 retry_user_prompt = (
                     f"{user_prompt}\n\n**重要**:你必须且只能输出一个有效的 JSON 对象。"
                     f"上一次输出缺少字段:{'、'.join(missing_contract_fields)}。"
-                    "本次 JSON 顶层必须包含全部字段:work_item, work_status, work_progress, "
+                    "本次 JSON 顶层必须包含全部字段:is_coherent, coherence_reason, "
+                    "capture_groups, work_item, work_status, work_progress, "
                     "overview, details, entities, category, importance, history_view, "
                     "content_origin, activity_type, event_time_start, event_time_end, "
                     "evidence_strength, data_facts, data_pages。"
@@ -3776,6 +4831,55 @@ class KnowledgeExtractorV2:
                                 result[field] = retry_result[field]
                 except Exception as retry_exc:
                     logger.warning("合并提炼数据契约补发失败: %s", retry_exc)
+
+            # 3.2 落库前任务一致性门禁：缺少判定、分组遗漏/重复/编造都
+            # fail-closed，保留 captures 等下一轮重试，绝不降级成混合时间线。
+            is_coherent = result.get('is_coherent')
+            if isinstance(is_coherent, str):
+                normalized_coherence = is_coherent.strip().casefold()
+                if normalized_coherence in {'true', '1', 'yes', '是', '一致'}:
+                    is_coherent = True
+                elif normalized_coherence in {'false', '0', 'no', '否', '不一致'}:
+                    is_coherent = False
+
+            if not isinstance(is_coherent, bool):
+                logger.warning(
+                    "合并提炼缺少有效 is_coherent，拒绝落库: ids=%s value=%r",
+                    all_capture_ids,
+                    result.get('is_coherent'),
+                )
+                return None
+
+            if is_coherent:
+                capture_groups = _validated_coherent_capture_group(
+                    result.get('capture_groups'),
+                    all_capture_ids,
+                )
+            else:
+                capture_groups = _validated_capture_groups(
+                    result.get('capture_groups'),
+                    all_capture_ids,
+                    minimum_groups=2,
+                )
+            if not capture_groups or (is_coherent and len(capture_groups) != 1):
+                logger.warning(
+                    "合并提炼 capture_groups 不是有效完整分区，拒绝落库: coherent=%s ids=%s groups=%s",
+                    is_coherent,
+                    all_capture_ids,
+                    result.get('capture_groups'),
+                )
+                return None
+
+            if not is_coherent:
+                logger.info(
+                    "合并提炼一致性门禁触发: %d captures → %d 个任务组 groups=%s",
+                    len(all_capture_ids), len(capture_groups), capture_groups,
+                )
+                return {
+                    '_split_required': True,
+                    'capture_groups': capture_groups,
+                    'split_reason': str(result.get('coherence_reason') or '').strip(),
+                }
 
             overview = _normalize_inline_text(result.get('overview', ''))
             if not overview or overview == 'SKIP':
@@ -3810,6 +4914,14 @@ class KnowledgeExtractorV2:
                 result.get('data_facts'),
                 merged_text,
             )
+            if not data_facts:
+                recovered_facts, recovered_rejected = self._recover_missing_data_facts(
+                    merged_text,
+                    result,
+                    f"merge:{','.join(str(capture_id) for capture_id in all_capture_ids[:5])}",
+                )
+                data_facts = recovered_facts
+                rejected_data_fact_count += recovered_rejected
             allowed_urls = {
                 _normalize_page_url(c.get('url'))
                 for c in captures
@@ -3825,7 +4937,6 @@ class KnowledgeExtractorV2:
                         "合并提炼 data_pages 由分段提炼结果兜底: %s",
                         [p.get('url') for p in data_pages],
                     )
-
             # 语义分段已在步骤 0 生成（并过滤掉确定性丢弃的分段）
 
             knowledge = {

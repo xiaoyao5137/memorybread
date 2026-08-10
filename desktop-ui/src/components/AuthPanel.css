@@ -239,8 +239,32 @@
 
 .auth-panel__method-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+
+.auth-panel__back,
+.auth-panel__forgot {
+  width: fit-content;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #813f22;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.auth-panel__back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.auth-panel__forgot {
+  margin-top: -8px;
+  justify-self: end;
 }
 
 .auth-panel__method-tab {
@@ -340,6 +364,13 @@
   line-height: 1.55;
 }
 
+.auth-panel__verification-note {
+  color: #6f6156;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
 .auth-panel__error {
   padding: 12px;
   border: 1px solid #efc4a4;
@@ -348,6 +379,25 @@
   color: #6e3b20;
   font-size: 13px;
   line-height: 1.5;
+}
+
+.auth-panel__notice {
+  padding: 12px;
+  border: 1px solid #b9d8c3;
+  border-radius: 12px;
+  background: #eef8f1;
+  color: #285d39;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.auth-panel__tab:focus-visible,
+.auth-panel__method-tab:focus-visible,
+.auth-panel__code-button:focus-visible,
+.auth-panel__back:focus-visible,
+.auth-panel__forgot:focus-visible {
+  outline: 3px solid rgba(198, 95, 47, 0.24);
+  outline-offset: 2px;
 }
 
 .auth-panel__wechat-placeholder {

@@ -8,6 +8,7 @@ EmbeddingModel — Embedding 编排器
 from __future__ import annotations
 
 import logging
+import os
 
 from .base import EmbeddingBackend, EmbeddingVector
 from .ollama import OllamaEmbeddingBackend
@@ -15,39 +16,45 @@ from .sentence_transformers_backend import SentenceTransformersBackend
 
 logger = logging.getLogger(__name__)
 
+# 允许通过环境变量强制指定后端（"st" / "ollama"）；默认 st。
+_EMBEDDING_BACKEND_ENV = "MEMORYBREAD_EMBEDDING_BACKEND"
+
 
 class EmbeddingModel:
     """
     Embedding 模型编排器。
 
-    默认使用 OllamaEmbeddingBackend（bge-small-zh-v1.5 量化模型），可通过构造函数注入自定义后端。
+    默认使用 SentenceTransformersBackend（进程内 CPU 推理，bge-small-zh-v1.5），
+    可通过构造函数注入自定义后端。
     """
 
     def __init__(self, backend: Optional[EmbeddingBackend] = None) -> None:
-        self._backend = backend or OllamaEmbeddingBackend()
+        self._backend = backend or SentenceTransformersBackend()
 
     # ── 工厂方法 ──────────────────────────────────────────────────────────────
 
     @classmethod
     def create_default(cls) -> "EmbeddingModel":
         """创建默认配置的 EmbeddingModel。
-        优先 Ollama，不可用时（如 Ollama 0.30.x 移除 llama-server）降级到 sentence-transformers。
+
+        优先 sentence-transformers：进程内推理不占用推理运行时，避免
+        Ollama 额外拉起一个 embedding 专用 llama-server（全局只允许存在
+        一个 llama-server，防止模型驻留内存翻倍与孤儿进程泄漏）。
+        ST 不可用时才降级到 Ollama 后端。
         """
-        ollama = OllamaEmbeddingBackend()
-        # 快速探测：Ollama 运行但 embed 调用会 500（llama-server not found）
-        # 用实际 encode 探一下，避免 is_available() 仅检查服务存活就认为 OK
-        if ollama.is_available():
-            try:
-                ollama.encode(["test"])
-                return cls(backend=ollama)
-            except Exception as e:
-                logger.warning("Ollama embedding 不可用，降级到 sentence-transformers: %s", e)
+        forced = os.environ.get(_EMBEDDING_BACKEND_ENV, "").strip().lower()
+        if forced == "ollama":
+            logger.info(
+                "按 %s=ollama 强制使用 Ollama embedding 后端", _EMBEDDING_BACKEND_ENV
+            )
+            return cls(backend=OllamaEmbeddingBackend())
+
         st = SentenceTransformersBackend()
         if st.is_available():
             logger.info("使用 sentence-transformers 本地 embedding 后端")
             return cls(backend=st)
-        # 两者都不行，保留 Ollama 后端（encode 时会报出清晰错误）
-        return cls(backend=ollama)
+        logger.warning("sentence-transformers 不可用，降级到 Ollama embedding 后端")
+        return cls(backend=OllamaEmbeddingBackend())
 
     # ── 公共接口 ──────────────────────────────────────────────────────────────
 

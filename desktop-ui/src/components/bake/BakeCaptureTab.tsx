@@ -21,6 +21,15 @@ const textOrNull = (value?: string | null) => {
   return trimmed ? trimmed : null
 }
 
+const CAPTURE_TEXT_PENDING_WINDOW_MS = 10 * 60 * 1000
+
+const captureNeedsTextRefresh = (item: BakeCaptureItem, now = Date.now()) => (
+  Boolean(textOrNull(item.screenshotPath))
+  && !textOrNull(item.axText)
+  && !textOrNull(item.ocrText)
+  && now <= item.ts + CAPTURE_TEXT_PENDING_WINDOW_MS
+)
+
 const captureTitle = (item: BakeCaptureItem) => {
   const title = textOrNull(item.winTitle) ?? textOrNull(item.webpageTitle)
   if (title) return title
@@ -35,6 +44,67 @@ const capturePreview = (item: BakeCaptureItem) => (
   textOrNull(item.axText) ??
   textOrNull(item.ocrText) ??
   '暂无正文'
+)
+
+const captureTextInformation = (item: BakeCaptureItem) => {
+  const texts = [item.axText, item.ocrText]
+    .map(textOrNull)
+    .filter((text): text is string => Boolean(text))
+    .filter((text, index, values) => values.indexOf(text) === index)
+
+  if (texts.length === 0) {
+    return captureNeedsTextRefresh(item)
+      ? '文本识别中，完成后将自动显示…'
+      : '暂无文本信息'
+  }
+  if (texts.length === 1) return texts[0]
+
+  const moreCompleteText = texts.find(text => texts.every(candidate => text.includes(candidate)))
+  return moreCompleteText ?? texts.join('\n\n')
+}
+
+const CAPTURE_TRIGGER_META: Record<string, { label: string; description: string }> = {
+  app_switch: {
+    label: '应用切换',
+    description: '检测到前台应用发生变化后触发本次采集。',
+  },
+  browser_navigation: {
+    label: 'URL 变动',
+    description: '检测到浏览器前台页面的 URL 发生变化后触发本次采集。',
+  },
+  mouse_click: {
+    label: '鼠标事件',
+    description: '检测到鼠标点击后触发；仅记录触发类型，不记录点击内容。',
+  },
+  scroll: {
+    label: '滚动事件',
+    description: '检测到页面或内容滚动后触发；仅记录触发类型。',
+  },
+  key_pause: {
+    label: '键盘事件',
+    description: '检测到键盘活动并短暂停顿后触发；不记录按键或输入内容。',
+  },
+  auto: {
+    label: '定时器兜底',
+    description: '达到采集间隔后由定时器触发，避免遗漏持续进行中的工作。',
+  },
+  manual: {
+    label: '手动触发',
+    description: '由用户操作或调试流程主动触发本次采集。',
+  },
+}
+
+const captureTriggerMeta = (eventType?: string | null) => (
+  CAPTURE_TRIGGER_META[eventType ?? ''] ?? {
+    label: '其他触发信号',
+    description: eventType
+      ? `本次采集由事件 ${eventType} 触发。`
+      : '当前记录没有可识别的触发信号。',
+  }
+)
+
+const rawTypeLabel = (label?: string | null) => (
+  textOrNull(label)?.replace(/^(原始模态|原始事件)[：:]\s*/, '') ?? '未识别'
 )
 
 const BakeCaptureTab: React.FC<{
@@ -91,12 +161,18 @@ const BakeCaptureTab: React.FC<{
   onGoBack,
 }) => {
   const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
+  const debugModeEnabled = useAppStore((s) => s.debugModeEnabled)
   const [pageInput, setPageInput] = useState('')
   const [isScreenshotOpen, setIsScreenshotOpen] = useState(false)
-  const selected = selectedCaptureDetail ?? captures.find(item => item.id === selectedCaptureId) ?? captures[0] ?? null
+  const selectedListItem = captures.find(item => item.id === selectedCaptureId) ?? null
+  // 详情接口返回前继续使用列表项数据，避免选中态停留在上一条记录上
+  const selected = selectedCaptureDetail && selectedCaptureDetail.id === selectedCaptureId
+    ? selectedCaptureDetail
+    : selectedListItem ?? captures[0] ?? null
   const page = Math.floor(offset / limit) + 1
   const totalPages = Math.max(1, Math.ceil(total / limit))
   const screenshotUrl = selected?.screenshotPath ? `${apiBaseUrl}/api/bake/captures/${encodeURIComponent(selected.id)}/screenshot` : null
+  const triggerMeta = captureTriggerMeta(selected?.eventType)
 
   useEffect(() => {
     if (!screenshotUrl && isScreenshotOpen) {
@@ -134,7 +210,7 @@ const BakeCaptureTab: React.FC<{
                 className="bake-input"
                 value={draftQuery}
                 onChange={(event) => onDraftQueryChange(event.target.value)}
-                placeholder="搜索标题、正文或 OCR"
+                placeholder="搜索标题、正文或文本信息"
               />
             </label>
             <div className="bake-list-toolbar__repository-actions bake-list-toolbar__repository-actions--search">
@@ -214,6 +290,7 @@ const BakeCaptureTab: React.FC<{
               <select
                 className="bake-input bake-pagination__select"
                 value={String(limit)}
+                aria-label="每页条数"
                 onChange={(event) => onLimitChange(Number(event.target.value))}
               >
                 {[10, 20, 50, 100].map(option => (
@@ -231,6 +308,7 @@ const BakeCaptureTab: React.FC<{
                 value={pageInput}
                 onChange={(event) => setPageInput(event.target.value)}
                 placeholder={String(page)}
+                aria-label="跳转页码"
               />
               <span className="bake-muted">页</span>
               <BakeButton
@@ -261,17 +339,27 @@ const BakeCaptureTab: React.FC<{
               <BakePill text={`ID #${selected.id}`} />
             </div>
 
-            <div className="bake-grid-2 bake-capture-detail__meta-grid">
+            <div className={`bake-grid-2 bake-capture-detail__meta-grid ${debugModeEnabled ? '' : 'bake-capture-detail__meta-grid--single'}`.trim()}>
               <div className="bake-capture-detail__meta-card">
                 <div className="bake-kv__title">窗口 / 页面</div>
                 <div className="bake-muted" style={{ lineHeight: 1.7 }}>{selected.winTitle || selected.webpageTitle || '—'}</div>
               </div>
-              <div className="bake-capture-detail__meta-card">
-                <div className="bake-capture-detail__type-stack">
-                  <div className="bake-capture-detail__type-primary">{selected.semanticTypeLabel || '未识别类型'}</div>
-                  <div className="bake-muted">原始模态：{selected.rawTypeLabel || selected.eventType || '—'}</div>
+              {debugModeEnabled && (
+                <div className="bake-capture-detail__meta-card bake-capture-detail__debug-card">
+                  <div className="bake-capture-detail__debug-section">
+                    <div className="bake-kv__title">触发信号</div>
+                    <div className="bake-capture-detail__type-primary">{triggerMeta.label}</div>
+                    <div className="bake-muted">{triggerMeta.description}</div>
+                  </div>
+                  <div className="bake-capture-detail__debug-section">
+                    <div className="bake-kv__title">片段类型</div>
+                    <div className="bake-capture-detail__type-stack">
+                      <div className="bake-capture-detail__type-primary">{selected.semanticTypeLabel || '未识别类型'}</div>
+                      <div className="bake-muted">原始模态：{rawTypeLabel(selected.rawTypeLabel || selected.eventType)}</div>
+                    </div>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
 
             <div>
@@ -298,13 +386,8 @@ const BakeCaptureTab: React.FC<{
             </div>
 
             <div>
-              <div className="bake-kv__title">AX 文本</div>
-              <div className="bake-capture-detail__text">{selected.axText || '暂无 AX 文本'}</div>
-            </div>
-
-            <div>
-              <div className="bake-kv__title">OCR 文本</div>
-              <div className="bake-capture-detail__text">{selected.ocrText || '暂无 OCR 文本'}</div>
+              <div className="bake-kv__title">文本信息</div>
+              <div className="bake-capture-detail__text">{captureTextInformation(selected)}</div>
             </div>
 
             <div>
@@ -381,6 +464,6 @@ const BakeCaptureTab: React.FC<{
   )
 }
 
-export { parseDateInputToMs }
+export { captureNeedsTextRefresh, parseDateInputToMs }
 
 export default BakeCaptureTab

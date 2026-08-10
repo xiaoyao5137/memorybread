@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import type { ExtractionLive, MonitorOverview, SystemResources } from '../types'
+import type { CaptureHealth, ExtractionLive, MonitorOverview, SystemResources } from '../types'
 import { useAppStore } from '../store/useAppStore'
 import { toUserFacingError } from '../utils/userFacingError'
 import PipelineDagPanel from './PipelineDagPanel'
@@ -85,12 +85,23 @@ const EMPTY_OVERVIEW: MonitorOverview = {
     pending_bake_count: 0,
     oldest_pending_bake_at_ms: null,
     bake_retry_pending_count: 0,
+    bake_fresh_pending_count: 0,
+    bake_retry_ready_count: 0,
+    bake_retry_delayed_count: 0,
+    bake_actionable_count: 0,
     bake_retry_exhausted_count: 0,
     bake_timeout_failure_count: 0,
     bake_truncated_failure_count: 0,
     bake_other_failure_count: 0,
+    bake_upstream_failure_count: 0,
+    bake_recent_no_progress_count: 0,
+    bake_next_retry_at_ms: null,
+    bake_recommended_retry_after_ms: 0,
+    bake_scheduler_mismatch: false,
     running_bake_count: 0,
     stale_bake_run_count: 0,
+    bake_drain_rate_per_hour: 0,
+    bake_eta_ms: null,
     by_time: [],
     recent: [],
     extracting: [],
@@ -784,19 +795,31 @@ const BakeQueueCard: React.FC<{
   oldestPendingAtMs: number | null | undefined
   runningCount: number
   staleRunCount: number
-  retryPendingCount: number
   retryExhaustedCount: number
+  freshPendingCount: number
+  retryReadyCount: number
+  retryDelayedCount: number
+  noProgressCount: number
+  nextRetryAtMs: number | null | undefined
   stalled: boolean
   paused: boolean
+  drainRatePerHour: number
+  etaMs: number | null | undefined
 }> = ({
   pending,
   oldestPendingAtMs,
   runningCount,
   staleRunCount,
-  retryPendingCount,
   retryExhaustedCount,
+  freshPendingCount,
+  retryReadyCount,
+  retryDelayedCount,
+  noProgressCount,
+  nextRetryAtMs,
   stalled,
   paused,
+  drainRatePerHour,
+  etaMs,
 }) => {
   const oldestAge = oldestQueueAge(oldestPendingAtMs)
   const color = paused
@@ -804,14 +827,26 @@ const BakeQueueCard: React.FC<{
     : staleRunCount > 0 || stalled
     ? '#FF3B30'
     : pending > 0 ? '#FF9500' : '#8E8E93'
+  const drainParts = [
+    drainRatePerHour > 0 ? `消化 ${fmt(Math.round(drainRatePerHour))}/h` : '',
+    etaMs ? `预计清空 ${fmtDurationMs(etaMs)}` : '',
+  ]
   const sub = paused
     ? `自动烘焙已暂停 · 保留 ${pending} 条待恢复处理`
     : pending > 0
-    ? `最老已等待 ${fmtDurationMs(oldestAge)} · 运行 ${runningCount}`
+    ? [
+        `最老已等待 ${fmtDurationMs(oldestAge)}`,
+        `运行 ${runningCount}`,
+        ...drainParts,
+      ].join(' · ')
     : `当前无待烘焙内容 · 运行 ${runningCount}`
   const retryParts = [
-    retryPendingCount > 0 ? `退避重试 ${retryPendingCount}` : '',
+    freshPendingCount > 0 ? `新任务 ${freshPendingCount}` : '',
+    retryReadyCount > 0 ? `可重试 ${retryReadyCount}` : '',
+    retryDelayedCount > 0 ? `退避中 ${retryDelayedCount}` : '',
     retryExhaustedCount > 0 ? `需处理 ${retryExhaustedCount}` : '',
+    noProgressCount > 0 ? `近 5 批空跑 ${noProgressCount}` : '',
+    nextRetryAtMs && retryDelayedCount > 0 ? `下次 ${fmtTs(nextRetryAtMs)}` : '',
   ].filter(Boolean)
   const detail = retryParts.length > 0 ? `${sub} · ${retryParts.join(' · ')}` : sub
   return (
@@ -857,6 +892,8 @@ export const PipelineBacklogAlert: React.FC<{
   recentBakeFailures: number
   recentBakeDeferred: number
   recentBakeRuns: number
+  recentNoProgress: number
+  schedulerMismatch: boolean
   captureEnabled: boolean
   inferenceQueue: ExtractionLive['inference_queue'] | undefined
   enablingCapture?: boolean
@@ -872,6 +909,8 @@ export const PipelineBacklogAlert: React.FC<{
   recentBakeFailures,
   recentBakeDeferred,
   recentBakeRuns,
+  recentNoProgress,
+  schedulerMismatch,
   captureEnabled,
   inferenceQueue,
   enablingCapture = false,
@@ -910,6 +949,9 @@ export const PipelineBacklogAlert: React.FC<{
   if (bakeStalled && recentBakeRuns >= 3 && recentBakeFailures + recentBakeDeferred >= 3) {
     issues.push(`最近 ${recentBakeRuns} 批中失败 ${recentBakeFailures}、延后 ${recentBakeDeferred}`)
   }
+  if (schedulerMismatch) {
+    issues.push(`队列仍有可执行候选，但最近 5 批有 ${recentNoProgress} 批未取得进展`)
+  }
   if (inferenceQueue?.available && inferenceQueue.oldest_wait_ms >= 600_000) {
     issues.push(`模型推理队列最老等待 ${fmtDurationMs(inferenceQueue.oldest_wait_ms)}`)
   }
@@ -940,19 +982,20 @@ const BakeFailureAlert: React.FC<{
   exhausted: number
   timeoutFailures: number
   truncatedFailures: number
+  upstreamFailures: number
   otherFailures: number
-}> = ({ retryPending, exhausted, timeoutFailures, truncatedFailures, otherFailures }) => {
+}> = ({ retryPending, exhausted, timeoutFailures, truncatedFailures, upstreamFailures, otherFailures }) => {
   if (retryPending === 0 && exhausted === 0) return null
   const parts: string[] = []
   if (retryPending > 0) parts.push(`${retryPending} 条正在退避重试`)
-  if (exhausted > 0) {
-    const reasons = [
-      timeoutFailures > 0 ? `超时 ${timeoutFailures}` : '',
-      truncatedFailures > 0 ? `输出截断 ${truncatedFailures}` : '',
-      otherFailures > 0 ? `其他 ${otherFailures}` : '',
-    ].filter(Boolean)
-    parts.push(`${exhausted} 条达到最大尝试次数${reasons.length > 0 ? `（${reasons.join('、')}）` : ''}`)
-  }
+  if (exhausted > 0) parts.push(`${exhausted} 条达到最大尝试次数`)
+  const reasons = [
+    timeoutFailures > 0 ? `超时 ${timeoutFailures}` : '',
+    truncatedFailures > 0 ? `输出异常 ${truncatedFailures}` : '',
+    upstreamFailures > 0 ? `上游 5xx ${upstreamFailures}` : '',
+    otherFailures > 0 ? `其他 ${otherFailures}` : '',
+  ].filter(Boolean)
+  if (reasons.length > 0) parts.push(`错误分布：${reasons.join('、')}`)
   const color = exhausted > 0 ? '#FF3B30' : '#FF9500'
   return (
     <div style={{
@@ -965,7 +1008,7 @@ const BakeFailureAlert: React.FC<{
       fontSize: 12,
       fontWeight: 600,
     }}>
-      候选处理状态：{parts.join('；')}。失败候选不会删除原始时间线。
+      候选处理状态：{parts.join('；')}。
     </div>
   )
 }
@@ -1115,7 +1158,8 @@ const OverviewContent: React.FC<{
   enablingCapture: boolean
   enableCaptureError: string | null
   onEnableCapture: () => void
-}> = ({ data, range, liveData, nowMs, enablingCapture, enableCaptureError, onEnableCapture }) => {
+  captureHealth: CaptureHealth | null
+}> = ({ data, range, liveData, nowMs, enablingCapture, enableCaptureError, onEnableCapture, captureHealth }) => {
   const token_usage = {
     ...EMPTY_OVERVIEW.token_usage,
     ...(data?.token_usage ?? {}),
@@ -1186,6 +1230,18 @@ const OverviewContent: React.FC<{
     bake_retry_pending_count: liveData?.bake_retry_pending_count
       ?? data?.knowledge_flow?.bake_retry_pending_count
       ?? 0,
+    bake_fresh_pending_count: liveData?.bake_fresh_pending_count
+      ?? data?.knowledge_flow?.bake_fresh_pending_count
+      ?? 0,
+    bake_retry_ready_count: liveData?.bake_retry_ready_count
+      ?? data?.knowledge_flow?.bake_retry_ready_count
+      ?? 0,
+    bake_retry_delayed_count: liveData?.bake_retry_delayed_count
+      ?? data?.knowledge_flow?.bake_retry_delayed_count
+      ?? 0,
+    bake_actionable_count: liveData?.bake_actionable_count
+      ?? data?.knowledge_flow?.bake_actionable_count
+      ?? 0,
     bake_retry_exhausted_count: liveData?.bake_retry_exhausted_count
       ?? data?.knowledge_flow?.bake_retry_exhausted_count
       ?? 0,
@@ -1198,12 +1254,33 @@ const OverviewContent: React.FC<{
     bake_other_failure_count: liveData?.bake_other_failure_count
       ?? data?.knowledge_flow?.bake_other_failure_count
       ?? 0,
+    bake_upstream_failure_count: liveData?.bake_upstream_failure_count
+      ?? data?.knowledge_flow?.bake_upstream_failure_count
+      ?? 0,
+    bake_recent_no_progress_count: liveData?.bake_recent_no_progress_count
+      ?? data?.knowledge_flow?.bake_recent_no_progress_count
+      ?? 0,
+    bake_next_retry_at_ms: liveData?.bake_next_retry_at_ms
+      ?? data?.knowledge_flow?.bake_next_retry_at_ms
+      ?? null,
+    bake_recommended_retry_after_ms: liveData?.bake_recommended_retry_after_ms
+      ?? data?.knowledge_flow?.bake_recommended_retry_after_ms
+      ?? 0,
+    bake_scheduler_mismatch: liveData?.bake_scheduler_mismatch
+      ?? data?.knowledge_flow?.bake_scheduler_mismatch
+      ?? false,
     running_bake_count: liveData?.running_bake_count
       ?? data?.knowledge_flow?.running_bake_count
       ?? 0,
     stale_bake_run_count: liveData?.stale_bake_run_count
       ?? data?.knowledge_flow?.stale_bake_run_count
       ?? 0,
+    bake_drain_rate_per_hour: liveData?.bake_drain_rate_per_hour
+      ?? data?.knowledge_flow?.bake_drain_rate_per_hour
+      ?? 0,
+    bake_eta_ms: liveData?.bake_eta_ms
+      ?? data?.knowledge_flow?.bake_eta_ms
+      ?? null,
   }
   const task_executions = {
     ...EMPTY_OVERVIEW.task_executions,
@@ -1229,6 +1306,20 @@ const OverviewContent: React.FC<{
   const chartDomain = { start: nowMs - overviewRangeMs, end: nowMs }
   const rangeLabel = getOverviewRangeLabel(range)
   const bucketLabel = getOverviewBucketLabel(range)
+  const captureBlackout = captureHealth?.content_blackout_ms ?? null
+  const latestCaptureAttempt = captureHealth?.recent[0]
+  const captureIsInactive = latestCaptureAttempt?.outcome === 'privacy_skipped'
+    || (latestCaptureAttempt?.outcome === 'degraded'
+      && ['system_idle', 'display_asleep'].includes(latestCaptureAttempt.reason))
+  const captureBlackoutExceeded = Boolean(
+    captureHealth?.capture_enabled
+    && !captureIsInactive
+    && captureBlackout != null
+    && captureBlackout > captureHealth.max_active_blackout_ms,
+  )
+  const skippedAttemptCount = captureHealth?.outcome_counts
+    .filter(item => item.outcome !== 'captured' && item.outcome !== 'continuity')
+    .reduce((sum, item) => sum + item.count, 0) ?? 0
   return (
     <>
       <ServiceHealthBanner health={serviceHealth} />
@@ -1242,6 +1333,8 @@ const OverviewContent: React.FC<{
         recentBakeFailures={liveData?.recent_bake_failed_count ?? 0}
         recentBakeDeferred={liveData?.recent_bake_deferred_count ?? 0}
         recentBakeRuns={liveData?.recent_bake_run_count ?? 0}
+        recentNoProgress={knowledge_flow.bake_recent_no_progress_count ?? 0}
+        schedulerMismatch={knowledge_flow.bake_scheduler_mismatch ?? false}
         captureEnabled={knowledge_flow.capture_enabled}
         inferenceQueue={liveData?.inference_queue}
         enablingCapture={enablingCapture}
@@ -1253,6 +1346,7 @@ const OverviewContent: React.FC<{
         exhausted={knowledge_flow.bake_retry_exhausted_count}
         timeoutFailures={knowledge_flow.bake_timeout_failure_count}
         truncatedFailures={knowledge_flow.bake_truncated_failure_count}
+        upstreamFailures={knowledge_flow.bake_upstream_failure_count ?? 0}
         otherFailures={knowledge_flow.bake_other_failure_count}
       />
       <div className="monitor-metric-grid">
@@ -1262,6 +1356,14 @@ const OverviewContent: React.FC<{
           sub={`可处理 ${fmt(capture_flow.eligible_count)} · 今日 ${capture_flow.today_count}`} color="#34C759" />
         <StatCard label="总采集数" value={fmt(data?.capture_total_count ?? 0)}
           sub={`数据库 ${fmtBytes(data?.db_size_bytes ?? 0)}`} color="#32ADE6" />
+        <StatCard label="采集实际间隔" value={captureHealth ? `${captureHealth.effective_interval_secs}s` : '—'}
+          sub={captureHealth
+            ? `设置 ${captureHealth.configured_interval_secs}s${captureHealth.pressure_degraded ? ' · 压力降级中' : ''}`
+            : '等待运行状态'} color={captureHealth?.pressure_degraded ? '#FF9500' : '#34C759'} />
+        <StatCard label="最近有效关键帧" value={captureHealth?.last_captured_at_ms ? fmtTs(captureHealth.last_captured_at_ms) : '暂无'}
+          sub={captureHealth?.last_continuity_at_ms ? `连续性 ${fmtTs(captureHealth.last_continuity_at_ms)}` : '暂无连续性复用'} color="#007AFF" />
+        <StatCard label="当前内容空窗" value={captureBlackout == null ? '暂无数据' : fmtDurationMs(captureBlackout)}
+          sub={`近 6 小时跳过/降级 ${fmt(skippedAttemptCount)} 次`} color={captureBlackoutExceeded ? '#FF3B30' : '#34C759'} />
         <StatCard label="知识提炼" value={fmt(knowledge_flow.period_count)}
           sub={`今日 ${fmt(knowledge_flow.today_count)}`} color="#BF5AF2" />
         <ExtractionQueueCard
@@ -1276,10 +1378,16 @@ const OverviewContent: React.FC<{
           oldestPendingAtMs={knowledge_flow.oldest_pending_bake_at_ms}
           runningCount={knowledge_flow.running_bake_count}
           staleRunCount={knowledge_flow.stale_bake_run_count}
-          retryPendingCount={knowledge_flow.bake_retry_pending_count}
           retryExhaustedCount={knowledge_flow.bake_retry_exhausted_count}
+          freshPendingCount={knowledge_flow.bake_fresh_pending_count ?? 0}
+          retryReadyCount={knowledge_flow.bake_retry_ready_count ?? 0}
+          retryDelayedCount={knowledge_flow.bake_retry_delayed_count ?? 0}
+          noProgressCount={knowledge_flow.bake_recent_no_progress_count ?? 0}
+          nextRetryAtMs={knowledge_flow.bake_next_retry_at_ms}
           stalled={liveData?.bake_stalled ?? false}
           paused={!knowledge_flow.capture_enabled}
+          drainRatePerHour={knowledge_flow.bake_drain_rate_per_hour}
+          etaMs={knowledge_flow.bake_eta_ms}
         />
         <InferenceQueueCard queue={liveData?.inference_queue} />
         <StatCard label="待识别截图" value={fmt(ocr_backfill.backlog_count)}
@@ -1480,6 +1588,40 @@ const OverviewContent: React.FC<{
             </div>
           ))}
       </div>
+
+      {captureHealth && (
+        <div style={cardStyle}>
+          <div style={sectionTitle}>采集可靠性</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+            {captureHealth.outcome_counts.length > 0 ? captureHealth.outcome_counts.map(item => (
+              <span key={`${item.outcome}-${item.reason}`} style={{
+                fontSize: 11,
+                color: item.outcome === 'failed' ? '#C62828' : item.outcome === 'degraded' ? '#9A6700' : '#3A3A3C',
+                background: item.outcome === 'failed' ? '#FFF1F0' : '#F2F2F7',
+                borderRadius: 999,
+                padding: '4px 8px',
+              }}>{item.reason} · {item.count}</span>
+            )) : <span style={{ color: '#8E8E93', fontSize: 12 }}>暂无采集尝试记录</span>}
+          </div>
+          {captureHealth.recent.slice(0, 8).map((item, index) => (
+            <div key={`${item.observed_at}-${index}`} style={{
+              display: 'grid',
+              gridTemplateColumns: '140px 110px minmax(0, 1fr)',
+              gap: 10,
+              padding: '7px 0',
+              fontSize: 12,
+              borderTop: index === 0 ? 'none' : '1px solid rgba(0,0,0,0.05)',
+            }}>
+              <span style={{ color: '#8E8E93' }}>{fmtTs(item.observed_at)}</span>
+              <span style={{ color: item.outcome === 'failed' ? '#C62828' : '#3A3A3C' }}>{item.outcome}</span>
+              <span style={{ color: '#636366', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {item.is_private ? '隐私活动（内容未记录）' : [item.app_name, item.win_title].filter(Boolean).join(' · ') || item.reason}
+                {` · ${item.reason}`}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div style={cardStyle}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
@@ -2160,6 +2302,7 @@ const MonitorPanel: React.FC = () => {
   const systemAbortRef = useRef<AbortController | null>(null)
   const [data, setData] = useState<MonitorOverview | null>(null)
   const [liveData, setLiveData] = useState<ExtractionLive | null>(null)
+  const [captureHealth, setCaptureHealth] = useState<CaptureHealth | null>(null)
   const [nowMs, setNowMs] = useState<number>(() => Date.now())
   const [sysData, setSysData] = useState<SystemResources | null>(null)
   const [range, setRange] = useState<OverviewRange>({ amount: 6, unit: 'hour' })
@@ -2200,6 +2343,16 @@ const MonitorPanel: React.FC = () => {
       setLiveData(json)
     } catch {
       // 静默失败：保留上一次 liveData，避免短暂网络抖动导致 UI 闪烁
+    }
+  }
+
+  const loadCaptureHealth = async () => {
+    try {
+      const res = await fetch(`${base}/api/monitor/capture-health`)
+      if (!res.ok) return
+      setCaptureHealth((await res.json()) as CaptureHealth)
+    } catch {
+      // 保留上一次状态，避免本机服务短暂重启导致可靠性卡片闪烁。
     }
   }
 
@@ -2247,7 +2400,7 @@ const MonitorPanel: React.FC = () => {
       const status = await response.json() as { capture_enabled?: boolean }
       if (status.capture_enabled !== true) throw new Error('本地服务未确认开启状态')
       await invoke('set_capture_menu_state', { enabled: true }).catch(() => {})
-      await Promise.all([load(), loadLive()])
+      await Promise.all([load(), loadLive(), loadCaptureHealth()])
     } catch (error) {
       setEnableCaptureError(toUserFacingError(error, '开启失败，请确认本机服务正常后重试'))
     } finally {
@@ -2255,7 +2408,12 @@ const MonitorPanel: React.FC = () => {
     }
   }
 
-  useEffect(() => { if (tab === 'overview') load() }, [base, range, tab])
+  useEffect(() => {
+    if (tab === 'overview') {
+      load()
+      loadCaptureHealth()
+    }
+  }, [base, range, tab])
   useEffect(() => { if (tab === 'system' && isVisible) loadSys() }, [base, sysRange, tab, isVisible])
 
   useEffect(() => {
@@ -2276,6 +2434,7 @@ const MonitorPanel: React.FC = () => {
     if (tab !== 'overview' || !isVisible) return
     const timer = window.setInterval(() => {
       load()
+      loadCaptureHealth()
     }, 15000)
     return () => window.clearInterval(timer)
   }, [tab, base, range, isVisible])
@@ -2339,7 +2498,9 @@ const MonitorPanel: React.FC = () => {
               color: sysRange === value ? 'white' : '#6E6E73',
             }}>{label}</button>
           ))}
-          <button onClick={tab === 'overview' ? load : tab === 'system' ? loadSys : () => {}} style={{
+          <button onClick={tab === 'overview'
+            ? () => { load(); loadCaptureHealth() }
+            : tab === 'system' ? loadSys : () => {}} style={{
             fontSize: 11, padding: '3px 8px', borderRadius: 6, border: '1px solid rgba(0,0,0,0.1)',
             background: 'white', color: '#6E6E73', cursor: 'pointer',
             visibility: tab === 'dag' ? 'hidden' : 'visible',
@@ -2359,6 +2520,7 @@ const MonitorPanel: React.FC = () => {
           enablingCapture={enablingCapture}
           enableCaptureError={enableCaptureError}
           onEnableCapture={() => void enableCapture()}
+          captureHealth={captureHealth}
         />
       )}
       {tab === 'overview' && !data && !overviewError && !loadingOverview && (

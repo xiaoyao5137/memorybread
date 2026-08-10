@@ -63,6 +63,95 @@ describe('显式搜索交互', () => {
     expect(screen.queryByText('关键词：芝士')).not.toBeInTheDocument()
   })
 
+  it('总览趋势保留服务端全量统计，不被热度 Top 100 列表覆盖', async () => {
+    const now = new Date()
+    const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+    const dayLabel = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/models')) return jsonResponse({ ollama: true, llm: true, embedding: true })
+      if (url.includes('/api/bake/overview')) {
+        return jsonResponse({
+          ...overviewResponse,
+          knowledge_count: 2066,
+          template_count: 6,
+          inventory_trend: [{
+            label: dayLabel,
+            start_ts: dayStart,
+            end_ts: dayStart + 86_400_000 - 1,
+            memory_count: 179,
+            knowledge_count: 6,
+            template_count: 1,
+            sop_count: 0,
+            data_count: 0,
+          }],
+        })
+      }
+      if (url.includes('/api/bake/knowledge')) {
+        // 历史高热条目占满列表上限，今日 6 条不在这个素材集中。
+        return jsonResponse({ items: [], total: 2066, limit: 100, offset: 0 })
+      }
+      if (url.includes('/api/bake/documents')) {
+        return jsonResponse({
+          items: [{
+            id: 1,
+            title: '今日文档',
+            doc_type: 'article',
+            status: 'enabled',
+            tags: [],
+            applicable_tasks: [],
+            source_memory_ids: [],
+            source_capture_ids: [],
+            source_episode_ids: [],
+            linked_knowledge_ids: [],
+            sections: [],
+            style_phrases: [],
+            replacement_rules: [],
+            usage_count: 0,
+            review_status: 'confirmed',
+            created_at_ms: dayStart + 1_000,
+          }],
+          total: 6,
+          limit: 100,
+          offset: 0,
+        })
+      }
+      if (url.includes('/api/bake/sops')) return jsonResponse({ items: [], total: 0, limit: 100, offset: 0 })
+      if (url.includes('/api/data/sources')) return jsonResponse({ items: [], total: 0 })
+      if (url.includes('/api/knowledge')) return jsonResponse({ entries: [], total: 0, limit: 1, offset: 0 })
+      throw new Error(`unexpected url: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    useAppStore.setState({ bakeTab: 'overview' })
+    const { container } = render(<BakePanel />)
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/bake/knowledge'))).toBe(true)
+    })
+    const chart = await waitFor(() => {
+      const element = container.querySelector('.bake-trend-chart') as HTMLDivElement | null
+      expect(element).not.toBeNull()
+      return element as HTMLDivElement
+    })
+    vi.spyOn(chart, 'getBoundingClientRect').mockReturnValue({
+      width: 720,
+      height: 248,
+      top: 0,
+      right: 720,
+      bottom: 248,
+      left: 0,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    })
+    fireEvent.pointerMove(chart, { clientX: 360, clientY: 80 })
+
+    await waitFor(() => {
+      expect(container.querySelector('.bake-trend-tooltip')).toHaveTextContent('知识6')
+    })
+  })
+
   it('BakePanel 知识搜索无结果后不保留旧详情', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
@@ -289,6 +378,38 @@ describe('显式搜索交互', () => {
     expect(screen.queryByText('暂无时间线详情')).not.toBeInTheDocument()
   })
 
+  it('RepositoryPanel 时间线支持按需展开记忆图谱', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === 'http://localhost:7070/api/knowledge?limit=20&offset=0') {
+        return jsonResponse({ entries: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.includes('/api/bake/knowledge')) return jsonResponse({ items: [], total: 0, limit: 100, offset: 0 })
+      if (url.includes('/api/bake/documents')) return jsonResponse({ items: [], total: 0, limit: 100, offset: 0 })
+      if (url.includes('/api/bake/sops')) return jsonResponse({ items: [], total: 0, limit: 100, offset: 0 })
+      if (url.includes('/api/data/sources')) return jsonResponse({ items: [], total: 0 })
+      throw new Error(`unexpected url: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    useAppStore.setState({ repositoryTab: 'memory' })
+    render(<RepositoryPanel />)
+
+    const graphButton = screen.getByRole('button', { name: '展开记忆图谱' })
+    expect(screen.queryByRole('region', { name: '记忆图谱' })).not.toBeInTheDocument()
+    fireEvent.click(graphButton)
+
+    expect(await screen.findByRole('region', { name: '记忆图谱' })).toBeInTheDocument()
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('http://localhost:7070/api/bake/knowledge?sort=heat&limit=100&offset=0')
+      expect(fetchMock).toHaveBeenCalledWith('http://localhost:7070/api/bake/documents?limit=100&offset=0')
+      expect(fetchMock).toHaveBeenCalledWith('http://localhost:7070/api/bake/sops?limit=100&offset=0')
+      expect(fetchMock.mock.calls.some(([input]) => (
+        String(input) === 'http://localhost:7070/api/data/sources?limit=100&offset=0'
+      ))).toBe(true)
+    })
+  })
+
   it('RepositoryPanel 情节记忆搜索只有点击搜索后才发起带筛选请求', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
@@ -484,6 +605,45 @@ describe('显式搜索交互', () => {
     expect(screen.queryByText('结束：2026-07-23')).not.toBeInTheDocument()
   })
 
+  it('RepositoryPanel 会自动刷新等待 OCR 回写的采集详情', async () => {
+    const captureTs = Date.now()
+    let detailRequestCount = 0
+    const capture = {
+      id: 26238,
+      ts: captureTs,
+      app_name: 'ChatGPT',
+      win_title: 'ChatGPT',
+      event_type: 'key_pause',
+      screenshot_path: 'screenshots/26238.jpg',
+      ax_text: null,
+      ocr_text: null,
+      is_sensitive: false,
+      pii_scrubbed: false,
+    }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === 'http://localhost:7070/api/bake/captures/26238') {
+        detailRequestCount += 1
+        return jsonResponse({
+          ...capture,
+          ocr_text: detailRequestCount >= 2 ? 'OCR 回写后的文本' : null,
+        })
+      }
+      if (url === 'http://localhost:7070/api/bake/captures?limit=20&offset=0') {
+        return jsonResponse({ items: [capture], total: 1, limit: 20, offset: 0 })
+      }
+      throw new Error(`unexpected url: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    useAppStore.setState({ repositoryTab: 'capture' })
+    render(<RepositoryPanel />)
+
+    expect(await screen.findByText('文本识别中，完成后将自动显示…')).toBeInTheDocument()
+    expect(await screen.findByText('OCR 回写后的文本', {}, { timeout: 3_500 })).toBeInTheDocument()
+    expect(detailRequestCount).toBe(2)
+  })
+
   it('RepositoryPanel 从时间线点击采集记录会限定到对应采集片段', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
@@ -499,6 +659,11 @@ describe('显式搜索交互', () => {
             created_at: '2026-04-11 09:30',
             created_at_ms: 0,
             capture_ids: [41, 42],
+            keyTimestamps: [{
+              start_ts: 1710000000000,
+              end_ts: 1710000001000,
+              summary: '旧版分段没有采集 ID',
+            }],
           }],
           total: 1,
           limit: 20,

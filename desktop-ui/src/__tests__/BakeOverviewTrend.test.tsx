@@ -31,15 +31,13 @@ const overview: BakeOverview = {
   inventoryTrend: Array.from({ length: 12 }, (_, index) => createBucket(index + 1, index + 1)),
 }
 
-const noop = vi.fn()
-
 describe('BakeOverviewTab 趋势图', () => {
   afterEach(() => {
     vi.useRealTimers()
   })
 
   it('提供时间范围控件并使用紧凑横轴日期', () => {
-    render(<BakeOverviewTab overview={overview} onOpenTab={noop} onOpenRepository={noop} />)
+    render(<BakeOverviewTab overview={overview} />)
 
     expect(screen.getByRole('button', { name: '全部' })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByRole('button', { name: '7天' })).toBeInTheDocument()
@@ -68,7 +66,7 @@ describe('BakeOverviewTab 趋势图', () => {
       }],
     }
 
-    const { container } = render(<BakeOverviewTab overview={coarseOverview} onOpenTab={noop} onOpenRepository={noop} />)
+    const { container } = render(<BakeOverviewTab overview={coarseOverview} />)
 
     fireEvent.click(screen.getByRole('button', { name: '7天' }))
 
@@ -100,7 +98,7 @@ describe('BakeOverviewTab 趋势图', () => {
   })
 
   it('鼠标悬浮趋势图时显示当前数据桶详情', () => {
-    const { container } = render(<BakeOverviewTab overview={overview} onOpenTab={noop} onOpenRepository={noop} />)
+    const { container } = render(<BakeOverviewTab overview={overview} />)
     const chart = container.querySelector('.bake-trend-chart')
     expect(chart).not.toBeNull()
     vi.spyOn(chart as HTMLDivElement, 'getBoundingClientRect').mockReturnValue({
@@ -128,14 +126,17 @@ describe('BakeOverviewTab 趋势图', () => {
   })
 
   it('记忆总览不再承载备份与恢复入口', () => {
-    render(
-      <BakeOverviewTab
-        overview={overview}
-        onOpenTab={noop}
-        onOpenRepository={noop}
-      />,
-    )
+    render(<BakeOverviewTab overview={overview} />)
 
     expect(screen.queryByLabelText('记忆备份')).not.toBeInTheDocument()
+  })
+
+  it('不再展示趋势副标题与底部快捷操作/仓库概览/最近处理流水', () => {
+    render(<BakeOverviewTab overview={overview} />)
+
+    expect(screen.queryByText('按年月日观察时间线、知识、文档、操作和数据的生产分布')).not.toBeInTheDocument()
+    expect(screen.queryByText('快捷操作')).not.toBeInTheDocument()
+    expect(screen.queryByText('仓库概览')).not.toBeInTheDocument()
+    expect(screen.queryByText('最近处理流水')).not.toBeInTheDocument()
   })
 })

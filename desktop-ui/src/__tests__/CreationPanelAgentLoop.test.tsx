@@ -185,8 +185,60 @@ describe('创作 Agent 多轮 Loop', () => {
       `http://localhost:7070/api/creation/evidence/${previewId}/image`,
     )
     expect(screen.getByText('采集完成')).toBeInTheDocument()
-    expect(screen.getByText('chrome · 不切换前台窗口')).toBeInTheDocument()
+    expect(screen.getByText('chrome · 完整长图 · 点击查看')).toBeInTheDocument()
+    expect(screen.getByTitle('打开完整网页长截图')).toHaveAttribute(
+      'href',
+      expect.stringContaining('/api/creation/evidence/'),
+    )
     expect(screen.getAllByRole('img', { name: '经营看板后台浏览器缩略图' })).toHaveLength(1)
+  })
+
+  it('为运行中的 Agent、Tool 和 Skill 展示呼吸状态灯', async () => {
+    useAppStore.getState().setCreationDraft({
+      sessionId: 'session-agent-test',
+      conversation: [{
+        id: 'message-running-capabilities',
+        role: 'user',
+        content: '生成一份产品方案',
+        createdAt: 1_720_000_000_000,
+        runId: 'run-1',
+      }],
+      agentEvents: [
+        event('agent.started', 1, '创作 Agent 正在规划'),
+        event(
+          'tool.started',
+          2,
+          '记忆搜索 Tool 正在检索',
+          { kind: 'tool', id: 'memory_search', name: '记忆搜索 Tool' },
+        ),
+        event(
+          'skill.started',
+          3,
+          '产品方案 Skill 正在执行',
+          { kind: 'skill', id: 'product-plan', name: '产品方案 Skill' },
+        ),
+      ] as any,
+    })
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      return new Response('{}', { status: 404 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<CreationPanel />)
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    const trace = screen.getByLabelText('Agent 执行情况')
+    const runningEvents = trace.querySelectorAll('.creation-agent-event.is-running')
+    expect(runningEvents).toHaveLength(3)
+    runningEvents.forEach((item) => {
+      expect(item.querySelector('.creation-agent-event__activity')).toBeInTheDocument()
+      expect(item.querySelector('.spin')).not.toBeInTheDocument()
+    })
   })
 
   it('开始创作后展示 Agent、Tool、Skill 轨迹，并基于当前文档继续多轮优化', async () => {
@@ -628,9 +680,22 @@ describe('创作 Agent 多轮 Loop', () => {
     expect(savedHistories[1].agent_trace.every((item: any) => !item.goal?.objective)).toBe(true)
   })
 
-  it('首版生成中的 Agent 内部润色不显示为用户改动', async () => {
+  it('首版生成中的 Agent 内部润色以本轮改动展示局部高亮', async () => {
     const initialDocument = '# GPU 利用率治理方案\n\n## 背景\n\n初始内容。\n\n## 方案\n\n初始表述。'
     const polishedDocument = '# GPU 利用率治理方案\n\n## 背景\n\n首版内容更自然。\n\n## 方案\n\n完善首版表述。'
+    const polishPatch = {
+      operation: 'quality_polish:anti_ai_style_agent',
+      target_sections: ['背景', '方案'],
+      change_count: 2,
+      changes: [{
+        change_type: 'modified',
+        section_title: '背景',
+        start_line: 5,
+        end_line: 5,
+        summary: '修改“背景”中的内容',
+      }],
+      summary: '已按本轮指令完成 2 处调整',
+    }
     const savedHistories: any[] = []
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input))
@@ -643,19 +708,6 @@ describe('创作 Agent 多轮 Loop', () => {
         return Response.json({ id: 33 })
       }
       if (url.pathname === '/api/creation/agent/run') {
-        const patch = {
-          operation: 'quality_polish:anti_ai_style_agent',
-          target_sections: ['背景', '方案'],
-          change_count: 2,
-          changes: [{
-            change_type: 'modified',
-            section_title: '背景',
-            start_line: 5,
-            end_line: 5,
-            summary: '修改“背景”中的内容',
-          }],
-          summary: '已按本轮指令完成 2 处调整',
-        }
         return sse([
           event('run.started', 1, '创作 Agent 已接管目标'),
           event(
@@ -678,7 +730,7 @@ describe('创作 Agent 多轮 Loop', () => {
               4,
               '去 AI 味 Agent 已应用内部润色',
               { kind: 'agent', id: 'anti_ai_style_agent', name: '去 AI 味 Agent' },
-              { content: polishedDocument, patch },
+              { content: polishedDocument, patch: polishPatch },
             ),
             status: 'completed',
           },
@@ -705,15 +757,323 @@ describe('创作 Agent 多轮 Loop', () => {
     const polishedText = await screen.findByText('首版内容更自然。')
     await waitFor(() => expect(savedHistories).toHaveLength(1))
 
-    expect(polishedText).not.toHaveClass('creation-latest-change')
-    expect(screen.queryByLabelText('本轮改动')).not.toBeInTheDocument()
-    expect(screen.queryByText(/本轮改动 \d+ 处/)).not.toBeInTheDocument()
+    expect(polishedText).toHaveClass('creation-latest-change')
+    expect(screen.getByLabelText('本轮改动')).toHaveTextContent('修改 · 背景')
+    expect(screen.getByText(/本轮改动 2 处/)).toBeInTheDocument()
     expect(screen.getByLabelText('Agent 消息')).toHaveTextContent('首版文档已生成')
     expect(savedHistories[0].edit_operation).toBe('create_document')
-    expect(savedHistories[0].document_patch).toBeNull()
+    expect(savedHistories[0].document_patch).toEqual(polishPatch)
     expect(savedHistories[0].agent_trace).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'document.patch.applied' }),
     ]))
+  })
+
+  it('浏览器即时刷新完成后重新读取来源快照并保存最新可用状态', async () => {
+    const sourceTitle = '电商GPU信息平台 - GPU项目用量管理'
+    const browserTool = { kind: 'tool', id: 'webpage_scrape', name: '网页爬取 Tool' }
+    const savedHistories: any[] = []
+    let sourceRequestCount = 0
+    let releaseScrape!: () => void
+    const encoder = new TextEncoder()
+
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history' && (!init?.method || init.method === 'GET')) {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.pathname === '/api/creation/history' && init?.method === 'POST') {
+        savedHistories.push(JSON.parse(String(init.body || '{}')))
+        return Response.json({ id: 44 })
+      }
+      if (url.pathname === '/api/data/sources/1584') {
+        sourceRequestCount += 1
+        return Response.json({
+          id: 1584,
+          title: sourceTitle,
+          source_kind: 'report_url',
+          access_mode: 'browser_session',
+          refresh_policy: 'on_demand',
+          realtime_level: 'live',
+          tags: [],
+          first_seen_at: 1,
+          last_seen_at: 2,
+          status: 'active',
+          latest_snapshot: sourceRequestCount > 1 ? {
+            id: 6978,
+            source_id: 1584,
+            collected_at: 1_786_271_177_838,
+            observed_at: 1_786_271_177_838,
+            collector: 'browser_attach',
+            content_text: '总卡数（X40 折算）为 1803.59 卡。',
+            structured_data: {
+              title: 'GPU 项目用量',
+              summary: '后台浏览器已完成即时采集。',
+              metric_rows: [{
+                dimension: '电商 GPU 项目',
+                metric: '总卡数（X40 折算）',
+                value: '1803.59 卡',
+                note: '即时快照',
+              }],
+            },
+            content_hash: 'snapshot-6978',
+            freshness_ttl_seconds: 3600,
+            provenance: {},
+            source_capture_ids: [],
+            source_timeline_ids: [],
+            status: 'active',
+          } : null,
+        })
+      }
+      if (url.pathname === '/api/creation/agent/run') {
+        const firstEvents = [
+          event('run.started', 1, '创作 Agent 已接管目标'),
+          event(
+            'tool.completed',
+            2,
+            '数据检索完成，召回 1 个来源，其中 1 个需要刷新',
+            { kind: 'tool', id: 'data_search', name: '数据检索 Tool' },
+            { result_count: 1, refresh_required_count: 1 },
+            {
+              data_sources: [{
+                source_id: 1584,
+                title: sourceTitle,
+                source_kind: 'report_url',
+                freshness_class: 'missing',
+                refresh_required: true,
+                can_use: false,
+              }],
+            },
+          ),
+        ]
+        const finalDocument = '# GPU成本优化周报\n\n总卡数（X40 折算）为 1803.59 卡。'
+        const finalEvents = [
+          event(
+            'tool.completed',
+            3,
+            '浏览器访问 1 个报表，1 个来源的数据与截图通过校验',
+            browserTool,
+            { result_count: 1, failed_count: 0 },
+            {
+              data_sources: [{
+                source_id: 1584,
+                title: sourceTitle,
+                source_kind: 'report_url',
+                freshness_class: 'fresh',
+                refresh_required: false,
+                can_use: true,
+              }],
+            },
+          ),
+          event(
+            'document.replaced',
+            4,
+            '创作 Agent 已提交完整文档版本',
+            undefined,
+            { content: finalDocument, operation: 'create_document' },
+          ),
+          {
+            ...event('run.completed', 5, '本轮创作完成', undefined, { document: finalDocument }),
+            status: 'completed',
+          },
+        ]
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(
+              firstEvents.map(item => `data: ${JSON.stringify(item)}\n\n`).join(''),
+            ))
+            releaseScrape = () => {
+              controller.enqueue(encoder.encode(
+                finalEvents.map(item => `data: ${JSON.stringify(item)}\n\n`).join(''),
+              ))
+              controller.close()
+            }
+          },
+        }), { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+    const input = screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/)
+    fireEvent.change(input, { target: { value: '请使用 GPU 成本周报技能创作本周周报' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
+
+    const dataResultLink = await screen.findByRole('button', { name: '召回 1 个来源，打开参考数据' })
+    fireEvent.click(dataResultLink)
+    expect(await screen.findByText('该来源尚未采集到数据快照。')).toBeInTheDocument()
+    expect(screen.getByText('需要刷新')).toBeInTheDocument()
+
+    releaseScrape()
+
+    expect(await screen.findByText('后台浏览器已完成即时采集。')).toBeInTheDocument()
+    expect(screen.getByRole('rowheader', { name: '总卡数（X40 折算）' })).toBeInTheDocument()
+    expect(screen.getByText('1803.59 卡')).toBeInTheDocument()
+    expect(screen.queryByText('当前可用')).not.toBeInTheDocument()
+    expect(screen.queryByText('可用于创作')).not.toBeInTheDocument()
+    expect(screen.queryByText('该来源尚未采集到数据快照。')).not.toBeInTheDocument()
+    await waitFor(() => expect(savedHistories).toHaveLength(1))
+    expect(sourceRequestCount).toBe(2)
+    const storedScrape = savedHistories[0].agent_trace.find(
+      (item: any) => item.type === 'tool.completed' && item.actor?.id === 'webpage_scrape',
+    )
+    expect(storedScrape.environment_patch.data_sources).toEqual([{
+      source_id: 1584,
+      title: sourceTitle,
+      source_kind: 'report_url',
+      freshness_class: 'fresh',
+      refresh_required: false,
+      can_use: true,
+    }])
+  })
+
+  it('同一次创作多次召回数据时在参考数据中展示全部来源', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history' && (!init?.method || init.method === 'GET')) {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.pathname === '/api/creation/history' && init?.method === 'POST') {
+        return Response.json({ id: 45 })
+      }
+      if (url.pathname === '/api/data/sources/21' || url.pathname === '/api/data/sources/22') {
+        const sourceId = Number(url.pathname.split('/').pop())
+        return Response.json({
+          id: sourceId,
+          title: sourceId === 21 ? '销售经营看板' : '渠道转化周报',
+          source_kind: 'report_url',
+          access_mode: 'direct_http',
+          refresh_policy: 'on_demand',
+          realtime_level: 'live',
+          tags: [],
+          first_seen_at: 1,
+          last_seen_at: 2,
+          status: 'active',
+          latest_snapshot: null,
+        })
+      }
+      if (url.pathname === '/api/creation/agent/run') {
+        const document = '# 经营复盘\n\n已汇总销售和渠道数据。'
+        return sse([
+          event('run.started', 1, '创作 Agent 已接管目标'),
+          event(
+            'tool.completed',
+            2,
+            '第一次数据检索完成，召回 1 个来源',
+            { kind: 'tool', id: 'data_search', name: '数据检索 Tool' },
+            { result_count: 1 },
+            { data_sources: [{
+              source_id: 21,
+              title: '销售经营看板',
+              source_kind: 'report_url',
+              freshness_class: 'fresh',
+              refresh_required: false,
+              can_use: true,
+            }] },
+          ),
+          event(
+            'tool.completed',
+            3,
+            '第二次数据检索完成，召回 1 个来源',
+            { kind: 'tool', id: 'data_search', name: '数据检索 Tool' },
+            { result_count: 1 },
+            { data_sources: [{
+              source_id: 22,
+              title: '渠道转化周报',
+              source_kind: 'memory_snapshot',
+              freshness_class: 'recent',
+              refresh_required: false,
+              can_use: true,
+            }] },
+          ),
+          event(
+            'document.replaced',
+            4,
+            '创作 Agent 已提交完整文档版本',
+            undefined,
+            { content: document, operation: 'create_document' },
+          ),
+          { ...event('run.completed', 5, '本轮创作完成', undefined, { document }), status: 'completed' },
+        ])
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+    const input = screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/)
+    fireEvent.change(input, { target: { value: '汇总经营数据' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
+
+    const dataTab = await screen.findByRole('tab', { name: '参考数据 (2)' })
+    fireEvent.click(dataTab)
+
+    expect(await screen.findByText('销售经营看板')).toBeInTheDocument()
+    expect(screen.getByText('渠道转化周报')).toBeInTheDocument()
+    expect(screen.queryByText('当前可用')).not.toBeInTheDocument()
+    expect(screen.queryByText('可用于创作')).not.toBeInTheDocument()
+  })
+
+  it('明确展示证据未通过原因且不把快照标成当前可用', async () => {
+    useAppStore.getState().setCreationDraft({
+      generatedContent: '# GPU成本优化周报',
+      dataReferences: [{
+        source_id: 1584,
+        title: '电商GPU信息平台 - GPU项目用量管理',
+        source_kind: 'report_url',
+        freshness_class: 'unverified',
+        refresh_required: true,
+        can_use: false,
+        evidence_status: 'rejected',
+        evidence_reason: 'no_verified_metric',
+        unavailable_reason: 'evidence_rejected',
+      }],
+    })
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.pathname === '/api/data/sources/1584') {
+        return Response.json({
+          id: 1584,
+          title: '电商GPU信息平台 - GPU项目用量管理',
+          source_kind: 'report_url',
+          access_mode: 'browser_session',
+          refresh_policy: 'on_demand',
+          realtime_level: 'live',
+          tags: [],
+          first_seen_at: 1,
+          last_seen_at: 2,
+          status: 'active',
+          latest_snapshot: {
+            id: 6978,
+            source_id: 1584,
+            collected_at: 1_786_273_349_226,
+            observed_at: 1_786_273_349_226,
+            collector: 'browser_attach',
+            content_text: '在用项目数 102，总卡数 1803.59。',
+            structured_data: { title: 'GPU 项目用量', summary: '页面 DOM 已采集。' },
+            content_hash: 'snapshot-6978',
+            freshness_ttl_seconds: 3600,
+            provenance: {},
+            source_capture_ids: [],
+            source_timeline_ids: [],
+            status: 'active',
+          },
+        })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+    fireEvent.click(await screen.findByRole('tab', { name: '参考数据 (1)' }))
+
+    expect(await screen.findByText('已采集，证据未通过')).toBeInTheDocument()
+    expect(screen.getByText('截图中未识别到可核验指标，该快照不会用于本轮创作。')).toBeInTheDocument()
+    expect(screen.getByText('证据未通过')).toBeInTheDocument()
+    expect(screen.queryByText('当前可用')).not.toBeInTheDocument()
   })
 
   it('把校验通过的即时截图显示在引用处并写入创作历史', async () => {

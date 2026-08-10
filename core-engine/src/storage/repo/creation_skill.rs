@@ -6,7 +6,7 @@ use crate::storage::{db::current_ts_ms, StorageError, StorageManager};
 const SELECT_COLUMNS: &str =
     "id, client_skill_key, cloud_skill_id, source_kind, source_id, title, summary,
      category_id, common_titles, title_style, text_style, diagram_style,
-     structure_pattern, writing_guidelines, distinctive_sections, section_headings, field_examples,
+     writing_guidelines, distinctive_sections, section_headings, field_examples,
      example_document, skill_description, execution_steps, package_files,
      status, installed, published, created_at, updated_at";
 
@@ -20,8 +20,6 @@ pub struct CreationSkillSectionHeadings {
     pub text_style: String,
     #[serde(default = "default_diagram_style_heading")]
     pub diagram_style: String,
-    #[serde(default = "default_structure_pattern_heading")]
-    pub structure_pattern: String,
     #[serde(default = "default_writing_guidelines_heading")]
     pub writing_guidelines: String,
 }
@@ -33,7 +31,6 @@ impl Default for CreationSkillSectionHeadings {
             title_style: default_title_style_heading(),
             text_style: default_text_style_heading(),
             diagram_style: default_diagram_style_heading(),
-            structure_pattern: default_structure_pattern_heading(),
             writing_guidelines: default_writing_guidelines_heading(),
         }
     }
@@ -49,8 +46,6 @@ pub struct CreationSkillFieldExamples {
     pub text_style: Vec<String>,
     #[serde(default = "default_diagram_style_examples")]
     pub diagram_style: Vec<String>,
-    #[serde(default = "default_structure_pattern_examples")]
-    pub structure_pattern: Vec<String>,
     #[serde(default = "default_writing_guideline_examples")]
     pub writing_guidelines: Vec<String>,
 }
@@ -62,7 +57,6 @@ impl Default for CreationSkillFieldExamples {
             title_style: default_title_style_examples(),
             text_style: default_text_style_examples(),
             diagram_style: default_diagram_style_examples(),
-            structure_pattern: default_structure_pattern_examples(),
             writing_guidelines: default_writing_guideline_examples(),
         }
     }
@@ -84,10 +78,6 @@ fn default_diagram_style_heading() -> String {
     "图片生成方式".to_string()
 }
 
-fn default_structure_pattern_heading() -> String {
-    "章节组织骨架".to_string()
-}
-
 fn default_writing_guidelines_heading() -> String {
     "话术表达风格".to_string()
 }
@@ -106,10 +96,6 @@ fn default_text_style_examples() -> Vec<String> {
 
 fn default_diagram_style_examples() -> Vec<String> {
     vec!["PlantUML 活动图：主流程纵向排列，跨角色动作放入对应泳道。".to_string()]
-}
-
-fn default_structure_pattern_examples() -> Vec<String> {
-    vec!["背景与目标 → 现状与约束 → 方案设计 → 实施计划 → 风险与验证".to_string()]
 }
 
 fn default_writing_guideline_examples() -> Vec<String> {
@@ -151,7 +137,11 @@ pub struct CreationSkillDescription {
     pub deliverables: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+fn default_retain_webpage_screenshot() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreationSkillExecutionStep {
     pub id: String,
     pub title: String,
@@ -163,6 +153,24 @@ pub struct CreationSkillExecutionStep {
     pub skills: Vec<String>,
     #[serde(default)]
     pub tools: Vec<String>,
+    /// 网页数据始终优先走 AX/DOM；该开关只控制是否额外保留页面截图证据。
+    #[serde(default = "default_retain_webpage_screenshot")]
+    pub retain_webpage_screenshot: bool,
+}
+
+impl Default for CreationSkillExecutionStep {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            title: String::new(),
+            objective: String::new(),
+            output: String::new(),
+            agents: Vec::new(),
+            skills: Vec::new(),
+            tools: Vec::new(),
+            retain_webpage_screenshot: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -179,7 +187,6 @@ pub struct CreationSkillRecord {
     pub title_style: String,
     pub text_style: String,
     pub diagram_style: String,
-    pub structure_pattern: Vec<String>,
     pub writing_guidelines: Vec<String>,
     #[serde(default)]
     pub distinctive_sections: Vec<CreationSkillDistinctiveSection>,
@@ -212,7 +219,6 @@ pub struct UpsertCreationSkill {
     pub title_style: String,
     pub text_style: String,
     pub diagram_style: String,
-    pub structure_pattern: Vec<String>,
     pub writing_guidelines: Vec<String>,
     #[serde(default)]
     pub distinctive_sections: Vec<CreationSkillDistinctiveSection>,
@@ -285,7 +291,6 @@ impl StorageManager {
         validate_skill(skill)?;
         let now = current_ts_ms();
         let common_titles = serde_json::to_string(&skill.common_titles)?;
-        let structure_pattern = serde_json::to_string(&skill.structure_pattern)?;
         let writing_guidelines = serde_json::to_string(&skill.writing_guidelines)?;
         let distinctive_sections = serde_json::to_string(&skill.distinctive_sections)?;
         let section_headings = serde_json::to_string(&skill.section_headings)?;
@@ -298,10 +303,10 @@ impl StorageManager {
                 "INSERT INTO creation_skills (
                     client_skill_key, cloud_skill_id, source_kind, source_id, title, summary,
                     category_id, common_titles, title_style, text_style, diagram_style,
-                    structure_pattern, writing_guidelines, distinctive_sections, section_headings,
+                    writing_guidelines, distinctive_sections, section_headings,
                     field_examples, example_document, skill_description, execution_steps,
                     package_files, status, installed, published, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?24)
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?23)
                  ON CONFLICT(client_skill_key) DO UPDATE SET
                     cloud_skill_id = excluded.cloud_skill_id,
                     source_kind = excluded.source_kind,
@@ -313,7 +318,6 @@ impl StorageManager {
                     title_style = excluded.title_style,
                     text_style = excluded.text_style,
                     diagram_style = excluded.diagram_style,
-                    structure_pattern = excluded.structure_pattern,
                     writing_guidelines = excluded.writing_guidelines,
                     distinctive_sections = excluded.distinctive_sections,
                     section_headings = excluded.section_headings,
@@ -339,7 +343,6 @@ impl StorageManager {
                     skill.title_style,
                     skill.text_style,
                     skill.diagram_style,
-                    structure_pattern,
                     writing_guidelines,
                     distinctive_sections,
                     section_headings,
@@ -377,33 +380,22 @@ impl StorageManager {
     }
 }
 
+// 创作配方各字段与完整示例文档在界面上允许留空，存储层只兜底核心字段；
+// 长度与取值上限由 API 层 validate_skill_input 负责。
 fn validate_skill(skill: &UpsertCreationSkill) -> Result<(), StorageError> {
     if skill.client_skill_key.trim().is_empty()
         || !matches!(
             skill.source_kind.as_str(),
-            "creation_history" | "bake_document" | "market" | "imported"
+            "creation_history" | "bake_document" | "market" | "imported" | "manual"
         )
         || skill.source_id.trim().is_empty()
         || skill.title.trim().is_empty()
         || skill.summary.trim().is_empty()
-        || skill.common_titles.is_empty()
-        || skill.title_style.trim().is_empty()
-        || skill.text_style.trim().is_empty()
-        || skill.diagram_style.trim().is_empty()
-        || skill.structure_pattern.is_empty()
         || skill.section_headings.common_titles.trim().is_empty()
         || skill.section_headings.title_style.trim().is_empty()
         || skill.section_headings.text_style.trim().is_empty()
         || skill.section_headings.diagram_style.trim().is_empty()
-        || skill.section_headings.structure_pattern.trim().is_empty()
         || skill.section_headings.writing_guidelines.trim().is_empty()
-        || skill.field_examples.common_titles.is_empty()
-        || skill.field_examples.title_style.is_empty()
-        || skill.field_examples.text_style.is_empty()
-        || skill.field_examples.diagram_style.is_empty()
-        || skill.field_examples.structure_pattern.is_empty()
-        || skill.field_examples.writing_guidelines.is_empty()
-        || skill.example_document.trim().is_empty()
         || !valid_skill_description(&skill.skill_description)
         || !valid_execution_steps(&skill.execution_steps)
         || (skill.source_kind == "imported" && skill.package_files.is_empty())
@@ -432,7 +424,6 @@ fn row_to_skill(row: &rusqlite::Row<'_>) -> rusqlite::Result<CreationSkillRecord
         title_style: row.get("title_style")?,
         text_style: row.get("text_style")?,
         diagram_style: row.get("diagram_style")?,
-        structure_pattern: parse_json(row.get::<_, String>("structure_pattern")?),
         writing_guidelines: parse_json(row.get::<_, String>("writing_guidelines")?),
         distinctive_sections: parse_json_object(row.get::<_, String>("distinctive_sections")?),
         section_headings: parse_json_object(row.get::<_, String>("section_headings")?),
@@ -475,7 +466,6 @@ fn valid_execution_steps(steps: &[CreationSkillExecutionStep]) -> bool {
             !step.id.trim().is_empty()
                 && !step.title.trim().is_empty()
                 && !step.objective.trim().is_empty()
-                && !step.output.trim().is_empty()
                 && step.agents.len() + step.tools.len() <= 4
         })
 }
@@ -495,6 +485,31 @@ where
 mod tests {
     use super::*;
 
+    #[test]
+    fn execution_step_defaults_to_retaining_webpage_screenshot() {
+        let legacy: CreationSkillExecutionStep = serde_json::from_value(serde_json::json!({
+            "id": "collect-data",
+            "title": "采集数据",
+            "objective": "读取实时页面",
+            "output": "指标",
+            "agents": [],
+            "skills": [],
+            "tools": ["data_search"]
+        }))
+        .unwrap();
+        assert!(legacy.retain_webpage_screenshot);
+
+        let disabled: CreationSkillExecutionStep = serde_json::from_value(serde_json::json!({
+            "id": "collect-data",
+            "title": "采集数据",
+            "objective": "读取实时页面",
+            "output": "指标",
+            "retain_webpage_screenshot": false
+        }))
+        .unwrap();
+        assert!(!disabled.retain_webpage_screenshot);
+    }
+
     fn sample_skill() -> UpsertCreationSkill {
         UpsertCreationSkill {
             client_skill_key: "skill-local-1".into(),
@@ -508,7 +523,6 @@ mod tests {
             title_style: "结论先行。".into(),
             text_style: "正式、克制。".into(),
             diagram_style: "分层架构图。".into(),
-            structure_pattern: vec!["背景".into(), "总体架构".into()],
             writing_guidelines: vec!["说明取舍。".into()],
             distinctive_sections: vec![CreationSkillDistinctiveSection {
                 title: "定义先行".into(),
@@ -534,6 +548,7 @@ mod tests {
                 agents: vec!["solution_design_agent".into()],
                 skills: vec![],
                 tools: vec!["plantuml_diagram".into()],
+                retain_webpage_screenshot: true,
             }],
             package_files: vec![],
             status: "saved".into(),
@@ -563,6 +578,29 @@ mod tests {
             vec!["solution_design_agent"]
         );
         assert_eq!(storage.list_creation_skills().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn stores_skill_with_empty_recipe_and_example_document() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        let mut minimal = sample_skill();
+        minimal.common_titles.clear();
+        minimal.title_style.clear();
+        minimal.text_style.clear();
+        minimal.diagram_style.clear();
+        minimal.writing_guidelines.clear();
+        minimal.field_examples = CreationSkillFieldExamples {
+            common_titles: vec![],
+            title_style: vec![],
+            text_style: vec![],
+            diagram_style: vec![],
+            writing_guidelines: vec![],
+        };
+        minimal.example_document.clear();
+
+        let saved = storage.upsert_creation_skill(&minimal).unwrap();
+        assert_eq!(saved.title, minimal.title);
+        assert_eq!(saved.common_titles, Vec::<String>::new());
     }
 
     #[test]

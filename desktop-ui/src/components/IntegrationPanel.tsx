@@ -18,6 +18,7 @@ import {
   FileArchive,
   FileCode2,
   FolderInput,
+  FolderOpen,
   Loader2,
   PackageCheck,
   PackagePlus,
@@ -44,11 +45,14 @@ import {
   downloadIntegrationSkillFile,
   getIntegrationSkill,
   getIntegrationSkillRun,
+  listIntegrationMemoryOptions,
   listIntegrationSkillRuns,
   listIntegrationSkills,
+  pickLocalDirectory,
   selectedFilesToIntegrationInput,
   startIntegrationSkillRun,
   type IntegrationDirection,
+  type IntegrationMemoryOption,
   type IntegrationSkillCatalogItem,
   type IntegrationSkillDetail,
   type IntegrationSkillInputFile,
@@ -71,6 +75,7 @@ const INTEGRATION_SKILL_CATEGORY: Record<IntegrationDirection, string> = {
 
 const SKILL_ICONS: Record<string, LucideIcon> = {
   obsidian: BookOpenText,
+  'obsidian-export': BookOpenText,
   qdrant: Database,
   milvus: Boxes,
   'chroma-pgvector': Braces,
@@ -81,9 +86,9 @@ const SKILL_ICONS: Record<string, LucideIcon> = {
 }
 
 const TABS: Array<{ id: IntegrationTab; label: string; description: string; icon: LucideIcon }> = [
-  { id: 'input', label: '输入', description: '本地导入与增量更新', icon: ArrowDownToLine },
+  { id: 'input', label: '输入', description: '导入外部记忆', icon: ArrowDownToLine },
   { id: 'output', label: '输出', description: '导出上下文或安装 Skill', icon: ArrowUpFromLine },
-  { id: 'backup', label: '备份与恢复', description: '守住完整记忆资产', icon: RefreshCw },
+  { id: 'backup', label: '备份与恢复', description: '备份本地记忆与恢复', icon: RefreshCw },
 ]
 
 const RUN_STATUS_COPY: Record<string, string> = {
@@ -108,6 +113,13 @@ const IntegrationPanel: React.FC = () => {
   const [encodingFiles, setEncodingFiles] = useState(false)
   const [query, setQuery] = useState('')
   const [resultLimit, setResultLimit] = useState(8)
+  const [vaultPath, setVaultPath] = useState(
+    () => window.localStorage.getItem('memorybread.obsidian-export.vaultPath') || '',
+  )
+  const [vaultSubfolder, setVaultSubfolder] = useState(
+    () => window.localStorage.getItem('memorybread.obsidian-export.subfolder') || 'MemoryBread',
+  )
+  const [selectedMemoryIds, setSelectedMemoryIds] = useState<number[]>([])
   const [runs, setRuns] = useState<IntegrationSkillRun[]>([])
   const [activeRun, setActiveRun] = useState<IntegrationSkillRun | null>(null)
   const [runPending, setRunPending] = useState(false)
@@ -157,6 +169,14 @@ const IntegrationPanel: React.FC = () => {
     void loadCustomSkills()
   }, [loadCatalog, loadCustomSkills])
 
+  useEffect(() => {
+    window.localStorage.setItem('memorybread.obsidian-export.vaultPath', vaultPath)
+  }, [vaultPath])
+
+  useEffect(() => {
+    window.localStorage.setItem('memorybread.obsidian-export.subfolder', vaultSubfolder)
+  }, [vaultSubfolder])
+
   const selectedSkill = useMemo(
     () => skills.find(skill => skill.id === selectedSkillId) || null,
     [selectedSkillId, skills],
@@ -171,7 +191,11 @@ const IntegrationPanel: React.FC = () => {
       ? inputFiles.length > 0
       : selectedSkill.inputKind === 'query'
         ? query.trim().length >= 2
-        : true
+        : selectedSkill.inputKind === 'memory_pick'
+          ? selectedMemoryIds.length > 0
+            && selectedMemoryIds.length <= MEMORY_EXPORT_MAX
+            && vaultPath.trim().length > 0
+          : true
     : false
 
   const openWorkbench = useCallback(async (skill: IntegrationSkillCatalogItem, view: WorkbenchView) => {
@@ -181,6 +205,7 @@ const IntegrationPanel: React.FC = () => {
     setViewingFilePath('')
     setInputFiles([])
     setQuery('')
+    setSelectedMemoryIds([])
     setActiveRun(null)
     setRuns([])
     setWorkbenchError('')
@@ -255,12 +280,20 @@ const IntegrationPanel: React.FC = () => {
       const run = await startIntegrationSkillRun(apiBaseUrl, selectedSkill.id, {
         mode,
         files: inputFiles,
-        config: selectedSkill.inputKind === 'query' ? { query, limit: resultLimit } : {},
+        config: selectedSkill.inputKind === 'query'
+          ? { query, limit: resultLimit }
+          : selectedSkill.inputKind === 'memory_pick'
+            ? {
+                memoryIds: selectedMemoryIds,
+                vaultPath: vaultPath.trim(),
+                subfolder: vaultSubfolder.trim() || 'MemoryBread',
+              }
+            : {},
       })
       setActiveRun(run)
       setRuns(current => [run, ...current.filter(item => item.id !== run.id)])
       setWorkbenchView('run')
-      setNotice(mode === 'preview' ? '预检已启动，请在右侧查看状态' : '本地执行已启动，请在右侧查看状态与日志')
+      setNotice(mode === 'preview' ? '预检已启动，请在右侧查看状态' : '记忆导入已启动，请在右侧查看记忆输出')
     } catch (error) {
       setWorkbenchError(toUserFacingError(error, '启动 Skill 失败'))
     } finally {
@@ -321,17 +354,17 @@ const IntegrationPanel: React.FC = () => {
         <div className="integration-route" aria-label="本地数据经过可审计 Skill 执行后进入记忆库或形成工作产物">
           <div className="integration-route__node">
             <FolderInput size={18} aria-hidden />
-            <span>明确选择</span>
+            <span>记忆来源</span>
           </div>
           <div className="integration-route__line" aria-hidden><span /><ArrowRight size={14} /></div>
           <div className="integration-route__node integration-route__node--core">
             <TerminalSquare size={18} aria-hidden />
-            <span>本机执行</span>
+            <span>记忆导入</span>
           </div>
           <div className="integration-route__line" aria-hidden><span /><ArrowRight size={14} /></div>
           <div className="integration-route__node">
             <ScrollText size={18} aria-hidden />
-            <span>状态与日志</span>
+            <span>记忆输出</span>
           </div>
         </div>
       </header>
@@ -402,7 +435,7 @@ const IntegrationPanel: React.FC = () => {
           <div className="integration-section-heading">
             <div>
               <span>{activeTab === 'input' ? 'Bring data in, locally' : 'Put memory to work'}</span>
-              <h2>{activeTab === 'input' ? '导入记忆Skill' : '导出记忆Skill'}</h2>
+              <h2>{activeTab === 'input' ? '导入记忆Skill' : '输出记忆到外部工具'}</h2>
             </div>
             <button className="integration-upload-button" type="button" onClick={() => openSkillPackagePicker(activeTab)} disabled={uploadingDirection !== null}>
               {uploadingDirection === activeTab ? <Loader2 className="spin" size={17} /> : <PackagePlus size={17} />}
@@ -488,6 +521,16 @@ const IntegrationPanel: React.FC = () => {
                         <label htmlFor="integration-limit">最多带入 {resultLimit} 条本机记忆</label>
                         <input id="integration-limit" type="range" min="3" max="20" value={resultLimit} onChange={event => setResultLimit(Number(event.target.value))} />
                       </div>
+                    ) : selectedSkill.inputKind === 'memory_pick' ? (
+                      <MemoryExportPicker
+                        apiBaseUrl={apiBaseUrl}
+                        vaultPath={vaultPath}
+                        onVaultPathChange={setVaultPath}
+                        subfolder={vaultSubfolder}
+                        onSubfolderChange={setVaultSubfolder}
+                        selectedIds={selectedMemoryIds}
+                        onSelectedIdsChange={setSelectedMemoryIds}
+                      />
                     ) : (
                       <div className="integration-install-note">
                         <PackageCheck size={23} />
@@ -504,7 +547,13 @@ const IntegrationPanel: React.FC = () => {
                       )}
                       <button className="integration-primary-action" type="button" onClick={() => void handleRun('execute')} disabled={!runInputReady || runPending || encodingFiles}>
                         {runPending ? <Loader2 className="spin" size={15} /> : <Play size={15} />}
-                        {selectedSkill.direction === 'input' ? '执行导入' : selectedSkill.executor === 'install_agent_skill' ? '安装 Skill' : '生成上下文包'}
+                        {selectedSkill.direction === 'input'
+                          ? '执行导入'
+                          : selectedSkill.executor === 'install_agent_skill'
+                            ? '安装 Skill'
+                            : selectedSkill.executor === 'vault_export'
+                              ? '导出到 Vault'
+                              : '生成上下文包'}
                       </button>
                     </div>
 
@@ -520,7 +569,19 @@ const IntegrationPanel: React.FC = () => {
                     </div>
                   </div>
 
-                  <RunInspector run={activeRun} onCopyError={setWorkbenchError} />
+                  <RunInspector
+                    run={activeRun}
+                    onCopyError={setWorkbenchError}
+                    onOpenMemory={(memoryId) => {
+                      useAppStore.setState({
+                        windowMode: 'knowledge',
+                        repositoryTab: 'memory',
+                        repositoryMemoryFocusId: String(memoryId),
+                        selectedMemoryId: String(memoryId),
+                        bakeMemoryOffset: 0,
+                      })
+                    }}
+                  />
                 </div>
               )}
             </section>
@@ -561,6 +622,259 @@ const IntegrationPanel: React.FC = () => {
   )
 }
 
+const MEMORY_OPTIONS_PAGE_SIZE = 60
+const MEMORY_EXPORT_MAX = 200
+
+export const MemoryExportPicker: React.FC<{
+  apiBaseUrl: string
+  vaultPath: string
+  onVaultPathChange: (path: string) => void
+  subfolder: string
+  onSubfolderChange: (value: string) => void
+  selectedIds: number[]
+  onSelectedIdsChange: (ids: number[]) => void
+}> = ({
+  apiBaseUrl,
+  vaultPath,
+  onVaultPathChange,
+  subfolder,
+  onSubfolderChange,
+  selectedIds,
+  onSelectedIdsChange,
+}) => {
+  const [memoryQuery, setMemoryQuery] = useState('')
+  const [options, setOptions] = useState<IntegrationMemoryOption[]>([])
+  const [optionsLoading, setOptionsLoading] = useState(false)
+  const [hasMoreOptions, setHasMoreOptions] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [marquee, setMarquee] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const dragRef = useRef<{ startX: number; startY: number; initial: number[] } | null>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const lastClickedIndexRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setOptionsLoading(true)
+      listIntegrationMemoryOptions(apiBaseUrl, memoryQuery, MEMORY_OPTIONS_PAGE_SIZE)
+        .then(items => {
+          setOptions(items)
+          setHasMoreOptions(items.length >= MEMORY_OPTIONS_PAGE_SIZE)
+        })
+        .catch(() => {
+          setOptions([])
+          setHasMoreOptions(false)
+        })
+        .finally(() => setOptionsLoading(false))
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [apiBaseUrl, memoryQuery])
+
+  const loadMoreOptions = useCallback(() => {
+    if (loadingMore || optionsLoading || !hasMoreOptions) return
+    setLoadingMore(true)
+    listIntegrationMemoryOptions(apiBaseUrl, memoryQuery, MEMORY_OPTIONS_PAGE_SIZE, options.length)
+      .then(items => {
+        setOptions(current => {
+          const known = new Set(current.map(item => item.id))
+          return [...current, ...items.filter(item => !known.has(item.id))]
+        })
+        setHasMoreOptions(items.length >= MEMORY_OPTIONS_PAGE_SIZE)
+      })
+      .catch(() => setHasMoreOptions(false))
+      .finally(() => setLoadingMore(false))
+  }, [apiBaseUrl, memoryQuery, options.length, hasMoreOptions, loadingMore, optionsLoading])
+
+  const handleListScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    const container = event.currentTarget
+    if (container.scrollTop + container.clientHeight >= container.scrollHeight - 120) {
+      loadMoreOptions()
+    }
+  }
+
+  useEffect(() => {
+    if (!dragging) return undefined
+    const handleMove = (event: MouseEvent) => {
+      const container = containerRef.current
+      const drag = dragRef.current
+      if (!container || !drag) return
+      const rect = container.getBoundingClientRect()
+      const x = event.clientX - rect.left + container.scrollLeft
+      const y = event.clientY - rect.top + container.scrollTop
+      const left = Math.min(drag.startX, x)
+      const top = Math.min(drag.startY, y)
+      const width = Math.abs(x - drag.startX)
+      const height = Math.abs(y - drag.startY)
+      setMarquee({ left, top, width, height })
+      if (width < 4 && height < 4) return
+      const box = { left, top, right: left + width, bottom: top + height }
+      const hit: number[] = []
+      container.querySelectorAll<HTMLElement>('[data-memory-card]').forEach(card => {
+        const cardRect = card.getBoundingClientRect()
+        const cardLeft = cardRect.left - rect.left + container.scrollLeft
+        const cardTop = cardRect.top - rect.top + container.scrollTop
+        const intersects = cardLeft < box.right
+          && cardLeft + cardRect.width > box.left
+          && cardTop < box.bottom
+          && cardTop + cardRect.height > box.top
+        if (!intersects) return
+        const id = Number(card.dataset.memoryCard)
+        if (!Number.isNaN(id)) hit.push(id)
+      })
+      onSelectedIdsChange(Array.from(new Set([...drag.initial, ...hit])))
+    }
+    const handleUp = () => {
+      setDragging(false)
+      setMarquee(null)
+      dragRef.current = null
+    }
+    window.addEventListener('mousemove', handleMove)
+    window.addEventListener('mouseup', handleUp)
+    return () => {
+      window.removeEventListener('mousemove', handleMove)
+      window.removeEventListener('mouseup', handleUp)
+    }
+  }, [dragging, onSelectedIdsChange])
+
+  const handleContainerMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    const target = event.target as HTMLElement
+    if (target.closest('[data-memory-card]')) return
+    const container = containerRef.current
+    if (!container) return
+    const rect = container.getBoundingClientRect()
+    dragRef.current = {
+      startX: event.clientX - rect.left + container.scrollLeft,
+      startY: event.clientY - rect.top + container.scrollTop,
+      initial: event.shiftKey || event.metaKey || event.ctrlKey ? selectedIds : [],
+    }
+    setDragging(true)
+    setMarquee({ left: dragRef.current.startX, top: dragRef.current.startY, width: 0, height: 0 })
+    event.preventDefault()
+  }
+
+  const handleCardClick = (event: React.MouseEvent, option: IntegrationMemoryOption, index: number) => {
+    if (event.shiftKey && lastClickedIndexRef.current !== null) {
+      const from = Math.min(lastClickedIndexRef.current, index)
+      const to = Math.max(lastClickedIndexRef.current, index)
+      const rangeIds = options.slice(from, to + 1).map(item => item.id)
+      onSelectedIdsChange(Array.from(new Set([...selectedIds, ...rangeIds])))
+    } else if (selectedIds.includes(option.id)) {
+      onSelectedIdsChange(selectedIds.filter(id => id !== option.id))
+    } else {
+      onSelectedIdsChange([...selectedIds, option.id])
+    }
+    lastClickedIndexRef.current = index
+  }
+
+  const handleListKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') {
+      event.preventDefault()
+      onSelectedIdsChange(options.map(option => option.id))
+    }
+  }
+
+  const handlePickVault = async () => {
+    const picked = await pickLocalDirectory()
+    if (picked) onVaultPathChange(picked)
+  }
+
+  return (
+    <div className="integration-memory-picker">
+      <div className="integration-vault-config">
+        <label htmlFor="integration-vault-path">Obsidian Vault 文件夹</label>
+        <div className="integration-vault-row">
+          <button type="button" onClick={() => void handlePickVault()}>
+            <FolderOpen size={15} />选择文件夹
+          </button>
+          <input
+            id="integration-vault-path"
+            value={vaultPath}
+            onChange={event => onVaultPathChange(event.target.value)}
+            placeholder="选择或粘贴 Vault 绝对路径，笔记写入其子目录"
+          />
+        </div>
+        <label htmlFor="integration-vault-subfolder">Vault 内子目录</label>
+        <input
+          id="integration-vault-subfolder"
+          value={subfolder}
+          onChange={event => onSubfolderChange(event.target.value)}
+          placeholder="MemoryBread"
+        />
+      </div>
+
+      <div className="integration-memory-search">
+        <Search size={15} />
+        <input
+          value={memoryQuery}
+          onChange={event => setMemoryQuery(event.target.value)}
+          placeholder="搜索记忆标题或摘要，缩小圈选范围"
+          aria-label="搜索待导出记忆"
+        />
+      </div>
+
+      <div className="integration-memory-toolbar">
+        <span>
+          已选 {selectedIds.length} 条{selectedIds.length > MEMORY_EXPORT_MAX ? ` · 超过单次上限 ${MEMORY_EXPORT_MAX} 条` : ''} · 已加载 {options.length} 条{hasMoreOptions ? ' · 滚动加载更多' : ''} · 空白处拖拽圈选 · Shift 连选 · ⌘/Ctrl+A 全选
+        </span>
+        <div>
+          <button type="button" onClick={() => onSelectedIdsChange(options.map(option => option.id))} disabled={!options.length}>全选</button>
+          <button type="button" onClick={() => onSelectedIdsChange([])} disabled={!selectedIds.length}>清空</button>
+        </div>
+      </div>
+
+      <div
+        className={`integration-memory-list${dragging ? ' is-dragging' : ''}`}
+        ref={containerRef}
+        tabIndex={0}
+        role="listbox"
+        aria-multiselectable="true"
+        aria-label="待导出记忆列表"
+        onMouseDown={handleContainerMouseDown}
+        onKeyDown={handleListKeyDown}
+        onScroll={handleListScroll}
+      >
+        {optionsLoading && !options.length ? (
+          <p className="integration-memory-empty"><Loader2 className="spin" size={15} /> 正在读取本机记忆…</p>
+        ) : !options.length ? (
+          <p className="integration-memory-empty">没有匹配的本机记忆，换一个关键词试试。</p>
+        ) : options.map((option, index) => {
+          const selected = selectedIds.includes(option.id)
+          return (
+            <div
+              key={option.id}
+              data-memory-card={option.id}
+              role="option"
+              aria-selected={selected}
+              className={`integration-memory-card${selected ? ' is-selected' : ''}`}
+              onClick={event => handleCardClick(event, option, index)}
+            >
+              <span className="integration-memory-card__check">{selected ? <Check size={12} /> : null}</span>
+              <div>
+                <strong>{option.title}</strong>
+                <small>
+                  {option.category}
+                  {option.observedAt ? ` · ${formatRunTime(option.observedAt)}` : ''}
+                </small>
+              </div>
+            </div>
+          )
+        })}
+        {loadingMore && (
+          <p className="integration-memory-empty"><Loader2 className="spin" size={15} /> 正在加载更多记忆…</p>
+        )}
+        {marquee && (
+          <div
+            className="integration-marquee"
+            aria-hidden
+            style={{ left: marquee.left, top: marquee.top, width: marquee.width, height: marquee.height }}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
 const ExecutableSkillCard: React.FC<{
   skill: IntegrationSkillCatalogItem
   selected: boolean
@@ -586,7 +900,7 @@ const ExecutableSkillCard: React.FC<{
       </div>
       <div className="integration-skill-card__footer"><span>{skill.capability}</span></div>
       <div className="integration-skill-card__actions">
-        <button className="is-primary" type="button" onClick={onRun}><Play size={14} />配置执行</button>
+        <button className="is-primary" type="button" onClick={onRun}><Play size={14} />执行</button>
         <button type="button" onClick={onFiles}><Eye size={14} />文件</button>
         <button type="button" onClick={onDownload} aria-label={`下载 ${skill.title} Skill 包`}><Download size={14} /></button>
       </div>
@@ -625,7 +939,11 @@ const SkillFilesView: React.FC<{
   )
 }
 
-const RunInspector: React.FC<{ run: IntegrationSkillRun | null; onCopyError: (message: string) => void }> = ({ run, onCopyError }) => {
+const RunInspector: React.FC<{
+  run: IntegrationSkillRun | null
+  onCopyError: (message: string) => void
+  onOpenMemory: (memoryId: string | number) => void
+}> = ({ run, onCopyError, onOpenMemory }) => {
   if (!run) {
     return (
       <div className="integration-run-inspector integration-run-inspector--empty">
@@ -650,8 +968,40 @@ const RunInspector: React.FC<{ run: IntegrationSkillRun | null; onCopyError: (me
               <Metric label="跳过" value={run.result.skipped} />
             </div>
           )}
+          {run.result.kind === 'vault_preview' && (
+            <div className="integration-result-metrics">
+              <Metric label="计划笔记" value={run.result.noteCount} />
+              <Metric label="将覆盖" value={run.result.overwriteCount} />
+            </div>
+          )}
+          {run.result.kind === 'vault_export' && (
+            <div className="integration-result-metrics">
+              <Metric label="新增" value={run.result.created} />
+              <Metric label="更新" value={run.result.updated} />
+              <Metric label="未变化" value={run.result.unchanged} />
+            </div>
+          )}
+          {(run.result.kind === 'vault_preview' || run.result.kind === 'vault_export') && (
+            <p className="integration-result-target">
+              {run.result.target ? `目标目录：${run.result.target}` : '尚未选择 Vault 文件夹，正式导出前请先选择。'}
+            </p>
+          )}
           {run.result.kind === 'install_preview' && <p>目标：{run.result.target}。{run.result.existingInstallation ? '检测到旧版本，正式安装会先备份。' : '目标目录可以直接安装。'}</p>}
           {run.result.kind === 'install' && <p>已安装到 {run.result.target}，共 {run.result.fileCount} 个文件。调用方式：<code>{run.result.invocation}</code></p>}
+          {!!run.result.records?.length && (
+            <div className="integration-result-records" aria-label={run.result.kind === 'import' ? '导入记忆明细' : '记忆来源明细'}>
+              {run.result.records.map(record => (
+                <button key={`${record.id}-${record.path || record.title}`} type="button" onClick={() => onOpenMemory(record.id)}>
+                  <span>
+                    <strong>{record.title}</strong>
+                    <small>{record.path || `时间线 #${record.id}`}</small>
+                  </span>
+                  {record.outcome && <em>{record.outcome === 'created' ? '新增' : record.outcome === 'updated' ? '更新' : '未变化'}</em>}
+                  <ChevronRight size={14} aria-hidden />
+                </button>
+              ))}
+            </div>
+          )}
           {artifact && (
             <div className="integration-artifact">
               <FileArchive size={21} /><div><strong>{artifact.fileName}</strong><small>{run.result.matchCount || 0} 条本机上下文</small></div>
@@ -676,7 +1026,7 @@ const RunRail: React.FC<{ status: string }> = ({ status }) => {
   const failed = status === 'failed'
   const stages = [
     { id: 'queued', label: '进入队列' },
-    { id: 'running', label: '本机执行' },
+    { id: 'running', label: '记忆导入' },
     { id: failed ? 'failed' : 'succeeded', label: failed ? '失败' : '完成' },
   ]
   const activeIndex = status === 'queued' ? 0 : status === 'running' ? 1 : 2

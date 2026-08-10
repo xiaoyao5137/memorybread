@@ -1,5 +1,7 @@
 #[cfg(not(debug_assertions))]
 use std::fs::OpenOptions;
+#[cfg(not(feature = "app-store"))]
+use std::sync::{atomic::AtomicU64, Arc};
 use std::{
     fs,
     io::{Read, Write},
@@ -15,6 +17,8 @@ use std::{
 use base64::{engine::general_purpose, Engine as _};
 use image::{codecs::jpeg::JpegEncoder, imageops, DynamicImage, Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
+#[cfg(not(feature = "app-store"))]
+use sha2::{Digest, Sha256};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
@@ -24,6 +28,8 @@ use tauri::{
 #[cfg(not(feature = "app-store"))]
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_shell::ShellExt;
+#[cfg(not(feature = "app-store"))]
+use tauri_plugin_updater::{Update, UpdaterExt};
 
 #[cfg(target_os = "macos")]
 use objc2::{
@@ -206,8 +212,35 @@ struct TrayMenuState {
 struct AppMetadata {
     product_name: String,
     version: String,
+    build_number: String,
     platform: String,
     architecture: String,
+    distribution: String,
+    update_supported: bool,
+}
+
+#[cfg(not(feature = "app-store"))]
+#[derive(Default)]
+struct PendingSoftwareUpdate {
+    update: Mutex<Option<Update>>,
+}
+
+#[cfg(not(feature = "app-store"))]
+#[derive(Debug, Serialize)]
+struct PreparedSoftwareUpdate {
+    current_version: String,
+    version: String,
+    notes: Option<String>,
+    published_at: Option<String>,
+}
+
+#[cfg(not(feature = "app-store"))]
+#[derive(Debug, Clone, Serialize)]
+struct SoftwareUpdateProgress {
+    phase: &'static str,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    percent: Option<u8>,
 }
 
 struct BundledBackendProcess {
@@ -890,12 +923,8 @@ fn connect_ipc_stream() -> Result<Box<dyn ReadWrite>, String> {
     use std::os::unix::net::UnixStream;
 
     let socket_path = ipc_socket_path();
-    let stream = UnixStream::connect(&socket_path).map_err(|error| {
-        format!(
-            "无法连接 OCR sidecar（{}）：{error}",
-            socket_path.display()
-        )
-    })?;
+    let stream = UnixStream::connect(&socket_path)
+        .map_err(|error| format!("无法连接 OCR sidecar（{}）：{error}", socket_path.display()))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(20)))
         .map_err(|error| error.to_string())?;
@@ -1060,10 +1089,8 @@ fn start_bundled_backends(app: &AppHandle) -> Result<(), String> {
     fs::create_dir_all(&log_dir).map_err(|error| error.to_string())?;
     let _ = PACKAGED_RUNTIME_HOME.set(runtime_home.clone());
     #[cfg(unix)]
-    let ipc_socket_path = std::env::temp_dir().join(format!(
-        "memory-bread-sidecar-{}.sock",
-        std::process::id()
-    ));
+    let ipc_socket_path =
+        std::env::temp_dir().join(format!("memory-bread-sidecar-{}.sock", std::process::id()));
     #[cfg(not(unix))]
     let ipc_socket_path = PathBuf::new();
     #[cfg(unix)]
@@ -1242,9 +1269,196 @@ fn get_app_metadata(app: AppHandle) -> AppMetadata {
     AppMetadata {
         product_name: "记忆面包".to_string(),
         version: app.package_info().version.to_string(),
+        build_number: option_env!("MEMORY_BREAD_BUILD_NUMBER")
+            .unwrap_or("1")
+            .to_string(),
         platform: std::env::consts::OS.to_string(),
         architecture: std::env::consts::ARCH.to_string(),
+        distribution: if cfg!(feature = "app-store") {
+            "app_store".to_string()
+        } else {
+            "direct".to_string()
+        },
+        update_supported: !cfg!(feature = "app-store")
+            && option_env!("MEMORY_BREAD_UPDATER_PUBLIC_KEY")
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty()),
     }
+}
+
+#[cfg(not(feature = "app-store"))]
+#[tauri::command]
+async fn prepare_software_update(
+    app: AppHandle,
+    state: tauri::State<'_, PendingSoftwareUpdate>,
+    manifest_url: String,
+    environment: String,
+    cohort: String,
+) -> Result<Option<PreparedSoftwareUpdate>, String> {
+    if option_env!("MEMORY_BREAD_UPDATER_PUBLIC_KEY")
+        .map(str::trim)
+        .is_none_or(str::is_empty)
+    {
+        return Err("此安装包未配置更新签名公钥，请重新安装正式发布包".to_string());
+    }
+    if !matches!(environment.as_str(), "production" | "staging") {
+        return Err("软件更新环境不合法".to_string());
+    }
+    if cohort.len() != 64
+        || !cohort
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err("软件更新 cohort 不合法".to_string());
+    }
+    let endpoint: tauri::Url = manifest_url
+        .parse()
+        .map_err(|_| "软件更新清单地址不合法".to_string())?;
+    if !cfg!(debug_assertions) && endpoint.scheme() != "https" {
+        return Err("正式版只允许使用 HTTPS 更新清单".to_string());
+    }
+
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![endpoint])
+        .map_err(|error| format!("软件更新地址不可用：{error}"))?
+        .header("X-MemoryBread-Environment", environment)
+        .map_err(|error| format!("软件更新环境头无效：{error}"))?
+        .header("X-MemoryBread-Update-Cohort", cohort)
+        .map_err(|error| format!("软件更新 cohort 无效：{error}"))?
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("无法初始化软件更新器：{error}"))?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|error| format!("检查签名更新包失败：{error}"))?;
+    let Some(update) = update else {
+        *state.update.lock().map_err(|_| "软件更新状态不可用")? = None;
+        return Ok(None);
+    };
+    let prepared = PreparedSoftwareUpdate {
+        current_version: update.current_version.clone(),
+        version: update.version.clone(),
+        notes: update.body.clone(),
+        published_at: update.date.map(|date| date.to_string()),
+    };
+    *state.update.lock().map_err(|_| "软件更新状态不可用")? = Some(update);
+    Ok(Some(prepared))
+}
+
+#[cfg(not(feature = "app-store"))]
+#[tauri::command]
+async fn download_and_install_software_update(
+    app: AppHandle,
+    state: tauri::State<'_, PendingSoftwareUpdate>,
+) -> Result<(), String> {
+    let update = state
+        .update
+        .lock()
+        .map_err(|_| "软件更新状态不可用")?
+        .take()
+        .ok_or_else(|| "请先重新检查可安装的更新".to_string())?;
+    let retry_update = update.clone();
+    let expected_checksum = update
+        .raw_json
+        .get("checksum_sha256")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "更新清单缺少 SHA-256，已拒绝安装".to_string())?;
+
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let progress_downloaded = Arc::clone(&downloaded);
+    let progress_app = app.clone();
+    let finish_app = app.clone();
+    let _ = app.emit(
+        "software-update-progress",
+        SoftwareUpdateProgress {
+            phase: "downloading",
+            downloaded_bytes: 0,
+            total_bytes: update
+                .raw_json
+                .get("download_size_bytes")
+                .and_then(serde_json::Value::as_u64),
+            percent: Some(0),
+        },
+    );
+    let bytes = match update
+        .download(
+            move |chunk_length, content_length| {
+                let current = progress_downloaded.fetch_add(chunk_length as u64, Ordering::SeqCst)
+                    + chunk_length as u64;
+                let percent = content_length
+                    .filter(|total| *total > 0)
+                    .map(|total| ((current.saturating_mul(100) / total).min(100)) as u8);
+                let _ = progress_app.emit(
+                    "software-update-progress",
+                    SoftwareUpdateProgress {
+                        phase: "downloading",
+                        downloaded_bytes: current,
+                        total_bytes: content_length,
+                        percent,
+                    },
+                );
+            },
+            move || {
+                let _ = finish_app.emit(
+                    "software-update-progress",
+                    SoftwareUpdateProgress {
+                        phase: "verifying",
+                        downloaded_bytes: downloaded.load(Ordering::SeqCst),
+                        total_bytes: None,
+                        percent: Some(100),
+                    },
+                );
+            },
+        )
+        .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            *state.update.lock().map_err(|_| "软件更新状态不可用")? = Some(retry_update);
+            return Err(format!("更新包下载或签名校验失败：{error}"));
+        }
+    };
+
+    let actual_checksum = format!("{:x}", Sha256::digest(&bytes));
+    if actual_checksum != expected_checksum {
+        *state.update.lock().map_err(|_| "软件更新状态不可用")? = Some(retry_update);
+        return Err("更新包 SHA-256 校验失败，已拒绝安装".to_string());
+    }
+    let _ = app.emit(
+        "software-update-progress",
+        SoftwareUpdateProgress {
+            phase: "installing",
+            downloaded_bytes: bytes.len() as u64,
+            total_bytes: Some(bytes.len() as u64),
+            percent: Some(100),
+        },
+    );
+    if let Err(error) = update.install(bytes) {
+        *state.update.lock().map_err(|_| "软件更新状态不可用")? = Some(retry_update);
+        return Err(format!("更新包安装失败：{error}"));
+    }
+    let _ = app.emit(
+        "software-update-progress",
+        SoftwareUpdateProgress {
+            phase: "ready_to_restart",
+            downloaded_bytes: 0,
+            total_bytes: None,
+            percent: Some(100),
+        },
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn restart_application(app: AppHandle) -> Result<(), String> {
+    QUITTING.store(true, Ordering::SeqCst);
+    stop_bundled_backends(&app);
+    app.restart()
 }
 
 #[tauri::command]
@@ -1433,6 +1647,14 @@ fn open_export_folder(app: AppHandle, path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn pick_local_directory() -> Option<String> {
+    rfd::FileDialog::new()
+        .set_title("选择 Obsidian Vault 文件夹")
+        .pick_folder()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
 async fn capture_screen_ocr_for_floating_assist(
     app: AppHandle,
 ) -> Result<FloatingAssistOcrResult, String> {
@@ -1494,6 +1716,12 @@ async fn capture_screen_ocr_for_floating_assist(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default().plugin(tauri_plugin_shell::init());
+    #[cfg(not(feature = "app-store"))]
+    let builder = builder.plugin(
+        tauri_plugin_updater::Builder::new()
+            .pubkey(option_env!("MEMORY_BREAD_UPDATER_PUBLIC_KEY").unwrap_or(""))
+            .build(),
+    );
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
     #[cfg(not(feature = "app-store"))]
@@ -1501,12 +1729,20 @@ pub fn run() {
         MacosLauncher::LaunchAgent,
         Some(vec!["--autostart"]),
     ));
-    builder
+    let builder = builder
         .manage(BundledBackendState::default())
         .manage(FloatingAssistWindowState::default())
-        .manage(PendingFloatingAssistActionState::default())
+        .manage(PendingFloatingAssistActionState::default());
+    #[cfg(not(feature = "app-store"))]
+    let builder = builder.manage(PendingSoftwareUpdate::default());
+    builder
         .invoke_handler(tauri::generate_handler![
             get_app_metadata,
+            restart_application,
+            #[cfg(not(feature = "app-store"))]
+            prepare_software_update,
+            #[cfg(not(feature = "app-store"))]
+            download_and_install_software_update,
             open_external_url,
             set_capture_menu_state,
             set_floating_assist_menu_state,
@@ -1522,6 +1758,7 @@ pub fn run() {
             read_floating_assist_image_data_url,
             open_floating_assist_reference,
             open_export_folder,
+            pick_local_directory,
             capture_screen_ocr_for_floating_assist,
         ])
         .setup(|app| {

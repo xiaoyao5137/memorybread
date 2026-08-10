@@ -4,6 +4,7 @@ pub mod action_log;
 pub mod bake_document;
 pub mod bake_run;
 pub mod capture;
+pub mod capture_attempt;
 pub mod creation_evidence;
 pub mod creation_history;
 pub mod creation_skill;

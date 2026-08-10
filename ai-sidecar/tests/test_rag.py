@@ -249,7 +249,7 @@ def _init_knowledge_db(db_path: str) -> None:
     cursor = conn.cursor()
     cursor.executescript(
         """
-        CREATE TABLE knowledge_entries (
+        CREATE TABLE timelines (
             id INTEGER PRIMARY KEY,
             capture_id INTEGER NOT NULL,
             summary TEXT,
@@ -271,16 +271,17 @@ def _init_knowledge_db(db_path: str) -> None:
             activity_type TEXT,
             is_self_generated INTEGER DEFAULT 0,
             evidence_strength TEXT,
-            importance INTEGER DEFAULT 3
+            importance INTEGER DEFAULT 3,
+            created_at_ms INTEGER
         );
         CREATE VIRTUAL TABLE knowledge_fts USING fts5(
             overview,
             details,
             entities,
-            content='knowledge_entries',
+            content='timelines',
             content_rowid='id'
         );
-        CREATE TRIGGER knowledge_ai AFTER INSERT ON knowledge_entries BEGIN
+        CREATE TRIGGER knowledge_ai AFTER INSERT ON timelines BEGIN
             INSERT INTO knowledge_fts(rowid, overview, details, entities)
             VALUES (new.id, new.overview, new.details, new.entities);
         END;
@@ -733,9 +734,10 @@ class TestRagPipeline:
         assert intent.task_type == "weekly_report"
         assert intent.query_mode == "summary"
         assert intent.observed_start_ts is not None  # 默认本周
-        assert intent.activity_types == ["coding", "reading", "meeting", "chat", "ask_ai"]
-        assert intent.evidence_strengths == ["medium", "high"]
-        assert intent.history_view is False
+        # 报告任务在召回阶段不过滤活动类型，由 _select_contexts 做精细筛选。
+        assert intent.activity_types == []
+        assert intent.evidence_strengths == []
+        assert intent.history_view is None
 
     def test_daily_report_intent_detected(self):
         """'帮我写今天的日报' 应识别为 daily_report 任务型意图"""
@@ -811,7 +813,7 @@ class TestRagPipeline:
         pipeline.query("帮我生成项目周报，包含OKR/KPI/专项进展")
         assert "## 本周量化进展（OKR/KPI/专项）" in llm.last_prompt
         assert "【量化证据】（仅可引用以下证据中的数字结论）" in llm.last_prompt
-        assert "引用：R#1" in llm.last_prompt
+        assert "证据：R#1" in llm.last_prompt
         assert "K#12/C#34" not in llm.last_prompt
 
     def test_quant_evidence_extractor_filters_noise_numbers(self):
@@ -830,7 +832,7 @@ class TestRagPipeline:
         conn = sqlite3.connect(db_path)
         conn.executemany(
             """
-            INSERT INTO knowledge_entries (
+            INSERT INTO timelines (
                 id, capture_id, summary, overview, details, start_time, end_time, duration_minutes,
                 frag_app_name, frag_win_title, entities, category, user_verified, observed_at,
                 event_time_start, event_time_end, history_view, content_origin, activity_type,
@@ -1254,7 +1256,7 @@ class TestSqliteRetrievers:
         )
         conn.execute(
             """
-            INSERT INTO knowledge_entries
+            INSERT INTO timelines
                 (id, capture_id, summary, overview, details, start_time, end_time,
                  duration_minutes, frag_app_name, frag_win_title, entities, category, user_verified)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1275,7 +1277,6 @@ class TestSqliteRetrievers:
                 1,
             ),
         )
-        conn.execute("ALTER TABLE knowledge_entries RENAME TO timelines")
         conn.commit()
         conn.row_factory = sqlite3.Row
         statements: list[str] = []
@@ -1663,7 +1664,7 @@ class TestSqliteRetrievers:
 
         conn = sqlite3.connect(db_path)
         conn.executemany(
-            "INSERT INTO knowledge_entries (id, capture_id, summary, overview, details, start_time, end_time, duration_minutes, frag_app_name, frag_win_title, entities, category, user_verified, observed_at, event_time_start, event_time_end, history_view, content_origin, activity_type, is_self_generated, evidence_strength) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO timelines (id, capture_id, summary, overview, details, start_time, end_time, duration_minutes, frag_app_name, frag_win_title, entities, category, user_verified, observed_at, event_time_start, event_time_end, history_view, content_origin, activity_type, is_self_generated, evidence_strength) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (1, 100, "今天问 Gemini", "今天问 Gemini 发布计划", "确认发布时间", 1_710_000_000_000, 1_710_000_060_000, 1, "Gemini", "Gemini", "[]", "聊天", 1, 1_710_000_060_000, None, None, 0, "live_interaction", "ask_ai", 0, "high"),
                 (2, 101, "回看历史消息", "今天回看昨天飞书消息", "确认昨天安排", 1_710_000_100_000, 1_710_000_160_000, 1, "Feishu", "项目群", "[]", "聊天", 1, 1_710_000_160_000, 1_709_913_600_000, 1_709_914_000_000, 1, "historical_content", "reviewing_history", 0, "high"),
@@ -1705,7 +1706,7 @@ class TestSqliteRetrievers:
 
         conn = sqlite3.connect(db_path)
         conn.executemany(
-            "INSERT INTO knowledge_entries (id, capture_id, summary, overview, details, start_time, end_time, duration_minutes, frag_app_name, frag_win_title, entities, category, user_verified, observed_at, event_time_start, event_time_end, history_view, content_origin, activity_type, is_self_generated, evidence_strength) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO timelines (id, capture_id, summary, overview, details, start_time, end_time, duration_minutes, frag_app_name, frag_win_title, entities, category, user_verified, observed_at, event_time_start, event_time_end, history_view, content_origin, activity_type, is_self_generated, evidence_strength) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (1, 100, "低价值条目", "低价值工作片段（invalid_json）", "噪声", 1_710_000_000_000, 1_710_000_060_000, 1, "Gemini", "Gemini", "[]", "其他", 0, 1_710_000_060_000, None, None, 0, "other", "other", 0, "low"),
                 (2, 101, "AIGC 方案", "推进 AIGC 选题与页面方案", "整理 AIGC 工作流与页面方案", 1_710_000_100_000, 1_710_000_160_000, 1, "VS Code", "AIGC", "[]", "代码", 1, 1_710_000_160_000, None, None, 0, "live_interaction", "coding", 0, "high"),
@@ -1725,7 +1726,7 @@ class TestSqliteRetrievers:
 
         conn = sqlite3.connect(db_path)
         conn.execute(
-            "INSERT INTO knowledge_entries (id, capture_id, summary, overview, details, start_time, end_time, duration_minutes, frag_app_name, frag_win_title, entities, category, user_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO timelines (id, capture_id, summary, overview, details, start_time, end_time, duration_minutes, frag_app_name, frag_win_title, entities, category, user_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (1, 100, "浏览器工作", "整理资料", "在 Chrome 中查看文档", 1_710_000_000_000, 1_710_000_060_000, 1, "Google Chrome", "Claude", "[]", "文档", 1),
         )
         conn.commit()

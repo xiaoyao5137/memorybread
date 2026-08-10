@@ -1,7 +1,7 @@
 import { fetchWithLocalhostFallback } from '../hooks/useApi'
 
 export type IntegrationDirection = 'input' | 'output'
-export type IntegrationInputKind = 'folder' | 'files' | 'query' | 'none'
+export type IntegrationInputKind = 'folder' | 'files' | 'query' | 'memory_pick' | 'none'
 export type IntegrationRunMode = 'preview' | 'execute'
 export type IntegrationRunStatus = 'queued' | 'running' | 'succeeded' | 'failed'
 
@@ -52,7 +52,7 @@ export interface IntegrationArtifact {
 }
 
 export interface IntegrationSkillRunResult {
-  kind?: 'import' | 'artifact' | 'install' | 'install_preview' | string
+  kind?: 'import' | 'artifact' | 'install' | 'install_preview' | 'vault_preview' | 'vault_export' | string
   mode?: IntegrationRunMode
   parsed?: number
   created?: number
@@ -63,7 +63,15 @@ export interface IntegrationSkillRunResult {
   linkCount?: number
   embedCount?: number
   matchCount?: number
+  noteCount?: number
+  overwriteCount?: number
   sample?: Array<{ title: string; path: string }>
+  records?: Array<{
+    id: string | number
+    title: string
+    path?: string
+    outcome?: 'created' | 'updated' | 'unchanged' | string
+  }>
   target?: string
   fileCount?: number
   existingInstallation?: boolean
@@ -97,6 +105,13 @@ export interface StartIntegrationSkillRunInput {
   mode: IntegrationRunMode
   files?: IntegrationSkillInputFile[]
   config?: Record<string, unknown>
+}
+
+export interface IntegrationMemoryOption {
+  id: number
+  title: string
+  category: string
+  observedAt?: number | null
 }
 
 const parseError = async (response: Response, fallback: string) => {
@@ -165,6 +180,32 @@ export async function listIntegrationSkillRuns(
   )
   if (!response.ok) throw new Error(await parseError(response, '读取 Skill 执行历史失败'))
   return response.json()
+}
+
+export async function listIntegrationMemoryOptions(
+  apiBaseUrl: string,
+  query = '',
+  limit = 60,
+  offset = 0,
+): Promise<IntegrationMemoryOption[]> {
+  const search = new URLSearchParams({ limit: String(limit) })
+  if (offset > 0) search.set('offset', String(offset))
+  if (query.trim()) search.set('q', query.trim())
+  const response = await fetchWithLocalhostFallback(
+    `${apiBaseUrl}/api/integration-skills/memory-options?${search}`,
+  )
+  if (!response.ok) throw new Error(await parseError(response, '读取记忆候选失败'))
+  return response.json()
+}
+
+export async function pickLocalDirectory(): Promise<string | null> {
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const picked = await invoke<string | null>('pick_local_directory')
+    return typeof picked === 'string' && picked.trim() ? picked : null
+  } catch {
+    return null
+  }
 }
 
 export async function selectedFilesToIntegrationInput(

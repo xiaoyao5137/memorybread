@@ -44,6 +44,9 @@ SANDBOX_OLLAMA_PORT = 11435
 SANDBOX_CORE_PORT = 17070
 OLLAMA_GUI_APP_ROOT = Path("/Applications/Ollama.app").resolve()
 MIN_FREE_DISK_GB = 6.0
+# 引擎健康检查失败后的降级宽限秒数。应用启动早期本地 AI 引擎可能还未
+# 被拉起，立即把完成状态降级为中断会让用户永久卡在恢复页。
+INVALID_STATE_GRACE_SECONDS = 90.0
 MAX_PROCESS_LOG_BYTES = 5 * 1024 * 1024
 PROCESS_LOG_BACKUPS = 2
 SANDBOX_COLD_INSTALL_STAGES = frozenset(
@@ -110,6 +113,7 @@ class InitializationManager:
         self._lock = threading.RLock()
         self._thread: Optional[threading.Thread] = None
         self._processes: dict[str, subprocess.Popen] = {}
+        self._invalid_since: dict[str, Optional[float]] = {}
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self._mark_interrupted_runs()
 
@@ -716,6 +720,8 @@ class InitializationManager:
                 "OLLAMA_MODELS": str(models_dir),
                 "OLLAMA_NO_CLOUD": "1",
                 "OLLAMA_NOHISTORY": "1",
+                # 全局最多驻留 1 个模型 = 最多 1 个 llama-server 子进程。
+                "OLLAMA_MAX_LOADED_MODELS": "1",
             }
         )
         try:
@@ -1005,13 +1011,39 @@ class InitializationManager:
         return self._load_state("sandbox" if self._test_mode_enabled() else "normal")
 
     def _refresh_completed_state(self, state: dict[str, Any]) -> dict[str, Any]:
+        mode = str(state.get("mode") or "normal")
+        if (
+            state.get("state") == "interrupted"
+            and state.get("error_code") == "INITIALIZATION_COMPONENT_MISSING"
+        ):
+            # 此前因暂时性原因（如启动早期引擎尚未就绪）被降级的状态，
+            # 在组件恢复可用后应自动回到完成状态，而不是永远停在恢复页。
+            healed = self._recover_interrupted_state(state, mode)
+            if healed is not None:
+                return healed
+            return state
         if (
             state.get("state") != "completed"
             or not state.get("quality_gate", {}).get("passed")
-            or self._completed_state_still_valid(str(state.get("mode") or "normal"))
+            or self._completed_state_still_valid(mode)
         ):
+            self._invalid_since[mode] = None
             return state
-        mode = str(state.get("mode") or "normal")
+        if not self._components_genuinely_missing(mode):
+            # 模型文件与记忆库仍然完好，只是引擎暂时不可达。给启动时序竞态
+            # 一个宽限窗口，窗口内恢复则保持完成状态；不提前持久化降级。
+            now = time.monotonic()
+            since = self._invalid_since.get(mode)
+            if since is None:
+                self._invalid_since[mode] = now
+                logger.info(
+                    "completed state recheck failed, entering grace window mode=%s",
+                    mode,
+                )
+                return state
+            if now - since < INVALID_STATE_GRACE_SECONDS:
+                return state
+        self._invalid_since[mode] = None
         invalid = self._empty_state(mode)
         invalid.update(
             {
@@ -1025,7 +1057,64 @@ class InitializationManager:
             }
         )
         self._save_state(invalid)
+        logger.warning(
+            "completed state demoted to interrupted mode=%s error_code=%s",
+            mode,
+            "INITIALIZATION_COMPONENT_MISSING",
+        )
         return invalid
+
+    def _recover_interrupted_state(
+        self, state: dict[str, Any], mode: str
+    ) -> Optional[dict[str, Any]]:
+        try:
+            if not self._completed_state_still_valid(mode):
+                return None
+        except Exception:
+            return None
+        restored = copy.deepcopy(state)
+        restored.update(
+            {
+                "state": "completed",
+                "progress": 100,
+                "current_stage": "feature_smoke_tests",
+                "message": "初始化与质检已完成",
+                "suggestion": None,
+                "error_code": None,
+                "can_retry": False,
+                "can_report": False,
+                "finished_at": _utc_now(),
+            }
+        )
+        restored.setdefault("quality_gate", {"passed": False, "checks": []})
+        restored["quality_gate"]["passed"] = True
+        for stage in restored.get("stages", []):
+            stage.update(
+                {
+                    "status": "succeeded",
+                    "progress": 100,
+                    "detail": "已恢复，复用既有组件",
+                    "error_code": None,
+                }
+            )
+        self._save_state(restored)
+        logger.info("interrupted state recovered mode=%s", mode)
+        return restored
+
+    def _components_genuinely_missing(self, mode: str) -> bool:
+        """只做不依赖引擎运行状态的磁盘级组件检查。
+
+        引擎本身由应用在启动过程中拉起，sidecar 首次健康检查时它可能还未
+        就绪，因此引擎不可达不视为组件缺失，由宽限窗口处理。
+        """
+        try:
+            manifests_dir = self._models_root(mode) / "manifests" / "registry.ollama.ai"
+            if not manifests_dir.exists() or not any(manifests_dir.rglob("*")):
+                return True
+            self._validate_database(self._database_path(mode))
+            return False
+        except Exception:
+            return True
 
     def _completed_state_still_valid(self, mode: str) -> bool:
         try:

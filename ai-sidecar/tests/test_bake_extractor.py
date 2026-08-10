@@ -14,6 +14,9 @@ from knowledge.extractor_v2 import (
     BAKE_NUM_PREDICT,
     BAKE_RETRY_NUM_PREDICT,
     BAKE_RETRY_REPEAT_PENALTY,
+    BAKE_TIMEOUT_BUNDLE_RESPONSE_SCHEMA,
+    BAKE_TIMEOUT_RETRY_NUM_PREDICT,
+    BAKE_TIMEOUT_RETRY_REPEAT_PENALTY,
     BAKE_RESPONSE_SCHEMA,
     BakeModelRequestError,
     BakeOutputTruncatedError,
@@ -40,6 +43,7 @@ class ResponseLike:
 SAMPLE_CANDIDATE = {
     "source_timeline_id": 1,
     "source_capture_id": 10,
+    "source_capture_count": 3,
     "summary": "修复 bake pipeline 的 JSON 提炼链路",
     "overview": "定位 sidecar 返回空内容导致 bake 三类产物全部 rejected。",
     "details": "检查 extractor_v2 的 JSON 解析与 response shape 兼容逻辑，并补充测试覆盖。",
@@ -66,6 +70,7 @@ SAMPLE_CANDIDATE = {
 TEMPLATE_ONLY_CANDIDATE = {
     "source_timeline_id": 2,
     "source_capture_id": 20,
+    "source_capture_count": 2,
     "summary": "整理周报撰写模板骨架",
     "overview": "抽象固定段落模板：背景、进展、风险、下周计划。",
     "details": "这次工作重点是沉淀一套可重复复用的周报结构与槽位，而不是总结某一周发生了什么。",
@@ -150,7 +155,7 @@ def test_ollama_compatible_format_removes_grammar_expanding_string_limits():
     assert _schema_contains_key(BAKE_BUNDLE_RESPONSE_SCHEMA, "maxLength") is True
     assert _schema_contains_key(compatible, "maxLength") is False
     assert _schema_contains_key(compatible, "maxItems") is True
-    assert compatible["required"] == ["knowledge", "design", "sop"]
+    assert compatible["required"] == ["classification", "knowledge", "design", "sop"]
 
 
 def test_model_request_error_does_not_include_provider_response_in_message():
@@ -326,6 +331,10 @@ def test_extract_bake_artifact_marks_missing_payload_as_degraded():
 def test_extract_bake_bundle_uses_one_llm_call_for_three_artifacts():
     extractor = make_extractor()
     response_payload = {
+        "classification": {
+            "primary_type": "document",
+            "reason": "主体是一份可复用周报",
+        },
         "knowledge": {
             "accepted": False,
             "reason": "not_a_knowledge",
@@ -364,11 +373,57 @@ def test_extract_bake_bundle_uses_one_llm_call_for_three_artifacts():
     assert result["knowledge"]["reason"] == "not_a_knowledge"
     assert result["design"]["payload"]["name"] == "周报模板"
     assert result["sop"]["reason"] == "not_a_sop"
+    assert result["primary_type"] == "document"
     assert result["usage"] == {"prompt_tokens": 7, "completion_tokens": 8}
     assert result["degraded"] is False
     assert set(result["stage_elapsed_ms"]) == {"bundle"}
     assert isinstance(result["total_elapsed_ms"], int)
     assert result["total_elapsed_ms"] >= 0
+
+
+def test_extract_bake_bundle_uses_primary_data_classification_to_prevent_duplicate_assets():
+    extractor = make_extractor()
+    response_payload = {
+        "classification": {
+            "primary_type": "data",
+            "reason": "主体是会变化的指标卡和明细表",
+        },
+        "knowledge": {
+            "accepted": True,
+            "reason": None,
+            "payload": {"summary": "模型误收的字段公式"},
+        },
+        "design": {"accepted": False, "reason": "not_a_document", "payload": None},
+        "sop": {
+            "accepted": True,
+            "reason": None,
+            "payload": {"summary": "模型误收的按钮操作"},
+        },
+    }
+    client = DummyClient({
+        "model": "mock-model",
+        "message": {"content": json.dumps(response_payload, ensure_ascii=False)},
+        "prompt_eval_count": 7,
+        "eval_count": 8,
+    })
+    extractor._ollama_chat = client.chat
+
+    result = extractor.extract_bake_bundle({
+        **SAMPLE_CANDIDATE,
+        "source_capture_count": 3,
+    })
+
+    assert result["primary_type"] == "data"
+    assert result["knowledge"] == {
+        "accepted": False,
+        "reason": "primary_asset_is_data",
+        "payload": None,
+    }
+    assert result["sop"] == {
+        "accepted": False,
+        "reason": "primary_asset_is_data",
+        "payload": None,
+    }
 
 
 def test_extract_bake_bundle_rejects_chat_document_mentions_even_if_model_accepts_design():
@@ -537,6 +592,42 @@ def test_bake_bundle_uses_compact_output_on_bounded_retry():
     assert client.calls[0]["options"]["num_predict"] == BAKE_RETRY_NUM_PREDICT
     assert client.calls[0]["options"]["repeat_penalty"] == BAKE_RETRY_REPEAT_PENALTY
     assert result["degraded"] is False
+
+
+def test_bake_bundle_timeout_retry_uses_smaller_input_and_output_budget():
+    extractor = make_raw_extractor()
+    response_payload = {
+        "classification": {"primary_type": "none", "reason": "证据不足"},
+        "knowledge": {"accepted": False, "reason": "not_primary_type", "payload": None},
+        "design": {"accepted": False, "reason": "not_primary_type", "payload": None},
+        "sop": {"accepted": False, "reason": "not_primary_type", "payload": None},
+    }
+    client = DummyClient({
+        "model": "mock-model",
+        "message": {"content": json.dumps(response_payload, ensure_ascii=False)},
+        "prompt_eval_count": 10_000,
+        "eval_count": 80,
+        "done_reason": "stop",
+    })
+    extractor._ollama_chat = client.chat
+    candidate = {
+        **SAMPLE_CANDIDATE,
+        "capture_ax_text": "主采集正文" * 4_000,
+        "url_aggregated_text": "累计文档正文" * 8_000,
+    }
+
+    extractor.extract_bake_bundle(
+        candidate,
+        retry_attempt=1,
+        retry_error_code="INFERENCE_TIMEOUT",
+    )
+
+    assert client.calls[0]["format"] == BAKE_TIMEOUT_BUNDLE_RESPONSE_SCHEMA
+    assert client.calls[0]["options"]["num_predict"] == BAKE_TIMEOUT_RETRY_NUM_PREDICT
+    assert (
+        client.calls[0]["options"]["repeat_penalty"]
+        == BAKE_TIMEOUT_RETRY_REPEAT_PENALTY
+    )
 
 
 def test_bake_bundle_initial_preemption_stays_retryable():
@@ -773,6 +864,76 @@ def test_extract_bake_sop_accepts_valid_payload():
     assert meta["model"] == "mock-model"
     assert meta["elapsed_ms"] >= 0
 
+
+def test_extract_bake_sop_rejects_single_capture_even_when_model_accepts():
+    """单帧是硬约束：模型即使产出完整步骤，也不能形成操作。"""
+    extractor = make_extractor()
+    payload = {
+        "summary": "单帧推测出的配置流程",
+        "overview": "从设置页按钮推测配置步骤。",
+        "details": "## 行动路线\n1. 打开设置\n2. 修改选项\n3. 保存",
+        "source_title": "设置页",
+        "trigger_keywords": ["设置"],
+        "extracted_problem": "如何配置选项",
+        "steps": ["打开设置", "修改选项", "保存"],
+        "linked_knowledge_ids": [],
+        "confidence": "high",
+        "evidence_summary": "单个设置页面。",
+        "match_score": 0.95,
+        "match_level": "high",
+        "review_status": "auto_created",
+    }
+    calls = []
+
+    def fake_call(self, caller_id, system_prompt, user_prompt):
+        calls.append(caller_id)
+        return (
+            {"accepted": True, "reason": None, "payload": payload},
+            {
+                "usage": {"prompt_tokens": 16, "completion_tokens": 28},
+                "model": "mock-model",
+                "raw_content": '{"accepted": true}',
+                "raw_preview": '{"accepted": true}',
+                "response_preview": '{"accepted": true}',
+                "empty_content": False,
+                "elapsed_ms": 20,
+            },
+        )
+
+    extractor._call_bake_llm = types.MethodType(fake_call, extractor)
+    artifact, meta = extractor._extract_bake_artifact(
+        {**SAMPLE_CANDIDATE, "source_capture_count": 1},
+        "sop",
+        "prompt",
+    )
+
+    assert len(calls) == 1
+    assert artifact == {
+        "accepted": False,
+        "reason": "insufficient_multi_capture_evidence",
+        "payload": None,
+    }
+    assert meta["degraded"] is False
+
+
+def test_bake_candidate_exposes_multi_capture_context_to_existing_bundle_call():
+    """多帧动作沿用现有 bundle 输入，不引入第二次推理。"""
+    extractor = make_raw_extractor()
+    text = extractor._build_bake_candidate_text({
+        **SAMPLE_CANDIDATE,
+        "source_capture_count": 5,
+        "url_aggregated_capture_count": 4,
+        "url_aggregated_text": (
+            "--- capture#10 ---\n打开配置页\n\n"
+            "--- capture#11 ---\n修改推理参数\n\n"
+            "--- capture#12 ---\n运行并验证结果"
+        ),
+    })
+
+    assert "source_capture_count: 5" in text
+    assert "multi_capture_context" in text
+    assert "打开配置页" in text
+    assert "运行并验证结果" in text
 
 
 def test_build_bake_candidate_text_strips_score_metadata_from_details():

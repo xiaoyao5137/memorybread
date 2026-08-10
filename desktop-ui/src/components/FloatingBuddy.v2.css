@@ -77,7 +77,64 @@
   padding: 9px 10px 11px;
   border-top: 1px solid rgba(78, 48, 27, 0.1);
   background: rgba(255, 255, 255, 0.58);
+  display: grid;
+  gap: 5px;
 }
+
+.buddy-update-entry {
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 9px;
+  border: 1px solid rgba(166, 106, 50, .2);
+  border-radius: 11px;
+  background: linear-gradient(180deg, rgba(255, 250, 242, .94), rgba(250, 238, 220, .8));
+  color: #4b3524;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: 0 5px 15px rgba(91, 53, 25, .07);
+  transition: border-color .18s ease, box-shadow .18s ease, transform .12s ease;
+}
+
+.buddy-update-entry:hover {
+  border-color: rgba(166, 90, 36, .38);
+  box-shadow: 0 7px 18px rgba(91, 53, 25, .11);
+}
+
+.buddy-update-entry:active { transform: scale(.985); }
+.buddy-update-entry:focus-visible { outline: 2px solid rgba(198, 95, 47, .34); outline-offset: 2px; }
+
+.buddy-update-entry__icon {
+  width: 29px;
+  height: 29px;
+  border-radius: 9px;
+  background: #a66a32;
+  color: #fffaf4;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+}
+
+.buddy-update-entry__copy {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.buddy-update-entry__copy strong { font-size: 12px; }
+.buddy-update-entry__copy span { color: #856c59; font: 10px "SFMono-Regular", Consolas, monospace; }
+.buddy-update-entry__action { color: #9a5b2a; font-size: 11px; font-weight: 750; }
+
+.buddy-update-entry--mandatory {
+  border-color: rgba(174, 65, 38, .32);
+  background: linear-gradient(180deg, #fff8f2, #fbe5da);
+}
+
+.buddy-update-entry--mandatory .buddy-update-entry__icon { background: #aa4d2e; }
 
 .buddy-account-entry {
   width: 100%;
@@ -324,4 +381,13 @@
   .buddy-account-entry--active {
     background: rgba(244, 193, 119, 0.11);
   }
+
+  .buddy-update-entry {
+    border-color: rgba(244, 193, 119, .2);
+    background: linear-gradient(180deg, rgba(83, 57, 33, .88), rgba(55, 39, 26, .9));
+    color: #fff7e8;
+  }
+
+  .buddy-update-entry__copy span,
+  .buddy-update-entry__action { color: #f4c177; }
 }

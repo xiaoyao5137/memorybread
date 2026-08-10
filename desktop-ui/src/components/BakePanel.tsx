@@ -28,7 +28,6 @@ import { listLocalCreationSkills, type CreationSkillSource, type LocalCreationSk
 import type {
   ArticleTemplate,
   BakeKnowledgeItem,
-  BakeInventoryTrendBucket,
   BakeOverview,
   BakeTab,
   DataSource,
@@ -47,6 +46,7 @@ import type { MemoryGraphAssets, MemoryGraphNode } from './bake/memoryGraph'
 import { BakeButton } from './bake/BakeShared'
 import { parseDateInputToMs } from './bake/BakeCaptureTab'
 import CreationSkillEditor from './CreationSkillEditor'
+import { useConfirmDialog } from './useConfirmDialog'
 import './bake/BakePanel.css'
 
 const PAGE_SIZE = 20
@@ -130,105 +130,6 @@ const mapBakeOverview = (data: BakeOverviewResponse): BakeOverview => {
   }
 }
 
-const DAY_MS = 86_400_000
-const RECENT_DAILY_TREND_DAYS = 90
-const MAX_OLDER_TREND_BUCKETS = 30
-const OVERVIEW_TREND_LIMIT = 5000
-
-const startOfLocalDay = (timestamp: number) => {
-  const date = new Date(timestamp)
-  if (Number.isNaN(date.getTime())) return 0
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
-}
-
-const addLocalDays = (dayStart: number, days: number) => {
-  const date = new Date(dayStart)
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days).getTime()
-}
-
-const formatTrendDate = (timestamp: number) => {
-  const date = new Date(timestamp)
-  if (Number.isNaN(date.getTime())) return '未知'
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-const buildLocalInventoryTrend = (sources: {
-  memories: TimelineItem[]
-  knowledge: BakeKnowledgeItem[]
-  templates: ArticleTemplate[]
-  sops: SopCandidate[]
-  data: DataSource[]
-}): BakeInventoryTrendBucket[] => {
-  const dataItems = sources.data.map(item => ({
-    createdAtMs: item.created_at ?? item.first_seen_at,
-  }))
-  const timestamps = [
-    ...sources.memories.map(item => item.createdAtMs),
-    ...sources.knowledge.map(item => item.createdAtMs),
-    ...sources.templates.map(item => item.createdAtMs ?? 0),
-    ...sources.sops.map(item => item.createdAtMs ?? 0),
-    ...dataItems.map(item => item.createdAtMs),
-  ].filter(timestamp => timestamp > 0)
-
-  if (timestamps.length === 0) return []
-
-  const minDay = startOfLocalDay(Math.min(...timestamps))
-  const maxDay = startOfLocalDay(Math.max(...timestamps))
-  if (minDay <= 0 || maxDay <= 0) return []
-
-  const countInBucket = (items: Array<{ createdAtMs?: number }>, startTs: number, endTs: number) => (
-    items.filter(item => {
-      const timestamp = item.createdAtMs ?? 0
-      return timestamp > 0 && timestamp >= startTs && timestamp < endTs
-    }).length
-  )
-
-  const buildBucket = (startTs: number, nextStartTs: number): BakeInventoryTrendBucket => {
-    const endTs = nextStartTs - 1
-    const label = nextStartTs <= addLocalDays(startTs, 1)
-      ? formatTrendDate(startTs)
-      : `${formatTrendDate(startTs)}-${formatTrendDate(addLocalDays(nextStartTs, -1))}`
-
-    return {
-      label,
-      startTs,
-      endTs,
-      memoryCount: countInBucket(sources.memories, startTs, nextStartTs),
-      dataCount: countInBucket(dataItems, startTs, nextStartTs),
-      knowledgeCount: countInBucket(sources.knowledge, startTs, nextStartTs),
-      templateCount: countInBucket(sources.templates, startTs, nextStartTs),
-      sopCount: countInBucket(sources.sops, startTs, nextStartTs),
-    }
-  }
-
-  const buckets: BakeInventoryTrendBucket[] = []
-  const recentStartCandidate = addLocalDays(maxDay, 1 - RECENT_DAILY_TREND_DAYS)
-  const recentStartDay = Math.max(minDay, recentStartCandidate)
-
-  if (minDay < recentStartDay) {
-    const olderDays = Math.max(1, Math.round((recentStartDay - minDay) / DAY_MS))
-    const olderBucketCount = Math.max(1, Math.min(MAX_OLDER_TREND_BUCKETS, olderDays))
-    const olderDaysPerBucket = Math.max(1, Math.ceil(olderDays / olderBucketCount))
-
-    for (let startTs = minDay; startTs < recentStartDay;) {
-      const nextStartTs = Math.min(addLocalDays(startTs, olderDaysPerBucket), recentStartDay)
-      buckets.push(buildBucket(startTs, nextStartTs))
-      startTs = nextStartTs
-    }
-  }
-
-  for (let startTs = recentStartDay; startTs <= maxDay;) {
-    const nextStartTs = addLocalDays(startTs, 1)
-    buckets.push(buildBucket(startTs, nextStartTs))
-    startTs = nextStartTs
-  }
-
-  return buckets
-}
-
 const BakePanel: React.FC = () => {
   const apiBaseUrl = useAppStore(state => state.apiBaseUrl)
   const {
@@ -302,6 +203,7 @@ const BakePanel: React.FC = () => {
   const fetchDataSources = useFetchDataSources()
   const refreshDataSource = useRefreshDataSource()
   const deleteDataSource = useDeleteDataSource()
+  const { confirm: confirmDestructive, dialog: confirmDialog } = useConfirmDialog()
 
   const [overview, setOverview] = useState<BakeOverview>(defaultOverview)
   const [knowledgeItems, setKnowledgeItems] = useState<BakeKnowledgeItem[]>([])
@@ -380,31 +282,25 @@ const BakePanel: React.FC = () => {
     setGraphLoading(true)
     setGraphError(null)
 
-    const loadOverviewTrend = async () => {
+    const loadOverviewAssets = async () => {
       const [memoriesResult, knowledgeResult, templatesResult, sopsResult, dataResult] = await Promise.allSettled([
-        fetchMemories({ limit: OVERVIEW_TREND_LIMIT, offset: 0 }),
-        fetchKnowledge({ sort: 'heat', limit: OVERVIEW_TREND_LIMIT, offset: 0 }),
-        fetchTemplates({ limit: OVERVIEW_TREND_LIMIT, offset: 0 }),
-        fetchSops({ limit: OVERVIEW_TREND_LIMIT, offset: 0 }),
+        fetchMemories({ limit: 1, offset: 0 }),
+        fetchKnowledge({ sort: 'heat', limit: GRAPH_ASSET_LIMIT, offset: 0 }),
+        fetchTemplates({ limit: GRAPH_ASSET_LIMIT, offset: 0 }),
+        fetchSops({ limit: GRAPH_ASSET_LIMIT, offset: 0 }),
         fetchDataSources({ limit: GRAPH_ASSET_LIMIT, offset: 0 }),
       ])
       if (cancelled) return
 
-      const memories = memoriesResult.status === 'fulfilled' ? memoriesResult.value.items : []
       const knowledge = knowledgeResult.status === 'fulfilled' ? knowledgeResult.value.items : []
       const templateItems = templatesResult.status === 'fulfilled' ? templatesResult.value.items : []
       const sops = sopsResult.status === 'fulfilled' ? sopsResult.value.items : []
       const dataItems = dataResult.status === 'fulfilled' ? dataResult.value.items : []
       const failedGraphRequests = [knowledgeResult, templatesResult, sopsResult, dataResult]
         .filter(result => result.status === 'rejected').length
-      const inventoryTrend = buildLocalInventoryTrend({
-        memories,
-        knowledge,
-        templates: templateItems,
-        sops,
-        data: dataItems,
-      })
 
+      // 趋势只使用 /api/bake/overview 的全量聚合；这些列表最多返回 100 条，
+      // 只能用于图谱素材和总数，不能二次推导每日产量。
       setOverview(prev => ({
         ...prev,
         memoryCount: memoriesResult.status === 'fulfilled' ? memoriesResult.value.total : prev.memoryCount,
@@ -412,7 +308,6 @@ const BakePanel: React.FC = () => {
         templateCount: templatesResult.status === 'fulfilled' ? templatesResult.value.total : prev.templateCount,
         sopCount: sopsResult.status === 'fulfilled' ? sopsResult.value.total : prev.sopCount,
         dataCount: dataResult.status === 'fulfilled' ? dataResult.value.total : prev.dataCount,
-        inventoryTrend: inventoryTrend.length > 0 ? inventoryTrend : prev.inventoryTrend,
       }))
       setGraphAssets({
         knowledge,
@@ -429,7 +324,7 @@ const BakePanel: React.FC = () => {
       if (failedGraphRequests === 4) setGraphError('本地资产暂时无法读取，请稍后重新加载。')
     }
 
-    void loadOverviewTrend()
+    void loadOverviewAssets()
       .catch(() => {
         if (!cancelled) setGraphError('本地资产暂时无法读取，请稍后重新加载。')
       })
@@ -925,7 +820,7 @@ const BakePanel: React.FC = () => {
   }
 
   const handleDeleteData = async (sourceId: number) => {
-    if (!window.confirm('确认删除这条数据？删除后不会影响来源时间线和采集记录。')) return
+    if (!(await confirmDestructive({ title: '删除这条数据？', description: '删除后不会影响来源时间线和采集记录。' }))) return
     setDeletingDataId(sourceId)
     try {
       await deleteDataSource(sourceId)
@@ -993,12 +888,6 @@ const BakePanel: React.FC = () => {
     setStatusMessage(`已从记忆图谱打开「${node.label}」`)
   }
 
-  const handleOpenRepositoryFromOverview = (tab: 'memory' | 'capture') => {
-    clearBakeNavigationStack()
-    setWindowMode('knowledge')
-    setRepositoryTab(tab)
-  }
-
   const handleCreateTemplate = async () => {
     try {
       const created = await createTemplate(createDraftTemplate())
@@ -1056,7 +945,7 @@ const BakePanel: React.FC = () => {
   }
 
   const handleDeleteTemplate = async (templateId: string) => {
-    if (!window.confirm('确认删除这份文档？删除后无法恢复，来源时间线和其他内容会保留。')) return
+    if (!(await confirmDestructive({ title: '删除这份文档？', description: '删除后无法恢复，来源时间线和其他内容会保留。' }))) return
     try {
       await deleteTemplate(templateId)
       const nextOffset = getFallbackOffsetAfterRemoval(templates.length, bakeTemplateOffset, bakeTemplateLimit)
@@ -1118,7 +1007,7 @@ const BakePanel: React.FC = () => {
   }
 
   const handleDeleteKnowledge = async (id: string) => {
-    if (!window.confirm('确认删除这条知识？删除后无法恢复，来源时间线和采集记录会保留。')) return
+    if (!(await confirmDestructive({ title: '删除这条知识？', description: '删除后无法恢复，来源时间线和采集记录会保留。' }))) return
     try {
       await deleteKnowledge(id)
       const nextOffset = getFallbackOffsetAfterRemoval(knowledgeItems.length, bakeKnowledgeOffset, bakeKnowledgeLimit)
@@ -1138,7 +1027,7 @@ const BakePanel: React.FC = () => {
   }
 
   const handleDeleteSop = async (id: string) => {
-    if (!window.confirm('确认删除这条操作？删除后无法恢复，来源时间线和采集记录会保留。')) return
+    if (!(await confirmDestructive({ title: '删除这份操作？', description: '删除后无法恢复，来源时间线和采集记录会保留。' }))) return
     try {
       await deleteSop(id)
       const nextOffset = getFallbackOffsetAfterRemoval(sopCandidates.length, bakeSopOffset, bakeSopLimit)
@@ -1255,8 +1144,6 @@ const BakePanel: React.FC = () => {
             graphAssets={graphAssetsForRender}
             graphLoading={graphLoading}
             graphError={graphError}
-            onOpenTab={handleBakeTabChange}
-            onOpenRepository={handleOpenRepositoryFromOverview}
             onRetryGraph={() => setGraphRevision(current => current + 1)}
             onOpenGraphNode={handleOpenGraphNode}
             onSearchGraph={searchOverviewGraph}
@@ -1424,6 +1311,7 @@ const BakePanel: React.FC = () => {
           />
         )}
       </div>
+      {confirmDialog}
     </div>
   )
 }

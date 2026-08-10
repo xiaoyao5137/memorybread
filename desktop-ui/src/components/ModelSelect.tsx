@@ -33,11 +33,23 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
   title,
 }) => {
   const [open, setOpen] = useState(false)
+  const [dropUpward, setDropUpward] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const activeOption = useMemo(
     () => options.find(option => option.id === value) || options[0],
     [options, value],
   )
+
+  const toggleOpen = () => {
+    if (!open && rootRef.current) {
+      // 展开前根据剩余空间决定向上还是向下弹出，避免列表被视口底部截断
+      const rect = rootRef.current.getBoundingClientRect()
+      const estimatedMenuHeight = Math.min(options.length, 4) * 54 + 16
+      const spaceBelow = window.innerHeight - rect.bottom
+      setDropUpward(spaceBelow < estimatedMenuHeight && rect.top > spaceBelow)
+    }
+    setOpen(!open)
+  }
 
   useEffect(() => {
     if (!open) return
@@ -64,7 +76,10 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
   }
 
   return (
-    <div className="model-select" ref={rootRef}>
+    <div
+      className={`model-select${open && dropUpward ? ' model-select--drop-upward' : ''}`}
+      ref={rootRef}
+    >
       <span className="model-select__label">{label}</span>
       <button
         type="button"
@@ -73,7 +88,7 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
         aria-haspopup="listbox"
         aria-expanded={open}
         title={title}
-        onClick={() => setOpen(current => !current)}
+        onClick={toggleOpen}
       >
         <span className="model-select__icon" aria-hidden="true">
           {activeOption?.remote ? <Cloud size={15} /> : <HardDrive size={15} />}

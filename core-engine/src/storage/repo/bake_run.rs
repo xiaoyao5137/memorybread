@@ -3,7 +3,9 @@ use rusqlite::{params, Connection};
 use crate::storage::{
     db::current_ts_ms,
     error::StorageError,
-    models_bake::{BakeRunRecord, BakeWatermarkRecord, NewBakeRun},
+    models_bake::{
+        BakeQueueStatusRecord, BakeRetryStateRecord, BakeRunRecord, BakeWatermarkRecord, NewBakeRun,
+    },
     StorageManager,
 };
 
@@ -23,6 +25,143 @@ const RECOVERABLE_BAKE_FAILURE_PREDICATE: &str = r#"
     OR last_error LIKE 'internal error: 解析 bake sop payload 失败: invalid type:%'
     OR last_error LIKE 'internal error: 解析 bake design payload 失败: invalid type:%'
 "#;
+
+/// 一次可展示的记忆产物生产事件。
+///
+/// 自动提炼使用 `bake_runs` 的完成时间与产物计数；手工产物没有 bake run，
+/// 因此以资产首次创建时间补入。这样既能统计“合并到既有资产”的真实收录，
+/// 也不会把后台维护导致的普通 `updated_at` 刷新误算成生产。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BakeProductionEventRecord {
+    pub occurred_at_ms: i64,
+    pub knowledge_count: i64,
+    pub document_count: i64,
+    pub sop_count: i64,
+}
+
+/// 读取指定时间之后的记忆产物生产事件。
+///
+/// `from_ms = 0` 用于总览历史趋势；传入本地自然日起点则用于“今日完成”。
+pub fn load_bake_production_events(
+    conn: &Connection,
+    from_ms: i64,
+) -> Result<Vec<BakeProductionEventRecord>, StorageError> {
+    let mut stmt = conn.prepare(
+        r#"
+        WITH knowledge_assets AS (
+            SELECT
+                COALESCE(
+                    created_at_ms,
+                    CAST(strftime('%s', created_at) AS INTEGER) * 1000
+                ) AS occurred_at_ms,
+                COALESCE(
+                    json_extract(
+                        CASE WHEN json_valid(content) THEN content ELSE '{}' END,
+                        '$.creation_mode'
+                    ),
+                    ''
+                ) AS creation_mode,
+                COALESCE(
+                    json_extract(
+                        CASE WHEN json_valid(content) THEN content ELSE '{}' END,
+                        '$.generation_version'
+                    ),
+                    ''
+                ) AS generation_version
+            FROM bake_knowledge
+        ),
+        sop_assets AS (
+            SELECT
+                COALESCE(
+                    created_at_ms,
+                    CAST(strftime('%s', created_at) AS INTEGER) * 1000
+                ) AS occurred_at_ms,
+                COALESCE(
+                    json_extract(
+                        CASE WHEN json_valid(content) THEN content ELSE '{}' END,
+                        '$.creation_mode'
+                    ),
+                    ''
+                ) AS creation_mode,
+                COALESCE(
+                    json_extract(
+                        CASE WHEN json_valid(content) THEN content ELSE '{}' END,
+                        '$.generation_version'
+                    ),
+                    ''
+                ) AS generation_version
+            FROM bake_sops
+        ),
+        production_events AS (
+            -- 自动提炼：run 计数包含新建和成功合并，是真实生产口径。
+            SELECT
+                completed_at AS occurred_at_ms,
+                knowledge_created_count AS knowledge_count,
+                design_created_count AS document_count,
+                sop_created_count AS sop_count
+            FROM bake_runs
+            WHERE status = 'completed'
+              AND completed_at IS NOT NULL
+              AND completed_at >= ?1
+              AND (
+                    knowledge_created_count > 0
+                 OR design_created_count > 0
+                 OR sop_created_count > 0
+              )
+
+            UNION ALL
+
+            -- 手工知识没有 bake run，按首次创建补入；旧版自动产物继续排除。
+            SELECT occurred_at_ms, 1, 0, 0
+            FROM knowledge_assets
+            WHERE occurred_at_ms >= ?1
+              AND creation_mode != 'llm_bake'
+              AND NOT (
+                  creation_mode = 'auto'
+                  AND generation_version = 'bake-v1'
+              )
+
+            UNION ALL
+
+            -- 手工文档同理。删除只改变当前库存，不抹除已经发生的生产历史。
+            SELECT created_at, 0, 1, 0
+            FROM bake_documents
+            WHERE created_at >= ?1
+              AND COALESCE(creation_mode, '') != 'llm_bake'
+              AND NOT (
+                  COALESCE(creation_mode, '') = 'auto'
+                  AND COALESCE(generation_version, '') = 'bake-v1'
+              )
+
+            UNION ALL
+
+            -- 手工操作没有 bake run，按首次创建补入。
+            SELECT occurred_at_ms, 0, 0, 1
+            FROM sop_assets
+            WHERE occurred_at_ms >= ?1
+              AND creation_mode != 'llm_bake'
+              AND NOT (
+                  creation_mode = 'auto'
+                  AND generation_version = 'bake-v1'
+              )
+        )
+        SELECT occurred_at_ms, knowledge_count, document_count, sop_count
+        FROM production_events
+        WHERE occurred_at_ms > 0
+        ORDER BY occurred_at_ms ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![from_ms], |row| {
+        Ok(BakeProductionEventRecord {
+            occurred_at_ms: row.get(0)?,
+            knowledge_count: row.get(1)?,
+            document_count: row.get(2)?,
+            sop_count: row.get(3)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::Sqlite)
+}
 
 impl StorageManager {
     pub fn insert_bake_run(&self, run: &NewBakeRun) -> Result<i64, StorageError> {
@@ -285,16 +424,45 @@ impl StorageManager {
         timeline_id: i64,
         last_error: &str,
     ) -> Result<i64, StorageError> {
+        self.bump_bake_retry_failure_with_code(timeline_id, last_error, "BAKE_UNKNOWN")
+    }
+
+    /// 记录候选失败，并把下一次可执行时间持久化到数据库。
+    ///
+    /// 退避按错误类型区分；即使 Core 或 Sidecar 重启，也不会把 502/超时候选
+    /// 立即重新塞回模型队列。
+    pub fn bump_bake_retry_failure_with_code(
+        &self,
+        timeline_id: i64,
+        last_error: &str,
+        error_code: &str,
+    ) -> Result<i64, StorageError> {
         let now = current_ts_ms();
         self.with_conn(|conn| {
+            let previous_count: i64 = conn.query_row(
+                "SELECT COALESCE(
+                    (SELECT failure_count FROM bake_retry_state WHERE timeline_id = ?1),
+                    0
+                 )",
+                params![timeline_id],
+                |row| row.get(0),
+            )?;
+            let next_count = previous_count.saturating_add(1);
+            let next_retry_at_ms =
+                now.saturating_add(bake_retry_delay_ms(error_code, next_count, timeline_id));
             conn.execute(
-                "INSERT INTO bake_retry_state (timeline_id, failure_count, last_error, last_failed_at_ms)
-                 VALUES (?1, 1, ?2, ?3)
+                "INSERT INTO bake_retry_state (
+                     timeline_id, failure_count, last_error, last_failed_at_ms,
+                     last_error_code, next_retry_at_ms
+                 )
+                 VALUES (?1, 1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(timeline_id) DO UPDATE SET
                      failure_count = bake_retry_state.failure_count + 1,
                      last_error = excluded.last_error,
-                     last_failed_at_ms = excluded.last_failed_at_ms",
-                params![timeline_id, last_error, now],
+                     last_failed_at_ms = excluded.last_failed_at_ms,
+                     last_error_code = excluded.last_error_code,
+                     next_retry_at_ms = excluded.next_retry_at_ms",
+                params![timeline_id, last_error, now, error_code, next_retry_at_ms],
             )?;
             let count: i64 = conn.query_row(
                 "SELECT failure_count FROM bake_retry_state WHERE timeline_id = ?1",
@@ -302,6 +470,33 @@ impl StorageManager {
                 |r| r.get(0),
             )?;
             Ok(count)
+        })
+    }
+
+    pub fn get_bake_retry_state(
+        &self,
+        timeline_id: i64,
+    ) -> Result<Option<BakeRetryStateRecord>, StorageError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT timeline_id, failure_count, last_error, last_error_code,
+                        last_failed_at_ms, next_retry_at_ms
+                 FROM bake_retry_state
+                 WHERE timeline_id = ?1",
+            )?;
+            let mut rows = stmt.query(params![timeline_id])?;
+            if let Some(row) = rows.next()? {
+                Ok(Some(BakeRetryStateRecord {
+                    timeline_id: row.get(0)?,
+                    failure_count: row.get(1)?,
+                    last_error: row.get(2)?,
+                    last_error_code: row.get(3)?,
+                    last_failed_at_ms: row.get(4)?,
+                    next_retry_at_ms: row.get(5)?,
+                }))
+            } else {
+                Ok(None)
+            }
         })
     }
 
@@ -328,6 +523,241 @@ impl StorageManager {
                 params![timeline_id],
             )?;
             Ok(changed > 0)
+        })
+    }
+
+    /// 返回调度与监控共用的烘焙队列快照。候选价值、watermark、产物排除、
+    /// retry due/dead-letter 口径在此集中，避免 Sidecar 和监控各自复制 SQL。
+    pub fn get_bake_queue_status(
+        &self,
+        max_failures: i64,
+    ) -> Result<BakeQueueStatusRecord, StorageError> {
+        let now = current_ts_ms();
+        self.with_conn(|conn| {
+            let mut status = conn.query_row(
+                r#"
+                WITH wm AS (
+                    SELECT
+                        COALESCE(MAX(last_processed_ts), 0) AS last_processed_ts,
+                        MAX(updated_at) AS updated_at
+                    FROM bake_watermarks
+                    WHERE pipeline_name = 'unified'
+                ),
+                queue AS (
+                    SELECT
+                        t.id,
+                        MAX(
+                            COALESCE(t.updated_at_ms, 0),
+                            COALESCE((SELECT MAX(c2.ts) FROM captures c2 WHERE c2.timeline_id = t.id), 0)
+                        ) AS candidate_ts,
+                        COALESCE(r.failure_count, 0) AS failure_count,
+                        COALESCE(r.next_retry_at_ms, 0) AS next_retry_at_ms,
+                        COALESCE(r.last_error_code, '') AS last_error_code,
+                        wm.last_processed_ts AS watermark_ts,
+                        wm.updated_at AS watermark_updated_at_ms
+                    FROM timelines t
+                    CROSS JOIN wm
+                    LEFT JOIN bake_retry_state r ON r.timeline_id = t.id
+                    WHERE t.category NOT IN (
+                        'bake_article', 'bake_knowledge', 'bake_sop', 'legacy_bake_candidate'
+                    )
+                      AND t.is_self_generated = 0
+                      AND (
+                            t.importance >= 4
+                         OR t.user_verified = 1
+                         OR t.history_view = 1
+                         OR (
+                                t.evidence_strength IN ('high', 'medium')
+                            AND (
+                                   t.activity_type IN ('coding', 'reading', 'reviewing_history', 'document_reference')
+                                OR t.content_origin IN ('historical_content', 'live_interaction')
+                            )
+                         )
+                         OR EXISTS (
+                            SELECT 1 FROM captures dc
+                            WHERE dc.timeline_id = t.id
+                              AND (
+                                   LOWER(COALESCE(dc.url, '')) LIKE '%docs.corp%'
+                                OR LOWER(COALESCE(dc.url, '')) LIKE '%/docs/%'
+                                OR LOWER(COALESCE(dc.url, '')) LIKE '%docs.google%'
+                                OR LOWER(COALESCE(dc.url, '')) LIKE '%/document/%'
+                                OR LOWER(COALESCE(dc.url, '')) LIKE '%yuque.com%'
+                                OR LOWER(COALESCE(dc.url, '')) LIKE '%feishu.cn/docx%'
+                                OR LOWER(COALESCE(dc.url, '')) LIKE '%feishu.cn/wiki%'
+                                OR LOWER(COALESCE(dc.url, '')) LIKE '%notion.so%'
+                                OR LOWER(COALESCE(dc.url, '')) LIKE '%confluence%'
+                                OR LOWER(COALESCE(dc.url, '')) LIKE '%/wiki/%'
+                                OR LOWER(COALESCE(dc.url, '')) LIKE '%shimo.im%'
+                                OR LOWER(COALESCE(dc.url, '')) LIKE '%/d/home/%'
+                                OR LOWER(COALESCE(dc.url, '')) LIKE '%/s/home/%'
+                                OR LOWER(COALESCE(dc.url, '')) LIKE '%/k/home/%'
+                              )
+                              AND LENGTH(REPLACE(REPLACE(
+                                  COALESCE(dc.ax_text, '') || COALESCE(dc.ocr_text, ''),
+                                  ' ', ''), char(10), '')) >= 200
+                         )
+                      )
+                      AND NOT EXISTS (SELECT 1 FROM bake_knowledge bk WHERE bk.timeline_id = t.id)
+                      AND NOT EXISTS (SELECT 1 FROM bake_sops bs WHERE bs.timeline_id = t.id)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM bake_documents bd
+                          WHERE bd.deleted_at IS NULL
+                            AND (
+                                (json_valid(COALESCE(bd.source_memory_ids, '[]')) AND EXISTS (
+                                    SELECT 1 FROM json_each(bd.source_memory_ids)
+                                    WHERE CAST(json_each.value AS TEXT) = CAST(t.id AS TEXT)
+                                ))
+                                OR
+                                (json_valid(COALESCE(bd.source_episode_ids, '[]')) AND EXISTS (
+                                    SELECT 1 FROM json_each(bd.source_episode_ids)
+                                    WHERE CAST(json_each.value AS TEXT) = CAST(t.id AS TEXT)
+                                ))
+                            )
+                      )
+                )
+                SELECT
+                    COALESCE(MAX(watermark_ts), 0),
+                    MAX(watermark_updated_at_ms),
+                    COALESCE(SUM(failure_count = 0 AND candidate_ts > watermark_ts), 0),
+                    COALESCE(SUM(failure_count > 0 AND failure_count < ?1 AND next_retry_at_ms <= ?2), 0),
+                    COALESCE(SUM(failure_count > 0 AND failure_count < ?1 AND next_retry_at_ms > ?2), 0),
+                    COALESCE(SUM(failure_count >= ?1), 0),
+                    COALESCE(SUM(failure_count > 0 AND last_error_code IN ('INFERENCE_TIMEOUT', 'GATEWAY_TIMEOUT')), 0),
+                    COALESCE(SUM(failure_count > 0 AND last_error_code IN (
+                        'BAKE_OUTPUT_TRUNCATED', 'BAKE_OUTPUT_INVALID', 'BAKE_MODEL_RESPONSE_INVALID'
+                    )), 0),
+                    COALESCE(SUM(failure_count > 0 AND last_error_code IN (
+                        'BAKE_MODEL_UPSTREAM_ERROR', 'BAKE_UNCLASSIFIED_UPSTREAM_ERROR'
+                    )), 0),
+                    COALESCE(SUM(failure_count > 0 AND last_error_code NOT IN (
+                        'INFERENCE_TIMEOUT', 'GATEWAY_TIMEOUT', 'BAKE_OUTPUT_TRUNCATED',
+                        'BAKE_OUTPUT_INVALID', 'BAKE_MODEL_RESPONSE_INVALID',
+                        'BAKE_MODEL_UPSTREAM_ERROR', 'BAKE_UNCLASSIFIED_UPSTREAM_ERROR'
+                    )), 0),
+                    MIN(CASE WHEN failure_count = 0 AND candidate_ts > watermark_ts THEN candidate_ts END),
+                    MIN(CASE WHEN failure_count > 0 THEN candidate_ts END),
+                    MIN(CASE WHEN
+                        (failure_count = 0 AND candidate_ts > watermark_ts)
+                        OR (failure_count > 0 AND failure_count < ?1 AND next_retry_at_ms <= ?2)
+                        THEN candidate_ts END),
+                    MIN(CASE WHEN failure_count > 0 AND failure_count < ?1 AND next_retry_at_ms > ?2
+                        THEN next_retry_at_ms END)
+                FROM queue
+                "#,
+                params![max_failures, now],
+                |row| {
+                    let fresh_count: i64 = row.get(2)?;
+                    let retry_ready_count: i64 = row.get(3)?;
+                    let retry_delayed_count: i64 = row.get(4)?;
+                    let dead_letter_count: i64 = row.get(5)?;
+                    Ok(BakeQueueStatusRecord {
+                        watermark_last_processed_ts: row.get(0)?,
+                        watermark_updated_at_ms: row.get(1)?,
+                        fresh_count,
+                        metadata_refresh_count: 0,
+                        retry_ready_count,
+                        retry_delayed_count,
+                        dead_letter_count,
+                        retry_timeout_count: row.get(6)?,
+                        retry_output_count: row.get(7)?,
+                        retry_upstream_count: row.get(8)?,
+                        retry_other_count: row.get(9)?,
+                        actionable_count: fresh_count.saturating_add(retry_ready_count),
+                        pending_count: fresh_count
+                            .saturating_add(retry_ready_count)
+                            .saturating_add(retry_delayed_count)
+                            .saturating_add(dead_letter_count),
+                        oldest_fresh_at_ms: row.get(10)?,
+                        oldest_retry_at_ms: row.get(11)?,
+                        oldest_actionable_at_ms: row.get(12)?,
+                        next_retry_at_ms: row.get(13)?,
+                        recent_no_progress_count: 0,
+                        recommended_retry_after_ms: 0,
+                    })
+                },
+            )?;
+
+            let (watermark_ts, watermark_updated_at_ms) = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(last_processed_ts), 0), MAX(updated_at)
+                     FROM bake_watermarks
+                     WHERE pipeline_name = 'unified'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap_or((0, None));
+            status.watermark_last_processed_ts = watermark_ts;
+            status.watermark_updated_at_ms = watermark_updated_at_ms;
+            status.metadata_refresh_count = conn
+                .query_row(
+                    r#"
+                    SELECT COUNT(DISTINCT t.id)
+                    FROM timelines t
+                    WHERE EXISTS (
+                        SELECT 1
+                        FROM bake_documents d
+                        JOIN captures c ON c.timeline_id = t.id
+                        WHERE d.deleted_at IS NULL
+                          AND json_valid(COALESCE(d.source_memory_ids, '[]'))
+                          AND EXISTS (
+                              SELECT 1 FROM json_each(d.source_memory_ids)
+                              WHERE CAST(json_each.value AS TEXT) = CAST(t.id AS TEXT)
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM json_each(
+                                  CASE
+                                      WHEN json_valid(COALESCE(d.source_capture_ids, '[]'))
+                                      THEN d.source_capture_ids
+                                      ELSE '[]'
+                                  END
+                              )
+                              WHERE CAST(json_each.value AS TEXT) = CAST(c.id AS TEXT)
+                          )
+                    )
+                    "#,
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            status.actionable_count = status
+                .actionable_count
+                .saturating_add(status.metadata_refresh_count);
+
+            status.recent_no_progress_count = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(
+                         status = 'no_op'
+                         OR (
+                             status = 'completed'
+                             AND processed_episode_count = 0
+                             AND candidate_count = 0
+                             AND auto_created_count = 0
+                         )
+                     ), 0)
+                     FROM (
+                         SELECT status, processed_episode_count, candidate_count,
+                                auto_created_count
+                         FROM bake_runs
+                         ORDER BY started_at DESC, id DESC
+                         LIMIT 5
+                     )",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            status.recommended_retry_after_ms = if status.actionable_count == 0 {
+                status
+                    .next_retry_at_ms
+                    .map(|next| next.saturating_sub(now).clamp(1_000, 300_000))
+                    .unwrap_or(300_000)
+            } else if status.recent_no_progress_count > 0 {
+                15_000_i64
+                    .saturating_mul(1_i64 << status.recent_no_progress_count.min(4))
+                    .min(300_000)
+            } else {
+                0
+            };
+            Ok(status)
         })
     }
 
@@ -384,6 +814,36 @@ impl StorageManager {
     }
 }
 
+fn bake_retry_delay_ms(error_code: &str, failure_count: i64, timeline_id: i64) -> i64 {
+    let attempt = failure_count.clamp(1, 8) as u32;
+    match error_code {
+        "BAKE_OUTPUT_TRUNCATED" | "BAKE_OUTPUT_INVALID" | "BAKE_MODEL_RESPONSE_INVALID" => {
+            match attempt {
+                1 => 10_000,
+                2 => 30_000,
+                _ => 60_000,
+            }
+        }
+        "INFERENCE_TIMEOUT" | "GATEWAY_TIMEOUT" => match attempt {
+            1 => 60_000,
+            2 => 120_000,
+            _ => 300_000,
+        },
+        "BAKE_MODEL_UPSTREAM_ERROR" | "BAKE_UNCLASSIFIED_UPSTREAM_ERROR" => {
+            let base = 300_000_i64
+                .saturating_mul(1_i64.checked_shl(attempt.saturating_sub(1)).unwrap_or(8))
+                .min(1_800_000);
+            let jitter = timeline_id.unsigned_abs().wrapping_mul(7) % 30_001;
+            base.saturating_add(jitter as i64)
+        }
+        _ => match attempt {
+            1 => 120_000,
+            2 => 300_000,
+            _ => 600_000,
+        },
+    }
+}
+
 fn insert_bake_run_inner(conn: &Connection, run: &NewBakeRun) -> Result<i64, StorageError> {
     conn.execute(
         "INSERT INTO bake_runs (
@@ -436,6 +896,78 @@ mod tests {
 
     fn make_mgr() -> StorageManager {
         StorageManager::open_in_memory().expect("内存数据库初始化失败")
+    }
+
+    #[test]
+    fn production_events_count_completed_merges_without_using_asset_updates() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE bake_knowledge (
+                id INTEGER PRIMARY KEY,
+                content TEXT,
+                created_at TEXT,
+                created_at_ms INTEGER,
+                updated_at_ms INTEGER
+            );
+            CREATE TABLE bake_sops (
+                id INTEGER PRIMARY KEY,
+                content TEXT,
+                created_at TEXT,
+                created_at_ms INTEGER,
+                updated_at_ms INTEGER
+            );
+            CREATE TABLE bake_documents (
+                id INTEGER PRIMARY KEY,
+                creation_mode TEXT,
+                generation_version TEXT,
+                created_at INTEGER,
+                updated_at INTEGER
+            );
+            CREATE TABLE bake_runs (
+                id INTEGER PRIMARY KEY,
+                status TEXT NOT NULL,
+                completed_at INTEGER,
+                knowledge_created_count INTEGER NOT NULL DEFAULT 0,
+                design_created_count INTEGER NOT NULL DEFAULT 0,
+                sop_created_count INTEGER NOT NULL DEFAULT 0
+            );
+
+            INSERT INTO bake_knowledge VALUES
+                (1, '{"creation_mode":"manual"}', NULL, 3000, 3000),
+                (2, '{"creation_mode":"llm_bake"}', NULL, 3100, 3600),
+                (3, '{"creation_mode":"auto","generation_version":"bake-v1"}', NULL, 3200, 3200),
+                (4, '{"creation_mode":"manual"}', NULL, 1000, 3700);
+            INSERT INTO bake_documents VALUES
+                (1, 'manual', NULL, 3300, 3300),
+                (2, 'llm_bake', 'bake-v1', 1000, 3500);
+            INSERT INTO bake_sops VALUES
+                (1, '{"creation_mode":"manual"}', NULL, 3400, 3400),
+                (2, '{"creation_mode":"llm_bake"}', NULL, 3450, 3450);
+            INSERT INTO bake_runs VALUES
+                (1, 'completed', 3500, 2, 1, 3),
+                (2, 'failed', 3600, 9, 9, 9);
+            "#,
+        )
+        .unwrap();
+
+        let events = load_bake_production_events(&conn, 2500).unwrap();
+        let totals =
+            events
+                .iter()
+                .fold(BakeProductionEventRecord::default(), |mut total, event| {
+                    total.knowledge_count += event.knowledge_count;
+                    total.document_count += event.document_count;
+                    total.sop_count += event.sop_count;
+                    total
+                });
+
+        assert_eq!(totals.knowledge_count, 3);
+        assert_eq!(totals.document_count, 2);
+        assert_eq!(totals.sop_count, 4);
+        assert!(events
+            .iter()
+            .any(|event| { event.occurred_at_ms == 3500 && event.document_count == 1 }));
     }
 
     #[test]
@@ -555,6 +1087,91 @@ mod tests {
         assert!(mgr.clear_bake_retry_failure(105).unwrap());
         assert!(mgr.clear_bake_retry_failure(103).unwrap());
         assert!(!mgr.clear_bake_retry_failure(103).unwrap());
+    }
+
+    #[test]
+    fn test_retry_schedule_uses_error_specific_persistent_backoff() {
+        let mgr = make_mgr();
+        mgr.with_conn(|conn| {
+            for id in [201_i64, 202, 203] {
+                conn.execute(
+                    "INSERT INTO captures (id, ts, event_type) VALUES (?1, ?1, 'manual')",
+                    params![id],
+                )?;
+                conn.execute(
+                    "INSERT INTO timelines (id, capture_id, summary) VALUES (?1, ?1, 'test')",
+                    params![id],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        mgr.bump_bake_retry_failure_with_code(201, "invalid output", "BAKE_OUTPUT_INVALID")
+            .unwrap();
+        mgr.bump_bake_retry_failure_with_code(202, "timeout", "INFERENCE_TIMEOUT")
+            .unwrap();
+        mgr.bump_bake_retry_failure_with_code(
+            203,
+            "upstream 502",
+            "BAKE_UNCLASSIFIED_UPSTREAM_ERROR",
+        )
+        .unwrap();
+
+        let output = mgr.get_bake_retry_state(201).unwrap().unwrap();
+        let timeout = mgr.get_bake_retry_state(202).unwrap().unwrap();
+        let upstream = mgr.get_bake_retry_state(203).unwrap().unwrap();
+        assert_eq!(
+            output.last_error_code.as_deref(),
+            Some("BAKE_OUTPUT_INVALID")
+        );
+        assert!(output.next_retry_at_ms - output.last_failed_at_ms >= 10_000);
+        assert!(timeout.next_retry_at_ms - timeout.last_failed_at_ms >= 60_000);
+        assert!(upstream.next_retry_at_ms - upstream.last_failed_at_ms >= 300_000);
+
+        mgr.bump_bake_retry_failure_with_code(
+            203,
+            "upstream 502",
+            "BAKE_UNCLASSIFIED_UPSTREAM_ERROR",
+        )
+        .unwrap();
+        let upstream_second = mgr.get_bake_retry_state(203).unwrap().unwrap();
+        assert_eq!(upstream_second.failure_count, 2);
+        assert!(upstream_second.next_retry_at_ms - upstream_second.last_failed_at_ms >= 600_000);
+    }
+
+    #[test]
+    fn test_queue_status_counts_legacy_empty_completed_runs_as_no_progress() {
+        let mgr = make_mgr();
+        for started_at in [100_i64, 200, 300] {
+            let run_id = mgr
+                .insert_bake_run(&NewBakeRun {
+                    trigger_reason: "knowledge_background".to_string(),
+                    status: "running".to_string(),
+                    started_at,
+                })
+                .unwrap();
+            mgr.complete_bake_run(
+                run_id,
+                "completed",
+                started_at + 10,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                None,
+                Some(10),
+            )
+            .unwrap();
+        }
+
+        let queue = mgr.get_bake_queue_status(3).unwrap();
+        assert_eq!(queue.recent_no_progress_count, 3);
+        assert_eq!(queue.actionable_count, 0);
+        assert_eq!(queue.recommended_retry_after_ms, 300_000);
     }
 
     #[test]

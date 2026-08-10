@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import OnboardingWizard from '../components/OnboardingWizard'
 import { useAppStore } from '../store/useAppStore'
@@ -175,7 +175,6 @@ describe('首次启动一键初始化', () => {
       status: 'failed',
       error_code: 'MODEL_DOWNLOAD_FAILED',
     }
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       if (url.endsWith('/api/initialization/status')) {
@@ -207,7 +206,10 @@ describe('首次启动一键初始化', () => {
     expect(await screen.findByText(/MODEL_DOWNLOAD_FAILED/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '上报诊断' }))
 
-    expect(confirm).toHaveBeenCalled()
+    const dialog = await screen.findByRole('alertdialog', { name: '确认上报诊断信息？' })
+    expect(dialog).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: '确认上报' }))
+
     expect(await screen.findByText(/report-001/)).toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledWith(
       'http://127.0.0.1:8080/v1/initialization-reports',

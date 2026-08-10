@@ -1,0 +1,58 @@
+.mention-highlight-field {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+.mention-highlight-field__mirror {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  margin: 0;
+  overflow: hidden;
+  color: #172033;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  pointer-events: none;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.mention-highlight-field.is-multiline .mention-highlight-field__mirror {
+  padding: 10px 11px;
+}
+
+.mention-highlight-field.is-single-line .mention-highlight-field__mirror {
+  height: 100%;
+  padding: 0 11px;
+  display: flex;
+  align-items: center;
+  white-space: pre;
+}
+
+.mention-highlight-field__mention {
+  margin: 0;
+  border-radius: 3px;
+  background: rgba(180, 112, 49, .11);
+  color: #955a29;
+  font: inherit;
+  text-shadow: .18px 0 currentColor, -.18px 0 currentColor;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+.mention-highlight-field__control {
+  position: relative;
+  z-index: 1;
+  display: block;
+  background: transparent !important;
+  color: transparent !important;
+  caret-color: #172033;
+  -webkit-text-fill-color: transparent;
+}
+
+.mention-highlight-field__control::placeholder {
+  color: #98a2b3;
+  -webkit-text-fill-color: #98a2b3;
+}

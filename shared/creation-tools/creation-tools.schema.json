@@ -19,6 +19,20 @@
         "data_search",
         "webpage_scrape"
       ]
+    },
+    "max_references": {
+      "type": "integer",
+      "description": "memory_search 单次最多召回的记忆资料条数。旧客户端不传时默认 10 条。",
+      "minimum": 1,
+      "maximum": 30,
+      "default": 10
+    },
+    "data_search_limit": {
+      "type": "integer",
+      "description": "data_search 单次最多召回的数据来源条数。旧客户端不传时默认 30 条。",
+      "minimum": 1,
+      "maximum": 50,
+      "default": 30
     }
   },
   "$defs": {
@@ -90,6 +104,10 @@
             "result_count": {
               "type": "integer",
               "minimum": 0
+            },
+            "result_limit": {
+              "type": "integer",
+              "minimum": 1
             },
             "error_code": {
               "type": "string",
@@ -223,6 +241,7 @@
                     "quality_review_failed",
                     "quality_gate_passed",
                     "quality_issues_detected",
+                    "quality_issues_deferred",
                     "quality_cycle_budget_exhausted",
                     "hard_failure_retry_exhausted"
                   ]

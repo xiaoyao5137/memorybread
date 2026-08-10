@@ -23,12 +23,18 @@ export interface CreationToolDefinition {
   capability: string
   required: boolean
   official: boolean
+  resultLimit?: {
+    defaultValue: number
+    min: number
+    max: number
+  }
 }
 
 export interface CreationToolState {
   id: CreationToolId
   installed: boolean
   enabled: boolean
+  resultLimit?: number
 }
 
 export const CREATION_TOOL_DEFINITIONS: readonly CreationToolDefinition[] = [
@@ -47,6 +53,7 @@ export const CREATION_TOOL_DEFINITIONS: readonly CreationToolDefinition[] = [
     capability: '本地执行 · 原始记忆不上传',
     required: true,
     official: true,
+    resultLimit: { defaultValue: 10, min: 1, max: 30 },
   },
   {
     id: 'data_search',
@@ -55,6 +62,7 @@ export const CREATION_TOOL_DEFINITIONS: readonly CreationToolDefinition[] = [
     capability: '本地检索 · 返回时效与来源证据',
     required: true,
     official: true,
+    resultLimit: { defaultValue: 30, min: 1, max: 50 },
   },
   {
     id: 'webpage_scrape',
@@ -89,6 +97,18 @@ const definitionById = new Map(
 const isCreationToolId = (value: unknown): value is CreationToolId =>
   typeof value === 'string' && definitionById.has(value as CreationToolId)
 
+const normalizeResultLimit = (
+  definition: CreationToolDefinition,
+  value: unknown,
+): number | undefined => {
+  if (!definition.resultLimit) return undefined
+  const numeric = Number(value)
+  const resolved = Number.isFinite(numeric)
+    ? Math.round(numeric)
+    : definition.resultLimit.defaultValue
+  return Math.max(definition.resultLimit.min, Math.min(resolved, definition.resultLimit.max))
+}
+
 export const normalizeCreationTools = (value: unknown): CreationToolState[] => {
   const byId = new Map<CreationToolId, Partial<CreationToolState>>()
   if (Array.isArray(value)) {
@@ -101,15 +121,22 @@ export const normalizeCreationTools = (value: unknown): CreationToolState[] => {
   }
 
   return CREATION_TOOL_DEFINITIONS.map((definition) => {
-    if (definition.required) {
-      return { id: definition.id, installed: true, enabled: true }
-    }
     const stored = byId.get(definition.id)
+    const resultLimit = normalizeResultLimit(definition, stored?.resultLimit)
+    if (definition.required) {
+      return {
+        id: definition.id,
+        installed: true,
+        enabled: true,
+        ...(resultLimit == null ? {} : { resultLimit }),
+      }
+    }
     const installed = stored?.installed === true
     return {
       id: definition.id,
       installed,
       enabled: installed && stored?.enabled === true,
+      ...(resultLimit == null ? {} : { resultLimit }),
     }
   })
 }
@@ -162,6 +189,31 @@ export const setCreationToolEnabled = (
       ? { ...tool, enabled }
       : tool
   )))
+}
+
+export const setCreationToolResultLimit = (
+  tools: CreationToolState[],
+  id: CreationToolId,
+  resultLimit: number,
+): CreationToolState[] => {
+  const definition = definitionById.get(id)
+  if (!definition?.resultLimit) return normalizeCreationTools(tools)
+  return normalizeCreationTools(tools.map(tool => (
+    tool.id === id ? { ...tool, resultLimit } : tool
+  )))
+}
+
+export const creationToolResultLimits = (tools: CreationToolState[]) => {
+  const normalized = normalizeCreationTools(tools)
+  const limitFor = (id: CreationToolId) => (
+    normalized.find(tool => tool.id === id)?.resultLimit
+    ?? definitionById.get(id)?.resultLimit?.defaultValue
+    ?? 1
+  )
+  return {
+    memorySearch: limitFor('memory_search'),
+    dataSearch: limitFor('data_search'),
+  }
 }
 
 export const enabledCreationToolIds = (tools: CreationToolState[]): CreationToolId[] =>

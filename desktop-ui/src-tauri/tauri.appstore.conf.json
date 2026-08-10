@@ -4,6 +4,7 @@
   },
   "bundle": {
     "category": "Productivity",
+    "createUpdaterArtifacts": false,
     "targets": ["app"],
     "externalBin": [
       "binaries/memory-bread-core"

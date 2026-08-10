@@ -16,21 +16,54 @@
       "type": "string",
       "enum": ["live", "fresh", "aging", "stale", "missing"]
     },
-    "data_memory_v11": {
+    "timeline_data_fact_v3": {
       "type": "object",
-      "required": ["extraction_version", "title", "summary", "semantic_subject", "semantic_identity", "metric_rows"],
+      "required": ["title", "subject", "action", "target_context", "dimension", "metric", "value", "unit", "statement", "evidence_quote", "confidence"],
       "properties": {
-        "extraction_version": {"const": "data-memory.v11"},
         "title": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 80,
+          "maxLength": 120,
+          "description": "不含数值且完整说明具体对象、动作或目标场景与指标；不得使用用户、任务、生成参数等泛称"
+        },
+        "subject": {"type": "string", "minLength": 1, "maxLength": 80},
+        "action": {"type": "string"},
+        "target_context": {"type": "string"},
+        "dimension": {"type": "string"},
+        "metric": {"type": "string", "minLength": 1, "maxLength": 60},
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "description": "原始数值、范围或复合数值；16分31秒等复合时长必须整体保留"
+        },
+        "unit": {
+          "type": "string",
+          "maxLength": 24,
+          "description": "单一原始单位；复合时长的单位保留在 value 中且本字段为空"
+        },
+        "statement": {"type": "string", "minLength": 1, "maxLength": 500},
+        "evidence_quote": {"type": "string", "minLength": 1, "maxLength": 500},
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]}
+      },
+      "additionalProperties": false
+    },
+    "data_memory_v15": {
+      "type": "object",
+      "required": ["extraction_version", "semantic_origin", "title", "summary", "semantic_subject", "semantic_identity", "metric_rows"],
+      "properties": {
+        "extraction_version": {"const": "data-memory.v15"},
+        "semantic_origin": {"type": "string", "enum": ["model_structured_fact", "legacy_parser"]},
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
           "description": "不含具体数值、能够说明数据对象与主题的语义标题"
         },
         "summary": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 260,
+          "maxLength": 500,
           "description": "包含主题、对象/范围、关键指标值及可用结论的概述"
         },
         "semantic_subject": {
@@ -105,7 +138,7 @@
         "query": {"type": "string", "minLength": 1, "maxLength": 12000},
         "need_fresh": {"type": "boolean", "default": false},
         "as_of_ms": {"type": "integer", "minimum": 0},
-        "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 6}
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 30}
       },
       "additionalProperties": false
     },
@@ -138,9 +171,28 @@
         "content_excerpt": {"type": ["string", "null"]},
         "structured_data": {
           "type": ["object", "array", "null"],
-          "description": "工作数据使用 data_memory_v11；报表结果可在同一对象中附带原始表格字段"
+          "description": "工作数据使用 data_memory_v15；报表结果可在同一对象中附带原始表格字段"
         },
-        "provenance": {"type": ["object", "null"]}
+        "provenance": {"type": ["object", "null"]},
+        "history": {
+          "type": "array",
+          "description": "同一数据源按自然周阶段保留的历史快照，最新阶段在前，用于趋势和同期比较",
+          "items": {
+            "type": "object",
+            "required": ["observed_at", "content_text", "structured_data", "period_granularity", "period_key"],
+            "properties": {
+              "observed_at": {"type": ["integer", "null"]},
+              "collected_at": {"type": "integer"},
+              "content_text": {"type": "string"},
+              "structured_data": {"type": ["object", "array"]},
+              "period_granularity": {"const": "week"},
+              "period_key": {"type": "string"},
+              "period_start_at": {"type": ["integer", "null"]},
+              "period_end_at": {"type": ["integer", "null"]},
+              "provenance": {"type": "object"}
+            }
+          }
+        }
       }
     },
     "data_search_response": {
@@ -192,7 +244,7 @@
         "content_text": {"type": "string"},
         "structured_data": {
           "type": ["object", "array", "null"],
-          "description": "采集成功后追加 data-memory.v11 的 title、summary、semantic_identity 与 metric_rows"
+          "description": "采集成功后追加 data-memory.v15 的 title、summary、semantic_identity 与 metric_rows"
         },
         "content_hash": {"type": "string"},
         "evidence": {

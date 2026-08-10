@@ -41,6 +41,7 @@ interface SyncWorkProfileOptions {
   adminApiBaseUrl: string
   authToken: string
   userId: string
+  signal?: AbortSignal
 }
 
 interface SyncWorkProfileEventDetail {
@@ -416,6 +417,7 @@ const requestCloudProfile = async (
   authToken: string,
   userId: string,
   local?: WorkProfileSummary,
+  signal?: AbortSignal,
 ) => {
   const baseUrl = adminApiBaseUrl.replace(/\/$/, '')
   const range = rangeDateKeys(local)
@@ -431,12 +433,14 @@ const requestCloudProfile = async (
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(pending!.request),
+        ...(signal ? { signal } : {}),
       })
     : await fetch(`${baseUrl}/v1/work-profile?from=${range.startDate}&to=${range.endDate}`, {
         headers: {
           ...serviceEnvironmentHeaders(),
           Authorization: `Bearer ${authToken}`,
         },
+        ...(signal ? { signal } : {}),
       })
   const payload = await response.json().catch(() => null)
   if (!response.ok) {
@@ -468,7 +472,7 @@ const runSync = async (options: SyncWorkProfileOptions): Promise<WorkProfileSumm
     notifyWorkProfileSynced(options.userId, cached)
   }
   try {
-    local = await fetchWorkProfile(options.apiBaseUrl)
+    local = await fetchWorkProfile(options.apiBaseUrl, options.signal)
     displayProfile = cached ? mergeWorkProfiles(local, cached) : local
     cacheWorkProfile(options.userId, displayProfile)
     notifyWorkProfileSynced(options.userId, displayProfile)
@@ -482,6 +486,7 @@ const runSync = async (options: SyncWorkProfileOptions): Promise<WorkProfileSumm
       options.authToken,
       options.userId,
       local ?? undefined,
+      options.signal,
     )
     const profile = displayProfile ? mergeWorkProfiles(displayProfile, cloud) : cloud
     cacheWorkProfile(options.userId, profile)

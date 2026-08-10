@@ -4,8 +4,11 @@ import { invoke } from '@tauri-apps/api/core'
 export interface AppMetadata {
   product_name: string
   version: string
+  build_number: string
   platform: 'macos' | 'windows' | 'linux' | string
   architecture: 'universal' | 'aarch64' | 'x86_64' | string
+  distribution: 'direct' | 'app_store'
+  update_supported: boolean
 }
 
 const browserPlatform = (): AppMetadata['platform'] => {
@@ -19,8 +22,11 @@ const browserPlatform = (): AppMetadata['platform'] => {
 export const FALLBACK_APP_METADATA: AppMetadata = {
   product_name: '记忆面包',
   version: typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.1.0',
+  build_number: '1',
   platform: browserPlatform(),
   architecture: 'universal',
+  distribution: 'direct',
+  update_supported: false,
 }
 
 let metadataPromise: Promise<AppMetadata> | null = null

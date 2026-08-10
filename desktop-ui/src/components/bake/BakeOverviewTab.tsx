@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react'
 import type { BakeInventoryTrendBucket, BakeOverview } from '../../types'
 import BakeMemoryGraph from './BakeMemoryGraph'
 import type { MemoryGraphAssets, MemoryGraphNode } from './memoryGraph'
-import { BakeButton, BakeCard, BakeSectionHeader } from './BakeShared'
+import { BakeCard, BakeSectionHeader } from './BakeShared'
 
 const trendSeries = [
   { key: 'memoryCount', label: '时间线', color: '#007AFF' },
@@ -215,7 +215,6 @@ const InventoryTrendChart: React.FC<{ overview: BakeOverview }> = ({ overview })
     <BakeCard>
       <BakeSectionHeader
         title="记忆生产历程"
-        subtitle="按年月日观察时间线、知识、文档、操作和数据的生产分布"
         right={(
           <div className="bake-trend-header-tools">
             <div className="bake-trend-range" role="radiogroup" aria-label="趋势时间范围">
@@ -381,8 +380,6 @@ const BakeOverviewTab: React.FC<{
   graphAssets?: MemoryGraphAssets
   graphLoading?: boolean
   graphError?: string | null
-  onOpenTab: (tab: 'knowledge' | 'templates' | 'sop' | 'data') => void
-  onOpenRepository: (tab: 'memory' | 'capture') => void
   onRetryGraph?: () => void
   onOpenGraphNode?: (node: MemoryGraphNode) => void
   onSearchGraph?: (query: string) => Promise<MemoryGraphAssets>
@@ -391,8 +388,6 @@ const BakeOverviewTab: React.FC<{
   graphAssets = emptyOverviewGraphAssets,
   graphLoading,
   graphError,
-  onOpenTab,
-  onOpenRepository,
   onRetryGraph,
   onOpenGraphNode,
   onSearchGraph,
@@ -419,81 +414,6 @@ const BakeOverviewTab: React.FC<{
         onOpenNode={onOpenGraphNode}
         onSearchAssets={onSearchGraph}
       />
-
-      <div className="bake-split-overview">
-        <BakeCard>
-          <BakeSectionHeader title="快捷操作" subtitle="快速访问各个功能区" />
-          <div className="bake-list">
-            <div className="bake-list-item">
-              <div className="bake-inline-meta">
-                <div style={{ minWidth: 0 }}>
-                  <div className="bake-list-item__title">查看时间线</div>
-                  <div className="bake-muted">浏览和回溯时间线记录</div>
-                </div>
-                <BakeButton primary onClick={() => onOpenRepository('memory')}>打开</BakeButton>
-              </div>
-            </div>
-            <div className="bake-list-item">
-              <div className="bake-inline-meta">
-                <div style={{ minWidth: 0 }}>
-                  <div className="bake-list-item__title">管理文档</div>
-                  <div className="bake-muted">查看和管理文档模板</div>
-                </div>
-                <BakeButton primary onClick={() => onOpenTab('templates')}>打开</BakeButton>
-              </div>
-            </div>
-            <div className="bake-list-item">
-              <div className="bake-inline-meta">
-                <div style={{ minWidth: 0 }}>
-                  <div className="bake-list-item__title">管理知识</div>
-                  <div className="bake-muted">查看和管理已提炼的知识</div>
-                </div>
-                <BakeButton primary onClick={() => onOpenTab('knowledge')}>打开</BakeButton>
-              </div>
-            </div>
-            <div className="bake-list-item">
-              <div className="bake-inline-meta">
-                <div style={{ minWidth: 0 }}>
-                  <div className="bake-list-item__title">管理操作</div>
-                  <div className="bake-muted">查看和管理操作</div>
-                </div>
-                <BakeButton primary onClick={() => onOpenTab('sop')}>打开</BakeButton>
-              </div>
-            </div>
-            <div className="bake-list-item">
-              <div className="bake-inline-meta">
-                <div style={{ minWidth: 0 }}>
-                  <div className="bake-list-item__title">管理数据</div>
-                  <div className="bake-muted">检索工作数据并即时刷新报表网页</div>
-                </div>
-                <BakeButton primary onClick={() => onOpenTab('data')}>打开</BakeButton>
-              </div>
-            </div>
-          </div>
-        </BakeCard>
-
-        <div style={{ display: 'grid', gap: 16 }}>
-          <BakeCard>
-            <div className="bake-section-title">仓库概览</div>
-            <div className="bake-list">
-              <div className="bake-muted">时间线 {overview.memoryCount}</div>
-              <div className="bake-muted">文档 {overview.templateCount}</div>
-              <div className="bake-muted">知识 {overview.knowledgeCount}</div>
-              <div className="bake-muted">操作 {overview.sopCount}</div>
-              <div className="bake-muted">数据 {overview.dataCount}</div>
-              <div className="bake-muted">采集记录 {overview.captureCount}</div>
-            </div>
-          </BakeCard>
-          <BakeCard>
-            <div className="bake-section-title">最近处理流水</div>
-            <div className="bake-list">
-              {overview.recentActivities.map(item => (
-                <div key={item} className="bake-muted">• {item}</div>
-              ))}
-            </div>
-          </BakeCard>
-        </div>
-      </div>
     </div>
   )
 }

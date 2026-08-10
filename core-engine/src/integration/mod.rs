@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf};
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use serde::{Deserialize, Serialize};
@@ -13,6 +17,8 @@ const MAX_INPUT_FILES: usize = 512;
 const MAX_INPUT_BYTES: usize = 24 * 1024 * 1024;
 const MAX_FILE_BYTES: usize = 5 * 1024 * 1024;
 const MAX_IMPORTED_CONTENT_CHARS: usize = 200_000;
+const MAX_EXPORT_MEMORIES: usize = 200;
+const MAX_EXPORT_NOTE_CHARS: usize = 200_000;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -124,6 +130,19 @@ pub fn integration_skill_catalog() -> Vec<IntegrationSkillCatalogItem> {
             "markdown_import",
             "folder",
             ".md,.markdown",
+            true,
+        ),
+        catalog_item(
+            "obsidian-export",
+            "Obsidian 导出",
+            "Markdown Vault 导出",
+            "把圈选的本机记忆写成 Obsidian 笔记，直写用户选定的 Vault 目录并幂等更新。",
+            "记忆圈选 · 直写 Vault",
+            "推荐",
+            "output",
+            "vault_export",
+            "memory_pick",
+            "",
             true,
         ),
         catalog_item(
@@ -289,6 +308,7 @@ pub fn run_input_summary(request: &RunIntegrationSkillRequest) -> Value {
         "totalBytes": request.files.iter().map(|file| file.size_bytes).sum::<usize>(),
         "queryLength": request.config.get("query").and_then(Value::as_str).map(|value| value.chars().count()).unwrap_or(0),
         "limit": request.config.get("limit").and_then(Value::as_u64),
+        "memoryCount": request.config.get("memoryIds").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
     })
 }
 
@@ -328,6 +348,19 @@ pub fn validate_run_request(
             }
             Ok(())
         }
+        "memory_pick" => {
+            parse_memory_ids(&request.config)?;
+            let vault_path = vault_path_text(&request.config);
+            if request.mode == "execute"
+                && (vault_path.is_empty() || !Path::new(&vault_path).is_absolute())
+            {
+                return Err(IntegrationExecutionError::bad_input(
+                    "请选择有效的 Obsidian Vault 文件夹",
+                ));
+            }
+            vault_subfolder(&request.config)?;
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -348,6 +381,7 @@ pub fn execute_integration_skill(
             execute_record_import(storage, run_id, skill_id, request)
         }
         "workbody" | "qianwen-office" => execute_context_export(storage, run_id, skill_id, request),
+        "obsidian-export" => execute_vault_export(storage, run_id, request),
         "codex" | "claude-code" => execute_agent_install(storage, run_id, skill_id, request),
         _ => Err(IntegrationExecutionError::bad_input("未知的内置集成 Skill")),
     }
@@ -406,16 +440,32 @@ fn finish_import(
     let mut created = 0usize;
     let mut updated = 0usize;
     let mut unchanged = 0usize;
+    let mut records = Vec::new();
     if mode == "execute" {
         for item in &items {
-            match storage
+            let (outcome, timeline_id) = match storage
                 .upsert_integration_import_item(skill_id, item)
                 .map_err(storage_error)?
             {
-                ImportWriteOutcome::Created => created += 1,
-                ImportWriteOutcome::Updated => updated += 1,
-                ImportWriteOutcome::Unchanged => unchanged += 1,
-            }
+                ImportWriteOutcome::Created(timeline_id) => {
+                    created += 1;
+                    ("created", timeline_id)
+                }
+                ImportWriteOutcome::Updated(timeline_id) => {
+                    updated += 1;
+                    ("updated", timeline_id)
+                }
+                ImportWriteOutcome::Unchanged(timeline_id) => {
+                    unchanged += 1;
+                    ("unchanged", timeline_id)
+                }
+            };
+            records.push(json!({
+                "id": timeline_id,
+                "title": item.title,
+                "path": item.source_path,
+                "outcome": outcome,
+            }));
         }
     }
     let sample = items
@@ -435,6 +485,7 @@ fn finish_import(
         "linkCount": stats.link_count,
         "embedCount": stats.embed_count,
         "sample": sample,
+        "records": records,
     }))
 }
 
@@ -520,12 +571,365 @@ fn execute_context_export(
     Ok(json!({
         "kind": "artifact",
         "matchCount": contexts.len(),
+        "records": contexts.iter().map(|item| json!({
+            "id": item.get("id").cloned().unwrap_or(Value::Null),
+            "title": item.get("title").cloned().unwrap_or_else(|| Value::String("未命名记忆".to_string())),
+        })).collect::<Vec<_>>(),
         "artifact": {
             "fileName": file_name,
             "mediaType": "text/markdown; charset=utf-8",
             "contentBase64": BASE64_STANDARD.encode(markdown.as_bytes()),
         }
     }))
+}
+
+#[derive(Debug)]
+struct VaultNotePlan {
+    id: i64,
+    title: String,
+    file_name: String,
+    content_hash: String,
+    content: String,
+}
+
+fn execute_vault_export(
+    storage: &StorageManager,
+    run_id: &str,
+    request: &RunIntegrationSkillRequest,
+) -> Result<Value, IntegrationExecutionError> {
+    let memory_ids = parse_memory_ids(&request.config)?;
+    let subfolder = vault_subfolder(&request.config)?;
+    let vault_path = vault_path_text(&request.config);
+    let memories = storage
+        .integration_export_memories_by_ids(&memory_ids)
+        .map_err(storage_error)?;
+    if memories.is_empty() {
+        return Err(IntegrationExecutionError::failed(
+            "MEMORY_NOT_FOUND",
+            "所选记忆不存在或已被隐藏",
+        ));
+    }
+    storage
+        .append_integration_skill_log(
+            run_id,
+            "info",
+            &format!("已选择 {} 条记忆，目标子目录 {subfolder}", memories.len()),
+        )
+        .map_err(storage_error)?;
+
+    let exported_at = crate::storage::db::current_ts_ms();
+    let mut used_names = HashSet::new();
+    let mut plans = Vec::with_capacity(memories.len());
+    for memory in &memories {
+        let id = memory.get("id").and_then(Value::as_i64).unwrap_or_default();
+        let title = memory
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("未命名记忆")
+            .chars()
+            .take(240)
+            .collect::<String>();
+        let category = memory
+            .get("category")
+            .and_then(Value::as_str)
+            .unwrap_or("memory");
+        let observed_at = memory.get("observedAt").and_then(Value::as_i64);
+        let overview = memory
+            .get("overview")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let details = memory
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .take(MAX_EXPORT_NOTE_CHARS)
+            .collect::<String>();
+        let content_hash = digest_text(&format!(
+            "{title}\u{1f}{category}\u{1f}{}\u{1f}{overview}\u{1f}{details}",
+            observed_at.unwrap_or_default()
+        ));
+        let file_name = vault_note_filename(&title, id, &mut used_names);
+        let content = render_vault_note(
+            id,
+            &title,
+            category,
+            observed_at,
+            overview,
+            &details,
+            &content_hash,
+            exported_at,
+        );
+        plans.push(VaultNotePlan {
+            id,
+            title,
+            file_name,
+            content_hash,
+            content,
+        });
+    }
+
+    if request.mode == "preview" {
+        let target_display = if vault_path.is_empty() {
+            String::new()
+        } else {
+            PathBuf::from(&vault_path)
+                .join(&subfolder)
+                .display()
+                .to_string()
+        };
+        let overwrite_count = if vault_path.is_empty() {
+            0
+        } else {
+            let target_dir = PathBuf::from(&vault_path).join(&subfolder);
+            plans
+                .iter()
+                .filter(|plan| target_dir.join(&plan.file_name).exists())
+                .count()
+        };
+        storage
+            .append_integration_skill_log(
+                run_id,
+                "info",
+                &format!("预检完成，计划写入 {} 篇笔记", plans.len()),
+            )
+            .map_err(storage_error)?;
+        return Ok(json!({
+            "kind": "vault_preview",
+            "target": target_display,
+            "noteCount": plans.len(),
+            "overwriteCount": overwrite_count,
+            "records": plans.iter().map(|plan| json!({
+                "id": plan.id,
+                "title": plan.title,
+                "path": format!("{}/{}", subfolder, plan.file_name),
+            })).collect::<Vec<_>>(),
+        }));
+    }
+
+    let vault_dir = PathBuf::from(&vault_path);
+    let target_dir = vault_dir.join(&subfolder);
+    fs::create_dir_all(&target_dir).map_err(vault_write_error)?;
+    let mut created = 0usize;
+    let mut updated = 0usize;
+    let mut unchanged = 0usize;
+    let mut records = Vec::with_capacity(plans.len());
+    for plan in &plans {
+        let destination = target_dir.join(&plan.file_name);
+        let relative = format!("{}/{}", subfolder, plan.file_name);
+        let outcome = if destination.exists() {
+            let existing = fs::read_to_string(&destination).unwrap_or_default();
+            let matches = vault_note_identity(&existing).is_some_and(|(old_id, old_hash)| {
+                old_id == plan.id.to_string() && old_hash == plan.content_hash
+            });
+            if matches {
+                unchanged += 1;
+                "unchanged"
+            } else {
+                fs::write(&destination, plan.content.as_bytes()).map_err(vault_write_error)?;
+                updated += 1;
+                "updated"
+            }
+        } else {
+            fs::write(&destination, plan.content.as_bytes()).map_err(vault_write_error)?;
+            created += 1;
+            "created"
+        };
+        records.push(json!({
+            "id": plan.id,
+            "title": plan.title,
+            "path": relative,
+            "outcome": outcome,
+        }));
+    }
+    storage
+        .append_integration_skill_log(
+            run_id,
+            "info",
+            &format!("已写入 Vault：新增 {created}，更新 {updated}，未变化 {unchanged}"),
+        )
+        .map_err(storage_error)?;
+    Ok(json!({
+        "kind": "vault_export",
+        "target": target_dir.display().to_string(),
+        "created": created,
+        "updated": updated,
+        "unchanged": unchanged,
+        "records": records,
+    }))
+}
+
+fn parse_memory_ids(config: &Value) -> Result<Vec<i64>, IntegrationExecutionError> {
+    let raw = config
+        .get("memoryIds")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut ids = Vec::with_capacity(raw.len());
+    for value in raw {
+        let id = value.as_i64().filter(|id| *id > 0).ok_or_else(|| {
+            IntegrationExecutionError::bad_input("memoryIds 只能包含正整数记忆 id")
+        })?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    if ids.is_empty() {
+        return Err(IntegrationExecutionError::bad_input(
+            "请先圈选或勾选至少一条记忆",
+        ));
+    }
+    if ids.len() > MAX_EXPORT_MEMORIES {
+        return Err(IntegrationExecutionError::bad_input(format!(
+            "一次最多导出 {MAX_EXPORT_MEMORIES} 条记忆"
+        )));
+    }
+    Ok(ids)
+}
+
+fn vault_path_text(config: &Value) -> String {
+    config
+        .get("vaultPath")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+fn vault_subfolder(config: &Value) -> Result<String, IntegrationExecutionError> {
+    let raw = config
+        .get("subfolder")
+        .and_then(Value::as_str)
+        .unwrap_or("MemoryBread")
+        .trim();
+    let raw = if raw.is_empty() { "MemoryBread" } else { raw };
+    if raw.chars().count() > 120 || raw.contains('\0') {
+        return Err(IntegrationExecutionError::bad_input(
+            "Vault 子目录名称过长或包含无效字符",
+        ));
+    }
+    let normalized = raw.replace('\\', "/");
+    let parts = normalized.split('/').map(str::trim).collect::<Vec<_>>();
+    for part in &parts {
+        if part.is_empty() || *part == "." || *part == ".." || part.starts_with('.') {
+            return Err(IntegrationExecutionError::bad_input(
+                "Vault 子目录包含不安全或无效的目录名",
+            ));
+        }
+    }
+    Ok(parts.join("/"))
+}
+
+fn vault_note_filename(title: &str, id: i64, used: &mut HashSet<String>) -> String {
+    let cleaned = title
+        .chars()
+        .map(|character| match character {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '-',
+            other if other.is_control() => '-',
+            other => other,
+        })
+        .collect::<String>();
+    let cleaned = cleaned
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|character| character == '.' || character == '-')
+        .chars()
+        .take(80)
+        .collect::<String>();
+    let base = if cleaned.is_empty() {
+        format!("memory-{id}")
+    } else {
+        cleaned
+    };
+    let mut candidate = format!("{base}.md");
+    if used.contains(&candidate) {
+        let suffix = digest_text(&format!("{base}-{id}"));
+        candidate = format!("{base}-{}.md", &suffix[..8]);
+        if used.contains(&candidate) {
+            candidate = format!("{base}-{id}.md");
+        }
+    }
+    used.insert(candidate.clone());
+    candidate
+}
+
+fn render_vault_note(
+    id: i64,
+    title: &str,
+    category: &str,
+    observed_at: Option<i64>,
+    overview: &str,
+    details: &str,
+    content_hash: &str,
+    exported_at: i64,
+) -> String {
+    let mut note = String::new();
+    note.push_str("---\n");
+    note.push_str(&format!("title: {}\n", yaml_scalar(title)));
+    note.push_str(&format!("memorybread_id: {id}\n"));
+    note.push_str(&format!("memorybread_content_hash: {content_hash}\n"));
+    note.push_str(&format!("category: {}\n", yaml_scalar(category)));
+    if let Some(timestamp) = observed_at {
+        note.push_str(&format!("observed_at: {timestamp}\n"));
+    }
+    note.push_str(&format!("exported_at_ms: {exported_at}\n"));
+    note.push_str("source: memorybread\n");
+    note.push_str("tags:\n  - memorybread\n");
+    note.push_str("---\n\n");
+    note.push_str(&format!("# {title}\n\n"));
+    let overview = overview.trim();
+    if !overview.is_empty() {
+        note.push_str(overview);
+        note.push_str("\n\n");
+    }
+    let details = details.trim();
+    if !details.is_empty() && details != overview {
+        note.push_str(details);
+        note.push('\n');
+    }
+    note
+}
+
+fn yaml_scalar(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', " ");
+    format!("\"{escaped}\"")
+}
+
+fn vault_note_identity(text: &str) -> Option<(String, String)> {
+    let mut lines = text.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    let mut id = None;
+    let mut hash = None;
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            break;
+        }
+        if let Some(rest) = trimmed.strip_prefix("memorybread_id:") {
+            id = Some(rest.trim().to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("memorybread_content_hash:") {
+            hash = Some(rest.trim().to_string());
+        }
+    }
+    match (id, hash) {
+        (Some(id), Some(hash)) => Some((id, hash)),
+        _ => None,
+    }
+}
+
+fn vault_write_error(error: std::io::Error) -> IntegrationExecutionError {
+    IntegrationExecutionError::failed(
+        "VAULT_WRITE_FAILED",
+        format!("写入 Obsidian Vault 失败: {error}"),
+    )
 }
 
 fn execute_agent_install(
@@ -1209,6 +1613,18 @@ fn source_file_contents(id: &str) -> Vec<(&'static str, &'static str, &'static s
                 include_str!("../../../integrations/builtin/obsidian/integration.json"),
             ),
         ],
+        "obsidian-export" => vec![
+            (
+                "SKILL.md",
+                "text/markdown",
+                include_str!("../../../integrations/builtin/obsidian-export/SKILL.md"),
+            ),
+            (
+                "integration.json",
+                "application/json",
+                include_str!("../../../integrations/builtin/obsidian-export/integration.json"),
+            ),
+        ],
         "qdrant" => vec![
             (
                 "SKILL.md",
@@ -1420,6 +1836,16 @@ mod tests {
             execute_integration_skill(&storage, "import-run", "obsidian", &import_request)
                 .expect("execute import");
         assert_eq!(imported.get("created").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            imported.pointer("/records/0/id").and_then(Value::as_i64),
+            Some(1)
+        );
+        assert_eq!(
+            imported
+                .pointer("/records/0/outcome")
+                .and_then(Value::as_str),
+            Some("created")
+        );
 
         let export_request = RunIntegrationSkillRequest {
             mode: "execute".to_string(),
@@ -1438,6 +1864,10 @@ mod tests {
             execute_integration_skill(&storage, "export-run", "workbody", &export_request)
                 .expect("execute export");
         assert_eq!(exported.get("matchCount").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            exported.pointer("/records/0/id").and_then(Value::as_i64),
+            Some(1)
+        );
         let artifact = exported
             .pointer("/artifact/contentBase64")
             .and_then(Value::as_str)
@@ -1446,5 +1876,172 @@ mod tests {
         assert!(String::from_utf8(decoded)
             .expect("utf8 artifact")
             .contains("Imported decision"));
+    }
+
+    fn vault_export_request(
+        mode: &str,
+        memory_ids: Vec<i64>,
+        vault_path: &str,
+    ) -> RunIntegrationSkillRequest {
+        RunIntegrationSkillRequest {
+            mode: mode.to_string(),
+            files: Vec::new(),
+            config: json!({
+                "memoryIds": memory_ids,
+                "vaultPath": vault_path,
+                "subfolder": "MemoryBread",
+            }),
+        }
+    }
+
+    #[test]
+    fn validates_memory_pick_requests() {
+        let empty = vault_export_request("execute", Vec::new(), "/tmp/vault");
+        let error = validate_run_request("obsidian-export", &empty).unwrap_err();
+        assert_eq!(error.code, "INVALID_INPUT");
+        assert!(error.message.contains("至少一条记忆"));
+
+        let too_many = vault_export_request("execute", (1..=201).collect(), "/tmp/vault");
+        let error = validate_run_request("obsidian-export", &too_many).unwrap_err();
+        assert!(error.message.contains("最多导出"));
+
+        let missing_vault = vault_export_request("execute", vec![1], "");
+        let error = validate_run_request("obsidian-export", &missing_vault).unwrap_err();
+        assert!(error.message.contains("Vault 文件夹"));
+
+        let relative_vault = vault_export_request("execute", vec![1], "vault/notes");
+        assert!(validate_run_request("obsidian-export", &relative_vault).is_err());
+
+        let mut traversal = vault_export_request("execute", vec![1], "/tmp/vault");
+        traversal.config["subfolder"] = json!("../evil");
+        let error = validate_run_request("obsidian-export", &traversal).unwrap_err();
+        assert!(error.message.contains("子目录"));
+
+        let preview_without_vault = vault_export_request("preview", vec![1], "");
+        assert!(validate_run_request("obsidian-export", &preview_without_vault).is_ok());
+    }
+
+    #[test]
+    fn exports_selected_memories_to_vault_idempotently() {
+        let storage = StorageManager::open_in_memory().expect("storage");
+        let import_markdown = |run_id: &str, path: &str, body: &str| {
+            let request = RunIntegrationSkillRequest {
+                mode: "execute".to_string(),
+                files: vec![IntegrationInputFile {
+                    path: path.to_string(),
+                    media_type: "text/markdown".to_string(),
+                    content_base64: BASE64_STANDARD.encode(body.as_bytes()),
+                    size_bytes: body.len(),
+                }],
+                config: json!({}),
+            };
+            storage
+                .create_integration_skill_run(
+                    run_id,
+                    "obsidian",
+                    "execute",
+                    &run_input_summary(&request),
+                )
+                .expect("create seed run");
+            execute_integration_skill(&storage, run_id, "obsidian", &request).expect("seed import");
+        };
+        import_markdown("seed-run-1", "Notes/Alpha.md", "# Alpha\n\nAlpha evidence.");
+        import_markdown("seed-run-2", "Notes/Beta.md", "# Beta\n\nBeta evidence.");
+
+        let vault = tempfile::tempdir().expect("tempdir");
+        fs::write(vault.path().join("outside.md"), "untouched").expect("outside file");
+        let vault_path = vault.path().to_str().expect("vault path").to_string();
+
+        let preview_request = vault_export_request("preview", vec![1, 2], &vault_path);
+        storage
+            .create_integration_skill_run(
+                "vault-preview",
+                "obsidian-export",
+                "preview",
+                &run_input_summary(&preview_request),
+            )
+            .expect("create preview run");
+        let preview = execute_integration_skill(
+            &storage,
+            "vault-preview",
+            "obsidian-export",
+            &preview_request,
+        )
+        .expect("preview export");
+        assert_eq!(
+            preview.get("kind").and_then(Value::as_str),
+            Some("vault_preview")
+        );
+        assert_eq!(preview.get("noteCount").and_then(Value::as_u64), Some(2));
+        assert_eq!(
+            preview.get("overwriteCount").and_then(Value::as_u64),
+            Some(0)
+        );
+        let target_dir = vault.path().join("MemoryBread");
+        assert!(!target_dir.exists(), "preview must not write files");
+
+        let execute_request = vault_export_request("execute", vec![1, 2], &vault_path);
+        storage
+            .create_integration_skill_run(
+                "vault-run-1",
+                "obsidian-export",
+                "execute",
+                &run_input_summary(&execute_request),
+            )
+            .expect("create export run");
+        let first =
+            execute_integration_skill(&storage, "vault-run-1", "obsidian-export", &execute_request)
+                .expect("first export");
+        assert_eq!(
+            first.get("kind").and_then(Value::as_str),
+            Some("vault_export")
+        );
+        assert_eq!(first.get("created").and_then(Value::as_u64), Some(2));
+        assert_eq!(
+            first.pointer("/records/0/path").and_then(Value::as_str),
+            Some("MemoryBread/Alpha.md")
+        );
+        let note = fs::read_to_string(target_dir.join("Alpha.md")).expect("read note");
+        assert!(note.contains("memorybread_id: 1"));
+        assert!(note.contains("Alpha evidence."));
+
+        storage
+            .create_integration_skill_run(
+                "vault-run-2",
+                "obsidian-export",
+                "execute",
+                &run_input_summary(&execute_request),
+            )
+            .expect("create second export run");
+        let second =
+            execute_integration_skill(&storage, "vault-run-2", "obsidian-export", &execute_request)
+                .expect("second export");
+        assert_eq!(second.get("created").and_then(Value::as_u64), Some(0));
+        assert_eq!(second.get("unchanged").and_then(Value::as_u64), Some(2));
+
+        import_markdown(
+            "seed-run-3",
+            "Notes/Alpha.md",
+            "# Alpha revised\n\nRevised evidence.",
+        );
+        storage
+            .create_integration_skill_run(
+                "vault-run-3",
+                "obsidian-export",
+                "execute",
+                &run_input_summary(&execute_request),
+            )
+            .expect("create third export run");
+        let third =
+            execute_integration_skill(&storage, "vault-run-3", "obsidian-export", &execute_request)
+                .expect("third export");
+        assert_eq!(third.get("updated").and_then(Value::as_u64), Some(1));
+        assert_eq!(third.get("unchanged").and_then(Value::as_u64), Some(1));
+        let revised = fs::read_to_string(target_dir.join("Alpha.md")).expect("read revised");
+        assert!(revised.contains("Revised evidence."));
+        assert_eq!(
+            fs::read_to_string(vault.path().join("outside.md")).expect("outside"),
+            "untouched"
+        );
     }
 }

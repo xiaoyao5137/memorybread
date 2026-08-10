@@ -83,8 +83,14 @@ describe('技能安装与使用', () => {
     fireEvent.click(within(picker).getByRole('option', { name: /跨部门技术沟通会文档/ }))
 
     expect(textarea).toHaveValue('@跨部门技术沟通会文档 ')
+    const promptField = textarea.closest('.mention-highlight-field')
+    expect(promptField?.querySelector('.mention-highlight-field__mention')).toHaveTextContent('@跨部门技术沟通会文档')
     const matched = screen.getByLabelText('本次使用的技能')
     expect(within(matched).getByText('@ 已选择')).toBeInTheDocument()
+
+    // 选中技能后继续输入正文，选择器不应重新弹出
+    fireEvent.change(textarea, { target: { value: '@跨部门技术沟通会文档 是' } })
+    expect(screen.queryByRole('listbox', { name: '选择技能' })).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
     await waitFor(() => expect(generationPayload).not.toBeNull())
@@ -344,6 +350,27 @@ describe('技能安装与使用', () => {
     await waitFor(() => expect(localSkills[0]).toMatchObject({ installed: false }))
   })
 
+  it('技能库头部提供手工新建技能入口', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills' && (!init?.method || init.method === 'GET')) {
+        return Response.json([rawSkill])
+      }
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /技能/ }))
+    fireEvent.click(screen.getByRole('button', { name: '新建技能' }))
+
+    const editor = await screen.findByRole('dialog', { name: '新建技能' })
+    expect(within(editor).getByText(/手工新建从空白开始/)).toBeInTheDocument()
+  })
+
   it('删除技能前要求二次确认', async () => {
     let deleteCount = 0
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -376,5 +403,7 @@ describe('技能安装与使用', () => {
 
     await waitFor(() => expect(deleteCount).toBe(1))
     expect(await screen.findByText('还没有技能')).toBeInTheDocument()
+    // 头部与空状态区域各有一个新建技能入口
+    expect(screen.getAllByRole('button', { name: '新建技能' }).length).toBeGreaterThanOrEqual(2)
   })
 })

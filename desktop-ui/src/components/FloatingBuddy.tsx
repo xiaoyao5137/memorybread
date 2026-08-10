@@ -10,15 +10,18 @@
  */
 
 import React from 'react'
-import { ChevronRight, LogIn } from 'lucide-react'
+import { ArrowDownToLine, ChevronRight, LogIn } from 'lucide-react'
 import { useAppStore } from '../store/useAppStore'
 import { type WindowMode } from '../types'
 import { getRunModeLabel, getUserDisplayName } from '../utils/accountDisplay'
+import type { SoftwareUpdateCheck } from '../utils/softwareUpdate'
 import { BreadAppIcon, type BreadAppIconName } from './icons/BreadIcons'
 import './FloatingBuddy.v2.css'
 
 interface FloatingBuddyProps {
   className?: string
+  softwareUpdate?: SoftwareUpdateCheck | null
+  onSoftwareUpdateClick?: () => void
 }
 
 interface MenuItem {
@@ -136,7 +139,7 @@ const getAccountInitials = (label: string): string => {
   return Array.from(normalized).slice(0, 2).join('').toUpperCase()
 }
 
-const FloatingBuddy: React.FC<FloatingBuddyProps> = ({ className = '' }) => {
+const FloatingBuddy: React.FC<FloatingBuddyProps> = ({ className = '', softwareUpdate, onSoftwareUpdateClick }) => {
   const { windowMode, setWindowMode, clearBakeNavigationStack, currentUser, cloudSubscription } = useAppStore()
   const accountLabel = getUserDisplayName(currentUser)
   const runModeLabel = getRunModeLabel(currentUser, cloudSubscription)
@@ -157,7 +160,7 @@ const FloatingBuddy: React.FC<FloatingBuddyProps> = ({ className = '' }) => {
         </div>
         <div className="buddy-sidebar-title-group">
           <h1 className="buddy-sidebar-title">记忆面包</h1>
-          <p className="buddy-sidebar-subtitle">让工作持续积累</p>
+          <p className="buddy-sidebar-subtitle">品尝新知识</p>
         </div>
       </div>
 
@@ -189,6 +192,21 @@ const FloatingBuddy: React.FC<FloatingBuddyProps> = ({ className = '' }) => {
       </nav>
 
       <footer className="buddy-sidebar-footer">
+        {softwareUpdate?.update_available && softwareUpdate.release && (
+          <button
+            className={`buddy-update-entry ${softwareUpdate.is_mandatory ? 'buddy-update-entry--mandatory' : ''}`}
+            data-testid="software-update-entry"
+            onClick={onSoftwareUpdateClick}
+            type="button"
+          >
+            <span className="buddy-update-entry__icon" aria-hidden="true"><ArrowDownToLine size={17} /></span>
+            <span className="buddy-update-entry__copy">
+              <strong>{softwareUpdate.is_mandatory ? '需要更新' : '更新可用'}</strong>
+              <span>v{softwareUpdate.latest_version}</span>
+            </span>
+            <span className="buddy-update-entry__action">更新</span>
+          </button>
+        )}
         <button
           className={`buddy-account-entry ${windowMode === 'account' || windowMode === 'messages' ? 'buddy-account-entry--active' : ''}`}
           data-testid="account-entry"

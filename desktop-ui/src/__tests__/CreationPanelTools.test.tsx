@@ -39,6 +39,17 @@ describe('创作工具 Tab', () => {
     expect(screen.getByRole('button', { name: '数据检索 Tool已开启' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '网页爬取 Tool已安装' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '网页爬取 Tool已开启' })).toBeDisabled()
+    expect(screen.getByRole('spinbutton', { name: '记忆搜索 Tool默认召回条数' })).toHaveValue(10)
+    expect(screen.getByRole('spinbutton', { name: '数据检索 Tool默认召回条数' })).toHaveValue(30)
+
+    fireEvent.change(
+      screen.getByRole('spinbutton', { name: '记忆搜索 Tool默认召回条数' }),
+      { target: { value: '14' } },
+    )
+    fireEvent.change(
+      screen.getByRole('spinbutton', { name: '数据检索 Tool默认召回条数' }),
+      { target: { value: '42' } },
+    )
 
     const plantUmlCard = screen.getByText('PlantUML 画图 Tool').closest('article')
     expect(plantUmlCard).not.toBeNull()
@@ -60,14 +71,20 @@ describe('创作工具 Tab', () => {
         installed: true,
         enabled: false,
       })
+      expect(stored.find((tool: { id: string }) => tool.id === 'memory_search')).toMatchObject({
+        resultLimit: 14,
+      })
+      expect(stored.find((tool: { id: string }) => tool.id === 'data_search')).toMatchObject({
+        resultLimit: 42,
+      })
     })
   })
 
   it('把已开启 Tool ID 传给创作 Agent', async () => {
     window.localStorage.setItem(CREATION_TOOLS_STORAGE_KEY, JSON.stringify([
       { id: 'internet_search', installed: true, enabled: true },
-      { id: 'memory_search', installed: true, enabled: true },
-      { id: 'data_search', installed: true, enabled: true },
+      { id: 'memory_search', installed: true, enabled: true, resultLimit: 12 },
+      { id: 'data_search', installed: true, enabled: true, resultLimit: 37 },
       { id: 'webpage_scrape', installed: true, enabled: true },
       { id: 'github_search', installed: true, enabled: true },
     ]))
@@ -107,5 +124,7 @@ describe('创作工具 Tab', () => {
       'webpage_scrape',
       'github_search',
     ])
+    expect(agentPayloads[0].max_references).toBe(12)
+    expect(agentPayloads[0].data_search_limit).toBe(37)
   })
 })

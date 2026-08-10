@@ -9,6 +9,7 @@ import {
   type InitializationStage,
   type InitializationStatus,
 } from '../utils/initialization'
+import { useConfirmDialog } from './useConfirmDialog'
 import './OnboardingWizard.css'
 
 const STATUS_POLL_MS = 1_000
@@ -97,6 +98,7 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
     setHasCompletedSetup,
     setWindowMode,
   } = useAppStore()
+  const { confirm: confirmDestructive, dialog: confirmDialog } = useConfirmDialog()
   const [status, setStatus] = useState<InitializationStatus | null>(null)
   const [connecting, setConnecting] = useState(true)
   const [connectionError, setConnectionError] = useState('')
@@ -211,9 +213,12 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
   }
 
   const report = async () => {
-    const confirmed = window.confirm(
-      '将上报应用版本、系统版本、硬件档位、失败阶段和稳定错误码。不会上报截图、知识内容、提示词、回答、文件路径或密钥。确认上报吗？',
-    )
+    const confirmed = await confirmDestructive({
+      title: '确认上报诊断信息？',
+      description: '将上报应用版本、系统版本、硬件档位、失败阶段和稳定错误码。不会上报截图、知识内容、提示词、回答、文件路径或密钥。',
+      confirmLabel: '确认上报',
+      danger: false,
+    })
     if (!confirmed) return
     setReporting(true)
     setActionError('')
@@ -490,6 +495,7 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
           </section>
         </div>
       )}
+      {confirmDialog}
     </main>
   )
 }

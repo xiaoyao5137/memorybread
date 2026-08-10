@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react'
-import { CheckCircle2, Download, RefreshCw, ShieldCheck, X } from 'lucide-react'
+import { CheckCircle2, Download, RefreshCw, X } from 'lucide-react'
 import { useAppStore } from '../store/useAppStore'
-import { openExternalUrl, useAppMetadata } from '../utils/appMetadata'
-import { fetchSoftwareUpdate, type SoftwareUpdateCheck } from '../utils/softwareUpdate'
+import { useAppMetadata } from '../utils/appMetadata'
+import { fetchSoftwareUpdate, requestSoftwareUpdate, type SoftwareUpdateCheck } from '../utils/softwareUpdate'
 import './AboutPanel.css'
 
 const AboutPanel: React.FC = () => {
@@ -64,7 +64,8 @@ const AboutPanel: React.FC = () => {
           <dl>
             <div><dt>当前版本</dt><dd>v{metadata.version}</dd></div>
             <div><dt>运行平台</dt><dd>{metadata.platform} · {metadata.architecture}</dd></div>
-            <div><dt>更新渠道</dt><dd>stable</dd></div>
+            <div><dt>构建号</dt><dd>{metadata.build_number}</dd></div>
+            <div><dt>更新渠道</dt><dd>{metadata.distribution === 'direct' ? '应用内更新' : 'App Store'}</dd></div>
           </dl>
 
           {error && <div className="about-panel__status about-panel__status--error" role="alert">{error}</div>}
@@ -75,15 +76,10 @@ const AboutPanel: React.FC = () => {
             <div className="about-panel__update">
               <div><Download size={19} aria-hidden /><span><strong>v{update.latest_version} 可下载安装</strong><small>{update.release.title}</small></span></div>
               <p>{update.release.release_notes}</p>
-              <button onClick={() => void openExternalUrl(update.release!.download_url)} type="button">打开下载页面</button>
+              <button onClick={() => requestSoftwareUpdate(update)} type="button">{metadata.update_supported ? '立即更新' : metadata.distribution === 'app_store' ? '前往 App Store' : '下载安装包'}</button>
             </div>
           )}
         </article>
-
-        <footer className="about-panel__privacy">
-          <ShieldCheck size={20} aria-hidden />
-          <p><strong>本地优先</strong><span>软件版本检查只发送版本号、平台和架构，不上传截图、窗口标题或知识内容。</span></p>
-        </footer>
       </div>
     </section>
   )

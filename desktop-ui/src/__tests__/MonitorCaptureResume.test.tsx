@@ -12,6 +12,8 @@ const defaultProps = {
   recentBakeFailures: 0,
   recentBakeDeferred: 0,
   recentBakeRuns: 0,
+  recentNoProgress: 0,
+  schedulerMismatch: false,
   captureEnabled: false,
   inferenceQueue: undefined,
 }
@@ -51,5 +53,19 @@ describe('MonitorPanel 采集暂停提示', () => {
 
     expect(screen.getByRole('alert')).toHaveTextContent('开启失败，请确认本机服务正常后重试')
     expect(screen.getByRole('button', { name: '开启自动采集与提炼' })).toBeEnabled()
+  })
+
+  it('队列可执行但连续空跑时显示调度口径异常', () => {
+    render(
+      <PipelineBacklogAlert
+        {...defaultProps}
+        captureEnabled
+        bakePending={319}
+        recentNoProgress={4}
+        schedulerMismatch
+      />,
+    )
+
+    expect(screen.getByText(/队列仍有可执行候选，但最近 5 批有 4 批未取得进展/)).toBeInTheDocument()
   })
 })

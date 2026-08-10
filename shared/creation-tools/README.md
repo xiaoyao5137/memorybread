@@ -6,6 +6,7 @@
 
 - `enabled_tools` 是新增的可选请求字段；旧客户端不传时，Core Engine 与 Sidecar 都补齐 `internet_search`、`memory_search`、`data_search`、`webpage_scrape`。
 - `internet_search`、`memory_search`、`data_search`、`webpage_scrape` 是必备 Tool，客户端不得卸载或关闭，服务端收到空数组时也必须补齐。
+- `memory_search` 默认最多召回 10 条，可在创作“工具”页配置为 1～30 条；`data_search` 默认最多召回 30 条，可配置为 1～50 条。旧客户端不传 `max_references` / `data_search_limit` 时由 Core Engine 与 Sidecar 补齐默认值，越界值在服务端收敛到契约范围。
 - 日报、周报、项目总结和分析任务可把 `data_search` 作为与记忆、文档、知识等来源平权的证据探针；报表 URL 统一参加 Top-K。Harness 对 Top-K 报表在创作时调用 `webpage_scrape` 获取通用浏览器截图，只有 OCR/DOM 硬校验通过的数据才进入 `data_analysis_agent`，不预置供应商专用流程。
 - 初稿质检通过 `$defs.quality_issue` 返回问题代码、严重度、目标 Agent、可观察证据和前置能力。`harness.decision` 兼容数据反馈与质量反馈两个分支；质量分支可通过 `activated_skills[]` 动态激活匹配的已应用 Skill，并追加数据分析、PlantUML、文档重写、五类专项润色和再次质检。
 - 首次创作必须把 `chapter_design_agent` 放在首个 Writer 前；专项润色不预置成固定流水线，只在质量问题命中时运行，最多三轮。

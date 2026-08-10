@@ -15,6 +15,7 @@ import { useAppStore } from '../store/useAppStore'
 import type { AchievementBadge, RagContext } from '../types'
 import { buildAttachmentMetadata, buildAttachmentPrompt, filesToAttachments, formatAttachmentSize, type UserAttachment } from '../utils/attachments'
 import { ACHIEVEMENTS_CHANGED_KEY, fetchAchievementProfile, fetchBillingBalance } from '../utils/authApi'
+import { createOptionalCloudRequestSignal, optionalCloudIsReachable } from '../utils/optionalCloud'
 import {
   FLOATING_ASSIST_AUTO_TASK_KEY,
   FLOATING_ASSIST_ENABLED_KEY,
@@ -415,14 +416,32 @@ const SystemFloatingAssist: React.FC = () => {
       return
     }
     let cancelled = false
-    fetchBillingBalance(adminApiBaseUrl, authToken)
-      .then(balance => {
+    let refreshing = false
+    const lifecycleController = new AbortController()
+    const refreshBalance = async () => {
+      if (cancelled || refreshing || !optionalCloudIsReachable()) return
+      refreshing = true
+      const request = createOptionalCloudRequestSignal(lifecycleController.signal)
+      try {
+        const balance = await fetchBillingBalance(adminApiBaseUrl, authToken, request.signal)
         if (!cancelled) setCloudBalance(balance)
-      })
-      .catch(() => {
+      } catch {
         if (!cancelled) setCloudBalance(null)
-      })
-    return () => { cancelled = true }
+      } finally {
+        request.dispose()
+        refreshing = false
+      }
+    }
+    const useLocalModelOffline = () => setCloudBalance(null)
+    void refreshBalance()
+    window.addEventListener('online', refreshBalance)
+    window.addEventListener('offline', useLocalModelOffline)
+    return () => {
+      cancelled = true
+      lifecycleController.abort()
+      window.removeEventListener('online', refreshBalance)
+      window.removeEventListener('offline', useLocalModelOffline)
+    }
   }, [adminApiBaseUrl, authToken, currentUser, setCloudBalance])
 
   useEffect(() => {
@@ -431,13 +450,22 @@ const SystemFloatingAssist: React.FC = () => {
       return undefined
     }
     let cancelled = false
+    let refreshing = false
+    const lifecycleController = new AbortController()
     const refreshBadge = () => {
-      fetchAchievementProfile(adminApiBaseUrl, authToken)
+      if (cancelled || refreshing || !optionalCloudIsReachable()) return
+      refreshing = true
+      const request = createOptionalCloudRequestSignal(lifecycleController.signal)
+      fetchAchievementProfile(adminApiBaseUrl, authToken, request.signal)
         .then((profile) => {
           if (!cancelled) setFloatingBadge(profile.equipped.floating_avatar ?? null)
         })
         .catch(() => {
           if (!cancelled) setFloatingBadge(null)
+        })
+        .finally(() => {
+          request.dispose()
+          refreshing = false
         })
     }
     const handleStorage = (event: StorageEvent) => {
@@ -445,9 +473,12 @@ const SystemFloatingAssist: React.FC = () => {
     }
     refreshBadge()
     window.addEventListener('storage', handleStorage)
+    window.addEventListener('online', refreshBadge)
     return () => {
       cancelled = true
+      lifecycleController.abort()
       window.removeEventListener('storage', handleStorage)
+      window.removeEventListener('online', refreshBadge)
     }
   }, [adminApiBaseUrl, authToken, currentUser])
 

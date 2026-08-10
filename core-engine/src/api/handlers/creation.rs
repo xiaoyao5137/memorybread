@@ -50,6 +50,8 @@ pub struct GenerateRequest {
     pub freshness_weight: f64,
     #[serde(default = "default_max_references")]
     pub max_references: i64,
+    #[serde(default = "default_data_search_limit")]
+    pub data_search_limit: usize,
     #[serde(default)]
     pub creation_model: Option<String>,
     #[serde(default)]
@@ -105,6 +107,7 @@ struct CreationPayload {
     format_weight: f64,
     freshness_weight: f64,
     max_references: i64,
+    data_search_limit: usize,
     creation_model: Option<String>,
     creation_api_key: Option<String>,
     creation_base_url: Option<String>,
@@ -207,7 +210,8 @@ pub async fn generate_document(
         usage_weight: req.usage_weight,
         format_weight: req.format_weight,
         freshness_weight: req.freshness_weight,
-        max_references: req.max_references,
+        max_references: req.max_references.clamp(1, 30),
+        data_search_limit: req.data_search_limit.clamp(1, 50),
         creation_model: req.creation_model,
         creation_api_key: req.creation_api_key,
         creation_base_url: req.creation_base_url,
@@ -378,7 +382,8 @@ pub async fn run_creation_agent(
             usage_weight: generation.usage_weight,
             format_weight: generation.format_weight,
             freshness_weight: generation.freshness_weight,
-            max_references: generation.max_references,
+            max_references: generation.max_references.clamp(1, 30),
+            data_search_limit: generation.data_search_limit.clamp(1, 50),
             creation_model: generation.creation_model,
             creation_api_key: generation.creation_api_key,
             creation_base_url: generation.creation_base_url,
@@ -554,7 +559,11 @@ fn default_freshness_weight() -> f64 {
 }
 
 fn default_max_references() -> i64 {
-    6
+    10
+}
+
+fn default_data_search_limit() -> usize {
+    30
 }
 
 fn default_model_mode() -> String {
@@ -1291,6 +1300,9 @@ mod tests {
             "enabled_tools": ["plantuml_diagram", "memory_search", ""]
         }))
         .unwrap();
+
+        assert_eq!(request.max_references, 10);
+        assert_eq!(request.data_search_limit, 30);
 
         assert_eq!(
             normalize_creation_tool_ids(request.enabled_tools),

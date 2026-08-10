@@ -1,12 +1,14 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   CREATION_TOOLS_STORAGE_KEY,
+  creationToolResultLimits,
   enabledCreationToolIds,
   loadCreationTools,
   normalizeCreationTools,
   saveCreationTools,
   setCreationToolEnabled,
   setCreationToolInstalled,
+  setCreationToolResultLimit,
 } from '../utils/creationTools'
 
 describe('创作 Tool 配置', () => {
@@ -29,8 +31,13 @@ describe('创作 Tool 配置', () => {
     expect(tools.find(tool => tool.id === 'memory_search')).toMatchObject({
       installed: true,
       enabled: true,
+      resultLimit: 10,
     })
-    expect(tools.find(tool => tool.id === 'data_search')).toMatchObject({ installed: true, enabled: true })
+    expect(tools.find(tool => tool.id === 'data_search')).toMatchObject({
+      installed: true,
+      enabled: true,
+      resultLimit: 30,
+    })
     expect(tools.find(tool => tool.id === 'webpage_scrape')).toMatchObject({ installed: true, enabled: true })
     expect(enabledCreationToolIds(tools)).toEqual([
       'internet_search',
@@ -38,6 +45,23 @@ describe('创作 Tool 配置', () => {
       'data_search',
       'webpage_scrape',
     ])
+  })
+
+  it('为记忆和数据检索补齐默认召回条数，并持久化合法范围内的配置', () => {
+    let tools = normalizeCreationTools([
+      { id: 'memory_search', installed: true, enabled: true, resultLimit: 99 },
+      { id: 'data_search', installed: true, enabled: true, resultLimit: 0 },
+    ])
+    expect(creationToolResultLimits(tools)).toEqual({ memorySearch: 30, dataSearch: 1 })
+
+    tools = setCreationToolResultLimit(tools, 'memory_search', 12)
+    tools = setCreationToolResultLimit(tools, 'data_search', 36)
+    saveCreationTools(tools)
+
+    expect(creationToolResultLimits(loadCreationTools())).toEqual({
+      memorySearch: 12,
+      dataSearch: 36,
+    })
   })
 
   it('可选 Tool 支持分别安装、开启、关闭、重新加载和卸载', () => {

@@ -23,7 +23,7 @@ const gpuSource: DataSource = {
     collector: 'memory_extract',
     content_text: '背景显示国内日均 GPU 利用率为 42%，海外为 47%，但 GPUTL 无法反映硅片内 SM 的实际使用情况，存在掩盖低效的事实',
     structured_data: {
-      extraction_version: 'data-memory.v11',
+      extraction_version: 'data-memory.v13',
       title: 'GPU 利用率对比',
       summary: '日均 GPU 利用率：国内 42%，海外 47%；GPUTL 无法反映 SM 实际使用，可能掩盖实际低效',
       metric_rows: [
@@ -50,7 +50,7 @@ const orderSource: DataSource = {
     source_id: 23,
     content_text: '本周订单 1200，环比增长 8%',
     structured_data: {
-      extraction_version: 'data-memory.v11',
+      extraction_version: 'data-memory.v13',
       title: '订单规模与环比变化',
       summary: '本周订单 1200，环比增长 8%',
       metric_rows: [
@@ -59,6 +59,22 @@ const orderSource: DataSource = {
       ],
     },
     source_timeline_ids: [72],
+  },
+}
+
+const reportSource: DataSource = {
+  ...gpuSource,
+  id: 24,
+  title: 'GPU 实时看板',
+  source_kind: 'report_url',
+  source_url: 'https://bi.example.com/dashboard/gpu',
+  access_mode: 'browser_session',
+  refresh_policy: 'on_demand',
+  realtime_level: 'live',
+  latest_snapshot: {
+    ...gpuSource.latest_snapshot!,
+    id: 240,
+    source_id: 24,
   },
 }
 
@@ -145,5 +161,27 @@ describe('BakeDataTab', () => {
     })
 
     expect(screen.getAllByText(/本周订单 1200/).length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('网页来源的数据记录并展示来源网址', () => {
+    renderDataTab({
+      items: [reportSource],
+      selectedId: 24,
+    })
+
+    // 列表项展示网址
+    expect(screen.getByText('网址：https://bi.example.com/dashboard/gpu')).toBeInTheDocument()
+    // 详情区像文档一样展示可点击的来源网址
+    expect(screen.getByText('来源网址')).toBeInTheDocument()
+    const link = screen.getByRole('link', { name: 'https://bi.example.com/dashboard/gpu' })
+    expect(link).toHaveAttribute('href', 'https://bi.example.com/dashboard/gpu')
+    expect(link).toHaveAttribute('target', '_blank')
+  })
+
+  it('非网页来源的数据不展示来源网址', () => {
+    renderDataTab()
+
+    expect(screen.queryByText('来源网址')).not.toBeInTheDocument()
+    expect(screen.queryByText(/^网址：/)).not.toBeInTheDocument()
   })
 })

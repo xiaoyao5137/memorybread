@@ -3,6 +3,7 @@ import { render, screen, fireEvent } from '@testing-library/react'
 import FloatingBuddy from '../components/FloatingBuddy'
 import BakeTabs from '../components/bake/BakeTabs'
 import { useAppStore } from '../store/useAppStore'
+import type { SoftwareUpdateCheck } from '../utils/softwareUpdate'
 
 beforeEach(() => {
   useAppStore.getState().reset()
@@ -121,6 +122,41 @@ describe('FloatingBuddy', () => {
 
     expect(screen.getByTestId('account-entry')).toHaveAttribute('aria-current', 'page')
     expect(screen.queryByTestId('messages-btn')).not.toBeInTheDocument()
+  })
+
+  it('在左下角显示可直接触发的更新入口', () => {
+    const onSoftwareUpdateClick = vi.fn()
+    const softwareUpdate: SoftwareUpdateCheck = {
+      current_version: '1.1.0',
+      latest_version: '1.2.0',
+      update_available: true,
+      is_mandatory: false,
+      release: {
+        id: 'release-1',
+        version: '1.2.0',
+        build_number: 12,
+        channel: 'stable',
+        distribution: 'direct',
+        platform: 'macos',
+        architecture: 'universal',
+        title: '记忆面包 1.2.0',
+        release_notes: '更新说明',
+        download_url: 'https://download.example.com/memorybread.app.tar.gz',
+        rollout_percentage: 100,
+        is_mandatory: false,
+        status: 'published',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    }
+
+    render(<FloatingBuddy softwareUpdate={softwareUpdate} onSoftwareUpdateClick={onSoftwareUpdateClick} />)
+    const updateEntry = screen.getByTestId('software-update-entry')
+    expect(updateEntry.closest('footer')).toHaveClass('buddy-sidebar-footer')
+    expect(updateEntry).toHaveTextContent('v1.2.0')
+
+    fireEvent.click(updateEntry)
+    expect(onSoftwareUpdateClick).toHaveBeenCalledOnce()
   })
 })
 

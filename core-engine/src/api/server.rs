@@ -17,12 +17,13 @@ use super::{
             create_bake_document, delete_bake_capture, delete_bake_document, delete_bake_knowledge,
             delete_bake_memory, delete_bake_sop, get_bake_capture, get_bake_capture_screenshot,
             get_bake_document, get_bake_knowledge, get_bake_memory_preview, get_bake_overview,
-            get_bake_sop, get_bake_style_config, ignore_bake_memory, initialize_bake_memories,
-            list_bake_captures, list_bake_documents, list_bake_knowledge, list_bake_memories,
-            list_bake_sops, promote_bake_memory_to_document, promote_bake_memory_to_sop,
-            run_bake_pipeline, toggle_bake_document_status, update_bake_document,
-            update_bake_style_config,
+            get_bake_queue_status, get_bake_sop, get_bake_style_config, ignore_bake_memory,
+            initialize_bake_memories, list_bake_captures, list_bake_documents, list_bake_knowledge,
+            list_bake_memories, list_bake_sops, promote_bake_memory_to_document,
+            promote_bake_memory_to_sop, run_bake_pipeline, toggle_bake_document_status,
+            update_bake_document, update_bake_style_config,
         },
+        capture_health::monitor_capture_health,
         captures::list_captures,
         config_checks::{
             delete_config_check, install_config_check, list_config_checks, run_config_check,
@@ -38,7 +39,7 @@ use super::{
         data::{
             delete_data_source, extract_data_sources, get_browser_preview_image,
             get_creation_evidence_image, get_data_source, list_data_sources, refresh_data_source,
-            search_data, validate_creation_evidence,
+            register_discovered_source, search_data, validate_creation_evidence,
         },
         debug::{
             clear_extraction_queue, debug_log_content, debug_log_files, system_stats, vector_status,
@@ -47,8 +48,8 @@ use super::{
         health::health_handler,
         integration_skill::{
             download_integration_skill_bundle, download_integration_skill_file,
-            get_integration_skill, get_integration_skill_run, list_integration_skill_runs,
-            list_integration_skills, start_integration_skill_run,
+            get_integration_skill, get_integration_skill_run, list_integration_memory_options,
+            list_integration_skill_runs, list_integration_skills, start_integration_skill_run,
         },
         knowledge::{
             delete_knowledge, extract_knowledge, get_knowledge, list_knowledge, verify_knowledge,
@@ -146,6 +147,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/data/sources", get(list_data_sources))
         .route("/api/data/sources/extract", post(extract_data_sources))
         .route(
+            "/api/data/sources/discovered",
+            post(register_discovered_source),
+        )
+        .route(
             "/api/data/sources/:id",
             get(get_data_source).delete(delete_data_source),
         )
@@ -186,6 +191,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
                 .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
         )
         .route("/api/integration-skills", get(list_integration_skills))
+        .route(
+            "/api/integration-skills/memory-options",
+            get(list_integration_memory_options),
+        )
         .route(
             "/api/integration-skills/runs",
             get(list_integration_skill_runs),
@@ -243,6 +252,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         // 监控
         .route("/api/monitor/overview", get(monitor_overview))
+        .route("/api/monitor/capture-health", get(monitor_capture_health))
         .route("/api/monitor/extraction_live", get(monitor_extraction_live))
         .route("/api/monitor/pipeline_dag", get(monitor_pipeline_dag))
         .route("/api/monitor/system", get(monitor_system))
@@ -278,6 +288,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         // 烤面包
         .route("/api/bake/overview", get(get_bake_overview))
+        .route("/api/bake/queue-status", get(get_bake_queue_status))
         .route("/api/bake/run", post(run_bake_pipeline))
         .route(
             "/api/bake/style-config",

@@ -27,7 +27,8 @@ import AchievementCelebration from './components/AchievementCelebration'
 import SystemFloatingAssist   from './components/SystemFloatingAssist'
 import AboutPanel             from './components/AboutPanel'
 import SoftwareUpdateNotice   from './components/SoftwareUpdateNotice'
-import { fetchConsoleSummary, fetchCurrentUser } from './utils/authApi'
+import PanelErrorBoundary     from './components/PanelErrorBoundary'
+import { cloudSessionIsInvalid, fetchConsoleSummary, fetchCurrentUser } from './utils/authApi'
 import { syncEligibleAchievementTasks } from './utils/achievementTasks'
 import {
   FLOATING_ASSIST_ENABLED_KEY,
@@ -41,11 +42,13 @@ import { getAppMetadata } from './utils/appMetadata'
 import {
   fetchSoftwareUpdate,
   registerCurrentDevice,
+  SOFTWARE_UPDATE_REQUEST_EVENT,
   shouldShowSoftwareUpdate,
   snoozeSoftwareUpdate,
   type SoftwareUpdateCheck,
 } from './utils/softwareUpdate'
 import { fetchInitializationStatus, initializationIsReady } from './utils/initialization'
+import { createOptionalCloudRequestSignal, optionalCloudIsReachable } from './utils/optionalCloud'
 import type { AccountProfileSection, AchievementAward } from './types'
 
 const WORK_PROFILE_SYNC_INTERVAL_MS = 5 * 60 * 1000
@@ -74,7 +77,6 @@ const App: React.FC = () => {
     // 尚未就绪或临时离线时只剩一个空白原生窗口；实际咨询仍由各自请求处理错误。
     return <SystemFloatingAssist />
   }
-
   const {
     windowMode,
     setWindowMode,
@@ -116,37 +118,17 @@ const App: React.FC = () => {
   const [achievementCelebrations, setAchievementCelebrations] = useState<AchievementAward[][]>([])
   const [accountNavigation, setAccountNavigation] = useState<AccountNavigationRequest | null>(null)
   const [softwareUpdate, setSoftwareUpdate] = useState<SoftwareUpdateCheck | null>(null)
-  // 每次进程启动都以 sidecar 的实时质检状态为准；已完成用户先走轻量核验，
-  // 避免为了校验而挂载完整初始化页并改变其上次停留位置。
-  const [initializationValidated, setInitializationValidated] = useState<boolean | null>(
-    hasCompletedSetup ? null : false,
-  )
+  const [softwareUpdateNoticeOpen, setSoftwareUpdateNoticeOpen] = useState(false)
+  // v2 完成标记只会在全量质检与冒烟测试通过后写入。已完成用户启动时
+  // 直接放行主界面，再在后台核验 sidecar，避免 DMG 冷启动被本地服务就绪时间阻塞。
+  const [initializationValidated, setInitializationValidated] = useState(hasCompletedSetup)
 
-  const showOnboarding = initializationValidated !== true || !hasCompletedSetup
+  const showOnboarding = !initializationValidated || !hasCompletedSetup
   const activeAchievementCelebration = achievementCelebrations[0] ?? null
 
   const handleInitializationValidated = useCallback((ready: boolean) => {
     setInitializationValidated(ready)
   }, [])
-
-  useEffect(() => {
-    if (initializationValidated !== null) return
-    let mounted = true
-    void fetchInitializationStatus()
-      .then(next => {
-        if (!mounted) return
-        const ready = initializationIsReady(next)
-        setInitializationValidated(ready)
-        if (!ready) setHasCompletedSetup(false)
-      })
-      .catch(() => {
-        if (!mounted) return
-        setInitializationValidated(false)
-      })
-    return () => {
-      mounted = false
-    }
-  }, [initializationValidated, setHasCompletedSetup])
 
   useEffect(() => {
     if (showOnboarding) return
@@ -337,11 +319,16 @@ const App: React.FC = () => {
   }, [apiBaseUrl, setCreationModelConfigs])
 
   useEffect(() => {
-    if (!authToken) return
+    if (!authToken || showOnboarding) return undefined
     let cancelled = false
+    let validating = false
+    const lifecycleController = new AbortController()
     const validateSession = async () => {
+      if (cancelled || validating || !optionalCloudIsReachable()) return
+      validating = true
+      const request = createOptionalCloudRequestSignal(lifecycleController.signal)
       try {
-        const user = await fetchCurrentUser(adminApiBaseUrl, authToken)
+        const user = await fetchCurrentUser(adminApiBaseUrl, authToken, request.signal)
         if (!cancelled) {
           setAuthSession({
             access_token: authToken,
@@ -349,34 +336,53 @@ const App: React.FC = () => {
             user,
           })
         }
-        const summary = await fetchConsoleSummary(adminApiBaseUrl, authToken).catch(() => null)
+        const summary = await fetchConsoleSummary(
+          adminApiBaseUrl,
+          authToken,
+          request.signal,
+        ).catch(() => null)
         if (!cancelled && summary) {
           setCloudBalance(summary.balance ?? null)
           setCloudSubscription(summary.current_subscription ?? null)
         }
-      } catch {
-        if (!cancelled) clearAuthSession()
+      } catch (error) {
+        // 断网、超时和云端故障只让账户增强暂时降级；只有明确的鉴权拒绝才注销。
+        if (!cancelled && cloudSessionIsInvalid(error)) clearAuthSession()
+      } finally {
+        request.dispose()
+        validating = false
       }
     }
     void validateSession()
-    return () => { cancelled = true }
-  }, [adminApiBaseUrl, authToken, clearAuthSession, setAuthSession, setCloudBalance, setCloudSubscription])
+    window.addEventListener('online', validateSession)
+    return () => {
+      cancelled = true
+      lifecycleController.abort()
+      window.removeEventListener('online', validateSession)
+    }
+  }, [adminApiBaseUrl, authToken, clearAuthSession, setAuthSession, setCloudBalance, setCloudSubscription, showOnboarding])
 
   useEffect(() => {
     if (showOnboarding) return undefined
     let cancelled = false
     let checking = false
+    const lifecycleController = new AbortController()
 
     const checkForUpdate = async () => {
-      if (checking || cancelled) return
+      if (checking || cancelled || !optionalCloudIsReachable()) return
       checking = true
+      const request = createOptionalCloudRequestSignal(lifecycleController.signal)
       try {
         const metadata = await getAppMetadata()
-        const update = await fetchSoftwareUpdate(adminApiBaseUrl, metadata)
-        if (!cancelled) setSoftwareUpdate(shouldShowSoftwareUpdate(update) ? update : null)
+        const update = await fetchSoftwareUpdate(adminApiBaseUrl, metadata, 'stable', request.signal)
+        if (!cancelled) {
+          setSoftwareUpdate(update.update_available && update.release ? update : null)
+          if (shouldShowSoftwareUpdate(update)) setSoftwareUpdateNoticeOpen(true)
+        }
       } catch {
         // 软件更新检查不阻断本地能力；联网恢复后会自动重试。
       } finally {
+        request.dispose()
         checking = false
       }
     }
@@ -390,6 +396,7 @@ const App: React.FC = () => {
     document.addEventListener('visibilitychange', checkWhenVisible)
     return () => {
       cancelled = true
+      lifecycleController.abort()
       window.clearInterval(interval)
       window.removeEventListener('online', checkForUpdate)
       document.removeEventListener('visibilitychange', checkWhenVisible)
@@ -397,38 +404,69 @@ const App: React.FC = () => {
   }, [adminApiBaseUrl, serviceEnvironment, showOnboarding])
 
   useEffect(() => {
-    if (!authToken || !currentUser) return undefined
+    const openRequestedUpdate = (event: Event) => {
+      const update = (event as CustomEvent<SoftwareUpdateCheck>).detail
+      if (!update?.update_available || !update.release) return
+      setSoftwareUpdate(update)
+      setSoftwareUpdateNoticeOpen(true)
+    }
+    window.addEventListener(SOFTWARE_UPDATE_REQUEST_EVENT, openRequestedUpdate)
+    return () => window.removeEventListener(SOFTWARE_UPDATE_REQUEST_EVENT, openRequestedUpdate)
+  }, [])
+
+  useEffect(() => {
+    if (!authToken || !currentUser || showOnboarding) return undefined
     let cancelled = false
+    let reporting = false
+    const lifecycleController = new AbortController()
     const reportVersion = async () => {
-      if (cancelled) return
-      await registerCurrentDevice(adminApiBaseUrl, authToken).catch(() => {
+      if (cancelled || reporting || !optionalCloudIsReachable()) return
+      reporting = true
+      const request = createOptionalCloudRequestSignal(lifecycleController.signal)
+      try {
+        await registerCurrentDevice(adminApiBaseUrl, authToken, request.signal)
+      } catch {
         // 设备版本上报是可重试的后台动作，不影响离线使用。
-      })
+      } finally {
+        request.dispose()
+        reporting = false
+      }
     }
     void reportVersion()
     const interval = window.setInterval(() => void reportVersion(), SOFTWARE_UPDATE_CHECK_INTERVAL_MS)
     window.addEventListener('online', reportVersion)
     return () => {
       cancelled = true
+      lifecycleController.abort()
       window.clearInterval(interval)
       window.removeEventListener('online', reportVersion)
     }
-  }, [adminApiBaseUrl, authToken, currentUser?.id, serviceEnvironment])
+  }, [adminApiBaseUrl, authToken, currentUser?.id, serviceEnvironment, showOnboarding])
 
   useEffect(() => {
-    if (!authToken || !currentUser) return undefined
+    if (!authToken || !currentUser || showOnboarding) return undefined
     let cancelled = false
+    let syncing = false
+    const lifecycleController = new AbortController()
 
     const sync = async () => {
-      if (cancelled) return
-      await synchronizeWorkProfile({
-        apiBaseUrl,
-        adminApiBaseUrl,
-        authToken,
-        userId: currentUser.id,
-      }).catch(() => {
+      if (cancelled || syncing || !optionalCloudIsReachable()) return
+      syncing = true
+      const request = createOptionalCloudRequestSignal(lifecycleController.signal)
+      try {
+        await synchronizeWorkProfile({
+          apiBaseUrl,
+          adminApiBaseUrl,
+          authToken,
+          userId: currentUser.id,
+          signal: request.signal,
+        })
+      } catch {
         // 本地画像始终可用；网络恢复或下个周期会自动重试云端同步。
-      })
+      } finally {
+        request.dispose()
+        syncing = false
+      }
     }
     const syncWhenVisible = () => {
       if (document.visibilityState === 'visible') void sync()
@@ -440,11 +478,12 @@ const App: React.FC = () => {
     document.addEventListener('visibilitychange', syncWhenVisible)
     return () => {
       cancelled = true
+      lifecycleController.abort()
       window.clearInterval(interval)
       window.removeEventListener('online', sync)
       document.removeEventListener('visibilitychange', syncWhenVisible)
     }
-  }, [adminApiBaseUrl, apiBaseUrl, authToken, currentUser?.id, serviceEnvironment])
+  }, [adminApiBaseUrl, apiBaseUrl, authToken, currentUser?.id, serviceEnvironment, showOnboarding])
 
   useEffect(() => {
     setAchievementCelebrations([])
@@ -457,14 +496,15 @@ const App: React.FC = () => {
     let syncInFlight = false
 
     const syncAchievements = async () => {
-      if (controller.signal.aborted || syncInFlight) return
+      if (controller.signal.aborted || syncInFlight || !optionalCloudIsReachable()) return
       syncInFlight = true
+      const request = createOptionalCloudRequestSignal(controller.signal)
       try {
         const awards = await syncEligibleAchievementTasks({
           adminApiBaseUrl,
           apiBaseUrl,
           authToken,
-          signal: controller.signal,
+          signal: request.signal,
         })
         if (!controller.signal.aborted && awards.length > 0) {
           setAchievementCelebrations((queue) => [...queue, awards])
@@ -472,6 +512,7 @@ const App: React.FC = () => {
       } catch {
         // 领取检测属于后台增强；本地或账户服务恢复后会自动重试。
       } finally {
+        request.dispose()
         syncInFlight = false
       }
     }
@@ -611,19 +652,6 @@ const App: React.FC = () => {
     setWindowMode,
   ])
 
-  if (initializationValidated === null) {
-    return (
-      <div className="app" data-testid="app-root">
-        <main className="initialization-gate" aria-label="正在核验本地能力">
-          <div className="initialization-connection" role="status">
-            <span className="connection-pulse" aria-hidden />
-            正在核验本地能力…
-          </div>
-        </main>
-      </div>
-    )
-  }
-
   if (showOnboarding) {
     return (
       <div className="app" data-testid="app-root">
@@ -635,30 +663,35 @@ const App: React.FC = () => {
 
   return (
     <div className="app" data-testid="app-root">
-      <FloatingBuddy />
+      <FloatingBuddy
+        softwareUpdate={softwareUpdate}
+        onSoftwareUpdateClick={() => setSoftwareUpdateNoticeOpen(true)}
+      />
 
       <main className="app-content">
-        {windowMode === 'rag'       && <RagPanel />}
-        {windowMode === 'creation'  && <CreationPanel />}
-        {windowMode === 'knowledge' && <RepositoryPanel />}
-        {windowMode === 'models'    && <ModelManager />}
-        {windowMode === 'privacy'   && <PrivacyPanel />}
-        {windowMode === 'settings'  && <Settings />}
-        {debugModeEnabled && windowMode === 'debug' && <DebugPanel />}
-        {windowMode === 'tasks'     && <ScheduledTasksPanel />}
-        {windowMode === 'monitor'   && <MonitorPanel />}
-        {windowMode === 'bake'      && <BakePanel />}
-        {windowMode === 'diary'     && <DiaryPanel />}
-        {windowMode === 'integration' && <IntegrationPanel />}
-        {windowMode === 'about'     && <AboutPanel />}
-        {(windowMode === 'account' || windowMode === 'messages') && (
-          <AuthPanel
-            highlightedAchievementKeys={accountNavigation?.highlightedAchievementKeys}
-            initialProfileSection={windowMode === 'messages' ? 'messages' : accountNavigation?.section}
-            key={windowMode}
-            onInitialProfileSectionHandled={handleAccountNavigationConsumed}
-          />
-        )}
+        <PanelErrorBoundary resetKey={`${windowMode}:${debugModeEnabled}`}>
+          {windowMode === 'rag'       && <RagPanel />}
+          {windowMode === 'creation'  && <CreationPanel />}
+          {windowMode === 'knowledge' && <RepositoryPanel />}
+          {windowMode === 'models'    && <ModelManager />}
+          {windowMode === 'privacy'   && <PrivacyPanel />}
+          {windowMode === 'settings'  && <Settings />}
+          {debugModeEnabled && windowMode === 'debug' && <DebugPanel />}
+          {windowMode === 'tasks'     && <ScheduledTasksPanel />}
+          {windowMode === 'monitor'   && <MonitorPanel />}
+          {windowMode === 'bake'      && <BakePanel />}
+          {windowMode === 'diary'     && <DiaryPanel />}
+          {windowMode === 'integration' && <IntegrationPanel />}
+          {windowMode === 'about'     && <AboutPanel />}
+          {(windowMode === 'account' || windowMode === 'messages') && (
+            <AuthPanel
+              highlightedAchievementKeys={accountNavigation?.highlightedAchievementKeys}
+              initialProfileSection={windowMode === 'messages' ? 'messages' : accountNavigation?.section}
+              key={windowMode}
+              onInitialProfileSectionHandled={handleAccountNavigationConsumed}
+            />
+          )}
+        </PanelErrorBoundary>
       </main>
 
       {activeAchievementCelebration && (
@@ -668,12 +701,12 @@ const App: React.FC = () => {
           onViewCards={viewCelebratedAchievements}
         />
       )}
-      {softwareUpdate && (
+      {softwareUpdate && softwareUpdateNoticeOpen && (
         <SoftwareUpdateNotice
           update={softwareUpdate}
           onDismiss={() => {
             snoozeSoftwareUpdate(softwareUpdate.latest_version)
-            setSoftwareUpdate(null)
+            setSoftwareUpdateNoticeOpen(false)
           }}
         />
       )}

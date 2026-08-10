@@ -6,7 +6,7 @@ Embedding 模块测试
 - MockEmbeddingBackend 行为
 - EmbeddingModel 编排逻辑（encode / 错误处理 / model_name / dimension）
 - EmbedWorker 异步 IPC 处理（成功 / 空文本 / 后端不可用 / 意外异常）
-- BgeM3Backend 接口（不依赖实际安装）
+- SentenceTransformersBackend 接口（不加载实际模型）
 """
 
 from __future__ import annotations
@@ -17,8 +17,8 @@ import uuid
 import pytest
 
 from embedding.base   import EmbeddingBackend, EmbeddingVector
-from embedding.bge    import BgeM3Backend
 from embedding.model  import EmbeddingModel
+from embedding.sentence_transformers_backend import SentenceTransformersBackend
 from embedding.worker import EmbedWorker
 from memory_bread_ipc    import IpcResponse, ResponseStatus
 
@@ -283,34 +283,27 @@ class TestEmbedWorkerErrors:
         assert resp.id == req.id
 
 
-# ── BgeM3Backend 接口测试 ─────────────────────────────────────────────────────
+# ── SentenceTransformersBackend 接口测试 ─────────────────────────────────────
 
-class TestBgeM3Backend:
+class TestSentenceTransformersBackend:
     def test_model_name_default(self):
-        backend = BgeM3Backend()
-        assert "bge-m3" in backend.model_name.lower()
+        backend = SentenceTransformersBackend()
+        assert "bge-small-zh" in backend.model_name.lower()
 
     def test_dimension_default_before_loading(self):
-        backend = BgeM3Backend()
-        assert backend.dimension == 1024
+        backend = SentenceTransformersBackend()
+        assert backend.dimension == 512
 
     def test_lazy_load(self):
         """初始化时不应加载模型"""
-        backend = BgeM3Backend()
+        backend = SentenceTransformersBackend()
         assert backend._model is None
 
     def test_is_available_returns_bool(self):
-        backend = BgeM3Backend()
+        backend = SentenceTransformersBackend()
         assert isinstance(backend.is_available(), bool)
 
-    def test_run_raises_when_not_installed(self):
-        """未安装 sentence-transformers 时，encode() 应抛出 ImportError 或 RuntimeError"""
-        try:
-            import sentence_transformers  # type: ignore  # noqa: F401
-            pytest.skip("sentence-transformers 已安装，跳过此测试")
-        except ImportError:
-            pass
-
-        backend = BgeM3Backend()
-        with pytest.raises((ImportError, Exception)):
-            backend.encode(["test"])
+    def test_empty_input_does_not_load_model(self):
+        backend = SentenceTransformersBackend()
+        assert backend.encode([]) == []
+        assert backend._model is None

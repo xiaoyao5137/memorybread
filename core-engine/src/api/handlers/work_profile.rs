@@ -11,13 +11,15 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::api::{error::ApiError, state::AppState};
-use crate::storage::models::{CaptureActivityAggregate, WorkImCaptureSample};
+use crate::storage::models::{CaptureActivityAggregate, WorkCategoryTotals, WorkImCaptureSample};
 
 const DAY_MS: i64 = 86_400_000;
 const MAX_RANGE_DAYS: i64 = 400;
 const IDLE_GAP_CAP_MS: i64 = 5 * 60 * 1000;
 const LAST_CAPTURE_TAIL_MS: i64 = 60 * 1000;
 const OVERNIGHT_END_HOUR: i64 = 6;
+// 深度专注：同一应用连续有效工作不切换的单段最小长度。
+const MIN_FOCUS_RUN_MS: i64 = 45 * 60 * 1000;
 // 采集记录无法直接证明用户已经入睡，因此以 4 小时以上的连续空档作为候选睡眠段；
 // 同一自然日存在多个候选时，后续只采用最长的一段作为当天作息分界。
 const MIN_SLEEP_GAP_MS: i64 = 4 * 60 * 60 * 1000;
@@ -52,7 +54,9 @@ pub struct WorkProfileResponse {
     pub days: Vec<WorkDaySummary>,
 }
 
-/// 标签卡片只消费本地计算后的时长峰值，不包含任何工作内容。
+/// 标签卡片只消费本地计算后的时长峰值与分类时长，不包含任何工作内容。
+///
+/// 分类时长字段在旧核心进程上可能缺失，客户端必须按可选字段处理。
 #[derive(Debug, Serialize)]
 pub struct AchievementMetrics {
     pub longest_work_session_minutes: i64,
@@ -60,6 +64,14 @@ pub struct AchievementMetrics {
     pub interruption_gap_minutes: i64,
     pub overnight_start_hour: i64,
     pub overnight_end_hour: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coding_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub design_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub knowledge_minutes: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -163,7 +175,7 @@ pub async fn get_work_profile(
         (None, false) => None,
     };
     let storage = state.storage.clone();
-    let (rows, im_samples, timestamps) = tokio::task::spawn_blocking(move || {
+    let (rows, im_samples, timestamps, category_totals) = tokio::task::spawn_blocking(move || {
         let rows = storage.summarize_capture_activity(
             range_start,
             range_end,
@@ -183,7 +195,25 @@ pub async fn get_work_profile(
             .map(|(start, end)| storage.list_capture_activity_timestamps(start, end))
             .transpose()?
             .unwrap_or_default();
-        Ok::<_, crate::storage::error::StorageError>((rows, im_samples, timestamps))
+        // 分类时长属于增强指标：统计失败时降级为零值，不阻断工作画像主流程。
+        let category_totals = if include_achievement_metrics {
+            storage
+                .summarize_work_category_minutes(
+                    range_start,
+                    range_end,
+                    IDLE_GAP_CAP_MS,
+                    MIN_FOCUS_RUN_MS,
+                )
+                .unwrap_or_default()
+        } else {
+            Default::default()
+        };
+        Ok::<_, crate::storage::error::StorageError>((
+            rows,
+            im_samples,
+            timestamps,
+            category_totals,
+        ))
     })
     .await
     .map_err(|error| ApiError::Internal(error.to_string()))??;
@@ -194,6 +224,7 @@ pub async fn get_work_profile(
         mood,
         &timestamps,
         include_achievement_metrics,
+        category_totals,
         range_start,
         range_end,
         timezone_offset_ms,
@@ -226,6 +257,7 @@ fn build_response(
     mood: TodayMoodSummary,
     timestamps: &[i64],
     include_achievement_metrics: bool,
+    category_totals: WorkCategoryTotals,
     range_start: i64,
     range_end: i64,
     timezone_offset_ms: i64,
@@ -317,8 +349,15 @@ fn build_response(
         .map(|day| round_minutes(day.duration_ms))
         .max()
         .unwrap_or_default();
-    let achievement_metrics = include_achievement_metrics
-        .then(|| build_achievement_metrics(timestamps, range_start, range_end, timezone_offset_ms));
+    let achievement_metrics = include_achievement_metrics.then(|| {
+        build_achievement_metrics(
+            timestamps,
+            range_start,
+            range_end,
+            timezone_offset_ms,
+            category_totals,
+        )
+    });
 
     Ok(WorkProfileResponse {
         range_start,
@@ -433,6 +472,7 @@ fn build_achievement_metrics(
     range_start: i64,
     range_end: i64,
     timezone_offset_ms: i64,
+    category_totals: WorkCategoryTotals,
 ) -> AchievementMetrics {
     let sessions = build_active_sessions(timestamps, range_start, range_end);
     let longest_work_session_ms = sessions
@@ -452,6 +492,10 @@ fn build_achievement_metrics(
         interruption_gap_minutes: IDLE_GAP_CAP_MS / 60_000,
         overnight_start_hour: 0,
         overnight_end_hour: OVERNIGHT_END_HOUR,
+        coding_minutes: Some(floor_minutes(category_totals.coding_ms)),
+        design_minutes: Some(floor_minutes(category_totals.design_ms)),
+        focus_minutes: Some(floor_minutes(category_totals.focus_ms)),
+        knowledge_minutes: Some(floor_minutes(category_totals.knowledge_ms)),
     }
 }
 
@@ -797,6 +841,7 @@ mod tests {
             infer_work_mood(&[]),
             &[],
             false,
+            WorkCategoryTotals::default(),
             (today - 1) * DAY_MS,
             (today + 1) * DAY_MS,
             0,
@@ -834,6 +879,7 @@ mod tests {
             infer_work_mood(&[]),
             &[],
             false,
+            WorkCategoryTotals::default(),
             (today - 2) * DAY_MS,
             today * DAY_MS,
             0,
@@ -876,6 +922,7 @@ mod tests {
             infer_work_mood(&[]),
             &timestamps,
             false,
+            WorkCategoryTotals::default(),
             day,
             day + DAY_MS,
             0,
@@ -923,10 +970,40 @@ mod tests {
             local_midnight,
             local_midnight + DAY_MS,
             timezone_offset_ms,
+            WorkCategoryTotals::default(),
         );
 
         assert_eq!(metrics.max_overnight_work_minutes, 360);
         assert!(metrics.longest_work_session_minutes >= 360);
+    }
+
+    #[test]
+    fn exposes_category_minutes_when_achievement_metrics_are_requested() {
+        let day = 20_000 * DAY_MS;
+        let totals = WorkCategoryTotals {
+            coding_ms: 90 * 60_000 + 29_000,
+            design_ms: 30 * 60_000,
+            knowledge_ms: 0,
+            focus_ms: 47 * 60_000,
+        };
+        let response = build_response(
+            vec![activity(20_000, "Code", 60)],
+            infer_work_mood(&[]),
+            &[],
+            true,
+            totals,
+            day,
+            day + DAY_MS,
+            0,
+            false,
+        )
+        .unwrap();
+
+        let metrics = response.achievement_metrics.unwrap();
+        assert_eq!(metrics.coding_minutes, Some(90));
+        assert_eq!(metrics.design_minutes, Some(30));
+        assert_eq!(metrics.knowledge_minutes, Some(0));
+        assert_eq!(metrics.focus_minutes, Some(47));
     }
 
     #[test]
@@ -935,7 +1012,13 @@ mod tests {
         let continuous = (0..=48)
             .map(|index| start + index * 5 * 60_000)
             .collect::<Vec<_>>();
-        let continuous_metrics = build_achievement_metrics(&continuous, start, start + DAY_MS, 0);
+        let continuous_metrics = build_achievement_metrics(
+            &continuous,
+            start,
+            start + DAY_MS,
+            0,
+            WorkCategoryTotals::default(),
+        );
         assert!(continuous_metrics.longest_work_session_minutes >= 240);
 
         let interrupted = continuous
@@ -948,7 +1031,13 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        let interrupted_metrics = build_achievement_metrics(&interrupted, start, start + DAY_MS, 0);
+        let interrupted_metrics = build_achievement_metrics(
+            &interrupted,
+            start,
+            start + DAY_MS,
+            0,
+            WorkCategoryTotals::default(),
+        );
         assert!(interrupted_metrics.longest_work_session_minutes < 240);
     }
 

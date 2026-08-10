@@ -238,6 +238,11 @@ describe('useFetchBakeMemories', () => {
           created_at: '2026-04-11 10:00',
           created_at_ms: 1712800800000,
           capture_ids: [11, 12],
+          keyTimestamps: [{
+            start_ts: 1712800800000,
+            end_ts: 1712800860000,
+            summary: '缺少 capture_ids 的历史分段',
+          }],
         }],
         total: 1,
         limit: 10,
@@ -265,6 +270,12 @@ describe('useFetchBakeMemories', () => {
       createdAt: '2026-04-11 10:00',
       createdAtMs: 1712800800000,
       captureIds: [11, 12],
+      keyTimestamps: [{
+        capture_ids: [],
+        start_ts: 1712800800000,
+        end_ts: 1712800860000,
+        summary: '缺少 capture_ids 的历史分段',
+      }],
     })
   })
 

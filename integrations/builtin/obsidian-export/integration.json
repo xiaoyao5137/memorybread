@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "memorybread.integration-skill.v1",
+  "id": "obsidian-export",
+  "version": "1.0.0",
+  "direction": "output",
+  "executor": "vault_export",
+  "accept": [],
+  "maxMemories": 200,
+  "modes": ["preview", "execute"],
+  "privacy": {
+    "network": "loopback-only",
+    "filesystem": "user-selected-vault-only",
+    "logContent": false
+  },
+  "source": "core-engine/src/integration/mod.rs"
+}

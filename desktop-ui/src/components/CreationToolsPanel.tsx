@@ -19,6 +19,7 @@ interface CreationToolsPanelProps {
   onInstall: (id: CreationToolId) => void
   onUninstall: (id: CreationToolId) => void
   onToggle: (id: CreationToolId, enabled: boolean) => void
+  onResultLimitChange: (id: CreationToolId, resultLimit: number) => void
 }
 
 const CreationToolsPanel: React.FC<CreationToolsPanelProps> = ({
@@ -26,6 +27,7 @@ const CreationToolsPanel: React.FC<CreationToolsPanelProps> = ({
   onInstall,
   onUninstall,
   onToggle,
+  onResultLimitChange,
 }) => {
   const stateById = new Map(tools.map(tool => [tool.id, tool]))
 
@@ -40,25 +42,48 @@ const CreationToolsPanel: React.FC<CreationToolsPanelProps> = ({
           <h3 id="required-tools-title">必备工具</h3>
         </header>
         <div className="creation-tools-grid">
-          {CREATION_TOOL_DEFINITIONS.filter(tool => tool.required).map(definition => (
-            <article className="creation-tool-card is-required" key={definition.id}>
-              <div className="creation-tool-card__status-row">
-                <span className="creation-tool-card__status is-official">官方工具</span>
-                <span className="is-enabled"><LockKeyhole size={12} /> 始终开启</span>
-              </div>
-              <h4>{definition.name}</h4>
-              <p>{definition.summary}</p>
-              <div className="creation-tool-card__meta">{definition.capability}</div>
-              <footer>
-                <button type="button" className="is-installed" disabled aria-label={`${definition.name}已安装`}>
-                  <PackageCheck size={14} /> 已安装
-                </button>
-                <button type="button" className="is-enabled" disabled aria-label={`${definition.name}已开启`}>
-                  <Power size={14} /> 已开启
-                </button>
-              </footer>
-            </article>
-          ))}
+          {CREATION_TOOL_DEFINITIONS.filter(tool => tool.required).map((definition) => {
+            const state = stateById.get(definition.id)
+            return (
+              <article className="creation-tool-card is-required" key={definition.id}>
+                <div className="creation-tool-card__status-row">
+                  <span className="creation-tool-card__status is-official">官方工具</span>
+                  <span className="is-enabled"><LockKeyhole size={12} /> 始终开启</span>
+                </div>
+                <h4>{definition.name}</h4>
+                <p>{definition.summary}</p>
+                <div className="creation-tool-card__meta">{definition.capability}</div>
+                {definition.resultLimit && (
+                  <div className="creation-tool-card__setting">
+                    <label htmlFor={`creation-tool-result-limit-${definition.id}`}>
+                      默认召回条数
+                    </label>
+                    <span>
+                      <input
+                        id={`creation-tool-result-limit-${definition.id}`}
+                        type="number"
+                        min={definition.resultLimit.min}
+                        max={definition.resultLimit.max}
+                        step={1}
+                        value={state?.resultLimit ?? definition.resultLimit.defaultValue}
+                        onChange={event => onResultLimitChange(definition.id, Number(event.target.value))}
+                        aria-label={`${definition.name}默认召回条数`}
+                      />
+                      条
+                    </span>
+                  </div>
+                )}
+                <footer>
+                  <button type="button" className="is-installed" disabled aria-label={`${definition.name}已安装`}>
+                    <PackageCheck size={14} /> 已安装
+                  </button>
+                  <button type="button" className="is-enabled" disabled aria-label={`${definition.name}已开启`}>
+                    <Power size={14} /> 已开启
+                  </button>
+                </footer>
+              </article>
+            )
+          })}
         </div>
       </section>
 

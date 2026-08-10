@@ -3,15 +3,68 @@
 //! 变化监听先轻量比较前台应用和浏览器 URL，仅在发生变化时触发完整采集；
 //! 低频定时路径继续负责 90 秒兜底采集。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::sync::Notify;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use super::{ax::get_frontmost_context_snapshot_async, ax::AXInfo, CaptureEvent};
 use crate::monitor::SystemPressureState;
+use crate::storage::{models::NewCaptureAttempt, StorageManager};
+
+/// 采集定时器的运行时状态。设置页更新后通过 `Notify` 立即唤醒监听器，
+/// `effective_interval_secs` 则供监控页展示压力退避后的真实间隔。
+#[derive(Debug)]
+pub struct CaptureSchedule {
+    configured_interval_secs: AtomicU64,
+    effective_interval_secs: AtomicU64,
+    pressure_degraded: AtomicBool,
+    changed: Notify,
+}
+
+impl CaptureSchedule {
+    pub fn new(interval_secs: u64) -> Self {
+        let interval_secs = interval_secs.max(1);
+        Self {
+            configured_interval_secs: AtomicU64::new(interval_secs),
+            effective_interval_secs: AtomicU64::new(interval_secs),
+            pressure_degraded: AtomicBool::new(false),
+            changed: Notify::new(),
+        }
+    }
+
+    pub fn configured_interval_secs(&self) -> u64 {
+        self.configured_interval_secs.load(Ordering::Relaxed).max(1)
+    }
+
+    pub fn effective_interval_secs(&self) -> u64 {
+        self.effective_interval_secs.load(Ordering::Relaxed).max(1)
+    }
+
+    pub fn pressure_degraded(&self) -> bool {
+        self.pressure_degraded.load(Ordering::Relaxed)
+    }
+
+    pub fn update_configured_interval(&self, interval_secs: u64) {
+        let interval_secs = interval_secs.max(1);
+        self.configured_interval_secs
+            .store(interval_secs, Ordering::Relaxed);
+        self.effective_interval_secs
+            .store(interval_secs, Ordering::Relaxed);
+        self.pressure_degraded.store(false, Ordering::Relaxed);
+        self.changed.notify_waiters();
+    }
+
+    fn update_effective_interval(&self, interval_secs: u64, pressure_degraded: bool) {
+        self.effective_interval_secs
+            .store(interval_secs.max(1), Ordering::Relaxed);
+        self.pressure_degraded
+            .store(pressure_degraded, Ordering::Relaxed);
+    }
+}
 
 /// 内存压力等级
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +75,7 @@ enum MemoryPressure {
 }
 
 /// 事件监听器配置
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ListenerConfig {
     /// 定时采集间隔（秒）
     pub interval_secs: u64,
@@ -32,6 +85,10 @@ pub struct ListenerConfig {
     pub idle_threshold_secs: u64,
     /// ResourceMonitor 更新的系统/WindowServer 压力状态
     pub system_pressure: SystemPressureState,
+    /// 设置页与监听器共享的动态间隔状态。
+    pub schedule: Arc<CaptureSchedule>,
+    /// 可选审计存储；测试可不依赖真实数据库。
+    pub audit_storage: Option<StorageManager>,
 }
 
 impl Default for ListenerConfig {
@@ -41,11 +98,14 @@ impl Default for ListenerConfig {
             enabled: Arc::new(AtomicBool::new(true)),
             idle_threshold_secs: 300, // 5 分钟无操作暂停
             system_pressure: SystemPressureState::default(),
+            schedule: Arc::new(CaptureSchedule::new(90)),
+            audit_storage: None,
         }
     }
 }
 
-const MAX_BACKOFF_SECS: u64 = 300;
+/// 活跃状态下即使系统有压力，也不允许把兜底关键帧拉长到 2 分钟以上。
+const MAX_BACKOFF_SECS: u64 = 120;
 const LOW_MEMORY_THRESHOLD_MB: u64 = 500;
 const CONTEXT_WATCH_INTERVAL_SECS: u64 = 5;
 
@@ -150,6 +210,7 @@ fn context_change_event(
 pub async fn start_context_watcher(
     enabled: Arc<AtomicBool>,
     system_pressure: SystemPressureState,
+    audit_storage: Option<StorageManager>,
     tx: mpsc::Sender<CaptureEvent>,
 ) {
     info!(
@@ -189,7 +250,24 @@ pub async fn start_context_watcher(
             .unwrap_or(false);
         let ax_tripped = super::ax::is_circuit_breaker_tripped();
         let load_pressure = system_pressure.snapshot();
-        if asleep || mem_blocked || ax_tripped || load_pressure.under_pressure {
+        // 系统 CPU / WindowServer 压力不再关闭高价值的上下文变化事件；只有屏幕睡眠、
+        // 极低可用内存和 AX 熔断才降级跳过，并留下持久审计。
+        if asleep || mem_blocked || ax_tripped {
+            let reason = if asleep {
+                "display_asleep"
+            } else if mem_blocked {
+                "low_available_memory"
+            } else {
+                "ax_circuit_breaker"
+            };
+            record_listener_attempt(
+                audit_storage.as_ref(),
+                &event,
+                "degraded",
+                reason,
+                Some(&current),
+                Some(CONTEXT_WATCH_INTERVAL_SECS),
+            );
             warn!(
                 asleep,
                 avail_mb = ?avail_mb,
@@ -201,38 +279,60 @@ pub async fn start_context_watcher(
             continue;
         }
 
+        let audit_event = event.clone();
         match tokio::time::timeout(Duration::from_secs(1), tx.send(event)).await {
             Ok(Ok(())) => previous = Some(current),
             Ok(Err(_)) => {
                 info!("采集引擎已关闭，停止前台上下文变化监听器");
                 break;
             }
-            Err(_) => warn!("发送前台上下文变化事件超时，下一轮重试"),
+            Err(_) => {
+                record_listener_attempt(
+                    audit_storage.as_ref(),
+                    &audit_event,
+                    "failed",
+                    "event_queue_timeout",
+                    Some(&current),
+                    Some(CONTEXT_WATCH_INTERVAL_SECS),
+                );
+                warn!("发送前台上下文变化事件超时，下一轮重试");
+            }
         }
     }
 }
 
 /// 启动事件监听器（自适应采集策略）
 ///
-/// 三联门禁（任一命中 → 跳过本次 + 下次 tick 间隔翻倍至 300s 上限）：
+/// 三联门禁（任一命中 → 跳过本次 + 下次 tick 间隔翻倍至 120s 上限）：
 /// 1. 显示器睡眠（ioreg IODisplayWrangler.CurrentPowerState < 4）
 /// 2. 可用内存 < 500MB
 /// 3. AX 调用熔断中（连续超时 5 次后的 30s 冷却期）
 ///
 /// 未命中且当前 interval > base 时，按 (current + base) / 2 收敛回 base。
 pub async fn start_listener(config: ListenerConfig, tx: mpsc::Sender<CaptureEvent>) {
+    let configured_interval = config.schedule.configured_interval_secs();
     info!(
         "启动自适应事件监听器，基础间隔 {}s，回退上限 {}s",
-        config.interval_secs, MAX_BACKOFF_SECS
+        configured_interval, MAX_BACKOFF_SECS
     );
 
-    let base_interval = config.interval_secs.max(1);
+    let mut base_interval = configured_interval;
     let mut current_interval = base_interval;
-    let mut ticker = interval(Duration::from_secs(current_interval));
-    ticker.tick().await; // 消费 interval 创建后的立即 tick，避免启动瞬间触发采集。
+    config
+        .schedule
+        .update_effective_interval(current_interval, false);
 
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(current_interval)) => {}
+            _ = config.schedule.changed.notified() => {
+                base_interval = config.schedule.configured_interval_secs();
+                current_interval = base_interval;
+                config.schedule.update_effective_interval(current_interval, false);
+                info!(interval_secs = current_interval, "采集间隔已实时更新");
+                continue;
+            }
+        }
 
         if !config.enabled.load(Ordering::Relaxed) {
             debug!("采集已暂停，等待 5 秒后重试");
@@ -250,26 +350,46 @@ pub async fn start_listener(config: ListenerConfig, tx: mpsc::Sender<CaptureEven
         let load_pressure = config.system_pressure.snapshot();
 
         if asleep || mem_blocked || ax_tripped || load_pressure.under_pressure {
-            let new_interval = current_interval
-                .saturating_mul(2)
-                .min(MAX_BACKOFF_SECS)
-                .max(base_interval);
-            warn!(
-                asleep,
-                avail_mb = ?avail_mb,
-                ax_tripped,
-                system_cpu = load_pressure.system_cpu_percent,
-                window_server_cpu = load_pressure.window_server_cpu_percent,
-                from = current_interval,
-                to = new_interval,
-                "门禁命中，跳过本次采集并延长 tick"
-            );
-            if new_interval != current_interval {
-                current_interval = new_interval;
-                ticker = interval(Duration::from_secs(current_interval));
-                ticker.tick().await; // 消费 ticker 重建后立即触发的首 tick
+            if load_pressure.under_pressure && !asleep && !mem_blocked && !ax_tripped {
+                // 活跃但高负载：不丢本轮采集，只延长下一轮间隔；OCR 本身在后台执行。
+            } else {
+                let new_interval = current_interval
+                    .saturating_mul(2)
+                    .min(MAX_BACKOFF_SECS)
+                    .max(base_interval);
+                let reason = if asleep {
+                    "display_asleep"
+                } else if mem_blocked {
+                    "low_available_memory"
+                } else {
+                    "ax_circuit_breaker"
+                };
+                record_listener_attempt(
+                    config.audit_storage.as_ref(),
+                    &CaptureEvent::Periodic,
+                    "degraded",
+                    reason,
+                    None,
+                    Some(new_interval),
+                );
+                warn!(
+                    asleep,
+                    avail_mb = ?avail_mb,
+                    ax_tripped,
+                    system_cpu = load_pressure.system_cpu_percent,
+                    window_server_cpu = load_pressure.window_server_cpu_percent,
+                    from = current_interval,
+                    to = new_interval,
+                    "门禁命中，跳过本次采集并延长 tick"
+                );
+                if new_interval != current_interval {
+                    current_interval = new_interval;
+                }
+                config
+                    .schedule
+                    .update_effective_interval(current_interval, true);
+                continue;
             }
-            continue;
         }
 
         // ── 决定下一次 tick 间隔 ──────────────────────────────────────────────
@@ -293,13 +413,23 @@ pub async fn start_listener(config: ListenerConfig, tx: mpsc::Sender<CaptureEven
                 "调整 tick 间隔"
             );
             current_interval = next_interval;
-            ticker = interval(Duration::from_secs(current_interval));
-            ticker.tick().await;
         }
+        config.schedule.update_effective_interval(
+            current_interval,
+            load_pressure.under_pressure || pressure != MemoryPressure::Normal,
+        );
 
         // 系统空闲时间检测
         if let Ok(idle_secs) = get_system_idle_time_secs().await {
             if idle_secs > config.idle_threshold_secs {
+                record_listener_attempt(
+                    config.audit_storage.as_ref(),
+                    &CaptureEvent::Periodic,
+                    "degraded",
+                    "system_idle",
+                    None,
+                    Some(current_interval),
+                );
                 debug!("系统空闲 {} 秒，跳过本次采集", idle_secs);
                 continue;
             }
@@ -317,9 +447,45 @@ pub async fn start_listener(config: ListenerConfig, tx: mpsc::Sender<CaptureEven
                 break;
             }
             Err(_) => {
+                record_listener_attempt(
+                    config.audit_storage.as_ref(),
+                    &CaptureEvent::Periodic,
+                    "failed",
+                    "event_queue_timeout",
+                    None,
+                    Some(current_interval),
+                );
                 warn!("发送采集事件超时（5 秒），跳过本次");
             }
         }
+    }
+}
+
+fn record_listener_attempt(
+    storage: Option<&StorageManager>,
+    event: &CaptureEvent,
+    outcome: &str,
+    reason: &str,
+    context: Option<&ObservedContext>,
+    effective_interval_secs: Option<u64>,
+) {
+    let Some(storage) = storage else {
+        return;
+    };
+    let attempt = NewCaptureAttempt {
+        observed_at: crate::storage::db::current_ts_ms(),
+        event_type: event.to_event_type().as_str().to_string(),
+        outcome: outcome.to_string(),
+        reason: reason.to_string(),
+        capture_id: None,
+        related_capture_id: None,
+        app_name: context.map(|value| value.app_name.clone()),
+        win_title: context.and_then(|value| value.win_title.clone()),
+        is_private: false,
+        effective_interval_secs,
+    };
+    if let Err(error) = storage.insert_capture_attempt(&attempt) {
+        warn!(%error, reason, "记录采集降级审计失败");
     }
 }
 
@@ -596,6 +762,25 @@ mod tests {
     fn capture_intervals_keep_five_second_watch_and_ninety_second_fallback() {
         assert_eq!(CONTEXT_WATCH_INTERVAL_SECS, 5);
         assert_eq!(ListenerConfig::default().interval_secs, 90);
+        assert_eq!(
+            ListenerConfig::default()
+                .schedule
+                .configured_interval_secs(),
+            90
+        );
+    }
+
+    #[test]
+    fn capture_schedule_updates_runtime_interval_and_clears_pressure_state() {
+        let schedule = CaptureSchedule::new(90);
+        schedule.update_effective_interval(120, true);
+        assert_eq!(schedule.effective_interval_secs(), 120);
+        assert!(schedule.pressure_degraded());
+
+        schedule.update_configured_interval(30);
+        assert_eq!(schedule.configured_interval_secs(), 30);
+        assert_eq!(schedule.effective_interval_secs(), 30);
+        assert!(!schedule.pressure_degraded());
     }
 
     fn context(app: &str, bundle_id: &str, url: Option<&str>) -> ObservedContext {

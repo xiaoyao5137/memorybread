@@ -11,6 +11,7 @@ CORE_MANIFEST="$PROJECT_ROOT/core-engine/Cargo.toml"
 PACKAGE_ROOT="$TAURI_DIR/target/macos-package"
 STAGING_DIR="$TAURI_DIR/binaries"
 MODE="${1:-dmg}"
+DMG_ICON_TEMP_ROOT=""
 
 export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.0}"
@@ -19,6 +20,15 @@ fail() {
   echo "[macOS build] $*" >&2
   exit 1
 }
+
+cleanup() {
+  if [ -n "$DMG_ICON_TEMP_ROOT" ] && [ -d "$DMG_ICON_TEMP_ROOT" ]; then
+    find "$DMG_ICON_TEMP_ROOT" -depth -mindepth 1 -delete >/dev/null 2>&1 || true
+    rmdir "$DMG_ICON_TEMP_ROOT" >/dev/null 2>&1 || true
+  fi
+}
+
+trap cleanup EXIT
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "缺少命令: $1"
@@ -51,6 +61,36 @@ locate_app_bundle() {
 
 locate_dmg() {
   find "$TAURI_DIR/target" -path '*/release/bundle/dmg/*.dmg' -type f -print -quit
+}
+
+locate_updater_bundle() {
+  find "$TAURI_DIR/target" -path '*/release/bundle/macos/*.app.tar.gz' -type f -print -quit
+}
+
+apply_dmg_file_icon() {
+  local dmg_path="$1"
+  local temp_root
+  local iconset_path
+  local icon_png
+  local icon_resource
+
+  temp_root="$(mktemp -d "${TMPDIR:-/tmp}/memory-bread-dmg-icon.XXXXXX")"
+  DMG_ICON_TEMP_ROOT="$temp_root"
+  iconset_path="$temp_root/memorybread.iconset"
+  icon_png="$temp_root/memorybread.png"
+  icon_resource="$temp_root/memorybread.rsrc"
+
+  # Tauri 会设置 .app 和挂载卷图标，但不会设置 Finder 里的外层 .dmg 文件图标。
+  iconutil --convert iconset --output "$iconset_path" "$TAURI_DIR/icons/icon.icns"
+  cp "$iconset_path/icon_512x512@2x.png" "$icon_png"
+  sips -i "$icon_png" >/dev/null
+  DeRez -only icns "$icon_png" > "$icon_resource"
+  Rez -a "$icon_resource" -o "$dmg_path"
+  SetFile -a C "$dmg_path"
+
+  find "$temp_root" -depth -mindepth 1 -delete
+  rmdir "$temp_root"
+  DMG_ICON_TEMP_ROOT=""
 }
 
 prepare_python_helper() {
@@ -215,6 +255,15 @@ require_command file
 require_command plutil
 require_command codesign
 require_command hdiutil
+require_command iconutil
+require_command sips
+require_command DeRez
+require_command Rez
+require_command SetFile
+
+export MEMORY_BREAD_BUILD_NUMBER="$(node -p "require('$TAURI_DIR/tauri.conf.json').bundle.macOS.bundleVersion")"
+[[ "$MEMORY_BREAD_BUILD_NUMBER" =~ ^[0-9]+$ ]] && [ "$MEMORY_BREAD_BUILD_NUMBER" -gt 0 ] \
+  || fail "tauri.conf.json 的 bundleVersion 必须是大于 0 的整数"
 
 TARGET="${MEMORY_BREAD_MACOS_TARGET:-$(host_target)}"
 [ "$TARGET" = "$(host_target)" ] \
@@ -247,6 +296,25 @@ prepare_python_helper
 verify_staged_helpers
 
 if [ "$MODE" = "dmg" ]; then
+  TAURI_CONFIG_ARGS=(--config src-tauri/tauri.direct.conf.json)
+  if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ] && [ -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]; then
+    [ -f "$TAURI_SIGNING_PRIVATE_KEY_PATH" ] \
+      || fail "找不到 Tauri 更新签名私钥: $TAURI_SIGNING_PRIVATE_KEY_PATH"
+    export TAURI_SIGNING_PRIVATE_KEY="$(< "$TAURI_SIGNING_PRIVATE_KEY_PATH")"
+  fi
+  UPDATER_PRIVATE_KEY_CONFIGURED=0
+  if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] || [ -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]; then
+    UPDATER_PRIVATE_KEY_CONFIGURED=1
+  fi
+  if [ "$UPDATER_PRIVATE_KEY_CONFIGURED" -eq 0 ] && [ -z "${MEMORY_BREAD_UPDATER_PUBLIC_KEY:-}" ]; then
+    TAURI_CONFIG_ARGS+=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
+    echo "[macOS build] 未配置更新签名密钥；本次仅生成本机测试 DMG，不生成热更新包"
+  elif [ "$UPDATER_PRIVATE_KEY_CONFIGURED" -eq 0 ] || [ -z "${MEMORY_BREAD_UPDATER_PUBLIC_KEY:-}" ]; then
+    fail "生成热更新包必须同时设置 TAURI_SIGNING_PRIVATE_KEY（或 TAURI_SIGNING_PRIVATE_KEY_PATH）与 MEMORY_BREAD_UPDATER_PUBLIC_KEY"
+  else
+    UPDATER_PLUGIN_CONFIG="$(node -e 'const pubkey = process.env.MEMORY_BREAD_UPDATER_PUBLIC_KEY; process.stdout.write(JSON.stringify({ plugins: { updater: { pubkey } } }))')"
+    TAURI_CONFIG_ARGS+=(--config "$UPDATER_PLUGIN_CONFIG")
+  fi
   if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
     export APPLE_SIGNING_IDENTITY="-"
     echo "[macOS build] 未提供 Developer ID，当前 DMG 使用 ad-hoc 签名，仅供本机测试"
@@ -257,16 +325,24 @@ if [ "$MODE" = "dmg" ]; then
     npm run tauri -- build \
       --bundles app,dmg \
       --target "$TARGET" \
-      --config src-tauri/tauri.direct.conf.json
+      "${TAURI_CONFIG_ARGS[@]}"
   )
   APP_PATH="$(locate_app_bundle)"
   DMG_PATH="$(locate_dmg)"
   [ -d "$APP_PATH" ] || fail "未找到生成的 .app"
   [ -f "$DMG_PATH" ] || fail "未找到生成的 .dmg"
-  "$SCRIPT_DIR/verify-macos-bundle.sh" "$APP_PATH" dmg
-  hdiutil imageinfo "$DMG_PATH" >/dev/null
+  apply_dmg_file_icon "$DMG_PATH"
+  "$SCRIPT_DIR/verify-macos-bundle.sh" "$APP_PATH" dmg "$DMG_PATH"
   echo "[macOS build] App: $APP_PATH"
   echo "[macOS build] DMG: $DMG_PATH"
+  if [ "$UPDATER_PRIVATE_KEY_CONFIGURED" -eq 1 ]; then
+    UPDATER_PATH="$(locate_updater_bundle)"
+    [ -f "$UPDATER_PATH" ] || fail "未找到 Tauri 更新包"
+    [ -f "$UPDATER_PATH.sig" ] || fail "未找到 Tauri 更新签名"
+    echo "[macOS build] Updater: $UPDATER_PATH"
+    echo "[macOS build] Updater SHA-256: $(shasum -a 256 "$UPDATER_PATH" | awk '{print $1}')"
+    echo "[macOS build] Updater signature: $UPDATER_PATH.sig"
+  fi
   exit 0
 fi
 

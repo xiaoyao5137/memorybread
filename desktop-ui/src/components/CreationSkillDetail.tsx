@@ -33,6 +33,7 @@ export interface CreationSkillDetailData extends CreationSkillContent {
 interface CreationSkillDetailProps {
   skill: CreationSkillDetailData
   onClose: () => void
+  focusFiles?: boolean
   primaryAction?: {
     label: string
     loadingLabel?: string
@@ -54,11 +55,13 @@ export function localSkillDetail(
       ? '来自市场'
       : skill.sourceKind === 'imported'
         ? '手工上传 · Codex 兼容'
-        : skill.published
-        ? '已发布'
-        : skill.status === 'draft'
-          ? '草稿'
-          : '已保存',
+        : skill.sourceKind === 'manual'
+          ? '手工新建'
+          : skill.published
+          ? '已发布'
+          : skill.status === 'draft'
+            ? '草稿'
+            : '已保存',
     source: skill.sourceKind === 'market' ? 'market' as const : 'local' as const,
   }
   return { ...detail, packageFiles: codexSkillPackageFiles(skill) }
@@ -82,10 +85,13 @@ export function marketSkillDetail(
 export default function CreationSkillDetail({
   skill,
   onClose,
+  focusFiles = false,
   primaryAction,
 }: CreationSkillDetailProps) {
   const closeButtonRef = useRef<HTMLButtonElement>(null)
+  const filesSectionRef = useRef<HTMLElement>(null)
   const [selectedFilePath, setSelectedFilePath] = useState('SKILL.md')
+  const [filesHighlighted, setFilesHighlighted] = useState(false)
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -103,6 +109,19 @@ export default function CreationSkillDetail({
         : skill.packageFiles[0]?.path || '',
     )
   }, [skill.id, skill.packageFiles])
+
+  useEffect(() => {
+    if (!focusFiles) return
+    const timer = window.setTimeout(() => {
+      filesSectionRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+      setFilesHighlighted(true)
+    }, 120)
+    const fadeTimer = window.setTimeout(() => setFilesHighlighted(false), 2600)
+    return () => {
+      window.clearTimeout(timer)
+      window.clearTimeout(fadeTimer)
+    }
+  }, [focusFiles, skill.id])
 
   const selectedFile = useMemo(
     () => skill.packageFiles.find(file => file.path === selectedFilePath) || skill.packageFiles[0],
@@ -172,13 +191,16 @@ export default function CreationSkillDetail({
                   <div>
                     <h4>{step.title}</h4>
                     <p>{step.objective}</p>
-                    <small>产出：{step.output}</small>
+                    {step.output.trim() && <small>产出：{step.output}</small>}
+                    {step.tools.includes('data_search') && (
+                      <small>网页证据截图：{step.retainWebpageScreenshot === false ? '不保留（仍使用 AX/DOM）' : '保留'}</small>
+                    )}
                     {(step.agents.length > 0 || step.skills.length > 0 || step.tools.length > 0) && (
-                      <ul aria-label={`${step.title} 可调用能力`}>
-                        {step.agents.map(id => <li key={`agent-${id}`}>{resourceLabels.get(id) || id}</li>)}
-                        {step.skills.map(id => <li key={`skill-${id}`}>Skill · {id}</li>)}
-                        {step.tools.map(id => <li key={`tool-${id}`}>{resourceLabels.get(id) || id}</li>)}
-                      </ul>
+                      <div className="creation-skill-detail__resources" aria-label={`${step.title} 可调用能力`}>
+                        {step.agents.map(id => <span key={`agent-${id}`}><b>@{resourceLabels.get(id) || id}</b><i>Agent</i></span>)}
+                        {step.tools.map(id => <span key={`tool-${id}`}><b>@{resourceLabels.get(id) || id}</b><i>Tool</i></span>)}
+                        {step.skills.map(id => <span key={`skill-${id}`}><b>@{id}</b><i>Skill</i></span>)}
+                      </div>
                     )}
                   </div>
                 </article>
@@ -186,7 +208,10 @@ export default function CreationSkillDetail({
             </div>
           </section>
 
-          <section className="creation-skill-detail__files">
+          <section
+            ref={filesSectionRef}
+            className={`creation-skill-detail__files${filesHighlighted ? ' is-focused' : ''}`}
+          >
             <div className="creation-skill-detail__files-heading">
               <div>
                 <span><PackageOpen size={15} /> Codex 兼容目录</span>

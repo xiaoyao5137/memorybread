@@ -3,7 +3,7 @@ import pytest
 from creation.service import CreationService
 
 
-def test_creation_skill_fallback_extracts_markdown_structure():
+def test_creation_skill_fallback_extracts_markdown_style_and_workflow():
     result = CreationService._fallback_creation_skill_analysis(
         "数据平台技术架构设计",
         "# 背景与目标\n内容说明。\n## 总体架构\n架构说明。\n## 实施计划\n计划说明。",
@@ -11,7 +11,7 @@ def test_creation_skill_fallback_extracts_markdown_structure():
     )
 
     assert result["title"] == "技术架构设计文档"
-    assert result["structure_pattern"] == ["背景与目标", "总体方案", "实施计划"]
+    assert "structure_pattern" not in result
     assert result["common_titles"]
     assert len(result["diagram_style"]) >= 400
     assert len("".join(result["writing_guidelines"])) >= 400
@@ -31,6 +31,11 @@ def test_creation_skill_fallback_extracts_markdown_structure():
         "draft-document",
         "review-delivery",
     ]
+    assert all(
+        marker not in str(step.get("output") or "")
+        for step in result["execution_steps"]
+        for marker in ("证据不足", "证据缺口", "证据完备", "待核验")
+    )
     assert result["execution_steps"][2]["agents"] == ["solution_design_agent"]
     assert result["execution_steps"][2]["tools"] == ["plantuml_diagram"]
 
@@ -49,7 +54,7 @@ def test_creation_skill_normalizer_fills_missing_model_fields():
     assert len(result["text_style"]) >= 400
     assert len(result["diagram_style"]) >= 400
     assert len("".join(result["writing_guidelines"])) >= 400
-    assert result["structure_pattern"] == ["背景与目标"]
+    assert "structure_pattern" not in result
     assert len(result["example_document"]) >= 1000
     assert result["skill_description"]["purpose"]
     assert result["skill_description"]["problems"]
@@ -119,7 +124,7 @@ def test_creation_skill_prompt_requires_source_specific_style_fingerprint():
     assert "目标对象 目标对象" in prompt
     assert "四百至七百个中文字符" in prompt
     assert "合计四百至七百个中文字符" in prompt
-    assert "不得把它渲染成独立的“章节组织骨架”章节" in prompt
+    assert '"structure_pattern"' not in prompt
     assert "只有 distinctive_sections 是对象数组" in prompt
     assert '"distinctive_sections": [' in prompt
     assert '"skill_description": {' in prompt
@@ -442,7 +447,9 @@ def test_creation_skill_normalizer_humanizes_object_arrays_and_keeps_dynamic_sec
     serialized = str(result)
     assert result["title"] == "运行平台整体技术方案"
     assert result["common_titles"][0].startswith("一级标题：采用“")
-    assert result["structure_pattern"][0] == "先定义核心对象，再说明核心目标"
+    assert "structure_pattern" not in result
+    assert "structure_pattern" not in result["section_headings"]
+    assert "structure_pattern" not in result["field_examples"]
     assert "{'level':" not in serialized
     assert "{'role':" not in serialized
     assert result["distinctive_sections"][0]["title"] == "定义先行"

@@ -13,15 +13,12 @@ const renderBackupCard = (overrides: Partial<MemoryBackupCardProps> = {}) => {
     cloudSnapshotsStatus: 'idle',
     cloudSnapshotsError: null,
     selectedCloudSnapshotId: '',
-    recoveryKey: '',
-    generatedRecoveryKey: null,
     lastImportReport: null,
     importFileInputRef: React.createRef<HTMLInputElement>(),
     onExport: vi.fn(),
     onImportClick: vi.fn(),
     onImportFile: vi.fn(),
     onOpenAccount: vi.fn(),
-    onRecoveryKeyChange: vi.fn(),
     onCloudSnapshotChange: vi.fn(),
     onRefreshCloudSnapshots: vi.fn(),
     onBackupToCloud: vi.fn(),
@@ -38,10 +35,13 @@ describe('MemoryBackupCard', () => {
     const props = renderBackupCard()
 
     expect(screen.getByText('记忆备份')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '导出备份' })).toBeEnabled()
+    expect(screen.queryByText('记忆包内容')).not.toBeInTheDocument()
+    expect(screen.queryByText('账户独立同步')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '导出记忆包' })).toBeEnabled()
     expect(screen.getByRole('button', { name: '导入记忆包' })).toBeEnabled()
     expect(screen.getByText('登录后使用云端备份')).toBeInTheDocument()
     expect(screen.queryByLabelText('恢复密钥')).not.toBeInTheDocument()
+    expect(screen.queryByText('云端可用')).not.toBeInTheDocument()
     expect(screen.queryByRole('combobox', { name: '云端备份' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '备份到云端' })).not.toBeInTheDocument()
 
@@ -49,13 +49,51 @@ describe('MemoryBackupCard', () => {
     expect(props.onOpenAccount).toHaveBeenCalledTimes(1)
   })
 
-  it('已登录且有权限时展示云端操作和明确的加载状态', () => {
+  it('导入结果使用中文数据名称并展示更新数量', () => {
+    const onOpenImportDetails = vi.fn()
+    renderBackupCard({
+      onOpenImportDetails,
+      lastImportReport: {
+        file_sha256: 'file-sha256',
+        payload_sha256: 'payload-sha256',
+        dry_run: false,
+        capture_refs: {
+          name: 'capture_refs',
+          incoming: 0,
+          inserted: 0,
+          updated: 0,
+          skipped: 0,
+        },
+        tables: [{
+          name: 'data_sources',
+          incoming: 3,
+          inserted: 1,
+          updated: 2,
+          skipped: 0,
+        }, {
+          name: 'bake_sops',
+          incoming: 1,
+          inserted: 1,
+          updated: 0,
+          skipped: 0,
+        }],
+      },
+    })
+
+    expect(screen.getByLabelText('记忆包导入结果')).toHaveTextContent('数据记录 新增 1 / 更新 2 / 跳过 0')
+    expect(screen.getByLabelText('记忆包导入结果')).toHaveTextContent('操作 新增 1 / 更新 0 / 跳过 0')
+    fireEvent.click(screen.getByRole('button', { name: '查看数据记录导入明细' }))
+    expect(onOpenImportDetails).toHaveBeenCalledWith('data_sources')
+  })
+
+  it('已登录时展示云端操作和明确的加载状态', () => {
     renderBackupCard({
       accessState: 'available',
       cloudSnapshotsStatus: 'loading',
     })
 
-    expect(screen.getByLabelText('恢复密钥')).toBeInTheDocument()
+    expect(screen.queryByLabelText('恢复密钥')).not.toBeInTheDocument()
+    expect(screen.getByText(/备份与恢复无需设置密钥/)).toBeInTheDocument()
     expect(screen.getByRole('status')).toHaveTextContent('正在读取云端备份')
     expect(screen.getByRole('button', { name: '正在读取...' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '备份到云端' })).toBeEnabled()
@@ -74,11 +112,11 @@ describe('MemoryBackupCard', () => {
         committed_at: '2026-07-13T10:00:00Z',
       }],
       selectedCloudSnapshotId: 'snapshot-1',
-      generatedRecoveryKey: 'generated-recovery-key',
     })
 
     expect(screen.getByRole('combobox', { name: '云端备份' })).toHaveValue('snapshot-1')
-    expect(screen.getByLabelText('本次恢复密钥')).toHaveValue('generated-recovery-key')
+    expect(screen.queryByText('云端可用')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('本次恢复密钥')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '刷新列表' }))
     fireEvent.click(screen.getByRole('button', { name: '备份到云端' }))
@@ -97,15 +135,12 @@ describe('MemoryBackupCard', () => {
       cloudSnapshotsStatus="ready"
       cloudSnapshotsError={null}
       selectedCloudSnapshotId=""
-      recoveryKey=""
-      generatedRecoveryKey={null}
       lastImportReport={null}
       importFileInputRef={React.createRef<HTMLInputElement>()}
       onExport={vi.fn()}
       onImportClick={vi.fn()}
       onImportFile={vi.fn()}
       onOpenAccount={vi.fn()}
-      onRecoveryKeyChange={vi.fn()}
       onCloudSnapshotChange={vi.fn()}
       onRefreshCloudSnapshots={vi.fn()}
       onBackupToCloud={vi.fn()}
@@ -122,15 +157,12 @@ describe('MemoryBackupCard', () => {
       cloudSnapshotsStatus="error"
       cloudSnapshotsError="账户服务暂时不可用"
       selectedCloudSnapshotId=""
-      recoveryKey=""
-      generatedRecoveryKey={null}
       lastImportReport={null}
       importFileInputRef={React.createRef<HTMLInputElement>()}
       onExport={vi.fn()}
       onImportClick={vi.fn()}
       onImportFile={vi.fn()}
       onOpenAccount={vi.fn()}
-      onRecoveryKeyChange={vi.fn()}
       onCloudSnapshotChange={vi.fn()}
       onRefreshCloudSnapshots={vi.fn()}
       onBackupToCloud={vi.fn()}
@@ -140,14 +172,4 @@ describe('MemoryBackupCard', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('账户服务暂时不可用')
   })
 
-  it('已登录但暂未开通时展示账户说明，不渲染空白云端表单', () => {
-    const props = renderBackupCard({ accessState: 'unavailable' })
-
-    expect(screen.getByText('当前账户暂未开通云端备份')).toBeInTheDocument()
-    expect(screen.queryByLabelText('恢复密钥')).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '备份到云端' })).not.toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('button', { name: '查看账户' }))
-    expect(props.onOpenAccount).toHaveBeenCalledTimes(1)
-  })
 })

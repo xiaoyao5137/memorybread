@@ -18,6 +18,7 @@ import { useAppStore } from '../store/useAppStore'
 import { useFetchRagHistory, useModelStatus, useRagQuery } from '../hooks/useApi'
 import { useImeCompositionGuard } from '../hooks/useImeCompositionGuard'
 import { fetchBillingBalance } from '../utils/authApi'
+import { createOptionalCloudRequestSignal, optionalCloudIsReachable } from '../utils/optionalCloud'
 import { CREATION_MODEL_DEFS, LOCAL_CREATION_MODEL_ID, REMOTE_CREATION_MODEL_ID, canUseRemoteCreationModel, getEffectiveCreationModelId, getModelDisplayName } from '../utils/modelSelection'
 import { BUILTIN_TEMPLATES, CATEGORY_COLORS, groupTemplatesByCategory } from '../data/taskTemplates'
 import ModelSelect from './ModelSelect'
@@ -276,14 +277,32 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
       return
     }
     let cancelled = false
-    fetchBillingBalance(adminApiBaseUrl, authToken)
-      .then(balance => {
+    let refreshing = false
+    const lifecycleController = new AbortController()
+    const refreshBalance = async () => {
+      if (cancelled || refreshing || !optionalCloudIsReachable()) return
+      refreshing = true
+      const request = createOptionalCloudRequestSignal(lifecycleController.signal)
+      try {
+        const balance = await fetchBillingBalance(adminApiBaseUrl, authToken, request.signal)
         if (!cancelled) setCloudBalance(balance)
-      })
-      .catch(() => {
+      } catch {
         if (!cancelled) setCloudBalance(null)
-      })
-    return () => { cancelled = true }
+      } finally {
+        request.dispose()
+        refreshing = false
+      }
+    }
+    const useLocalModelOffline = () => setCloudBalance(null)
+    void refreshBalance()
+    window.addEventListener('online', refreshBalance)
+    window.addEventListener('offline', useLocalModelOffline)
+    return () => {
+      cancelled = true
+      lifecycleController.abort()
+      window.removeEventListener('online', refreshBalance)
+      window.removeEventListener('offline', useLocalModelOffline)
+    }
   }, [adminApiBaseUrl, authToken, currentUser, setCloudBalance])
 
   useEffect(() => {

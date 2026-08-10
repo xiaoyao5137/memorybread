@@ -15,6 +15,7 @@ import {
 import { useAppStore } from '../store/useAppStore'
 import type { CaptureRecord, DebugLogContent, DebugLogFile } from '../types'
 import { enableInitializationTestMode } from '../utils/initialization'
+import { useConfirmDialog } from './useConfirmDialog'
 
 interface DebugPanelProps {
   className?: string
@@ -35,6 +36,7 @@ interface SystemStats {
 
 const DebugPanel: React.FC<DebugPanelProps> = ({ className = '' }) => {
   const { apiBaseUrl, setHasCompletedSetup, setWindowMode } = useAppStore()
+  const { confirm: confirmDestructive, dialog: confirmDialog } = useConfirmDialog()
   const fetchDebugLogFiles = useFetchDebugLogFiles()
   const fetchDebugLogContent = useFetchDebugLogContent()
 
@@ -208,7 +210,7 @@ const DebugPanel: React.FC<DebugPanelProps> = ({ className = '' }) => {
   const handleClose = () => setWindowMode('buddy')
 
   const handleClearExtractionQueue = async () => {
-    if (!window.confirm('确认清空所有待提炼内容？此操作将跳过所有历史积压，无法恢复。')) return
+    if (!(await confirmDestructive({ title: '清空所有待提炼内容？', description: '此操作将跳过所有历史积压，无法恢复。' }))) return
     setClearingQueue(true)
     setClearQueueResult(null)
     try {
@@ -773,6 +775,7 @@ const DebugPanel: React.FC<DebugPanelProps> = ({ className = '' }) => {
           </div>
         )}
       </section>
+      {confirmDialog}
     </div>
   )
 }

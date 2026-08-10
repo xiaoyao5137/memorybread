@@ -118,15 +118,18 @@ describe('IntegrationPanel', () => {
 
     expect(screen.getByRole('heading', { name: '集成' })).toBeInTheDocument()
     expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual([
-      '输入本地导入与增量更新',
+      '输入导入外部记忆',
       '输出导出上下文或安装 Skill',
-      '备份与恢复守住完整记忆资产',
+      '备份与恢复备份本地记忆与恢复',
     ])
     expect(screen.getByRole('heading', { name: '导入记忆Skill' })).toBeInTheDocument()
     expect(screen.queryByText(/每个内置 Skill 都在本机真实执行/)).not.toBeInTheDocument()
     expect(await screen.findByText('Obsidian')).toBeInTheDocument()
     expect(screen.getByText('Qdrant')).toBeInTheDocument()
-    expect(screen.getAllByText('配置执行')).toHaveLength(2)
+    expect(screen.getByText('记忆来源')).toBeInTheDocument()
+    expect(screen.getByText('记忆导入')).toBeInTheDocument()
+    expect(screen.getByText('记忆输出')).toBeInTheDocument()
+    expect(screen.getAllByText('执行')).toHaveLength(2)
   })
 
   it('输出 Tab 展示上下文包与可安装编码 Agent Skill', async () => {
@@ -138,7 +141,7 @@ describe('IntegrationPanel', () => {
     expect(screen.getByText('千问办公')).toBeInTheDocument()
     expect(screen.getByText('Codex')).toBeInTheDocument()
     expect(screen.getByText('Claude Code')).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: '导出记忆Skill' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: '输出记忆到外部工具' })).toBeInTheDocument()
   })
 
   it('备份与恢复 Tab 承载原记忆备份组件', async () => {
@@ -165,7 +168,7 @@ describe('IntegrationPanel', () => {
   it('选择 Vault 后可启动预检并查看结果与日志', async () => {
     render(<IntegrationPanel />)
     const title = await screen.findByText('Obsidian')
-    fireEvent.click(within(title.closest('article') as HTMLElement).getByRole('button', { name: /配置执行/ }))
+    fireEvent.click(within(title.closest('article') as HTMLElement).getByRole('button', { name: '执行' }))
     await screen.findByText('选择本地仓库文件夹')
     const file = new File(['# Note'], 'Note.md', { type: 'text/markdown' })
     fireEvent.change(screen.getByLabelText('选择 Skill 输入文件'), { target: { files: [file] } })
@@ -186,7 +189,7 @@ describe('IntegrationPanel', () => {
   it('在清空文件输入前快照 WebView 的动态 FileList', async () => {
     render(<IntegrationPanel />)
     const title = await screen.findByText('Obsidian')
-    fireEvent.click(within(title.closest('article') as HTMLElement).getByRole('button', { name: /配置执行/ }))
+    fireEvent.click(within(title.closest('article') as HTMLElement).getByRole('button', { name: '执行' }))
     await screen.findByText('选择本地仓库文件夹')
 
     const input = screen.getByLabelText('选择 Skill 输入文件') as HTMLInputElement
@@ -215,9 +218,9 @@ describe('IntegrationPanel', () => {
       clientSkillKey: 'imported-my-input-skill', sourceKind: 'imported', sourceId: 'my-input-skill',
       title: 'my-input-skill', summary: '导入团队自己的数据。', categoryId: null,
       skillDescription: { purpose: '', documentTypes: [], problems: [], domains: [], deliverables: [] },
-      executionSteps: [], commonTitles: [], titleStyle: '', textStyle: '', diagramStyle: '', structurePattern: [], writingGuidelines: [],
-      sectionHeadings: { commonTitles: '', titleStyle: '', textStyle: '', diagramStyle: '', structurePattern: '', writingGuidelines: '' },
-      fieldExamples: { commonTitles: [], titleStyle: [], textStyle: [], diagramStyle: [], structurePattern: [], writingGuidelines: [] },
+      executionSteps: [], commonTitles: [], titleStyle: '', textStyle: '', diagramStyle: '', writingGuidelines: [],
+      sectionHeadings: { commonTitles: '', titleStyle: '', textStyle: '', diagramStyle: '', writingGuidelines: '' },
+      fieldExamples: { commonTitles: [], titleStyle: [], textStyle: [], diagramStyle: [], writingGuidelines: [] },
       exampleDocument: '', status: 'saved', installed: true, published: false,
       packageFiles: [{ path: 'SKILL.md', mediaType: 'text/markdown', contentBase64: 'LS0t', sizeBytes: 3 }],
     }
@@ -235,5 +238,31 @@ describe('IntegrationPanel', () => {
     ))
     expect(await screen.findByText('导入团队自己的数据。')).toBeInTheDocument()
     expect(screen.getByRole('status')).toHaveTextContent('my-input-skill 已保存为自定义输入 Skill')
+  })
+
+  it('执行结果中的记忆标题可进入对应时间线明细', async () => {
+    integrationMocks.listIntegrationSkillRuns.mockResolvedValue([{
+      ...succeededRun,
+      mode: 'execute',
+      result: {
+        ...succeededRun.result,
+        mode: 'execute',
+        created: 1,
+        records: [{ id: 42, title: 'Imported decision', path: 'Decisions/Import.md', outcome: 'created' }],
+      },
+    }])
+
+    render(<IntegrationPanel />)
+    const title = await screen.findByText('Obsidian')
+    fireEvent.click(within(title.closest('article') as HTMLElement).getByRole('button', { name: '执行' }))
+    const memoryLink = await screen.findByRole('button', { name: /Imported decision/ })
+    fireEvent.click(memoryLink)
+
+    expect(useAppStore.getState()).toMatchObject({
+      windowMode: 'knowledge',
+      repositoryTab: 'memory',
+      repositoryMemoryFocusId: '42',
+      selectedMemoryId: '42',
+    })
   })
 })

@@ -15,7 +15,9 @@ use crate::{
         BakeExtractResponse, BakeKnowledgePayload, BakeListFilter, BakeListSort, BakeMemoryFilter,
         BakeMemoryPayload, BakeOverviewPayload, BakePagedResponse, BakeService, BakeSopPayload,
         BakeStyleConfig, CreateOrUpdateDocumentRequest, InitializeBakeMemoriesResponse,
+        MAX_BAKE_RETRY_FAILURES,
     },
+    storage::models_bake::BakeQueueStatusRecord,
 };
 
 #[derive(serde::Deserialize)]
@@ -81,6 +83,27 @@ pub struct RunBakeRequest {
     pub trigger_reason: Option<String>,
     pub limit: Option<usize>,
     pub max_concurrency: Option<usize>,
+}
+
+#[derive(serde::Serialize)]
+pub struct BakeQueueStatusResponse {
+    #[serde(flatten)]
+    pub queue: BakeQueueStatusRecord,
+    pub capture_enabled: bool,
+    pub running_count: i64,
+}
+
+pub async fn get_bake_queue_status(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BakeQueueStatusResponse>, ApiError> {
+    let queue = state
+        .storage
+        .get_bake_queue_status(MAX_BAKE_RETRY_FAILURES)?;
+    Ok(Json(BakeQueueStatusResponse {
+        queue,
+        capture_enabled: state.is_capture_enabled(),
+        running_count: state.storage.count_running_bake_runs().unwrap_or(0),
+    }))
 }
 
 pub async fn get_bake_style_config(
@@ -510,6 +533,21 @@ pub async fn run_bake_pipeline(
             "id": null,
             "status": "skipped",
             "reason": format!("max {} concurrent bake runs reached", MAX_CONCURRENT_BAKE_RUNS),
+        })));
+    }
+
+    // 在写入 bake_runs 之前使用 Core 的统一队列口径预检，避免每 30 秒制造一条
+    // 空 completed run。Sidecar 也读取同一端点，不再自行扫描 SQLite。
+    let queue = state
+        .storage
+        .get_bake_queue_status(MAX_BAKE_RETRY_FAILURES)?;
+    if queue.actionable_count == 0 {
+        return Ok(Json(serde_json::json!({
+            "id": null,
+            "status": "skipped",
+            "reason": "no actionable bake candidates",
+            "retry_after_ms": queue.recommended_retry_after_ms,
+            "queue": queue,
         })));
     }
 

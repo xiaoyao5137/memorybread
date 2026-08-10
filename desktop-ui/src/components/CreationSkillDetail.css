@@ -66,13 +66,21 @@
 .creation-skill-detail__workflow h4 { margin: 0; color: #253041; font-size: 13px; }
 .creation-skill-detail__workflow p { margin: 5px 0 0; color: #667085; font-size: 11px; line-height: 1.6; }
 .creation-skill-detail__workflow small { display: block; margin-top: 5px; color: #7b6856; font-size: 10px; }
-.creation-skill-detail__workflow ul { margin: 8px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 5px; list-style: none; }
-.creation-skill-detail__workflow li { padding: 4px 7px; border: 1px solid rgba(15, 118, 110, .2); border-radius: 999px; background: #edf8f5; color: #0f6b63; font-size: 9px; font-weight: 650; }
+.creation-skill-detail__resources { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 5px; }
+.creation-skill-detail__resources > span { padding: 3px 6px; border: 1px solid rgba(15, 118, 110, .2); border-radius: 999px; background: #edf8f5; color: #0f6b63; display: inline-flex; align-items: center; gap: 4px; font-size: 9px; }
+.creation-skill-detail__resources > span b { font-weight: 700; }
+.creation-skill-detail__resources > span i { padding: 1px 4px; border-radius: 999px; background: rgba(15, 118, 110, .12); color: #0f766e; font-style: normal; font-size: 8px; font-weight: 700; }
 
 .creation-skill-detail__files {
   grid-column: 1 / -1;
   padding: 0;
   overflow: hidden;
+}
+
+.creation-skill-detail__files.is-focused {
+  border-color: #d6a05c;
+  box-shadow: 0 0 0 3px rgba(164, 93, 34, .18);
+  transition: box-shadow .4s ease, border-color .4s ease;
 }
 
 .creation-skill-detail__files-heading {

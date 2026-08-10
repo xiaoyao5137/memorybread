@@ -15,8 +15,12 @@ dependencies    = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths    = ["tests"]
-pythonpath   = ["."]        # 让 pytest 能找到 ocr/, dispatcher.py 等顶层模块
+pythonpath   = [
+    ".",                         # 让 pytest 能找到 ocr/, dispatcher.py 等顶层模块
+    "../shared/ipc-protocol/python", # 使用仓库内 IPC 协议包，不依赖 editable install
+]
 markers = [
     "initialization_cold: 可重复执行的纯本地冷初始化沙箱测试",
     "live_initialization: 下载真实运行时与模型的手工/夜间冷初始化测试",
+    "live_data_facts: 使用本地真实模型执行时间线数据事实金标回归",
 ]

@@ -86,6 +86,7 @@ const BakeMemoryGraph: React.FC<{
   const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 })
   const [positions, setPositions] = useState<Record<string, MemoryGraphPosition>>({})
   const svgRef = useRef<SVGSVGElement | null>(null)
+  const canvasRef = useRef<HTMLDivElement | null>(null)
   const fullscreenButtonRef = useRef<HTMLButtonElement | null>(null)
   const searchRequestRef = useRef(0)
   const gestureRef = useRef<{
@@ -217,15 +218,6 @@ const BakeMemoryGraph: React.FC<{
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [fullscreen])
 
-  const clientToViewbox = (clientX: number, clientY: number) => {
-    const rect = svgRef.current?.getBoundingClientRect()
-    if (!rect || rect.width <= 0 || rect.height <= 0) return { x: 0, y: 0 }
-    return {
-      x: ((clientX - rect.left) / rect.width) * VIEWBOX_WIDTH,
-      y: ((clientY - rect.top) / rect.height) * VIEWBOX_HEIGHT,
-    }
-  }
-
   const handlePointerMove = (event: React.PointerEvent<SVGSVGElement>) => {
     const gesture = gestureRef.current
     if (!gesture || gesture.pointerId !== event.pointerId) return
@@ -252,20 +244,40 @@ const BakeMemoryGraph: React.FC<{
     if (svgRef.current?.hasPointerCapture(event.pointerId)) svgRef.current.releasePointerCapture(event.pointerId)
   }
 
-  const handleWheel = (event: React.WheelEvent<SVGSVGElement>) => {
-    event.preventDefault()
-    const point = clientToViewbox(event.clientX, event.clientY)
-    setTransform(current => {
-      const nextScale = getMemoryGraphWheelScale(current.scale, event.deltaY)
-      const worldX = (point.x - current.x) / current.scale
-      const worldY = (point.y - current.y) / current.scale
-      return {
-        scale: nextScale,
-        x: point.x - worldX * nextScale,
-        y: point.y - worldY * nextScale,
+  // 缩放改用画布容器上的原生非 passive wheel 监听（见下方 useEffect），
+  // React 合成 onWheel 无法有效 preventDefault，会导致缩放与页面滚动同时发生。
+
+  // 嵌入页面时普通滚轮不拦截，避免路过图谱导致页面滚动与图谱缩放同时发生；
+  // 只有显式缩放意图（Ctrl/⌘+滚轮或触控板捏合）或全屏时才缩放。
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return undefined
+    const handleNativeWheel = (event: WheelEvent) => {
+      const zoomIntent = fullscreen || event.ctrlKey || event.metaKey
+      if (!zoomIntent) return
+      if (!svgRef.current) return
+      event.preventDefault()
+      event.stopPropagation()
+      const rect = svgRef.current.getBoundingClientRect()
+      if (rect.width <= 0 || rect.height <= 0) return
+      const point = {
+        x: ((event.clientX - rect.left) / rect.width) * VIEWBOX_WIDTH,
+        y: ((event.clientY - rect.top) / rect.height) * VIEWBOX_HEIGHT,
       }
-    })
-  }
+      setTransform(current => {
+        const nextScale = getMemoryGraphWheelScale(current.scale, event.deltaY)
+        const worldX = (point.x - current.x) / current.scale
+        const worldY = (point.y - current.y) / current.scale
+        return {
+          scale: nextScale,
+          x: point.x - worldX * nextScale,
+          y: point.y - worldY * nextScale,
+        }
+      })
+    }
+    canvas.addEventListener('wheel', handleNativeWheel, { passive: false })
+    return () => canvas.removeEventListener('wheel', handleNativeWheel)
+  }, [fullscreen])
 
   const toggleKind = (kind: MemoryGraphNodeKind) => {
     setEnabledKinds(current => {
@@ -368,7 +380,7 @@ const BakeMemoryGraph: React.FC<{
         </span>
       </div>
 
-      <div className="bake-memory-graph__canvas">
+      <div className="bake-memory-graph__canvas" ref={canvasRef}>
         {loading && visibleNodes.length === 0 ? (
           <div className="bake-memory-graph__state">
             <span className="bake-memory-graph__loader" />
@@ -412,7 +424,6 @@ const BakeMemoryGraph: React.FC<{
             onPointerMove={handlePointerMove}
             onPointerUp={endGesture}
             onPointerCancel={endGesture}
-            onWheel={handleWheel}
             onClick={(event) => {
               if ((event.target as Element).closest('[data-graph-node], [data-graph-edge]')) return
               setSelectedNodeId(focusNodeId ?? null)
@@ -550,7 +561,9 @@ const BakeMemoryGraph: React.FC<{
           <span><i className="bake-graph-line bake-graph-line--shared" />共同来源</span>
           <span><i className="bake-graph-line bake-graph-line--semantic" />语义相关</span>
         </div>
-        <span className="bake-memory-graph__hint">拖拽节点 · 空白处平移 · 滚动缩放 · 双击打开</span>
+        <span className="bake-memory-graph__hint">
+          拖拽节点 · 空白处平移 · {fullscreen ? '滚动缩放' : 'Ctrl/⌘+滚动缩放'} · 双击打开
+        </span>
         {slicedGraph.hiddenNodeCount > 0 && <span className="bake-memory-graph__hidden">另有 {slicedGraph.hiddenNodeCount} 项未展开</span>}
       </footer>
     </section>

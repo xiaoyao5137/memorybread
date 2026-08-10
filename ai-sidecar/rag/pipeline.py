@@ -145,6 +145,8 @@ _MAX_CHUNK_LEN = 800   # 单个上下文片段最大字符数
 _KEYWORD_RRF_WEIGHT = 0.45
 _PENDING_DOCUMENT_RRF_WEIGHT = 0.7
 _VECTOR_RRF_WEIGHT = 1.0
+# 关键词知识首位在 0.45 权重、RRF k=60 时的分数约为 0.00738。
+# 阈值高于该值会在向量召回存在时误删直接命中的持久知识，只留下向量结果。
 _LOOKUP_MIN_RRF_SCORE_WITH_VECTOR = 0.01
 _VECTOR_LOOKUP_SCORE_THRESHOLD = 0.45
 _VECTOR_SUMMARY_SCORE_THRESHOLD = 0.35
@@ -295,7 +297,9 @@ class RagPipeline:
                 query_vector = embed_results[0].vector
         except Exception as exc:
             logger.warning("Query embedding 失败: %s", exc)
-            raise RuntimeError(f"Query embedding 失败，无法执行向量检索: {exc}") from exc
+            # 向量只是多路召回之一；本地模型暂不可用时继续走持久知识/FTS，
+            # 避免整个咨询链路因可选增强能力故障而不可用。
+            query_vector = []
         embedding_finished = time.perf_counter()
 
         # 任务型意图：不按关键词过滤，纯按时间段和活动类型宽松召回
@@ -1356,9 +1360,16 @@ def _append_missing_artifact_candidates(
     appended: list[RetrievedChunk] = []
     for chunk in candidates:
         source_type = (chunk.metadata or {}).get("source_type") or chunk.source
-        if source_type not in {"document", "bake_knowledge", "operation"}:
-            continue
-        if float(chunk.score or 0) < 5.0:
+        # Legacy timeline knowledge commonly carries a normalized score below 1.0 and is
+        # still a primary, directly matched source. Bake artifacts use FTS-style scores;
+        # only append those when the keyword signal is strong so weak document matches do
+        # not leak back after the vector-aware RRF threshold filtered them out.
+        is_primary_knowledge = source_type == "knowledge"
+        is_strong_bake_artifact = (
+            source_type in {"document", "bake_knowledge", "operation"}
+            and float(chunk.score or 0) >= 5.0
+        )
+        if not is_primary_knowledge and not is_strong_bake_artifact:
             continue
         doc_key = chunk.doc_key or (chunk.metadata or {}).get("doc_key")
         if not doc_key or doc_key in seen:

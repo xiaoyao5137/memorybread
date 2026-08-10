@@ -74,6 +74,11 @@ cron       = "0.12"
 # 系统资源监控
 sysinfo    = "0.30"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# 只读全局输入事件监听：仅接收事件类型，不读取或保存键值。
+core-foundation = "0.9"
+core-graphics = "0.23"
+
 [dev-dependencies]
 tokio          = { version = "1", features = ["full"] }
 tempfile       = "3"

@@ -61,6 +61,9 @@ export interface CreationDataReferenceItem {
   freshness_class: string
   refresh_required: boolean
   can_use: boolean
+  evidence_status?: string
+  evidence_reason?: string
+  unavailable_reason?: string
 }
 
 export interface CreationChatMessage {

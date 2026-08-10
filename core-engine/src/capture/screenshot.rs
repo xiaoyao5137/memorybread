@@ -94,6 +94,60 @@ pub struct ScreenshotResult {
     pub window_title: Option<String>,
 }
 
+/// 只存在于内存中的低成本画面探针。获取像素后立即计算分块指纹；只有门禁判定为
+/// 明显变化时，才会把这里的同一帧编码为 JPEG，避免二次截图和画面竞态。
+#[derive(Debug)]
+pub(crate) struct VisualProbe {
+    image: DynamicImage,
+    pub fingerprint: VisualFingerprint,
+    pub dhash: u64,
+    pub source: ScreenshotSource,
+    pub app_name: Option<String>,
+    pub window_title: Option<String>,
+}
+
+/// 4×4 分块、每块 64 bit dHash。相比单个全局 dHash，小范围文本或局部滚动更容易被识别。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VisualFingerprint {
+    tiles: [u64; 16],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VisualDifference {
+    pub total_bits: u32,
+    pub max_tile_bits: u32,
+    pub changed_tiles: u32,
+}
+
+impl VisualFingerprint {
+    pub fn difference(&self, other: &Self) -> VisualDifference {
+        let mut total_bits = 0;
+        let mut max_tile_bits = 0;
+        let mut changed_tiles = 0;
+        for (left, right) in self.tiles.iter().zip(other.tiles.iter()) {
+            let bits = hamming_distance(*left, *right);
+            total_bits += bits;
+            max_tile_bits = max_tile_bits.max(bits);
+            if bits > 0 {
+                changed_tiles += 1;
+            }
+        }
+        VisualDifference {
+            total_bits,
+            max_tile_bits,
+            changed_tiles,
+        }
+    }
+
+    /// 允许单块轻微光标/动画噪声；局部明显变化或多块累计变化才进入完整采集。
+    pub fn is_significant_change(&self, other: &Self) -> bool {
+        let difference = self.difference(other);
+        difference.max_tile_bits >= 5
+            || difference.total_bits >= 12
+            || (difference.changed_tiles >= 3 && difference.total_bits >= 8)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenshotSource {
     Window,
@@ -126,6 +180,24 @@ pub async fn capture_and_save_async(
         .map_err(|e| CaptureError::ScreenshotFailed(format!("截图任务 panic: {}", e)))?
 }
 
+/// 只抓取前台窗口像素并计算视觉指纹，不编码、不落盘、不触发 OCR。
+pub(crate) async fn capture_visual_probe_async() -> Result<Option<VisualProbe>, CaptureError> {
+    tokio::task::spawn_blocking(capture_visual_probe)
+        .await
+        .map_err(|error| CaptureError::ScreenshotFailed(format!("视觉探针任务 panic: {error}")))?
+}
+
+/// 将已经通过指纹门禁的内存帧落盘，不再次调用系统截图 API。
+pub(crate) async fn save_visual_probe_async(
+    probe: VisualProbe,
+    captures_dir: PathBuf,
+    quality: u8,
+) -> Result<ScreenshotResult, CaptureError> {
+    tokio::task::spawn_blocking(move || save_visual_probe(probe, &captures_dir, quality))
+        .await
+        .map_err(|error| CaptureError::ScreenshotFailed(format!("视觉帧保存任务 panic: {error}")))?
+}
+
 /// 采集主显示器截图并以 JPEG 格式存储。
 ///
 /// 返回 `Ok(None)` 表示无可用显示器（无头服务器 / 测试环境）或熔断保护。
@@ -133,19 +205,10 @@ pub fn capture_and_save(
     captures_dir: &Path,
     quality: u8,
 ) -> Result<Option<ScreenshotResult>, CaptureError> {
-    // 熔断检查（防止显卡驱动崩溃时持续重试）
-    if !check_screenshot_circuit_breaker() {
+    let Some(probe) = capture_visual_probe()? else {
         return Ok(None);
-    }
-
-    #[cfg(not(test))]
-    {
-        capture_real(captures_dir, quality)
-    }
-    #[cfg(test)]
-    {
-        capture_test(captures_dir, quality)
-    }
+    };
+    save_visual_probe(probe, captures_dir, quality).map(Some)
 }
 
 /// 生成截图文件的相对路径。
@@ -180,6 +243,105 @@ pub fn compute_dhash64(image: &DynamicImage) -> u64 {
 /// 计算两个 dHash 的汉明距离。
 pub fn hamming_distance(a: u64, b: u64) -> u32 {
     (a ^ b).count_ones()
+}
+
+fn compute_visual_fingerprint(image: &DynamicImage) -> VisualFingerprint {
+    const GRID: u32 = 4;
+    const TILE_WIDTH: u32 = 9;
+    const TILE_HEIGHT: u32 = 8;
+    // 整帧只缩放一次到 36×32 灰度图，再从中读取 16 个 tile；避免对原始大图做
+    // 16 次裁剪和缩放。最终仅保留 128 字节指纹。
+    let sampled = image
+        .resize_exact(GRID * TILE_WIDTH, GRID * TILE_HEIGHT, FilterType::Triangle)
+        .grayscale()
+        .to_luma8();
+    let mut tiles = [0u64; 16];
+    for tile_y in 0..GRID {
+        for tile_x in 0..GRID {
+            let mut hash = 0u64;
+            let x0 = tile_x * TILE_WIDTH;
+            let y0 = tile_y * TILE_HEIGHT;
+            for y in 0..TILE_HEIGHT {
+                for x in 0..(TILE_WIDTH - 1) {
+                    hash <<= 1;
+                    if sampled.get_pixel(x0 + x, y0 + y)[0]
+                        > sampled.get_pixel(x0 + x + 1, y0 + y)[0]
+                    {
+                        hash |= 1;
+                    }
+                }
+            }
+            tiles[(tile_y * GRID + tile_x) as usize] = hash;
+        }
+    }
+    VisualFingerprint { tiles }
+}
+
+fn capture_visual_probe() -> Result<Option<VisualProbe>, CaptureError> {
+    if !check_screenshot_circuit_breaker() {
+        return Ok(None);
+    }
+
+    #[cfg(not(test))]
+    let result = capture_real_probe();
+    #[cfg(test)]
+    let result = capture_test_probe();
+
+    match result {
+        Ok(probe) => {
+            reset_screenshot_failure();
+            Ok(probe)
+        }
+        Err(error) => {
+            record_screenshot_failure();
+            Err(error)
+        }
+    }
+}
+
+fn save_visual_probe(
+    probe: VisualProbe,
+    captures_dir: &Path,
+    quality: u8,
+) -> Result<ScreenshotResult, CaptureError> {
+    use image::codecs::jpeg::JpegEncoder;
+    use std::fs;
+    use std::io::BufWriter;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let ts_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let relative_path = make_relative_path(ts_ms);
+    let full_path = captures_dir.join(&relative_path);
+    if let Some(parent) = full_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let width = probe.image.width();
+    let height = probe.image.height();
+    let rgb_image = probe.image.into_rgb8();
+    let file = fs::File::create(&full_path)?;
+    let writer = BufWriter::new(file);
+    let mut encoder = JpegEncoder::new_with_quality(writer, quality);
+    encoder
+        .encode_image(&DynamicImage::ImageRgb8(rgb_image))
+        .map_err(|error| CaptureError::ImageError(error.to_string()))?;
+    drop(encoder);
+    let file_size = fs::metadata(&full_path)?.len();
+
+    Ok(ScreenshotResult {
+        relative_path,
+        full_path,
+        dhash: probe.dhash,
+        width,
+        height,
+        file_size,
+        source: probe.source,
+        app_name: probe.app_name,
+        window_title: probe.window_title,
+    })
 }
 
 #[cfg(test)]
@@ -378,15 +540,7 @@ fn capture_fullscreen_image() -> Result<image::RgbaImage, CaptureError> {
 }
 
 #[cfg(not(test))]
-fn capture_real(
-    captures_dir: &Path,
-    quality: u8,
-) -> Result<Option<ScreenshotResult>, CaptureError> {
-    use image::codecs::jpeg::JpegEncoder;
-    use std::fs;
-    use std::io::BufWriter;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
+fn capture_real_probe() -> Result<Option<VisualProbe>, CaptureError> {
     let (rgba_image, source, app_name, window_title) = match capture_focused_window_image() {
         Ok(capture) => (
             capture.image,
@@ -401,52 +555,17 @@ fn capture_real(
             );
             match capture_fullscreen_image() {
                 Ok(img) => (img, ScreenshotSource::Fullscreen, None, None),
-                Err(e) => {
-                    record_screenshot_failure();
-                    return Err(e);
-                }
+                Err(e) => return Err(e),
             }
         }
     };
-
-    reset_screenshot_failure();
-
-    let ts_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-
     let dynamic = DynamicImage::ImageRgba8(rgba_image);
-    let width = dynamic.width();
-    let height = dynamic.height();
-
-    let relative_path = make_relative_path(ts_ms);
-    let full_path = captures_dir.join(&relative_path);
-
-    if let Some(parent) = full_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
     let dhash = compute_dhash64(&dynamic);
-    let rgb_image = dynamic.into_rgb8();
-
-    let file = fs::File::create(&full_path)?;
-    let writer = BufWriter::new(file);
-    let mut encoder = JpegEncoder::new_with_quality(writer, quality);
-    encoder
-        .encode_image(&DynamicImage::ImageRgb8(rgb_image))
-        .map_err(|e| CaptureError::ImageError(e.to_string()))?;
-    drop(encoder);
-
-    let file_size = fs::metadata(&full_path)?.len();
-
-    Ok(Some(ScreenshotResult {
-        relative_path,
-        full_path,
+    let fingerprint = compute_visual_fingerprint(&dynamic);
+    Ok(Some(VisualProbe {
+        image: dynamic,
+        fingerprint,
         dhash,
-        width,
-        height,
-        file_size,
         source,
         app_name,
         window_title,
@@ -454,15 +573,8 @@ fn capture_real(
 }
 
 #[cfg(test)]
-fn capture_test(
-    captures_dir: &Path,
-    quality: u8,
-) -> Result<Option<ScreenshotResult>, CaptureError> {
-    use image::{codecs::jpeg::JpegEncoder, RgbImage};
-    use std::fs;
-    use std::io::BufWriter;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
+fn capture_test_probe() -> Result<Option<VisualProbe>, CaptureError> {
+    use image::RgbImage;
     let fixture = match test_screenshot_queue().lock().unwrap().pop_front() {
         Some(fixture) => fixture,
         None => return Ok(None),
@@ -475,39 +587,13 @@ fn capture_test(
     } = fixture;
     let rgb_image = RgbImage::from_raw(width, height, pixels)
         .ok_or_else(|| CaptureError::ImageError("invalid test screenshot pixels".to_string()))?;
-
-    let ts_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-
-    let relative_path = make_relative_path(ts_ms);
-    let full_path = captures_dir.join(&relative_path);
-
-    if let Some(parent) = full_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
     let dynamic = DynamicImage::ImageRgb8(rgb_image);
     let dhash = compute_dhash64(&dynamic);
-
-    let file = fs::File::create(&full_path)?;
-    let writer = BufWriter::new(file);
-    let mut encoder = JpegEncoder::new_with_quality(writer, quality);
-    encoder
-        .encode_image(&dynamic)
-        .map_err(|e| CaptureError::ImageError(e.to_string()))?;
-    drop(encoder);
-
-    let file_size = fs::metadata(&full_path)?.len();
-
-    Ok(Some(ScreenshotResult {
-        relative_path,
-        full_path,
+    let fingerprint = compute_visual_fingerprint(&dynamic);
+    Ok(Some(VisualProbe {
+        image: dynamic,
+        fingerprint,
         dhash,
-        width,
-        height,
-        file_size,
         source: ScreenshotSource::Fullscreen,
         app_name: None,
         window_title: None,
@@ -565,6 +651,29 @@ mod tests {
         let hash1 = compute_dhash64(&image);
         let hash2 = compute_dhash64(&image);
         assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn tiled_visual_fingerprint_detects_local_content_change() {
+        let mut baseline = GrayImage::new(128, 128);
+        for y in 0..128 {
+            for x in 0..128 {
+                baseline.put_pixel(x, y, Luma([x as u8 ^ (y as u8 / 3)]));
+            }
+        }
+        let mut changed = baseline.clone();
+        for y in 32..64 {
+            for x in 64..96 {
+                changed.put_pixel(x, y, Luma([255u8.saturating_sub(x as u8)]));
+            }
+        }
+
+        let baseline = compute_visual_fingerprint(&DynamicImage::ImageLuma8(baseline));
+        let identical = baseline.clone();
+        let changed = compute_visual_fingerprint(&DynamicImage::ImageLuma8(changed));
+        assert!(!baseline.is_significant_change(&identical));
+        assert!(baseline.is_significant_change(&changed));
+        assert!(baseline.difference(&changed).changed_tiles >= 1);
     }
 
     #[test]
@@ -648,5 +757,28 @@ mod tests {
         // JPEG 有损，尺寸应保持一致
         assert_eq!(decoded.width(), width);
         assert_eq!(decoded.height(), height);
+    }
+
+    #[test]
+    fn visual_probe_saves_rgba_window_frame_as_jpeg() {
+        let dir = tempdir().unwrap();
+        let image = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            32,
+            24,
+            image::Rgba([12, 34, 56, 180]),
+        ));
+        let probe = VisualProbe {
+            fingerprint: compute_visual_fingerprint(&image),
+            dhash: compute_dhash64(&image),
+            image,
+            source: ScreenshotSource::Window,
+            app_name: Some("Test".into()),
+            window_title: Some("RGBA".into()),
+        };
+
+        let saved = save_visual_probe(probe, dir.path(), 80).unwrap();
+        assert!(saved.full_path.exists());
+        let decoded = image::open(saved.full_path).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (32, 24));
     }
 }

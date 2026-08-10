@@ -5,6 +5,7 @@ import { useAppStore } from '../store/useAppStore'
 import type { RagHistoryItem, RagHistoryPage } from '../types'
 
 const mocks = vi.hoisted(() => ({
+  fetchBillingBalance: vi.fn(),
   fetchHistory: vi.fn(),
   ragQuery: vi.fn(),
 }))
@@ -20,7 +21,7 @@ vi.mock('../hooks/useApi', () => ({
 }))
 
 vi.mock('../utils/authApi', () => ({
-  fetchBillingBalance: vi.fn(),
+  fetchBillingBalance: mocks.fetchBillingBalance,
 }))
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -39,11 +40,13 @@ const item = (id: number, query: string): RagHistoryItem => ({
 })
 
 beforeEach(() => {
+  Object.defineProperty(window.navigator, 'onLine', { configurable: true, value: true })
   useAppStore.getState().reset()
   useAppStore.getState().setApiBaseUrl('http://localhost:7070')
   mocks.ragQuery.mockReset()
   mocks.ragQuery.mockResolvedValue({ answer: '咨询回答', contexts: [] })
   mocks.fetchHistory.mockReset()
+  mocks.fetchBillingBalance.mockReset()
   mocks.fetchHistory.mockImplementation(async (
     params: { limit: number; offset: number; query: string },
   ): Promise<RagHistoryPage> => {
@@ -58,6 +61,29 @@ beforeEach(() => {
 })
 
 describe('咨询输入框提交', () => {
+  it('离线打开默认咨询页时直接使用本地模型且不请求云端余额', async () => {
+    useAppStore.getState().setAuthSession({
+      access_token: 'mbs_offline_rag_token',
+      expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+      user: {
+        id: 'offline-rag-user',
+        username: '离线咨询用户',
+        status: 'active',
+        roles: ['user'],
+        locale: 'zh-CN',
+        timezone: 'Asia/Shanghai',
+        created_at: new Date().toISOString(),
+      },
+    })
+    Object.defineProperty(window.navigator, 'onLine', { configurable: true, value: false })
+
+    render(<RagPanel />)
+
+    await waitFor(() => expect(mocks.fetchHistory).toHaveBeenCalled())
+    expect(screen.getByTestId('rag-panel')).toBeInTheDocument()
+    expect(mocks.fetchBillingBalance).not.toHaveBeenCalled()
+  })
+
   it('输入法确认候选词时不提交咨询', async () => {
     render(<RagPanel />)
     await waitFor(() => {

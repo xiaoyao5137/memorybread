@@ -47,6 +47,32 @@ function authErrorMessage(
   return payload?.error?.message || fallback
 }
 
+interface CloudApiError extends Error {
+  status?: number
+  code?: string
+  retryAfterSeconds?: number
+}
+
+const cloudApiError = (
+  payload: { error?: { code?: string; message?: string } } | null,
+  fallback: string,
+  status: number,
+): CloudApiError => {
+  const error = new Error(authErrorMessage(payload, fallback)) as CloudApiError
+  error.status = status
+  error.code = payload?.error?.code
+  const retryAfter = payload?.error && 'retry_after_seconds' in payload.error
+    ? Number((payload.error as { retry_after_seconds?: number }).retry_after_seconds)
+    : undefined
+  if (retryAfter && Number.isFinite(retryAfter)) error.retryAfterSeconds = retryAfter
+  return error
+}
+
+export const cloudSessionIsInvalid = (error: unknown): boolean => {
+  const status = (error as CloudApiError | null)?.status
+  return status === 401 || status === 403
+}
+
 export async function authenticateWithPassword(
   adminApiBaseUrl: string,
   mode: 'login' | 'register',
@@ -55,6 +81,8 @@ export async function authenticateWithPassword(
   username?: string,
   nickname?: string,
   companyName?: string,
+  emailChallengeId?: string,
+  emailCode?: string,
 ): Promise<AuthSession> {
   const response = await fetch(`${adminApiBaseUrl}/v1/auth/${mode}`, {
     method: 'POST',
@@ -65,6 +93,9 @@ export async function authenticateWithPassword(
       username: mode === 'register' ? username?.trim() || undefined : undefined,
       nickname: mode === 'register' ? nickname?.trim() || undefined : undefined,
       company_name: mode === 'register' ? companyName?.trim() || undefined : undefined,
+      email_verification: mode === 'register' && emailChallengeId && emailCode
+        ? { challenge_id: emailChallengeId, code: emailCode.trim() }
+        : undefined,
     }),
   }).catch((error) => {
     throw normalizeAuthFetchError(error, adminApiBaseUrl)
@@ -74,6 +105,69 @@ export async function authenticateWithPassword(
     throw new Error(authErrorMessage(payload, `auth failed: ${response.status}`))
   }
   return payload.data as AuthSession
+}
+
+export async function sendEmailVerificationCode(
+  adminApiBaseUrl: string,
+  email: string,
+): Promise<{ challenge_id: string; retry_after_seconds: number; expires_in_seconds: number }> {
+  const response = await fetch(`${adminApiBaseUrl}/v1/auth/email/send-code`, {
+    method: 'POST',
+    headers: { ...serviceEnvironmentHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  }).catch((error) => {
+    throw normalizeAuthFetchError(error, adminApiBaseUrl)
+  })
+  const payload = await response.json().catch(() => null)
+  if (!response.ok) {
+    throw cloudApiError(payload, `send email code failed: ${response.status}`, response.status)
+  }
+  return payload.data
+}
+
+export type PasswordResetChannel = 'email' | 'phone'
+
+export async function sendPasswordResetCode(
+  adminApiBaseUrl: string,
+  channel: PasswordResetChannel,
+  identifier: string,
+): Promise<{ challenge_id: string; retry_after_seconds: number; expires_in_seconds: number }> {
+  const response = await fetch(`${adminApiBaseUrl}/v1/auth/password-reset/send-code`, {
+    method: 'POST',
+    headers: { ...serviceEnvironmentHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channel, identifier }),
+  }).catch((error) => {
+    throw normalizeAuthFetchError(error, adminApiBaseUrl)
+  })
+  const payload = await response.json().catch(() => null)
+  if (!response.ok) {
+    throw cloudApiError(payload, `send password reset code failed: ${response.status}`, response.status)
+  }
+  return payload.data
+}
+
+export async function confirmPasswordReset(
+  adminApiBaseUrl: string,
+  request: {
+    challenge_id: string
+    channel: PasswordResetChannel
+    identifier: string
+    code: string
+    new_password: string
+  },
+): Promise<{ ok: boolean }> {
+  const response = await fetch(`${adminApiBaseUrl}/v1/auth/password-reset/confirm`, {
+    method: 'POST',
+    headers: { ...serviceEnvironmentHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  }).catch((error) => {
+    throw normalizeAuthFetchError(error, adminApiBaseUrl)
+  })
+  const payload = await response.json().catch(() => null)
+  if (!response.ok) {
+    throw cloudApiError(payload, `password reset failed: ${response.status}`, response.status)
+  }
+  return payload.data
 }
 
 export async function sendPhoneVerificationCode(
@@ -152,15 +246,20 @@ export async function updateUserProfile(
   return payload.data as CloudUser
 }
 
-export async function fetchCurrentUser(adminApiBaseUrl: string, token: string): Promise<CloudUser> {
+export async function fetchCurrentUser(
+  adminApiBaseUrl: string,
+  token: string,
+  signal?: AbortSignal,
+): Promise<CloudUser> {
   const response = await fetch(`${adminApiBaseUrl}/v1/auth/me`, {
     headers: { ...serviceEnvironmentHeaders(), Authorization: `Bearer ${token}` },
+    ...(signal ? { signal } : {}),
   }).catch((error) => {
     throw normalizeAuthFetchError(error, adminApiBaseUrl)
   })
   const payload = await response.json().catch(() => null)
   if (!response.ok) {
-    throw new Error(authErrorMessage(payload, `auth session invalid: ${response.status}`))
+    throw cloudApiError(payload, `auth session invalid: ${response.status}`, response.status)
   }
   return payload.data as CloudUser
 }
@@ -168,9 +267,11 @@ export async function fetchCurrentUser(adminApiBaseUrl: string, token: string): 
 export async function fetchBillingBalance(
   adminApiBaseUrl: string,
   token: string,
+  signal?: AbortSignal,
 ): Promise<CloudBalance> {
   const response = await fetch(`${adminApiBaseUrl}/v1/billing/balance`, {
     headers: { ...serviceEnvironmentHeaders(), Authorization: `Bearer ${token}` },
+    ...(signal ? { signal } : {}),
   }).catch((error) => {
     throw normalizeAuthFetchError(error, adminApiBaseUrl)
   })
@@ -189,9 +290,11 @@ export interface CloudConsoleSummary {
 export async function fetchConsoleSummary(
   adminApiBaseUrl: string,
   token: string,
+  signal?: AbortSignal,
 ): Promise<CloudConsoleSummary> {
   const response = await fetch(`${adminApiBaseUrl}/v1/console/summary`, {
     headers: { ...serviceEnvironmentHeaders(), Authorization: `Bearer ${token}` },
+    ...(signal ? { signal } : {}),
   }).catch((error) => {
     throw normalizeAuthFetchError(error, adminApiBaseUrl)
   })
@@ -213,6 +316,7 @@ export async function upsertCloudDevice(
   adminApiBaseUrl: string,
   token: string,
   device: UpsertCloudDeviceRequest,
+  signal?: AbortSignal,
 ): Promise<CloudDevice> {
   const response = await fetch(`${adminApiBaseUrl}/v1/devices`, {
     method: 'POST',
@@ -222,6 +326,7 @@ export async function upsertCloudDevice(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(device),
+    ...(signal ? { signal } : {}),
   }).catch((error) => {
     throw normalizeAuthFetchError(error, adminApiBaseUrl)
   })
@@ -354,9 +459,11 @@ export async function markAllCloudMessagesRead(
 export async function fetchAchievementProfile(
   adminApiBaseUrl: string,
   token: string,
+  signal?: AbortSignal,
 ): Promise<AchievementProfile> {
   const response = await fetch(`${adminApiBaseUrl}/v1/achievements`, {
     headers: { ...serviceEnvironmentHeaders(), Authorization: `Bearer ${token}` },
+    ...(signal ? { signal } : {}),
   }).catch((error) => {
     throw normalizeAuthFetchError(error, adminApiBaseUrl)
   })

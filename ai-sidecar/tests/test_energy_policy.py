@@ -46,7 +46,7 @@ def test_charging_profile_matches_model_parallelism(tmp_path):
     assert profile.timeline_batch_size == 20
     assert profile.bake_interval_secs == 30
     assert profile.bake_limit == 10
-    assert profile.bake_concurrency == 1
+    assert profile.bake_concurrency == 3
 
 
 def test_charging_profile_allows_explicit_model_parallelism(tmp_path):
@@ -120,7 +120,7 @@ def test_disabling_energy_saving_restores_unrestricted_behavior_on_battery(tmp_p
     assert profile.allow_diary is True
     assert profile.timeline_interval_secs == 45
     assert profile.timeline_batch_size == 12
-    assert profile.bake_concurrency == 1
+    assert profile.bake_concurrency == 3
 
 
 def test_missing_battery_sensor_is_treated_as_external_power(tmp_path):

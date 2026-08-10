@@ -273,6 +273,7 @@ pub async fn list_knowledge(
                          created_at_ms, updated_at_ms, capture_ids, key_timestamps
                          FROM timelines WHERE category = ?1
                            AND summary NOT LIKE ?2
+                           AND COALESCE(is_self_generated, 0) = 0
                          ORDER BY updated_at_ms DESC LIMIT ?3 OFFSET ?4"
                     ).map_err(|e| crate::storage::StorageError::Sqlite(e))?;
 
@@ -312,7 +313,7 @@ pub async fn list_knowledge(
                     .map_err(|e| crate::storage::StorageError::Sqlite(e))?;
 
                     let total: i64 = conn.query_row(
-                        "SELECT COUNT(*) FROM timelines WHERE category = ?1 AND summary NOT LIKE ?2",
+                        "SELECT COUNT(*) FROM timelines WHERE category = ?1 AND summary NOT LIKE ?2 AND COALESCE(is_self_generated, 0) = 0",
                         rusqlite::params![category, format!("{}%", FALLBACK_NOISE_OVERVIEW_PREFIX)],
                         |row| row.get(0),
                     ).map_err(|e| crate::storage::StorageError::Sqlite(e))?;
@@ -329,7 +330,8 @@ pub async fn list_knowledge(
                  history_view, content_origin, activity_type, is_self_generated,
                  evidence_strength, user_verified, user_edited, created_at, updated_at,
                  created_at_ms, updated_at_ms, capture_ids, key_timestamps
-                 FROM timelines WHERE summary NOT LIKE ?"
+                 FROM timelines WHERE summary NOT LIKE ?
+                 AND COALESCE(is_self_generated, 0) = 0"
             );
             let mut bind: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(noise_prefix.clone())];
             let query_terms = params
@@ -350,6 +352,20 @@ pub async fn list_knowledge(
                     let pattern = format!("%{}%", term);
                     for _ in 0..4 {
                         bind.push(Box::new(pattern.clone()));
+                    }
+                }
+                // FTS5 预筛：timelines_fts 候选可用时收窄扫描，否则回退 LIKE 全扫
+                if let Some(fts_query) = crate::storage::fts::build_fts_or_query(&query_terms) {
+                    if let Some(ids) = crate::storage::fts::fts_candidate_ids(
+                        &conn,
+                        "timelines_fts",
+                        &fts_query,
+                        crate::storage::fts::DEFAULT_FTS_CANDIDATE_CAP,
+                    ) {
+                        let (clause, mut id_binds) = crate::storage::fts::render_in_clause(&ids);
+                        sql.push_str(" AND id IN ");
+                        sql.push_str(&clause);
+                        bind.append(&mut id_binds);
                     }
                 }
             }
@@ -396,7 +412,7 @@ pub async fn list_knowledge(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| crate::storage::StorageError::Sqlite(e))?;
 
-            let mut count_sql = String::from("SELECT COUNT(*) FROM timelines WHERE summary NOT LIKE ?");
+            let mut count_sql = String::from("SELECT COUNT(*) FROM timelines WHERE summary NOT LIKE ? AND COALESCE(is_self_generated, 0) = 0");
             let mut count_bind: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(noise_prefix)];
             if !query_terms.is_empty() {
                 let query_clause = query_terms
@@ -411,6 +427,20 @@ pub async fn list_knowledge(
                     let pattern = format!("%{}%", term);
                     for _ in 0..4 {
                         count_bind.push(Box::new(pattern.clone()));
+                    }
+                }
+                // FTS5 预筛（与列表查询保持一致的候选收窄）
+                if let Some(fts_query) = crate::storage::fts::build_fts_or_query(&query_terms) {
+                    if let Some(ids) = crate::storage::fts::fts_candidate_ids(
+                        &conn,
+                        "timelines_fts",
+                        &fts_query,
+                        crate::storage::fts::DEFAULT_FTS_CANDIDATE_CAP,
+                    ) {
+                        let (clause, mut id_binds) = crate::storage::fts::render_in_clause(&ids);
+                        count_sql.push_str(" AND id IN ");
+                        count_sql.push_str(&clause);
+                        count_bind.append(&mut id_binds);
                     }
                 }
             }

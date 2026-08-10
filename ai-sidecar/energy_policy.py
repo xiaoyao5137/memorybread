@@ -36,7 +36,9 @@ CHARGING_BAKE_INTERVAL_SECS = 30
 # 单路模型吞吐，但能让每个 run 稳定落在 30 分钟总预算内，避免处理已有进度
 # 后被整批误标 failed；完成后 30 秒内会自动续下一批。
 CHARGING_BAKE_LIMIT = 10
-CHARGING_BAKE_CONCURRENCY = 1
+# 并发 3 用于流水线化候选间的 HTTP 往返与存储写入，已是 core 侧 clamp 上限 1~3；
+# 本地模型推理槽位仍由 inference_queue 的全局上限约束，不会真正放大算力开销。
+CHARGING_BAKE_CONCURRENCY = 3
 MODEL_PARALLELISM_ENV = "MEMORY_BREAD_MODEL_PARALLELISM"
 MAX_MODEL_PARALLELISM = 3
 
@@ -101,7 +103,8 @@ class EnergyPolicy:
         battery_percent, on_external_power = self._read_battery_state()
 
         if not saving_enabled:
-            automatic_concurrency = self.model_parallelism if on_external_power else 1
+            # 用户显式关闭节能时不区分电源态，统一用配置的模型并发度
+            automatic_concurrency = self.model_parallelism
             return EnergyProfile(
                 mode="unrestricted",
                 saving_enabled=False,

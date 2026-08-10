@@ -11,11 +11,24 @@ OcrEngine 编排逻辑测试
 
 from __future__ import annotations
 
+import importlib
+import sys
+
 import pytest
 
 from ocr.backends.base import OcrBox, OcrOutput
 from ocr.engine        import OcrEngine
 from tests.conftest    import MockOcrBackend
+
+
+def test_ocr_package_keeps_ipc_worker_lazy():
+    import ocr
+
+    sys.modules.pop("ocr.worker", None)
+    importlib.reload(ocr)
+
+    assert ocr.OcrEngine is OcrEngine
+    assert "ocr.worker" not in sys.modules
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────

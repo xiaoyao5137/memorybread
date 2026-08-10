@@ -9,7 +9,7 @@ use std::{
     },
 };
 
-use crate::storage::StorageManager;
+use crate::{capture::CaptureSchedule, storage::StorageManager};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -109,6 +109,8 @@ pub struct AppState {
     pub creation_skill_analysis_jobs: Arc<Mutex<HashMap<String, CreationSkillAnalysisJobRecord>>>,
     pub creation_skill_analysis_job_seq: Arc<AtomicU64>,
     pub capture_enabled: Arc<AtomicBool>,
+    pub keyboard_signal_enabled: Arc<AtomicBool>,
+    pub capture_schedule: Arc<CaptureSchedule>,
 }
 
 impl AppState {
@@ -177,6 +179,19 @@ impl AppState {
                 _ => None,
             })
             .unwrap_or(capture_enabled);
+        let capture_interval_secs = storage
+            .get_preference("privacy.capture_interval_sec")
+            .ok()
+            .flatten()
+            .and_then(|preference| preference.value.parse::<u64>().ok())
+            .map(|value| value.clamp(5, 120))
+            .unwrap_or(90);
+        let keyboard_signal_enabled = storage
+            .get_preference("privacy.keyboard_capture")
+            .ok()
+            .flatten()
+            .map(|preference| preference.value.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(true);
 
         Arc::new(Self {
             storage,
@@ -188,10 +203,22 @@ impl AppState {
             creation_skill_analysis_jobs: Arc::new(Mutex::new(HashMap::new())),
             creation_skill_analysis_job_seq: Arc::new(AtomicU64::new(1)),
             capture_enabled: Arc::new(AtomicBool::new(capture_enabled)),
+            keyboard_signal_enabled: Arc::new(AtomicBool::new(keyboard_signal_enabled)),
+            capture_schedule: Arc::new(CaptureSchedule::new(capture_interval_secs)),
         })
     }
 
     pub fn is_capture_enabled(&self) -> bool {
         self.capture_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn update_capture_interval(&self, interval_secs: u64) {
+        self.capture_schedule
+            .update_configured_interval(interval_secs.clamp(5, 120));
+    }
+
+    pub fn update_keyboard_signal_enabled(&self, enabled: bool) {
+        self.keyboard_signal_enabled
+            .store(enabled, Ordering::Relaxed);
     }
 }

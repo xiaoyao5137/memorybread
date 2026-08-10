@@ -98,7 +98,7 @@
 当你需要提问、追溯或获得启发时，基于已经积累下来的上下文、知识与模板进行智能问答。
 
 ### ✍️ 创作
-利用沉淀的模板和风格样本生成各类工作文档（方案、总结、周报等）。创作页的“工具”Tab 可管理 Agent 能力：互联网检索、记忆搜索、数据检索和网页爬取默认安装并始终开启，PlantUML 画图与 GitHub 检索可按需安装、开启或关闭。日报、周报、项目总结和数据分析可把本地数据作为与文档、知识、操作平权的证据；Harness 根据检索反馈决定是否复用已登录浏览器刷新报表或调用数据分析 Agent。初稿前由章节设计 Agent 先生成章节蓝图，初稿后再由质量审校把细节、自然表达、表格、重点文字和图示问题分派给对应润色 Agent，修改后继续质检，直到通过或达到循环预算。
+利用沉淀的模板和风格样本生成各类工作文档（方案、总结、周报等）。创作页的“工具”Tab 可管理 Agent 能力：互联网检索、记忆搜索、数据检索和网页爬取默认安装并始终开启，PlantUML 画图与 GitHub 检索可按需安装、开启或关闭。没有明确 Skill 时，通用创作链路可按检索反馈刷新报表或调用数据分析 Agent，并使用章节设计、文档撰写、质量审校和专项润色能力；命中明确 Skill 时，`execution_steps` 是唯一初始执行契约，只调用步骤中声明且已启用的 Tool/Agent，其余步骤由创作 Agent 自己完成并按顺序组装。若步骤声明的 `data_search` 命中实时报表，Harness 只补充取得当前快照所必需的受控 `webpage_scrape`，不会借此追加数据分析、Writer 或质检 Agent。
 
 ### 📚 记忆
 系统会把高价值内容继续加工成更适合后续消费的文档、知识、操作和数据资产。数据页保存报表地址、工作数据快照、采集时间和来源关系；Cookie 始终留在浏览器中。
@@ -263,6 +263,7 @@ node integrations/install-memory-retrieval-skill.mjs both
 - 以本地存储为基础
 - 支持本地模型路线
 - 云端能力按需启用，而不是默认依赖
+- 完成首次初始化后，启动和本地核心能力不等待账户、网关或云数据库；断网、未登录时仍可独立运行，云端增强会在联网后限时重试
 - 登录后会自动同步标签卡片、工作投入汇总和推断后的工作心情；换新机器登录即可恢复个人页数据
 - 登录后可同步已发布且命中当前账户的消息正文和已读状态；内部账户标签与目标规则不会下发
 - 工作画像同步只上传日期、分钟数、记录数量、应用级汇总和心情枚举，不上传截图、窗口标题或 IM 文本
@@ -293,12 +294,14 @@ node integrations/install-memory-retrieval-skill.mjs both
 
 ## 软件版本与更新
 
-- 桌面应用版本遵循 SemVer，并在 `desktop-ui/package.json`、
-  `desktop-ui/src-tauri/tauri.conf.json` 和 `desktop-ui/src-tauri/Cargo.toml` 保持一致。
-- `cd desktop-ui && npm run version:check` 可检查三个版本源；正式构建会自动先执行检查。
+- 桌面应用使用“不含 build metadata 的 SemVer + 单调递增构建号”。版本在 `package.json`、
+  `package-lock.json`、`tauri.conf.json` 和 `Cargo.toml` 保持一致，构建号写入 macOS `bundleVersion`。
+- `cd desktop-ui && npm run version:set -- 1.4.2 42` 统一更新版本源；`npm run version:check` 校验同步，正式构建会自动执行。
 - 登录后客户端会定期向账户服务上报当前安装包版本，运营台据此显示用户最近使用的软件版本。
-- 客户端启动、联网恢复或重新回到前台时会检查新版本；有更新时显示更新说明和 HTTPS 下载入口。
-- 当前版本可在个人信息、设置，以及顶部托盘菜单的“关于记忆面包”中查看。
+- 官网直装版在启动、联网恢复和回到前台时检查签名更新；有更新时左下角常驻入口可完成下载、Tauri 签名校验、SHA-256 校验、安装与重启。
+- Mac App Store 版不包含应用内安装命令，只引导用户前往 App Store 更新。
+- 直装发布使用 `TAURI_SIGNING_PRIVATE_KEY`（或 `TAURI_SIGNING_PRIVATE_KEY_PATH`）、`MEMORY_BREAD_UPDATER_PUBLIC_KEY` 构建 `.app.tar.gz` 与 `.sig`；私钥不得进入源码或运营台。
+- 完整发布、灰度、暂停、回滚和密钥轮换流程见 [`doc/应用内更新与版本管理完整方案.md`](doc/应用内更新与版本管理完整方案.md)。
 
 ---
 

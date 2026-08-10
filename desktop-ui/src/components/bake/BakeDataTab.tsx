@@ -189,6 +189,9 @@ const BakeDataTab: React.FC<{
                       <div className="bake-data-record-item__title bake-line-clamp-2">{presentation.title}</div>
                       <div className="bake-data-record-item__summary bake-line-clamp-3">{presentation.summary}</div>
                       <div className="bake-data-record-item__source bake-line-clamp-1">来源：{item.title}</div>
+                      {item.source_url && (
+                        <div className="bake-data-record-item__source bake-line-clamp-1">网址：{item.source_url}</div>
+                      )}
                       <div className="bake-memory-list-item__meta">
                         <span>{freshnessLabel(item)}</span>
                         <span>{formatTimestamp(item.latest_snapshot?.collected_at)}</span>
@@ -212,7 +215,12 @@ const BakeDataTab: React.FC<{
             <div className="bake-pagination__right">
               <label className="bake-pagination__field">
                 <span className="bake-muted">每页</span>
-                <select className="bake-input bake-pagination__select" value={String(limit)} onChange={(event) => onLimitChange(Number(event.target.value))}>
+                <select
+                  className="bake-input bake-pagination__select"
+                  value={String(limit)}
+                  aria-label="每页条数"
+                  onChange={(event) => onLimitChange(Number(event.target.value))}
+                >
                   {[10, 20, 50, 100].map(option => <option key={option} value={option}>{option} 条</option>)}
                 </select>
               </label>
@@ -226,7 +234,7 @@ const BakeDataTab: React.FC<{
                   value={pageInput}
                   onChange={(event) => setPageInput(event.target.value)}
                   placeholder={String(page)}
-                  aria-label="页码"
+                  aria-label="跳转页码"
                 />
                 <span className="bake-muted">页</span>
                 <BakeButton compact onClick={() => {
@@ -298,6 +306,19 @@ const BakeDataTab: React.FC<{
                   <div><dt>采集方式</dt><dd>{accessModeLabel(selected.access_mode)}</dd></div>
                   <div><dt>采集时间</dt><dd>{formatTimestamp(selected.latest_snapshot.collected_at)}</dd></div>
                 </dl>
+                {selected.source_url && (
+                  <div className="bake-data-source-url">
+                    <div className="bake-kv__title">来源网址</div>
+                    <a
+                      href={selected.source_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ color: '#2563EB', textDecoration: 'underline', wordBreak: 'break-all' }}
+                    >
+                      {selected.source_url}
+                    </a>
+                  </div>
+                )}
                 <div className="bake-data-timeline-links">
                   <span className="bake-muted">关联时间线</span>
                   {selectedTimelineIds.length > 0 ? selectedTimelineIds.map(timelineId => (

@@ -42,6 +42,8 @@ Thumbs.db
 # Logs
 *.log
 logs/
+log/
+*.pid
 
 # Database
 *.db
@@ -62,6 +64,7 @@ models/
 tmp/
 temp/
 *.tmp
+~$*
 
 # Node
 node_modules/

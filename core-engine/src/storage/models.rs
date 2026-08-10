@@ -105,6 +105,18 @@ pub struct WorkImCaptureSample {
     pub text: String,
 }
 
+/// 按内置工作类别聚合的有效工作时长（毫秒）。
+///
+/// 分类规则只依赖应用 Bundle ID 与窗口标题关键词，全部在本机完成；
+/// 该结构只携带聚合后的时长，不包含任何应用名、标题或正文。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkCategoryTotals {
+    pub coding_ms: i64,
+    pub design_ms: i64,
+    pub knowledge_ms: i64,
+    pub focus_ms: i64,
+}
+
 impl CaptureRecord {
     /// 返回最佳文本（programmatic/ax_text 优先，fallback 到 ocr_text）
     pub fn best_text(&self) -> Option<&str> {
@@ -132,6 +144,23 @@ pub struct NewCapture {
     pub pii_scrubbed: bool,
     pub url: Option<String>,
     pub webpage_title: Option<String>,
+}
+
+/// 一次采集尝试的持久化审计记录。
+///
+/// 隐私跳过时调用方必须把 `app_name` / `win_title` 留空，只记录时间与原因。
+#[derive(Debug, Clone)]
+pub struct NewCaptureAttempt {
+    pub observed_at: i64,
+    pub event_type: String,
+    pub outcome: String,
+    pub reason: String,
+    pub capture_id: Option<i64>,
+    pub related_capture_id: Option<i64>,
+    pub app_name: Option<String>,
+    pub win_title: Option<String>,
+    pub is_private: bool,
+    pub effective_interval_secs: Option<u64>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

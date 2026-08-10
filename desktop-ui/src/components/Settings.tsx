@@ -20,8 +20,8 @@ import {
 } from '../hooks/useApi'
 import type { ConfigCheckItem, ConfigCheckStatus, PreferenceRecord } from '../types'
 import { toUserFacingError } from '../utils/userFacingError'
-import { openExternalUrl, useAppMetadata } from '../utils/appMetadata'
-import { fetchSoftwareUpdate, type SoftwareUpdateCheck } from '../utils/softwareUpdate'
+import { useAppMetadata } from '../utils/appMetadata'
+import { fetchSoftwareUpdate, requestSoftwareUpdate, type SoftwareUpdateCheck } from '../utils/softwareUpdate'
 import { useImeCompositionGuard } from '../hooks/useImeCompositionGuard'
 import InteractionSettings from './InteractionSettings'
 import './Settings.v2.css'
@@ -50,7 +50,6 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
     apiBaseUrl,
     adminApiBaseUrl,
     gatewayApiBaseUrl,
-    sidecarVersion,
     debugModeEnabled,
     localDebugModeEnabled,
     serviceEnvironment,
@@ -860,13 +859,10 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
             </div>
           </div>
 
-          <div className="settings-v2__version-list">
-            <div className="settings-v2__version-item" data-testid="sidecar-version">
-              <span className="settings-v2__version-label">AI 能力</span>
-              <span className="settings-v2__version-value">{sidecarVersion}</span>
-            </div>
+          <div className="settings-v2__version-foot">
+            <div className="settings-v2__version-list">
             <div className="settings-v2__version-item" data-testid="app-version">
-              <span className="settings-v2__version-label">桌面应用</span>
+              <span className="settings-v2__version-label">当前版本</span>
               <span className="settings-v2__version-value">v{appMetadata.version}</span>
             </div>
             {softwareUpdate && (
@@ -877,8 +873,8 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
                 </span>
               </div>
             )}
-          </div>
-          <div className="settings-v2__version-actions">
+            </div>
+            <div className="settings-v2__version-actions">
             <button className="settings-v2__btn settings-v2__btn--secondary" onClick={() => setWindowMode('about')} type="button">
               关于记忆面包
             </button>
@@ -886,10 +882,11 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
               {softwareUpdateChecking ? '检查中' : '检查更新'}
             </button>
             {softwareUpdate?.update_available && softwareUpdate.release && (
-              <button className="settings-v2__btn settings-v2__btn--primary" onClick={() => void openExternalUrl(softwareUpdate.release!.download_url).catch((cause) => setError(toUserFacingError(cause, '下载页面打开失败')))} type="button">
-                下载新版本
+              <button className="settings-v2__btn settings-v2__btn--primary" onClick={() => requestSoftwareUpdate(softwareUpdate)} type="button">
+                {appMetadata.update_supported ? '立即更新' : appMetadata.distribution === 'app_store' ? '前往 App Store' : '下载安装包'}
               </button>
-            )}
+              )}
+            </div>
           </div>
         </section>
       </div>

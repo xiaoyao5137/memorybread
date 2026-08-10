@@ -190,6 +190,18 @@ process_cwd() {
     lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1 || true
 }
 
+process_executable() {
+    local pid=$1
+    # macOS 的 `ps -o comm` 受 MAXCOMLEN 限制，会把
+    # `target/debug/memory-bread-desktop` 截成 `target/debug/mem`，导致桌面
+    # 进程无法被记录和清理。lsof 的首个 txt 映射是进程主可执行文件，且返回
+    # 完整绝对路径；这也能统一识别开发二进制与 .app 内的 helper。
+    lsof -a -p "$pid" -d txt -Fn 2>/dev/null \
+        | sed -n 's/^n//p' \
+        | head -n 1 \
+        || true
+}
+
 pid_belongs_to_project() {
     local pid=$1
     local cwd
@@ -201,6 +213,48 @@ pid_belongs_to_project() {
     cwd=$(process_cwd "$pid")
     case "$cwd" in
         "$PROJECT_ROOT"|"$PROJECT_ROOT"/*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+pid_belongs_to_packaged_app() {
+    local pid=$1
+    local executable
+
+    if ! [[ "$pid" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+
+    executable=$(process_executable "$pid")
+    case "$executable" in
+        */记忆面包.app/Contents/MacOS/memory-bread-desktop|\
+        */记忆面包.app/Contents/MacOS/memory-bread-core|\
+        */记忆面包.app/Contents/Helpers/memory-bread-ai.app/Contents/MacOS/memory-bread-ai)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+pid_belongs_to_memorybread() {
+    local pid=$1
+    pid_belongs_to_project "$pid" || pid_belongs_to_packaged_app "$pid"
+}
+
+pid_is_desktop_app() {
+    local pid=$1
+    local executable
+
+    executable=$(process_executable "$pid")
+    case "$executable" in
+        "$PROJECT_ROOT"/desktop-ui/src-tauri/target/*/memory-bread-desktop|\
+        */记忆面包.app/Contents/MacOS/memory-bread-desktop)
             return 0
             ;;
         *)
@@ -305,6 +359,8 @@ sidecar_sources_changed() {
         "$PROJECT_ROOT/ai-sidecar/inference_queue.py" \
         "$PROJECT_ROOT/ai-sidecar/model_registry.py" \
         "$PROJECT_ROOT/ai-sidecar/scheduled_task_executor.py" \
+        "$PROJECT_ROOT/ai-sidecar/creation" \
+        "$PROJECT_ROOT/ai-sidecar/knowledge" \
         "$PROJECT_ROOT/ai-sidecar/ocr" \
         "$PROJECT_ROOT/ai-sidecar/asr" \
         "$PROJECT_ROOT/ai-sidecar/vlm"
@@ -432,6 +488,16 @@ print(models_root)
 PY
 }
 
+# 清扫托管运行时的孤儿/多余 llama-server，保证全局最多 1 个 llama-server。
+# 宿主 ollama serve 被终止后子 runner 会 reparent 到 launchd 继续驻留内存，
+# 必须在启动新 serve 前与停止服务后各清扫一次。
+sweep_managed_runtime_processes() {
+    local guard_script="$PROJECT_ROOT/ai-sidecar/runtime_process_guard.py"
+    if [ -f "$guard_script" ] && command -v python3 &> /dev/null; then
+        python3 "$guard_script" >> "$LOG_DIR/runtime_guard.log" 2>&1 || true
+    fi
+}
+
 ensure_ollama_running() {
     local managed_config=""
     local ollama_executable=""
@@ -461,12 +527,16 @@ ensure_ollama_running() {
 
     cleanup_port "$OLLAMA_PORT" "Ollama"
 
+    # 启动前清扫历史遗留的孤儿 llama-server，确保新 serve 是唯一宿主。
+    sweep_managed_runtime_processes
+
     if [ -n "$ollama_executable" ]; then
         log_info "启动 MemoryBread 托管 Ollama 服务..."
         OLLAMA_HOST="127.0.0.1:${OLLAMA_PORT}" \
         OLLAMA_MODELS="$ollama_models_root" \
         OLLAMA_NO_CLOUD=1 \
         OLLAMA_NOHISTORY=1 \
+        OLLAMA_MAX_LOADED_MODELS=1 \
             nohup "$ollama_executable" serve > "$OLLAMA_LOG" 2>&1 &
     else
         if ! command -v ollama &> /dev/null; then
@@ -506,7 +576,7 @@ cleanup_port() {
 
     while IFS= read -r pid; do
         [ -n "$pid" ] || continue
-        if pid_belongs_to_project "$pid"; then
+        if pid_belongs_to_memorybread "$pid"; then
             project_pids+=("$pid")
         else
             foreign_pids+=("$pid")
@@ -519,14 +589,41 @@ cleanup_port() {
     fi
 
     if [ "${#project_pids[@]}" -gt 0 ]; then
-        log_info "清理占用 ${port} 端口的本项目进程（${label}）: ${project_pids[*]}"
+        log_info "清理占用 ${port} 端口的 MemoryBread 进程（${label}）: ${project_pids[*]}"
         kill "${project_pids[@]}" 2>/dev/null || true
         sleep 1
         for pid in "${project_pids[@]}"; do
-            if ps -p "$pid" > /dev/null 2>&1 && pid_belongs_to_project "$pid"; then
+            if ps -p "$pid" > /dev/null 2>&1 && pid_belongs_to_memorybread "$pid"; then
                 kill -9 "$pid" 2>/dev/null || true
             fi
         done
+    fi
+}
+
+find_packaged_backend_pids() {
+    local pid
+    while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        if pid_belongs_to_packaged_app "$pid" && ! pid_is_desktop_app "$pid"; then
+            printf '%s\n' "$pid"
+        fi
+    done < <(pgrep -f "memory-bread-ai|memory-bread-core" || true)
+}
+
+cleanup_packaged_backends() {
+    local pids
+
+    pids=$(find_packaged_backend_pids)
+    if [ -z "$pids" ]; then
+        return 0
+    fi
+
+    log_info "清理残留的已打包客户端服务: $(echo "$pids" | tr '\n' ' ' | xargs)"
+    echo "$pids" | xargs kill 2>/dev/null || true
+    sleep 1
+    pids=$(find_packaged_backend_pids)
+    if [ -n "$pids" ]; then
+        echo "$pids" | xargs kill -9 2>/dev/null || true
     fi
 }
 
@@ -542,16 +639,17 @@ cleanup_desktop_app() {
         fi
     fi
     rm -f "$UI_APP_PID_FILE"
+    cleanup_packaged_backends
 }
 
 find_desktop_app_pids() {
     local pid
     while IFS= read -r pid; do
         [ -n "$pid" ] || continue
-        if pid_belongs_to_project "$pid"; then
+        if pid_is_desktop_app "$pid"; then
             printf '%s\n' "$pid"
         fi
-    done < <(pgrep -f "/target/debug/memory-bread-desktop|target/debug/memory-bread-desktop" || true)
+    done < <(pgrep -f "memory-bread-desktop" || true)
 }
 
 warn_if_multiple_desktop_apps() {
@@ -831,6 +929,9 @@ stop_all() {
         fi
         rm -f "$OLLAMA_PID_FILE"
     fi
+
+    # 只杀宿主会留下 llama-server 孤儿；无条件兜底清扫（无 pid 文件时也可能有历史遗留）。
+    sweep_managed_runtime_processes
 
     if [ "$keep_supervisor_marker" != "true" ]; then
         rm -f "$SUPERVISOR_SHUTDOWN_MARKER"

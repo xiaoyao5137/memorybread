@@ -13,7 +13,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Iterable, Optional
 from urllib.parse import quote_plus, urlparse
 from uuid import uuid4
 
@@ -25,7 +25,10 @@ from .tools import (
     INTERNET_SEARCH_TOOL_ID,
     MEMORY_SEARCH_TOOL_ID,
     WEBPAGE_SCRAPE_TOOL_ID,
+    fallback_routing_decision,
     normalize_creation_tool_ids,
+    routing_capability_lines,
+    validate_routing_decision,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,7 +90,6 @@ CREATION_SKILL_ANALYSIS_SCHEMA = {
         "title_style": {"type": "string"},
         "text_style": {"type": "string"},
         "diagram_style": {"type": "string"},
-        "structure_pattern": {"type": "array", "items": {"type": "string"}},
         "writing_guidelines": {"type": "array", "items": {"type": "string"}},
         "distinctive_sections": {
             "type": "array",
@@ -111,7 +113,6 @@ CREATION_SKILL_ANALYSIS_SCHEMA = {
                 "title_style": {"type": "string"},
                 "text_style": {"type": "string"},
                 "diagram_style": {"type": "string"},
-                "structure_pattern": {"type": "string"},
                 "writing_guidelines": {"type": "string"},
             },
             "required": [
@@ -119,7 +120,6 @@ CREATION_SKILL_ANALYSIS_SCHEMA = {
                 "title_style",
                 "text_style",
                 "diagram_style",
-                "structure_pattern",
                 "writing_guidelines",
             ],
         },
@@ -131,7 +131,6 @@ CREATION_SKILL_ANALYSIS_SCHEMA = {
                 "title_style": {"type": "array", "items": {"type": "string"}},
                 "text_style": {"type": "array", "items": {"type": "string"}},
                 "diagram_style": {"type": "array", "items": {"type": "string"}},
-                "structure_pattern": {"type": "array", "items": {"type": "string"}},
                 "writing_guidelines": {"type": "array", "items": {"type": "string"}},
             },
             "required": [
@@ -139,7 +138,6 @@ CREATION_SKILL_ANALYSIS_SCHEMA = {
                 "title_style",
                 "text_style",
                 "diagram_style",
-                "structure_pattern",
                 "writing_guidelines",
             ],
         },
@@ -158,7 +156,6 @@ CREATION_SKILL_ANALYSIS_SCHEMA = {
         "title_style",
         "text_style",
         "diagram_style",
-        "structure_pattern",
         "writing_guidelines",
         "distinctive_sections",
         "section_headings",
@@ -186,7 +183,8 @@ class CreationOptions:
     usage_weight: float = 0.10
     format_weight: float = 0.10
     freshness_weight: float = 0.05
-    max_references: int = 6
+    max_references: int = 10
+    data_search_limit: int = 30
     enabled_tools: tuple[str, ...] = (
         INTERNET_SEARCH_TOOL_ID,
         MEMORY_SEARCH_TOOL_ID,
@@ -196,6 +194,8 @@ class CreationOptions:
 
     def __post_init__(self) -> None:
         self.enabled_tools = normalize_creation_tool_ids(self.enabled_tools)
+        self.max_references = max(1, min(int(self.max_references), 30))
+        self.data_search_limit = max(1, min(int(self.data_search_limit), 50))
         # 旧布尔字段继续保留，但其值投影自新 Tool 契约，不能关闭必备 Tool。
         self.enable_rag = MEMORY_SEARCH_TOOL_ID in self.enabled_tools
         self.enable_web_search = INTERNET_SEARCH_TOOL_ID in self.enabled_tools
@@ -280,13 +280,13 @@ class CreationService:
         self,
         query: str,
         parsed_requirement: dict,
-        limit: int = 6,
+        limit: int = 30,
     ) -> list[dict]:
         """调用本机数据检索 Tool，返回含时效与可采纳状态的候选。"""
         payload = {
             "query": query,
             "need_fresh": True,
-            "limit": max(1, min(int(limit), 20)),
+            "limit": max(1, min(int(limit), 50)),
         }
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
@@ -312,7 +312,7 @@ class CreationService:
                 "本地数据检索返回格式无效",
             ) from exc
         results = data.get("results") if isinstance(data, dict) else []
-        return [item for item in (results or []) if isinstance(item, dict)][:20]
+        return [item for item in (results or []) if isinstance(item, dict)][:50]
 
     async def scrape_data_context(
         self,
@@ -323,8 +323,9 @@ class CreationService:
         run_id: Optional[str] = None,
         session_id: Optional[str] = None,
         preview_ids: Optional[dict[int, str]] = None,
+        retain_screenshot: bool = True,
     ) -> dict:
-        """创作时刷新 Top-K 报表源，并生成经 OCR/DOM 校验的通用截图证据。"""
+        """刷新 Top-K 报表源，以 AX/DOM 校验数据并按需保留截图证据。"""
         report_sources = [
             item
             for item in data_results
@@ -349,6 +350,7 @@ class CreationService:
                         json={
                             "mode": "auto",
                             "capture_evidence": True,
+                            "retain_screenshot": bool(retain_screenshot),
                             "run_id": run_id,
                             "session_id": session_id,
                             "preview_id": preview_id,
@@ -382,8 +384,14 @@ class CreationService:
                                 "url": payload.get("url"),
                                 "browser": payload.get("browser"),
                                 "interaction_mode": payload.get("interaction_mode"),
-                                "preview_id": preview_id,
-                                "preview_url": preview_url,
+                                **(
+                                    {
+                                        "preview_id": preview_id,
+                                        "preview_url": preview_url,
+                                    }
+                                    if retain_screenshot
+                                    else {}
+                                ),
                                 "evidence": evidence,
                                 "validation_reason": (
                                     evidence.get("validation", {}).get("reason")
@@ -403,8 +411,11 @@ class CreationService:
                         "source_id": source_id,
                         "status": "failed",
                         "error_code": error_code,
-                        "preview_id": preview_id,
-                        "preview_url": preview_url,
+                        **(
+                            {"preview_id": preview_id, "preview_url": preview_url}
+                            if retain_screenshot
+                            else {}
+                        ),
                     }
                 )
 
@@ -426,26 +437,67 @@ class CreationService:
         evidence_by_source: dict[int, dict],
         attempted_source_ids: set[int],
     ) -> list[dict]:
+        attempted_report_urls = {
+            str(item.get("source_url") or "").strip(): int(item["source_id"])
+            for item in data_results
+            if item.get("source_kind") == "report_url"
+            and item.get("source_id") is not None
+            and int(item["source_id"]) in attempted_source_ids
+            and str(item.get("source_url") or "").strip()
+        }
         merged: list[dict] = []
         for original in data_results:
             item = dict(original)
             source_id_value = item.get("source_id")
             source_id = int(source_id_value) if source_id_value is not None else None
+            source_url = str(item.get("source_url") or "").strip()
+            live_source_id = attempted_report_urls.get(source_url)
+            if item.get("source_kind") != "report_url" and live_source_id is not None:
+                # 同 URL 工作记忆是报表的历史派生值。既然本轮已经请求即时刷新，
+                # 无论本轮程序化刷新是否可用，都不能再让旧派生值冒充“最新数据”。
+                item.update(
+                    {
+                        "can_use": False,
+                        "content_excerpt": None,
+                        "structured_data": None,
+                        "freshness_class": "superseded",
+                        "unavailable_reason": "superseded_by_live_report",
+                        "superseded_by_source_id": live_source_id,
+                    }
+                )
+                merged.append(item)
+                continue
             payload = payload_by_source.get(source_id) if source_id is not None else None
             evidence = evidence_by_source.get(source_id) if source_id is not None else None
             if payload is not None:
                 collected_at = payload.get("collected_at")
+                evidence_verified = (
+                    isinstance(evidence, dict)
+                    and evidence.get("validation_status") == "verified"
+                )
+                validation = (
+                    evidence.get("validation")
+                    if isinstance(evidence, dict)
+                    and isinstance(evidence.get("validation"), dict)
+                    else {}
+                )
                 item.update(
                     {
                         "title": payload.get("title") or item.get("title"),
                         "source_url": payload.get("url") or item.get("source_url"),
                         "collected_at": collected_at,
                         "observed_at": collected_at,
-                        "freshness_class": "fresh",
-                        "freshness_score": 1.0,
-                        "refresh_required": False,
+                        "freshness_class": "fresh" if evidence_verified else "unverified",
+                        "freshness_score": 1.0 if evidence_verified else 0.0,
+                        "refresh_required": not evidence_verified,
                         "content_excerpt": payload.get("content_text"),
                         "structured_data": payload.get("structured_data"),
+                        "evidence_status": (
+                            evidence.get("validation_status")
+                            if isinstance(evidence, dict)
+                            else "rejected"
+                        ),
+                        "evidence_reason": validation.get("reason") or "evidence_missing",
                         "provenance": {
                             "collector": payload.get("collector"),
                             "browser": payload.get("browser"),
@@ -454,16 +506,18 @@ class CreationService:
                         },
                     }
                 )
-                if (
-                    isinstance(evidence, dict)
-                    and evidence.get("validation_status") == "verified"
-                ):
+                if evidence_verified:
                     item["creation_evidence"] = evidence
                     item["can_use"] = True
                 else:
                     item["can_use"] = False
+                    item["unavailable_reason"] = "evidence_rejected"
             elif item.get("source_kind") == "report_url" and source_id in attempted_source_ids:
                 item["can_use"] = False
+                item["refresh_required"] = True
+                item["freshness_class"] = "unverified"
+                item["evidence_status"] = "failed"
+                item["unavailable_reason"] = "refresh_failed"
             merged.append(item)
         return merged
 
@@ -474,16 +528,51 @@ class CreationService:
         *,
         require_metric: bool = False,
     ) -> dict:
+        validation = self._compare_scrape_programmatic_channels(scrape_payload)
+        if require_metric:
+            metric_claims = [
+                claim
+                for claim in validation.get("verified_claims", [])
+                if isinstance(claim, dict)
+                and claim.get("claim_type") == "metric"
+                and str(claim.get("value") or "").strip()
+            ]
+            validation["verified_claims"] = metric_claims
+            if not metric_claims:
+                validation["reason"] = "no_verified_metric"
+
         evidence = scrape_payload.get("evidence")
         if not isinstance(evidence, dict) or not evidence.get("id"):
-            return {"validation_status": "rejected", "reason": "screenshot_missing"}
+            return {
+                "validation_status": (
+                    "verified" if validation.get("verified_claims") else "rejected"
+                ),
+                "evidence_kind": "structured_page",
+                "validation": validation,
+            }
+
+        metadata_ok = (
+            str(evidence.get("source_url") or "")
+            == str(scrape_payload.get("url") or "")
+            and str(evidence.get("page_title") or "")
+            == str(scrape_payload.get("title") or "")
+            and int(evidence.get("captured_at") or 0)
+            == int(scrape_payload.get("collected_at") or -1)
+        )
+        validation["metadata_match"] = metadata_ok
+        if not metadata_ok:
+            validation["reason"] = "metadata_mismatch"
+            validation["verified_claims"] = []
 
         image_url = str(evidence.get("image_url") or "")
         image_response = await client.get(f"{self.core_engine_base_url}{image_url}")
         if not image_response.is_success:
-            validation = {"reason": "screenshot_unreadable", "verified_claims": []}
+            validation["screenshot_status"] = "unreadable"
             return await self._persist_evidence_validation(
-                client, evidence, "rejected", validation
+                client,
+                evidence,
+                "verified" if validation.get("verified_claims") else "rejected",
+                validation,
             )
 
         temp_path = ""
@@ -496,21 +585,19 @@ class CreationService:
 
                 self._ocr_engine = OcrEngine.create_default()
             output = await asyncio.to_thread(self._ocr_engine.process, temp_path)
-            validation = self._compare_scrape_with_ocr(scrape_payload, output.text)
-            if require_metric:
-                metric_claims = [
-                    claim
-                    for claim in validation.get("verified_claims", [])
-                    if isinstance(claim, dict)
-                    and str(claim.get("value") or "").strip()
-                ]
-                validation["verified_claims"] = metric_claims
-                if not metric_claims:
-                    validation["reason"] = "no_verified_metric"
+            ocr_validation = self._compare_scrape_with_ocr(scrape_payload, output.text)
             validation["ocr_confidence"] = round(float(output.confidence), 4)
+            validation["ocr_verified_claim_count"] = len(
+                ocr_validation.get("verified_claims", [])
+            )
+            validation["screenshot_status"] = (
+                "matched"
+                if ocr_validation.get("verified_claims")
+                else "retained_unmatched"
+            )
         except Exception as exc:
             logger.warning("创作证据 OCR 失败: %s", exc)
-            validation = {"reason": "ocr_failed", "verified_claims": []}
+            validation["screenshot_status"] = "ocr_failed"
         finally:
             if temp_path:
                 try:
@@ -520,6 +607,78 @@ class CreationService:
 
         status = "verified" if validation.get("verified_claims") else "rejected"
         return await self._persist_evidence_validation(client, evidence, status, validation)
+
+    @classmethod
+    def _compare_scrape_programmatic_channels(cls, scrape_payload: dict) -> dict:
+        """AX 为首选事实文本，DOM 为结构化后备；截图不参与可用性门禁。"""
+        structured = scrape_payload.get("structured_data") or {}
+        extraction = structured.get("extraction", {}) if isinstance(structured, dict) else {}
+        primary = (
+            str(extraction.get("primary") or "dom")
+            if isinstance(extraction, dict)
+            else "dom"
+        )
+        dom_text = (
+            str(structured.get("dom_content_text") or "")
+            if isinstance(structured, dict)
+            else ""
+        )
+        dom_payload = dict(scrape_payload)
+        dom_payload["content_text"] = dom_text or str(
+            scrape_payload.get("content_text") or ""
+        )
+        candidates = cls._scrape_claim_candidates(dom_payload)
+        if primary == "accessibility":
+            verified = cls._match_claims_in_text(
+                candidates,
+                str(scrape_payload.get("content_text") or ""),
+            )
+            return {
+                "reason": "ax_dom_matched" if verified else "ax_dom_mismatch",
+                "primary_channel": "accessibility",
+                "secondary_channel": "dom",
+                "verified_claims": verified,
+            }
+        return {
+            "reason": "dom_structured" if candidates else "dom_empty",
+            "primary_channel": "dom",
+            "secondary_channel": None,
+            "verified_claims": candidates[:20],
+        }
+
+    @classmethod
+    def _match_claims_in_text(cls, claims: list[dict], target_text: str) -> list[dict]:
+        normalized_target = cls._normalize_evidence_text(target_text)
+        verified: list[dict] = []
+        for claim in claims:
+            if claim.get("claim_type") == "text":
+                statement = str(claim.get("statement") or "")
+                normalized_statement = cls._normalize_evidence_text(statement)
+                tokens = cls._evidence_match_tokens(statement)
+                matched_tokens = [
+                    token
+                    for token in tokens
+                    if cls._normalize_evidence_text(token) in normalized_target
+                ]
+                if (
+                    normalized_statement
+                    and normalized_statement in normalized_target
+                ) or (
+                    len(matched_tokens) >= 2
+                    and len(matched_tokens) / max(1, len(tokens)) >= 0.6
+                ):
+                    verified.append(claim)
+            else:
+                value = cls._normalize_evidence_text(str(claim.get("value") or ""))
+                labels = cls._evidence_match_tokens(str(claim.get("label") or ""))
+                if value and value in normalized_target and any(
+                    cls._normalize_evidence_text(token) in normalized_target
+                    for token in labels
+                ):
+                    verified.append(claim)
+            if len(verified) >= 20:
+                break
+        return verified
 
     async def _persist_evidence_validation(
         self,
@@ -537,7 +696,7 @@ class CreationService:
                 return response.json()
         except Exception as exc:
             logger.warning("保存创作证据校验状态失败: %s", exc)
-        return {**evidence, "validation_status": "rejected", "validation": validation}
+        return {**evidence, "validation_status": status, "validation": validation}
 
     @classmethod
     def _compare_scrape_with_ocr(cls, scrape_payload: dict, ocr_text: str) -> dict:
@@ -678,7 +837,7 @@ class CreationService:
         statistical_period = cls._content_statistical_period(content_lines)
         date_pattern = re.compile(r"^20\d{2}[-/.年]\d{1,2}(?:[-/.月]\d{1,2}日?)?$")
         value_pattern = re.compile(
-            r"^[+-]?\d[\d,]*(?:\.\d+)?(?:%|亿|万|千|百|卡|个|次|元|秒|ms|s)?$",
+            r"^[+-]?\d[\d,]*(?:\.\d+)?(?:%|亿元|万元|亿|万|千|百|卡|个|次|元|秒|ms|s|x)?$",
             re.IGNORECASE,
         )
         for index, line in enumerate(content_lines):
@@ -932,6 +1091,148 @@ class CreationService:
                 error_msg=str(exc),
             )
             raise
+
+    def build_routing_prompts(
+        self,
+        query: str,
+        requirement: dict,
+        selected_skills: Iterable[dict] = (),
+    ) -> tuple[str, str]:
+        """系统提示词动态加载各能力的自描述（渐进式披露），由模型决策执行链路。
+
+        路由倾向不在这里硬编码：每个 Tool / Agent（Agent as Tool）/ Skill 在自身
+        定义处声明解决什么问题、在什么目标下使用，这里只负责加载。
+        """
+        skill_lines = self._skill_description_lines(selected_skills)
+        capability_lines = routing_capability_lines(skill_lines)
+        system = (
+            "你是创作 Agent 的执行链路路由决策器。下面是每个能力自己声明的描述，"
+            "请依据这些描述为完成用户请求选择需要的能力，只做选择，不写正文。\n\n"
+            "可选能力（描述由各能力自行声明）：\n"
+            + "\n".join(capability_lines)
+            + "\n\n决策原则：\n"
+            "1. 依据每个能力的自描述选择能力，与请求无关的能力不要加\n"
+            "2. memory_search 和网页刷新是结构性能力，不需要你决策\n"
+            "3. 只输出一个 JSON 对象，不要输出任何其他内容\n\n"
+            '输出格式：{"tools": [...], "agents": [...], '
+            '"reasoning": "不超过 50 字的理由"}'
+        )
+        topic = str(requirement.get("topic") or "").strip()
+        doc_type = str(requirement.get("doc_type") or "").strip()
+        audience = str(requirement.get("audience") or "").strip()
+        context_lines = [f"用户请求：{query.strip()}"]
+        if doc_type:
+            context_lines.append(f"文档类型：{doc_type}")
+        if topic and topic != query.strip():
+            context_lines.append(f"主题：{topic}")
+        if audience:
+            context_lines.append(f"目标读者：{audience}")
+        if requirement.get("needs_latest"):
+            context_lines.append("附加信号：需求解析认为涉及最新外部信息")
+        return system, "\n".join(context_lines)
+
+    @staticmethod
+    def _skill_description_lines(
+        selected_skills: Iterable[dict],
+    ) -> list[str]:
+        """Skill 同样以自己的描述参与披露；Skill 自动应用，不进入决策输出。"""
+        lines: list[str] = []
+        for item in selected_skills or ():
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or item.get("name") or "").strip()
+            description = (
+                item.get("skillDescription")
+                or item.get("skill_description")
+                or {}
+            )
+            purpose = ""
+            problems = ""
+            if isinstance(description, dict):
+                purpose = str(description.get("purpose") or "").strip()
+                raw_problems = description.get("problems") or []
+                if isinstance(raw_problems, (list, tuple)):
+                    problems = "；".join(str(part) for part in raw_problems if part)
+            text = purpose or str(item.get("summary") or "").strip()
+            if problems:
+                text = f"{text}（解决的问题：{problems}）" if text else problems
+            if not title or not text:
+                continue
+            lines.append(
+                f"- {title} (Skill 上下文): {text} 该 Skill 会自动应用，无需写入决策输出。"
+            )
+        return lines
+
+    def parse_routing_decision(self, text: str) -> dict:
+        """只做输出校验：提取 JSON，解析失败时抛出 ValueError。"""
+        candidate = (text or "").strip()
+        if candidate.startswith("```"):
+            candidate = re.sub(r"^```[a-zA-Z]*\s*", "", candidate)
+            candidate = re.sub(r"\s*```$", "", candidate).strip()
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start < 0 or end <= start:
+            raise ValueError("路由决策输出中没有 JSON 对象")
+        try:
+            parsed = json.loads(candidate[start : end + 1])
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"路由决策输出不是合法 JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("路由决策输出必须是 JSON 对象")
+        decision = validate_routing_decision(parsed)
+        decision["reasoning"] = str(parsed.get("reasoning") or "")[:200]
+        return decision
+
+    async def route_capabilities(
+        self,
+        *,
+        query: str,
+        requirement: dict,
+        selected_skills: Iterable[dict] = (),
+        creation_model: Optional[str] = None,
+        creation_api_key: Optional[str] = None,
+        creation_base_url: Optional[str] = None,
+    ) -> dict:
+        """由模型推理路由决策；失败时降级为保守回退，不阻断创作链路。"""
+        system_prompt, user_prompt = self.build_routing_prompts(
+            query, requirement, selected_skills
+        )
+        started_ms = int(time.time() * 1000)
+        model_name = creation_model or self.model
+        parts: list[str] = []
+        try:
+            async for chunk in self._stream_direct_completion(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                creation_model=creation_model,
+                creation_api_key=creation_api_key,
+                creation_base_url=creation_base_url,
+                num_predict=400,
+                temperature=0.1,
+            ):
+                parts.append(chunk)
+            response_text = "".join(parts)
+            decision = self.parse_routing_decision(response_text)
+            decision["source"] = "model"
+            self._log_creation_usage(
+                model_name=model_name,
+                prompt_text=system_prompt + "\n\n" + user_prompt,
+                response_text=response_text,
+                latency_ms=int(time.time() * 1000) - started_ms,
+                status="success",
+            )
+            return decision
+        except Exception as exc:
+            logger.warning("路由模型推理失败，降级为保守路由: %s", exc)
+            self._log_creation_usage(
+                model_name=model_name,
+                prompt_text=system_prompt + "\n\n" + user_prompt,
+                response_text="".join(parts),
+                latency_ms=int(time.time() * 1000) - started_ms,
+                status="failed",
+                error_msg=str(exc),
+            )
+            return fallback_routing_decision(query, requirement)
 
     async def run_specialist_agent(
         self,
@@ -1252,7 +1553,7 @@ Skill 命名与简介原则：
 - 输出前检查：文档主题必须完全虚构，标题示例语义完整，JSON 字符串正确转义，所有字段均无阿拉伯数字。
 
 JSON 类型硬约束：
-- common_titles、structure_pattern、writing_guidelines、suggested_category_keywords 只能是字符串数组；数组项禁止使用对象、键值对或嵌套数组。
+- common_titles、writing_guidelines、suggested_category_keywords 只能是字符串数组；数组项禁止使用对象、键值对或嵌套数组。
 - field_examples 的每个值只能是字符串数组。
 - 只有 distinctive_sections 是对象数组。不要把 Python 字典、JSON 对象或类似 {{'level': '一级标题'}} 的文本塞进字符串数组。
 
@@ -1315,7 +1616,6 @@ JSON 类型硬约束：
   "title_style": "旧版兼容字段：复制 common_titles 中的内容，不增加新的标题规则",
   "text_style": "行文设计思路：用四百至七百个中文字符写成可执行配方，依次说明开篇定调、章节递进、段内顺序、列表条件、信息密度、过渡方式、结尾收束和不应迁移的写法；每一项都落到源文档可观察到的组织特征",
   "diagram_style": "图片生成方式：用四百至七百个中文字符写成可执行配方。依次说明源文档是否存在图示证据、什么情况下才需要生成、推荐 PlantUML 或 Mermaid 的哪一种图、正文信息如何筛选、阅读方向与分组如何安排、节点与连线怎样命名、颜色与边界怎样克制、正文在图前后怎样引导，以及哪些内容禁止画入和交付前如何自检；没有图示依据时先明确写“默认不生成图片”，再说明真正需要补图的触发条件，不能为了完整感强行配图",
-  "structure_pattern": ["兼容字段：按源文档实际顺序抽象出四至十个章节角色，仅供内部保持推进信息，不得把它渲染成独立的“章节组织骨架”章节"],
   "writing_guidelines": ["话术表达风格：输出五至八条、合计四百至七百个中文字符的可执行规则。每条从源文档中的非敏感原词、短语、过渡语、动作动词、专业用语、标点或句式出发，写清证据表达、常见位置、承担作用、句法语气、迁移方式和使用边界；没有稳定证据时明确禁止额外植入模板话术，不要改写成放到任何文档都成立的通用规范"],
   "distinctive_sections": [
     {{
@@ -1330,7 +1630,6 @@ JSON 类型硬约束：
     "title_style": "标题设计风格",
     "text_style": "行文设计思路",
     "diagram_style": "图片生成方式",
-    "structure_pattern": "内部章节推进信息",
     "writing_guidelines": "话术表达风格"
   }},
   "field_examples": {{
@@ -1338,7 +1637,6 @@ JSON 类型硬约束：
     "title_style": ["旧版兼容字段：复制 common_titles 示例"],
     "text_style": ["一至三个使用全新虚构主题、但严格复现源文档组织次序和段落推进的正文片段"],
     "diagram_style": ["一至三个可执行的代码生图说明，明确 PlantUML 或 Mermaid 的图类型、启用条件、信息范围、元素、布局、标注和图文衔接方式；必要时给出短代码骨架"],
-    "structure_pattern": ["兼容字段：一至三个复现源文档推进节奏、但替换业务主题的内部章节顺序示例，不单独渲染为技能章节"],
     "writing_guidelines": ["一至三个把收集到的惯用短语、动词、标点或专业表达迁移到虚构主题中的完整仿写句，并让示例体现对应规则的出现位置和语气"]
   }},
   "example_document": "一份一千二百至两千二百个中文字符的完整 Markdown 示例文档，使用全新虚构主题，至少包含主标题、摘要、六个二级章节和结论；核心章节至少两个完整段落，必须实际体现上述标题句式、行文逻辑、话术和图示方式，不得出现源文档中的名称、事实、阿拉伯数字或完整句子",
@@ -1461,7 +1759,6 @@ JSON 类型硬约束：
                 "common_titles",
                 "text_style",
                 "diagram_style",
-                "structure_pattern",
                 "writing_guidelines",
             )
         }
@@ -1516,7 +1813,6 @@ JSON 类型硬约束：
             "title_style": legacy_title_style,
             "text_style": text_style,
             "diagram_style": diagram_style,
-            "structure_pattern": clean_list("structure_pattern", 16, 160),
             "writing_guidelines": writing_guidelines,
             "distinctive_sections": distinctive_sections,
             "section_headings": cls._default_skill_section_headings(),
@@ -1671,8 +1967,6 @@ JSON 类型硬约束：
                 prefix = f"{level}：" if level else ""
                 suffix = f"；{boundary}" if boundary else ""
                 return f"{prefix}采用“{pattern}”的标题骨架{suffix}"
-        if key == "structure_pattern":
-            return first("role", "section", "title", "name", "章节角色", "内容")
         if key == "writing_guidelines":
             phrase = first("phrase", "term", "wording", "短语", "话术")
             usage = first("role", "usage", "effect", "作用", "说明")
@@ -1986,7 +2280,6 @@ JSON 类型硬约束：
                 "title_style": list(heading_examples),
                 "text_style": [cls._fallback_flow_example(structure, content)],
                 "diagram_style": diagram_examples,
-                "structure_pattern": [" → ".join(structure)],
                 "writing_guidelines": voice_examples,
             }
         )
@@ -2009,7 +2302,6 @@ JSON 类型硬约束：
             "title_style": "；".join(title_design)[:1200],
             "text_style": text_style,
             "diagram_style": diagram_style,
-            "structure_pattern": structure,
             "writing_guidelines": voice_style,
             "distinctive_sections": distinctive_sections,
             "section_headings": cls._default_skill_section_headings(),
@@ -2084,7 +2376,7 @@ JSON 类型硬约束：
                 "id": "collect-context",
                 "title": "收集需求与事实",
                 "objective": "明确创作目标、读者、范围、已有资料和不能推断的事实边界。",
-                "output": "需求清单、事实材料和待核验项",
+                "output": "需求清单和有依据的事实材料",
                 "agents": [],
                 "skills": [],
                 "tools": ["memory_search"],
@@ -2108,7 +2400,7 @@ JSON 类型硬约束：
                     "id": "analyze-data",
                     "title": "分析数据与证据",
                     "objective": "核对数据口径，识别关键关系、差异和支撑结论的证据。",
-                    "output": "数据判断、口径说明和证据缺口",
+                    "output": "有依据的数据判断和口径说明",
                     "agents": ["data_analysis_agent"],
                     "skills": [],
                     "tools": ["data_search", "webpage_scrape"],
@@ -2143,7 +2435,7 @@ JSON 类型硬约束：
                     "id": "review-delivery",
                     "title": "审校并交付",
                     "objective": "检查目标回应、事实依据、结构完整、术语一致和行动可执行性。",
-                    "output": "通过质量检查的最终文档与待核验项",
+                    "output": "通过质量检查的最终文档",
                     "agents": ["quality_review_agent"],
                     "skills": [],
                     "tools": [],
@@ -2648,7 +2940,6 @@ JSON 类型硬约束：
             "title_style": "标题设计风格",
             "text_style": "行文设计思路",
             "diagram_style": "图片生成方式",
-            "structure_pattern": "内部章节推进信息",
             "writing_guidelines": "话术表达风格",
         }
 
@@ -2659,7 +2950,6 @@ JSON 类型硬约束：
             "title_style": ["现状与约束", "方案如何落到执行"],
             "text_style": ["先界定适用范围，再沿“现状 → 判断 → 动作 → 验证”逐层收束。"],
             "diagram_style": ["PlantUML 活动图：主流程纵向排列，跨角色动作放入对应泳道。"],
-            "structure_pattern": ["背景与目标 → 现状与约束 → 方案设计 → 实施计划 → 风险与验证"],
             "writing_guidelines": ["需要说明的是，目标对象只覆盖已经确认的适用范围。"],
         }
 
@@ -3159,7 +3449,7 @@ flowchart LR
             )
 
         refs.sort(key=lambda item: item.final_weight, reverse=True)
-        return refs[: max(1, min(options.max_references, 12))]
+        return refs[: max(1, min(options.max_references, 30))]
 
     async def collect_web_context(
         self,

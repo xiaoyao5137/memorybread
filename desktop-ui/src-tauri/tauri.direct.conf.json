@@ -1,6 +1,7 @@
 {
   "bundle": {
     "category": "Productivity",
+    "createUpdaterArtifacts": true,
     "targets": ["app", "dmg"],
     "externalBin": [
       "binaries/memory-bread-core"

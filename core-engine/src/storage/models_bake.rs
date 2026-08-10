@@ -268,8 +268,19 @@ pub struct BakeMemorySourceRecord {
     pub capture_audio_text: Option<String>,
     pub capture_url: Option<String>,
     pub capture_webpage_title: Option<String>,
+    /// 从时间线全部成员 capture 中按出现次数与时间选出的可靠文档标题。
+    /// 主 capture 可能仍停留在“知识库/未命名文档”等加载占位页。
+    #[serde(default)]
+    pub preferred_source_title: Option<String>,
     pub url_aggregated_text: Option<String>,
     pub url_aggregated_capture_count: i64,
+    /// 0 表示 fresh lane；大于 0 表示独立于 watermark 的 retry lane。
+    #[serde(default)]
+    pub retry_failure_count: i64,
+    #[serde(default)]
+    pub retry_error_code: Option<String>,
+    #[serde(default)]
+    pub retry_next_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -353,6 +364,39 @@ pub struct BakeWatermarkRecord {
     pub pipeline_name: String,
     pub last_processed_ts: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BakeRetryStateRecord {
+    pub timeline_id: i64,
+    pub failure_count: i64,
+    pub last_error: Option<String>,
+    pub last_error_code: Option<String>,
+    pub last_failed_at_ms: i64,
+    pub next_retry_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BakeQueueStatusRecord {
+    pub watermark_last_processed_ts: i64,
+    pub watermark_updated_at_ms: Option<i64>,
+    pub fresh_count: i64,
+    pub metadata_refresh_count: i64,
+    pub retry_ready_count: i64,
+    pub retry_delayed_count: i64,
+    pub dead_letter_count: i64,
+    pub retry_timeout_count: i64,
+    pub retry_output_count: i64,
+    pub retry_upstream_count: i64,
+    pub retry_other_count: i64,
+    pub actionable_count: i64,
+    pub pending_count: i64,
+    pub oldest_fresh_at_ms: Option<i64>,
+    pub oldest_retry_at_ms: Option<i64>,
+    pub oldest_actionable_at_ms: Option<i64>,
+    pub next_retry_at_ms: Option<i64>,
+    pub recent_no_progress_count: i64,
+    pub recommended_retry_after_ms: i64,
 }
 
 pub fn now_ms() -> i64 {

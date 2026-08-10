@@ -1,6 +1,6 @@
 {
   "name": "memory-bread-desktop",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -15,7 +15,8 @@
     "macos:build:dmg": "../scripts/build-macos.sh dmg",
     "macos:build:appstore": "../scripts/build-macos.sh appstore",
     "macos:verify": "../scripts/verify-macos-bundle.sh",
-    "version:check": "node ../scripts/check-version-sync.mjs"
+    "version:check": "node ../scripts/check-version-sync.mjs",
+    "version:set": "node ../scripts/set-version.mjs"
   },
   "dependencies": {
     "@tailwindcss/typography": "^0.5.19",

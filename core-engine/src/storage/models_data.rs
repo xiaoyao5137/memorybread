@@ -1,6 +1,18 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// 模型分类发现的数据页面注册结果。
+///
+/// 时间线提炼的同一次推理可能输出 data_pages 分类，sidecar 校验后调用注册接口；
+/// 非法 URL、缺失或敏感的 capture 都直接拒绝，不创建数据源。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoveredSourceOutcome {
+    Registered { source_id: i64, created: bool },
+    RejectedInvalidUrl,
+    RejectedCaptureMissing,
+    RejectedCaptureSensitive,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataSnapshotRecord {
     pub id: i64,
@@ -16,6 +28,10 @@ pub struct DataSnapshotRecord {
     pub source_capture_ids: Vec<i64>,
     pub source_timeline_ids: Vec<i64>,
     pub status: String,
+    pub period_granularity: String,
+    pub period_key: String,
+    pub period_start_at: Option<i64>,
+    pub period_end_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +76,8 @@ pub struct DataSearchResult {
     pub content_excerpt: Option<String>,
     pub structured_data: Option<Value>,
     pub provenance: Option<Value>,
+    /// 同一语义数据源按阶段保留的历史快照，最新阶段在前。
+    pub history: Vec<DataSnapshotRecord>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -39,9 +39,18 @@ def test_bake_extract_forwards_retry_attempt(monkeypatch):
         def __init__(self):
             super().__init__(1_000)
             self.retry_attempt = None
+            self.retry_error_code = None
 
-        def extract_bake_bundle(self, _candidate, *, preempt_check, retry_attempt):
+        def extract_bake_bundle(
+            self,
+            _candidate,
+            *,
+            preempt_check,
+            retry_attempt,
+            retry_error_code,
+        ):
             self.retry_attempt = retry_attempt
+            self.retry_error_code = retry_error_code
             assert preempt_check is not None
             rejected = {"accepted": False, "reason": "test", "payload": None}
             return {
@@ -58,12 +67,14 @@ def test_bake_extract_forwards_retry_attempt(monkeypatch):
         "/bake/extract",
         json={
             "retry_attempt": 2,
+            "retry_error_code": "INFERENCE_TIMEOUT",
             "candidate": {"source_timeline_id": 42},
         },
     )
 
     assert response.status_code == 200
     assert extractor.retry_attempt == 2
+    assert extractor.retry_error_code == "INFERENCE_TIMEOUT"
 
 
 def test_bake_extract_timeout_is_retryable(monkeypatch):

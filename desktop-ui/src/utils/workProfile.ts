@@ -22,6 +22,11 @@ export interface WorkAchievementMetrics {
   interruption_gap_minutes: number
   overnight_start_hour: number
   overnight_end_hour: number
+  /** 分类时长由新版核心引擎本地聚合；旧核心或统计降级时字段缺失，消费方必须按可选处理。 */
+  coding_minutes?: number
+  design_minutes?: number
+  focus_minutes?: number
+  knowledge_minutes?: number
 }
 
 export interface WorkProfileSummary {
@@ -164,6 +169,12 @@ export const sanitizeWorkProfile = (profile: WorkProfileSummary): WorkProfileSum
   }
 }
 
+const normalizeOptionalMinutes = (value: unknown) => (
+  typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : undefined
+)
+
 const normalizeWorkProfile = (payload: Partial<WorkProfileSummary>): WorkProfileSummary => {
   if (
     !payload.today
@@ -206,7 +217,15 @@ const normalizeWorkProfile = (payload: Partial<WorkProfileSummary>): WorkProfile
   const achievementMetrics = receivedMetrics
     && Number.isFinite(receivedMetrics.longest_work_session_minutes)
     && Number.isFinite(receivedMetrics.max_overnight_work_minutes)
-    ? receivedMetrics
+    ? {
+        ...receivedMetrics,
+        // 分类时长字段可能被旧核心省略或被核心降级为零值；只保留有限数值，
+        // 其它情况一律置为 undefined，任务评估会自动跳过对应标签。
+        coding_minutes: normalizeOptionalMinutes(receivedMetrics.coding_minutes),
+        design_minutes: normalizeOptionalMinutes(receivedMetrics.design_minutes),
+        focus_minutes: normalizeOptionalMinutes(receivedMetrics.focus_minutes),
+        knowledge_minutes: normalizeOptionalMinutes(receivedMetrics.knowledge_minutes),
+      }
     : undefined
 
   return sanitizeWorkProfile({

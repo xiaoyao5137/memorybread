@@ -226,6 +226,16 @@
 .integration-result-metrics strong { color: #3f2e22; font-size: 14px; }
 .integration-result-metrics small { color: #8c7b6d; font-size: 7px; }
 
+.integration-result-records { display: grid; gap: 5px; margin-top: 10px; }
+.integration-result-records button { width: 100%; min-height: 38px; padding: 7px 8px; border-color: rgba(185, 107, 45, 0.2); background: #fffaf5; color: #6f3e17; justify-content: flex-start; text-align: left; }
+.integration-result-records button:hover { border-color: rgba(185, 107, 45, 0.48); background: #fff5ea; }
+.integration-result-records button > span { min-width: 0; display: grid; flex: 1; gap: 1px; }
+.integration-result-records strong,
+.integration-result-records small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.integration-result-records strong { color: #493426; font-size: 9px; }
+.integration-result-records small { color: #89786a; font-size: 8px; }
+.integration-result-records em { padding: 2px 5px; border-radius: 999px; background: rgba(185, 107, 45, 0.1); font-size: 7px; font-style: normal; white-space: nowrap; }
+
 .integration-artifact { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 8px; margin-top: 10px; padding: 9px; border-radius: 9px; background: #f6f2ed; color: #9b521f; }
 .integration-artifact > div { min-width: 0; display: grid; gap: 1px; }
 .integration-artifact strong { overflow: hidden; color: #493426; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
@@ -528,4 +538,90 @@
   .integration-run-history > button.is-active,
   .integration-files-view aside > button.is-active,
   .integration-dialog__body aside button.is-active { background: #35291f; }
+}
+
+.integration-memory-picker { display: flex; flex-direction: column; gap: 10px; }
+.integration-vault-config { display: flex; flex-direction: column; gap: 6px; }
+.integration-vault-config label { color: #5f4938; font-size: 9px; font-weight: 750; }
+.integration-vault-row { display: flex; gap: 6px; align-items: stretch; }
+.integration-vault-row button {
+  flex-shrink: 0; min-height: 34px; padding: 0 11px; display: inline-flex; align-items: center; gap: 5px;
+  border: 1px solid rgba(105, 67, 35, 0.22); border-radius: 9px; background: #fff; color: #6d4a2c;
+  font-size: 10px; font-weight: 650; cursor: pointer;
+}
+.integration-vault-row button:hover { border-color: rgba(155, 82, 31, 0.5); color: #9b521f; }
+.integration-vault-row input,
+.integration-vault-config > input {
+  flex: 1; min-width: 0; min-height: 34px; padding: 0 10px;
+  border: 1px solid rgba(105, 67, 35, 0.17); border-radius: 9px; background: #fff;
+  color: #4a3323; font-size: 10.5px;
+}
+.integration-vault-row input::placeholder,
+.integration-vault-config > input::placeholder,
+.integration-memory-search input::placeholder { color: #b2a294; }
+
+.integration-memory-search {
+  min-height: 34px; padding: 0 10px; display: flex; align-items: center; gap: 8px;
+  border: 1px solid rgba(105, 67, 35, 0.17); border-radius: 9px; background: #fff; color: #9b521f;
+}
+.integration-memory-search input { flex: 1; min-width: 0; border: none; outline: none; background: transparent; color: #4a3323; font-size: 10.5px; }
+
+.integration-memory-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.integration-memory-toolbar > span { color: #837264; font-size: 9px; line-height: 1.5; }
+.integration-memory-toolbar > div { display: flex; gap: 6px; flex-shrink: 0; }
+.integration-memory-toolbar button {
+  padding: 3px 9px; border: 1px solid rgba(105, 67, 35, 0.2); border-radius: 999px;
+  background: #fff; color: #6d4a2c; font-size: 9px; font-weight: 650; cursor: pointer;
+}
+.integration-memory-toolbar button:disabled { opacity: 0.45; cursor: default; }
+
+.integration-memory-list {
+  position: relative; max-height: 260px; overflow: auto; display: flex; flex-direction: column; gap: 6px;
+  padding: 8px; border: 1px dashed rgba(105, 67, 35, 0.25); border-radius: 11px; background: rgba(255, 252, 248, 0.7);
+  outline: none; user-select: none;
+}
+.integration-memory-list:focus-visible { border-color: rgba(155, 82, 31, 0.55); }
+.integration-memory-list.is-dragging { cursor: crosshair; }
+.integration-memory-empty { margin: 14px 4px; display: flex; align-items: center; gap: 7px; color: #9c8b7c; font-size: 10px; }
+
+.integration-memory-card {
+  display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px;
+  border: 1px solid rgba(105, 67, 35, 0.14); border-radius: 9px; background: #fff; cursor: pointer;
+}
+.integration-memory-card:hover { border-color: rgba(155, 82, 31, 0.42); }
+.integration-memory-card.is-selected {
+  border-color: rgba(155, 82, 31, 0.7);
+  background: linear-gradient(135deg, rgba(238, 216, 195, 0.6), rgba(255, 255, 255, 0.85));
+  box-shadow: 0 1px 6px rgba(105, 67, 35, 0.12);
+}
+.integration-memory-card__check {
+  flex-shrink: 0; width: 17px; height: 17px; margin-top: 1px; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid rgba(105, 67, 35, 0.3); border-radius: 5px; background: #fff; color: #fff;
+}
+.integration-memory-card.is-selected .integration-memory-card__check { background: #9b521f; border-color: #9b521f; }
+.integration-memory-card strong { display: block; color: #4a3323; font-size: 11px; line-height: 1.45; }
+.integration-memory-card small { display: block; margin-top: 2px; color: #9c8b7c; font-size: 8.5px; }
+
+.integration-marquee {
+  position: absolute; z-index: 5; border: 1px solid rgba(155, 82, 31, 0.75);
+  border-radius: 4px; background: rgba(155, 82, 31, 0.12); pointer-events: none;
+}
+
+.integration-result-target { margin: 8px 0 0; color: #837264; font-size: 10px; line-height: 1.6; word-break: break-all; }
+
+@media (prefers-color-scheme: dark) {
+  .integration-vault-row button,
+  .integration-memory-toolbar button { background: #241b13; color: #d9c7b6; border-color: rgba(217, 199, 182, 0.25); }
+  .integration-vault-row input,
+  .integration-vault-config > input,
+  .integration-memory-search { background: #241b13; border-color: rgba(217, 199, 182, 0.22); }
+  .integration-vault-row input,
+  .integration-vault-config > input,
+  .integration-memory-search input { color: #f2e8df; }
+  .integration-memory-list { background: rgba(30, 23, 16, 0.7); border-color: rgba(217, 199, 182, 0.3); }
+  .integration-memory-card { background: #241b13; border-color: rgba(217, 199, 182, 0.2); }
+  .integration-memory-card strong { color: #f2e8df; }
+  .integration-memory-card.is-selected { background: linear-gradient(135deg, rgba(155, 82, 31, 0.4), rgba(36, 27, 19, 0.9)); border-color: rgba(224, 141, 84, 0.8); }
+  .integration-memory-card__check { background: #241b13; border-color: rgba(217, 199, 182, 0.35); }
+  .integration-memory-card.is-selected .integration-memory-card__check { background: #c77b3f; border-color: #c77b3f; }
 }

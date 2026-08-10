@@ -185,20 +185,6 @@
 .about-panel__update p { margin: 0; color: #604b3d; font-size: 13px; line-height: 1.65; white-space: pre-wrap; }
 .about-panel__update button { width: max-content; color: #fffaf5; background: #a94c25; }
 
-.about-panel__privacy {
-  padding: 16px 18px;
-  border-radius: 14px;
-  color: #5e574b;
-  background: rgba(243, 238, 226, .8);
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-}
-
-.about-panel__privacy p { margin: 0; display: grid; gap: 4px; }
-.about-panel__privacy strong { font-size: 13px; }
-.about-panel__privacy span { font-size: 12px; line-height: 1.55; }
-
 .about-panel button:focus-visible {
   outline: 3px solid rgba(193, 98, 48, .32);
   outline-offset: 3px;

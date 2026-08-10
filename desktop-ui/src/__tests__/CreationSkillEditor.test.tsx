@@ -134,8 +134,10 @@ describe('沉淀技能', () => {
     }, { timeout: 2500 })
     expect(screen.queryByText('把这份文档的写法提炼成可复用的创作配方；所有分析先在本机完成。')).not.toBeInTheDocument()
     expect(screen.queryAllByRole('combobox')).toHaveLength(0)
-    expect(screen.getByRole('option', { name: '互联网' })).toHaveAttribute('aria-selected', 'true')
-    expect(savedBodies[0]).toMatchObject({ status: 'draft', installed: false })
+    // 创作类目默认折叠且默认值为“私有”，不再自动建议类目，也不再展示私有提示文案
+    expect(screen.queryByText('私有（仅本机可用）')).not.toBeInTheDocument()
+    expect(screen.queryByText('默认私有，发布到市场需选择具体类目')).not.toBeInTheDocument()
+    expect(savedBodies[0]).toMatchObject({ status: 'draft', installed: false, category_id: null })
     expect(screen.getByRole('heading', { name: '标题设计风格' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '行文设计思路' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '图片生成方式' })).toBeInTheDocument()
@@ -155,8 +157,9 @@ describe('沉淀技能', () => {
     })
   })
 
-  it('编辑已有内容时显示“编辑技能”并使用级联选项卡', async () => {
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+  it('编辑已有内容时保存修改后的技能简介，并使用级联选项卡', async () => {
+    let savedBody: Record<string, any> | null = null
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input))
       if (url.pathname === '/v1/creation-skill-categories') {
         return new Response(JSON.stringify({
@@ -170,9 +173,14 @@ describe('沉淀技能', () => {
           })),
         }), { status: 200, headers: { 'Content-Type': 'application/json' } })
       }
+      if (url.pathname === '/api/creation/skills/21' && init?.method === 'PUT') {
+        savedBody = JSON.parse(String(init.body))
+        return Response.json({ ...savedBody, id: 21, created_at: 1, updated_at: 3 })
+      }
       return new Response('', { status: 404 })
     }))
     const categoryId = OFFLINE_CREATION_SKILL_CATEGORIES.find(item => item.key === 'enterprise-architecture-design-doc')!.id
+    const onSaved = vi.fn()
 
     render(<CreationSkillEditor
       initialSkill={{
@@ -198,13 +206,12 @@ describe('沉淀技能', () => {
           output: '总体方案与关键设计',
           agents: ['solution_design_agent'],
           skills: [],
-          tools: ['plantuml_diagram'],
+          tools: ['data_search'],
         }],
         commonTitles: ['总体架构设计'],
         titleStyle: '结论先行。',
         textStyle: '清晰正式。',
         diagramStyle: '分层架构图。',
-        structurePattern: ['背景', '总体设计'],
         writingGuidelines: [],
         distinctiveSections: [{
           title: '定义先行',
@@ -222,17 +229,125 @@ describe('沉淀技能', () => {
         updatedAt: 2,
       }}
       onClose={vi.fn()}
-      onSaved={vi.fn()}
+      onSaved={onSaved}
     />)
 
-    expect(screen.getByRole('heading', { name: '编辑技能' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: '技能编辑' })).toBeInTheDocument()
+    expect(screen.queryByText('沉淀自：技术架构创作方法')).not.toBeInTheDocument()
+    const summaryInput = screen.getByLabelText(/技能简介/) as HTMLTextAreaElement
+    expect(summaryInput).toHaveValue('用于技术架构设计。')
     expect(screen.queryByText('把这份文档的写法提炼成可复用的创作配方；所有分析先在本机完成。')).not.toBeInTheDocument()
-    await waitFor(() => expect(screen.getByRole('option', { name: '企业服务' })).toHaveAttribute('aria-selected', 'true'))
+    await waitFor(() => expect(screen.getByRole('option', { name: '企业服务', hidden: true })).toHaveAttribute('aria-selected', 'true'))
     expect(screen.queryAllByRole('combobox')).toHaveLength(0)
     expect(screen.queryByRole('button', { name: /发布|开放到市场|更新市场版本|下架市场/ })).not.toBeInTheDocument()
     expect(screen.queryByText('发布边界')).not.toBeInTheDocument()
     expect(screen.getByDisplayValue('定义先行')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '删除特色亮点 1' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '添加特色章节' })).toBeInTheDocument()
+    const screenshotOption = screen.getByRole('checkbox', { name: '创作时保留网页证据截图到文档上' })
+    expect(screenshotOption).toBeChecked()
+    fireEvent.click(screenshotOption)
+    expect(screenshotOption).not.toBeChecked()
+    expect(screen.queryByText(/默认开启；关闭后仍优先通过 AX\/DOM 精确读取/)).not.toBeInTheDocument()
+    fireEvent.change(summaryInput, { target: { value: '把算力数据整理成可复核的分析文档。' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
+    await waitFor(() => {
+      expect(savedBody).toMatchObject({
+        summary: '把算力数据整理成可复核的分析文档。',
+        skill_description: {
+          purpose: '把算力数据整理成可复核的分析文档。',
+          problems: ['把算力数据整理成可复核的分析文档。'],
+        },
+      })
+      expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({
+        summary: '把算力数据整理成可复核的分析文档。',
+      }))
+    })
+    // 特色亮点区块默认折叠，按钮在折叠状态下仍存在于 DOM 中
+    expect(screen.getByRole('button', { name: '删除特色亮点 1', hidden: true })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '添加特色章节', hidden: true })).toBeInTheDocument()
+  })
+
+  it('生成示例时把当前配方作为 Skill 交给创作 Agent 即时生成', async () => {
+    let agentBody: Record<string, unknown> | null = null
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/v1/creation-skill-categories') {
+        return new Response('', { status: 404 })
+      }
+      if (url.pathname === '/api/creation/agent/run') {
+        agentBody = JSON.parse(String(init?.body))
+        const events = [
+          { type: 'run.queued', summary: '已接收本轮指令' },
+          { type: 'document.delta', actor: { id: 'document_writer_agent' }, data: { content: '# 虚构主题示例\n\n' } },
+          { type: 'document.delta', actor: { id: 'document_writer_agent' }, data: { content: '创作 Agent 生成的正文。' } },
+          { type: 'run.completed', status: 'completed', data: { document: '# 虚构主题示例\n\n创作 Agent 生成的正文。' } },
+        ]
+        const sseText = events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')
+        return new Response(sseText, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      return new Response('', { status: 404 })
+    }))
+
+    render(<CreationSkillEditor
+      initialSkill={{
+        id: 21,
+        clientSkillKey: 'skill-21',
+        cloudSkillId: null,
+        sourceKind: 'manual',
+        sourceId: 'manual-21',
+        title: '技术架构创作方法',
+        summary: '用于技术架构设计。',
+        categoryId: null,
+        skillDescription: {
+          purpose: '用于把目标、约束和证据组织成技术架构设计文档。',
+          documentTypes: ['技术架构设计文档'],
+          problems: ['澄清系统边界与关键取舍'],
+          domains: [],
+          deliverables: ['可评审的架构设计文档'],
+        },
+        executionSteps: [{
+          id: 'design-solution',
+          title: '设计总体方案',
+          objective: '把约束和证据转化为架构方案。',
+          output: '',
+          agents: [],
+          skills: [],
+          tools: [],
+        }],
+        commonTitles: ['总体架构设计'],
+        titleStyle: '结论先行。',
+        textStyle: '清晰正式。',
+        diagramStyle: '',
+        writingGuidelines: [],
+        distinctiveSections: [],
+        sectionHeadings: { ...DEFAULT_CREATION_SKILL_SECTION_HEADINGS },
+        fieldExamples: DEFAULT_CREATION_SKILL_FIELD_EXAMPLES,
+        exampleDocument: DEFAULT_CREATION_SKILL_EXAMPLE_DOCUMENT,
+        status: 'saved',
+        installed: false,
+        published: false,
+        createdAt: 1,
+        updatedAt: 2,
+      }}
+      onClose={vi.fn()}
+      onSaved={vi.fn()}
+    />)
+
+    fireEvent.click(screen.getByRole('button', { name: '生成示例', hidden: true }))
+    await waitFor(() => {
+      expect((screen.getByLabelText('完整示例文档') as HTMLTextAreaElement).value).toContain('创作 Agent 生成的正文')
+    })
+
+    expect(agentBody).not.toBeNull()
+    const selectedSkills = agentBody!.selected_skills as Array<Record<string, unknown>>
+    expect(selectedSkills).toHaveLength(1)
+    expect(selectedSkills[0].title).toBe('技术架构创作方法')
+    expect(selectedSkills[0].writingDesign).toBe('清晰正式。')
+    // 旧示例不应回传给 Agent，避免照抄而不是生成新主题
+    expect(selectedSkills[0].exampleDocument).toBe('')
+    expect(agentBody!.enable_rag).toBe(false)
+    expect(agentBody!.enable_web_search).toBe(false)
+    expect(agentBody!.model_mode).toBe('local')
+    expect(String(agentBody!.user_prompt)).toContain('技术架构创作方法')
+    expect(screen.getByText(/示例已由创作 Agent 按当前配方生成/)).toBeInTheDocument()
   })
 })

@@ -1,0 +1,44 @@
+[
+  {
+    "id": "executed_homepage_video_parameters",
+    "source_text": "用户已在 MemoryBread 官网首屏背景视频生成任务中提交并完成生成，实际成片时长15秒，画幅比例16：9。",
+    "timeline_context": {
+      "work_item": "MemoryBread 官网首屏背景视频生成",
+      "overview": "用户已完成官网首屏背景视频生成。"
+    },
+    "expected": [
+      {
+        "value": "15",
+        "accepted_values": ["15", "15秒"],
+        "semantic_tokens": ["MemoryBread", "首屏", "时长"]
+      },
+      {
+        "value": "16:9",
+        "semantic_tokens": ["MemoryBread", "首屏", "比例"]
+      }
+    ]
+  },
+  {
+    "id": "completed_homepage_optimization_duration",
+    "source_text": "MemoryBread 官网首页视觉与文案优化任务已完成，从开始到验收的任务总耗时为16分31秒。",
+    "timeline_context": {
+      "work_item": "MemoryBread 官网首页视觉与文案优化",
+      "overview": "用户完成了官网首页视觉与文案优化。"
+    },
+    "expected": [
+      {
+        "value": "16分31秒",
+        "semantic_tokens": ["MemoryBread", "首页", "耗时"]
+      }
+    ]
+  },
+  {
+    "id": "planned_video_threshold_is_not_observed_fact",
+    "source_text": "下一步计划将官网首屏视频时长设为10秒，上线前检查画幅比例是否达到16:9；目前尚未提交生成。",
+    "timeline_context": {
+      "work_item": "官网首屏视频生成方案",
+      "overview": "用户正在制定待执行的视频生成计划。"
+    },
+    "expected": []
+  }
+]

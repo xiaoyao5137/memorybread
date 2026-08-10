@@ -7,7 +7,10 @@ use rusqlite::{params, Connection};
 use crate::storage::{
     db::current_ts_ms,
     error::StorageError,
-    models::{CaptureActivityAggregate, CaptureRecord, NewCapture, WorkImCaptureSample},
+    models::{
+        CaptureActivityAggregate, CaptureRecord, NewCapture, WorkCategoryTotals,
+        WorkImCaptureSample,
+    },
     StorageManager,
 };
 
@@ -19,6 +22,164 @@ fn keyword_terms(query: &str) -> Vec<String> {
         .map(ToString::to_string)
         .collect()
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 工作类别时长聚合（内置分类表）
+//
+// 分类口径：
+// 1. 优先按 app_bundle_id 精确归类（小写全等）；
+// 2. 浏览器类应用再按窗口标题关键词归类（不区分大小写的包含匹配）；
+// 3. 无法归类的时长不进入任何类别。分类表调整时只需修改下面两段 SQL。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 每个类别的分摊时长：口径与 summarize_capture_activity 一致
+/// （相邻采集间隔最多计 idle_gap_cap，末条计 1 分钟）。
+const CATEGORY_MINUTES_SQL: &str = "WITH ordered AS (
+        SELECT
+            id,
+            ts,
+            LOWER(TRIM(COALESCE(app_bundle_id, ''))) AS bundle_key,
+            win_title,
+            LEAD(ts) OVER (ORDER BY ts, id) AS next_ts
+        FROM captures
+        WHERE ts >= ?1 AND ts < ?2 AND is_sensitive = 0
+    ), eligible AS (
+        SELECT id, ts, bundle_key, win_title, next_ts
+        FROM ordered
+        WHERE bundle_key != 'com.apple.loginwindow'
+    ), categorized AS (
+        SELECT
+            CASE
+                WHEN bundle_key IN (
+                    'com.microsoft.vscode',
+                    'com.microsoft.vscode.insiders',
+                    'com.apple.dt.xcode',
+                    'com.apple.terminal',
+                    'com.googlecode.iterm2',
+                    'dev.warp.warp-macos',
+                    'com.sublimetext.4',
+                    'com.sublimetext.3',
+                    'dev.zed.zed',
+                    'com.openai.codex',
+                    'com.aliyun.lingma.ide',
+                    'com.kuaishou.codeflicker.editor',
+                    'com.github.githubdesktop'
+                ) OR bundle_key LIKE 'com.jetbrains.%' THEN 'coding'
+                WHEN bundle_key IN (
+                    'com.figma.desktop',
+                    'com.bohemiancoding.sketch3',
+                    'com.adobe.photoshop',
+                    'com.adobe.illustrator',
+                    'com.adobe.xd'
+                ) OR bundle_key LIKE 'com.seriflabs.%' THEN 'design'
+                WHEN bundle_key IN ('md.obsidian') THEN 'knowledge'
+                WHEN bundle_key IN (
+                    'com.google.chrome',
+                    'com.apple.safari',
+                    'com.microsoft.edgemac',
+                    'org.mozilla.firefox',
+                    'company.arc.browser',
+                    'com.brave.browser',
+                    'com.vivaldi.vivaldi'
+                ) THEN
+                    CASE
+                        WHEN LOWER(COALESCE(win_title, '')) LIKE '%github%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%gitlab%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%gitee%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%bitbucket%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%stackoverflow%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%jupyter%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%pull request%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%merge request%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%.rs -%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%.py -%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%.ts -%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%.go -%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%.java -%' THEN 'coding'
+                        WHEN LOWER(COALESCE(win_title, '')) LIKE '%figma.com%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%mastergo%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%js.design%'
+                            OR COALESCE(win_title, '') LIKE '%即时设计%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%canva%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%dribbble%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%behance%' THEN 'design'
+                        WHEN COALESCE(win_title, '') LIKE '%语雀%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%yuque%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%notion%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%confluence%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%wikipedia%'
+                            OR LOWER(COALESCE(win_title, '')) LIKE '%/wiki/%'
+                            OR COALESCE(win_title, '') LIKE '%飞书云文档%' THEN 'knowledge'
+                        ELSE NULL
+                    END
+                ELSE NULL
+            END AS category,
+            ts,
+            CASE
+                WHEN next_ts IS NULL THEN 60000
+                WHEN next_ts <= ts THEN 0
+                WHEN next_ts - ts > ?3 THEN ?3
+                ELSE next_ts - ts
+            END AS duration_ms
+        FROM eligible
+    )
+    SELECT category, SUM(duration_ms) AS duration_ms
+    FROM categorized
+    WHERE category IS NOT NULL
+    GROUP BY category";
+
+/// 深度专注时长：同一应用连续有效工作（无应用切换、间隔不超 idle_gap）的单段
+/// 达到最小长度才计入该段全部分摊时长。
+const FOCUS_MINUTES_SQL: &str = "WITH ordered AS (
+        SELECT
+            id,
+            ts,
+            COALESCE(
+                NULLIF(TRIM(app_bundle_id), ''),
+                NULLIF(TRIM(app_name), ''),
+                '其他'
+            ) AS app_key,
+            LEAD(ts) OVER (ORDER BY ts, id) AS next_ts,
+            LAG(ts) OVER (ORDER BY ts, id) AS prev_ts,
+            LAG(COALESCE(
+                NULLIF(TRIM(app_bundle_id), ''),
+                NULLIF(TRIM(app_name), ''),
+                '其他'
+            )) OVER (ORDER BY ts, id) AS prev_app
+        FROM captures
+        WHERE ts >= ?1 AND ts < ?2 AND is_sensitive = 0
+    ), eligible AS (
+        SELECT *
+        FROM ordered
+        WHERE LOWER(TRIM(app_key)) != 'com.apple.loginwindow'
+          AND LOWER(TRIM(app_key)) != 'loginwindow'
+    ), flagged AS (
+        SELECT
+            CASE
+                WHEN prev_ts IS NULL THEN 1
+                WHEN prev_app != app_key THEN 1
+                WHEN ts - prev_ts > ?3 THEN 1
+                ELSE 0
+            END AS run_start,
+            CASE
+                WHEN next_ts IS NULL THEN 60000
+                WHEN next_ts <= ts THEN 0
+                WHEN next_ts - ts > ?3 THEN ?3
+                ELSE next_ts - ts
+            END AS duration_ms,
+            ROW_NUMBER() OVER (ORDER BY ts, id) AS seq
+        FROM eligible
+    ), runs AS (
+        SELECT run_start, duration_ms, SUM(run_start) OVER (ORDER BY seq) AS run_id
+        FROM flagged
+    )
+    SELECT COALESCE(SUM(run_duration), 0)
+    FROM (
+        SELECT run_id, SUM(duration_ms) AS run_duration
+        FROM runs
+        GROUP BY run_id
+        HAVING SUM(duration_ms) >= ?4
+    )";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 写操作
@@ -468,6 +629,58 @@ impl StorageManager {
         })
     }
 
+    /// 按内置工作类别聚合本地有效工作时长。
+    ///
+    /// 分类完全在本机完成：先按 `app_bundle_id` 精确表归类，浏览器类应用再看窗口标题关键词；
+    /// 时长分摊口径与 [`Self::summarize_capture_activity`] 完全一致。只返回分钟级聚合结果，
+    /// 不暴露窗口标题或采集正文。
+    ///
+    /// `focus` 定义为“同一应用连续有效工作不切换”的长段：单段时长达到
+    /// `min_focus_run_ms` 才计入，用于支撑“深度专注”类任务口径。
+    pub fn summarize_work_category_minutes(
+        &self,
+        from_ts: i64,
+        to_ts: i64,
+        idle_gap_cap_ms: i64,
+        min_focus_run_ms: i64,
+    ) -> Result<WorkCategoryTotals, StorageError> {
+        let category_rows = self.with_conn(|conn| {
+            let mut stmt = conn.prepare(CATEGORY_MINUTES_SQL)?;
+            let rows = stmt.query_map(params![from_ts, to_ts, idle_gap_cap_ms], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(StorageError::Sqlite)
+        })?;
+
+        // 深度专注统计失败时降级为 0，不影响其它类别的正常下发。
+        let focus_ms = self
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(FOCUS_MINUTES_SQL)?;
+                stmt.query_row(
+                    params![from_ts, to_ts, idle_gap_cap_ms, min_focus_run_ms],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(StorageError::Sqlite)
+            })
+            .unwrap_or_default();
+
+        let mut totals = WorkCategoryTotals {
+            focus_ms: focus_ms.max(0),
+            ..Default::default()
+        };
+        for (category, duration_ms) in category_rows {
+            let slot = match category.as_str() {
+                "coding" => &mut totals.coding_ms,
+                "design" => &mut totals.design_ms,
+                "knowledge" => &mut totals.knowledge_ms,
+                _ => continue,
+            };
+            *slot += duration_ms.max(0);
+        }
+        Ok(totals)
+    }
+
     /// 读取工作画像时间段内的有效采集时间点。
     ///
     /// 该接口只返回时间戳，用于在本地计算连续工作和夜间工作峰值；
@@ -909,6 +1122,132 @@ mod tests {
             .unwrap();
 
         assert_eq!(timestamps, vec![base + 1, base + 2]);
+    }
+
+    fn capture_at(ts: i64, bundle: &str, title: &str) -> NewCapture {
+        let mut capture = sample_capture();
+        capture.ts = ts;
+        capture.app_name = Some("TestApp".into());
+        capture.app_bundle_id = Some(bundle.into());
+        capture.win_title = Some(title.into());
+        capture
+    }
+
+    #[test]
+    fn category_minutes_classify_by_bundle_and_browser_title() {
+        let mgr = make_mgr();
+        let base = 1_700_000_000_000_i64;
+        let minute = 60_000_i64;
+        let idle_cap = 5 * minute;
+
+        // VSCode（大写 Bundle 验证归一化）两条，间隔 10 分钟，各按 5 分钟封顶计入。
+        mgr.insert_capture(&capture_at(base, "com.microsoft.VSCode", "main.rs - demo"))
+            .unwrap();
+        mgr.insert_capture(&capture_at(
+            base + 10 * minute,
+            "com.microsoft.vscode",
+            "main.rs - demo",
+        ))
+        .unwrap();
+        // 浏览器标题命中 coding 关键词；另一条浏览器标题未命中任何类别。
+        mgr.insert_capture(&capture_at(
+            base + 20 * minute,
+            "com.google.Chrome",
+            "GitHub - Pull Request #12",
+        ))
+        .unwrap();
+        mgr.insert_capture(&capture_at(
+            base + 30 * minute,
+            "com.google.chrome",
+            "娱乐视频站点",
+        ))
+        .unwrap();
+        // Obsidian 按 bundle 归入 knowledge，末条计 1 分钟。
+        mgr.insert_capture(&capture_at(base + 40 * minute, "md.obsidian", "工作笔记"))
+            .unwrap();
+
+        let totals = mgr
+            .summarize_work_category_minutes(base, base + 60 * minute, idle_cap, 45 * minute)
+            .unwrap();
+
+        assert_eq!(totals.coding_ms, 15 * minute);
+        assert_eq!(totals.knowledge_ms, minute);
+        assert_eq!(totals.design_ms, 0);
+        // 每条都是不同应用的单条短段，达不到深度专注门槛。
+        assert_eq!(totals.focus_ms, 0);
+    }
+
+    #[test]
+    fn focus_minutes_require_a_single_app_run_above_the_threshold() {
+        let mgr = make_mgr();
+        let base = 1_700_000_000_000_i64;
+        let minute = 60_000_i64;
+        let idle_cap = 5 * minute;
+
+        // 同一应用连续 10 条、间隔恰好 5 分钟：9 段间隔各封顶 5 分钟，末条计 1 分钟，
+        // 总分摊 46 分钟 ≥ 45 分钟门槛。
+        for index in 0..10 {
+            mgr.insert_capture(&capture_at(
+                base + index * idle_cap,
+                "com.microsoft.vscode",
+                "edit.rs - demo",
+            ))
+            .unwrap();
+        }
+
+        let totals = mgr
+            .summarize_work_category_minutes(base, base + 60 * minute, idle_cap, 45 * minute)
+            .unwrap();
+        assert_eq!(totals.focus_ms, 9 * idle_cap + minute);
+        assert_eq!(totals.coding_ms, 9 * idle_cap + minute);
+
+        // 中间切换到其它应用会切断深度专注段。
+        let interrupted_mgr = make_mgr();
+        for index in 0..5 {
+            interrupted_mgr
+                .insert_capture(&capture_at(
+                    base + index * idle_cap,
+                    "com.microsoft.vscode",
+                    "edit.rs",
+                ))
+                .unwrap();
+        }
+        interrupted_mgr
+            .insert_capture(&capture_at(
+                base + 5 * idle_cap,
+                "com.apple.Safari",
+                "GitHub",
+            ))
+            .unwrap();
+        for index in 6..10 {
+            interrupted_mgr
+                .insert_capture(&capture_at(
+                    base + index * idle_cap,
+                    "com.microsoft.vscode",
+                    "edit.rs",
+                ))
+                .unwrap();
+        }
+        let interrupted = interrupted_mgr
+            .summarize_work_category_minutes(base, base + 60 * minute, idle_cap, 45 * minute)
+            .unwrap();
+        assert_eq!(interrupted.focus_ms, 0);
+    }
+
+    #[test]
+    fn category_minutes_ignore_sensitive_captures() {
+        let mgr = make_mgr();
+        let base = 1_700_000_000_000_i64;
+        let minute = 60_000_i64;
+
+        let mut sensitive = capture_at(base, "com.microsoft.vscode", "secret.rs");
+        sensitive.is_sensitive = true;
+        mgr.insert_capture(&sensitive).unwrap();
+
+        let totals = mgr
+            .summarize_work_category_minutes(base, base + 60 * minute, 5 * minute, 45 * minute)
+            .unwrap();
+        assert_eq!(totals, WorkCategoryTotals::default());
     }
 
     #[test]

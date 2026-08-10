@@ -11,7 +11,13 @@ const jsonResponse = (body: unknown, status = 200) => new Response(JSON.stringif
   headers: { 'Content-Type': 'application/json' },
 })
 
-const task = (id: string, taskKey: string, metricKey: string, threshold: string) => ({
+const task = (
+  id: string,
+  taskKey: string,
+  metricKey: string,
+  threshold: string,
+  metricUnit = 'minute',
+) => ({
   id,
   task_key: taskKey,
   title: taskKey,
@@ -21,7 +27,7 @@ const task = (id: string, taskKey: string, metricKey: string, threshold: string)
   period: 'weekly',
   metric_key: metricKey,
   threshold,
-  metric_unit: 'minute',
+  metric_unit: metricUnit,
   reward: {
     badge: {
       id: `${id}-badge`,
@@ -38,13 +44,18 @@ const task = (id: string, taskKey: string, metricKey: string, threshold: string)
   },
 })
 
-const workProfile = (withMetrics = true) => ({
+const workProfile = (withMetrics = true, overrides: Partial<{
+  total_minutes: number
+  current_streak: number
+  days: Array<{ date: string, minutes: number, capture_count: number }>
+  achievement_metrics: Record<string, number>
+}> = {}) => ({
   range_start: 1,
   range_end: 2,
   idle_gap_cap_minutes: 5,
-  total_minutes: 400,
+  total_minutes: overrides.total_minutes ?? 400,
   active_days: 1,
-  current_streak: 1,
+  current_streak: overrides.current_streak ?? 1,
   longest_streak: 1,
   longest_day_minutes: 400,
   achievement_metrics: withMetrics ? {
@@ -53,6 +64,7 @@ const workProfile = (withMetrics = true) => ({
     interruption_gap_minutes: 5,
     overnight_start_hour: 0,
     overnight_end_hour: 6,
+    ...overrides.achievement_metrics,
   } : undefined,
   today: {
     date: '2026-07-20',
@@ -68,7 +80,7 @@ const workProfile = (withMetrics = true) => ({
       source_apps: [],
     },
   },
-  days: [],
+  days: overrides.days ?? [],
 })
 
 describe('achievement task sync', () => {
@@ -144,6 +156,110 @@ describe('achievement task sync', () => {
       period_key: '2026-W30',
       observed_value: '241',
     })
+  })
+
+  it('claims the seven-day streak task using a lookback window for the streak metric', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/v1/tasks')) {
+        return jsonResponse({ data: [
+          task('streak', 'seven_day_streak', 'active_streak_days', '7', 'day'),
+        ] })
+      }
+      if (url.includes('/api/work-profile')) {
+        // 回溯窗口请求返回更长的连续天数；本周窗口返回较短的连续天数。
+        const parsed = new URL(url)
+        const usesLookback = Number(parsed.searchParams.get('from')) < new Date(2026, 6, 20).getTime()
+        return jsonResponse(workProfile(true, { current_streak: usesLookback ? 9 : 2 }))
+      }
+      if (url.includes('/claims')) {
+        return jsonResponse({ data: {
+          task_id: 'streak',
+          period_key: '2026-W30',
+          observed_value: '9',
+          badge: {
+            id: 'streak-badge',
+            badge_key: 'seven_day_streak',
+            name: '七日恒温',
+            tagline: '',
+            description: '',
+            icon_key: 'flame',
+            palette_key: 'rose',
+            rarity: 'common',
+          },
+          badge_quantity: 1,
+          total_badge_quantity: 1,
+          credit_granted: '80.0000',
+        } })
+      }
+      throw new Error(`unexpected request: ${url} ${init?.method || 'GET'}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const claimed = await syncEligibleAchievementTasks({
+      adminApiBaseUrl: 'http://127.0.0.1:8080',
+      apiBaseUrl: 'http://127.0.0.1:7070',
+      authToken: 'mbs_token',
+      now: new Date(2026, 6, 21, 12),
+    })
+
+    expect(claimed.map(({ badge }) => badge.name)).toEqual(['七日恒温'])
+    const claimCalls = fetchMock.mock.calls.filter(([input]) => String(input).includes('/claims'))
+    expect(claimCalls).toHaveLength(1)
+    expect(JSON.parse(String(claimCalls[0][1]?.body))).toMatchObject({
+      period_key: '2026-W30',
+      observed_value: '9',
+    })
+  })
+
+  it('claims the weekly total work minutes task from the profile total', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/v1/tasks')) {
+        return jsonResponse({ data: [
+          task('sleepless', 'weekly_sleepless_warrior', 'work_minutes', '300'),
+        ] })
+      }
+      if (url.includes('/api/work-profile')) {
+        return jsonResponse(workProfile(true, {
+          total_minutes: 400,
+          days: [{ date: '2026-07-20', minutes: 400, capture_count: 80 }],
+        }))
+      }
+      if (url.includes('/claims')) {
+        return jsonResponse({ data: {
+          task_id: 'sleepless',
+          period_key: '2026-W30',
+          observed_value: '400',
+          badge: {
+            id: 'sleepless-badge',
+            badge_key: 'sleepless_warrior',
+            name: '不睡战神',
+            tagline: '',
+            description: '',
+            icon_key: 'moon',
+            palette_key: 'midnight',
+            rarity: 'legendary',
+          },
+          badge_quantity: 1,
+          total_badge_quantity: 1,
+          credit_granted: '500.0000',
+        } })
+      }
+      throw new Error(`unexpected request: ${url} ${init?.method || 'GET'}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const claimed = await syncEligibleAchievementTasks({
+      adminApiBaseUrl: 'http://127.0.0.1:8080',
+      apiBaseUrl: 'http://127.0.0.1:7070',
+      authToken: 'mbs_token',
+      now: new Date(2026, 6, 21, 12),
+    })
+
+    expect(claimed.map(({ badge }) => badge.name)).toEqual(['不睡战神'])
+    const claimCalls = fetchMock.mock.calls.filter(([input]) => String(input).includes('/claims'))
+    expect(JSON.parse(String(claimCalls[0][1]?.body))).toMatchObject({ observed_value: '400' })
   })
 
   it('uses a fresh idempotency key on later checks so a replay is not celebrated again', async () => {
@@ -311,5 +427,101 @@ describe('achievement task sync', () => {
 
     expect(achievementsChanged).not.toHaveBeenCalled()
     window.removeEventListener(ACHIEVEMENTS_CHANGED_KEY, achievementsChanged)
+  })
+
+  it('claims category minute tasks from the new core achievement metrics', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/v1/tasks')) {
+        return jsonResponse({ data: [
+          task('coding', 'weekly_code_elite', 'coding_minutes', '3000'),
+          task('focus', 'weekly_deep_focus', 'focus_minutes', '1800'),
+        ] })
+      }
+      if (url.includes('/api/work-profile')) {
+        return jsonResponse(workProfile(true, {
+          achievement_metrics: { coding_minutes: 3200, focus_minutes: 1799 },
+        }))
+      }
+      if (url.includes('/claims')) {
+        return jsonResponse({ data: {
+          task_id: 'coding',
+          period_key: '2026-W30',
+          observed_value: '3200',
+          badge: {
+            id: 'coding-badge',
+            badge_key: 'code_elite',
+            name: '代码精英',
+            tagline: '',
+            description: '',
+            icon_key: 'code',
+            palette_key: 'honey',
+            rarity: 'common',
+          },
+          badge_quantity: 1,
+          total_badge_quantity: 1,
+          credit_granted: '40.0000',
+        } })
+      }
+      throw new Error(`unexpected request: ${url} ${init?.method || 'GET'}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const claimed = await syncEligibleAchievementTasks({
+      adminApiBaseUrl: 'http://127.0.0.1:8080',
+      apiBaseUrl: 'http://127.0.0.1:7070',
+      authToken: 'mbs_token',
+      now: new Date(2026, 6, 21, 12),
+    })
+
+    // focus 未达阈值不领取；coding 达标领取。
+    expect(claimed.map(({ badge }) => badge.name)).toEqual(['代码精英'])
+    const claimCalls = fetchMock.mock.calls.filter(([input]) => String(input).includes('/claims'))
+    expect(claimCalls).toHaveLength(1)
+    expect(JSON.parse(String(claimCalls[0][1]?.body))).toMatchObject({ observed_value: '3200' })
+  })
+
+  it('skips category minute tasks when an old core omits the category fields', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/v1/tasks')) {
+        return jsonResponse({ data: [
+          task('coding', 'weekly_code_elite', 'coding_minutes', '1'),
+          task('knowledge', 'weekly_knowledge_baker', 'knowledge_minutes', '1'),
+        ] })
+      }
+      // 旧核心不返回分类时长字段：不领取、不报错。
+      if (url.includes('/api/work-profile')) return jsonResponse(workProfile())
+      throw new Error(`unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(syncEligibleAchievementTasks({
+      adminApiBaseUrl: 'http://127.0.0.1:8080',
+      apiBaseUrl: 'http://127.0.0.1:7070',
+      authToken: 'mbs_token',
+      now: new Date(2026, 6, 21, 12),
+    })).resolves.toEqual([])
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/claims'))).toBe(false)
+  })
+
+  it('returns no awards without crashing when the local core engine is unreachable', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/work-profile')) {
+        throw new TypeError('Failed to fetch')
+      }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(syncEligibleAchievementTasks({
+      adminApiBaseUrl: 'http://127.0.0.1:8080',
+      apiBaseUrl: 'http://127.0.0.1:7070',
+      authToken: 'mbs_token',
+      now: new Date(2026, 6, 21, 12),
+    })).resolves.toEqual([])
+    // 本地核心不可达时不再请求任务清单和领取接口。
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })

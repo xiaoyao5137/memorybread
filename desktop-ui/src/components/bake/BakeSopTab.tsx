@@ -220,7 +220,12 @@ const BakeSopTab: React.FC<{
           <div className="bake-pagination__right">
             <label className="bake-pagination__field">
               <span className="bake-muted">每页</span>
-              <select className="bake-input bake-pagination__select" value={String(limit)} onChange={(event) => onLimitChange(Number(event.target.value))}>
+              <select
+                className="bake-input bake-pagination__select"
+                value={String(limit)}
+                aria-label="每页条数"
+                onChange={(event) => onLimitChange(Number(event.target.value))}
+              >
                 {[10, 20, 50, 100].map(option => (
                   <option key={option} value={option}>{option} 条</option>
                 ))}
@@ -236,6 +241,7 @@ const BakeSopTab: React.FC<{
                 value={pageInput}
                 onChange={(event) => setPageInput(event.target.value)}
                 placeholder={String(page)}
+                aria-label="跳转页码"
               />
               <span className="bake-muted">页</span>
               <BakeButton compact onClick={() => {

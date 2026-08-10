@@ -2,8 +2,12 @@ use rusqlite::{params, Connection};
 
 use crate::storage::{
     db::current_ts_ms,
-    document_identity::canonical_document_identity,
+    document_identity::{
+        canonical_document_identity, canonical_document_source_title,
+        canonical_document_title_identity,
+    },
     error::StorageError,
+    fts::{build_fts_or_query, fts_candidate_ids, render_in_clause, DEFAULT_FTS_CANDIDATE_CAP},
     models_bake::{
         BakeDocumentRecord, BakeKnowledgeRecord, BakeMemorySourceRecord, BakeSopRecord,
         EpisodicMemoryRecord, NewBakeKnowledge, NewBakeSop, NewEpisodicMemory, NewTimeline,
@@ -531,6 +535,18 @@ impl StorageManager {
                         bind_values.push(Box::new(pattern.clone()));
                     }
                 }
+                // FTS5 预筛：timelines_fts 命中候选可用时收窄扫描范围；
+                // 候选为空/被截断/表缺失时自动回退原有 LIKE 全扫。
+                if let Some(fts_query) = build_fts_or_query(&query_terms) {
+                    if let Some(ids) =
+                        fts_candidate_ids(conn, "timelines_fts", &fts_query, DEFAULT_FTS_CANDIDATE_CAP)
+                    {
+                        let (clause, mut id_binds) = render_in_clause(&ids);
+                        sql.push_str(" AND k.id IN ");
+                        sql.push_str(&clause);
+                        bind_values.append(&mut id_binds);
+                    }
+                }
             }
             if let Some(value) = from_ts {
                 sql.push_str(" AND k.created_at_ms >= ?");
@@ -588,6 +604,17 @@ impl StorageManager {
                         bind_values.push(Box::new(pattern.clone()));
                     }
                 }
+                // FTS5 预筛（与列表查询保持一致的候选收窄）
+                if let Some(fts_query) = build_fts_or_query(&query_terms) {
+                    if let Some(ids) =
+                        fts_candidate_ids(conn, "timelines_fts", &fts_query, DEFAULT_FTS_CANDIDATE_CAP)
+                    {
+                        let (clause, mut id_binds) = render_in_clause(&ids);
+                        sql.push_str(" AND k.id IN ");
+                        sql.push_str(&clause);
+                        bind_values.append(&mut id_binds);
+                    }
+                }
             }
             if let Some(value) = from_ts {
                 sql.push_str(" AND k.created_at_ms >= ?");
@@ -602,6 +629,46 @@ impl StorageManager {
             let params: Vec<&dyn rusqlite::ToSql> = bind_values.iter().map(|b| b.as_ref()).collect();
             stmt.query_row(params.as_slice(), |row| row.get(0)).map_err(StorageError::Sqlite)
         })
+    }
+
+    /// 基于 timelines_fts 预计算关键词搜索候选时间线 ID。
+    ///
+    /// 返回 `None` 表示 FTS 不可用或候选不可靠（为空/被截断），
+    /// 调用方应回退为原有全量过滤路径。
+    pub fn timeline_fts_candidate_ids(&self, query: &str) -> Option<Vec<i64>> {
+        let terms = keyword_terms(query);
+        let fts_query = build_fts_or_query(&terms)?;
+        self.with_conn(|conn| {
+            Ok(fts_candidate_ids(
+                conn,
+                "timelines_fts",
+                &fts_query,
+                DEFAULT_FTS_CANDIDATE_CAP,
+            ))
+        })
+        .ok()
+        .flatten()
+    }
+
+    /// 基于 bake_sops_fts 预计算关键词搜索候选 SOP ID（bake_sops 行 id）。
+    ///
+    /// SOP 列表的可搜索字段来自 bake_sops 表（title/summary/content），
+    /// 因此预筛必须走 bake_sops_fts 而非 timelines_fts。
+    /// 返回 `None` 表示 FTS 不可用或候选不可靠（为空/被截断），
+    /// 调用方应回退为原有全量过滤路径。
+    pub fn bake_sop_fts_candidate_ids(&self, query: &str) -> Option<Vec<i64>> {
+        let terms = keyword_terms(query);
+        let fts_query = build_fts_or_query(&terms)?;
+        self.with_conn(|conn| {
+            Ok(fts_candidate_ids(
+                conn,
+                "bake_sops_fts",
+                &fts_query,
+                DEFAULT_FTS_CANDIDATE_CAP,
+            ))
+        })
+        .ok()
+        .flatten()
     }
 
     pub fn list_bake_knowledge_paginated(
@@ -860,8 +927,97 @@ impl StorageManager {
         limit: usize,
         max_failures: i64,
     ) -> Result<Vec<BakeMemorySourceRecord>, StorageError> {
+        let mut records =
+            self.list_bake_memory_fresh_candidates(since_ts_ms, limit, max_failures)?;
+        records.extend(self.list_bake_memory_retry_candidates(limit, max_failures)?);
+        records.sort_by_key(|candidate| (candidate.timeline.updated_at_ms, candidate.timeline.id));
+        records.truncate(limit);
+        Ok(records)
+    }
+
+    /// 新候选只受 unified watermark 控制，不与历史重试共享扫描窗口。
+    pub fn list_bake_memory_fresh_candidates(
+        &self,
+        since_ts_ms: i64,
+        limit: usize,
+        max_failures: i64,
+    ) -> Result<Vec<BakeMemorySourceRecord>, StorageError> {
+        self.list_bake_memory_candidates_by_lane(since_ts_ms, limit, max_failures, false)
+    }
+
+    /// 重试候选独立于 watermark，并且只有到达持久化调度时间且尚无任何产物时
+    /// 才能进入执行队列。
+    pub fn list_bake_memory_retry_candidates(
+        &self,
+        limit: usize,
+        max_failures: i64,
+    ) -> Result<Vec<BakeMemorySourceRecord>, StorageError> {
+        self.list_bake_memory_candidates_by_lane(0, limit, max_failures, true)
+    }
+
+    fn list_bake_memory_candidates_by_lane(
+        &self,
+        since_ts_ms: i64,
+        limit: usize,
+        max_failures: i64,
+        retry_lane: bool,
+    ) -> Result<Vec<BakeMemorySourceRecord>, StorageError> {
+        let lane_predicate = if retry_lane {
+            r#"
+                COALESCE(r.failure_count, 0) > 0
+                AND r.failure_count < ?3
+                AND COALESCE(r.next_retry_at_ms, 0) <= ?4
+                AND NOT EXISTS (SELECT 1 FROM bake_knowledge bk WHERE bk.timeline_id = k.id)
+                AND NOT EXISTS (SELECT 1 FROM bake_sops bs WHERE bs.timeline_id = k.id)
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM bake_documents bd
+                    WHERE bd.deleted_at IS NULL
+                      AND (
+                           (json_valid(COALESCE(bd.source_memory_ids, '[]')) AND EXISTS (
+                               SELECT 1 FROM json_each(bd.source_memory_ids)
+                               WHERE CAST(json_each.value AS TEXT) = CAST(k.id AS TEXT)
+                           ))
+                        OR (json_valid(COALESCE(bd.source_episode_ids, '[]')) AND EXISTS (
+                               SELECT 1 FROM json_each(bd.source_episode_ids)
+                               WHERE CAST(json_each.value AS TEXT) = CAST(k.id AS TEXT)
+                           ))
+                      )
+                )
+            "#
+        } else {
+            r#"
+                COALESCE(r.failure_count, 0) = 0
+                AND ?3 > 0
+                AND ?4 >= 0
+                AND (
+                    MAX(k.updated_at_ms, COALESCE((SELECT MAX(c2.ts) FROM captures c2 WHERE c2.timeline_id = k.id), 0)) > ?1
+                    OR EXISTS (
+                        SELECT 1
+                        FROM bake_documents d
+                        JOIN captures c3 ON c3.timeline_id = k.id
+                        WHERE d.deleted_at IS NULL
+                          AND json_valid(COALESCE(d.source_memory_ids, '[]'))
+                          AND EXISTS (
+                              SELECT 1 FROM json_each(d.source_memory_ids)
+                              WHERE CAST(json_each.value AS TEXT) = CAST(k.id AS TEXT)
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM json_each(
+                                  CASE
+                                      WHEN json_valid(COALESCE(d.source_capture_ids, '[]'))
+                                      THEN d.source_capture_ids
+                                      ELSE '[]'
+                                  END
+                              )
+                              WHERE CAST(json_each.value AS TEXT) = CAST(c3.id AS TEXT)
+                          )
+                    )
+                )
+            "#
+        };
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
+            let sql = format!(
                 "SELECT k.id, k.capture_id, k.summary, k.overview, k.details, k.entities, k.category, k.importance,
                         k.occurrence_count, k.observed_at, k.event_time_start, k.event_time_end,
                         k.history_view, k.content_origin, k.activity_type, k.is_self_generated,
@@ -872,32 +1028,21 @@ impl StorageManager {
                         k.duration_minutes, k.frag_app_name, k.frag_win_title, k.time_range_start,
                         k.time_range_end, k.key_timestamps,
                         c.ts, c.app_name, c.win_title, c.ax_text, c.ocr_text, c.input_text, c.audio_text,
-                        c.url, c.webpage_title
+                        c.url, c.webpage_title,
+                        COALESCE(r.failure_count, 0), r.last_error_code,
+                        COALESCE(r.next_retry_at_ms, 0)
                  FROM timelines k
                  INNER JOIN captures c ON c.id = k.capture_id
                  LEFT JOIN bake_retry_state r ON r.timeline_id = k.id
                  WHERE k.category NOT IN ('bake_article', 'bake_knowledge', 'bake_sop', 'legacy_bake_candidate')
-                   AND (
-                     MAX(k.updated_at_ms, COALESCE((SELECT MAX(c2.ts) FROM captures c2 WHERE c2.timeline_id = k.id), 0)) > ?1
-                     OR EXISTS (
-                       SELECT 1
-                       FROM bake_documents d
-                       JOIN captures c3 ON c3.timeline_id = k.id
-                       WHERE d.deleted_at IS NULL
-                         AND (
-                           d.source_memory_ids = ('[\"' || k.id || '\"]')
-                           OR d.source_memory_ids LIKE ('[\"' || k.id || '\",%')
-                           OR d.source_memory_ids LIKE ('%,\"' || k.id || '\",%')
-                           OR d.source_memory_ids LIKE ('%,\"' || k.id || '\"]')
-                         )
-                         AND instr(d.source_capture_ids, '\"' || c3.id || '\"') = 0
-                     )
-                   )
-                   AND COALESCE(r.failure_count, 0) < ?3
+                   AND ({lane_predicate})
                  ORDER BY MAX(k.updated_at_ms, COALESCE((SELECT MAX(c2.ts) FROM captures c2 WHERE c2.timeline_id = k.id), 0)) ASC, k.id ASC
-                 LIMIT ?2",
-            )?;
-            let rows = stmt.query_map(params![since_ts_ms, limit as i64, max_failures], |row| {
+                 LIMIT ?2"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                params![since_ts_ms, limit as i64, max_failures, current_ts_ms()],
+                |row| {
                 Ok(BakeMemorySourceRecord {
                     timeline: row_to_timeline_record(row).map_err(|_| rusqlite::Error::InvalidQuery)?,
                     capture_ts: row.get(32)?,
@@ -912,8 +1057,12 @@ impl StorageManager {
                         if t.is_empty() { None } else { Some(t.to_string()) }
                     }),
                     capture_webpage_title: row.get(40)?,
+                    preferred_source_title: None,
                     url_aggregated_text: None,
                     url_aggregated_capture_count: 0,
+                    retry_failure_count: row.get(41)?,
+                    retry_error_code: row.get(42)?,
+                    retry_next_at_ms: row.get(43)?,
                 })
             })?;
             let mut records: Vec<BakeMemorySourceRecord> =
@@ -924,6 +1073,11 @@ impl StorageManager {
                 if !full_member_ids.is_empty() {
                     record.timeline.capture_ids = Some(to_json_array_string(&full_member_ids));
                 }
+                record.preferred_source_title = preferred_member_source_title(
+                    conn,
+                    record.timeline.id,
+                    record.timeline.capture_id,
+                )?;
 
                 if record.capture_url.is_none() {
                     let preferred_titles = [
@@ -1382,6 +1536,92 @@ fn list_timeline_capture_ids(
     Ok(ids)
 }
 
+/// 时间线的主 capture 常是文档加载页，只带“知识库/未命名文档”等占位标题。
+/// 对全部成员帧按“出现帧数 > 最近时间 > webpage_title 优先”选择稳定标题，
+/// 并按标题身份去重，避免同一帧的 webpage_title/win_title 被重复计数。
+fn preferred_member_source_title(
+    conn: &Connection,
+    timeline_id: i64,
+    primary_capture_id: i64,
+) -> Result<Option<String>, StorageError> {
+    struct TitleCandidate {
+        display: String,
+        capture_count: i64,
+        latest_ts: i64,
+        has_webpage_title: bool,
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT ts, app_name, webpage_title, win_title
+         FROM captures
+         WHERE timeline_id = ?1 OR id = ?2
+         ORDER BY ts ASC, id ASC",
+    )?;
+    let rows = stmt.query_map(params![timeline_id, primary_capture_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+
+    let mut candidates: std::collections::HashMap<String, TitleCandidate> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let (ts, app_name, webpage_title, win_title) = row.map_err(StorageError::Sqlite)?;
+        let mut identities_in_capture = std::collections::HashSet::new();
+        for (raw_title, is_webpage_title) in [
+            (webpage_title.as_deref(), true),
+            (win_title.as_deref(), false),
+        ] {
+            let Some(display) = raw_title
+                .and_then(|title| canonical_document_source_title(title, app_name.as_deref()))
+            else {
+                continue;
+            };
+            let Some(identity) = canonical_document_title_identity(&display) else {
+                continue;
+            };
+            if !identities_in_capture.insert(identity.clone()) {
+                continue;
+            }
+            let entry = candidates
+                .entry(identity)
+                .or_insert_with(|| TitleCandidate {
+                    display: display.clone(),
+                    capture_count: 0,
+                    latest_ts: ts,
+                    has_webpage_title: is_webpage_title,
+                });
+            entry.capture_count += 1;
+            if ts > entry.latest_ts
+                || (ts == entry.latest_ts && is_webpage_title && !entry.has_webpage_title)
+            {
+                entry.display = display;
+                entry.latest_ts = ts;
+                entry.has_webpage_title = is_webpage_title;
+            }
+        }
+    }
+
+    Ok(candidates
+        .into_values()
+        .max_by(|left, right| {
+            left.capture_count
+                .cmp(&right.capture_count)
+                .then(left.latest_ts.cmp(&right.latest_ts))
+                .then(left.has_webpage_title.cmp(&right.has_webpage_title))
+                .then(
+                    left.display
+                        .chars()
+                        .count()
+                        .cmp(&right.display.chars().count()),
+                )
+        })
+        .map(|candidate| candidate.display))
+}
+
 fn to_json_array_string(ids: &[i64]) -> String {
     serde_json::to_string(ids).unwrap_or_else(|_| "[]".to_string())
 }
@@ -1702,11 +1942,16 @@ impl StorageManager {
             let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(cat) = category
             {
                 (
-                    "SELECT COUNT(*) FROM timelines WHERE category = ?".to_string(),
+                    "SELECT COUNT(*) FROM timelines WHERE category = ? AND COALESCE(is_self_generated, 0) = 0"
+                        .to_string(),
                     vec![Box::new(cat.to_string())],
                 )
             } else {
-                ("SELECT COUNT(*) FROM timelines".to_string(), vec![])
+                (
+                    "SELECT COUNT(*) FROM timelines WHERE COALESCE(is_self_generated, 0) = 0"
+                        .to_string(),
+                    vec![],
+                )
             };
 
             let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
@@ -2556,6 +2801,79 @@ mod tests {
     }
 
     #[test]
+    fn test_retry_lane_ignores_watermark_and_excludes_existing_artifact() {
+        let mgr = make_mgr();
+        let timeline_id = mgr
+            .insert_timeline_entry(&sample_entry(&mgr, "meeting"))
+            .unwrap();
+        mgr.upsert_bake_watermark("unified", current_ts_ms() + 60_000)
+            .unwrap();
+        mgr.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO bake_retry_state (
+                    timeline_id, failure_count, last_error, last_failed_at_ms,
+                    last_error_code, next_retry_at_ms
+                 ) VALUES (?1, 1, 'output invalid', 1, 'BAKE_OUTPUT_INVALID', 0)",
+                params![timeline_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let retry = mgr.list_bake_memory_retry_candidates(10, 3).unwrap();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].timeline.id, timeline_id);
+        assert_eq!(retry[0].retry_failure_count, 1);
+        assert_eq!(
+            retry[0].retry_error_code.as_deref(),
+            Some("BAKE_OUTPUT_INVALID")
+        );
+
+        mgr.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO bake_knowledge (timeline_id, title, summary)
+                 VALUES (?1, '已完成', '已有知识产物')",
+                params![timeline_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(mgr
+            .list_bake_memory_retry_candidates(10, 3)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_retry_lane_respects_persistent_next_retry_time() {
+        let mgr = make_mgr();
+        let timeline_id = mgr
+            .insert_timeline_entry(&sample_entry(&mgr, "meeting"))
+            .unwrap();
+        mgr.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO bake_retry_state (
+                    timeline_id, failure_count, last_error, last_failed_at_ms,
+                    last_error_code, next_retry_at_ms
+                 ) VALUES (?1, 1, 'timeout', 1, 'INFERENCE_TIMEOUT', ?2)",
+                params![timeline_id, current_ts_ms() + 60_000],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(mgr
+            .list_bake_memory_retry_candidates(10, 3)
+            .unwrap()
+            .is_empty());
+        let queue = mgr.get_bake_queue_status(3).unwrap();
+        assert_eq!(queue.retry_delayed_count, 1);
+        assert_eq!(queue.retry_ready_count, 0);
+        assert_eq!(queue.actionable_count, 0);
+        assert!(queue.recommended_retry_after_ms > 0);
+    }
+
+    #[test]
     fn test_document_identity_ignores_fragment() {
         assert_eq!(
             canonical_document_identity(
@@ -2654,6 +2972,48 @@ mod tests {
     }
 
     #[test]
+    fn test_bake_candidate_prefers_repeated_member_title_over_primary_placeholder() {
+        let mgr = make_mgr();
+        let url = "https://docs.corp.kuaishou.com/k/home/space/document-id";
+        let primary = seed_document_capture(&mgr, 1_700_000_000_000, "正文第一页".repeat(100), url);
+        let second = seed_document_capture(&mgr, 1_700_000_010_000, "正文第二页".repeat(100), url);
+        let third = seed_document_capture(&mgr, 1_700_000_020_000, "正文第三页".repeat(100), url);
+        let mut timeline = sample_entry(&mgr, "document");
+        timeline.capture_id = primary;
+        let timeline_id = mgr.insert_timeline_entry(&timeline).unwrap();
+        mgr.with_conn(|conn| {
+            conn.execute(
+                "UPDATE captures
+                 SET timeline_id = ?1, webpage_title = '知识库', win_title = '知识库'
+                 WHERE id = ?2",
+                params![timeline_id, primary],
+            )?;
+            conn.execute(
+                "UPDATE captures
+                 SET timeline_id = ?1,
+                     webpage_title = '商业化大模型例行压测介绍 - 云文档',
+                     win_title = '商业化大模型例行压测介绍 - 云文档 - Google Chrome'
+                 WHERE id IN (?2, ?3)",
+                params![timeline_id, second, third],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let candidate = mgr
+            .list_bake_memory_init_candidates(0, 10)
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.timeline.id == timeline_id)
+            .unwrap();
+
+        assert_eq!(
+            candidate.preferred_source_title.as_deref(),
+            Some("商业化大模型例行压测介绍 - 云文档")
+        );
+    }
+
+    #[test]
     fn test_url_aggregation_keeps_longest_snapshot_when_document_head_repeats() {
         let mgr = make_mgr();
         let url = "https://docs.corp.kuaishou.com/d/home/long-document";
@@ -2746,5 +3106,75 @@ mod tests {
             )
             .unwrap());
         assert!(mgr.set_knowledge_verified(id, true).unwrap());
+    }
+
+    fn seed_unrelated_timeline(mgr: &StorageManager) -> i64 {
+        let mut other = sample_entry(mgr, "bake_memory");
+        other.summary = "完全无关的记录".to_string();
+        other.overview = Some("无关概览".to_string());
+        other.details = Some("{}".to_string());
+        other.entities = r#"["无关"]"#.to_string();
+        mgr.insert_timeline_entry(&other).unwrap()
+    }
+
+    fn drop_timelines_fts(mgr: &StorageManager) {
+        mgr.with_conn(|conn| {
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS timelines_fts_insert;
+                 DROP TRIGGER IF EXISTS timelines_fts_update;
+                 DROP TRIGGER IF EXISTS timelines_fts_delete;
+                 DROP TABLE IF EXISTS timelines_fts;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_list_bake_memories_query_prefilter_results_match_like() {
+        let mgr = make_mgr();
+        let hit_id = mgr
+            .insert_timeline_entry(&sample_entry(&mgr, "bake_memory"))
+            .unwrap();
+        seed_unrelated_timeline(&mgr);
+
+        let results = mgr
+            .list_bake_memories_paginated(Some("客服"), None, None, 10, 0)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, hit_id);
+        assert_eq!(
+            mgr.count_bake_memories_filtered(Some("客服"), None, None)
+                .unwrap(),
+            1
+        );
+
+        // FTS 候选接口也应命中同一批 ID
+        let candidate_ids = mgr.timeline_fts_candidate_ids("客服").unwrap();
+        assert!(candidate_ids.contains(&hit_id));
+    }
+
+    #[test]
+    fn test_list_bake_memories_query_falls_back_without_fts() {
+        let mgr = make_mgr();
+        let hit_id = mgr
+            .insert_timeline_entry(&sample_entry(&mgr, "bake_memory"))
+            .unwrap();
+        seed_unrelated_timeline(&mgr);
+        drop_timelines_fts(&mgr);
+
+        let results = mgr
+            .list_bake_memories_paginated(Some("客服"), None, None, 10, 0)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, hit_id);
+        assert_eq!(
+            mgr.count_bake_memories_filtered(Some("客服"), None, None)
+                .unwrap(),
+            1
+        );
+
+        // FTS 表缺失时候选接口返回 None，调用方回退全量过滤
+        assert!(mgr.timeline_fts_candidate_ids("客服").is_none());
     }
 }

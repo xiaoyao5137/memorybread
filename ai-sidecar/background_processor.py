@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -32,16 +33,31 @@ _PROCESS_LOCK_FILE = "/tmp/memory-bread-knowledge-extract.lock"
 _DEFAULT_CORE_ENGINE_URL = "http://127.0.0.1:7070"
 _DEFAULT_MODEL_API_URL = "http://127.0.0.1:7071"
 _BAKE_RUN_ENDPOINT = "/api/bake/run"
+_BAKE_QUEUE_STATUS_ENDPOINT = "/api/bake/queue-status"
 _DATA_EXTRACTION_ENDPOINT = "/api/data/sources/extract"
+_DATA_SOURCE_DISCOVERED_ENDPOINT = "/api/data/sources/discovered"
 _INFERENCE_QUEUE_STATUS_ENDPOINT = "/api/inference/queue-status"
 _CHARGING_CATCHUP_MAX_BATCH_SIZE = 100
 _CHARGING_CATCHUP_SLEEP_SECS = 1
 _SUBSTANTIVE_DOCUMENT_MIN_CHARS = 200
 _ARTIFACT_VECTOR_CHECK_INTERVAL_SECS = 5 * 60
 _VECTOR_CONSISTENCY_AUDIT_INTERVAL_SECS = 24 * 60 * 60
-_BAKE_DEFERRED_RETRY_BACKOFF_MS = 2 * 60 * 1000
-_MAX_BAKE_RETRY_FAILURES = 3
 _DATA_EXTRACTION_INTERVAL_SECS = 5 * 60
+# 推理运行时进程守卫巡检周期：保证全局最多 1 个 llama-server，孤儿及时回收。
+_RUNTIME_GUARD_INTERVAL_SECS = 15 * 60
+
+# 时间线增长上限：防止单条时间线无限吞噬不相关的采集记录（过度合并）。
+# 历史上出现过单条时间线被反复合并到跨 5 天的脏数据（如 ID 2148），
+# 根因是跨批合并与相似度去重均无规模上限，导致宽泛主题的时间线成为"垃圾桶"。
+# 注意：短时高频采集（如同一 2 小时会话内上百条截图/采集）是正常时间线，
+# 上限必须足够宽松，避免把同一时段的密集采集拆散到多条时间线浪费空间；
+# 真正的异常特征是"跨天合并"，由跨度上限兜底。
+_TIMELINE_MAX_MEMBER_COUNT = 500      # 成员 capture 数上限
+_TIMELINE_MAX_OCCURRENCE_COUNT = 200  # 合并次数上限（初始=1，每次合并+1）
+# 确定性丢弃（SKIP/无价值/质量不足）的 captures 挂到这条隐藏时间线上标记已处理，
+# 避免 timeline_id 一直为 NULL 被 `_get_unprocessed_captures` 反复重提炼。
+_LOW_VALUE_SINK_SUMMARY = "低价值采集回收"
+_TIMELINE_MAX_SPAN_HOURS = 24.0       # 时间跨度上限（小时）
 
 # 全局 embedding 信号量，限制并发数
 _embedding_semaphore = asyncio.Semaphore(2)
@@ -383,7 +399,8 @@ class BackgroundProcessor:
         )
         cursor.execute(f"""
             SELECT c.id, c.ts, c.app_name, c.win_title,
-                   c.ocr_text, c.ax_text, c.input_text, c.audio_text, c.url
+                   c.ocr_text, c.ax_text, c.input_text, c.audio_text, c.url,
+                   c.webpage_title
             FROM captures c
             WHERE (COALESCE(c.ocr_text, '') != ''
                OR COALESCE(c.ax_text, '') != ''
@@ -402,6 +419,7 @@ class BackgroundProcessor:
                 'id': r[0], 'ts': r[1], 'app_name': r[2],
                 'window_title': r[3], 'ocr_text': r[4], 'ax_text': r[5],
                 'input_text': r[6], 'audio_text': r[7], 'url': r[8],
+                'webpage_title': r[9],
             }
             for r in rows
         ]
@@ -476,7 +494,7 @@ class BackgroundProcessor:
         cursor.execute(f"""
             SELECT c.id, c.ts, c.app_name, c.win_title,
                    c.ocr_text, c.ax_text, c.input_text, c.audio_text,
-                   c.timeline_id, c.url
+                   c.timeline_id, c.url, c.webpage_title
             FROM captures c
             WHERE c.timeline_id IS NOT NULL
               AND c.ts < ?
@@ -493,7 +511,8 @@ class BackgroundProcessor:
                 'id': r[0], 'ts': r[1], 'app_name': r[2],
                 'window_title': r[3], 'ocr_text': r[4], 'ax_text': r[5],
                 'input_text': r[6], 'audio_text': r[7],
-                'timeline_id': r[8], 'url': r[9], '_is_context': True,  # 标记为前缀上下文
+                'timeline_id': r[8], 'url': r[9], 'webpage_title': r[10],
+                '_is_context': True,  # 标记为前缀上下文
             }
             for r in reversed(rows)
         ]
@@ -589,6 +608,25 @@ class BackgroundProcessor:
             logger.debug("读取跨进程推理队列状态失败，按忙碌处理: %s", exc)
             return False
 
+    def _get_bake_queue_status(self) -> Optional[dict]:
+        """读取 Core 统一计算的 bake 队列快照；不可用时 fail-closed。"""
+        url = f"{self._get_core_engine_url().rstrip('/')}{_BAKE_QUEUE_STATUS_ENDPOINT}"
+        try:
+            request = urllib_request.Request(url, method="GET")
+            with urllib_request.urlopen(request, timeout=5) as response:
+                body = response.read().decode("utf-8") if response else ""
+                data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                return None
+            if not data.get("capture_enabled"):
+                return data
+            if "actionable_count" not in data:
+                return None
+            return data
+        except Exception as exc:
+            logger.debug("读取 Core bake 队列状态失败，按不可调度处理: %s", exc)
+            return None
+
     async def _trigger_unified_bake_pipeline(
         self,
         processed_count: int,
@@ -601,6 +639,37 @@ class BackgroundProcessor:
             return {
                 "triggered": False,
                 "reason": "no_new_knowledge",
+            }
+        queue_status = await asyncio.to_thread(self._get_bake_queue_status)
+        if queue_status is None:
+            return {
+                "triggered": False,
+                "reason": "queue_status_unavailable",
+                "retry_after_ms": 30_000,
+            }
+        if not queue_status.get("capture_enabled"):
+            return {
+                "triggered": False,
+                "reason": "capture_disabled",
+                "retry_after_ms": int(queue_status.get("recommended_retry_after_ms") or 300_000),
+            }
+        if int(queue_status.get("actionable_count") or 0) <= 0:
+            return {
+                "triggered": False,
+                "reason": "no_actionable_bake_candidate",
+                "retry_after_ms": int(queue_status.get("recommended_retry_after_ms") or 300_000),
+                "queue": queue_status,
+            }
+        # recommended_retry_after_ms 只描述“当前没有可执行候选”时的下一次检查时间。
+        # recent_no_progress_count 也会让 Core 给出较长建议值，但只要 actionable_count
+        # 大于 0，就必须实际发起一次 run；否则每次检查都会再次读到相同建议值，形成
+        # 永久自我延后，监控只能持续报 scheduler_mismatch。
+        # core 同时只允许一个 bake run；已有 run 在跑时不再发起 HTTP 触发，
+        # 避免高频空转请求。陈旧 running 行由监控轮询收敛，不会永久阻塞。
+        if await asyncio.to_thread(self._has_active_bake_run):
+            return {
+                "triggered": False,
+                "reason": "run_in_progress",
             }
         if not await asyncio.to_thread(self._all_inference_queues_idle):
             return {
@@ -912,11 +981,18 @@ class BackgroundProcessor:
                     )
                     merge_into = None
                 if i == 0 and merge_into:
-                    if await self._append_captures_to_timeline(group, merge_into):
+                    if await self._process_capture_group(
+                        group,
+                        merge_timeline_id=merge_into,
+                    ):
                         processed += 1
-                        logger.info("🔀 跨批合并: %d 条 captures → timeline_id=%d", len(group), merge_into)
+                        logger.info(
+                            "🔀 跨批提炼并合并: %d 条 captures → timeline_id=%d",
+                            len(group),
+                            merge_into,
+                        )
                     else:
-                        # 追加失败退化为正常提炼
+                        # 指定时间线可能已被删除；退化为正常提炼。
                         if await self._process_capture_group(group):
                             processed += 1
                 else:
@@ -960,6 +1036,199 @@ class BackgroundProcessor:
                 bake_limit=bake_limit,
                 bake_concurrency=bake_concurrency,
             )
+
+    @staticmethod
+    def _save_timeline_data_facts(
+        conn: sqlite3.Connection,
+        timeline_id: int,
+        knowledge: dict,
+        capture_ids: list[int],
+    ) -> None:
+        """持久化模型一次提炼出的结构化事实；不在此处重做语义提炼。"""
+        contract_version = str(knowledge.get('data_fact_contract') or '').strip()
+        if not contract_version:
+            return
+
+        raw_facts = knowledge.get('data_facts')
+        facts = raw_facts if isinstance(raw_facts, list) else []
+        try:
+            rejected_count = max(0, int(knowledge.get('data_fact_rejected_count') or 0))
+        except (TypeError, ValueError):
+            rejected_count = 0
+        now_ms = int(time.time() * 1000)
+        observed_at = knowledge.get('observed_at') or knowledge.get('end_time') or knowledge.get('start_time')
+        period_observed_at = int(observed_at or now_ms)
+        week_ms = 7 * 24 * 60 * 60 * 1000
+        first_monday_ms = 4 * 24 * 60 * 60 * 1000
+        period_start_at = (
+            (period_observed_at - first_monday_ms) // week_ms
+        ) * week_ms + first_monday_ms
+        period_end_at = period_start_at + week_ms - 1
+        period_key = f"week:{period_start_at}"
+        capture_ids_json = json.dumps(capture_ids, ensure_ascii=False)
+
+        try:
+            conn.execute(
+                """
+                INSERT INTO timeline_data_fact_runs (
+                    timeline_id, contract_version, accepted_count, rejected_count, created_at, updated_at
+                ) VALUES (?, ?, 0, ?, ?, ?)
+                ON CONFLICT(timeline_id) DO UPDATE SET
+                    contract_version = excluded.contract_version,
+                    rejected_count = timeline_data_fact_runs.rejected_count + excluded.rejected_count,
+                    updated_at = excluded.updated_at
+                """,
+                (timeline_id, contract_version, rejected_count, now_ms, now_ms),
+            )
+            for fact in facts:
+                if not isinstance(fact, dict):
+                    continue
+                identity = "\x1f".join(
+                    str(fact.get(field) or '').strip().casefold()
+                    for field in ('subject', 'action', 'target_context', 'metric')
+                )
+                fact_key = hashlib.sha256(identity.encode('utf-8')).hexdigest()
+                conn.execute(
+                    """
+                    INSERT INTO timeline_data_facts (
+                        timeline_id, fact_key, title, subject, action, target_context,
+                        dimension, metric, value, unit, statement, evidence_quote,
+                        confidence, observed_at, period_granularity, period_key,
+                        period_start_at, period_end_at, source_capture_ids, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'week', ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(timeline_id, fact_key, dimension, value, unit) DO UPDATE SET
+                        title = excluded.title,
+                        statement = excluded.statement,
+                        evidence_quote = excluded.evidence_quote,
+                        confidence = excluded.confidence,
+                        observed_at = COALESCE(excluded.observed_at, timeline_data_facts.observed_at),
+                        source_capture_ids = excluded.source_capture_ids,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        timeline_id,
+                        fact_key,
+                        fact.get('title', ''),
+                        fact.get('subject', ''),
+                        fact.get('action', ''),
+                        fact.get('target_context', ''),
+                        fact.get('dimension', ''),
+                        fact.get('metric', ''),
+                        fact.get('value', ''),
+                        fact.get('unit', ''),
+                        fact.get('statement', ''),
+                        fact.get('evidence_quote', ''),
+                        fact.get('confidence', 'medium'),
+                        observed_at,
+                        period_key,
+                        period_start_at,
+                        period_end_at,
+                        capture_ids_json,
+                        now_ms,
+                        now_ms,
+                    ),
+                )
+            accepted_count = conn.execute(
+                "SELECT COUNT(*) FROM timeline_data_facts WHERE timeline_id = ?",
+                (timeline_id,),
+            ).fetchone()[0]
+            conn.execute(
+                """
+                UPDATE timeline_data_fact_runs
+                SET accepted_count = ?, updated_at = ?
+                WHERE timeline_id = ?
+                """,
+                (accepted_count, now_ms, timeline_id),
+            )
+        except sqlite3.OperationalError as exc:
+            # Sidecar 可能比 Core Engine 更早启动；迁移完成前保留时间线主流程。
+            logger.warning("结构化数据事实表尚不可用，暂不持久化: %s", exc)
+
+    # 模型判定为可刷新报表源的页面类型；data_content/none 不注册
+    _REGISTERABLE_PAGE_KINDS = {"data_report", "data_platform"}
+
+    def _register_timeline_data_pages(
+        self,
+        timeline_id: int,
+        knowledge: dict,
+        captures: list,
+    ) -> None:
+        """注册时间线推理中模型分类出的数据报表/平台页面为可刷新报表源。
+
+        与 data_facts 同车产出、同姿态容错：仅接受规范化后仍存在于本组
+        capture URL 集合的条目（防模型幻觉），接口失败仅告警，不打断
+        时间线主流程。data_content 的数值已由 data_facts 通道落库，此处不注册。
+        """
+        contract_version = str(knowledge.get('data_page_contract') or '').strip()
+        pages = knowledge.get('data_pages')
+        if not contract_version or not isinstance(pages, list) or not pages:
+            return
+
+        url_to_capture = {}
+        for capture in captures or []:
+            capture_id = capture.get('id')
+            url = str(capture.get('url') or '').strip().rstrip('/')
+            if capture_id is not None and url and url not in url_to_capture:
+                url_to_capture[url] = int(capture_id)
+        if not url_to_capture:
+            return
+
+        candidates = []
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            kind = str(page.get('page_kind') or '').strip()
+            if kind not in self._REGISTERABLE_PAGE_KINDS:
+                continue
+            url = str(page.get('url') or '').strip().rstrip('/')
+            capture_id = url_to_capture.get(url)
+            if capture_id is None:
+                logger.info("data_pages 条目 URL 不在本组采集中，跳过注册: %s", url[:200])
+                continue
+            candidates.append((url, kind, capture_id, str(page.get('title') or '').strip()))
+        if not candidates:
+            return
+
+        observed_at = (
+            knowledge.get('observed_at')
+            or knowledge.get('end_time')
+            or knowledge.get('start_time')
+        )
+        endpoint = f"{self._get_core_engine_url().rstrip('/')}{_DATA_SOURCE_DISCOVERED_ENDPOINT}"
+        for url, kind, capture_id, title in candidates:
+            payload = json.dumps({
+                "url": url,
+                "title": title or None,
+                "capture_id": capture_id,
+                "timeline_id": timeline_id,
+                "observed_at": observed_at,
+                "page_kind": kind,
+            }).encode("utf-8")
+            request = urllib_request.Request(
+                endpoint,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib_request.urlopen(request, timeout=5) as response:
+                    body = response.read().decode("utf-8") if response else ""
+                    data = json.loads(body) if body else {}
+                if data.get("status") == "registered":
+                    logger.info(
+                        "模型分类数据页面已注册为报表源: url=%s source_id=%s created=%s",
+                        url[:120], data.get("source_id"), data.get("created"),
+                    )
+                else:
+                    logger.info(
+                        "数据页面注册被服务端拒绝: reason=%s url=%s",
+                        data.get("reason_code"), url[:120],
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "数据页面注册失败（不影响时间线主流程）: %s url=%s",
+                    type(exc).__name__, url[:120],
+                )
 
     def _save_knowledge(self, conn: sqlite3.Connection, knowledge: dict) -> int:
         """保存 knowledge 条目，返回新插入的 id"""
@@ -1040,8 +1309,10 @@ class BackgroundProcessor:
             current_time_ms,
             current_time_ms,
         ))
+        timeline_id = cursor.lastrowid
+        self._save_timeline_data_facts(conn, timeline_id, knowledge, capture_ids)
         conn.commit()
-        return cursor.lastrowid
+        return timeline_id
 
     @staticmethod
     def _apply_document_metadata_defaults(knowledge: dict, captures: list[dict]) -> bool:
@@ -1050,10 +1321,13 @@ class BackgroundProcessor:
         importance 仍保留模型对业务重要程度的判断；文档是否进入 bake 不再依赖
         importance，也不依赖模型是否完整输出 activity/origin/evidence 三个字段。
         """
-        from knowledge.fragment_grouper import _document_identity
+        from knowledge.fragment_grouper import _document_identity, _content_document_identity
 
         substantive_chars = 0
         has_document_url = False
+        # 内容文档（无 URL）：办公应用/IM 里的密集长正文同样是文档，
+        # 但必须占本组实质正文的主体，避免混合组被误标为文档（timeline 2008 教训）。
+        content_doc_chars = 0
         for capture in captures:
             if _document_identity(capture.get('url')):
                 has_document_url = True
@@ -1061,9 +1335,14 @@ class BackgroundProcessor:
                 str(capture.get(key) or "")
                 for key in ("ax_text", "ocr_text", "input_text", "audio_text")
             )
-            substantive_chars += len("".join(visible_text.split()))
+            chars = len("".join(visible_text.split()))
+            substantive_chars += chars
+            if _content_document_identity(capture):
+                content_doc_chars += chars
 
-        if not has_document_url or substantive_chars < _SUBSTANTIVE_DOCUMENT_MIN_CHARS:
+        if substantive_chars < _SUBSTANTIVE_DOCUMENT_MIN_CHARS:
+            return False
+        if not has_document_url and content_doc_chars * 2 < substantive_chars:
             return False
 
         knowledge['category'] = '文档'
@@ -1082,6 +1361,71 @@ class BackgroundProcessor:
             [timeline_id] + capture_ids,
         )
         conn.commit()
+
+    def _get_low_value_sink_timeline_id(
+        self, conn: sqlite3.Connection, primary_capture_id: int
+    ) -> int:
+        """获取/创建隐藏的"低价值回收"时间线，承接确定性丢弃的 captures。
+
+        该时间线 is_self_generated=1（UI 与 bake 的查询都带 is_self_generated=0
+        过滤，不会展示），overview 保持 NULL，避免被
+        `_find_similar_knowledge` 的相似度合并命中。
+        """
+        row = conn.execute(
+            "SELECT id FROM timelines WHERE summary = ? AND is_self_generated = 1 "
+            "ORDER BY id LIMIT 1",
+            (_LOW_VALUE_SINK_SUMMARY,),
+        ).fetchone()
+        if row:
+            return int(row[0])
+        now_ms = int(time.time() * 1000)
+        cursor = conn.execute(
+            """
+            INSERT INTO timelines (
+                capture_id, summary, overview, details, entities, category,
+                importance, occurrence_count, observed_at, history_view,
+                content_origin, activity_type, is_self_generated,
+                evidence_strength, created_at_ms, updated_at_ms
+            )
+            VALUES (?, ?, NULL, ?, '[]', '其他', 0, 0, ?, 1, 'system',
+                    'background_task', 1, 'low', ?, ?)
+            """,
+            (
+                primary_capture_id,
+                _LOW_VALUE_SINK_SUMMARY,
+                "确定性丢弃的低价值采集挂此隐藏时间线回收，不对外展示。",
+                now_ms,
+                now_ms,
+                now_ms,
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+    def _consume_discarded_captures(
+        self, capture_ids: list[int], reason: str
+    ) -> bool:
+        """将确定性丢弃的 captures 挂到隐藏回收时间线并标记已处理。"""
+        sink_id = None
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                sink_id = self._get_low_value_sink_timeline_id(
+                    conn, int(capture_ids[0])
+                )
+                self._mark_captures_processed(conn, capture_ids, sink_id)
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            logger.warning("确定性丢弃 captures 落库失败: %s", e)
+            return False
+        logger.info(
+            "🗑 片段确定性丢弃 (reason=%s): %d 条 captures 挂到低价值回收时间线 %d，不再重提炼",
+            reason,
+            len(capture_ids),
+            sink_id,
+        )
+        return True
 
     def _timeline_member_capture_ids(
         self, conn: sqlite3.Connection, timeline_id: int
@@ -1223,6 +1567,57 @@ class BackgroundProcessor:
             ),
         )
 
+    def _timeline_accepts_merge(
+        self,
+        conn: sqlite3.Connection,
+        timeline_id: int,
+        additional_count: int = 0,
+    ) -> bool:
+        """增长上限守卫：时间线成员数/合并次数/时间跨度达到上限时拒绝继续合并。
+
+        这是过度合并的根治闸：无论跨批合并还是相似度去重合并，只要目标时间线
+        已经足够大，就强制新建时间线，避免单条时间线无限吞噬不相关采集记录。
+        返回 True 表示允许合并，False 表示应新建时间线。
+        """
+        try:
+            row = conn.execute(
+                "SELECT occurrence_count, start_time, end_time FROM timelines WHERE id = ?",
+                (timeline_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # 旧库缺列时不拦截，保持向后兼容
+            return True
+        if not row:
+            return False
+
+        occurrence_count = int(row[0] or 0)
+        if occurrence_count >= _TIMELINE_MAX_OCCURRENCE_COUNT:
+            logger.info(
+                "⛔ 时间线 %d 合并次数已达上限 %d，拒绝继续合并，改为新建",
+                timeline_id, occurrence_count,
+            )
+            return False
+
+        member_count = len(self._timeline_member_capture_ids(conn, timeline_id))
+        if member_count + max(0, additional_count) > _TIMELINE_MAX_MEMBER_COUNT:
+            logger.info(
+                "⛔ 时间线 %d 成员数将达上限 %d（当前 %d + 新增 %d），拒绝合并",
+                timeline_id, _TIMELINE_MAX_MEMBER_COUNT, member_count, additional_count,
+            )
+            return False
+
+        start_time, end_time = row[1], row[2]
+        if start_time and end_time and end_time > start_time:
+            span_hours = (int(end_time) - int(start_time)) / 3600000.0
+            if span_hours > _TIMELINE_MAX_SPAN_HOURS:
+                logger.info(
+                    "⛔ 时间线 %d 跨度 %.1f 小时已超上限 %.1f，拒绝合并",
+                    timeline_id, span_hours, _TIMELINE_MAX_SPAN_HOURS,
+                )
+                return False
+
+        return True
+
     def _doc_compatible_with_timeline(self, group: list[dict], timeline_id: int) -> bool:
         """文档边界守卫：判断 group 是否可跨批合并进 timeline_id。
 
@@ -1284,6 +1679,99 @@ class BackgroundProcessor:
 
         # 普通 timeline 不接收已知文档或 URL 为空的文档型 capture。
         return not grp_has_document_hint
+
+    def _entities_compatible_with_timeline(self, knowledge: dict, timeline_id: int) -> bool:
+        """实体一致性守卫：相似度合并前确认新旧知识不是"同项目不同任务"。
+
+        只在新旧知识都带实体且交集为空时拦截；任一侧实体缺失时不拦截，
+        交由相似度阈值判断。数据库查询失败时不拦截，保持与旧行为兼容。
+        """
+        def _parse_entities(raw) -> set:
+            if raw is None:
+                return set()
+            if isinstance(raw, list):
+                items = raw
+            else:
+                try:
+                    items = json.loads(raw or '[]')
+                except (TypeError, json.JSONDecodeError):
+                    return set()
+            return {str(e).strip().lower() for e in items if str(e).strip()}
+
+        new_entities = _parse_entities(knowledge.get('entities'))
+        if not new_entities:
+            return True
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                row = conn.execute(
+                    "SELECT entities FROM timelines WHERE id = ?",
+                    (timeline_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning("实体一致性守卫查询失败 timeline_id=%d: %s，不拦截", timeline_id, e)
+            return True
+        if not row:
+            return False
+        existing_entities = _parse_entities(row[0])
+        if not existing_entities:
+            return True
+        return bool(new_entities & existing_entities)
+
+    def _density_compatible_with_timeline(self, group: list[dict], timeline_id: int) -> bool:
+        """内容密度差守卫：新片段与目标时间线成员的正文密度差异过大时拒绝合并。
+
+        针对 timeline 2008 类问题：密集汇报正文被并进以日历/杂项为主的
+        稀薄时间线后细节被稀释。双向拦截：密集片段不进稀薄时间线，
+        稀薄片段也不进密集时间线。阈值取 0.3；无法计算时不拦截，
+        保持与旧行为兼容。
+        """
+        from knowledge.fragment_grouper import text_density_score
+
+        def _capture_density(capture: dict) -> Optional[float]:
+            text = str(
+                capture.get('ax_text')
+                or capture.get('ocr_text')
+                or capture.get('input_text')
+                or capture.get('audio_text')
+                or ''
+            )
+            if len(' '.join(text.split())) < 40:
+                return None
+            return text_density_score(text)
+
+        new_densities = [d for d in (_capture_density(c) for c in group) if d is not None]
+        if not new_densities:
+            return True
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                member_ids = self._timeline_member_capture_ids(conn, timeline_id)
+                if not member_ids:
+                    return True
+                placeholders = ','.join('?' for _ in member_ids)
+                rows = conn.execute(
+                    f"SELECT ocr_text, ax_text, input_text, audio_text FROM captures WHERE id IN ({placeholders})",
+                    member_ids,
+                ).fetchall()
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning("密度差守卫查询失败 timeline_id=%d: %s，不拦截", timeline_id, e)
+            return True
+        member_densities = []
+        for row in rows:
+            text = str(row[1] or row[0] or row[2] or row[3] or '')
+            if len(' '.join(text.split())) < 40:
+                continue
+            member_densities.append(text_density_score(text))
+        if not member_densities:
+            return True
+        new_avg = sum(new_densities) / len(new_densities)
+        member_avg = sum(member_densities) / len(member_densities)
+        return abs(new_avg - member_avg) < 0.3
 
     async def _append_captures_to_timeline(self, group: list[dict], timeline_id: int) -> bool:
         """跨批合并：把 group 里的新 captures 追加到已有 timeline（occurrence_count+1，更新 end_time）。
@@ -1361,7 +1849,11 @@ class BackgroundProcessor:
 
         return False, 'idle_not_enough'
 
-    async def _process_capture_group(self, group: list[dict]):
+    async def _process_capture_group(
+        self,
+        group: list[dict],
+        merge_timeline_id: Optional[int] = None,
+    ):
         """将一组 captures 合并提炼为一个 knowledge 条目"""
         try:
             capture_ids = [c['id'] for c in group]
@@ -1408,6 +1900,50 @@ class BackgroundProcessor:
                 logger.warning(f"片段提炼未产出 knowledge ({len(group)} 条 captures)")
                 return False
 
+            if knowledge.get('_split_required'):
+                # LLM 在落库前确认上游片段实际包含多个独立任务。严格按已经
+                # 校验过的 capture ID 分区逐组重提炼，绝不先写入一条混合时间线。
+                # 原 group 若带跨批合并目标也不向子组透传，避免所有子组被强制
+                # 追加到同一旧时间线；各子组重新走正常的相似度与实体门禁。
+                capture_by_id = {int(c['id']): c for c in group}
+                subgroup_ids = knowledge.get('capture_groups') or []
+                subgroups = [
+                    [capture_by_id[int(capture_id)] for capture_id in ids]
+                    for ids in subgroup_ids
+                ]
+                logger.info(
+                    "任务一致性门禁拆分片段: original_ids=%s groups=%s reason=%s",
+                    capture_ids,
+                    subgroup_ids,
+                    knowledge.get('split_reason') or '',
+                )
+                handled_all = True
+                for subgroup in subgroups:
+                    if not await self._process_capture_group(subgroup):
+                        handled_all = False
+                return handled_all
+
+            if knowledge.get('_discarded'):
+                # 确定性丢弃（SKIP/无价值/质量不足）：标记已处理，终止重提炼循环。
+                # 临时失败（抢占/RAG 活跃/解析失败）仍返回 None 走上面的重试路径。
+                self._consume_discarded_captures(
+                    capture_ids, knowledge.get('discard_reason', 'unknown')
+                )
+                return True
+
+            discarded_ids = knowledge.get('_discarded_capture_ids') or []
+            if discarded_ids:
+                # 混入同组的低价值 captures：挂隐藏回收时间线标记已处理，
+                # 并从本提炼组剔除，不写入时间线成员（防无关采集混入）。
+                self._consume_discarded_captures(
+                    [int(i) for i in discarded_ids], 'merged_group_low_value'
+                )
+                discarded_set = set(int(i) for i in discarded_ids)
+                group = [c for c in group if c['id'] not in discarded_set]
+                capture_ids = [c['id'] for c in group]
+                if not group:
+                    return True
+
             if self._apply_document_metadata_defaults(knowledge, group):
                 logger.info(
                     "文档元数据确定性兜底已应用: captures=%s activity=reading origin=document_reference evidence=medium",
@@ -1418,13 +1954,23 @@ class BackgroundProcessor:
 
             # 跨批次去重：若新 knowledge 与已有条目高度相似，则合并而非插入
             overview = knowledge.get('overview') or knowledge.get('summary', '')
-            similar_id = extractor._find_similar_knowledge(
-                overview,
-                conn,
-                entities=json.loads(knowledge.get('entities') or '[]') if knowledge.get('entities') else None,
-                start_time=knowledge.get('start_time'),
-                end_time=knowledge.get('end_time'),
-            ) if overview else None
+            similar_id = merge_timeline_id
+            if similar_id is not None:
+                timeline_exists = conn.execute(
+                    "SELECT COUNT(*) > 0 FROM timelines WHERE id = ?",
+                    (similar_id,),
+                ).fetchone()[0]
+                if not timeline_exists:
+                    conn.close()
+                    return False
+            else:
+                similar_id = extractor._find_similar_knowledge(
+                    overview,
+                    conn,
+                    entities=json.loads(knowledge.get('entities') or '[]') if knowledge.get('entities') else None,
+                    start_time=knowledge.get('start_time'),
+                    end_time=knowledge.get('end_time'),
+                ) if overview else None
 
             if similar_id:
                 if not self._doc_compatible_with_timeline(group, similar_id):
@@ -1433,6 +1979,27 @@ class BackgroundProcessor:
                         similar_id,
                     )
                     similar_id = None
+
+            if similar_id and not self._entities_compatible_with_timeline(knowledge, similar_id):
+                logger.info(
+                    "🚫 相似时间线合并被实体一致性拦截: 新知识实体与 timeline_id=%d 无任何交集，改为新建时间线",
+                    similar_id,
+                )
+                similar_id = None
+
+            if similar_id and not self._density_compatible_with_timeline(group, similar_id):
+                logger.info(
+                    "🚫 相似时间线合并被内容密度差拦截: 新片段与 timeline_id=%d 成员正文密度差异过大，改为新建时间线",
+                    similar_id,
+                )
+                similar_id = None
+
+            if similar_id and not self._timeline_accepts_merge(conn, similar_id, len(capture_ids)):
+                logger.info(
+                    "🚫 时间线 %d 已达增长上限，拒绝继续合并，改为新建时间线（过度合并防护）",
+                    similar_id,
+                )
+                similar_id = None
 
             if similar_id:
                 # 合并：occurrence_count+1，追加 details（去重保留新信息）
@@ -1453,6 +2020,13 @@ class BackgroundProcessor:
                     group,
                     merged_details,
                 )
+                self._save_timeline_data_facts(
+                    conn,
+                    similar_id,
+                    knowledge,
+                    self._timeline_member_capture_ids(conn, similar_id),
+                )
+                self._register_timeline_data_pages(similar_id, knowledge, group)
                 conn.commit()
                 self._mark_captures_processed(conn, capture_ids, similar_id)
                 conn.close()
@@ -1462,6 +2036,7 @@ class BackgroundProcessor:
                 return True
 
             timeline_id = self._save_knowledge(conn, knowledge)
+            self._register_timeline_data_pages(timeline_id, knowledge, group)
             self._mark_captures_processed(conn, capture_ids, timeline_id)
             conn.close()
 
@@ -2074,6 +2649,36 @@ class BackgroundProcessor:
 
             if knowledge:
                 self._apply_document_metadata_defaults(knowledge, [capture_data])
+                merged_timeline_id = knowledge.get('_merged_timeline_id')
+                if merged_timeline_id:
+                    merged_capture_ids = self._timeline_member_capture_ids(
+                        conn,
+                        int(merged_timeline_id),
+                    )
+                    if capture_data['id'] not in merged_capture_ids:
+                        merged_capture_ids.append(capture_data['id'])
+                    self._save_timeline_data_facts(
+                        conn,
+                        int(merged_timeline_id),
+                        knowledge,
+                        merged_capture_ids,
+                    )
+                    self._register_timeline_data_pages(
+                        int(merged_timeline_id), knowledge, [capture_data]
+                    )
+                    conn.commit()
+                    self._mark_captures_processed(
+                        conn,
+                        [capture_data['id']],
+                        int(merged_timeline_id),
+                    )
+                    conn.close()
+                    logger.info(
+                        "✅ 单条采集已合并并保存结构化事实: capture_id=%s timeline_id=%s",
+                        capture_data['id'],
+                        merged_timeline_id,
+                    )
+                    return True
                 # 保存到数据库
                 cursor = conn.cursor()
 
@@ -2111,7 +2716,20 @@ class BackgroundProcessor:
                     current_time_ms,
                 ))
 
+                timeline_id = cursor.lastrowid
+                self._save_timeline_data_facts(
+                    conn,
+                    timeline_id,
+                    knowledge,
+                    [capture_data['id']],
+                )
+                self._register_timeline_data_pages(timeline_id, knowledge, [capture_data])
                 conn.commit()
+                self._mark_captures_processed(
+                    conn,
+                    [capture_data['id']],
+                    timeline_id,
+                )
                 conn.close()
 
                 logger.info(f"✅ 时间线提炼完成: capture_id={capture_data['id']}, category={knowledge.get('category')}")
@@ -2150,98 +2768,27 @@ class BackgroundProcessor:
                 "reason": "batch_error",
             }
 
-    def _has_pending_bake_timelines(self) -> bool:
-        """检查数据库中是否有满足 bake 候选条件的 pending timeline（本地 SQLite 快速查询）。"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            try:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT COUNT(*) FROM timelines t
-                    LEFT JOIN bake_retry_state r ON r.timeline_id = t.id
-                    WHERE t.category NOT IN ('bake_article', 'bake_knowledge', 'bake_sop', 'legacy_bake_candidate')
-                      AND t.is_self_generated = 0
-                      -- 与 Core 的“最多三次后终态”口径一致，避免只剩死信时
-                      -- sidecar 仍每 30 秒触发一个实际无候选的空批次。
-                      AND COALESCE(r.failure_count, 0) < ?
-                      AND (
-                          t.importance >= 4
-                          OR t.user_verified = 1
-                          OR EXISTS (
-                              SELECT 1
-                              FROM captures c
-                              WHERE c.timeline_id = t.id
-                                AND (
-                                    LOWER(COALESCE(c.url, '')) LIKE '%docs.corp%'
-                                    OR LOWER(COALESCE(c.url, '')) LIKE '%/docs/%'
-                                    OR LOWER(COALESCE(c.url, '')) LIKE '%docs.google%'
-                                    OR LOWER(COALESCE(c.url, '')) LIKE '%/document/%'
-                                    OR LOWER(COALESCE(c.url, '')) LIKE '%yuque.com%'
-                                    OR LOWER(COALESCE(c.url, '')) LIKE '%feishu.cn/docx%'
-                                    OR LOWER(COALESCE(c.url, '')) LIKE '%feishu.cn/wiki%'
-                                    OR LOWER(COALESCE(c.url, '')) LIKE '%notion.so%'
-                                    OR LOWER(COALESCE(c.url, '')) LIKE '%confluence%'
-                                    OR LOWER(COALESCE(c.url, '')) LIKE '%/wiki/%'
-                                    OR LOWER(COALESCE(c.url, '')) LIKE '%shimo.im%'
-                                    OR LOWER(COALESCE(c.url, '')) LIKE '%/d/home/%'
-                                    OR LOWER(COALESCE(c.url, '')) LIKE '%/s/home/%'
-                                    OR LOWER(COALESCE(c.url, '')) LIKE '%/k/home/%'
-                                )
-                                AND LENGTH(
-                                    REPLACE(REPLACE(
-                                        COALESCE(c.ax_text, '') || COALESCE(c.ocr_text, ''),
-                                        ' ', ''
-                                    ), char(10), '')
-                                ) >= 200
-                          )
-                          OR (
-                              t.evidence_strength IN ('high', 'medium')
-                              AND (t.history_view = 1
-                                   OR t.activity_type IN ('coding','reading','reviewing_history','document_reference')
-                                   OR t.content_origin IN ('historical_content','live_interaction')
-                              )
-                          )
-                      )
-                      AND NOT EXISTS (SELECT 1 FROM bake_knowledge bk WHERE bk.timeline_id = t.id)
-                      AND NOT EXISTS (SELECT 1 FROM bake_sops bs WHERE bs.timeline_id = t.id)
-                      AND NOT EXISTS (
-                          SELECT 1 FROM bake_documents bd
-                          WHERE bd.deleted_at IS NULL
-                            AND EXISTS (
-                                SELECT 1 FROM json_each(bd.source_episode_ids)
-                                WHERE json_each.value = CAST(t.id AS TEXT)
-                            )
-                      )
-                """, (_MAX_BAKE_RETRY_FAILURES,))
-                row = cursor.fetchone()
-                return bool(row and row[0] > 0)
-            finally:
-                conn.close()
-        except Exception as e:
-            logger.warning("检查 pending bake timelines 失败: %s", e)
-            return False
+    def _has_active_bake_run(self) -> bool:
+        """检查是否有未完成的 bake run，避免重复触发空转请求。
 
-    def _deferred_bake_backoff_remaining_ms(self) -> int:
-        """最近一批因瞬态错误延后时，限制同一队首候选的立即重放。"""
+        查询失败或表不存在时返回 False，退回原有触发路径。
+        """
         try:
             conn = sqlite3.connect(self.db_path)
             try:
                 row = conn.execute(
-                    """
-                    SELECT status, completed_at
-                    FROM bake_runs
-                    ORDER BY started_at DESC, id DESC
-                    LIMIT 1
-                    """
+                    "SELECT COUNT(*) FROM bake_runs WHERE status = 'running'"
                 ).fetchone()
             finally:
                 conn.close()
+            return bool(row and row[0] > 0)
         except (sqlite3.Error, OSError):
-            return 0
-        if not row or row[0] != 'deferred' or row[1] is None:
-            return 0
-        elapsed_ms = max(0, int(time.time() * 1000) - int(row[1]))
-        return max(0, _BAKE_DEFERRED_RETRY_BACKOFF_MS - elapsed_ms)
+            return False
+
+    def _has_pending_bake_timelines(self) -> bool:
+        """兼容旧调用；候选口径以 Core queue-status 为唯一真相源。"""
+        status = self._get_bake_queue_status()
+        return bool(status and int(status.get("actionable_count") or 0) > 0)
 
     async def _maybe_trigger_periodic_bake(
         self,
@@ -2250,17 +2797,6 @@ class BackgroundProcessor:
         max_concurrency: int,
     ) -> dict:
         """周期性主动触发 bake，处理因没有新 capture 而积压的 pending timeline。"""
-        if not self._has_pending_bake_timelines():
-            return {"triggered": False, "reason": "no_pending_bake_timeline"}
-        retry_after_ms = await asyncio.to_thread(
-            self._deferred_bake_backoff_remaining_ms
-        )
-        if retry_after_ms > 0:
-            return {
-                "triggered": False,
-                "reason": "deferred_backoff",
-                "retry_after_ms": retry_after_ms,
-            }
         logger.info("🔁 检测到积压的 pending timeline，主动触发 bake pipeline")
         result = await self._trigger_unified_bake_pipeline(
             processed_count=limit,
@@ -2277,14 +2813,61 @@ class BackgroundProcessor:
             logger.warning("周期性 bake 触发失败: %s", result.get("reason"))
         return result
 
+    async def _run_periodic_bake_check(
+        self,
+        profile,
+        next_check_ts: float,
+        *,
+        now: Optional[float] = None,
+    ) -> tuple[float, bool]:
+        """尝试触发 bake，返回（下次检查时间，是否已触发）。
+
+        这个检查既要放在 capture 批处理前，也要保留在批处理后。
+        充电追赶模式一批最多会提炼 100 条 capture；若只在批末检查，
+        长批次会让已到期的 bake 积压继续等待十几分钟。
+        """
+        check_ts = time.monotonic() if now is None else float(now)
+        if check_ts < next_check_ts:
+            return next_check_ts, False
+
+        bake_result = await self._maybe_trigger_periodic_bake(
+            limit=profile.bake_limit,
+            max_concurrency=profile.bake_concurrency,
+        )
+        retry_after_secs = max(
+            profile.bake_interval_secs,
+            int(bake_result.get("retry_after_ms") or 0) / 1000.0,
+        )
+        return check_ts + retry_after_secs, bool(bake_result.get("triggered"))
+
+    def _enforce_runtime_guard(self, reason: str) -> None:
+        """巡检托管推理运行时，保证全局最多 1 个 llama-server（孤儿一律回收）。"""
+        try:
+            from runtime_process_guard import enforce_runtime_guards
+            summary = enforce_runtime_guards(reason=reason)
+            if summary.get("killed_runners") or summary.get("killed_serves"):
+                logger.warning(
+                    "进程守卫收敛: runners=%s serves=%s（%s）",
+                    summary.get("killed_runners"),
+                    summary.get("killed_serves"),
+                    reason,
+                )
+        except Exception as exc:
+            logger.warning("进程守卫巡检失败（忽略）: %s", exc)
+
     async def run(self):
         """运行后台处理循环"""
         self.running = True
         logger.info(f"🚀 后台处理器启动 (间隔={self.interval}s, 批量={self.batch_size})")
 
-        _last_periodic_bake_ts: float = 0.0
+        _next_periodic_bake_check_ts: float = 0.0
         _last_artifact_vector_check_ts: float = 0.0
         _last_vector_consistency_audit_ts: float = 0.0
+        _last_runtime_guard_ts: float = 0.0
+
+        # 启动即清扫一次：上次退出可能遗留孤儿 llama-server（宿主被杀后 reparent 到 launchd）。
+        await asyncio.to_thread(self._enforce_runtime_guard, "startup sweep")
+        _last_runtime_guard_ts = time.monotonic()
 
         while self.running:
             sleep_secs = self.interval
@@ -2314,6 +2897,10 @@ class BackgroundProcessor:
                 ):
                     await self.backfill_bake_document_vectors(limit=16)
                     _last_artifact_vector_check_ts = now
+
+                if now - _last_runtime_guard_ts >= _RUNTIME_GUARD_INTERVAL_SECS:
+                    await asyncio.to_thread(self._enforce_runtime_guard, "periodic sweep")
+                    _last_runtime_guard_ts = now
 
                 if not self._capture_and_extraction_enabled():
                     logger.debug("采集与自动提炼已暂停，跳过本轮后台处理")
@@ -2350,6 +2937,26 @@ class BackgroundProcessor:
                     await asyncio.sleep(sleep_secs)
                     continue
 
+                # 先给已到期的 bake 一次调度机会，再进入可能很长的
+                # capture 追赶批次，避免两条后台流水线互相饥饿。
+                (
+                    _next_periodic_bake_check_ts,
+                    preflight_bake_triggered,
+                ) = await self._run_periodic_bake_check(
+                    profile, _next_periodic_bake_check_ts
+                )
+                if preflight_bake_triggered:
+                    # Core 是异步 accepted：此时 P2 请求可能尚未拿到跨进程
+                    # 单模型槽。本轮若立即提交 P1 capture，会在优先级上
+                    # 反超 bake，造成“触发成功但水位仍不推进”。
+                    logger.info(
+                        "周期性 bake 已接受，本轮让出 capture 批处理的模型槽"
+                    )
+                    await asyncio.sleep(
+                        min(sleep_secs, max(1, profile.bake_interval_secs))
+                    )
+                    continue
+
                 maximum_throughput = profile.mode in {"charging", "unrestricted"}
                 pending_before = await asyncio.to_thread(self._count_unprocessed_captures)
                 timeline_batch_limit = self._timeline_batch_limit(profile, pending_before)
@@ -2375,7 +2982,9 @@ class BackgroundProcessor:
                 if processed > 0:
                     logger.info(f"✅ 本轮处理完成: {processed} 条记录")
                 if (batch_result.get('bake_trigger') or {}).get('triggered'):
-                    _last_periodic_bake_ts = time.monotonic()
+                    _next_periodic_bake_check_ts = (
+                        time.monotonic() + profile.bake_interval_secs
+                    )
                 if maximum_throughput and pending_before > profile.timeline_batch_size:
                     pending_after = await asyncio.to_thread(self._count_unprocessed_captures)
                     if self._should_continue_charging_catchup(
@@ -2386,22 +2995,13 @@ class BackgroundProcessor:
                     ):
                         sleep_secs = _CHARGING_CATCHUP_SLEEP_SECS
 
-                # 周期性检查：即使本轮没有新 capture，也要尝试消化积压的 pending timeline
-                now = time.monotonic()
-                periodic_due = now - _last_periodic_bake_ts >= profile.bake_interval_secs
-                battery_idle_due = False
-                if profile.mode == "battery":
-                    battery_idle_due = (
-                        await asyncio.to_thread(self._all_inference_queues_idle)
-                        and now - _last_periodic_bake_ts >= profile.timeline_interval_secs
+                # 长批次结束后再检查一次，方便在本轮刚产出新
+                # timeline 或前一个 run 刚完成时立即续跑。
+                _next_periodic_bake_check_ts, _ = (
+                    await self._run_periodic_bake_check(
+                        profile, _next_periodic_bake_check_ts
                     )
-                if periodic_due or battery_idle_due:
-                    bake_result = await self._maybe_trigger_periodic_bake(
-                        limit=profile.bake_limit,
-                        max_concurrency=profile.bake_concurrency,
-                    )
-                    if bake_result.get("triggered"):
-                        _last_periodic_bake_ts = now
+                )
 
                 # 等待下一轮
                 await asyncio.sleep(sleep_secs)

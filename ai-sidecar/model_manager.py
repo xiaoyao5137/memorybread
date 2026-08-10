@@ -24,6 +24,15 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 from enum import Enum
 
+try:
+    from runtime_process_guard import enforce_runtime_guards, shutdown_all_managed_serves
+except ImportError:  # 测试环境或独立调用时守卫不可用不阻断主流程
+    def enforce_runtime_guards(reason: str = ""):
+        return {"killed_runners": [], "killed_serves": []}
+
+    def shutdown_all_managed_serves(reason: str = ""):
+        return []
+
 logger = logging.getLogger(__name__)
 
 MIN_MACOS_MAJOR_FOR_OLLAMA = 14
@@ -326,12 +335,22 @@ class ModelManager:
         if not cmd:
             return {'status': 'error', 'stage': 'start', 'message': '未找到 ollama 可执行文件。', 'detail': status}
 
+        # 启动前清扫：终止历史遗留的孤儿 llama-server，保证新 serve 是唯一的宿主。
+        try:
+            enforce_runtime_guards(reason="before ollama serve start")
+        except Exception as exc:
+            logger.warning("启动前进程守卫巡检失败（忽略）: %s", exc)
+
+        serve_env = os.environ.copy()
+        # 全局最多驻留 1 个模型 = 最多 1 个 llama-server 子进程。
+        serve_env['OLLAMA_MAX_LOADED_MODELS'] = '1'
         try:
             subprocess.Popen(
                 [cmd, 'serve'],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
+                env=serve_env,
             )
         except Exception as exc:
             return {'status': 'error', 'stage': 'start', 'message': f'启动 Ollama 服务失败: {exc}', 'detail': status}
@@ -399,10 +418,23 @@ class ModelManager:
                 # 重启 Ollama 服务（后台启动）
                 with self._upgrade_lock:
                     self._upgrade_status = {'status': 'upgrading', 'message': '重启 Ollama 服务...'}
-                subprocess.run(['pkill', '-9', 'ollama'], capture_output=True)
+                # 禁用 pkill -9：宿主被 SIGKILL 后 llama-server 子进程会变孤儿驻留内存。
+                # 改用守卫模块按进程树优雅终止，确保重启后全局最多 1 个 llama-server。
+                try:
+                    shutdown_all_managed_serves(reason="ollama upgrade restart")
+                except Exception as exc:
+                    logger.warning("升级前关闭托管 Ollama 失败，回退 pkill: %s", exc)
+                    subprocess.run(['pkill', 'ollama'], capture_output=True)
                 time.sleep(1)
                 # 后台启动 ollama serve
-                subprocess.Popen(['ollama', 'serve'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                serve_env = os.environ.copy()
+                serve_env['OLLAMA_MAX_LOADED_MODELS'] = '1'
+                subprocess.Popen(
+                    ['ollama', 'serve'],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=serve_env,
+                )
                 time.sleep(2)
 
                 refreshed = self.get_ollama_setup_status()

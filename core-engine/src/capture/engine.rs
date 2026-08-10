@@ -21,7 +21,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::ipc::IpcClient;
 use crate::storage::{
-    models::{EventType, NewCapture, NewVectorIndex},
+    models::{EventType, NewCapture, NewCaptureAttempt, NewVectorIndex},
     StorageManager,
 };
 
@@ -30,7 +30,10 @@ use super::{
     blacklist::BlacklistChecker,
     content_filter::ContentFilter,
     filter::PrivacyFilter,
-    screenshot::{capture_and_save_async, hamming_distance},
+    screenshot::{
+        capture_and_save_async, capture_visual_probe_async, hamming_distance,
+        save_visual_probe_async, VisualDifference, VisualFingerprint, VisualProbe,
+    },
     CaptureError,
 };
 
@@ -94,11 +97,8 @@ pub enum CaptureEvent {
     },
     /// 鼠标点击（在新位置落点）
     MouseClick { x: f64, y: f64 },
-    /// 键盘停顿（2 秒无按键）
-    KeyPause {
-        /// 停顿前的键盘输入片段（已去除密码框内容）
-        input_buffer: String,
-    },
+    /// 键盘活动后停顿。只表示发生过活动，不携带键码、字符或输入文本。
+    KeyPause,
     /// 页面/内容滚动
     Scroll,
     /// 定时兜底采集（按配置触发，默认 90 秒）
@@ -114,19 +114,16 @@ impl CaptureEvent {
             CaptureEvent::AppSwitch { .. } => EventType::AppSwitch,
             CaptureEvent::BrowserNavigation { .. } => EventType::BrowserNavigation,
             CaptureEvent::MouseClick { .. } => EventType::MouseClick,
-            CaptureEvent::KeyPause { .. } => EventType::KeyPause,
+            CaptureEvent::KeyPause => EventType::KeyPause,
             CaptureEvent::Scroll => EventType::Scroll,
             CaptureEvent::Periodic => EventType::Auto,
             CaptureEvent::Manual => EventType::Manual,
         }
     }
 
-    /// 提取键盘输入文本（仅 KeyPause 有值）。
+    /// 输入事件只作为触发信号，永不携带或保存原始按键文本。
     pub fn input_text(&self) -> Option<&str> {
-        match self {
-            CaptureEvent::KeyPause { input_buffer } => Some(input_buffer),
-            _ => None,
-        }
+        None
     }
 
     /// 提取事件携带的应用名（AppSwitch 专用）。
@@ -173,6 +170,17 @@ impl CaptureEvent {
         matches!(
             self,
             CaptureEvent::AppSwitch { .. } | CaptureEvent::BrowserNavigation { .. }
+        )
+    }
+
+    fn requires_visual_change_gate(&self) -> bool {
+        matches!(
+            self,
+            CaptureEvent::AppSwitch { .. }
+                | CaptureEvent::BrowserNavigation { .. }
+                | CaptureEvent::MouseClick { .. }
+                | CaptureEvent::KeyPause
+                | CaptureEvent::Scroll
         )
     }
 
@@ -650,6 +658,7 @@ pub struct CaptureEngine {
     ipc_client: Option<IpcClient>,
     last_context: Mutex<Option<CachedContext>>,
     recent_captures: Mutex<HashMap<CaptureSceneKey, VecDeque<RecentCaptureFingerprint>>>,
+    visual_probes: Mutex<HashMap<String, VisualFingerprint>>,
     ocr_backfill_permits: Arc<Semaphore>,
     ocr_backfill_queue_slots: Arc<Semaphore>,
 }
@@ -674,6 +683,7 @@ impl CaptureEngine {
             ipc_client: Some(ipc_client),
             last_context: Mutex::new(None),
             recent_captures: Mutex::new(HashMap::new()),
+            visual_probes: Mutex::new(HashMap::new()),
             ocr_backfill_permits: Arc::new(Semaphore::new(1)),
             ocr_backfill_queue_slots: Arc::new(Semaphore::new(OCR_BACKFILL_MAX_PENDING)),
         }
@@ -702,6 +712,7 @@ impl CaptureEngine {
             ipc_client: Some(ipc_client),
             last_context: Mutex::new(None),
             recent_captures: Mutex::new(HashMap::new()),
+            visual_probes: Mutex::new(HashMap::new()),
             ocr_backfill_permits: Arc::new(Semaphore::new(1)),
             ocr_backfill_queue_slots: Arc::new(Semaphore::new(OCR_BACKFILL_MAX_PENDING)),
         }
@@ -713,8 +724,14 @@ impl CaptureEngine {
     ///
     /// 返回 `Ok(Some(id))`：已写入数据库的 capture id；隐私拦截或重复内容返回 `Ok(None)`。
     pub async fn process_event(&self, event: CaptureEvent) -> Result<Option<i64>, CaptureError> {
-        // 变化事件已携带可信应用身份，先做一次隐私门禁，避免对密码管理器等应用发起 AX 正文读取。
-        if let Some(context) = event.context_info() {
+        let requires_visual_gate = event.requires_visual_change_gate();
+        // 明确信号自带上下文；键鼠信号先只读取应用/窗口元数据。隐私门禁必须先于
+        // 像素探针，避免对密码管理器或敏感窗口调用系统截图 API。
+        let mut gate_context = event.context_info();
+        if requires_visual_gate && gate_context.is_none() {
+            gate_context = get_frontmost_context_snapshot_async().await;
+        }
+        if let Some(context) = gate_context.as_ref() {
             if is_system_session_context(
                 context.app_bundle_id.as_deref(),
                 context.app_name.as_deref(),
@@ -725,6 +742,15 @@ impl CaptureEngine {
                     app = ?context.app_name,
                     bundle_id = ?context.app_bundle_id,
                     "登录/锁屏系统会话不属于工作内容，跳过采集"
+                );
+                self.record_attempt(
+                    &event,
+                    "privacy_skipped",
+                    "system_session",
+                    Some(&context),
+                    None,
+                    None,
+                    true,
                 );
                 return Ok(None);
             }
@@ -748,7 +774,87 @@ impl CaptureEngine {
                     bundle_id = ?context.app_bundle_id,
                     "变化事件命中隐私门禁，跳过 AX 正文读取"
                 );
+                self.record_attempt(
+                    &event,
+                    "privacy_skipped",
+                    if blacklisted {
+                        "app_blacklist"
+                    } else {
+                        "sensitive_context"
+                    },
+                    Some(&context),
+                    None,
+                    None,
+                    true,
+                );
                 return Ok(None);
+            }
+        }
+
+        let mut visual_probe = None;
+        if requires_visual_gate && self.config.enable_screenshot {
+            let Some(context) = gate_context.as_ref() else {
+                self.record_attempt(
+                    &event,
+                    "degraded",
+                    "visual_context_unavailable",
+                    None,
+                    None,
+                    None,
+                    false,
+                );
+                return Ok(None);
+            };
+            match capture_visual_probe_async().await {
+                Ok(Some(probe)) => {
+                    if let Some((significant, difference)) =
+                        self.evaluate_visual_probe(context, &probe.fingerprint)
+                    {
+                        if !significant {
+                            debug!(
+                                event = ?event.to_event_type(),
+                                total_bits = difference.total_bits,
+                                max_tile_bits = difference.max_tile_bits,
+                                changed_tiles = difference.changed_tiles,
+                                "视觉指纹变化低于阈值，放弃完整采集"
+                            );
+                            self.record_attempt(
+                                &event,
+                                "deduplicated",
+                                "visual_fingerprint_below_threshold",
+                                Some(context),
+                                None,
+                                None,
+                                false,
+                            );
+                            return Ok(None);
+                        }
+                    }
+                    visual_probe = Some(probe);
+                }
+                Ok(None) => {
+                    self.record_attempt(
+                        &event,
+                        "degraded",
+                        "visual_probe_unavailable_fallback",
+                        Some(context),
+                        None,
+                        None,
+                        false,
+                    );
+                }
+                Err(error) => {
+                    warn!(%error, event = ?event.to_event_type(), "视觉探针失败，回退到原采集链路");
+                    self.record_attempt(
+                        &event,
+                        "degraded",
+                        "visual_probe_failed_fallback",
+                        Some(context),
+                        None,
+                        None,
+                        false,
+                    );
+                }
             }
         }
 
@@ -757,7 +863,8 @@ impl CaptureEngine {
         } else {
             None
         };
-        self.process_event_with_ax_info(event, ax_info, true).await
+        self.process_event_with_ax_info_and_probe(event, ax_info, true, visual_probe)
+            .await
     }
 
     async fn process_event_with_ax_info(
@@ -765,6 +872,17 @@ impl CaptureEngine {
         event: CaptureEvent,
         ax_info: Option<AXInfo>,
         revalidate_context: bool,
+    ) -> Result<Option<i64>, CaptureError> {
+        self.process_event_with_ax_info_and_probe(event, ax_info, revalidate_context, None)
+            .await
+    }
+
+    async fn process_event_with_ax_info_and_probe(
+        &self,
+        event: CaptureEvent,
+        ax_info: Option<AXInfo>,
+        revalidate_context: bool,
+        mut visual_probe: Option<VisualProbe>,
     ) -> Result<Option<i64>, CaptureError> {
         let ts = current_ts_ms();
         let is_context_change_event = event.is_context_change_event();
@@ -778,6 +896,15 @@ impl CaptureEngine {
                 expected = ?event.context_info(),
                 actual = ?ax_info,
                 "变化事件处理时前台上下文已改变，丢弃过期事件"
+            );
+            self.record_attempt(
+                &event,
+                "stale",
+                "context_changed_before_processing",
+                ax_info.as_ref(),
+                None,
+                None,
+                false,
             );
             return Ok(None);
         }
@@ -793,6 +920,15 @@ impl CaptureEngine {
                 app = ?merged.app_name,
                 bundle_id = ?merged.app_bundle_id,
                 "登录/锁屏系统会话不属于工作内容，跳过采集"
+            );
+            self.record_attempt(
+                &event,
+                "privacy_skipped",
+                "system_session",
+                Some(&merged),
+                None,
+                None,
+                true,
             );
             return Ok(None);
         }
@@ -831,6 +967,15 @@ impl CaptureEngine {
                 "应用在黑名单中，跳过采集"
             );
             self.record_blacklist_block(&merged);
+            self.record_attempt(
+                &event,
+                "privacy_skipped",
+                "app_blacklist",
+                Some(&merged),
+                None,
+                None,
+                true,
+            );
             return Ok(None);
         }
 
@@ -854,6 +999,15 @@ impl CaptureEngine {
                 reason = "sensitive_capture_with_empty_text",
                 "capture dropped: empty_text_payload"
             );
+            self.record_attempt(
+                &event,
+                "privacy_skipped",
+                "sensitive_context",
+                Some(&merged),
+                None,
+                None,
+                true,
+            );
             return Ok(None);
         }
 
@@ -867,23 +1021,33 @@ impl CaptureEngine {
                 url = ?merged.url,
                 "正文抓取后前台上下文已改变，丢弃过期变化采集"
             );
+            self.record_attempt(
+                &event,
+                "stale",
+                "context_changed_after_ax",
+                Some(&merged),
+                None,
+                None,
+                false,
+            );
             return Ok(None);
         }
 
         let ax_text_hash = meaningful_ax_text_hash(&merged);
-        if is_periodic_event
-            && ax_text_hash.is_some()
-            && self
-                .find_recent_duplicate(&merged, ts, ax_text_hash, None)
-                .is_some()
-        {
-            debug!(
-                event = ?event.to_event_type(),
-                app = ?merged.app_name,
-                url = ?merged.url,
-                "跳过入库：periodic_ax_text_duplicate"
-            );
-            return Ok(None);
+        let mut continuity_reason: Option<&str> = None;
+        let mut related_capture_id = None;
+        if is_periodic_event && ax_text_hash.is_some() {
+            if let Some(previous) = self.find_recent_duplicate(&merged, ts, ax_text_hash, None) {
+                continuity_reason = Some("periodic_ax_text_duplicate");
+                related_capture_id = Some(previous.capture_id);
+                debug!(
+                    event = ?event.to_event_type(),
+                    app = ?merged.app_name,
+                    url = ?merged.url,
+                    related_capture_id = previous.capture_id,
+                    "定时 AX 内容重复，保留轻量连续性记录"
+                );
+            }
         }
 
         // AX 正文优先：只有 AX 正文为空时才截图，并把截图交给后台 OCR。
@@ -892,12 +1056,23 @@ impl CaptureEngine {
         let mut screenshot_dhash = None;
         let mut duplicate_capture_id = None;
         if !has_ax_text && self.config.enable_screenshot {
-            match capture_and_save_async(
-                self.config.captures_dir.clone(),
-                self.config.screenshot_quality,
-            )
-            .await
-            {
+            let screenshot_result = match visual_probe.take() {
+                Some(probe) => save_visual_probe_async(
+                    probe,
+                    self.config.captures_dir.clone(),
+                    self.config.screenshot_quality,
+                )
+                .await
+                .map(Some),
+                None => {
+                    capture_and_save_async(
+                        self.config.captures_dir.clone(),
+                        self.config.screenshot_quality,
+                    )
+                    .await
+                }
+            };
+            match screenshot_result {
                 Ok(Some(result)) => {
                     if merged.app_name.as_deref().unwrap_or("").trim().is_empty() {
                         merged.app_name = result.app_name.clone();
@@ -921,6 +1096,15 @@ impl CaptureEngine {
                             reason = "sensitive_capture_after_screenshot_context",
                             "capture dropped: sensitive metadata recovered from screenshot context"
                         );
+                        self.record_attempt(
+                            &event,
+                            "privacy_skipped",
+                            "sensitive_context_after_screenshot",
+                            Some(&merged),
+                            None,
+                            None,
+                            true,
+                        );
                         return Ok(None);
                     }
 
@@ -934,22 +1118,25 @@ impl CaptureEngine {
                             path = %result.relative_path,
                             "截图后前台上下文已改变，删除错配截图"
                         );
+                        self.record_attempt(
+                            &event,
+                            "stale",
+                            "context_changed_after_screenshot",
+                            Some(&merged),
+                            None,
+                            None,
+                            false,
+                        );
                         return Ok(None);
                     }
 
                     let duplicate =
                         self.find_recent_duplicate(&merged, ts, None, Some(result.dhash));
-                    if is_periodic_event && duplicate.is_some() {
-                        delete_screenshot_file(&result.full_path);
-                        debug!(
-                            event = ?event.to_event_type(),
-                            path = %result.relative_path,
-                            "跳过入库：periodic_visual_duplicate"
-                        );
-                        return Ok(None);
-                    }
-
                     if let Some(previous) = duplicate.as_ref() {
+                        if is_periodic_event {
+                            continuity_reason = Some("periodic_visual_duplicate");
+                            related_capture_id = Some(previous.capture_id);
+                        }
                         if let Some(previous_path) = previous.screenshot_path.as_deref() {
                             let previous_full_path = self.config.captures_dir.join(previous_path);
                             if replace_with_hard_link(&previous_full_path, &result.full_path) {
@@ -978,6 +1165,15 @@ impl CaptureEngine {
                 }
                 Err(error) => {
                     if !has_ax_text && !has_input_text {
+                        self.record_attempt(
+                            &event,
+                            "failed",
+                            "screenshot_failed_without_text",
+                            Some(&merged),
+                            None,
+                            None,
+                            false,
+                        );
                         return Err(error);
                     }
                     warn!(
@@ -1017,11 +1213,20 @@ impl CaptureEngine {
                 reason = "empty_text_payload",
                 "capture dropped: empty_text_payload"
             );
+            self.record_attempt(
+                &event,
+                "failed",
+                "empty_text_payload",
+                Some(&merged),
+                None,
+                None,
+                false,
+            );
             return Ok(None);
         }
 
         // 5. 写入数据库
-        let id = self.save_capture(
+        let id = match self.save_capture(
             ts,
             &merged,
             &event,
@@ -1029,7 +1234,21 @@ impl CaptureEngine {
             screenshot_source.clone(),
             ocr_text_for_insert.clone(),
             false,
-        )?;
+        ) {
+            Ok(id) => id,
+            Err(error) => {
+                self.record_attempt(
+                    &event,
+                    "failed",
+                    "storage_insert_failed",
+                    Some(&merged),
+                    None,
+                    related_capture_id,
+                    false,
+                );
+                return Err(error);
+            }
+        };
         self.update_cached_context(&merged);
         let mut ocr_backfill_enqueued = false;
         if !has_ax_text {
@@ -1066,6 +1285,19 @@ impl CaptureEngine {
             screenshot = screenshot_path.is_some(),
             ocr_backfill_enqueued,
             "采集完成"
+        );
+        self.record_attempt(
+            &event,
+            if continuity_reason.is_some() {
+                "continuity"
+            } else {
+                "captured"
+            },
+            continuity_reason.unwrap_or("capture_persisted"),
+            Some(&merged),
+            Some(id),
+            related_capture_id,
+            false,
         );
 
         Ok(Some(id))
@@ -1192,6 +1424,67 @@ impl CaptureEngine {
                 });
             });
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_attempt(
+        &self,
+        event: &CaptureEvent,
+        outcome: &str,
+        reason: &str,
+        info: Option<&AXInfo>,
+        capture_id: Option<i64>,
+        related_capture_id: Option<i64>,
+        is_private: bool,
+    ) {
+        let attempt = NewCaptureAttempt {
+            observed_at: current_ts_ms(),
+            event_type: event.to_event_type().as_str().to_string(),
+            outcome: outcome.to_string(),
+            reason: reason.to_string(),
+            capture_id,
+            related_capture_id,
+            app_name: if is_private {
+                None
+            } else {
+                info.and_then(|value| value.app_name.clone())
+            },
+            win_title: if is_private {
+                None
+            } else {
+                info.and_then(|value| value.win_title.clone())
+            },
+            is_private,
+            effective_interval_secs: None,
+        };
+        if let Err(error) = self.storage.insert_capture_attempt(&attempt) {
+            warn!(%error, outcome, reason, "记录采集尝试审计失败");
+        }
+    }
+
+    /// 返回与同一前台应用上一探针的差异，并无论结果如何更新基线。按应用而不是 URL
+    /// 分组，保证 URL 变化也会真正比较画面，而不是因为新 URL 没有基线而直接放行。
+    fn evaluate_visual_probe(
+        &self,
+        info: &AXInfo,
+        current: &VisualFingerprint,
+    ) -> Option<(bool, VisualDifference)> {
+        let app_identity = info
+            .app_bundle_id
+            .as_deref()
+            .or(info.app_name.as_deref())?
+            .trim();
+        if app_identity.is_empty() {
+            return None;
+        }
+        let Ok(mut probes) = self.visual_probes.lock() else {
+            return None;
+        };
+        let previous = probes.insert(app_identity.to_string(), current.clone());
+        previous.map(|previous| {
+            let difference = previous.difference(current);
+            (previous.is_significant_change(current), difference)
+        })
     }
 
     fn find_recent_duplicate(
@@ -1865,19 +2158,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_key_pause_stores_input_text() {
+    async fn test_key_pause_without_visual_payload_skips_insert() {
         let engine = make_engine();
-        let id = engine
-            .process_event(CaptureEvent::KeyPause {
-                input_buffer: "你好世界".into(),
-            })
-            .await
-            .unwrap()
-            .unwrap();
+        let result = engine.process_event(CaptureEvent::KeyPause).await.unwrap();
 
-        let rec = engine.storage.get_capture(id).unwrap().unwrap();
-        assert_eq!(rec.event_type, "key_pause");
-        assert_eq!(rec.input_text.as_deref(), Some("你好世界"));
+        assert!(result.is_none());
+        assert!(engine
+            .storage
+            .list_captures(&CaptureFilter::new())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1890,9 +2180,7 @@ mod tests {
             extracted_text: Some("客户手机号 13800138000，另有色情信息".into()),
             ..Default::default()
         };
-        let event = CaptureEvent::KeyPause {
-            input_buffer: "验证码: 123456".into(),
-        };
+        let event = CaptureEvent::Manual;
 
         let id = engine
             .save_capture(
@@ -1911,7 +2199,7 @@ mod tests {
             rec.ax_text.as_deref(),
             Some("客户手机号 [已过滤]，另有[已过滤]")
         );
-        assert_eq!(rec.input_text.as_deref(), Some("[已过滤]"));
+        assert!(rec.input_text.is_none());
         assert_eq!(rec.ocr_text.as_deref(), Some("备用手机号 [已过滤]"));
         assert!(rec.pii_scrubbed);
 
@@ -1924,25 +2212,7 @@ mod tests {
             .any(|stat| stat.stat_type == "filter" && stat.target_id == "pii"));
         assert!(stats
             .iter()
-            .any(|stat| stat.stat_type == "filter" && stat.target_id == "chat"));
-        assert!(stats
-            .iter()
             .any(|stat| stat.stat_type == "filter" && stat.target_id == "other"));
-    }
-
-    #[tokio::test]
-    async fn test_key_pause_with_blank_input_skips_insert() {
-        let engine = make_engine();
-        let result = engine
-            .process_event(CaptureEvent::KeyPause {
-                input_buffer: "   ".into(),
-            })
-            .await
-            .unwrap();
-
-        assert!(result.is_none());
-        let list = engine.storage.list_captures(&CaptureFilter::new()).unwrap();
-        assert!(list.is_empty());
     }
 
     #[tokio::test]
@@ -2048,6 +2318,55 @@ mod tests {
         assert!(rec.ax_text.is_none());
         assert!(rec.screenshot_path.is_some());
         assert!(rec.ocr_text.is_none(), "OCR 应后台补写，不阻塞变化采集");
+    }
+
+    #[tokio::test]
+    async fn test_explicit_signal_uses_visual_probe_before_full_capture() {
+        clear_test_screenshots();
+        let engine = make_engine_with_screenshot();
+        let event = || CaptureEvent::AppSwitch {
+            app_name: "Chrome".into(),
+            bundle_id: Some("com.google.Chrome".into()),
+            win_title: "Doc".into(),
+        };
+
+        push_test_screenshot_from_image(&gradient_image(0));
+        let first_id = engine.process_event(event()).await.unwrap().unwrap();
+        assert!(engine
+            .storage
+            .get_capture(first_id)
+            .unwrap()
+            .unwrap()
+            .screenshot_path
+            .is_some());
+
+        push_test_screenshot_from_image(&gradient_image(0));
+        assert!(engine.process_event(event()).await.unwrap().is_none());
+        let deduplicated: i64 = engine
+            .storage
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM capture_attempts
+                     WHERE outcome = 'deduplicated'
+                       AND reason = 'visual_fingerprint_below_threshold'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(deduplicated, 1);
+
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        push_test_screenshot_from_image(&gradient_image(255));
+        assert!(engine.process_event(event()).await.unwrap().is_some());
+        assert_eq!(
+            engine
+                .storage
+                .list_captures(&CaptureFilter::new())
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -2168,7 +2487,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_periodic_ax_missing_duplicate_frame_skips_insert_and_deletes_file() {
+    async fn test_periodic_ax_missing_duplicate_frame_keeps_continuity_and_reuses_file_block() {
         clear_test_screenshots();
         let engine = make_engine_with_screenshot();
         engine.update_cached_context(&AXInfo {
@@ -2196,17 +2515,53 @@ mod tests {
         assert!(first_path.exists());
 
         push_test_screenshot_from_image(&gradient_image(0));
-        let result = engine.process_event(CaptureEvent::Periodic).await.unwrap();
-        assert!(result.is_none());
+        let second_id = engine
+            .process_event(CaptureEvent::Periodic)
+            .await
+            .unwrap()
+            .unwrap();
 
         let list = engine.storage.list_captures(&CaptureFilter::new()).unwrap();
-        assert_eq!(list.len(), 1);
+        assert_eq!(list.len(), 2);
+        let second = engine.storage.get_capture(second_id).unwrap().unwrap();
+        let second_path = engine
+            .config
+            .captures_dir
+            .join(second.screenshot_path.as_deref().unwrap());
+        assert!(second_path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                std::fs::metadata(&first_path).unwrap().ino(),
+                std::fs::metadata(&second_path).unwrap().ino(),
+                "重复帧应通过硬链接复用同一个数据块"
+            );
+        }
+
+        let continuity_count: i64 = engine
+            .storage
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM capture_attempts
+                     WHERE capture_id = ?1 AND outcome = 'continuity'
+                       AND reason = 'periodic_visual_duplicate'",
+                    rusqlite::params![second_id],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(continuity_count, 1);
 
         let screenshot_files = std::fs::read_dir(&screenshot_dir)
             .ok()
             .map(|entries| entries.filter_map(Result::ok).count())
             .unwrap_or(0);
-        assert_eq!(screenshot_files, baseline_files + 1, "重复截图文件应被清理");
+        assert_eq!(
+            screenshot_files,
+            baseline_files + 2,
+            "连续性记录保留独立路径，但底层数据块必须复用"
+        );
     }
 
     #[test]
@@ -2375,6 +2730,21 @@ mod tests {
             .list_captures(&CaptureFilter::new())
             .unwrap()
             .is_empty());
+        let private_attempt: (i64, Option<String>, Option<String>, String) = engine
+            .storage
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT is_private, app_name, win_title, reason
+                     FROM capture_attempts ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(private_attempt.0, 1);
+        assert_eq!(private_attempt.1, None);
+        assert_eq!(private_attempt.2, None);
+        assert_eq!(private_attempt.3, "sensitive_context");
     }
 
     #[tokio::test]
@@ -2447,27 +2817,17 @@ mod tests {
         let engine = CaptureEngine::new(storage, config);
         let (tx, rx) = mpsc::channel::<CaptureEvent>(16);
 
-        // 发送 4 个事件后关闭 channel，仅保留带输入文本的 key pause
+        // 发送 4 个无内容事件后关闭 channel，均不应产生空壳采集。
         tx.send(CaptureEvent::Manual).await.unwrap();
         tx.send(CaptureEvent::Periodic).await.unwrap();
         tx.send(CaptureEvent::Scroll).await.unwrap();
-        tx.send(CaptureEvent::KeyPause {
-            input_buffer: "hello".into(),
-        })
-        .await
-        .unwrap();
+        tx.send(CaptureEvent::KeyPause).await.unwrap();
         drop(tx); // channel 关闭后 run() 返回
 
         engine.run(rx).await.unwrap();
 
         let list = storage_clone.list_captures(&CaptureFilter::new()).unwrap();
-        assert_eq!(
-            list.len(),
-            1,
-            "空壳事件应被统一跳过，仅保留带输入文本的 key_pause"
-        );
-        assert_eq!(list[0].event_type, "key_pause");
-        assert_eq!(list[0].input_text.as_deref(), Some("hello"));
+        assert!(list.is_empty(), "输入信号不得生成没有视觉或文本内容的记录");
     }
 
     // ── CaptureEvent 方法 ─────────────────────────────────────────────────
@@ -2493,13 +2853,7 @@ mod tests {
             CaptureEvent::MouseClick { x: 0.0, y: 0.0 }.to_event_type(),
             EventType::MouseClick
         );
-        assert_eq!(
-            CaptureEvent::KeyPause {
-                input_buffer: "".into()
-            }
-            .to_event_type(),
-            EventType::KeyPause
-        );
+        assert_eq!(CaptureEvent::KeyPause.to_event_type(), EventType::KeyPause);
         assert_eq!(
             CaptureEvent::AppSwitch {
                 app_name: "".into(),
@@ -2513,11 +2867,9 @@ mod tests {
 
     #[test]
     fn test_event_input_text() {
-        let e1 = CaptureEvent::KeyPause {
-            input_buffer: "hello".into(),
-        };
-        assert_eq!(e1.input_text(), Some("hello"));
-        assert!(has_meaningful_input_text(&e1));
+        let e1 = CaptureEvent::KeyPause;
+        assert!(e1.input_text().is_none());
+        assert!(!has_meaningful_input_text(&e1));
 
         let e2 = CaptureEvent::Manual;
         assert!(e2.input_text().is_none());
@@ -2526,12 +2878,6 @@ mod tests {
         let e3 = CaptureEvent::MouseClick { x: 1.0, y: 2.0 };
         assert!(e3.input_text().is_none());
         assert!(!has_meaningful_input_text(&e3));
-
-        let e4 = CaptureEvent::KeyPause {
-            input_buffer: "   ".into(),
-        };
-        assert_eq!(e4.input_text(), Some("   "));
-        assert!(!has_meaningful_input_text(&e4));
     }
 
     #[test]

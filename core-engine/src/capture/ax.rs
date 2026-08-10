@@ -26,6 +26,262 @@ const AX_CACHE_TTL_SECS: u64 = 3600; // AX 支持缓存 1 小时
 // AX 支持缓存：记录哪些应用不支持 AX，避免重复检测
 static AX_SUPPORT_CACHE: OnceLock<Mutex<HashMap<String, (bool, Instant)>>> = OnceLock::new();
 
+/// 从指定应用的指定后台窗口读取原生 Accessibility Tree 文本。
+///
+/// 与前台采集不同，这个入口不依赖 `front window`，用于创作过程中的专用
+/// 浏览器窗口。AX 不可用、窗口不匹配或超时时返回 None，调用方再降级 DOM。
+pub fn extract_window_text_by_title(
+    app_process_name: &str,
+    title_contains: &str,
+) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        targeted_macos_ax::extract_window_text(app_process_name, title_contains)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app_process_name, title_contains);
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod targeted_macos_ax {
+    use super::EXTRACTED_TEXT_MAX_CHARS;
+    use core_foundation::{
+        array::CFArray,
+        base::{CFRelease, CFType, CFTypeRef, TCFType},
+        boolean::CFBoolean,
+        string::{CFString, CFStringRef},
+    };
+    use std::{
+        collections::HashSet,
+        ffi::c_void,
+        process::Command,
+        ptr,
+        time::{Duration, Instant},
+    };
+
+    type AXUIElementRef = *mut c_void;
+    type AXValueRef = *const c_void;
+    type AXError = i32;
+    const AX_ERROR_SUCCESS: AXError = 0;
+    const MAX_AX_NODES: usize = 4_000;
+    const AX_TRAVERSAL_TIMEOUT: Duration = Duration::from_secs(4);
+    const AX_VALUE_CGPOINT: i32 = 1;
+    const AX_VALUE_CGSIZE: i32 = 2;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct CGSize {
+        width: f64,
+        height: f64,
+    }
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
+        fn AXUIElementSetMessagingTimeout(element: AXUIElementRef, timeout: f32) -> AXError;
+        fn AXUIElementCopyAttributeValue(
+            element: AXUIElementRef,
+            attribute: CFStringRef,
+            value: *mut CFTypeRef,
+        ) -> AXError;
+        fn AXUIElementSetAttributeValue(
+            element: AXUIElementRef,
+            attribute: CFStringRef,
+            value: CFTypeRef,
+        ) -> AXError;
+        fn AXValueGetValue(value: AXValueRef, value_type: i32, value_ptr: *mut c_void) -> bool;
+    }
+
+    fn process_id(process_name: &str) -> Option<i32> {
+        let output = Command::new("pgrep")
+            .args(["-x", process_name])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| line.trim().parse::<i32>().ok())
+    }
+
+    unsafe fn copy_attribute(element: AXUIElementRef, name: &str) -> Option<CFType> {
+        if element.is_null() {
+            return None;
+        }
+        let key = CFString::new(name);
+        let mut value: CFTypeRef = ptr::null();
+        let status = AXUIElementCopyAttributeValue(element, key.as_concrete_TypeRef(), &mut value);
+        if status != AX_ERROR_SUCCESS || value.is_null() {
+            return None;
+        }
+        Some(CFType::wrap_under_create_rule(value))
+    }
+
+    unsafe fn string_attribute(element: AXUIElementRef, name: &str) -> Option<String> {
+        copy_attribute(element, name)?
+            .downcast::<CFString>()
+            .map(|value| value.to_string())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    unsafe fn window_matches_dedicated_bounds(element: AXUIElementRef) -> bool {
+        let Some(position_value) = copy_attribute(element, "AXPosition") else {
+            return false;
+        };
+        let Some(size_value) = copy_attribute(element, "AXSize") else {
+            return false;
+        };
+        let mut position = CGPoint::default();
+        let mut size = CGSize::default();
+        if !AXValueGetValue(
+            position_value.as_CFTypeRef() as AXValueRef,
+            AX_VALUE_CGPOINT,
+            &mut position as *mut CGPoint as *mut c_void,
+        ) || !AXValueGetValue(
+            size_value.as_CFTypeRef() as AXValueRef,
+            AX_VALUE_CGSIZE,
+            &mut size as *mut CGSize as *mut c_void,
+        ) {
+            return false;
+        }
+        (position.x - 80.0).abs() <= 5.0
+            && (position.y - 80.0).abs() <= 45.0
+            && (size.width - 1_200.0).abs() <= 10.0
+            && (size.height - 740.0).abs() <= 45.0
+    }
+
+    fn push_line(output: &mut String, seen: &mut HashSet<String>, raw: String) {
+        for line in raw.lines() {
+            let normalized = line.split_whitespace().collect::<Vec<_>>().join(" ");
+            if normalized.is_empty() || !seen.insert(normalized.clone()) {
+                continue;
+            }
+            if output.chars().count() >= EXTRACTED_TEXT_MAX_CHARS {
+                return;
+            }
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.extend(
+                normalized
+                    .chars()
+                    .take(EXTRACTED_TEXT_MAX_CHARS.saturating_sub(output.chars().count())),
+            );
+        }
+    }
+
+    unsafe fn visit_element(
+        element: AXUIElementRef,
+        started: Instant,
+        visited: &mut HashSet<usize>,
+        seen_lines: &mut HashSet<String>,
+        output: &mut String,
+    ) {
+        if element.is_null()
+            || started.elapsed() >= AX_TRAVERSAL_TIMEOUT
+            || visited.len() >= MAX_AX_NODES
+            || output.chars().count() >= EXTRACTED_TEXT_MAX_CHARS
+            || !visited.insert(element as usize)
+        {
+            return;
+        }
+
+        // 把单次跨进程消息限制在较短时间内，避免某个异常 AX 节点阻塞采集。
+        let _ = AXUIElementSetMessagingTimeout(element, 0.25);
+        for attribute in ["AXValue", "AXTitle", "AXDescription", "AXHelp"] {
+            if let Some(value) = string_attribute(element, attribute) {
+                push_line(output, seen_lines, value);
+            }
+        }
+
+        let Some(children) =
+            copy_attribute(element, "AXChildren").and_then(|value| value.downcast::<CFArray>())
+        else {
+            return;
+        };
+        // 子元素指针只在 CFArray 存活时使用；递归不能延后到数组释放之后。
+        for raw in children.get_all_values() {
+            visit_element(raw as AXUIElementRef, started, visited, seen_lines, output);
+            if started.elapsed() >= AX_TRAVERSAL_TIMEOUT
+                || visited.len() >= MAX_AX_NODES
+                || output.chars().count() >= EXTRACTED_TEXT_MAX_CHARS
+            {
+                break;
+            }
+        }
+    }
+
+    pub fn extract_window_text(process_name: &str, title_contains: &str) -> Option<String> {
+        let pid = process_id(process_name)?;
+        let title_contains = title_contains.trim();
+        if title_contains.is_empty() {
+            return None;
+        }
+        unsafe {
+            let application = AXUIElementCreateApplication(pid);
+            if application.is_null() {
+                return None;
+            }
+            let _ = AXUIElementSetMessagingTimeout(application, 0.6);
+            // Chromium/Electron 可能在没有屏幕阅读器时延迟构造渲染器 AX 树；
+            // 通过公开 AX 属性显式开启后再读取，仍不触碰页面脚本或用户凭据。
+            let enabled = CFBoolean::true_value();
+            for attribute in ["AXEnhancedUserInterface", "AXManualAccessibility"] {
+                let key = CFString::new(attribute);
+                let _ = AXUIElementSetAttributeValue(
+                    application,
+                    key.as_concrete_TypeRef(),
+                    enabled.as_CFTypeRef(),
+                );
+            }
+            let result = (|| {
+                let windows = copy_attribute(application, "AXWindows")?.downcast::<CFArray>()?;
+                let window_values = windows.get_all_values();
+                let target = window_values
+                    .iter()
+                    .copied()
+                    .find(|raw| {
+                        string_attribute(*raw as AXUIElementRef, "AXTitle")
+                            .map(|title| title.contains(title_contains))
+                            .unwrap_or(false)
+                    })
+                    .or_else(|| {
+                        window_values
+                            .iter()
+                            .copied()
+                            .find(|raw| window_matches_dedicated_bounds(*raw as AXUIElementRef))
+                    })?;
+                let mut visited = HashSet::new();
+                let mut seen_lines = HashSet::new();
+                let mut output = String::new();
+                visit_element(
+                    target as AXUIElementRef,
+                    Instant::now(),
+                    &mut visited,
+                    &mut seen_lines,
+                    &mut output,
+                );
+                let meaningful = output.chars().filter(|ch| ch.is_alphanumeric()).count();
+                (meaningful >= 12).then_some(output)
+            })();
+            CFRelease(application as CFTypeRef);
+            result
+        }
+    }
+}
+
 /// 从 Accessibility Tree 抓取到的前台应用信息
 #[derive(Debug, Clone, Default)]
 pub struct AXInfo {

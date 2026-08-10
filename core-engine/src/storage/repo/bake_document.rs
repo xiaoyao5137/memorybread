@@ -4,6 +4,10 @@ use crate::storage::{
     db::current_ts_ms,
     document_identity::{canonical_document_identity, canonical_document_title_identity},
     error::StorageError,
+    fts::{
+        build_fts_or_query, fts_candidate_ids, render_in_clause, split_query_terms,
+        DEFAULT_FTS_CANDIDATE_CAP,
+    },
     models_bake::{BakeDocumentRecord, NewBakeDocument},
     StorageManager,
 };
@@ -61,6 +65,8 @@ impl StorageManager {
                 bind_values.push(Box::new(pattern.clone()));
                 bind_values.push(Box::new(pattern.clone()));
                 bind_values.push(Box::new(pattern));
+                // FTS5 预筛：bake_documents_fts 候选可用时收窄扫描，否则回退 LIKE 全扫
+                append_document_fts_prefilter(conn, &mut sql, &mut bind_values, q);
             }
             sql.push_str(" ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?");
             bind_values.push(Box::new(limit as i64));
@@ -91,6 +97,8 @@ impl StorageManager {
                 bind_values.push(Box::new(pattern.clone()));
                 bind_values.push(Box::new(pattern.clone()));
                 bind_values.push(Box::new(pattern));
+                // FTS5 预筛（与列表查询保持一致的候选收窄）
+                append_document_fts_prefilter(conn, &mut sql, &mut bind_values, q);
             }
             let mut stmt = conn.prepare(&sql)?;
             let params: Vec<&dyn rusqlite::ToSql> =
@@ -221,6 +229,28 @@ impl StorageManager {
             Ok(None)
         })?;
         document_id.map_or(Ok(None), |id| self.get_bake_document(id))
+    }
+
+    /// 按源文本指纹查找未删除的烘焙文档，供 bake 指纹预筛使用。
+    pub fn find_bake_document_id_by_source_fingerprint(
+        &self,
+        fingerprint: &str,
+    ) -> Result<Option<i64>, StorageError> {
+        self.with_conn(|conn| {
+            match conn.query_row(
+                "SELECT fd.document_id
+                 FROM bake_document_source_fingerprints fd
+                 JOIN bake_documents d ON d.id = fd.document_id
+                 WHERE fd.fingerprint = ?1 AND d.deleted_at IS NULL
+                 LIMIT 1",
+                params![fingerprint],
+                |row| row.get(0),
+            ) {
+                Ok(id) => Ok(Some(id)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(error) => Err(StorageError::Sqlite(error)),
+            }
+        })
     }
 
     pub fn has_bake_document_source_fingerprint(
@@ -422,6 +452,33 @@ fn insert_bake_document_inner(
     Ok(conn.last_insert_rowid())
 }
 
+/// FTS5 预筛：bake_documents_fts 候选可用时追加 `id IN (...)` 收窄扫描；
+/// FTS 表缺失、查询失败、候选为空或被上限截断时不做任何修改，
+/// 调用方保留原有 LIKE 子句回退全量扫描。
+fn append_document_fts_prefilter(
+    conn: &Connection,
+    sql: &mut String,
+    bind_values: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    query: &str,
+) {
+    let terms = split_query_terms(query);
+    let Some(fts_query) = build_fts_or_query(&terms) else {
+        return;
+    };
+    let Some(ids) = fts_candidate_ids(
+        conn,
+        "bake_documents_fts",
+        &fts_query,
+        DEFAULT_FTS_CANDIDATE_CAP,
+    ) else {
+        return;
+    };
+    let (clause, mut id_binds) = render_in_clause(&ids);
+    sql.push_str(" AND id IN ");
+    sql.push_str(&clause);
+    bind_values.append(&mut id_binds);
+}
+
 fn row_to_bake_document(row: &rusqlite::Row<'_>) -> Result<BakeDocumentRecord, StorageError> {
     Ok(BakeDocumentRecord {
         id: row.get(0)?,
@@ -619,5 +676,61 @@ mod tests {
         let id = mgr.insert_bake_document(&sample_document()).unwrap();
         let toggled = mgr.toggle_bake_document_status(id).unwrap().unwrap();
         assert_eq!(toggled.status, "enabled");
+    }
+
+    fn seed_unrelated_document(mgr: &StorageManager) -> i64 {
+        let mut other = sample_document();
+        other.title = "完全无关条目".to_string();
+        other.doc_type = "模板".to_string();
+        other.summary = Some("与搜索词毫无关系的内容。".to_string());
+        other.full_content = Some("另一份正文。".to_string());
+        other.prompt_hint = Some("无关提示".to_string());
+        other.source_url = Some("https://docs.example.com/unrelated".to_string());
+        mgr.insert_bake_document(&other).unwrap()
+    }
+
+    #[test]
+    fn test_list_bake_documents_query_prefilter_results_match_like() {
+        let mgr = make_mgr();
+        let id = mgr.insert_bake_document(&sample_document()).unwrap();
+        seed_unrelated_document(&mgr);
+
+        let results = mgr
+            .list_bake_documents_paginated(Some("技术方案"), 10, 0)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, id);
+        assert_eq!(
+            mgr.count_bake_documents_filtered(Some("技术方案")).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_list_bake_documents_query_falls_back_without_fts() {
+        let mgr = make_mgr();
+        let id = mgr.insert_bake_document(&sample_document()).unwrap();
+        seed_unrelated_document(&mgr);
+
+        mgr.with_conn(|conn| {
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS bake_documents_fts_insert;
+                 DROP TRIGGER IF EXISTS bake_documents_fts_update;
+                 DROP TRIGGER IF EXISTS bake_documents_fts_delete;
+                 DROP TABLE IF EXISTS bake_documents_fts;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let results = mgr
+            .list_bake_documents_paginated(Some("技术方案"), 10, 0)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, id);
+        assert_eq!(
+            mgr.count_bake_documents_filtered(Some("技术方案")).unwrap(),
+            1
+        );
     }
 }

@@ -39,15 +39,12 @@ pub struct CloudBackupRequest {
     pub service_environment: String,
     pub access_token: String,
     pub device_id: String,
-    /// 32-byte base64 key. If omitted, core-engine generates a one-time recovery key.
-    pub recovery_key_base64: Option<String>,
     pub output_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct CloudBackupResponse {
     pub local_encrypted_path: String,
-    pub generated_recovery_key_base64: Option<String>,
     pub oss_object_key: String,
     pub checksum_sha256: String,
     pub encrypted_size: i64,
@@ -60,7 +57,6 @@ pub struct CloudRestoreRequest {
     pub service_environment: String,
     pub access_token: String,
     pub snapshot_id: String,
-    pub recovery_key_base64: String,
     pub encrypted_output_path: Option<String>,
     pub decrypted_output_path: Option<String>,
     pub import_to_local: Option<bool>,
@@ -98,6 +94,7 @@ struct CloudEnvelope<T> {
 #[derive(Debug, Deserialize)]
 struct PreparedUploadData {
     oss_object_key: String,
+    encryption_key_base64: String,
     upload_url: String,
     required_headers: BTreeMap<String, String>,
 }
@@ -107,6 +104,7 @@ struct DownloadUrlData {
     oss_object_key: String,
     encrypted_size: i64,
     checksum_sha256: Option<String>,
+    encryption_key_base64: String,
     download_url: String,
 }
 
@@ -159,7 +157,6 @@ pub async fn backup_asset_snapshot_to_cloud(
     let service_environment = normalize_service_environment(&body.service_environment)?;
     let access_token = clean_required(&body.access_token, "access_token")?;
     let device_id = clean_required(&body.device_id, "device_id")?;
-    let (key, generated_recovery_key_base64) = recovery_key(body.recovery_key_base64.as_deref())?;
     let output_path = body
         .output_path
         .map(PathBuf::from)
@@ -172,9 +169,30 @@ pub async fn backup_asset_snapshot_to_cloud(
     })
     .await
     .map_err(|error| ApiError::Internal(error.to_string()))??;
+    let client = reqwest::Client::new();
+    // AES-GCM changes bytes but not envelope length, so this gives an exact quota preflight
+    // without generating or persisting user-managed recovery material.
+    let encrypted_size = encrypt_snapshot_bytes(&plaintext, &[0u8; 32])?.len() as i64;
+    let prepare: CloudEnvelope<PreparedUploadData> = send_json(
+        client
+            .post(format!("{admin_base_url}/v1/snapshots/upload-url"))
+            .header("x-memorybread-environment", &service_environment)
+            .bearer_auth(&access_token)
+            .json(&json!({
+                "device_id": device_id,
+                "encrypted_size": encrypted_size,
+                "checksum_sha256": null,
+                "format_version": crate::storage::snapshot::ASSET_SNAPSHOT_FORMAT_VERSION,
+                "schema_version": crate::storage::snapshot::ASSET_SNAPSHOT_SCHEMA_VERSION,
+                "encryption_version": 2,
+                "content_type": "application/octet-stream"
+            })),
+        "CLOUD_PREPARE_UPLOAD_FAILED",
+    )
+    .await?;
+    let key = parse_encryption_key(&prepare.data.encryption_key_base64)?;
     let encrypted = encrypt_snapshot_bytes(&plaintext, &key)?;
     let checksum_sha256 = sha256_hex(&encrypted);
-    let encrypted_size = encrypted.len() as i64;
 
     if let Some(parent) = output_path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -184,25 +202,6 @@ pub async fn backup_asset_snapshot_to_cloud(
     tokio::fs::write(&output_path, &encrypted)
         .await
         .map_err(|error| ApiError::Internal(error.to_string()))?;
-
-    let client = reqwest::Client::new();
-    let prepare: CloudEnvelope<PreparedUploadData> = send_json(
-        client
-            .post(format!("{admin_base_url}/v1/snapshots/upload-url"))
-            .header("x-memorybread-environment", &service_environment)
-            .bearer_auth(&access_token)
-            .json(&json!({
-                "device_id": device_id,
-                "encrypted_size": encrypted_size,
-                "checksum_sha256": checksum_sha256,
-                "format_version": crate::storage::snapshot::ASSET_SNAPSHOT_FORMAT_VERSION,
-                "schema_version": crate::storage::snapshot::ASSET_SNAPSHOT_SCHEMA_VERSION,
-                "encryption_version": 1,
-                "content_type": "application/octet-stream"
-            })),
-        "CLOUD_PREPARE_UPLOAD_FAILED",
-    )
-    .await?;
 
     let mut put = client.put(&prepare.data.upload_url);
     for (name, value) in &prepare.data.required_headers {
@@ -227,7 +226,7 @@ pub async fn backup_asset_snapshot_to_cloud(
                 "checksum_sha256": checksum_sha256,
                 "format_version": crate::storage::snapshot::ASSET_SNAPSHOT_FORMAT_VERSION,
                 "schema_version": crate::storage::snapshot::ASSET_SNAPSHOT_SCHEMA_VERSION,
-                "encryption_version": 1
+                "encryption_version": 2
             })),
         "CLOUD_COMPLETE_SNAPSHOT_FAILED",
     )
@@ -235,7 +234,6 @@ pub async fn backup_asset_snapshot_to_cloud(
 
     Ok(Json(CloudBackupResponse {
         local_encrypted_path: output_path.display().to_string(),
-        generated_recovery_key_base64,
         oss_object_key: prepare.data.oss_object_key,
         checksum_sha256,
         encrypted_size,
@@ -251,7 +249,6 @@ pub async fn restore_asset_snapshot_from_cloud(
     let service_environment = normalize_service_environment(&body.service_environment)?;
     let access_token = clean_required(&body.access_token, "access_token")?;
     let snapshot_id = clean_required(&body.snapshot_id, "snapshot_id")?;
-    let (key, _) = recovery_key(Some(&body.recovery_key_base64))?;
     let encrypted_output_path = body
         .encrypted_output_path
         .map(PathBuf::from)
@@ -272,6 +269,7 @@ pub async fn restore_asset_snapshot_from_cloud(
         "CLOUD_PREPARE_DOWNLOAD_FAILED",
     )
     .await?;
+    let key = parse_encryption_key(&download.data.encryption_key_base64)?;
 
     let response = client
         .get(&download.data.download_url)
@@ -411,25 +409,18 @@ fn clean_required(value: &str, field: &str) -> Result<String, ApiError> {
     Ok(trimmed.to_string())
 }
 
-fn recovery_key(value: Option<&str>) -> Result<([u8; 32], Option<String>), ApiError> {
-    if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
-        let decoded = BASE64
-            .decode(value)
-            .map_err(|_| ApiError::BadRequest("恢复密钥不是合法 base64".to_string()))?;
-        if decoded.len() != 32 {
-            return Err(ApiError::BadRequest(
-                "恢复密钥必须是 32 字节 base64".to_string(),
-            ));
-        }
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&decoded);
-        return Ok((key, None));
+fn parse_encryption_key(value: &str) -> Result<[u8; 32], ApiError> {
+    let decoded = BASE64
+        .decode(value.trim())
+        .map_err(|_| ApiError::BadRequest("云端备份加密材料不合法".to_string()))?;
+    if decoded.len() != 32 {
+        return Err(ApiError::BadRequest(
+            "云端备份加密材料长度不合法".to_string(),
+        ));
     }
-
     let mut key = [0u8; 32];
-    OsRng.fill_bytes(&mut key);
-    let encoded = BASE64.encode(key);
-    Ok((key, Some(encoded)))
+    key.copy_from_slice(&decoded);
+    Ok(key)
 }
 
 fn encrypt_snapshot_bytes(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, ApiError> {
@@ -443,7 +434,7 @@ fn encrypt_snapshot_bytes(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, A
     let envelope = EncryptedAssetSnapshotEnvelope {
         magic: "MemoryBreadAssetSnapshotEncrypted".to_string(),
         format_version: 1,
-        encryption_version: 1,
+        encryption_version: 2,
         algorithm: "AES-256-GCM".to_string(),
         nonce_base64: BASE64.encode(nonce),
         ciphertext_base64: BASE64.encode(ciphertext),
@@ -458,7 +449,7 @@ fn decrypt_snapshot_bytes(encrypted: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, A
     let envelope: EncryptedAssetSnapshotEnvelope = serde_json::from_slice(encrypted)
         .map_err(|_| ApiError::BadRequest("加密快照格式不合法".to_string()))?;
     if envelope.magic != "MemoryBreadAssetSnapshotEncrypted"
-        || envelope.encryption_version != 1
+        || !matches!(envelope.encryption_version, 1 | 2)
         || envelope.algorithm != "AES-256-GCM"
     {
         return Err(ApiError::BadRequest("不支持的加密快照格式".to_string()));
@@ -478,7 +469,7 @@ fn decrypt_snapshot_bytes(encrypted: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, A
         .map_err(|_| ApiError::Internal("初始化快照解密器失败".to_string()))?;
     let plaintext = cipher
         .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
-        .map_err(|_| ApiError::BadRequest("恢复密钥不正确或快照已损坏".to_string()))?;
+        .map_err(|_| ApiError::BadRequest("云端备份解密失败或快照已损坏".to_string()))?;
     if plaintext.len() as u64 != envelope.plaintext_size
         || sha256_hex(&plaintext) != envelope.plaintext_sha256
     {
@@ -511,10 +502,19 @@ async fn ensure_success(
         return Ok(response);
     }
 
-    let message = response
+    let response_body = response
         .text()
         .await
         .unwrap_or_else(|_| "上游服务请求失败".to_string());
+    let message = serde_json::from_str::<Value>(&response_body)
+        .ok()
+        .and_then(|payload| {
+            payload
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or(response_body);
     let status = axum::http::StatusCode::from_u16(status.as_u16())
         .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
     Err(ApiError::Upstream {
@@ -531,14 +531,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        decrypt_snapshot_bytes, encrypt_snapshot_bytes, normalize_service_environment, recovery_key,
-    };
+    use super::{decrypt_snapshot_bytes, encrypt_snapshot_bytes, normalize_service_environment};
 
     #[test]
     fn encrypts_and_decrypts_snapshot_bytes() {
-        let (key, generated) = recovery_key(None).unwrap();
-        assert!(generated.is_some());
+        let key = [7u8; 32];
 
         let plaintext = br#"{"hello":"bread"}"#;
         let encrypted = encrypt_snapshot_bytes(plaintext, &key).unwrap();

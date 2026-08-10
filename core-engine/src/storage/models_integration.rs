@@ -38,7 +38,7 @@ pub struct ImportedKnowledgeItem {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportWriteOutcome {
-    Created,
-    Updated,
-    Unchanged,
+    Created(i64),
+    Updated(i64),
+    Unchanged(i64),
 }

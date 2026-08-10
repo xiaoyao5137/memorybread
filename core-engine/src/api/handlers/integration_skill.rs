@@ -31,8 +31,31 @@ pub struct IntegrationFileQuery {
     pub path: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct MemoryOptionsQuery {
+    pub q: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
 pub async fn list_integration_skills() -> impl IntoResponse {
     Json(integration_skill_catalog())
+}
+
+pub async fn list_integration_memory_options(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<MemoryOptionsQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    validate_local_execution_origin(&headers)?;
+    let limit = query.limit.unwrap_or(60).clamp(1, 200);
+    let offset = query.offset.unwrap_or(0);
+    let keyword = query.q.unwrap_or_default();
+    state
+        .storage
+        .integration_list_memory_options(&keyword, limit, offset)
+        .map(Json)
+        .map_err(|error| ApiError::Internal(format!("读取记忆候选失败: {error}")))
 }
 
 pub async fn get_integration_skill(

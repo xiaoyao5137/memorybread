@@ -379,7 +379,6 @@ export interface MemoryPackageImportReport {
 
 export interface CloudMemoryPackageBackupResult {
   local_encrypted_path: string
-  generated_recovery_key_base64?: string | null
   oss_object_key: string
   checksum_sha256: string
   encrypted_size: number
@@ -707,12 +706,23 @@ export interface MonitorOverview {
     pending_bake_count: number
     oldest_pending_bake_at_ms: number | null
     bake_retry_pending_count: number
+    bake_fresh_pending_count?: number
+    bake_retry_ready_count?: number
+    bake_retry_delayed_count?: number
+    bake_actionable_count?: number
     bake_retry_exhausted_count: number
     bake_timeout_failure_count: number
     bake_truncated_failure_count: number
     bake_other_failure_count: number
+    bake_upstream_failure_count?: number
+    bake_recent_no_progress_count?: number
+    bake_next_retry_at_ms?: number | null
+    bake_recommended_retry_after_ms?: number
+    bake_scheduler_mismatch?: boolean
     running_bake_count: number
     stale_bake_run_count: number
+    bake_drain_rate_per_hour: number
+    bake_eta_ms: number | null
     by_time: { ts: number; count: number }[]
     recent: { id: number; ts: number; summary: string; category: string; importance: number; app_name: string; win_title: string }[]
     extracting: { id: number; ts: number; app_name: string; win_title: string; group_started_at_ms: number }[]
@@ -732,6 +742,32 @@ export interface MonitorOverview {
     success_rate: number
     recent:       { id: number; task_name: string; status: string; started_at: number; latency_ms: number | null; knowledge_count: number | null }[]
   }
+}
+
+export interface CaptureHealth {
+  capture_enabled: boolean
+  configured_interval_secs: number
+  effective_interval_secs: number
+  pressure_degraded: boolean
+  last_attempt_at_ms: number | null
+  last_captured_at_ms: number | null
+  last_continuity_at_ms: number | null
+  content_blackout_ms: number | null
+  max_active_blackout_ms: number
+  outcome_counts: { outcome: string; reason: string; count: number }[]
+  recent: {
+    observed_at: number
+    event_type: string
+    outcome: string
+    reason: string
+    capture_id: number | null
+    related_capture_id: number | null
+    app_name: string | null
+    win_title: string | null
+    is_private: boolean
+    effective_interval_secs: number | null
+  }[]
+  server_now_ms: number
 }
 
 export interface TokenMetricDistribution {
@@ -765,12 +801,23 @@ export interface ExtractionLive {
   pending_bake_count: number
   oldest_pending_bake_at_ms: number | null
   bake_retry_pending_count: number
+  bake_fresh_pending_count?: number
+  bake_retry_ready_count?: number
+  bake_retry_delayed_count?: number
+  bake_actionable_count?: number
   bake_retry_exhausted_count: number
   bake_timeout_failure_count: number
   bake_truncated_failure_count: number
   bake_other_failure_count: number
+  bake_upstream_failure_count?: number
+  bake_recent_no_progress_count?: number
+  bake_next_retry_at_ms?: number | null
+  bake_recommended_retry_after_ms?: number
+  bake_scheduler_mismatch?: boolean
   running_bake_count: number
   stale_bake_run_count: number
+  bake_drain_rate_per_hour: number
+  bake_eta_ms: number | null
   bake_watermark_updated_at_ms: number | null
   latest_bake_status: string | null
   recent_bake_run_count: number

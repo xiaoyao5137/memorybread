@@ -98,11 +98,11 @@ Harness 每完成一个 Agent、Tool 或 Skill 步骤就重新读取环境。依
 
 ## 5. 功能需求
 
-- FR-001 — 当运行模式为首次创作时，Harness 必须把章节设计 Agent 放在首个文档撰写 Agent 之前，即使主 Skill 已声明 Writer 步骤。
+- FR-001 — 当运行模式为通用首次创作且没有明确 Skill 时，Harness 必须把章节设计 Agent 放在首个文档撰写 Agent 之前。
 - FR-002 — 章节设计 Agent 必须输出章节顺序、每章目的、关键问题、可用证据、建议表达形式和完成标准，不得编写正文或补造事实。
 - FR-003 — 文档撰写 Agent 必须消费 `chapter_design`、Tool 证据、专业 Agent 结论和已应用 Skill，并输出完整 Markdown。
-- FR-004 — 每次文档写入或专项润色后，质量审校 Agent 必须产生布尔质检指标和结构化 `quality_issues[]`。
-- FR-005 — Harness 必须依据质量问题的 `agent_id` 与 `required_capabilities` 动态插入允许的 Agent、Tool 和匹配的已应用 Skill，并在每轮末尾再次插入质量审校 Agent；Skill 激活必须记录问题代码、能力标签和质量轮次。
+- FR-004 — 通用创作链路每次文档写入或专项润色后，质量审校 Agent 必须产生布尔质检指标和结构化 `quality_issues[]`。
+- FR-005 — 通用创作 Harness 必须依据质量问题的 `agent_id` 与 `required_capabilities` 动态插入允许的 Agent、Tool，并在每轮末尾再次插入质量审校 Agent。
 - FR-006 — 去 AI 味 Agent 必须处理装饰性引号、高频套话、机械衔接、语义冗余和长句堆叠，同时保持事实、来源、语义强度和目标语域。
 - FR-007 — 细节润色 Agent 必须优先补齐质检指出的短章节或跳步论证；当数据证据不足时必须保留口径或待核验项，不得编造数字。
 - FR-008 — 表格润色 Agent 必须输出列数一致的标准 Markdown 表格；创作页面必须为表头渲染品牌背景色、边框和对齐，为正文渲染斑马纹。
@@ -112,6 +112,8 @@ Harness 每完成一个 Agent、Tool 或 Skill 步骤就重新读取环境。依
 - FR-012 — 外部品牌模型执行章节设计、初稿和专项润色时，Loop 必须支持 `model.request → run.paused → run.resumed`，恢复后继续原计划。
 - FR-013 — 质量问题无法在预算内清除时，运行必须以当前完整文档结束，并在 `quality_warnings` 中返回剩余问题代码。
 - FR-014 — Skill 编辑器必须把章节设计和五类专项润色 Agent 作为受控可选能力；默认生成的创作工作流必须包含章节设计、初稿和质检步骤，不预置固定润色链。
+- FR-015 — 明确 Skill 的 `execution_steps` 必须作为唯一初始执行契约。Harness 只能调用步骤中声明且已启用的 Tool/Agent，不得追加通用章节设计、Writer、质量审校或专项润色；但步骤声明的 `data_search` 命中实时报表时，允许在同一步追加取得当前快照所必需的 `webpage_scrape`，不得继续隐式追加数据分析 Agent。网页刷新只把本轮 AX/DOM 程序化验证通过的指标写回环境；`retain_webpage_screenshot` 只控制截图附件并缺省为 `true`，不得改变取数和可用性判断。本轮已尝试刷新的报表不得再从同 URL 历史派生数据回退。没有声明子 Agent 的步骤由创作 Agent 自己完成并按顺序组装。
+- FR-016 — Skill 的 `example_document` 只用于编辑器预览与人工理解风格，不得进入运行时 `applied_skills`、模型事实环境、检索词、章节义务或证据缺口。`field_examples` 可用于复刻句式与排版，但其中的虚构业务主题同样不得形成事实要求。证据缺口只能来自用户原始需求、当前 `execution_steps` 明确写出的目标/产出，或已有证据之间可观察的不一致。
 
 ## 6. 非功能、隐私与兼容要求
 
@@ -131,7 +133,7 @@ Harness 每完成一个 Agent、Tool 或 Skill 步骤就重新读取环境。依
 
 ## 8. 验收标准与追踪
 
-- AC-001 — 给定一个首次创作请求，当构建计划时，验证 `chapter_design_agent` 位于首个 `document_writer_agent` 之前，覆盖 FR-001、FR-002、FR-003。
+- AC-001 — 给定一个没有明确 Skill 的首次创作请求，当构建计划时，验证 `chapter_design_agent` 位于首个 `document_writer_agent` 之前，覆盖 FR-001、FR-002、FR-003。
 - AC-002 — 给定包含装饰性引号、重复套话和机械衔接的长文，当质量审校执行时，必须观察到 `ai_style_signals` 并路由 `anti_ai_style_agent`，覆盖 FR-004、FR-005、FR-006。
 - AC-003 — 给定同时包含细节、表格、图示、自然表达和重点标识问题的质量反馈，当 Harness 重规划时，验证匹配 Skill、依赖与专项 Agent 按受控顺序插入且最后再次质检，覆盖 FR-005、FR-007、FR-008、FR-009、FR-010。
 - AC-004 — 给定数据型短章节且没有可用数据分析，当质量问题声明数据依赖时，必须先观察数据检索反馈，再由 Harness 决定是否调用网页刷新和数据分析，覆盖 FR-005、FR-007。
@@ -141,6 +143,9 @@ Harness 每完成一个 Agent、Tool 或 Skill 步骤就重新读取环境。依
 - AC-008 — 给定 Skill 编辑器，当读取 Agent 选项与默认步骤时，必须观察章节设计、五类专项润色能力以及“章节设计 → 初稿 → 质检”，覆盖 FR-014。
 - AC-009 — 给定包含合法 Markdown 表格和 `**重点**` 的文档，当创作预览渲染时，验证表头具有品牌背景色且重点文字具有品牌色、加粗和下划线，覆盖 FR-008、FR-009。
 - AC-010 — 给定旧版 `creation.agent.v1` 事件与历史记录，当新版页面读取时，必须继续展示文档和执行轨迹；给定未知能力 ID，运行时必须跳过而不是执行，覆盖 FR-012、FR-014。
+- AC-011 — 给定一个只声明三步和 `memory_search`、`data_search` 的明确 Skill，当执行完成时，验证步骤顺序不变，未出现章节设计、Writer、质量审校、数据分析或网页刷新，最终 Markdown 仅有这三个步骤标题，覆盖 FR-015。
+- AC-012 — 给定 `example_document` 含“国产卡切换、潮汐调度、推理引擎优化”，但用户请求与 `execution_steps` 均未包含这些主题，验证运行时 Prompt、检索词、最终文档和证据缺口均不出现三个主题，覆盖 FR-016。
+- AC-013 — 给定声明 `data_search` 的 Skill 步骤，旧数据或未配置时验证默认保留分段长截图；显式设置 `retain_webpage_screenshot=false` 时验证仍执行 AX/DOM 网页读取且指标可用，但不发预览事件、不创建图片资产、不插入证据卡，覆盖 FR-015。
 
 ## 9. 发布、迁移与回滚
 

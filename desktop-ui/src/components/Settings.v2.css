@@ -579,11 +579,24 @@
 }
 
 /* 版本信息 */
+.settings-v2__version-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.settings-v2__version-list {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
 .settings-v2__version-item {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
   align-items: center;
-  padding: 12px 0;
+  gap: 8px;
+  padding: 10px 0;
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
 }
 
@@ -601,13 +614,17 @@
   font-size: 14px;
   color: #6E6E73;
   font-family: 'SF Mono', Monaco, monospace;
+  text-align: right;
+  white-space: nowrap;
 }
 
 .settings-v2__version-actions {
-  margin-top: 14px;
+  margin-top: 0;
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
 }
 
 /* 提示文字 */
@@ -907,6 +924,12 @@
     align-items: flex-start;
     flex-direction: column;
     gap: 4px;
+  }
+
+  .settings-v2__version-foot {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
   }
 
   .settings-v2__version-actions {

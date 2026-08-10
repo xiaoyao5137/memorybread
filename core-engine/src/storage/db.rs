@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::Connection;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::error::StorageError;
 
@@ -281,8 +281,48 @@ static MIGRATIONS: &[(&str, &str)] = &[
         include_str!("migrations/067_integration_skill_runs.sql"),
     ),
     (
+        "068_timeline_data_facts",
+        include_str!("../../../shared/db-schema/migrations/068_timeline_data_facts.sql"),
+    ),
+    (
+        "069_creation_skill_manual_source",
+        include_str!("migrations/069_creation_skill_manual_source.sql"),
+    ),
+    (
         "070_requeue_bake_output_failures",
         include_str!("migrations/070_requeue_bake_output_failures.sql"),
+    ),
+    (
+        "071_timelines_fts",
+        include_str!("migrations/071_timelines_fts.sql"),
+    ),
+    (
+        "072_requeue_bake_output_failures_v2",
+        include_str!("migrations/072_requeue_bake_output_failures_v2.sql"),
+    ),
+    (
+        "073_capture_attempt_audit",
+        include_str!("../../../shared/db-schema/migrations/073_capture_attempt_audit.sql"),
+    ),
+    (
+        "074_data_snapshot_period_history",
+        include_str!("../../../shared/db-schema/migrations/074_data_snapshot_period_history.sql"),
+    ),
+    (
+        "075_timeline_data_fact_period_history",
+        include_str!(
+            "../../../shared/db-schema/migrations/075_timeline_data_fact_period_history.sql"
+        ),
+    ),
+    (
+        "076_remove_creation_skill_structure_pattern",
+        include_str!(
+            "../../../shared/db-schema/migrations/076_remove_creation_skill_structure_pattern.sql"
+        ),
+    ),
+    (
+        "077_bake_retry_schedule",
+        include_str!("migrations/077_bake_retry_schedule.sql"),
     ),
 ];
 
@@ -358,7 +398,10 @@ impl StorageManager {
     // ── 迁移执行 ─────────────────────────────────────────────────────────────
 
     fn run_migrations(&self) -> Result<(), StorageError> {
-        let conn = self.conn.lock()?;
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            warn!("数据库连接锁曾因线程 panic 中毒，已恢复连接访问");
+            poisoned.into_inner()
+        });
 
         // 确保迁移记录表存在（迁移前的最小依赖）
         conn.execute_batch(
@@ -837,7 +880,10 @@ impl StorageManager {
     where
         F: FnOnce(&Connection) -> Result<T, StorageError>,
     {
-        let conn = self.conn.lock()?;
+        let conn = self.conn.lock().unwrap_or_else(|poisoned| {
+            warn!("数据库连接锁曾因线程 panic 中毒，已恢复连接访问");
+            poisoned.into_inner()
+        });
         f(&conn)
     }
 
@@ -851,7 +897,10 @@ impl StorageManager {
     {
         let conn_arc = self.conn.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = conn_arc.lock()?;
+            let conn = conn_arc.lock().unwrap_or_else(|poisoned| {
+                warn!("数据库连接锁曾因线程 panic 中毒，已恢复连接访问");
+                poisoned.into_inner()
+            });
             f(&conn)
         })
         .await?
@@ -882,6 +931,85 @@ pub fn current_ts_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creation_skill_structure_migration_drops_hidden_legacy_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE creation_skills (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_skill_key TEXT NOT NULL UNIQUE,
+                cloud_skill_id TEXT,
+                source_kind TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                category_id TEXT,
+                common_titles TEXT NOT NULL DEFAULT '[]',
+                title_style TEXT NOT NULL DEFAULT '',
+                text_style TEXT NOT NULL DEFAULT '',
+                diagram_style TEXT NOT NULL DEFAULT '',
+                structure_pattern TEXT NOT NULL DEFAULT '[]',
+                writing_guidelines TEXT NOT NULL DEFAULT '[]',
+                published INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                deleted_at INTEGER,
+                status TEXT NOT NULL DEFAULT 'saved',
+                installed INTEGER NOT NULL DEFAULT 0,
+                section_headings TEXT NOT NULL DEFAULT '{}',
+                field_examples TEXT NOT NULL DEFAULT '{}',
+                example_document TEXT NOT NULL DEFAULT '',
+                package_files TEXT NOT NULL DEFAULT '[]',
+                distinctive_sections TEXT NOT NULL DEFAULT '[]',
+                skill_description TEXT NOT NULL DEFAULT '{}',
+                execution_steps TEXT NOT NULL DEFAULT '[]'
+            );
+            INSERT INTO creation_skills (
+                client_skill_key, source_kind, source_id, title, summary,
+                structure_pattern, section_headings, field_examples,
+                created_at, updated_at
+            ) VALUES (
+                'legacy-skill', 'manual', 'legacy-skill', '旧技能', '旧技能摘要',
+                '[\"辅助明细\"]',
+                '{\"common_titles\":\"标题设计风格\",\"structure_pattern\":\"章节组织骨架\",\"structurePattern\":\"旧驼峰字段\"}',
+                '{\"common_titles\":[\"示例标题\"],\"structure_pattern\":[\"辅助明细\"],\"structurePattern\":[\"旧驼峰示例\"]}',
+                1, 2
+            );",
+        )
+        .unwrap();
+
+        conn.execute_batch(include_str!(
+            "../../../shared/db-schema/migrations/076_remove_creation_skill_structure_pattern.sql"
+        ))
+        .unwrap();
+
+        let structure_column_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('creation_skills')
+                 WHERE name = 'structure_pattern'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let (headings, examples, title): (String, String, String) = conn
+            .query_row(
+                "SELECT section_headings, field_examples, title
+                 FROM creation_skills WHERE client_skill_key = 'legacy-skill'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(structure_column_count, 0);
+        assert_eq!(title, "旧技能");
+        assert!(!headings.contains("structure_pattern"));
+        assert!(!headings.contains("structurePattern"));
+        assert!(headings.contains("common_titles"));
+        assert!(!examples.contains("structure_pattern"));
+        assert!(!examples.contains("structurePattern"));
+        assert!(examples.contains("示例标题"));
+    }
 
     #[test]
     fn open_repairs_creation_history_schema_when_old_migration_was_marked_applied() {

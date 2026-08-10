@@ -118,7 +118,7 @@ async fn data_page_counts_only_semantic_records_and_supports_delete() {
     assert_eq!(json["items"][0]["id"], 1);
     assert_eq!(
         json["items"][0]["latest_snapshot"]["structured_data"]["extraction_version"],
-        "data-memory.v11"
+        "data-memory.v15"
     );
     assert_eq!(
         json["items"][0]["latest_snapshot"]["structured_data"]["title"],

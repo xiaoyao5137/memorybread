@@ -44,6 +44,60 @@ body {
   flex-direction: column;
 }
 
+.panel-error-state {
+  min-height: 100%;
+  padding: 32px;
+  display: grid;
+  place-items: center;
+  background: #f5f5f7;
+}
+
+.panel-error-state__card {
+  width: min(440px, 100%);
+  padding: 28px;
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 12px 32px rgba(17, 24, 39, 0.06);
+  display: grid;
+  gap: 12px;
+  text-align: center;
+}
+
+.panel-error-state__card strong {
+  color: #111827;
+  font-size: 18px;
+}
+
+.panel-error-state__card span {
+  color: #667085;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.panel-error-state__card button {
+  min-height: 38px;
+  margin-top: 4px;
+  padding: 0 16px;
+  border: 1px solid #0f766e;
+  border-radius: 9px;
+  background: #0f766e;
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.panel-error-state__card button:hover {
+  background: #0d665f;
+}
+
+.panel-error-state__card button:focus-visible {
+  outline: 3px solid rgba(15, 118, 110, 0.24);
+  outline-offset: 2px;
+}
+
 /* ========================================
    FloatingBuddy - 悬浮按钮
    ======================================== */
@@ -877,33 +931,6 @@ body {
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-.creation-history__entry .creation-history__item {
-  padding-right: 132px;
-}
-
-.creation-history__skill-action {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  min-height: 30px;
-  padding: 0 9px;
-  border: 1px solid #b8d8d4;
-  border-radius: 7px;
-  background: #eef9f7;
-  color: #0f766e;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  font-size: 11px;
-  font-weight: 650;
-}
-
-.creation-history__skill-action:hover {
-  border-color: #0f766e;
-  background: #e3f5f1;
-}
-
 .creation-history__item:hover {
   border-color: #0f766e;
   box-shadow: 0 4px 12px rgba(16, 24, 40, 0.04);
@@ -1052,6 +1079,7 @@ body {
 .creation-skill-library__empty strong { color: #344054; }
 .creation-skill-library__empty span { font-size: 12px; }
 .creation-skill-library__empty button { margin-top: 4px; }
+.creation-skill-library__empty-actions { display: flex; align-items: center; gap: 10px; }
 .creation-skill-market-count { margin: 0 0 10px; color: #667085; font-size: 11px; }
 .creation-skill-market-pagination { margin-top: 18px; display: flex; align-items: center; justify-content: center; gap: 12px; }
 .creation-skill-market-pagination span { color: #667085; font-size: 11px; font-variant-numeric: tabular-nums; }
@@ -1141,8 +1169,6 @@ body {
     justify-content: space-between;
   }
 
-  .creation-history__entry .creation-history__item { padding-right: 12px; padding-bottom: 48px; }
-  .creation-history__skill-action { top: auto; bottom: 10px; left: 12px; right: auto; }
   .creation-skill-library { padding: 14px; }
   .creation-skill-library > header { align-items: stretch; flex-direction: column; }
   .creation-skill-library__header-actions { align-items: stretch; flex-direction: column; }

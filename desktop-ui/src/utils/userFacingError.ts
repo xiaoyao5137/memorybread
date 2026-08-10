@@ -23,3 +23,18 @@ export function toUserFacingError(error: unknown, fallback: string): string {
   if (message.length > 160 || blockedDetailPattern.test(message)) return fallback
   return message
 }
+
+/**
+ * 仅用于本机 core-engine / 创作服务等本地 API 的错误展示：
+ * 本地服务返回的中文校验原因不包含供应商密钥等敏感信息，
+ * 不应被 toUserFacingError 的敏感词过滤吞成笼统兜底文案，
+ * 否则用户会看到“保存技能失败”这类不明原因的提示。
+ */
+export function toLocalApiError(error: unknown, fallback: string): string {
+  const message = extractMessage(error).trim()
+  if (!message) return fallback
+  if (/failed to fetch|networkerror|load failed|connection refused|econnrefused/i.test(message)) {
+    return `${fallback}：本地服务暂不可用，请稍后重试`
+  }
+  return message.length > 240 ? `${message.slice(0, 240)}…` : message
+}

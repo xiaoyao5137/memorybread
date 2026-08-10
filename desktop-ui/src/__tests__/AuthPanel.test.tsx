@@ -196,9 +196,22 @@ describe('AuthPanel', () => {
   })
 
   it('邮箱注册仅提交邮箱标识，不再提交独立账户名', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      if (String(input).endsWith('/v1/auth/email/send-code')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              challenge_id: '019c2c7e-706e-7a91-a61a-cd2a582cbb51',
+              retry_after_seconds: 60,
+              expires_in_seconds: 600,
+            },
+          }),
+        }
+      }
+      return {
+        ok: true,
+        json: async () => ({
         data: {
           access_token: 'mbs_register_token',
           expires_at: new Date(Date.now() + 86400_000).toISOString(),
@@ -213,13 +226,17 @@ describe('AuthPanel', () => {
             created_at: new Date().toISOString(),
           },
         },
-      }),
+        }),
+      }
     })
     vi.stubGlobal('fetch', fetchMock)
     render(<AuthPanel />)
 
     fireEvent.click(screen.getByRole('tab', { name: '注册' }))
     fireEvent.change(screen.getByLabelText('邮箱地址'), { target: { value: 'xiaomai@memorybread.local' } })
+    fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('验证码已发送')
+    fireEvent.change(screen.getByLabelText('邮箱验证码'), { target: { value: '123456' } })
     fireEvent.change(screen.getByLabelText('昵称'), { target: { value: '小麦' } })
     fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'MemoryBread@2026!' } })
     fireEvent.click(screen.getByRole('button', { name: '注册并登录' }))
@@ -227,11 +244,16 @@ describe('AuthPanel', () => {
     await waitFor(() => {
       expect(useAppStore.getState().authToken).toBe('mbs_register_token')
     })
-    const request = fetchMock.mock.calls[0]?.[1] as RequestInit
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://127.0.0.1:8080/v1/auth/email/send-code')
+    const request = fetchMock.mock.calls[1]?.[1] as RequestInit
     expect(JSON.parse(String(request.body))).toEqual({
       email: 'xiaomai@memorybread.local',
       password: 'MemoryBread@2026!',
       nickname: '小麦',
+      email_verification: {
+        challenge_id: '019c2c7e-706e-7a91-a61a-cd2a582cbb51',
+        code: '123456',
+      },
     })
   })
 
@@ -300,6 +322,56 @@ describe('AuthPanel', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('账户服务暂时未就绪')
     expect(screen.getByRole('alert')).not.toHaveTextContent('mb-admin/.env')
+  })
+
+  it('通过邮箱验证码重置密码并返回密码登录', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      if (String(input).endsWith('/v1/auth/password-reset/send-code')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              challenge_id: '019c2c7e-706e-7a91-a61a-cd2a582cbb61',
+              retry_after_seconds: 60,
+              expires_in_seconds: 600,
+            },
+          }),
+        }
+      }
+      return {
+        ok: true,
+        json: async () => ({ data: { ok: true } }),
+      }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<AuthPanel />)
+
+    fireEvent.click(screen.getByRole('button', { name: '忘记密码？' }))
+    expect(screen.getByRole('tablist', { name: '验证方式' })).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('邮箱地址'), { target: { value: 'xiaomai@example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('验证码已发送')
+    fireEvent.change(screen.getByLabelText('验证码'), { target: { value: '123456' } })
+    fireEvent.change(screen.getByLabelText('新密码'), { target: { value: 'MemoryBread@2026!' } })
+    fireEvent.change(screen.getByLabelText('确认新密码'), { target: { value: 'MemoryBread@2026!' } })
+    fireEvent.click(screen.getByRole('button', { name: '重置密码' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('密码已重置')
+    expect(screen.getByLabelText('邮箱或手机号')).toHaveValue('xiaomai@example.com')
+    expect(useAppStore.getState().authToken).toBeNull()
+    const sendRequest = fetchMock.mock.calls[0]?.[1] as RequestInit
+    expect(JSON.parse(String(sendRequest.body))).toEqual({
+      channel: 'email',
+      identifier: 'xiaomai@example.com',
+    })
+    const confirmRequest = fetchMock.mock.calls[1]?.[1] as RequestInit
+    expect(JSON.parse(String(confirmRequest.body))).toEqual({
+      challenge_id: '019c2c7e-706e-7a91-a61a-cd2a582cbb61',
+      channel: 'email',
+      identifier: 'xiaomai@example.com',
+      code: '123456',
+      new_password: 'MemoryBread@2026!',
+    })
   })
 
   it('使用顶部多 Tab 展示全宽内容，并在个人信息中显示账户资料', async () => {

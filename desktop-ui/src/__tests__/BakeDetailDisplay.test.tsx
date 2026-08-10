@@ -113,7 +113,6 @@ const relatedSkill: LocalCreationSkill = {
   titleStyle: '标题概括目标',
   textStyle: '结论先行',
   diagramStyle: '简洁流程图',
-  structurePattern: ['目标', '进展', '行动项'],
   writingGuidelines: ['明确负责人'],
   sectionHeadings: { ...DEFAULT_CREATION_SKILL_SECTION_HEADINGS },
   fieldExamples: DEFAULT_CREATION_SKILL_FIELD_EXAMPLES,
