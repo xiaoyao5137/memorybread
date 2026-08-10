@@ -123,8 +123,23 @@ prepare_python_helper() {
   local frozen_app="$dist_dir/memory-bread-ai.app"
   local frozen_executable="$frozen_app/Contents/MacOS/memory-bread-ai"
   local hidden_args=()
+  local signing_args=()
+  local signing_identity=""
   local package
   local module
+
+  if [ "$MODE" = "dmg" ]; then
+    if [ -n "${APPLE_SIGNING_IDENTITY:-}" ] && [ "$APPLE_SIGNING_IDENTITY" != "-" ]; then
+      signing_identity="$APPLE_SIGNING_IDENTITY"
+      signing_args+=(--codesign-identity "$signing_identity")
+    fi
+  else
+    signing_identity="$APPLE_APP_SIGNING_IDENTITY"
+    signing_args+=(
+      --codesign-identity "$signing_identity"
+      --osx-entitlements-file "$TAURI_DIR/Entitlements.child.plist"
+    )
+  fi
 
   while IFS= read -r module; do
     hidden_args+=(--hidden-import "$module")
@@ -165,6 +180,7 @@ prepare_python_helper() {
       --additional-hooks-dir "$SIDECAR_DIR/pyinstaller-hooks" \
       --add-data "$SIDECAR_DIR/migrations:migrations" \
       --add-data "$SIDECAR_DIR/Modelfile:." \
+      "${signing_args[@]}" \
       "${hidden_args[@]}" \
       "$SIDECAR_DIR/packaged_entry.py"
   fi
@@ -172,6 +188,31 @@ prepare_python_helper() {
   [ -d "$frozen_app" ] || fail "PyInstaller 未生成 memory-bread-ai.app"
   [ -x "$frozen_executable" ] || fail "PyInstaller helper 缺少主程序"
   "$frozen_executable" --help >/dev/null
+
+  if [ -n "$signing_identity" ]; then
+    local signed_file
+    local signature_info
+    local signed_macho_count=0
+
+    codesign --verify --deep --strict "$frozen_app" \
+      || fail "PyInstaller helper 的签名结构无效"
+    while IFS= read -r -d '' signed_file; do
+      if ! file "$signed_file" | grep -q 'Mach-O'; then
+        continue
+      fi
+      signed_macho_count=$((signed_macho_count + 1))
+      signature_info="$(codesign -d --verbose=4 "$signed_file" 2>&1)" \
+        || fail "无法读取 helper 内部签名: $signed_file"
+      printf '%s\n' "$signature_info" | grep -Fq "Authority=$signing_identity" \
+        || fail "helper 内部文件未使用预期证书签名: $signed_file"
+      printf '%s\n' "$signature_info" | grep -q '^Timestamp=' \
+        || fail "helper 内部文件缺少安全时间戳: $signed_file"
+      printf '%s\n' "$signature_info" | grep -Eq 'flags=.*\(.*runtime.*\)|^Runtime Version=' \
+        || fail "helper 内部文件未启用 Hardened Runtime: $signed_file"
+    done < <(find "$frozen_app/Contents" -type f -print0)
+    [ "$signed_macho_count" -gt 0 ] || fail "PyInstaller helper 内未找到可校验的 Mach-O 文件"
+    echo "[macOS build] Python AI sidecar 的 Developer ID、时间戳与 Hardened Runtime 校验通过"
+  fi
 
   rm -rf "$STAGING_DIR/memory-bread-ai.app"
   cp -R "$frozen_app" "$STAGING_DIR/memory-bread-ai.app"
