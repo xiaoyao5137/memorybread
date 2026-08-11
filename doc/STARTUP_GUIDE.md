@@ -34,7 +34,8 @@ MemoryBread 客户端，避免因为账户服务未启动而让客户端登录�
 3. Core Engine（后台）
 4. Desktop UI（后台启动 dev server / Tauri）
 
-该模式不启动 `mb-admin`，因此本地 `127.0.0.1:8080` 没有另行启动时，账户登录不可用。
+该模式不启动 `mb-admin`，因此 Debug 测试环境的本机账户服务
+`127.0.0.1:18080` 没有另行启动时，账户登录不可用。
 
 ### 方式 3: 手动分步启动
 
@@ -85,6 +86,16 @@ curl http://localhost:7070/api/vector/status
 ```
 
 ## 🐛 调试功能
+
+客户端云端服务地址使用固定的环境映射，不能通过构建变量、历史本地存储或登录页临时覆盖：
+
+| 启动模式 | 环境 | Admin API | Gateway |
+| --- | --- | --- | --- |
+| Debug（默认） | 测试 | `http://127.0.0.1:18080` | `http://127.0.0.1:18090` |
+| Debug（可切换） | 正式 | `https://memorybread.work` | `https://gateway.memorybread.work` |
+| 非 Debug | 正式（不可切换） | `https://memorybread.work` | `https://gateway.memorybread.work` |
+
+每次 Debug 启动都从测试环境开始；关闭调试模式会立即恢复正式环境和正式地址。
 
 在 Desktop UI 的设置页面，点击"🔧 打开调试面板"可以查看：
 - 实时采集统计

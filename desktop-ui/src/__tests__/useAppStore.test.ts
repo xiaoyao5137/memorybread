@@ -10,7 +10,6 @@ beforeEach(() => {
   useAppStore.getState().reset()
   useAppStore.setState({
     debugModeEnabled: false,
-    localDebugModeEnabled: false,
     serviceEnvironment: 'production',
   })
 })
@@ -149,14 +148,15 @@ describe('服务环境绑定', () => {
     useAppStore.getState().setServiceEnvironment('staging')
 
     expect(useAppStore.getState().serviceEnvironment).toBe('production')
+    expect(useAppStore.getState().adminApiBaseUrl).toBe('https://memorybread.work')
+    expect(useAppStore.getState().gatewayApiBaseUrl).toBe('https://gateway.memorybread.work')
     expect(serviceEnvironmentHeaders()).toEqual({
       'X-MemoryBread-Environment': 'production',
     })
   })
 
-  it('调试模式允许切换环境并让请求头同步变化', () => {
+  it('开启调试模式后默认使用本机测试环境', () => {
     useAppStore.getState().setDebugModeEnabled(true)
-    useAppStore.getState().setServiceEnvironment('staging')
 
     expect(useAppStore.getState().serviceEnvironment).toBe('staging')
     expect(useAppStore.getState().adminApiBaseUrl).toBe('http://127.0.0.1:18080')
@@ -166,19 +166,38 @@ describe('服务环境绑定', () => {
     })
   })
 
+  it('调试模式允许切换到固定的阿里云正式地址', () => {
+    useAppStore.getState().setDebugModeEnabled(true)
+    useAppStore.getState().setServiceEnvironment('production')
+
+    expect(useAppStore.getState().serviceEnvironment).toBe('production')
+    expect(useAppStore.getState().adminApiBaseUrl).toBe('https://memorybread.work')
+    expect(useAppStore.getState().gatewayApiBaseUrl).toBe('https://gateway.memorybread.work')
+    expect(serviceEnvironmentHeaders()).toEqual({
+      'X-MemoryBread-Environment': 'production',
+    })
+  })
+
+  it('忽略历史存储中的服务地址覆盖', () => {
+    localStorage.setItem('memory-bread_admin_api_base_url:production', 'http://127.0.0.1:8080')
+    localStorage.setItem('memory-bread_gateway_api_base_url:production', 'http://127.0.0.1:8090')
+
+    useAppStore.getState().setDebugModeEnabled(true)
+    useAppStore.getState().setServiceEnvironment('production')
+
+    expect(useAppStore.getState().adminApiBaseUrl).toBe('https://memorybread.work')
+    expect(useAppStore.getState().gatewayApiBaseUrl).toBe('https://gateway.memorybread.work')
+  })
+
   it('关闭调试模式会恢复正式环境和正式服务地址', () => {
     useAppStore.getState().setDebugModeEnabled(true)
-    useAppStore.getState().setServiceEnvironment('staging')
-    useAppStore.getState().setAdminApiBaseUrl('http://127.0.0.1:18080')
-    useAppStore.getState().setGatewayApiBaseUrl('http://127.0.0.1:18090')
 
     useAppStore.getState().setDebugModeEnabled(false)
 
     const state = useAppStore.getState()
     expect(state.serviceEnvironment).toBe('production')
-    expect(state.localDebugModeEnabled).toBe(false)
-    expect(state.adminApiBaseUrl).toBe('http://127.0.0.1:8080')
-    expect(state.gatewayApiBaseUrl).toBe('http://127.0.0.1:8090')
+    expect(state.adminApiBaseUrl).toBe('https://memorybread.work')
+    expect(state.gatewayApiBaseUrl).toBe('https://gateway.memorybread.work')
   })
 
   it('切换环境不会沿用当前环境的账户会话', () => {

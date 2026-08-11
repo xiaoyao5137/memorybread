@@ -51,12 +51,10 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
     adminApiBaseUrl,
     gatewayApiBaseUrl,
     debugModeEnabled,
-    localDebugModeEnabled,
     serviceEnvironment,
     currentUser,
     setApiBaseUrl,
     setDebugModeEnabled,
-    setLocalDebugModeEnabled,
     setServiceEnvironment,
     setWindowMode,
   } = useAppStore()
@@ -737,7 +735,7 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
             <div>
               <h2 className="settings-v2__card-title">开发者模式</h2>
               <p className="settings-v2__card-desc">
-                切换调试服务环境，或查看实时采集和处理状态
+                在固定的测试与正式服务环境间切换，或查看实时采集和处理状态
               </p>
             </div>
           </div>
@@ -766,7 +764,7 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
           <label className="settings-v2__toggle-row" htmlFor="debug-mode-toggle">
             <span>
               <strong>调试模式</strong>
-              <small>开启后允许选择测试环境和覆盖服务地址；关闭时强制恢复正式环境。</small>
+              <small>Debug 启动默认使用本机测试环境；关闭后强制恢复阿里云正式环境。</small>
             </span>
             <input
               id="debug-mode-toggle"
@@ -782,7 +780,7 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
               <div className="settings-v2__environment-row">
                 <span className="settings-v2__environment-copy">
                   <strong>服务环境</strong>
-                  <small>切换后，云端请求和登录状态都会使用所选环境。</small>
+                  <small>测试使用本机 18080/18090；正式使用 memorybread.work 域名。</small>
                 </span>
                 <div
                   className="settings-v2__environment-options"
@@ -809,22 +807,8 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
                   </button>
                 </div>
               </div>
-              <label className="settings-v2__toggle-row" htmlFor="local-debug-mode-toggle">
-                <span>
-                  <strong>本地调试模式</strong>
-                  <small>使用本机端口；请求会携带所选环境，服务环境不一致时会被拒绝。</small>
-                </span>
-                <input
-                  id="local-debug-mode-toggle"
-                  data-testid="local-debug-mode-toggle"
-                  type="checkbox"
-                  checked={localDebugModeEnabled}
-                  onChange={(event) => setLocalDebugModeEnabled(event.target.checked)}
-                />
-              </label>
               <div className="settings-v2__debug-routes" aria-label="调试服务环境绑定">
                 <span>Environment <strong>{serviceEnvironment}</strong></span>
-                <span>Mode <strong>{localDebugModeEnabled ? 'local' : 'configured'}</strong></span>
                 <span>Core <strong>{apiBaseUrl}</strong></span>
                 <span>Account <strong>{adminApiBaseUrl}</strong></span>
                 <span>Cloud Creation <strong>{gatewayApiBaseUrl}</strong></span>

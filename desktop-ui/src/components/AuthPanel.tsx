@@ -1,5 +1,5 @@
 import React, { FormEvent, useEffect, useState } from 'react'
-import { ArrowLeft, ArrowRight, Building2, KeyRound, LockKeyhole, Mail, Server, Smartphone, UserRound } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Building2, KeyRound, LockKeyhole, Mail, Smartphone, UserRound } from 'lucide-react'
 import { useAppStore } from '../store/useAppStore'
 import type { AccountProfileSection } from '../types'
 import { authenticateWithPassword, authenticateWithPhoneCode, confirmPasswordReset, fetchConsoleSummary, logoutSession, sendEmailVerificationCode, sendPasswordResetCode, sendPhoneVerificationCode } from '../utils/authApi'
@@ -30,8 +30,6 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
     currentUser,
     cloudBalance,
     cloudSubscription,
-    debugModeEnabled,
-    setAdminApiBaseUrl,
     setAuthSession,
     setCloudBalance,
     setCloudSubscription,
@@ -393,20 +391,6 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
             {mode === 'reset' ? '手机号验证' : mode === 'login' ? '验证码登录' : '手机号注册'}
           </button>
         </div>
-
-        {debugModeEnabled && (
-          <label>
-            <span>账户连接地址</span>
-            <div className="auth-panel__input-with-icon">
-              <Server size={16} aria-hidden />
-              <input
-                onChange={(event) => setAdminApiBaseUrl(event.target.value)}
-                value={adminApiBaseUrl}
-                spellCheck={false}
-              />
-            </div>
-          </label>
-        )}
 
         {loginMethod === 'email' && (
           <label>

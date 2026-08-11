@@ -166,15 +166,12 @@ describe('AuthPanel', () => {
     expect(screen.queryByLabelText('账户连接地址')).not.toBeInTheDocument()
   })
 
-  it('调试模式下允许编辑账户连接地址', () => {
-    useAppStore.setState({ debugModeEnabled: true })
+  it('调试模式下账户连接地址仍由测试环境固定提供', () => {
+    useAppStore.getState().setDebugModeEnabled(true)
 
     render(<AuthPanel />)
 
-    const input = screen.getByLabelText('账户连接地址')
-    expect(input).toHaveValue('http://127.0.0.1:8080')
-
-    fireEvent.change(input, { target: { value: 'http://127.0.0.1:18080' } })
+    expect(screen.queryByLabelText('账户连接地址')).not.toBeInTheDocument()
     expect(useAppStore.getState().adminApiBaseUrl).toBe('http://127.0.0.1:18080')
   })
 
@@ -244,7 +241,7 @@ describe('AuthPanel', () => {
     await waitFor(() => {
       expect(useAppStore.getState().authToken).toBe('mbs_register_token')
     })
-    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://127.0.0.1:8080/v1/auth/email/send-code')
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://memorybread.work/v1/auth/email/send-code')
     const request = fetchMock.mock.calls[1]?.[1] as RequestInit
     expect(JSON.parse(String(request.body))).toEqual({
       email: 'xiaomai@memorybread.local',
@@ -290,7 +287,7 @@ describe('AuthPanel', () => {
       expect(useAppStore.getState().authToken).toBe('mbs_test_token')
     })
     expect(useAppStore.getState().accountType).toBe('platform_admin')
-    expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:8080/v1/auth/login', expect.any(Object))
+    expect(fetchMock).toHaveBeenCalledWith('https://memorybread.work/v1/auth/login', expect.any(Object))
   })
 
   it('账户服务不可达时显示可操作的错误提示', async () => {
@@ -427,7 +424,7 @@ describe('AuthPanel', () => {
     expect(screen.getByRole('heading', { name: '小麦' })).toBeInTheDocument()
     expect(useAppStore.getState().currentUser?.nickname).toBe('小麦')
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:8080/v1/auth/profile',
+      'https://memorybread.work/v1/auth/profile',
       expect.objectContaining({ method: 'PUT' }),
     )
 
@@ -438,7 +435,7 @@ describe('AuthPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: '佩戴到头像' }))
     expect(await screen.findByText('已将「代码精英」佩戴到个人头像。')).toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:8080/v1/achievements/equipped',
+      'https://memorybread.work/v1/achievements/equipped',
       expect.objectContaining({ method: 'PUT' }),
     )
 

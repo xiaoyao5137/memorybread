@@ -194,6 +194,7 @@ export interface AppState {
   accountType: AccountType
   serviceEnvironment: ServiceEnvironment
   debugModeEnabled: boolean
+  /** Legacy read-only flag kept false for state compatibility. */
   localDebugModeEnabled: boolean
   authToken: string | null
   authExpiresAt: string | null
@@ -262,8 +263,6 @@ export interface AppState {
   confirmAction:         () => void
   cancelAction:          () => void
   setApiBaseUrl:         (url: string) => void
-  setAdminApiBaseUrl:    (url: string) => void
-  setGatewayApiBaseUrl:  (url: string) => void
   setSidecarVersion:     (v: string) => void
   setAccountType:        (type: AccountType) => void
   setAuthSession:        (session: AuthSession) => void
@@ -272,7 +271,6 @@ export interface AppState {
   setCloudSubscription:  (subscription: CloudSubscription | null) => void
   setServiceEnvironment: (environment: ServiceEnvironment) => void
   setDebugModeEnabled: (enabled: boolean) => void
-  setLocalDebugModeEnabled: (enabled: boolean) => void
   setHasCompletedSetup:  (v: boolean) => void
   setSetupSkipped:       (v: boolean) => void
   setCreationModelConfigs: (configs: CreationModelConfig[]) => void
@@ -286,11 +284,8 @@ const SETUP_KEY = 'memory-bread_initialization_v2_done'
 const SKIP_KEY  = 'memory-bread_setup_skipped'
 export const AUTH_SESSION_KEY = 'memory-bread_auth_session'
 export const ACCOUNT_TYPE_KEY = 'memory-bread_account_type'
-export const ADMIN_API_BASE_URL_KEY = 'memory-bread_admin_api_base_url'
-export const GATEWAY_API_BASE_URL_KEY = 'memory-bread_gateway_api_base_url'
 export const SERVICE_ENVIRONMENT_KEY = 'memory-bread_service_env'
 export const DEBUG_MODE_KEY = 'memory-bread_debug_mode_enabled'
-export const LOCAL_DEBUG_MODE_KEY = 'memory-bread_local_debug_mode_enabled'
 export const CREATION_MODEL_KEY = 'memory-bread_creation_models'
 export const CREATION_MODEL_PREFERENCE_KEY = 'creation.models'
 
@@ -298,15 +293,6 @@ const AUTH_SESSION_KEYS: Record<ServiceEnvironment, string> = {
   production: `${AUTH_SESSION_KEY}:production`,
   staging: `${AUTH_SESSION_KEY}:staging`,
 }
-const ADMIN_API_BASE_URL_KEYS: Record<ServiceEnvironment, string> = {
-  production: `${ADMIN_API_BASE_URL_KEY}:production`,
-  staging: `${ADMIN_API_BASE_URL_KEY}:staging`,
-}
-const GATEWAY_API_BASE_URL_KEYS: Record<ServiceEnvironment, string> = {
-  production: `${GATEWAY_API_BASE_URL_KEY}:production`,
-  staging: `${GATEWAY_API_BASE_URL_KEY}:staging`,
-}
-
 const safeLocalStorage = typeof window !== 'undefined' && typeof window.localStorage?.getItem === 'function'
   ? window.localStorage
   : null
@@ -315,17 +301,14 @@ const DEFAULT_CREATION_MODELS: CreationModelConfig[] = [
   { id: 'mbcd-plus-v1', enabled: false, apiKey: '' },
   { id: 'mbcd-std-v1',  enabled: true,  apiKey: '' },
 ]
-const LOCAL_ADMIN_API_BASE_URLS: Record<ServiceEnvironment, string> = {
-  production: 'http://127.0.0.1:8080',
+const DEFAULT_ADMIN_API_BASE_URLS: Record<ServiceEnvironment, string> = {
+  production: 'https://memorybread.work',
   staging: 'http://127.0.0.1:18080',
 }
-const LOCAL_GATEWAY_API_BASE_URLS: Record<ServiceEnvironment, string> = {
-  production: 'http://127.0.0.1:8090',
+const DEFAULT_GATEWAY_API_BASE_URLS: Record<ServiceEnvironment, string> = {
+  production: 'https://gateway.memorybread.work',
   staging: 'http://127.0.0.1:18090',
 }
-
-const normalizeServiceEnvironment = (value?: string | null): ServiceEnvironment =>
-  value === 'staging' ? 'staging' : 'production'
 
 const normalizeAccountType = (value?: string | null): AccountType =>
   value === 'platform_admin' || value === 'admin' ? 'platform_admin' : 'user'
@@ -342,56 +325,12 @@ const getBuildAccountType = (): string | null => {
   return getBuildEnvValue('VITE_MEMORYBREAD_ACCOUNT_TYPE')
 }
 
-const getBuildAdminApiBaseUrl = (environment: ServiceEnvironment): string | null => {
-  if (environment === 'staging') {
-    return getBuildEnvValue('VITE_MEMORYBREAD_STAGING_ADMIN_API_BASE_URL')
-  }
-  return getBuildEnvValue('VITE_MEMORYBREAD_PRODUCTION_ADMIN_API_BASE_URL')
-    || getBuildEnvValue('VITE_MEMORYBREAD_ADMIN_API_BASE_URL')
-}
-
-const getBuildGatewayApiBaseUrl = (environment: ServiceEnvironment): string | null => {
-  if (environment === 'staging') {
-    return getBuildEnvValue('VITE_MEMORYBREAD_STAGING_GATEWAY_API_BASE_URL')
-  }
-  return getBuildEnvValue('VITE_MEMORYBREAD_PRODUCTION_GATEWAY_API_BASE_URL')
-    || getBuildEnvValue('VITE_MEMORYBREAD_GATEWAY_API_BASE_URL')
-}
-
-const storedEndpoint = (
-  environment: ServiceEnvironment,
-  keys: Record<ServiceEnvironment, string>,
-  legacyKey: string,
-): string | null => {
-  return safeLocalStorage?.getItem(keys[environment])
-    || (environment === 'production' ? safeLocalStorage?.getItem(legacyKey) : null)
-    || null
-}
-
 const serviceEndpoints = (
   environment: ServiceEnvironment,
-  localDebugModeEnabled: boolean,
-  allowStoredOverrides: boolean,
-): { adminApiBaseUrl: string; gatewayApiBaseUrl: string } => {
-  if (localDebugModeEnabled) {
-    return {
-      adminApiBaseUrl: LOCAL_ADMIN_API_BASE_URLS[environment],
-      gatewayApiBaseUrl: LOCAL_GATEWAY_API_BASE_URLS[environment],
-    }
-  }
-  return {
-    adminApiBaseUrl: (allowStoredOverrides
-      ? storedEndpoint(environment, ADMIN_API_BASE_URL_KEYS, ADMIN_API_BASE_URL_KEY)
-      : null)
-      || getBuildAdminApiBaseUrl(environment)
-      || LOCAL_ADMIN_API_BASE_URLS[environment],
-    gatewayApiBaseUrl: (allowStoredOverrides
-      ? storedEndpoint(environment, GATEWAY_API_BASE_URL_KEYS, GATEWAY_API_BASE_URL_KEY)
-      : null)
-      || getBuildGatewayApiBaseUrl(environment)
-      || LOCAL_GATEWAY_API_BASE_URLS[environment],
-  }
-}
+): { adminApiBaseUrl: string; gatewayApiBaseUrl: string } => ({
+  adminApiBaseUrl: DEFAULT_ADMIN_API_BASE_URLS[environment],
+  gatewayApiBaseUrl: DEFAULT_GATEWAY_API_BASE_URLS[environment],
+})
 
 const isTruthyEnvValue = (value?: string | null): boolean =>
   ['1', 'true', 'yes', 'on', 'debug'].includes(String(value ?? '').trim().toLowerCase())
@@ -483,14 +422,9 @@ const initialCreationDraft: CreationDraft = {
 const startupDebugModeEnabled = getStartupDebugModeEnabled()
 const initialDebugModeEnabled = startupDebugModeEnabled
 const initialServiceEnvironment: ServiceEnvironment = initialDebugModeEnabled
-  ? normalizeServiceEnvironment(safeLocalStorage?.getItem(SERVICE_ENVIRONMENT_KEY))
+  ? 'staging'
   : 'production'
-const initialLocalDebugModeEnabled = initialDebugModeEnabled && safeLocalStorage?.getItem(LOCAL_DEBUG_MODE_KEY) === 'true'
-const initialEndpoints = serviceEndpoints(
-  initialServiceEnvironment,
-  initialLocalDebugModeEnabled,
-  initialDebugModeEnabled,
-)
+const initialEndpoints = serviceEndpoints(initialServiceEnvironment)
 const initialSession = loadAuthSession(initialServiceEnvironment)
 
 const initialState = {
@@ -550,7 +484,7 @@ const initialState = {
   accountType:         normalizeAccountType(initialSession?.user.roles.includes('platform_admin') ? 'platform_admin' : safeLocalStorage?.getItem(ACCOUNT_TYPE_KEY) || getBuildAccountType()),
   serviceEnvironment:  initialServiceEnvironment,
   debugModeEnabled:    initialDebugModeEnabled,
-  localDebugModeEnabled: initialLocalDebugModeEnabled,
+  localDebugModeEnabled: false,
   authToken:           initialSession?.access_token ?? null,
   authExpiresAt:       initialSession?.expires_at ?? null,
   currentUser:         initialSession?.user ?? null,
@@ -704,18 +638,6 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setApiBaseUrl:     (url) => set({ apiBaseUrl: url }),
 
-  setAdminApiBaseUrl: (url) => set((state) => {
-    if (!state.debugModeEnabled) return {}
-    safeLocalStorage?.setItem(ADMIN_API_BASE_URL_KEYS[state.serviceEnvironment], url)
-    return { adminApiBaseUrl: url }
-  }),
-
-  setGatewayApiBaseUrl: (url) => set((state) => {
-    if (!state.debugModeEnabled) return {}
-    safeLocalStorage?.setItem(GATEWAY_API_BASE_URL_KEYS[state.serviceEnvironment], url)
-    return { gatewayApiBaseUrl: url }
-  }),
-
   setSidecarVersion: (v) => set({ sidecarVersion: v }),
 
   setAccountType: (type) => {
@@ -760,11 +682,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const nextEnvironment: ServiceEnvironment = state.debugModeEnabled
       ? environment
       : 'production'
-    const endpoints = serviceEndpoints(
-      nextEnvironment,
-      state.debugModeEnabled && state.localDebugModeEnabled,
-      state.debugModeEnabled,
-    )
+    const endpoints = serviceEndpoints(nextEnvironment)
     const session = loadAuthSession(nextEnvironment)
     const accountType = normalizeAccountType(
       session?.user.roles.includes('platform_admin') ? 'platform_admin' : 'user',
@@ -773,6 +691,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     safeLocalStorage?.setItem(ACCOUNT_TYPE_KEY, accountType)
     return {
       serviceEnvironment: nextEnvironment,
+      localDebugModeEnabled: false,
       ...endpoints,
       authToken: session?.access_token ?? null,
       authExpiresAt: session?.expires_at ?? null,
@@ -785,22 +704,18 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setDebugModeEnabled: (enabled) => {
     safeLocalStorage?.setItem(DEBUG_MODE_KEY, String(enabled))
-    if (enabled) {
-      set({ debugModeEnabled: true })
-      return
-    }
-    safeLocalStorage?.setItem(LOCAL_DEBUG_MODE_KEY, 'false')
-    safeLocalStorage?.setItem(SERVICE_ENVIRONMENT_KEY, 'production')
-    const endpoints = serviceEndpoints('production', false, false)
-    const session = loadAuthSession('production')
+    const environment: ServiceEnvironment = enabled ? 'staging' : 'production'
+    safeLocalStorage?.setItem(SERVICE_ENVIRONMENT_KEY, environment)
+    const endpoints = serviceEndpoints(environment)
+    const session = loadAuthSession(environment)
     const accountType = normalizeAccountType(
       session?.user.roles.includes('platform_admin') ? 'platform_admin' : 'user',
     )
     safeLocalStorage?.setItem(ACCOUNT_TYPE_KEY, accountType)
     set({
-      debugModeEnabled: false,
+      debugModeEnabled: enabled,
       localDebugModeEnabled: false,
-      serviceEnvironment: 'production',
+      serviceEnvironment: environment,
       ...endpoints,
       authToken: session?.access_token ?? null,
       authExpiresAt: session?.expires_at ?? null,
@@ -808,18 +723,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       cloudBalance: null,
       cloudSubscription: null,
       accountType,
-    })
-  },
-
-  setLocalDebugModeEnabled: (enabled) => {
-    set((state) => {
-      const next = enabled && state.debugModeEnabled
-      safeLocalStorage?.setItem(LOCAL_DEBUG_MODE_KEY, String(next))
-      return {
-        localDebugModeEnabled: next,
-        ...(next ? { apiBaseUrl: 'http://127.0.0.1:7070' } : {}),
-        ...serviceEndpoints(state.serviceEnvironment, next, true),
-      }
     })
   },
 

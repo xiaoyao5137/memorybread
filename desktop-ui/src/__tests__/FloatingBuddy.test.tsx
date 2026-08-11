@@ -66,7 +66,9 @@ describe('FloatingBuddy', () => {
 
     expect(screen.queryByLabelText('服务环境切换')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('选择服务环境')).not.toBeInTheDocument()
-    expect(useAppStore.getState().serviceEnvironment).toBe('production')
+    expect(useAppStore.getState().serviceEnvironment).toBe('staging')
+    expect(useAppStore.getState().adminApiBaseUrl).toBe('http://127.0.0.1:18080')
+    expect(useAppStore.getState().gatewayApiBaseUrl).toBe('http://127.0.0.1:18090')
   })
 
   it('账号入口显示用户名和中文运行模式', () => {
