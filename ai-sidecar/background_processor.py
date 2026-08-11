@@ -39,6 +39,10 @@ _DATA_SOURCE_DISCOVERED_ENDPOINT = "/api/data/sources/discovered"
 _INFERENCE_QUEUE_STATUS_ENDPOINT = "/api/inference/queue-status"
 _CHARGING_CATCHUP_MAX_BATCH_SIZE = 100
 _CHARGING_CATCHUP_SLEEP_SECS = 1
+# 单模型槽下，P1 时间线提炼会在当前 P2 bake 候选结束后抢占模型。大积压时允许
+# bake 连续跑几个批次，再给 capture 一轮，既提高排空速度，也避免 capture 饥饿。
+_BAKE_BACKLOG_BURST_THRESHOLD = 100
+_BAKE_BACKLOG_MAX_CONSECUTIVE_RUNS = 3
 _SUBSTANTIVE_DOCUMENT_MIN_CHARS = 200
 _ARTIFACT_VECTOR_CHECK_INTERVAL_SECS = 5 * 60
 _VECTOR_CONSISTENCY_AUDIT_INTERVAL_SECS = 24 * 60 * 60
@@ -212,6 +216,7 @@ class BackgroundProcessor:
         self._run_lock = asyncio.Lock()
         self._last_energy_mode: Optional[str] = None
         self._last_data_extraction_at: float = 0.0
+        self._consecutive_backlog_bake_runs = 0
 
         # 懒加载 workers
         self._embed_worker = None
@@ -670,6 +675,7 @@ class BackgroundProcessor:
             return {
                 "triggered": False,
                 "reason": "run_in_progress",
+                "actionable_count": int(queue_status.get("actionable_count") or 0),
             }
         if not await asyncio.to_thread(self._all_inference_queues_idle):
             return {
@@ -721,6 +727,7 @@ class BackgroundProcessor:
             }
 
         result = await asyncio.to_thread(_send)
+        result["actionable_count"] = int(queue_status.get("actionable_count") or 0)
         if result.get("triggered"):
             logger.info(
                 "统一 bake pipeline 已触发: run_id=%s status=%s auto=%s candidate=%s discarded=%s",
@@ -2820,7 +2827,7 @@ class BackgroundProcessor:
         *,
         now: Optional[float] = None,
     ) -> tuple[float, bool]:
-        """尝试触发 bake，返回（下次检查时间，是否已触发）。
+        """尝试触发 bake，返回（下次检查时间，本轮是否应让出 capture 槽位）。
 
         这个检查既要放在 capture 批处理前，也要保留在批处理后。
         充电追赶模式一批最多会提炼 100 条 capture；若只在批末检查，
@@ -2838,7 +2845,36 @@ class BackgroundProcessor:
             profile.bake_interval_secs,
             int(bake_result.get("retry_after_ms") or 0) / 1000.0,
         )
-        return check_ts + retry_after_secs, bool(bake_result.get("triggered"))
+        triggered = bool(bake_result.get("triggered"))
+        reason = bake_result.get("reason")
+        actionable_count = int(bake_result.get("actionable_count") or 0)
+        backlog_burst = (
+            profile.mode in {"charging", "unrestricted"}
+            and actionable_count >= _BAKE_BACKLOG_BURST_THRESHOLD
+        )
+
+        if triggered:
+            if backlog_burst:
+                self._consecutive_backlog_bake_runs += 1
+            else:
+                self._consecutive_backlog_bake_runs = 0
+
+        # accepted 之后必须让出本轮；run_in_progress 时，只有大积压且尚未达到
+        # burst 上限才继续让出。达到上限后允许一轮 capture 排队，随后计数归零。
+        hold_capture = triggered
+        if (
+            triggered
+            and backlog_burst
+            and self._consecutive_backlog_bake_runs
+            >= _BAKE_BACKLOG_MAX_CONSECUTIVE_RUNS
+        ):
+            hold_capture = False
+        if reason == "run_in_progress" and backlog_burst:
+            hold_capture = (
+                self._consecutive_backlog_bake_runs
+                < _BAKE_BACKLOG_MAX_CONSECUTIVE_RUNS
+            )
+        return check_ts + retry_after_secs, hold_capture
 
     def _enforce_runtime_guard(self, reason: str) -> None:
         """巡检托管推理运行时，保证全局最多 1 个 llama-server（孤儿一律回收）。"""
@@ -2941,21 +2977,31 @@ class BackgroundProcessor:
                 # capture 追赶批次，避免两条后台流水线互相饥饿。
                 (
                     _next_periodic_bake_check_ts,
-                    preflight_bake_triggered,
+                    preflight_bake_holds_capture,
                 ) = await self._run_periodic_bake_check(
                     profile, _next_periodic_bake_check_ts
                 )
-                if preflight_bake_triggered:
+                if preflight_bake_holds_capture:
                     # Core 是异步 accepted：此时 P2 请求可能尚未拿到跨进程
                     # 单模型槽。本轮若立即提交 P1 capture，会在优先级上
                     # 反超 bake，造成“触发成功但水位仍不推进”。
                     logger.info(
-                        "周期性 bake 已接受，本轮让出 capture 批处理的模型槽"
+                        "周期性 bake 已接受或仍在运行，本轮让出 capture 批处理的模型槽"
                     )
                     await asyncio.sleep(
                         min(sleep_secs, max(1, profile.bake_interval_secs))
                     )
                     continue
+
+                if (
+                    self._consecutive_backlog_bake_runs
+                    >= _BAKE_BACKLOG_MAX_CONSECUTIVE_RUNS
+                ):
+                    logger.info(
+                        "大积压 bake burst 已连续运行 %s 批，本轮恢复 capture 公平配额",
+                        self._consecutive_backlog_bake_runs,
+                    )
+                    self._consecutive_backlog_bake_runs = 0
 
                 maximum_throughput = profile.mode in {"charging", "unrestricted"}
                 pending_before = await asyncio.to_thread(self._count_unprocessed_captures)

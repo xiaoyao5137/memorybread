@@ -742,6 +742,7 @@ def test_trigger_unified_bake_pipeline_posts_to_core(tmp_path, monkeypatch) -> N
         "candidate_count": 1,
         "discarded_count": 0,
         "reason": None,
+        "actionable_count": 2,
     }
 
 
@@ -959,6 +960,46 @@ def test_periodic_bake_check_runs_before_long_capture_batch(tmp_path, monkeypatc
     asyncio.run(processor.run())
 
     assert events == [("bake", 10, 1)]
+
+
+def test_large_bake_backlog_runs_bounded_burst_before_capture_turn(
+    tmp_path, monkeypatch
+) -> None:
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    profile = type(
+        "_Profile",
+        (),
+        {
+            "mode": "charging",
+            "bake_interval_secs": 30,
+            "bake_limit": 10,
+            "bake_concurrency": 1,
+        },
+    )()
+    results = iter([
+        {"triggered": True, "actionable_count": 374},
+        {"triggered": False, "reason": "run_in_progress", "actionable_count": 374},
+        {"triggered": True, "actionable_count": 364},
+        {"triggered": False, "reason": "run_in_progress", "actionable_count": 364},
+        {"triggered": True, "actionable_count": 354},
+    ])
+
+    async def _fake_periodic_bake(*, limit, max_concurrency):
+        return next(results)
+
+    monkeypatch.setattr(processor, "_maybe_trigger_periodic_bake", _fake_periodic_bake)
+
+    holds = []
+    for now in range(5):
+        _, hold = asyncio.run(
+            processor._run_periodic_bake_check(profile, 0.0, now=float(now))
+        )
+        holds.append(hold)
+
+    assert holds == [True, True, True, True, False]
+    assert processor._consecutive_backlog_bake_runs == 3
 
 
 def test_trigger_unified_bake_pipeline_skips_core_backoff_before_model_queue(

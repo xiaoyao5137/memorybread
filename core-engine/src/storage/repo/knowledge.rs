@@ -2874,6 +2874,30 @@ mod tests {
     }
 
     #[test]
+    fn test_dead_letter_is_not_reported_as_waiting_queue() {
+        let mgr = make_mgr();
+        let timeline_id = mgr
+            .insert_timeline_entry(&sample_entry(&mgr, "meeting"))
+            .unwrap();
+        mgr.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO bake_retry_state (
+                    timeline_id, failure_count, last_error, last_failed_at_ms,
+                    last_error_code, next_retry_at_ms
+                 ) VALUES (?1, 3, 'invalid output', 1, 'BAKE_OUTPUT_INVALID', 0)",
+                params![timeline_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let queue = mgr.get_bake_queue_status(3).unwrap();
+        assert_eq!(queue.dead_letter_count, 1);
+        assert_eq!(queue.pending_count, 0);
+        assert_eq!(queue.actionable_count, 0);
+    }
+
+    #[test]
     fn test_document_identity_ignores_fragment() {
         assert_eq!(
             canonical_document_identity(

@@ -663,10 +663,11 @@ impl StorageManager {
                         retry_upstream_count: row.get(8)?,
                         retry_other_count: row.get(9)?,
                         actionable_count: fresh_count.saturating_add(retry_ready_count),
+                        // 等待队列只统计仍会被调度的候选。已耗尽重试的终态失败
+                        // 单独通过 dead_letter_count 告警，不能让“等待”永远清不零。
                         pending_count: fresh_count
                             .saturating_add(retry_ready_count)
-                            .saturating_add(retry_delayed_count)
-                            .saturating_add(dead_letter_count),
+                            .saturating_add(retry_delayed_count),
                         oldest_fresh_at_ms: row.get(10)?,
                         oldest_retry_at_ms: row.get(11)?,
                         oldest_actionable_at_ms: row.get(12)?,

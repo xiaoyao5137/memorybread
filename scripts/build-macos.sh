@@ -164,6 +164,9 @@ prepare_python_helper() {
     echo "[macOS build] 复用已有 PyInstaller 产物（仅用于本地重试）..."
   else
     echo "[macOS build] 冻结 Python AI sidecar（${TARGET}）..."
+    # macOS 自带 Bash 3.2 在 `set -u` 下展开空数组会报 unbound variable。
+    # 本机 ad-hoc DMG 没有 signing_args，参数展开期间临时关闭 nounset。
+    set +u
     "$python_bin" -m PyInstaller \
       --noconfirm \
       --clean \
@@ -183,6 +186,7 @@ prepare_python_helper() {
       "${signing_args[@]}" \
       "${hidden_args[@]}" \
       "$SIDECAR_DIR/packaged_entry.py"
+    set -u
   fi
 
   [ -d "$frozen_app" ] || fail "PyInstaller 未生成 memory-bread-ai.app"

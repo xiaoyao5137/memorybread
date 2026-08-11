@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "suite": {
+    "id": "SUITE-MB-MANUAL-001",
+    "name": "记忆面包官网使用手册",
+    "owner": "MemoryBread",
+    "last_updated": "2026-08-11",
+    "update_trigger": "客户端导航、用户可见功能、官网公开口径、隐私边界或安装流程发生变化"
+  },
+  "sources": [
+    { "id": "S1", "path": "../../../PROJECT_CONTEXT.md", "as_of": "2026-08-11", "status": "confirmed" },
+    { "id": "S2", "path": "../../README.md", "as_of": "2026-08-11", "status": "confirmed" },
+    { "id": "S3", "path": "../../../mb-admin/apps/web/app/page.tsx", "as_of": "2026-08-11", "status": "confirmed" },
+    { "id": "S4", "path": "../../../mb-admin/apps/web/public/show", "as_of": "2026-08-10", "status": "confirmed" },
+    { "id": "S5", "path": "../../desktop-ui/src/components", "as_of": "2026-08-11", "status": "confirmed" },
+    { "id": "S6", "url": "https://my.feishu.cn/wiki/Fqlrw0OwTiy3LOkLPpxcaeCOnBe", "as_of": "2026-08-11", "status": "confirmed" }
+  ],
+  "terms": [
+    { "id": "TERM-001", "preferred": "记忆面包", "forbidden": ["Memory Bread"], "applies_to": ["DOC-001", "DOC-002", "DOC-003", "DOC-004", "DOC-005", "DOC-006", "DOC-007", "DOC-008", "DOC-009", "DOC-010", "DOC-011", "DOC-012", "DOC-013"] },
+    { "id": "TERM-002", "preferred": "本地优先", "forbidden": ["绝不上云", "完全离线"], "applies_to": ["DOC-001", "DOC-002", "DOC-004", "DOC-006", "DOC-007", "DOC-011", "DOC-012"] },
+    { "id": "TERM-003", "preferred": "Skill", "forbidden": ["插件脚本"], "applies_to": ["DOC-003", "DOC-007", "DOC-011"] }
+  ],
+  "facts": [
+    { "id": "FACT-001", "value": "0.1.2", "renderings": ["v0.1.2"], "status": "confirmed", "as_of": "2026-08-11", "source_ids": ["S2", "S5"], "applies_to": ["DOC-001", "DOC-013"] },
+    { "id": "FACT-002", "value": "macOS Apple Silicon and Intel", "renderings": ["macOS Apple Silicon 与 Intel"], "status": "confirmed", "as_of": "2026-08-11", "source_ids": ["S3"], "applies_to": ["DOC-002"] },
+    { "id": "FACT-003", "value": "采集、提炼、检索与创作默认在本机完成", "renderings": ["默认在本机完成"], "status": "confirmed", "as_of": "2026-08-11", "source_ids": ["S1", "S3", "S5"], "applies_to": ["DOC-001", "DOC-004", "DOC-006", "DOC-007"] },
+    { "id": "FACT-004", "value": "云端记忆包在客户端加密后上传，每个账号默认 50MB", "renderings": ["客户端加密", "默认 50MB"], "status": "confirmed", "as_of": "2026-08-11", "source_ids": ["S1", "S5"], "applies_to": ["DOC-012"] },
+    { "id": "FACT-005", "value": "消息渠道和 Webhook 地址只保存在当前设备", "renderings": ["只保存在本机"], "status": "confirmed", "as_of": "2026-08-11", "source_ids": ["S5"], "applies_to": ["DOC-008"] },
+    { "id": "FACT-006", "value": "敏感规则命中的内容直接丢弃，只保留拦截计数", "renderings": ["直接丢弃", "只统计条数"], "status": "confirmed", "as_of": "2026-08-11", "source_ids": ["S3", "S5"], "applies_to": ["DOC-001", "DOC-004"] }
+  ],
+  "decisions": [
+    { "id": "DEC-001", "statement": "公开文档使用精确的本地优先边界，不使用绝对不上云表述", "status": "approved", "owner": "MemoryBread", "decided_on": "2026-08-11", "applies_to": ["DOC-001", "DOC-002", "DOC-004", "DOC-012"] },
+    { "id": "DEC-002", "statement": "沿用飞书现有 13 篇目录，不新增并列文档", "status": "approved", "owner": "MemoryBread", "decided_on": "2026-08-11", "applies_to": ["DOC-001", "DOC-002", "DOC-003", "DOC-004", "DOC-005", "DOC-006", "DOC-007", "DOC-008", "DOC-009", "DOC-010", "DOC-011", "DOC-012", "DOC-013"] }
+  ],
+  "documents": [
+    { "id": "DOC-001", "path": "01-什么是记忆面包.md", "audience": "首次了解产品的用户", "job": "判断产品是否适合自己并理解数据边界", "access": "Public", "status": "draft", "required_fact_ids": ["FACT-001", "FACT-003", "FACT-006"], "required_term_ids": ["TERM-001", "TERM-002"], "derived_from": ["FACT-001", "FACT-003", "FACT-006", "DEC-001", "DEC-002"] },
+    { "id": "DOC-002", "path": "02-一、快速开始.md", "audience": "首次安装用户", "job": "完成安装、授权、初始化和第一次召回", "access": "Public", "status": "draft", "required_fact_ids": ["FACT-002"], "required_term_ids": ["TERM-001", "TERM-002"], "derived_from": ["FACT-002", "DEC-001", "DEC-002"] },
+    { "id": "DOC-003", "path": "03-二、基础功能.md", "audience": "新用户", "job": "选择正确的功能入口", "access": "Public", "status": "draft", "required_fact_ids": [], "required_term_ids": ["TERM-001", "TERM-003"], "derived_from": ["DEC-002"] },
+    { "id": "DOC-004", "path": "04-采集.md", "audience": "需要记录和找回工作现场的用户", "job": "安全地使用采集并管理记录", "access": "Public", "status": "draft", "required_fact_ids": ["FACT-003", "FACT-006"], "required_term_ids": ["TERM-001", "TERM-002"], "derived_from": ["FACT-003", "FACT-006", "DEC-001", "DEC-002"] },
+    { "id": "DOC-005", "path": "05-记忆.md", "audience": "需要整理长期知识资产的用户", "job": "理解并使用提炼后的记忆资产", "access": "Public", "status": "draft", "required_fact_ids": [], "required_term_ids": ["TERM-001"], "derived_from": ["DEC-002"] },
+    { "id": "DOC-006", "path": "06-咨询.md", "audience": "需要从历史工作中找答案的用户", "job": "提出可召回的问题并核对来源", "access": "Public", "status": "draft", "required_fact_ids": ["FACT-003"], "required_term_ids": ["TERM-001", "TERM-002"], "derived_from": ["FACT-003", "DEC-002"] },
+    { "id": "DOC-007", "path": "07-创作.md", "audience": "需要生成工作文档的用户", "job": "基于真实背景完成并复核文档", "access": "Public", "status": "draft", "required_fact_ids": ["FACT-003"], "required_term_ids": ["TERM-001", "TERM-002", "TERM-003"], "derived_from": ["FACT-003", "DEC-002"] },
+    { "id": "DOC-008", "path": "08-任务.md", "audience": "需要周期性自动化的用户", "job": "创建、运行和检查任务", "access": "Public", "status": "draft", "required_fact_ids": ["FACT-005"], "required_term_ids": ["TERM-001"], "derived_from": ["FACT-005", "DEC-002"] },
+    { "id": "DOC-009", "path": "09-日记.md", "audience": "需要复盘工作产出的用户", "job": "查看和编辑日记、周记与月记", "access": "Public", "status": "draft", "required_fact_ids": [], "required_term_ids": ["TERM-001"], "derived_from": ["DEC-002"] },
+    { "id": "DOC-010", "path": "10-三、进阶功能.md", "audience": "已完成基础使用的用户", "job": "选择集成或备份路径", "access": "Public", "status": "draft", "required_fact_ids": [], "required_term_ids": ["TERM-001"], "derived_from": ["DEC-002"] },
+    { "id": "DOC-011", "path": "11-外部集成.md", "audience": "需要连接知识库和编码 Agent 的用户", "job": "通过可检查的 Skill 导入或输出记忆", "access": "Public", "status": "draft", "required_fact_ids": [], "required_term_ids": ["TERM-001", "TERM-002", "TERM-003"], "derived_from": ["DEC-002"] },
+    { "id": "DOC-012", "path": "12-数据备份与恢复.md", "audience": "需要迁移或保护记忆资产的用户", "job": "完成本机或云端备份与恢复", "access": "Public", "status": "draft", "required_fact_ids": ["FACT-004"], "required_term_ids": ["TERM-001", "TERM-002"], "derived_from": ["FACT-004", "DEC-001", "DEC-002"] },
+    { "id": "DOC-013", "path": "13-四、联系我们.md", "audience": "需要帮助或反馈问题的用户", "job": "选择合适反馈渠道并提供安全信息", "access": "Public", "status": "draft", "required_fact_ids": ["FACT-001"], "required_term_ids": ["TERM-001"], "derived_from": ["FACT-001", "DEC-002"] }
+  ]
+}
