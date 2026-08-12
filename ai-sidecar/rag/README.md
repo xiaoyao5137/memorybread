@@ -50,11 +50,12 @@
 ### 启动服务
 
 ```bash
-# 方式 1: 使用启动脚本
-./start_rag_service.sh
+# 方式 1: 从仓库根目录启动完整开发环境（推荐）
+./start.sh start
 
-# 方式 2: 直接运行
-python rag_api_server.py
+# 方式 2: 在 ai-sidecar 目录单独启动统一 Model API / RAG API
+source .venv/bin/activate
+python3 model_api_server.py
 ```
 
 ### HTTP API
