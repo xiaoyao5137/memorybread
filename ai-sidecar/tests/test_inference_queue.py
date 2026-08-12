@@ -1,7 +1,7 @@
 """inference_queue 的功能测试。"""
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from types import SimpleNamespace
 from unittest import mock
 
@@ -93,7 +93,7 @@ def test_submit_sync_timeout_preempts_active_background_task(small_queue):
             raise_if_preempted()
             time.sleep(0.005)
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(FutureTimeoutError):
         small_queue.submit_sync(Priority.P2, background, timeout=0.05)
 
     assert started.wait(timeout=0.5)

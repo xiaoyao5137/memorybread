@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from typing import Optional
 
 import pytest
 
@@ -32,7 +33,7 @@ class MockEmbeddingBackend(EmbeddingBackend):
         self,
         dim:          int                = 4,
         available:    bool               = True,
-        should_raise: Exception | None   = None,
+        should_raise: Optional[Exception] = None,
     ) -> None:
         self._dim          = dim
         self._available    = available

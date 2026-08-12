@@ -4,6 +4,7 @@ import concurrent.futures
 import importlib
 import json
 import threading
+from typing import Optional
 
 import httpx
 import pytest
@@ -23,7 +24,7 @@ def parse_sse_events(response: httpx.Response) -> list[dict]:
 
 @pytest.mark.asyncio
 async def test_creation_generate_runs_in_interactive_p0_lane(monkeypatch):
-    calls: list[tuple[Priority, str | None]] = []
+    calls: list[tuple[Priority, Optional[str]]] = []
 
     async def fake_generate_document(**_kwargs):
         yield "创作"
@@ -70,7 +71,7 @@ async def test_creation_generate_runs_in_interactive_p0_lane(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_creation_agent_loop_runs_in_interactive_p0_lane(monkeypatch):
-    calls: list[tuple[Priority, str | None]] = []
+    calls: list[tuple[Priority, Optional[str]]] = []
 
     async def fake_agent_run(**_kwargs):
         yield {

@@ -13,6 +13,7 @@ import io
 import os
 import tempfile
 import uuid
+from typing import Optional
 
 import pytest
 
@@ -32,8 +33,8 @@ class MockOcrBackend(OcrBackend):
 
     def __init__(
         self,
-        output:       OcrOutput | None = None,
-        should_raise: Exception | None  = None,
+        output:       Optional[OcrOutput] = None,
+        should_raise: Optional[Exception] = None,
         available:    bool              = True,
     ) -> None:
         self._output       = output or OcrOutput(

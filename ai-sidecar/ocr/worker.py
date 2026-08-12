@@ -17,6 +17,7 @@ import asyncio
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 
 from memory_bread_ipc import IpcRequest, IpcResponse, OcrResult
 
@@ -41,7 +42,8 @@ class OcrWorker:
         self._privacy_filter = PrivacyFilter() if enable_privacy_filter else None
         # Vision/Paddle 都是同步且资源密集的实现。独立的单线程执行器提供硬并发上限，
         # Semaphore 则避免多个协程提前向执行器内部继续排队。
-        self._ocr_semaphore = asyncio.Semaphore(1)
+        self._ocr_semaphore: Optional[asyncio.Semaphore] = None
+        self._ocr_semaphore_loop: Optional[asyncio.AbstractEventLoop] = None
         self._executor = _OCR_EXECUTOR
 
     async def handle(self, req: IpcRequest) -> IpcResponse:
@@ -55,9 +57,13 @@ class OcrWorker:
         task = req.task  # OcrRequest
 
         try:
+            loop = asyncio.get_running_loop()
+            if self._ocr_semaphore is None or self._ocr_semaphore_loop is not loop:
+                self._ocr_semaphore = asyncio.Semaphore(1)
+                self._ocr_semaphore_loop = loop
+            ocr_semaphore = self._ocr_semaphore
             # OCR 全局串行执行，避免 Vision 在同一张图的超时重试下并发放大。
-            async with self._ocr_semaphore:
-                loop = asyncio.get_running_loop()
+            async with ocr_semaphore:
                 output = await loop.run_in_executor(
                     self._executor, self._engine.process, task.screenshot_path
                 )

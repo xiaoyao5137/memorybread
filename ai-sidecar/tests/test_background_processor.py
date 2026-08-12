@@ -2,6 +2,7 @@ import asyncio
 import json
 import sqlite3
 import time
+from typing import Optional
 
 from background_processor import (
     BackgroundProcessor,
@@ -332,7 +333,7 @@ class _SimilarExtractor:
         return self.similar_id
 
 
-def _seed_timeline(conn: sqlite3.Connection, doc_url: str | None) -> int:
+def _seed_timeline(conn: sqlite3.Connection, doc_url: Optional[str]) -> int:
     conn.execute(
         """
         INSERT INTO captures (id, ts, app_name, win_title, ocr_text, ax_text, timeline_id, url, webpage_title)

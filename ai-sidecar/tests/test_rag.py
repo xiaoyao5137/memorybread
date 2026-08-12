@@ -12,6 +12,7 @@ RAG 模块测试
 from __future__ import annotations
 
 import sqlite3
+from typing import Optional
 
 import pytest
 
@@ -35,7 +36,7 @@ from rag.reranker    import reciprocal_rank_fusion
 # ── Mock 工具 ─────────────────────────────────────────────────────────────────
 
 class MockEmbeddingBackend(EmbeddingBackend):
-    def __init__(self, dim: int = 4, should_raise: Exception | None = None) -> None:
+    def __init__(self, dim: int = 4, should_raise: Optional[Exception] = None) -> None:
         self._dim = dim
         self._should_raise = should_raise
 
@@ -62,7 +63,7 @@ class MockLlmBackend(LlmBackend):
         response: str = "模拟回答",
         available: bool = True,
         model_name: str = "mock-llm",
-        done_reason: str | None = None,
+        done_reason: Optional[str] = None,
     ) -> None:
         self._response  = response
         self._available = available
@@ -90,7 +91,7 @@ class MockLlmBackend(LlmBackend):
 
 class MockFts5Retriever:
     """鸭子类型 Fts5Retriever（无需 SQLite 连接）"""
-    def __init__(self, chunks: list[RetrievedChunk] | None = None) -> None:
+    def __init__(self, chunks: Optional[list[RetrievedChunk]] = None) -> None:
         self._chunks    = chunks or []
         self.call_count = 0
         self.last_kwargs: dict = {}
@@ -99,21 +100,21 @@ class MockFts5Retriever:
         self,
         query: str,
         top_k: int = 10,
-        start_ts: int | None = None,
-        end_ts: int | None = None,
-        entity_terms: list[str] | None = None,
-        observed_start_ts: int | None = None,
-        observed_end_ts: int | None = None,
-        event_start_ts: int | None = None,
-        event_end_ts: int | None = None,
-        activity_types: list[str] | None = None,
-        content_origins: list[str] | None = None,
-        history_view: bool | None = None,
-        is_self_generated: bool | None = None,
-        evidence_strengths: list[str] | None = None,
+        start_ts: Optional[int] = None,
+        end_ts: Optional[int] = None,
+        entity_terms: Optional[list[str]] = None,
+        observed_start_ts: Optional[int] = None,
+        observed_end_ts: Optional[int] = None,
+        event_start_ts: Optional[int] = None,
+        event_end_ts: Optional[int] = None,
+        activity_types: Optional[list[str]] = None,
+        content_origins: Optional[list[str]] = None,
+        history_view: Optional[bool] = None,
+        is_self_generated: Optional[bool] = None,
+        evidence_strengths: Optional[list[str]] = None,
         query_mode: str = "lookup",
-        created_start_ts: int | None = None,
-        created_end_ts: int | None = None,
+        created_start_ts: Optional[int] = None,
+        created_end_ts: Optional[int] = None,
     ) -> list[RetrievedChunk]:
         self.call_count += 1
         self.last_kwargs = {
@@ -142,7 +143,7 @@ class MockVectorRetriever:
     """鸭子类型 VectorRetriever（无需 Qdrant 连接）"""
     def __init__(
         self,
-        chunks:    list[RetrievedChunk] | None = None,
+        chunks:    Optional[list[RetrievedChunk]] = None,
         available: bool = True,
     ) -> None:
         self._chunks    = chunks or []
@@ -158,7 +159,7 @@ class MockVectorRetriever:
         query_vector: list[float],
         top_k: int = 10,
         score_threshold: float = 0.3,
-        filters: VectorSearchFilter | None = None,
+        filters: Optional[VectorSearchFilter] = None,
     ) -> list[RetrievedChunk]:
         self.call_count += 1
         self.last_kwargs = {
@@ -177,8 +178,8 @@ def _chunk(
     cid: int,
     score: float = 0.5,
     source: str = "fts5",
-    doc_key: str | None = None,
-    metadata: dict | None = None,
+    doc_key: Optional[str] = None,
+    metadata: Optional[dict] = None,
 ) -> RetrievedChunk:
     return RetrievedChunk(
         capture_id=cid,
@@ -191,11 +192,11 @@ def _chunk(
 
 
 def _make_pipeline(
-    fts_chunks: list[RetrievedChunk] | None = None,
-    knowledge_chunks: list[RetrievedChunk] | None = None,
-    vector_chunks: list[RetrievedChunk] | None = None,
+    fts_chunks: Optional[list[RetrievedChunk]] = None,
+    knowledge_chunks: Optional[list[RetrievedChunk]] = None,
+    vector_chunks: Optional[list[RetrievedChunk]] = None,
     llm_response: str = "测试回答",
-    embed_raise: Exception | None = None,
+    embed_raise: Optional[Exception] = None,
     top_k: int = 3,
 ) -> RagPipeline:
     return RagPipeline(

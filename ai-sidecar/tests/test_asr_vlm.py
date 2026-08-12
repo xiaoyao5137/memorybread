@@ -20,6 +20,7 @@ import os
 import tempfile
 import time
 import uuid
+from typing import Optional
 
 import pytest
 
@@ -41,8 +42,8 @@ class MockAsrBackend(AsrBackend):
 
     def __init__(
         self,
-        output:       AsrOutput | None = None,
-        should_raise: Exception | None = None,
+        output:       Optional[AsrOutput] = None,
+        should_raise: Optional[Exception] = None,
         available:    bool             = True,
     ) -> None:
         self._output       = output or AsrOutput(
@@ -59,7 +60,7 @@ class MockAsrBackend(AsrBackend):
     def is_available(self) -> bool:
         return self._available
 
-    def transcribe(self, audio_path: str, language: str | None = None) -> AsrOutput:
+    def transcribe(self, audio_path: str, language: Optional[str] = None) -> AsrOutput:
         self.call_count += 1
         if self._should_raise:
             raise self._should_raise
@@ -75,8 +76,8 @@ class MockVlmBackend(VlmBackend):
 
     def __init__(
         self,
-        output:       VlmOutput | None = None,
-        should_raise: Exception | None = None,
+        output:       Optional[VlmOutput] = None,
+        should_raise: Optional[Exception] = None,
         available:    bool             = True,
     ) -> None:
         self._output = output or VlmOutput(
@@ -102,7 +103,7 @@ class MockVlmBackend(VlmBackend):
         return "mock-vlm"
 
 
-def _make_asr_request(audio_path: str, language: str | None = None):
+def _make_asr_request(audio_path: str, language: Optional[str] = None):
     from memory_bread_ipc import IpcRequest
     from memory_bread_ipc.message import AsrRequest
     task = AsrRequest(capture_id=1, audio_path=audio_path, language=language)

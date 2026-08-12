@@ -225,7 +225,10 @@ class BackgroundProcessor:
         self.batch_size = batch_size
         self.energy_policy = energy_policy or EnergyPolicy(db_path)
         self.running = False
-        self._run_lock = asyncio.Lock()
+        # Python 3.9 会在 Lock 构造时绑定当前事件循环；HTTP 路由会先同步构造
+        # processor，再通过 asyncio.run() 执行，因此必须延迟到协程内创建。
+        self._run_lock: Optional[asyncio.Lock] = None
+        self._run_lock_loop: Optional[asyncio.AbstractEventLoop] = None
         self._last_energy_mode: Optional[str] = None
         self._last_data_extraction_at: float = 0.0
         self._consecutive_backlog_bake_runs = 0
@@ -1122,7 +1125,12 @@ class BackgroundProcessor:
         bake_limit: Optional[int] = None,
         bake_concurrency: int = 3,
     ) -> dict:
-        async with self._run_lock:
+        current_loop = asyncio.get_running_loop()
+        if self._run_lock is None or self._run_lock_loop is not current_loop:
+            self._run_lock = asyncio.Lock()
+            self._run_lock_loop = current_loop
+        run_lock = self._run_lock
+        async with run_lock:
             return await self._run_batch(
                 limit_override,
                 force_finalize_tail,

@@ -4,6 +4,7 @@ import json
 import os
 import time
 import urllib.request
+from typing import Optional
 
 import pytest
 
@@ -13,7 +14,7 @@ from initialization_manager import SANDBOX_COLD_INSTALL_STAGES
 SIDECAR = os.environ.get("MEMORY_BREAD_MODEL_API_URL", "http://127.0.0.1:7071")
 
 
-def _request(path: str, method: str = "GET", body: dict | None = None) -> dict:
+def _request(path: str, method: str = "GET", body: Optional[dict] = None) -> dict:
     payload = json.dumps(body).encode("utf-8") if body is not None else None
     request = urllib.request.Request(
         f"{SIDECAR}{path}",

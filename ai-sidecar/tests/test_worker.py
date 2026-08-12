@@ -15,6 +15,7 @@ import asyncio
 import threading
 import time
 import uuid
+from typing import Optional
 
 import pytest
 
@@ -30,7 +31,7 @@ from memory_bread_ipc     import IpcResponse, ResponseStatus
 def _make_engine_with(
     text:         str  = "识别文字",
     conf:         float = 0.9,
-    should_raise: Exception | None = None,
+    should_raise: Optional[Exception] = None,
     available:    bool = True,
 ) -> OcrEngine:
     mock = MockOcrBackend(

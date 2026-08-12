@@ -60,11 +60,31 @@ locate_app_bundle() {
 }
 
 locate_dmg() {
-  find "$TAURI_DIR/target" -path '*/release/bundle/dmg/*.dmg' -type f -print -quit
+  local bundle_dir
+  local candidate
+  for bundle_dir in \
+    "$TAURI_DIR/target/$TARGET/release/bundle/dmg" \
+    "$TAURI_DIR/target/release/bundle/dmg"; do
+    [ -d "$bundle_dir" ] || continue
+    candidate="$(find "$bundle_dir" -maxdepth 1 -type f -name "*_${APP_VERSION}_*.dmg" -print -quit)"
+    if [ -n "$candidate" ]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
 }
 
 locate_updater_bundle() {
-  find "$TAURI_DIR/target" -path '*/release/bundle/macos/*.app.tar.gz' -type f -print -quit
+  local candidate
+  for candidate in \
+    "$TAURI_DIR/target/$TARGET/release/bundle/macos/记忆面包.app.tar.gz" \
+    "$TAURI_DIR/target/release/bundle/macos/记忆面包.app.tar.gz"; do
+    if [ -f "$candidate" ]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  find "$TAURI_DIR/target/$TARGET" -path '*/release/bundle/macos/*.app.tar.gz' -type f -print -quit
 }
 
 apply_dmg_file_icon() {
@@ -94,8 +114,10 @@ apply_dmg_file_icon() {
 }
 
 prepare_python_helper() {
-  local python_bin="$SIDECAR_DIR/.venv/bin/python"
-  [ -x "$python_bin" ] || fail "缺少 ai-sidecar/.venv；请先按项目说明安装 Python 运行依赖"
+  local python_bin="${MEMORY_BREAD_PYTHON_BIN:-$SIDECAR_DIR/.venv/bin/python}"
+  [ -x "$python_bin" ] || fail "缺少 Python 发布环境: $python_bin"
+  "$python_bin" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 9) else 1)' \
+    || fail "macOS 发布构建必须使用 Python 3.9，当前为 $($python_bin --version 2>&1)"
 
   if ! "$python_bin" -c 'import PyInstaller' >/dev/null 2>&1; then
     echo "[macOS build] 安装隔离的 PyInstaller 构建依赖..."
@@ -115,6 +137,23 @@ prepare_python_helper() {
       ;;
     *) fail "Python sidecar 暂不支持目标: $TARGET" ;;
   esac
+
+  # Xcode 17 的 lipo 不再允许输入和输出使用同一路径，而 PyInstaller 6.21
+  # 会尝试原地裁剪 universal2 bootloader。发布环境按目标架构隔离，因此先在
+  # 虚拟环境里安全地裁成当前目标，避免 PyInstaller 在组装 EXE 时失败。
+  local pyinstaller_bootloader_dir
+  local pyinstaller_bootloader
+  local thinned_bootloader
+  pyinstaller_bootloader_dir="$($python_bin -c 'import os, PyInstaller; print(os.path.join(os.path.dirname(PyInstaller.__file__), "bootloader", "Darwin-64bit"))')"
+  for pyinstaller_bootloader in "$pyinstaller_bootloader_dir/run" "$pyinstaller_bootloader_dir/runw"; do
+    [ -f "$pyinstaller_bootloader" ] || continue
+    if [ "$(lipo -archs "$pyinstaller_bootloader")" = "x86_64 arm64" ]; then
+      thinned_bootloader="$(mktemp "${pyinstaller_bootloader}.${PYINSTALLER_ARCH}.XXXXXX")"
+      lipo -thin "$PYINSTALLER_ARCH" "$pyinstaller_bootloader" -output "$thinned_bootloader"
+      chmod +x "$thinned_bootloader"
+      mv "$thinned_bootloader" "$pyinstaller_bootloader"
+    fi
+  done
 
   local build_root="$PACKAGE_ROOT/pyinstaller/$TARGET"
   local dist_dir="$build_root/dist"
@@ -309,6 +348,7 @@ require_command SetFile
 export MEMORY_BREAD_BUILD_NUMBER="$(node -p "require('$TAURI_DIR/tauri.conf.json').bundle.macOS.bundleVersion")"
 [[ "$MEMORY_BREAD_BUILD_NUMBER" =~ ^[0-9]+$ ]] && [ "$MEMORY_BREAD_BUILD_NUMBER" -gt 0 ] \
   || fail "tauri.conf.json 的 bundleVersion 必须是大于 0 的整数"
+APP_VERSION="$(node -p "require('$TAURI_DIR/tauri.conf.json').version")"
 
 TARGET="${MEMORY_BREAD_MACOS_TARGET:-$(host_target)}"
 [ "$TARGET" = "$(host_target)" ] \
