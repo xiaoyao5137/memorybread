@@ -1,13 +1,13 @@
 <div align="center">
   <img src="./static/logo.png" alt="记忆面包 Logo" width="104" />
 
-# 记忆面包 MemoryBread
+# 记忆面包
 
 ### 目光所见，皆是未来答案
 
 本地优先的 AI 工作记忆助手：自动沉淀工作现场，在需要时找回背景、回答问题、生成文档并持续复用。
 
-[使用手册](https://my.feishu.cn/wiki/Fqlrw0OwTiy3LOkLPpxcaeCOnBe) · [GitHub](https://github.com/xiaoyao5137/MemoryBread) · [问题反馈](https://github.com/xiaoyao5137/MemoryBread/issues)
+[使用手册](https://my.feishu.cn/wiki/Fqlrw0OwTiy3LOkLPpxcaeCOnBe) · [官网](https://memorybread.cn/) · [问题反馈](https://github.com/xiaoyao5137/MemoryBread/issues)
 </div>
 
 ## 产品概览
@@ -18,6 +18,26 @@
 2. **沉淀长期记忆**：将零散记录整理为时间线、知识、文档、操作和数据。
 3. **用于咨询与创作**：按当前问题召回相关背景，减少重复解释。
 4. **形成自动化**：通过任务、日记和集成 Skill，让记忆继续产生工作成果。
+
+## 产品界面
+
+### 工作现场，随时找回
+
+![记忆面包时间线记录与检索界面](https://memorybread.cn/show/timeline-show.png)
+
+### 基于真实工作背景创作文档
+
+![记忆面包创作智能体编写项目周报](https://memorybread.cn/show/creation-show.png)
+
+### 本地运行与隐私保护
+
+![记忆面包敏感内容过滤与应用黑名单设置](https://memorybread.cn/show/privacy-show.png)
+
+## 快速入门视频
+
+[![观看记忆面包快速入门视频](https://memorybread.cn/show/memorybread-quick-start-poster.png)](https://memorybread.cn/#product-demo-video)
+
+点击上方封面前往官网播放完整的快速入门视频。
 
 ## 核心能力
 
@@ -83,7 +103,7 @@ node integrations/install-memory-retrieval-skill.mjs both
 主要技术栈为 Tauri、React、Rust 和 Python。建议准备 Node.js 18+、Rust stable，以及符合项目要求的 Python 环境。
 
 ```bash
-git clone https://github.com/xiaoyao5137/MemoryBread.git
+git clone https://github.com/xiaoyao5137/memorybread.git
 cd MemoryBread
 
 # 启动完整开发环境
