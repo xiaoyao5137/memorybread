@@ -28,18 +28,18 @@ import {
 } from 'lucide-react'
 import type {
   AccountProfileSection,
-  AchievementBadge,
-  AchievementProfile,
-  AchievementSurface,
+  BreadcrumbDefinition,
+  BreadcrumbProfile,
+  BreadcrumbSurface,
   CloudBalance,
   CloudUser,
 } from '../types'
+import { updateUserProfile } from '../utils/authApi'
 import {
-  ACHIEVEMENTS_CHANGED_KEY,
-  equipAchievementBadge,
-  fetchAchievementProfile,
-  updateUserProfile,
-} from '../utils/authApi'
+  BREADCRUMBS_CHANGED_KEY,
+  equipBreadcrumb,
+  fetchBreadcrumbProfile,
+} from '../utils/breadcrumbApi'
 import { toUserFacingError } from '../utils/userFacingError'
 import { useAppMetadata } from '../utils/appMetadata'
 import {
@@ -83,7 +83,7 @@ const TABS: Array<{
 }> = [
   { id: 'personal', label: '个人信息', icon: UserRound },
   { id: 'messages', label: '消息', icon: Bell },
-  { id: 'achievements', label: '标签卡片', icon: Award },
+  { id: 'achievements', label: '面包屑', icon: Award },
   { id: 'investment', label: '工作投入', icon: Clock },
   { id: 'mood', label: '工作心情', icon: Smile },
 ]
@@ -143,7 +143,7 @@ const BADGE_ICONS: Record<string, LucideIcon> = {
   flame: Flame,
 }
 
-const RARITY_LABELS: Record<AchievementBadge['rarity'], string> = {
+const RARITY_LABELS: Record<BreadcrumbDefinition['rarity'], string> = {
   common: '常见',
   rare: '稀有',
   epic: '史诗',
@@ -156,7 +156,7 @@ const BADGE_WELLNESS_NOTES: Partial<Record<string, string>> = {
   uninterrupted_four_hours: '长时间久坐会影响健康。记得起身、喝水和休息。',
 }
 
-const BadgeMark: React.FC<{ badge: AchievementBadge; className?: string }> = ({ badge, className = '' }) => {
+const BadgeMark: React.FC<{ badge: BreadcrumbDefinition; className?: string }> = ({ badge, className = '' }) => {
   const Icon = BADGE_ICONS[badge.icon_key] ?? Briefcase
   return (
     <span
@@ -222,12 +222,6 @@ const formatCreatedAt = (value: string) => new Date(value).toLocaleString('zh-CN
   hour12: false,
 })
 
-const formatCredit = (value: string) => {
-  const amount = Number(value)
-  if (!Number.isFinite(amount)) return value
-  return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 4 }).format(amount)
-}
-
 const formatHeatmapDate = (date: Date) => date.toLocaleDateString('zh-CN', {
   year: 'numeric',
   month: 'long',
@@ -270,11 +264,11 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
 }) => {
   const appMetadata = useAppMetadata()
   const [workProfile, setWorkProfile] = useState<WorkProfileSummary | null>(null)
-  const [achievements, setAchievements] = useState<AchievementProfile | null>(null)
+  const [achievements, setAchievements] = useState<BreadcrumbProfile | null>(null)
   const [achievementsError, setAchievementsError] = useState<string | null>(null)
   const [achievementsLoading, setAchievementsLoading] = useState(true)
   const [achievementRetryKey, setAchievementRetryKey] = useState(0)
-  const [equippingSurface, setEquippingSurface] = useState<AchievementSurface | null>(null)
+  const [equippingSurface, setEquippingSurface] = useState<BreadcrumbSurface | null>(null)
   const [achievementMessage, setAchievementMessage] = useState<string | null>(null)
   const [expandedAchievementId, setExpandedAchievementId] = useState<string | null>(null)
   const [workProfileError, setWorkProfileError] = useState<string | null>(null)
@@ -303,8 +297,8 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
   const achievementDialogRef = useRef<HTMLElement>(null)
   const achievementDialogCloseRef = useRef<HTMLButtonElement>(null)
   const achievementDialogTriggerRef = useRef<HTMLButtonElement | null>(null)
-  const expandedAchievement = achievements?.badges.find(
-    ({ badge }) => badge.id === expandedAchievementId,
+  const expandedAchievement = achievements?.breadcrumbs.find(
+    ({ breadcrumb }) => breadcrumb.id === expandedAchievementId,
   ) ?? null
 
   useEffect(() => {
@@ -376,31 +370,31 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
     const controller = new AbortController()
     setAchievementsLoading(true)
     setAchievementsError(null)
-    const initialProfile = fetchAchievementProfile(adminApiBaseUrl, authToken)
+    const initialProfile = fetchBreadcrumbProfile(apiBaseUrl, controller.signal)
     initialProfile
       .then((profile) => {
         if (!controller.signal.aborted) setAchievements(profile)
       })
       .catch((error) => {
         if (!controller.signal.aborted) {
-          setAchievementsError(toUserFacingError(error, '标签卡片读取失败'))
+          setAchievementsError(toUserFacingError(error, '面包屑读取失败'))
         }
       })
       .finally(() => {
         if (!controller.signal.aborted) setAchievementsLoading(false)
       })
     return () => controller.abort()
-  }, [adminApiBaseUrl, authToken, achievementRetryKey])
+  }, [apiBaseUrl, achievementRetryKey])
 
   useEffect(() => {
     const refreshAchievements = () => setAchievementRetryKey((value) => value + 1)
     const refreshAchievementsFromStorage = (event: StorageEvent) => {
-      if (event.key === ACHIEVEMENTS_CHANGED_KEY) refreshAchievements()
+      if (event.key === BREADCRUMBS_CHANGED_KEY) refreshAchievements()
     }
-    window.addEventListener(ACHIEVEMENTS_CHANGED_KEY, refreshAchievements)
+    window.addEventListener(BREADCRUMBS_CHANGED_KEY, refreshAchievements)
     window.addEventListener('storage', refreshAchievementsFromStorage)
     return () => {
-      window.removeEventListener(ACHIEVEMENTS_CHANGED_KEY, refreshAchievements)
+      window.removeEventListener(BREADCRUMBS_CHANGED_KEY, refreshAchievements)
       window.removeEventListener('storage', refreshAchievementsFromStorage)
     }
   }, [])
@@ -590,19 +584,19 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
   }
 
   const toggleBadge = async (
-    surface: AchievementSurface,
-    badge: AchievementBadge,
+    surface: BreadcrumbSurface,
+    badge: BreadcrumbDefinition,
   ) => {
     const equipped = achievements?.equipped[surface]
     const nextBadgeId = equipped?.id === badge.id ? null : badge.id
     setEquippingSurface(surface)
     setAchievementMessage(null)
     try {
-      const profile = await equipAchievementBadge(adminApiBaseUrl, authToken, surface, nextBadgeId)
+      const profile = await equipBreadcrumb(apiBaseUrl, surface, nextBadgeId)
       setAchievements(profile)
-      setAchievementMessage(nextBadgeId ? `已将「${badge.name}」佩戴到${surface === 'profile_avatar' ? '个人头像' : '悬浮球'}。` : `已从${surface === 'profile_avatar' ? '个人头像' : '悬浮球'}取下标签。`)
+      setAchievementMessage(nextBadgeId ? `已将「${badge.name}」佩戴到${surface === 'profile_avatar' ? '个人头像' : '悬浮球'}。` : `已从${surface === 'profile_avatar' ? '个人头像' : '悬浮球'}取下面包屑。`)
     } catch (error) {
-      setAchievementMessage(toUserFacingError(error, '佩戴标签失败'))
+      setAchievementMessage(toUserFacingError(error, '佩戴面包屑失败'))
     } finally {
       setEquippingSurface(null)
     }
@@ -882,13 +876,13 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
             >
               <div className="account-profile__panel-heading account-profile__panel-heading--achievements">
                 <div>
-                  <h2>标签卡片</h2>
-                  <p>卡片会持续累积，点击可放大查看并选择佩戴位置。</p>
+                  <h2>面包屑</h2>
+                  <p>面包屑会在本机持续累积，点击可查看并选择佩戴位置。</p>
                 </div>
-                {achievements && achievements.badges.length > 0 && (
-                  <div className="account-profile__achievement-total" aria-label="标签卡片统计">
-                    <strong>{achievements.badges.reduce((sum, item) => sum + item.quantity, 0)}</strong>
-                    <span>{achievements.badges.length} 种卡片</span>
+                {achievements && achievements.breadcrumbs.length > 0 && (
+                  <div className="account-profile__achievement-total" aria-label="面包屑统计">
+                    <strong>{achievements.breadcrumbs.reduce((sum, item) => sum + item.quantity, 0)}</strong>
+                    <span>{achievements.breadcrumbs.length} 种面包屑</span>
                   </div>
                 )}
               </div>
@@ -897,50 +891,50 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
               {!achievementsLoading && achievementsError && (
                 <div className="account-profile__data-error" role="alert">
                   <AlertCircle size={19} aria-hidden />
-                  <div><strong>暂时无法读取标签卡片</strong><span>{achievementsError}</span></div>
+                  <div><strong>暂时无法读取面包屑</strong><span>{achievementsError}</span></div>
                   <button onClick={() => setAchievementRetryKey((value) => value + 1)} type="button">重试</button>
                 </div>
               )}
-              {!achievementsLoading && !achievementsError && achievements?.badges.length === 0 && (
+              {!achievementsLoading && !achievementsError && achievements?.breadcrumbs.length === 0 && (
                 <div className="account-profile__achievement-empty">
                   <span aria-hidden="true"><Award size={28} /></span>
-                  <strong>第一张卡片还在烘焙</strong>
-                  <p>完成运营中的任务后，标签卡片和 Credit 奖励会一起进入你的账户。</p>
+                  <strong>第一枚面包屑还在烘焙</strong>
+                  <p>达到规则后，面包屑会在这台设备上自动累积，不会发放 Credit。</p>
                 </div>
               )}
-              {!achievementsLoading && !achievementsError && achievements && achievements.badges.length > 0 && (
+              {!achievementsLoading && !achievementsError && achievements && achievements.breadcrumbs.length > 0 && (
                 <div className="account-profile__achievement-grid">
-                  {achievements.badges.map((item) => {
-                    const badge = item.badge
-                    const Icon = BADGE_ICONS[badge.icon_key] ?? Briefcase
-                    const isNew = highlightedAchievementKeys.includes(badge.badge_key)
+                  {achievements.breadcrumbs.map((item) => {
+                    const breadcrumb = item.breadcrumb
+                    const Icon = BADGE_ICONS[breadcrumb.icon_key] ?? Briefcase
+                    const isNew = highlightedAchievementKeys.includes(breadcrumb.breadcrumb_key)
                     return (
                       <article
-                        aria-label={isNew ? `${badge.name}，刚刚获得` : undefined}
-                        className={`account-profile__achievement-card account-profile__achievement-card--${badge.palette_key}${isNew ? ' account-profile__achievement-card--new' : ''}`}
-                        key={badge.id}
+                        aria-label={isNew ? `${breadcrumb.name}，刚刚获得` : undefined}
+                        className={`account-profile__achievement-card account-profile__achievement-card--${breadcrumb.palette_key}${isNew ? ' account-profile__achievement-card--new' : ''}`}
+                        key={breadcrumb.id}
                         ref={isNew ? highlightedBadgeRef : undefined}
                       >
                         {isNew && <span className="account-profile__achievement-new-label">刚刚获得</span>}
                         <button
                           aria-haspopup="dialog"
-                          aria-label={`查看「${badge.name}」卡片详情`}
+                          aria-label={`查看「${breadcrumb.name}」面包屑详情`}
                           className="account-profile__achievement-card-trigger"
                           onClick={(event) => {
                             achievementDialogTriggerRef.current = event.currentTarget
                             setAchievementMessage(null)
-                            setExpandedAchievementId(badge.id)
+                            setExpandedAchievementId(breadcrumb.id)
                           }}
                           type="button"
                         >
                           <div className="account-profile__achievement-card-top">
                             <span className="account-profile__achievement-icon" aria-hidden="true"><Icon size={22} strokeWidth={2.2} /></span>
-                            <span className="account-profile__achievement-rarity">{RARITY_LABELS[badge.rarity]}</span>
+                            <span className="account-profile__achievement-rarity">{RARITY_LABELS[breadcrumb.rarity]}</span>
                             <span className="account-profile__achievement-quantity">×{item.quantity}</span>
                           </div>
                           <div className="account-profile__achievement-copy">
-                            <strong>{badge.name}</strong>
-                            <span>{badge.tagline}</span>
+                            <strong>{breadcrumb.name}</strong>
+                            <span>{breadcrumb.tagline}</span>
                           </div>
                           <span className="account-profile__achievement-open-hint" aria-hidden="true">查看详情</span>
                         </button>
@@ -1176,7 +1170,7 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
       </div>
 
       {expandedAchievement && achievements && (() => {
-        const badge = expandedAchievement.badge
+        const badge = expandedAchievement.breadcrumb
         const Icon = BADGE_ICONS[badge.icon_key] ?? Briefcase
         const onProfile = achievements.equipped.profile_avatar?.id === badge.id
         const onFloating = achievements.equipped.floating_avatar?.id === badge.id
@@ -1196,7 +1190,7 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
               role="dialog"
             >
               <button
-                aria-label={`关闭「${badge.name}」卡片详情`}
+                aria-label={`关闭「${badge.name}」面包屑详情`}
                 className="account-profile__achievement-dialog-close"
                 onClick={() => setExpandedAchievementId(null)}
                 ref={achievementDialogCloseRef}
@@ -1217,11 +1211,11 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
                 <p id={`achievement-detail-description-${badge.id}`}>{badge.description}</p>
               </div>
               <div className="account-profile__achievement-meta">
-                <span>累计奖励 <strong>{formatCredit(expandedAchievement.total_credit_earned)}</strong> Credit</span>
+                <span>本机累计 <strong>{expandedAchievement.quantity}</strong> 枚</span>
                 <span>最近获得 {new Date(expandedAchievement.last_earned_at).toLocaleDateString('zh-CN')}</span>
               </div>
-              {BADGE_WELLNESS_NOTES[badge.badge_key] && (
-                <div className="account-profile__achievement-rest-note">{BADGE_WELLNESS_NOTES[badge.badge_key]}</div>
+              {BADGE_WELLNESS_NOTES[badge.breadcrumb_key] && (
+                <div className="account-profile__achievement-rest-note">{BADGE_WELLNESS_NOTES[badge.breadcrumb_key]}</div>
               )}
               <div className="account-profile__achievement-actions">
                 <button

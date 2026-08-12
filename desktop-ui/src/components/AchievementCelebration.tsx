@@ -12,11 +12,11 @@ import {
   Sparkles,
   type LucideIcon,
 } from 'lucide-react'
-import type { AchievementAward } from '../types'
+import type { BreadcrumbAward } from '../types'
 import './AchievementCelebration.css'
 
 interface AchievementCelebrationProps {
-  awards: AchievementAward[]
+  awards: BreadcrumbAward[]
   onDismiss: () => void
   onViewCards: () => void
 }
@@ -40,12 +40,12 @@ const AchievementCelebration: React.FC<AchievementCelebrationProps> = ({
   const dialogRef = useRef<HTMLElement>(null)
   const primaryActionRef = useRef<HTMLButtonElement>(null)
   const primaryAward = awards[0]
-  const primaryBadge = primaryAward?.badge
+  const primaryBadge = primaryAward?.breadcrumb
   const Icon = BADGE_ICONS[primaryBadge?.icon_key] ?? Briefcase
-  const totalAwardQuantity = awards.reduce((sum, award) => sum + award.badge_quantity, 0)
+  const totalAwardQuantity = awards.reduce((sum, award) => sum + award.increment, 0)
   const awardNames = awards
-    .map(({ badge, badge_quantity: quantity }) => (
-      `「${badge.name}」${quantity > 1 ? ` ×${quantity}` : ''}`
+    .map(({ breadcrumb, increment }) => (
+      `「${breadcrumb.name}」${increment > 1 ? ` ×${increment}` : ''}`
     ))
     .join('、')
 
@@ -104,7 +104,7 @@ const AchievementCelebration: React.FC<AchievementCelebrationProps> = ({
           <span className="achievement-celebration__spark" aria-hidden="true">
             <Sparkles size={18} strokeWidth={2.2} />
           </span>
-          <span>{totalAwardQuantity > 1 ? `获得 ${totalAwardQuantity} 张新卡片` : '获得新卡片'}</span>
+          <span>{totalAwardQuantity > 1 ? `获得 ${totalAwardQuantity} 枚面包屑` : '获得新面包屑'}</span>
         </div>
 
         <div
@@ -115,23 +115,23 @@ const AchievementCelebration: React.FC<AchievementCelebrationProps> = ({
           </span>
           <span className="achievement-celebration__card-status">
             <Award size={13} aria-hidden="true" />
-            本次 +{primaryAward.badge_quantity} · 累计 ×{primaryAward.total_badge_quantity}
+            本次 +{primaryAward.increment} · 累计 ×{primaryAward.total_quantity}
           </span>
           <strong>{primaryBadge.name}</strong>
           <span>{primaryBadge.tagline}</span>
           {awards.length > 1 && (
             <small>
               本次还获得 {awards.slice(1)
-                .map(({ badge, badge_quantity: quantity }) => `${badge.name} ×${quantity}`)
+                .map(({ breadcrumb, increment }) => `${breadcrumb.name} ×${increment}`)
                 .join('、')}
             </small>
           )}
         </div>
 
         <div className="achievement-celebration__copy">
-          <h2 id="achievement-celebration-title">卡片已经烘焙完成</h2>
+          <h2 id="achievement-celebration-title">面包屑已经烘焙完成</h2>
           <p id="achievement-celebration-description">
-            你获得了{awardNames}。前往标签卡片页查看详情，也可以把它佩戴到头像或悬浮球。
+            你获得了{awardNames}。前往面包屑页查看详情，也可以把它佩戴到头像或悬浮球。
           </p>
         </div>
 

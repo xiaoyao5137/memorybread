@@ -324,6 +324,14 @@ static MIGRATIONS: &[(&str, &str)] = &[
         "077_bake_retry_schedule",
         include_str!("migrations/077_bake_retry_schedule.sql"),
     ),
+    (
+        "078_local_breadcrumbs",
+        include_str!("../../../shared/db-schema/migrations/078_local_breadcrumbs.sql"),
+    ),
+    (
+        "079_breadcrumb_rule_activation",
+        include_str!("../../../shared/db-schema/migrations/079_breadcrumb_rule_activation.sql"),
+    ),
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -658,6 +666,24 @@ impl StorageManager {
                         version,
                         reason: e.to_string(),
                     })?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_migrations (version, applied_at)
+                     VALUES (?1, ?2)",
+                    rusqlite::params![version, current_ts_ms()],
+                )?;
+                info!("迁移 {} 执行成功", version);
+                continue;
+            }
+
+            if *version == "079_breadcrumb_rule_activation" {
+                // SQLite 的 ADD COLUMN 不支持 IF NOT EXISTS。若进程在补列后、登记
+                // schema_migrations 前退出，后续启动必须能够从这个中间状态恢复。
+                Self::add_column_if_missing(
+                    &conn,
+                    "breadcrumb_rules",
+                    "is_active",
+                    "INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))",
+                )?;
                 conn.execute(
                     "INSERT OR IGNORE INTO schema_migrations (version, applied_at)
                      VALUES (?1, ?2)",
@@ -1075,6 +1101,42 @@ mod tests {
                     "creation_history",
                     "document_patch_json"
                 )?);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn breadcrumb_activation_migration_recovers_when_column_exists_without_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("interrupted-breadcrumb-migration.db");
+
+        let storage = StorageManager::open(&db).unwrap();
+        drop(storage);
+
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE version = '079_breadcrumb_rule_activation'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let storage = StorageManager::open(&db).unwrap();
+        storage
+            .with_conn(|conn| {
+                assert!(StorageManager::has_column(
+                    conn,
+                    "breadcrumb_rules",
+                    "is_active"
+                )?);
+                let applied: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM schema_migrations
+                     WHERE version = '079_breadcrumb_rule_activation'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(applied, 1);
                 Ok(())
             })
             .unwrap();

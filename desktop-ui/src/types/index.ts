@@ -222,12 +222,12 @@ export interface CloudMessagePage {
   unread_count: number
 }
 
-export type AchievementSurface = 'profile_avatar' | 'floating_avatar'
+export type BreadcrumbSurface = 'profile_avatar' | 'floating_avatar'
 export type AccountProfileSection = 'personal' | 'messages' | 'achievements' | 'investment' | 'mood'
 
-export interface AchievementBadge {
+export interface BreadcrumbDefinition {
   id: string
-  badge_key: string
+  breadcrumb_key: string
   name: string
   tagline: string
   description: string
@@ -236,54 +236,50 @@ export interface AchievementBadge {
   rarity: 'common' | 'rare' | 'epic' | 'legendary'
 }
 
-export interface UserAchievementBadge {
-  badge: AchievementBadge
+export interface OwnedBreadcrumb {
+  breadcrumb: BreadcrumbDefinition
   quantity: number
-  total_credit_earned: string
-  first_earned_at: string
-  last_earned_at: string
+  first_earned_at: number
+  last_earned_at: number
 }
 
-export interface AchievementProfile {
-  badges: UserAchievementBadge[]
+export interface BreadcrumbProfile {
+  breadcrumbs: OwnedBreadcrumb[]
   equipped: {
-    profile_avatar?: AchievementBadge | null
-    floating_avatar?: AchievementBadge | null
+    profile_avatar?: BreadcrumbDefinition | null
+    floating_avatar?: BreadcrumbDefinition | null
   }
 }
 
-export interface RewardTask {
+export interface BreadcrumbRule {
   id: string
-  task_key: string
+  rule_key: string
   title: string
   description: string
-  status: string
-  approval_status: string
-  period: 'weekly' | 'monthly' | 'lifetime'
-  metric_key: string
-  threshold: string
-  metric_unit: string
-  reward: {
-    badge: AchievementBadge
-    badge_quantity: number
-    credit: string
+  breadcrumb: BreadcrumbDefinition
+  calculation: {
+    period: 'weekly' | 'monthly' | 'lifetime'
+    metric_key: string
+    threshold: string
+    metric_unit: string
+    increment: number
   }
+  starts_at?: string | null
+  expires_at?: string | null
+  version: number
 }
 
-export interface TaskClaimResult {
-  task_id: string
-  period_key: string
-  observed_value: string
-  badge: AchievementBadge
-  badge_quantity: number
-  total_badge_quantity: number
-  credit_granted: string
+export interface BreadcrumbAwardResult {
+  awarded: boolean
+  breadcrumb: BreadcrumbDefinition
+  increment: number
+  total_quantity: number
 }
 
-export interface AchievementAward {
-  badge: AchievementBadge
-  badge_quantity: number
-  total_badge_quantity: number
+export interface BreadcrumbAward {
+  breadcrumb: BreadcrumbDefinition
+  increment: number
+  total_quantity: number
 }
 
 export interface CloudSubscription {

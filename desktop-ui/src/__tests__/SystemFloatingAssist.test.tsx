@@ -15,7 +15,7 @@ import {
 } from '../utils/interactionSettings'
 
 const cloudMocks = vi.hoisted(() => ({
-  fetchAchievementProfile: vi.fn(),
+  fetchBreadcrumbProfile: vi.fn(),
   fetchBillingBalance: vi.fn(),
 }))
 
@@ -34,9 +34,12 @@ vi.mock('../hooks/useApi', () => ({
 }))
 
 vi.mock('../utils/authApi', () => ({
-  ACHIEVEMENTS_CHANGED_KEY: 'memorybread.achievements.changed',
-  fetchAchievementProfile: cloudMocks.fetchAchievementProfile,
   fetchBillingBalance: cloudMocks.fetchBillingBalance,
+}))
+
+vi.mock('../utils/breadcrumbApi', () => ({
+  BREADCRUMBS_CHANGED_KEY: 'memorybread.breadcrumbs.changed',
+  fetchBreadcrumbProfile: cloudMocks.fetchBreadcrumbProfile,
 }))
 
 const mockedInvoke = vi.mocked(invoke)
@@ -175,8 +178,8 @@ beforeEach(() => {
     contexts: [],
     output_truncated: false,
   } as any)
-  cloudMocks.fetchAchievementProfile.mockReset()
-  cloudMocks.fetchAchievementProfile.mockResolvedValue({ badges: [], equipped: {} })
+  cloudMocks.fetchBreadcrumbProfile.mockReset()
+  cloudMocks.fetchBreadcrumbProfile.mockResolvedValue({ breadcrumbs: [], equipped: {} })
   cloudMocks.fetchBillingBalance.mockReset()
   cloudMocks.fetchBillingBalance.mockResolvedValue(null)
 })
@@ -189,7 +192,7 @@ afterEach(() => {
 })
 
 describe('SystemFloatingAssist', () => {
-  it('离线启动时直接显示本地悬浮助手且不读取云端账户增强', () => {
+  it('离线启动时直接显示本地悬浮助手并读取本机面包屑', () => {
     useAppStore.getState().setAuthSession({
       access_token: 'mbs_offline_floating_token',
       expires_at: new Date(Date.now() + 86_400_000).toISOString(),
@@ -209,7 +212,7 @@ describe('SystemFloatingAssist', () => {
 
     expect(assistButton()).toBeInTheDocument()
     expect(cloudMocks.fetchBillingBalance).not.toHaveBeenCalled()
-    expect(cloudMocks.fetchAchievementProfile).not.toHaveBeenCalled()
+    expect(cloudMocks.fetchBreadcrumbProfile).toHaveBeenCalled()
   })
 
   it('闲置态渲染面包人角色且不再使用旧图片层', () => {

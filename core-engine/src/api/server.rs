@@ -23,6 +23,10 @@ use super::{
             promote_bake_memory_to_sop, run_bake_pipeline, toggle_bake_document_status,
             update_bake_document, update_bake_style_config,
         },
+        breadcrumbs::{
+            award_breadcrumb, equip_breadcrumb, list_breadcrumb_rules, list_breadcrumbs,
+            sync_breadcrumb_rules,
+        },
         capture_health::monitor_capture_health,
         captures::list_captures,
         config_checks::{
@@ -117,6 +121,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/captures", get(list_captures))
         .route("/captures", get(list_captures))
         .route("/api/work-profile", get(get_work_profile))
+        .route("/api/breadcrumbs", get(list_breadcrumbs))
+        .route("/api/breadcrumbs/rules", get(list_breadcrumb_rules))
+        .route("/api/breadcrumbs/rules/sync", post(sync_breadcrumb_rules))
+        .route("/api/breadcrumbs/awards", post(award_breadcrumb))
+        .route("/api/breadcrumbs/equipped", put(equip_breadcrumb))
         .route("/query", post(rag_query))
         .route("/api/rag/jobs", post(create_rag_job))
         .route("/api/rag/jobs/:job_id", get(get_rag_job))

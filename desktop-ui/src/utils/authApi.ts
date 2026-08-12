@@ -1,6 +1,4 @@
 import type {
-  AchievementProfile,
-  AchievementSurface,
   AuthSession,
   CloudBalance,
   CloudDevice,
@@ -10,24 +8,9 @@ import type {
   CloudSubscription,
   CloudUser,
   CompleteCloudSnapshotRequest,
-  RewardTask,
-  TaskClaimResult,
   UpsertCloudDeviceRequest,
 } from '../types'
 import { serviceEnvironmentHeaders } from '../store/useAppStore'
-
-export const ACHIEVEMENTS_CHANGED_KEY = 'memorybread.achievements.changed'
-
-export const notifyAchievementsChanged = (): void => {
-  try {
-    localStorage.setItem(ACHIEVEMENTS_CHANGED_KEY, String(Date.now()))
-  } catch {
-    // 同窗口事件仍可刷新；跨窗口广播属于尽力通知。
-  }
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent(ACHIEVEMENTS_CHANGED_KEY))
-  }
-}
 
 function normalizeAuthFetchError(error: unknown, adminApiBaseUrl: string): Error {
   if (error instanceof TypeError) {
@@ -454,106 +437,4 @@ export async function markAllCloudMessagesRead(
     throw new Error(authErrorMessage(payload, `messages read failed: ${response.status}`))
   }
   return payload.data
-}
-
-export async function fetchAchievementProfile(
-  adminApiBaseUrl: string,
-  token: string,
-  signal?: AbortSignal,
-): Promise<AchievementProfile> {
-  const response = await fetch(`${adminApiBaseUrl}/v1/achievements`, {
-    headers: { ...serviceEnvironmentHeaders(), Authorization: `Bearer ${token}` },
-    ...(signal ? { signal } : {}),
-  }).catch((error) => {
-    throw normalizeAuthFetchError(error, adminApiBaseUrl)
-  })
-  const payload = await response.json().catch(() => null)
-  if (!response.ok) {
-    throw new Error(authErrorMessage(payload, `achievements fetch failed: ${response.status}`))
-  }
-  const data = (payload?.data || {}) as Partial<AchievementProfile>
-  return {
-    badges: Array.isArray(data.badges) ? data.badges : [],
-    equipped: data.equipped || {},
-  }
-}
-
-export async function fetchRewardTasks(
-  adminApiBaseUrl: string,
-  token: string,
-  signal?: AbortSignal,
-): Promise<RewardTask[]> {
-  const response = await fetch(`${adminApiBaseUrl}/v1/tasks`, {
-    headers: { ...serviceEnvironmentHeaders(), Authorization: `Bearer ${token}` },
-    signal,
-  }).catch((error) => {
-    throw normalizeAuthFetchError(error, adminApiBaseUrl)
-  })
-  const payload = await response.json().catch(() => null)
-  if (!response.ok) {
-    throw new Error(authErrorMessage(payload, `tasks fetch failed: ${response.status}`))
-  }
-  return Array.isArray(payload?.data) ? payload.data as RewardTask[] : []
-}
-
-export async function claimRewardTask(
-  adminApiBaseUrl: string,
-  token: string,
-  taskId: string,
-  periodKey: string,
-  observedValue: number,
-  idempotencyKey: string,
-  signal?: AbortSignal,
-): Promise<TaskClaimResult | null> {
-  const response = await fetch(`${adminApiBaseUrl}/v1/tasks/${encodeURIComponent(taskId)}/claims`, {
-    method: 'POST',
-    headers: {
-      ...serviceEnvironmentHeaders(),
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      period_key: periodKey,
-      observed_value: String(Math.max(0, Math.floor(observedValue))),
-      idempotency_key: idempotencyKey,
-    }),
-    signal,
-  }).catch((error) => {
-    throw normalizeAuthFetchError(error, adminApiBaseUrl)
-  })
-  const payload = await response.json().catch(() => null)
-  if (!response.ok) {
-    if (payload?.error?.code === 'TASK_ALREADY_CLAIMED') return null
-    throw new Error(authErrorMessage(payload, `task claim failed: ${response.status}`))
-  }
-  return payload?.data as TaskClaimResult
-}
-
-export async function equipAchievementBadge(
-  adminApiBaseUrl: string,
-  token: string,
-  surface: AchievementSurface,
-  badgeId: string | null,
-): Promise<AchievementProfile> {
-  const response = await fetch(`${adminApiBaseUrl}/v1/achievements/equipped`, {
-    method: 'PUT',
-    headers: {
-      ...serviceEnvironmentHeaders(),
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ surface, badge_id: badgeId }),
-  }).catch((error) => {
-    throw normalizeAuthFetchError(error, adminApiBaseUrl)
-  })
-  const payload = await response.json().catch(() => null)
-  if (!response.ok) {
-    throw new Error(authErrorMessage(payload, `badge equip failed: ${response.status}`))
-  }
-  notifyAchievementsChanged()
-  const data = (payload?.data || {}) as Partial<AchievementProfile>
-  return {
-    badges: Array.isArray(data.badges) ? data.badges : [],
-    equipped: data.equipped || {},
-  }
 }

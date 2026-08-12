@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use crate::storage::{db::current_ts_ms, error::StorageError, StorageManager};
 
 pub const ASSET_SNAPSHOT_FORMAT_VERSION: i32 = 1;
-pub const ASSET_SNAPSHOT_SCHEMA_VERSION: i32 = 3;
+pub const ASSET_SNAPSHOT_SCHEMA_VERSION: i32 = 4;
 
 const EXCLUDED_RAW_CAPTURE_COLUMNS: &[&str] = &[
     "ax_text",
@@ -85,6 +85,26 @@ struct AssetTableSpec {
 }
 
 const ASSET_TABLES: &[AssetTableSpec] = &[
+    AssetTableSpec {
+        name: "breadcrumb_definitions",
+        identity_columns: &["id"],
+    },
+    AssetTableSpec {
+        name: "breadcrumb_rules",
+        identity_columns: &["id"],
+    },
+    AssetTableSpec {
+        name: "breadcrumb_inventory",
+        identity_columns: &["breadcrumb_id"],
+    },
+    AssetTableSpec {
+        name: "breadcrumb_awards",
+        identity_columns: &["rule_id", "period_key"],
+    },
+    AssetTableSpec {
+        name: "breadcrumb_equipment",
+        identity_columns: &["surface"],
+    },
     AssetTableSpec {
         name: "timelines",
         identity_columns: &["id"],
@@ -1322,6 +1342,45 @@ mod tests {
                      )",
                     [],
                 )?;
+                conn.execute(
+                    "INSERT INTO breadcrumb_definitions (
+                       id, breadcrumb_key, name, tagline, description, icon_key,
+                       palette_key, rarity, updated_at
+                     ) VALUES (
+                       'breadcrumb-1', 'focused', '专注面包屑', '专注留下痕迹',
+                       '记录稳定的专注投入。', 'focus', 'forest', 'common', 1700000000000
+                     )",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO breadcrumb_rules (
+                       id, rule_key, breadcrumb_id, title, description, period, metric_key,
+                       threshold, metric_unit, increment, version, updated_at
+                     ) VALUES (
+                       'rule-1', 'weekly_focus', 'breadcrumb-1', '本周专注',
+                       '本周专注达到一百分钟。', 'weekly', 'focus_minutes', '100',
+                       'minute', 1, 1, 1700000000000
+                     )",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO breadcrumb_inventory (
+                       breadcrumb_id, quantity, first_earned_at, last_earned_at, updated_at
+                     ) VALUES ('breadcrumb-1', 2, 1700000000000, 1700000000000, 1700000000000)",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO breadcrumb_awards (
+                       rule_id, period_key, breadcrumb_id, observed_value, increment,
+                       rule_version, awarded_at
+                     ) VALUES ('rule-1', '2026-W33', 'breadcrumb-1', '120', 1, 1, 1700000000000)",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO breadcrumb_equipment (surface, breadcrumb_id, equipped_at)
+                     VALUES ('profile_avatar', 'breadcrumb-1', 1700000000000)",
+                    [],
+                )?;
                 Ok(())
             })
             .unwrap();
@@ -1345,7 +1404,12 @@ mod tests {
         assert!(snapshot.tables.iter().all(|table| table.name != "captures"));
         assert!(snapshot.tables.iter().all(|table| matches!(
             table.name.as_str(),
-            "timelines"
+            "breadcrumb_definitions"
+                | "breadcrumb_rules"
+                | "breadcrumb_inventory"
+                | "breadcrumb_awards"
+                | "breadcrumb_equipment"
+                | "timelines"
                 | "bake_knowledge"
                 | "bake_documents"
                 | "bake_document_sections"
@@ -1417,6 +1481,11 @@ mod tests {
         assert_eq!(count_table(&target, "data_sources"), 1);
         assert_eq!(count_table(&target, "data_snapshots"), 1);
         assert_eq!(count_table(&target, "data_source_links"), 1);
+        assert_eq!(count_table(&target, "breadcrumb_definitions"), 1);
+        assert_eq!(count_table(&target, "breadcrumb_rules"), 1);
+        assert_eq!(count_table(&target, "breadcrumb_inventory"), 1);
+        assert_eq!(count_table(&target, "breadcrumb_awards"), 1);
+        assert_eq!(count_table(&target, "breadcrumb_equipment"), 1);
         assert_eq!(restored_skill.title, "架构文档写作法");
         assert_eq!(restored_skill.package_files.len(), 1);
         assert_eq!(restored_skill.package_files[0].path, "SKILL.md");

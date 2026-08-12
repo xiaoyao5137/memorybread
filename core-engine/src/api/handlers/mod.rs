@@ -2,6 +2,7 @@
 
 pub mod action;
 pub mod bake;
+pub mod breadcrumbs;
 pub mod capture_health;
 pub mod captures;
 pub mod config_checks;

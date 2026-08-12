@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
   fetchConsoleSummary: vi.fn(),
   fetchCurrentUser: vi.fn(),
   fetchInitializationStatus: vi.fn(),
-  syncEligibleAchievementTasks: vi.fn(),
+  syncEligibleBreadcrumbRules: vi.fn(),
   synchronizeWorkProfile: vi.fn(),
 }))
 
@@ -25,8 +25,8 @@ vi.mock('../utils/authApi', async (importOriginal) => ({
   fetchCurrentUser: mocks.fetchCurrentUser,
 }))
 
-vi.mock('../utils/achievementTasks', () => ({
-  syncEligibleAchievementTasks: mocks.syncEligibleAchievementTasks,
+vi.mock('../utils/breadcrumbRules', () => ({
+  syncEligibleBreadcrumbRules: mocks.syncEligibleBreadcrumbRules,
 }))
 
 vi.mock('../utils/workProfileCloud', () => ({
@@ -72,7 +72,7 @@ const user = {
 
 const overnightBadge = {
   id: 'badge-overnight',
-  badge_key: 'overnight_writer',
+  breadcrumb_key: 'overnight_writer',
   name: '通宵赶稿',
   tagline: '月落前还在落笔',
   description: '一个自然周内，曾在某个本地夜晚从 0 点到 6 点保持连续有效工作。',
@@ -107,10 +107,10 @@ beforeEach(() => {
     test_mode_enabled: false,
   })
   mocks.synchronizeWorkProfile.mockResolvedValue(null)
-  mocks.syncEligibleAchievementTasks.mockResolvedValue([{
-    badge: overnightBadge,
-    badge_quantity: 1,
-    total_badge_quantity: 1,
+  mocks.syncEligibleBreadcrumbRules.mockResolvedValue([{
+    breadcrumb: overnightBadge,
+    increment: 1,
+    total_quantity: 1,
   }])
 })
 
@@ -119,8 +119,8 @@ describe('App achievement celebration', () => {
     render(<App />)
 
     expect(await screen.findByTestId('rag-panel')).toBeInTheDocument()
-    expect(await screen.findByRole('dialog', { name: '卡片已经烘焙完成' })).toBeInTheDocument()
-    expect(mocks.syncEligibleAchievementTasks).toHaveBeenCalledWith(expect.objectContaining({
+    expect(await screen.findByRole('dialog', { name: '面包屑已经烘焙完成' })).toBeInTheDocument()
+    expect(mocks.syncEligibleBreadcrumbRules).toHaveBeenCalledWith(expect.objectContaining({
       authToken: 'mbs_celebration_token',
     }))
 

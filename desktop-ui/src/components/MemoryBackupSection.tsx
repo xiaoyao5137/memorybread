@@ -15,6 +15,11 @@ import { toUserFacingError } from '../utils/userFacingError'
 import { BakeButton, BakeCard, BakePill, BakeSectionHeader } from './bake/BakeShared'
 
 const tableLabels: Record<string, string> = {
+  breadcrumb_definitions: '面包屑定义',
+  breadcrumb_rules: '面包屑规则',
+  breadcrumb_inventory: '面包屑数量',
+  breadcrumb_awards: '面包屑记录',
+  breadcrumb_equipment: '面包屑佩戴',
   capture_refs: '占位引用',
   timelines: '时间线',
   bake_knowledge: '知识',

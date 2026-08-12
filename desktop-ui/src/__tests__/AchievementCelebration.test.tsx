@@ -4,7 +4,7 @@ import AchievementCelebration from '../components/AchievementCelebration'
 
 const overnightBadge = {
   id: 'badge-overnight',
-  badge_key: 'overnight_writer',
+  breadcrumb_key: 'overnight_writer',
   name: '通宵赶稿',
   tagline: '月落前还在落笔',
   description: '一个自然周内，曾在某个本地夜晚从 0 点到 6 点保持连续有效工作。',
@@ -20,16 +20,16 @@ describe('AchievementCelebration', () => {
     render(
       <AchievementCelebration
         awards={[{
-          badge: overnightBadge,
-          badge_quantity: 1,
-          total_badge_quantity: 1,
+          breadcrumb: overnightBadge,
+          increment: 1,
+          total_quantity: 1,
         }]}
         onDismiss={onDismiss}
         onViewCards={onViewCards}
       />,
     )
 
-    expect(screen.getByRole('dialog', { name: '卡片已经烘焙完成' })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: '面包屑已经烘焙完成' })).toBeInTheDocument()
     expect(screen.getByText('通宵赶稿')).toBeInTheDocument()
     const viewButton = screen.getByRole('button', { name: '去查收' })
     await waitFor(() => expect(viewButton).toHaveFocus())
@@ -45,9 +45,9 @@ describe('AchievementCelebration', () => {
     render(
       <AchievementCelebration
         awards={[{
-          badge: overnightBadge,
-          badge_quantity: 1,
-          total_badge_quantity: 1,
+          breadcrumb: overnightBadge,
+          increment: 1,
+          total_quantity: 1,
         }]}
         onDismiss={onDismiss}
         onViewCards={onViewCards}
@@ -63,9 +63,9 @@ describe('AchievementCelebration', () => {
     render(
       <AchievementCelebration
         awards={[{
-          badge: overnightBadge,
-          badge_quantity: 3,
-          total_badge_quantity: 7,
+          breadcrumb: overnightBadge,
+          increment: 3,
+          total_quantity: 7,
         }]}
         onDismiss={vi.fn()}
         onViewCards={vi.fn()}
@@ -73,7 +73,7 @@ describe('AchievementCelebration', () => {
     )
 
     expect(screen.getAllByRole('dialog')).toHaveLength(1)
-    expect(screen.getByText('获得 3 张新卡片')).toBeInTheDocument()
+    expect(screen.getByText('获得 3 枚面包屑')).toBeInTheDocument()
     expect(screen.getByText('本次 +3 · 累计 ×7')).toBeInTheDocument()
     expect(screen.getByText(/「通宵赶稿」 ×3/)).toBeInTheDocument()
   })

@@ -90,10 +90,10 @@ const mockSignedInProfileFetch = () => vi.fn(async (input: RequestInfo | URL, in
     }
   }
 
-  if (url.includes('/v1/achievements')) {
+  if (url.includes('/api/breadcrumbs')) {
     const badge = {
       id: '01910000-0000-7000-8000-000000000001',
-      badge_key: 'code_elite',
+      breadcrumb_key: 'code_elite',
       name: '代码精英',
       tagline: '逻辑在指尖升温',
       description: '一周内累计完成 50 小时代码编写工作。',
@@ -104,16 +104,13 @@ const mockSignedInProfileFetch = () => vi.fn(async (input: RequestInfo | URL, in
     return {
       ok: true,
       json: async () => ({
-        data: {
-          badges: [{
-            badge,
+          breadcrumbs: [{
+            breadcrumb: badge,
             quantity: 3,
-            total_credit_earned: '600.0000',
-            first_earned_at: '2026-07-01T00:00:00Z',
-            last_earned_at: '2026-07-18T00:00:00Z',
+            first_earned_at: 1751328000000,
+            last_earned_at: 1752796800000,
           }],
           equipped: init?.method === 'PUT' ? { profile_avatar: badge } : {},
-        },
       }),
     }
   }
@@ -403,7 +400,7 @@ describe('AuthPanel', () => {
     expect(screen.getAllByRole('tab')).toHaveLength(5)
     expect(screen.getByRole('tab', { name: '个人信息' })).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByRole('tab', { name: '消息' })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: '标签卡片' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: '面包屑' })).toBeInTheDocument()
     expect(screen.queryByRole('tab', { name: '工作热力图' })).not.toBeInTheDocument()
     expect(screen.getByText('运行模式')).toBeInTheDocument()
     expect(await screen.findAllByText('增强模式')).not.toHaveLength(0)
@@ -428,14 +425,14 @@ describe('AuthPanel', () => {
       expect.objectContaining({ method: 'PUT' }),
     )
 
-    fireEvent.click(screen.getByRole('tab', { name: '标签卡片' }))
+    fireEvent.click(screen.getByRole('tab', { name: '面包屑' }))
     expect(await screen.findByText('代码精英')).toBeInTheDocument()
     expect(screen.getByText('×3')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '查看「代码精英」卡片详情' }))
+    fireEvent.click(screen.getByRole('button', { name: '查看「代码精英」面包屑详情' }))
     fireEvent.click(screen.getByRole('button', { name: '佩戴到头像' }))
     expect(await screen.findByText('已将「代码精英」佩戴到个人头像。')).toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://memorybread.work/v1/achievements/equipped',
+      expect.stringContaining('/api/breadcrumbs/equipped'),
       expect.objectContaining({ method: 'PUT' }),
     )
 

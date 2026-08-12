@@ -12,9 +12,10 @@ import {
 } from '../hooks/useApi'
 import { useImeCompositionGuard } from '../hooks/useImeCompositionGuard'
 import { useAppStore } from '../store/useAppStore'
-import type { AchievementBadge, RagContext } from '../types'
+import type { BreadcrumbDefinition, RagContext } from '../types'
 import { buildAttachmentMetadata, buildAttachmentPrompt, filesToAttachments, formatAttachmentSize, type UserAttachment } from '../utils/attachments'
-import { ACHIEVEMENTS_CHANGED_KEY, fetchAchievementProfile, fetchBillingBalance } from '../utils/authApi'
+import { fetchBillingBalance } from '../utils/authApi'
+import { BREADCRUMBS_CHANGED_KEY, fetchBreadcrumbProfile } from '../utils/breadcrumbApi'
 import { createOptionalCloudRequestSignal, optionalCloudIsReachable } from '../utils/optionalCloud'
 import {
   FLOATING_ASSIST_AUTO_TASK_KEY,
@@ -276,7 +277,7 @@ const SystemFloatingAssist: React.FC = () => {
   const manualInputImeGuard = useImeCompositionGuard<HTMLTextAreaElement>()
   const [attachments, setAttachments] = useState<UserAttachment[]>([])
   const [attachmentError, setAttachmentError] = useState<string | null>(null)
-  const [floatingBadge, setFloatingBadge] = useState<AchievementBadge | null>(null)
+  const [floatingBadge, setFloatingBadge] = useState<BreadcrumbDefinition | null>(null)
   const [progress, setProgress] = useState(0)
   const [autoTaskConfig, setAutoTaskConfig] = useState(readFloatingAssistAutoTaskConfig)
   const [interactionSettings, setInteractionSettings] = useState(readInteractionSettings)
@@ -445,18 +446,13 @@ const SystemFloatingAssist: React.FC = () => {
   }, [adminApiBaseUrl, authToken, currentUser, setCloudBalance])
 
   useEffect(() => {
-    if (!authToken || !currentUser) {
-      setFloatingBadge(null)
-      return undefined
-    }
     let cancelled = false
     let refreshing = false
     const lifecycleController = new AbortController()
     const refreshBadge = () => {
-      if (cancelled || refreshing || !optionalCloudIsReachable()) return
+      if (cancelled || refreshing) return
       refreshing = true
-      const request = createOptionalCloudRequestSignal(lifecycleController.signal)
-      fetchAchievementProfile(adminApiBaseUrl, authToken, request.signal)
+      fetchBreadcrumbProfile(apiBaseUrl, lifecycleController.signal)
         .then((profile) => {
           if (!cancelled) setFloatingBadge(profile.equipped.floating_avatar ?? null)
         })
@@ -464,23 +460,22 @@ const SystemFloatingAssist: React.FC = () => {
           if (!cancelled) setFloatingBadge(null)
         })
         .finally(() => {
-          request.dispose()
           refreshing = false
         })
     }
     const handleStorage = (event: StorageEvent) => {
-      if (event.key === ACHIEVEMENTS_CHANGED_KEY) refreshBadge()
+      if (event.key === BREADCRUMBS_CHANGED_KEY) refreshBadge()
     }
     refreshBadge()
     window.addEventListener('storage', handleStorage)
-    window.addEventListener('online', refreshBadge)
+    window.addEventListener(BREADCRUMBS_CHANGED_KEY, refreshBadge)
     return () => {
       cancelled = true
       lifecycleController.abort()
       window.removeEventListener('storage', handleStorage)
-      window.removeEventListener('online', refreshBadge)
+      window.removeEventListener(BREADCRUMBS_CHANGED_KEY, refreshBadge)
     }
-  }, [adminApiBaseUrl, authToken, currentUser])
+  }, [apiBaseUrl])
 
   useEffect(() => {
     document.documentElement.classList.add('floating-assist-html')

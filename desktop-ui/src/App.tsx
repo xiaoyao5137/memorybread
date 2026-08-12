@@ -29,7 +29,7 @@ import AboutPanel             from './components/AboutPanel'
 import SoftwareUpdateNotice   from './components/SoftwareUpdateNotice'
 import PanelErrorBoundary     from './components/PanelErrorBoundary'
 import { cloudSessionIsInvalid, fetchConsoleSummary, fetchCurrentUser } from './utils/authApi'
-import { syncEligibleAchievementTasks } from './utils/achievementTasks'
+import { syncEligibleBreadcrumbRules } from './utils/breadcrumbRules'
 import {
   FLOATING_ASSIST_ENABLED_KEY,
   readFloatingAssistAutoTaskConfig,
@@ -49,7 +49,7 @@ import {
 } from './utils/softwareUpdate'
 import { fetchInitializationStatus, initializationIsReady } from './utils/initialization'
 import { createOptionalCloudRequestSignal, optionalCloudIsReachable } from './utils/optionalCloud'
-import type { AccountProfileSection, AchievementAward } from './types'
+import type { AccountProfileSection, BreadcrumbAward } from './types'
 
 const WORK_PROFILE_SYNC_INTERVAL_MS = 5 * 60 * 1000
 const ACHIEVEMENT_SYNC_INTERVAL_MS = 5 * 60 * 1000
@@ -115,7 +115,7 @@ const App: React.FC = () => {
     clearAuthSession,
   } = useAppStore()
 
-  const [achievementCelebrations, setAchievementCelebrations] = useState<AchievementAward[][]>([])
+  const [achievementCelebrations, setAchievementCelebrations] = useState<BreadcrumbAward[][]>([])
   const [accountNavigation, setAccountNavigation] = useState<AccountNavigationRequest | null>(null)
   const [softwareUpdate, setSoftwareUpdate] = useState<SoftwareUpdateCheck | null>(null)
   const [softwareUpdateNoticeOpen, setSoftwareUpdateNoticeOpen] = useState(false)
@@ -161,7 +161,9 @@ const App: React.FC = () => {
     if (activeAchievementCelebration) {
       setAccountNavigation({
         section: 'achievements',
-        highlightedAchievementKeys: activeAchievementCelebration.map(({ badge }) => badge.badge_key),
+        highlightedAchievementKeys: activeAchievementCelebration.map(
+          ({ breadcrumb }) => breadcrumb.breadcrumb_key,
+        ),
       })
     }
     setAchievementCelebrations((queue) => queue.slice(1))
@@ -496,23 +498,21 @@ const App: React.FC = () => {
     let syncInFlight = false
 
     const syncAchievements = async () => {
-      if (controller.signal.aborted || syncInFlight || !optionalCloudIsReachable()) return
+      if (controller.signal.aborted || syncInFlight) return
       syncInFlight = true
-      const request = createOptionalCloudRequestSignal(controller.signal)
       try {
-        const awards = await syncEligibleAchievementTasks({
+        const awards = await syncEligibleBreadcrumbRules({
           adminApiBaseUrl,
           apiBaseUrl,
           authToken,
-          signal: request.signal,
+          signal: controller.signal,
         })
         if (!controller.signal.aborted && awards.length > 0) {
           setAchievementCelebrations((queue) => [...queue, awards])
         }
       } catch {
-        // 领取检测属于后台增强；本地或账户服务恢复后会自动重试。
+        // 面包屑结算是本地增强；本地核心恢复后会自动重试。
       } finally {
-        request.dispose()
         syncInFlight = false
       }
     }
