@@ -81,8 +81,8 @@ describe('Settings debug mode visibility', () => {
     fireEvent.click(screen.getByTestId('service-environment-production'))
 
     expect(useAppStore.getState().serviceEnvironment).toBe('production')
-    expect(useAppStore.getState().adminApiBaseUrl).toBe('https://memorybread.work')
-    expect(useAppStore.getState().gatewayApiBaseUrl).toBe('https://gateway.memorybread.work')
+    expect(useAppStore.getState().adminApiBaseUrl).toBe('https://memorybread.cn')
+    expect(useAppStore.getState().gatewayApiBaseUrl).toBe('https://gateway.memorybread.cn')
     expect(screen.getByTestId('service-environment-production')).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByTestId('service-environment-staging')).toHaveAttribute('aria-pressed', 'false')
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))

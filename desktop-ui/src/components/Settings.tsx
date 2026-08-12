@@ -780,7 +780,7 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
               <div className="settings-v2__environment-row">
                 <span className="settings-v2__environment-copy">
                   <strong>服务环境</strong>
-                  <small>测试使用本机 18080/18090；正式使用 memorybread.work 域名。</small>
+                  <small>测试使用本机 18080/18090；正式使用 memorybread.cn 域名。</small>
                 </span>
                 <div
                   className="settings-v2__environment-options"

@@ -241,7 +241,7 @@ describe('AuthPanel', () => {
     await waitFor(() => {
       expect(useAppStore.getState().authToken).toBe('mbs_register_token')
     })
-    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://memorybread.work/v1/auth/email/send-code')
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://memorybread.cn/v1/auth/email/send-code')
     const request = fetchMock.mock.calls[1]?.[1] as RequestInit
     expect(JSON.parse(String(request.body))).toEqual({
       email: 'xiaomai@memorybread.local',
@@ -287,7 +287,7 @@ describe('AuthPanel', () => {
       expect(useAppStore.getState().authToken).toBe('mbs_test_token')
     })
     expect(useAppStore.getState().accountType).toBe('platform_admin')
-    expect(fetchMock).toHaveBeenCalledWith('https://memorybread.work/v1/auth/login', expect.any(Object))
+    expect(fetchMock).toHaveBeenCalledWith('https://memorybread.cn/v1/auth/login', expect.any(Object))
   })
 
   it('账户服务不可达时显示可操作的错误提示', async () => {
@@ -424,7 +424,7 @@ describe('AuthPanel', () => {
     expect(screen.getByRole('heading', { name: '小麦' })).toBeInTheDocument()
     expect(useAppStore.getState().currentUser?.nickname).toBe('小麦')
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://memorybread.work/v1/auth/profile',
+      'https://memorybread.cn/v1/auth/profile',
       expect.objectContaining({ method: 'PUT' }),
     )
 

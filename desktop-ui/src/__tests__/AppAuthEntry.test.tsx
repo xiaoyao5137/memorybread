@@ -339,7 +339,7 @@ describe('App auth entry', () => {
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        'http://127.0.0.1:8080/v1/work-profile',
+        'https://memorybread.cn/v1/work-profile',
         expect.objectContaining({ method: 'PUT' }),
       )
     })

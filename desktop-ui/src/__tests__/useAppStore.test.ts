@@ -148,8 +148,8 @@ describe('服务环境绑定', () => {
     useAppStore.getState().setServiceEnvironment('staging')
 
     expect(useAppStore.getState().serviceEnvironment).toBe('production')
-    expect(useAppStore.getState().adminApiBaseUrl).toBe('https://memorybread.work')
-    expect(useAppStore.getState().gatewayApiBaseUrl).toBe('https://gateway.memorybread.work')
+    expect(useAppStore.getState().adminApiBaseUrl).toBe('https://memorybread.cn')
+    expect(useAppStore.getState().gatewayApiBaseUrl).toBe('https://gateway.memorybread.cn')
     expect(serviceEnvironmentHeaders()).toEqual({
       'X-MemoryBread-Environment': 'production',
     })
@@ -171,8 +171,8 @@ describe('服务环境绑定', () => {
     useAppStore.getState().setServiceEnvironment('production')
 
     expect(useAppStore.getState().serviceEnvironment).toBe('production')
-    expect(useAppStore.getState().adminApiBaseUrl).toBe('https://memorybread.work')
-    expect(useAppStore.getState().gatewayApiBaseUrl).toBe('https://gateway.memorybread.work')
+    expect(useAppStore.getState().adminApiBaseUrl).toBe('https://memorybread.cn')
+    expect(useAppStore.getState().gatewayApiBaseUrl).toBe('https://gateway.memorybread.cn')
     expect(serviceEnvironmentHeaders()).toEqual({
       'X-MemoryBread-Environment': 'production',
     })
@@ -185,8 +185,8 @@ describe('服务环境绑定', () => {
     useAppStore.getState().setDebugModeEnabled(true)
     useAppStore.getState().setServiceEnvironment('production')
 
-    expect(useAppStore.getState().adminApiBaseUrl).toBe('https://memorybread.work')
-    expect(useAppStore.getState().gatewayApiBaseUrl).toBe('https://gateway.memorybread.work')
+    expect(useAppStore.getState().adminApiBaseUrl).toBe('https://memorybread.cn')
+    expect(useAppStore.getState().gatewayApiBaseUrl).toBe('https://gateway.memorybread.cn')
   })
 
   it('关闭调试模式会恢复正式环境和正式服务地址', () => {
@@ -196,8 +196,8 @@ describe('服务环境绑定', () => {
 
     const state = useAppStore.getState()
     expect(state.serviceEnvironment).toBe('production')
-    expect(state.adminApiBaseUrl).toBe('https://memorybread.work')
-    expect(state.gatewayApiBaseUrl).toBe('https://gateway.memorybread.work')
+    expect(state.adminApiBaseUrl).toBe('https://memorybread.cn')
+    expect(state.gatewayApiBaseUrl).toBe('https://gateway.memorybread.cn')
   })
 
   it('切换环境不会沿用当前环境的账户会话', () => {

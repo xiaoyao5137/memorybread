@@ -92,8 +92,8 @@ curl http://localhost:7070/api/vector/status
 | 启动模式 | 环境 | Admin API | Gateway |
 | --- | --- | --- | --- |
 | Debug（默认） | 测试 | `http://127.0.0.1:18080` | `http://127.0.0.1:18090` |
-| Debug（可切换） | 正式 | `https://memorybread.work` | `https://gateway.memorybread.work` |
-| 非 Debug | 正式（不可切换） | `https://memorybread.work` | `https://gateway.memorybread.work` |
+| Debug（可切换） | 正式 | `https://memorybread.cn` | `https://gateway.memorybread.cn` |
+| 非 Debug | 正式（不可切换） | `https://memorybread.cn` | `https://gateway.memorybread.cn` |
 
 每次 Debug 启动都从测试环境开始；关闭调试模式会立即恢复正式环境和正式地址。
 

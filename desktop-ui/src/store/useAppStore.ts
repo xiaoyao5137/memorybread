@@ -302,11 +302,11 @@ const DEFAULT_CREATION_MODELS: CreationModelConfig[] = [
   { id: 'mbcd-std-v1',  enabled: true,  apiKey: '' },
 ]
 const DEFAULT_ADMIN_API_BASE_URLS: Record<ServiceEnvironment, string> = {
-  production: 'https://memorybread.work',
+  production: 'https://memorybread.cn',
   staging: 'http://127.0.0.1:18080',
 }
 const DEFAULT_GATEWAY_API_BASE_URLS: Record<ServiceEnvironment, string> = {
-  production: 'https://gateway.memorybread.work',
+  production: 'https://gateway.memorybread.cn',
   staging: 'http://127.0.0.1:18090',
 }
 

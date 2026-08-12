@@ -212,7 +212,7 @@ describe('首次启动一键初始化', () => {
 
     expect(await screen.findByText(/report-001/)).toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:8080/v1/initialization-reports',
+      'https://memorybread.cn/v1/initialization-reports',
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({ 'Idempotency-Key': 'init-run-001' }),
