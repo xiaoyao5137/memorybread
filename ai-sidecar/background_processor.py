@@ -39,10 +39,22 @@ _DATA_SOURCE_DISCOVERED_ENDPOINT = "/api/data/sources/discovered"
 _INFERENCE_QUEUE_STATUS_ENDPOINT = "/api/inference/queue-status"
 _CHARGING_CATCHUP_MAX_BATCH_SIZE = 100
 _CHARGING_CATCHUP_SLEEP_SECS = 1
-# 单模型槽下，P1 时间线提炼会在当前 P2 bake 候选结束后抢占模型。大积压时允许
-# bake 连续跑几个批次，再给 capture 一轮，既提高排空速度，也避免 capture 饥饿。
+# 单模型槽下不能只按“批次数”做公平调度：100 条 capture 可能拆成十几个模型
+# 请求，一轮就独占十几分钟。双队列高压时把两侧都切成有界工作片，保证轮转。
 _BAKE_BACKLOG_BURST_THRESHOLD = 100
+# 双队列轮转同样使用正常批量 20 作为 bake 侧低水位；100 只保留为单边
+# bake burst 的启动阈值，避免从 100 降到 99 就重新出现 capture 长批。
+_BAKE_BACKLOG_PRESSURE_THRESHOLD = 20
+# 20 是充电档正常单批上限。高压模式必须持续到 backlog 回到正常单批以内，
+# 不能在 100 处形成阈值悬崖，否则一个大语义组就会让下一轮重新变成长批。
+_CAPTURE_BACKLOG_PRESSURE_THRESHOLD = 20
 _BAKE_BACKLOG_MAX_CONSECUTIVE_RUNS = 3
+_DUAL_BACKLOG_MAX_CONSECUTIVE_BAKE_RUNS = 1
+_DUAL_BACKLOG_CAPTURE_GROUP_QUANTUM = 3
+_DUAL_BACKLOG_BAKE_LIMIT = 3
+# 电池模式原本 30 分钟才调度 1 条 bake；当两条队列都高压时，时间线提炼本身
+# 已经持续占用同一个模型槽，因此改为轮转不会增加并发，只会重新分配既有算力。
+_BATTERY_BACKLOG_BAKE_INTERVAL_SECS = 2 * 60
 _SUBSTANTIVE_DOCUMENT_MIN_CHARS = 200
 _ARTIFACT_VECTOR_CHECK_INTERVAL_SECS = 5 * 60
 _VECTOR_CONSISTENCY_AUDIT_INTERVAL_SECS = 24 * 60 * 60
@@ -217,6 +229,7 @@ class BackgroundProcessor:
         self._last_energy_mode: Optional[str] = None
         self._last_data_extraction_at: float = 0.0
         self._consecutive_backlog_bake_runs = 0
+        self._latest_bake_actionable_count = 0
 
         # 懒加载 workers
         self._embed_worker = None
@@ -471,6 +484,67 @@ class BackgroundProcessor:
         return min(max(base_limit, int(pending_count)), _CHARGING_CATCHUP_MAX_BATCH_SIZE)
 
     @staticmethod
+    def _is_dual_backlog_pressure(
+        pending_capture_count: int,
+        actionable_bake_count: int,
+    ) -> bool:
+        return (
+            int(pending_capture_count) >= _CAPTURE_BACKLOG_PRESSURE_THRESHOLD
+            and int(actionable_bake_count) >= _BAKE_BACKLOG_PRESSURE_THRESHOLD
+        )
+
+    @classmethod
+    def _capture_group_quantum(
+        cls,
+        pending_capture_count: int,
+        actionable_bake_count: int,
+    ) -> Optional[int]:
+        if cls._is_dual_backlog_pressure(
+            pending_capture_count,
+            actionable_bake_count,
+        ):
+            return _DUAL_BACKLOG_CAPTURE_GROUP_QUANTUM
+        return None
+
+    @staticmethod
+    def _scheduled_bake_limit(profile, pending_capture_count: int) -> int:
+        limit = max(1, int(profile.bake_limit))
+        if int(pending_capture_count) >= _CAPTURE_BACKLOG_PRESSURE_THRESHOLD:
+            return min(limit, _DUAL_BACKLOG_BAKE_LIMIT)
+        return limit
+
+    @classmethod
+    def _bake_burst_run_limit(
+        cls,
+        pending_capture_count: int,
+        actionable_bake_count: int,
+    ) -> int:
+        if cls._is_dual_backlog_pressure(
+            pending_capture_count,
+            actionable_bake_count,
+        ):
+            return _DUAL_BACKLOG_MAX_CONSECUTIVE_BAKE_RUNS
+        return _BAKE_BACKLOG_MAX_CONSECUTIVE_RUNS
+
+    @classmethod
+    def _scheduled_bake_interval_secs(
+        cls,
+        profile,
+        pending_capture_count: int,
+        actionable_bake_count: int,
+    ) -> float:
+        interval_secs = max(1.0, float(profile.bake_interval_secs))
+        if (
+            profile.mode == "battery"
+            and cls._is_dual_backlog_pressure(
+                pending_capture_count,
+                actionable_bake_count,
+            )
+        ):
+            return min(interval_secs, float(_BATTERY_BACKLOG_BAKE_INTERVAL_SECS))
+        return interval_secs
+
+    @staticmethod
     def _should_continue_charging_catchup(
         profile,
         pending_before: int,
@@ -657,12 +731,14 @@ class BackgroundProcessor:
                 "triggered": False,
                 "reason": "capture_disabled",
                 "retry_after_ms": int(queue_status.get("recommended_retry_after_ms") or 300_000),
+                "actionable_count": int(queue_status.get("actionable_count") or 0),
             }
         if int(queue_status.get("actionable_count") or 0) <= 0:
             return {
                 "triggered": False,
                 "reason": "no_actionable_bake_candidate",
                 "retry_after_ms": int(queue_status.get("recommended_retry_after_ms") or 300_000),
+                "actionable_count": 0,
                 "queue": queue_status,
             }
         # recommended_retry_after_ms 只描述“当前没有可执行候选”时的下一次检查时间。
@@ -681,6 +757,7 @@ class BackgroundProcessor:
             return {
                 "triggered": False,
                 "reason": "inference_busy",
+                "actionable_count": int(queue_status.get("actionable_count") or 0),
             }
 
         url = f"{self._get_core_engine_url().rstrip('/')}{_BAKE_RUN_ENDPOINT}"
@@ -943,6 +1020,7 @@ class BackgroundProcessor:
         limit_override: Optional[int] = None,
         force_finalize_tail: bool = False,
         *,
+        max_groups: Optional[int] = None,
         trigger_bake: bool = True,
         bake_limit: Optional[int] = None,
         bake_concurrency: int = 3,
@@ -951,6 +1029,14 @@ class BackgroundProcessor:
         groups_to_process = batch.get('groups_to_process')
         if not groups_to_process:
             return batch
+        if max_groups is not None and len(groups_to_process) > max(1, int(max_groups)):
+            scheduled_count = max(1, int(max_groups))
+            logger.info(
+                "双队列高压工作片: 本轮处理 %s/%s 个 capture 语义组，其余留待轮转",
+                scheduled_count,
+                len(groups_to_process),
+            )
+            groups_to_process = groups_to_process[:scheduled_count]
 
         # 内存压力检查：内存不足时跳过提炼，避免系统卡死
         from model_registry_global import check_memory_pressure
@@ -1031,6 +1117,7 @@ class BackgroundProcessor:
         limit_override: Optional[int] = None,
         force_finalize_tail: bool = False,
         *,
+        max_groups: Optional[int] = None,
         trigger_bake: bool = True,
         bake_limit: Optional[int] = None,
         bake_concurrency: int = 3,
@@ -1039,6 +1126,7 @@ class BackgroundProcessor:
             return await self._run_batch(
                 limit_override,
                 force_finalize_tail,
+                max_groups=max_groups,
                 trigger_bake=trigger_bake,
                 bake_limit=bake_limit,
                 bake_concurrency=bake_concurrency,
@@ -2413,7 +2501,6 @@ class BackgroundProcessor:
 
     def _load_document_backfill_captures(self, limit: int) -> list[dict]:
         url_markers = (
-            "docs.corp",
             "/docs/",
             "docs.google",
             "/document/",
@@ -2754,6 +2841,7 @@ class BackgroundProcessor:
         self,
         *,
         limit: int,
+        max_groups: Optional[int],
         trigger_bake: bool,
         bake_limit: int,
         bake_concurrency: int,
@@ -2762,6 +2850,7 @@ class BackgroundProcessor:
         try:
             return await self.run_once(
                 limit_override=limit,
+                max_groups=max_groups,
                 trigger_bake=trigger_bake,
                 bake_limit=bake_limit,
                 bake_concurrency=bake_concurrency,
@@ -2826,6 +2915,7 @@ class BackgroundProcessor:
         next_check_ts: float,
         *,
         now: Optional[float] = None,
+        pending_capture_count: int = 0,
     ) -> tuple[float, bool]:
         """尝试触发 bake，返回（下次检查时间，本轮是否应让出 capture 槽位）。
 
@@ -2837,20 +2927,35 @@ class BackgroundProcessor:
         if check_ts < next_check_ts:
             return next_check_ts, False
 
+        bake_limit = self._scheduled_bake_limit(profile, pending_capture_count)
         bake_result = await self._maybe_trigger_periodic_bake(
-            limit=profile.bake_limit,
+            limit=bake_limit,
             max_concurrency=profile.bake_concurrency,
         )
+        actionable_count = int(bake_result.get("actionable_count") or 0)
+        if "actionable_count" in bake_result:
+            self._latest_bake_actionable_count = actionable_count
+        scheduled_interval_secs = self._scheduled_bake_interval_secs(
+            profile,
+            pending_capture_count,
+            actionable_count,
+        )
         retry_after_secs = max(
-            profile.bake_interval_secs,
+            scheduled_interval_secs,
             int(bake_result.get("retry_after_ms") or 0) / 1000.0,
         )
         triggered = bool(bake_result.get("triggered"))
         reason = bake_result.get("reason")
-        actionable_count = int(bake_result.get("actionable_count") or 0)
         backlog_burst = (
-            profile.mode in {"charging", "unrestricted"}
-            and actionable_count >= _BAKE_BACKLOG_BURST_THRESHOLD
+            actionable_count >= _BAKE_BACKLOG_BURST_THRESHOLD
+            or self._is_dual_backlog_pressure(
+                pending_capture_count,
+                actionable_count,
+            )
+        )
+        burst_run_limit = self._bake_burst_run_limit(
+            pending_capture_count,
+            actionable_count,
         )
 
         if triggered:
@@ -2859,20 +2964,20 @@ class BackgroundProcessor:
             else:
                 self._consecutive_backlog_bake_runs = 0
 
-        # accepted 之后必须让出本轮；run_in_progress 时，只有大积压且尚未达到
-        # burst 上限才继续让出。达到上限后允许一轮 capture 排队，随后计数归零。
+        # 单边 bake 积压时保留原来的 bounded burst；双边积压时一次小 bake run
+        # 就轮到一个有界 capture 工作片，避免两侧任一批次长期独占模型。
         hold_capture = triggered
         if (
             triggered
             and backlog_burst
             and self._consecutive_backlog_bake_runs
-            >= _BAKE_BACKLOG_MAX_CONSECUTIVE_RUNS
+            >= burst_run_limit
         ):
             hold_capture = False
         if reason == "run_in_progress" and backlog_burst:
             hold_capture = (
                 self._consecutive_backlog_bake_runs
-                < _BAKE_BACKLOG_MAX_CONSECUTIVE_RUNS
+                < burst_run_limit
             )
         return check_ts + retry_after_secs, hold_capture
 
@@ -2973,13 +3078,18 @@ class BackgroundProcessor:
                     await asyncio.sleep(sleep_secs)
                     continue
 
-                # 先给已到期的 bake 一次调度机会，再进入可能很长的
-                # capture 追赶批次，避免两条后台流水线互相饥饿。
+                pending_before = await asyncio.to_thread(
+                    self._count_unprocessed_captures
+                )
+
+                # 先给已到期的 bake 一次调度机会，再进入 capture 工作片。
                 (
                     _next_periodic_bake_check_ts,
                     preflight_bake_holds_capture,
                 ) = await self._run_periodic_bake_check(
-                    profile, _next_periodic_bake_check_ts
+                    profile,
+                    _next_periodic_bake_check_ts,
+                    pending_capture_count=pending_before,
                 )
                 if preflight_bake_holds_capture:
                     # Core 是异步 accepted：此时 P2 请求可能尚未拿到跨进程
@@ -2988,28 +3098,42 @@ class BackgroundProcessor:
                     logger.info(
                         "周期性 bake 已接受或仍在运行，本轮让出 capture 批处理的模型槽"
                     )
-                    await asyncio.sleep(
-                        min(sleep_secs, max(1, profile.bake_interval_secs))
+                    wait_until_check = max(
+                        1.0,
+                        _next_periodic_bake_check_ts - time.monotonic(),
                     )
+                    await asyncio.sleep(min(sleep_secs, wait_until_check))
                     continue
 
+                burst_run_limit = self._bake_burst_run_limit(
+                    pending_before,
+                    self._latest_bake_actionable_count,
+                )
                 if (
                     self._consecutive_backlog_bake_runs
-                    >= _BAKE_BACKLOG_MAX_CONSECUTIVE_RUNS
+                    >= burst_run_limit
                 ):
                     logger.info(
-                        "大积压 bake burst 已连续运行 %s 批，本轮恢复 capture 公平配额",
+                        "bake 工作片已运行 %s 批，本轮恢复 capture 公平配额",
                         self._consecutive_backlog_bake_runs,
                     )
                     self._consecutive_backlog_bake_runs = 0
 
                 maximum_throughput = profile.mode in {"charging", "unrestricted"}
-                pending_before = await asyncio.to_thread(self._count_unprocessed_captures)
                 timeline_batch_limit = self._timeline_batch_limit(profile, pending_before)
+                capture_group_quantum = self._capture_group_quantum(
+                    pending_before,
+                    self._latest_bake_actionable_count,
+                )
+                scheduled_bake_limit = self._scheduled_bake_limit(
+                    profile,
+                    pending_before,
+                )
                 batch_result = await self._process_batch(
                     limit=timeline_batch_limit,
+                    max_groups=capture_group_quantum,
                     trigger_bake=maximum_throughput,
-                    bake_limit=profile.bake_limit,
+                    bake_limit=scheduled_bake_limit,
                     bake_concurrency=profile.bake_concurrency,
                 )
                 processed = int(batch_result.get('processed_count', 0))
@@ -3027,12 +3151,24 @@ class BackgroundProcessor:
 
                 if processed > 0:
                     logger.info(f"✅ 本轮处理完成: {processed} 条记录")
-                if (batch_result.get('bake_trigger') or {}).get('triggered'):
-                    _next_periodic_bake_check_ts = (
-                        time.monotonic() + profile.bake_interval_secs
+                bake_trigger = batch_result.get('bake_trigger') or {}
+                if "actionable_count" in bake_trigger:
+                    self._latest_bake_actionable_count = int(
+                        bake_trigger.get("actionable_count") or 0
                     )
+                if bake_trigger.get('triggered'):
+                    scheduled_interval_secs = self._scheduled_bake_interval_secs(
+                        profile,
+                        pending_before,
+                        self._latest_bake_actionable_count,
+                    )
+                    _next_periodic_bake_check_ts = (
+                        time.monotonic() + scheduled_interval_secs
+                    )
+                pending_after = await asyncio.to_thread(
+                    self._count_unprocessed_captures
+                )
                 if maximum_throughput and pending_before > profile.timeline_batch_size:
-                    pending_after = await asyncio.to_thread(self._count_unprocessed_captures)
                     if self._should_continue_charging_catchup(
                         profile,
                         pending_before,
@@ -3041,13 +3177,36 @@ class BackgroundProcessor:
                     ):
                         sleep_secs = _CHARGING_CATCHUP_SLEEP_SECS
 
+                dual_backlog_pressure = self._is_dual_backlog_pressure(
+                    pending_after,
+                    self._latest_bake_actionable_count,
+                )
+                if dual_backlog_pressure:
+                    # capture 工作片结束后强制重新对账 bake 状态，不能因为充电
+                    # catch-up 的 1 秒间隔连续提交下一批 P1 请求。
+                    _next_periodic_bake_check_ts = 0.0
+
                 # 长批次结束后再检查一次，方便在本轮刚产出新
                 # timeline 或前一个 run 刚完成时立即续跑。
-                _next_periodic_bake_check_ts, _ = (
+                (
+                    _next_periodic_bake_check_ts,
+                    postflight_bake_holds_capture,
+                ) = (
                     await self._run_periodic_bake_check(
-                        profile, _next_periodic_bake_check_ts
+                        profile,
+                        _next_periodic_bake_check_ts,
+                        pending_capture_count=pending_after,
                     )
                 )
+                if postflight_bake_holds_capture:
+                    wait_until_check = max(
+                        1.0,
+                        _next_periodic_bake_check_ts - time.monotonic(),
+                    )
+                    sleep_secs = max(
+                        sleep_secs,
+                        min(profile.timeline_interval_secs, wait_until_check),
+                    )
 
                 # 等待下一轮
                 await asyncio.sleep(sleep_secs)

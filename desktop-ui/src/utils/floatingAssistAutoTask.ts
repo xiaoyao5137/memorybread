@@ -65,7 +65,7 @@ const bulletActionPattern = /^\s*(?:[-*•]\s*|\d+[.)、]\s*)?(?:完成|处理|�
 const issueWithActionPattern = /\b(?:jira|linear|issue|ticket|bug|BUG|Bug|P[0-3])\b.*(?:fix|implement|check|修复|实现|处理|排查|定位|跟进|确认)/i
 const deadlinePattern = /(?:截止|到期|deadline|due date|ETA)\s*[:：]?\s*\S|(?:今天|明天|本周|下周|月底|周[一二三四五六日天])(?:前|内)/i
 const taskObjectActionPattern = /(?:任务|需求|问题|故障|异常|缺陷|bug|Bug|BUG).*(?:完成|处理|跟进|推进|安排|提交|回复|确认|整理|实现|修复|优化|排查|定位|调试|测试)/i
-const documentSurfacePattern = /docs\.corp\.kuaishou\.com|云文档|所有改动已自动保存|正文，默认字体|可编辑|书签|新标签页/i
+const documentSurfacePattern = /(?:https?:\/\/|www\.)\S*(?:\/docs?(?:\/|\b)|\/wiki(?:\/|\b)|\/[dk]\/home\/)|云文档|所有改动已自动保存|正文，默认字体|可编辑|书签|新标签页/i
 const imSurfacePattern = /(?:微信|WeChat|企业微信|飞书|Lark|Slack|Teams|Microsoft Teams|钉钉|DingTalk|QQ|Telegram|Discord|WhatsApp|消息|聊天|群聊|私信|DM|channel|频道)/i
 
 const cleanStringList = (values: unknown, fallback: string[]) => {

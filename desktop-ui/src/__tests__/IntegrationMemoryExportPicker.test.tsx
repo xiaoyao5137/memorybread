@@ -125,7 +125,7 @@ describe('MemoryExportPicker', () => {
   })
 
   it('选择文件夹按钮调用本机目录选择器并回填路径', async () => {
-    integrationMocks.pickLocalDirectory.mockResolvedValue('/Users/tester/Vault')
+    integrationMocks.pickLocalDirectory.mockResolvedValue('/tmp/memorybread-test/Vault')
     await renderLoadedPicker()
 
     fireEvent.click(within(screen.getByRole('listbox').parentElement as HTMLElement)
@@ -133,7 +133,7 @@ describe('MemoryExportPicker', () => {
 
     await waitFor(() => {
       expect((screen.getByLabelText('Obsidian Vault 文件夹') as HTMLInputElement).value)
-        .toBe('/Users/tester/Vault')
+        .toBe('/tmp/memorybread-test/Vault')
     })
   })
 

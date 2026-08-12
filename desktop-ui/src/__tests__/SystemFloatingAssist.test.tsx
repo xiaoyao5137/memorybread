@@ -71,7 +71,7 @@ const anotherTaskOcrResult = {
   window_title: '项目群',
 }
 const documentTaskOcrResult = {
-  text: 'Chrome\ndocs.corp.kuaishou.com/d/home/example\n所有改动已自动保存\nTODO\n- [ ] 修复登录验证码异常\n截止：明天下午前',
+  text: 'Chrome\ndocs.example.com/d/home/example\n所有改动已自动保存\nTODO\n- [ ] 修复登录验证码异常\n截止：明天下午前',
   confidence: 0.91,
   screenshot_path: '/tmp/floating-document-task.jpg',
   width: 1440,

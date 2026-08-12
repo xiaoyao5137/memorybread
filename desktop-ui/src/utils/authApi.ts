@@ -8,6 +8,7 @@ import type {
   CloudSubscription,
   CloudUser,
   CompleteCloudSnapshotRequest,
+  ServiceEnvironment,
   UpsertCloudDeviceRequest,
 } from '../types'
 import { serviceEnvironmentHeaders } from '../store/useAppStore'
@@ -56,6 +57,9 @@ export const cloudSessionIsInvalid = (error: unknown): boolean => {
   return status === 401 || status === 403
 }
 
+export const cloudApiErrorCode = (error: unknown): string | undefined =>
+  (error as CloudApiError | null)?.code
+
 export async function authenticateWithPassword(
   adminApiBaseUrl: string,
   mode: 'login' | 'register',
@@ -85,7 +89,7 @@ export async function authenticateWithPassword(
   })
   const payload = await response.json().catch(() => null)
   if (!response.ok) {
-    throw new Error(authErrorMessage(payload, `auth failed: ${response.status}`))
+    throw cloudApiError(payload, `auth failed: ${response.status}`, response.status)
   }
   return payload.data as AuthSession
 }
@@ -166,7 +170,7 @@ export async function sendPhoneVerificationCode(
   })
   const payload = await response.json().catch(() => null)
   if (!response.ok) {
-    throw new Error(authErrorMessage(payload, `send phone code failed: ${response.status}`))
+    throw cloudApiError(payload, `send phone code failed: ${response.status}`, response.status)
   }
   return payload.data
 }
@@ -194,7 +198,7 @@ export async function authenticateWithPhoneCode(
   })
   const payload = await response.json().catch(() => null)
   if (!response.ok) {
-    throw new Error(authErrorMessage(payload, `phone auth failed: ${response.status}`))
+    throw cloudApiError(payload, `phone auth failed: ${response.status}`, response.status)
   }
   return payload.data as AuthSession
 }
@@ -300,11 +304,12 @@ export async function upsertCloudDevice(
   token: string,
   device: UpsertCloudDeviceRequest,
   signal?: AbortSignal,
+  environment?: ServiceEnvironment,
 ): Promise<CloudDevice> {
   const response = await fetch(`${adminApiBaseUrl}/v1/devices`, {
     method: 'POST',
     headers: {
-      ...serviceEnvironmentHeaders(),
+      ...serviceEnvironmentHeaders(environment),
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
@@ -315,7 +320,7 @@ export async function upsertCloudDevice(
   })
   const payload = await response.json().catch(() => null)
   if (!response.ok) {
-    throw new Error(authErrorMessage(payload, `device sync failed: ${response.status}`))
+    throw cloudApiError(payload, `device sync failed: ${response.status}`, response.status)
   }
   return payload.data as CloudDevice
 }

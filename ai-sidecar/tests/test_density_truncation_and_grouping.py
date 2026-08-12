@@ -174,7 +174,7 @@ class TestBuildMergedBlocks:
         800 字配额只留 ~350 字给正文，"文字乱码评测专家"等尾部段落丢失。
         """
         calendar_ocr = "日历\n2026年07月\n短视频AIGC专项日会\n会议时间\n我的待办\n今天" * 6
-        chatgpt_ocr = "创建定时任务：每日上午9:30推送三篇视频图片AIGC论文解读与快手电商落地思路，优先近30天论文，避免重复，引用一手来源"
+        chatgpt_ocr = "创建定时任务：每日上午9:30推送三篇视频图片AIGC论文解读与示例公司电商落地思路，优先近30天论文，避免重复，引用一手来源"
         captures = [
             _make_capture(19742, 1753849084000, "Kim", calendar_ocr),
             _make_capture(19745, 1753849328000, "ChatGPT", chatgpt_ocr),

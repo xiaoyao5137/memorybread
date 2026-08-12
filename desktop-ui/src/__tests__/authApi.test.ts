@@ -9,6 +9,7 @@ import {
   markAllCloudMessagesRead,
   markCloudMessageRead,
   sendEmailVerificationCode,
+  sendPhoneVerificationCode,
   sendPasswordResetCode,
   upsertCloudDevice,
   updateUserProfile,
@@ -102,6 +103,26 @@ describe('cloud device and snapshot API', () => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ email: 'xiaomai@example.com' }),
+    })
+  })
+
+  it('preserves phone verification throttling metadata for the resend countdown', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(jsonResponse({
+      error: {
+        code: 'VERIFICATION_SEND_THROTTLED',
+        message: '验证码发送过于频繁，请稍后再试',
+        retry_after_seconds: 42,
+      },
+    }, 429)))
+
+    await expect(sendPhoneVerificationCode(
+      'https://memorybread.cn',
+      '13800138000',
+    )).rejects.toMatchObject({
+      message: '验证码发送过于频繁，请稍后再试',
+      status: 429,
+      code: 'VERIFICATION_SEND_THROTTLED',
+      retryAfterSeconds: 42,
     })
   })
 

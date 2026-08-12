@@ -298,6 +298,20 @@
   font-weight: 800;
 }
 
+.auth-panel__field-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.auth-panel__field-heading small {
+  color: #8a6c57;
+  font-size: 11px;
+  font-weight: 500;
+  text-align: right;
+}
+
 .auth-panel__form input {
   width: 100%;
   min-height: 48px;
@@ -365,10 +379,37 @@
 }
 
 .auth-panel__verification-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px;
   color: #6f6156;
   font-size: 11px;
   font-weight: 500;
   line-height: 1.5;
+}
+
+.auth-panel__verification-note::before {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #2f7d4a;
+  content: "";
+  flex: 0 0 auto;
+}
+
+.auth-panel__verification-note time {
+  color: #285d39;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+}
+
+.auth-panel__verification-note--expired {
+  color: #9f4522;
+}
+
+.auth-panel__verification-note--expired::before {
+  background: #c65f2f;
 }
 
 .auth-panel__error {
@@ -668,6 +709,16 @@
     padding: 16px 14px;
     border-radius: 18px;
     gap: 12px;
+  }
+
+  .auth-panel__field-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .auth-panel__field-heading small {
+    text-align: left;
   }
 
   .auth-panel--login .auth-panel__form {

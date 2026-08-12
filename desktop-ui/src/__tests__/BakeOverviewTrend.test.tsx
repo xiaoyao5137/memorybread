@@ -116,13 +116,13 @@ describe('BakeOverviewTab 趋势图', () => {
     fireEvent.mouseMove(chart as HTMLDivElement, { clientX: 720 })
 
     expect(screen.getByText('2026-06-12')).toBeInTheDocument()
-    expect(screen.getByText('合计 14')).toBeInTheDocument()
+    expect(screen.getByText('新增合计 14')).toBeInTheDocument()
     expect(container.querySelector('.bake-trend-tooltip')).toHaveTextContent('数据2')
 
     fireEvent.mouseMove(chart as HTMLDivElement, { clientX: 0 })
 
     expect(screen.getByText('2026-06-01')).toBeInTheDocument()
-    expect(screen.getByText('合计 5')).toBeInTheDocument()
+    expect(screen.getByText('新增合计 5')).toBeInTheDocument()
   })
 
   it('记忆总览不再承载备份与恢复入口', () => {

@@ -1634,7 +1634,6 @@ fn is_document_url(url: &str) -> bool {
     }
     // 常见企业/通用文档域名与路径特征。
     const DOC_MARKERS: &[&str] = &[
-        "docs.corp",
         "/docs/",
         "docs.google",
         "/document/",
@@ -1647,6 +1646,7 @@ fn is_document_url(url: &str) -> bool {
         "shimo.im",
         "/d/home/",
         "/s/home/",
+        "/k/home/",
     ];
     DOC_MARKERS.iter().any(|marker| u.contains(marker))
 }
@@ -2895,16 +2895,17 @@ mod tests {
         assert_eq!(queue.dead_letter_count, 1);
         assert_eq!(queue.pending_count, 0);
         assert_eq!(queue.actionable_count, 0);
+        assert_eq!(queue.oldest_retry_at_ms, None);
     }
 
     #[test]
     fn test_document_identity_ignores_fragment() {
         assert_eq!(
             canonical_document_identity(
-                "https://docs.corp.kuaishou.com/d/home/fcAAmNeDmIOF15Y6K80NVq0Wq#section=a"
+                "https://docs.example.com/d/home/sample-document#section=a"
             ),
             canonical_document_identity(
-                "https://docs.corp.kuaishou.com/d/home/fcAAmNeDmIOF15Y6K80NVq0Wq#section=b"
+                "https://docs.example.com/d/home/sample-document#section=b"
             )
         );
     }
@@ -2969,9 +2970,7 @@ mod tests {
                 input_text: None,
                 is_sensitive: false,
                 pii_scrubbed: false,
-                url: Some(
-                    "https://docs.corp.kuaishou.com/d/home/fcAAmNeDmIOF15Y6K80NVq0Wq".to_string(),
-                ),
+                url: Some("https://docs.example.com/d/home/sample-document".to_string()),
                 webpage_title: Some("容器云 GPU 指标采集项目 - 云文档".to_string()),
             })
             .unwrap();
@@ -2991,14 +2990,14 @@ mod tests {
             .unwrap();
         assert_eq!(
             candidate.capture_url.as_deref(),
-            Some("https://docs.corp.kuaishou.com/d/home/fcAAmNeDmIOF15Y6K80NVq0Wq")
+            Some("https://docs.example.com/d/home/sample-document")
         );
     }
 
     #[test]
     fn test_bake_candidate_prefers_repeated_member_title_over_primary_placeholder() {
         let mgr = make_mgr();
-        let url = "https://docs.corp.kuaishou.com/k/home/space/document-id";
+        let url = "https://docs.example.com/k/home/space/document-id";
         let primary = seed_document_capture(&mgr, 1_700_000_000_000, "正文第一页".repeat(100), url);
         let second = seed_document_capture(&mgr, 1_700_000_010_000, "正文第二页".repeat(100), url);
         let third = seed_document_capture(&mgr, 1_700_000_020_000, "正文第三页".repeat(100), url);
@@ -3040,7 +3039,7 @@ mod tests {
     #[test]
     fn test_url_aggregation_keeps_longest_snapshot_when_document_head_repeats() {
         let mgr = make_mgr();
-        let url = "https://docs.corp.kuaishou.com/d/home/long-document";
+        let url = "https://docs.example.com/d/home/long-document";
         let shared_head = "共同文档开头".repeat(60);
         let short_text = format!("{shared_head}\n短版本");
         let long_tail = "长版本尾部关键信息".repeat(500);
@@ -3061,7 +3060,7 @@ mod tests {
     #[test]
     fn test_member_aggregation_keeps_longest_snapshot_even_if_only_one_remains() {
         let mgr = make_mgr();
-        let url = "https://docs.corp.kuaishou.com/d/home/member-long-document";
+        let url = "https://docs.example.com/d/home/member-long-document";
         let shared_head = "同一页面固定开头".repeat(60);
         let short_id = seed_document_capture(
             &mgr,

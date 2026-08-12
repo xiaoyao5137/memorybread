@@ -82,7 +82,7 @@ beforeEach(() => {
 describe('MemoryBackupSection', () => {
   it('导出成功后可打开备份所在文件夹', async () => {
     mocks.exportMemoryPackage.mockResolvedValue({
-      path: '/Users/test/.memory-bread/backups/memory-package-1.mbmemory.json',
+      path: '/tmp/memorybread-test/.memory-bread/backups/memory-package-1.mbmemory.json',
       file_sha256: 'file-sha256',
       file_size_bytes: 2048,
       manifest: {
@@ -90,7 +90,7 @@ describe('MemoryBackupSection', () => {
         format_version: 1,
         schema_version: 1,
         exported_at_ms: 1,
-        source_db_path: '/Users/test/.memory-bread/memory.db',
+        source_db_path: '/tmp/memorybread-test/.memory-bread/memory.db',
         excluded_tables: [],
         excluded_capture_columns: [],
         payload_sha256: 'payload-sha256',
@@ -118,7 +118,7 @@ describe('MemoryBackupSection', () => {
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('open_export_folder', {
-        path: '/Users/test/.memory-bread/backups/memory-package-1.mbmemory.json',
+        path: '/tmp/memorybread-test/.memory-bread/backups/memory-package-1.mbmemory.json',
       })
     })
   })

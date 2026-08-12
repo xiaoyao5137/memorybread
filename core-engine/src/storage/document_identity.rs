@@ -9,7 +9,6 @@ pub(crate) fn canonical_document_identity(url: &str) -> Option<String> {
     }
     let lowered = trimmed.to_lowercase();
     const DOCUMENT_URL_MARKERS: &[&str] = &[
-        "docs.corp",
         "/docs/",
         "docs.google",
         "/document/",
@@ -207,9 +206,9 @@ mod tests {
     fn canonical_url_ignores_view_parameters_and_scheme() {
         assert_eq!(
             canonical_document_identity(
-                "https://Docs.Corp.Example/d/home/ABC123?section=one#comment"
+                "https://Docs.Example.Com/d/home/ABC123?section=one#comment"
             ),
-            canonical_document_identity("http://docs.corp.example/d/home/abc123/")
+            canonical_document_identity("http://docs.example.com/d/home/abc123/")
         );
     }
 

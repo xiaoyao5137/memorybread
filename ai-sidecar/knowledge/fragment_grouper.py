@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 
 # 文档类 URL 识别：用于"一份文档独占一个 timeline"的边界判断。
 _DOC_URL_MARKERS = (
-    'docs.corp', '/docs/', 'docs.google', '/document/', 'yuque.com',
+    '/docs/', 'docs.google', '/document/', 'yuque.com',
     'feishu.cn/docx', 'feishu.cn/wiki', 'notion.so', 'confluence',
-    '/wiki/', 'shimo.im', '/d/home/', '/s/home/',
+    '/wiki/', 'shimo.im', '/d/home/', '/s/home/', '/k/home/',
 )
 
 _DOC_TITLE_MARKERS = (
@@ -41,7 +41,7 @@ def _is_document_url(url: Optional[str]) -> bool:
 def _document_identity(url: Optional[str]) -> Optional[str]:
     """从文档 URL 提取稳定的文档标识，用于区分"是否同一份文档"。
 
-    多数企业文档形如 https://docs.corp.x.com/d/home/<docId>，docId 段唯一标识一份文档。
+    常见文档地址形如 https://docs.example.com/d/home/<document-key>，路径中的键唯一标识一份文档。
     取 path 最后一个非空段作为标识；无法解析时回退到去掉 query/fragment 的完整 path。
     """
     if not _is_document_url(url):

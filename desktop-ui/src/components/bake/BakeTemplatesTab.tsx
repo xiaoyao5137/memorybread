@@ -3,6 +3,13 @@ import type { ArticleTemplate } from '../../types'
 import type { LocalCreationSkill } from '../../utils/creationSkills'
 import { BakeButton, BakeCard, BakeMarkdown, BakeSectionHeader } from './BakeShared'
 
+const formatTemplateTime = (timestamp?: number, fallback?: string) => {
+  if (timestamp && timestamp > 0) {
+    return new Date(timestamp).toLocaleString('zh-CN', { hour12: false })
+  }
+  return fallback || '—'
+}
+
 const BakeTemplatesTab: React.FC<{
   templates: ArticleTemplate[]
   total: number
@@ -122,6 +129,7 @@ const BakeTemplatesTab: React.FC<{
           return { from: from || line, to: to || '' }
         }),
       updatedAt: new Date().toLocaleString('zh-CN', { hour12: false }),
+      updatedAtMs: Date.now(),
     }))
     setIsEditing(false)
   }
@@ -157,7 +165,7 @@ const BakeTemplatesTab: React.FC<{
             </div>
             <div className="bake-list-toolbar__repository-row bake-list-toolbar__repository-row--dates">
               <label className="bake-form-field bake-filter-field">
-                <span className="bake-filter-label">开始日期</span>
+                <span className="bake-filter-label">新增开始日期</span>
                 <input
                   className="bake-input"
                   type="date"
@@ -166,7 +174,7 @@ const BakeTemplatesTab: React.FC<{
                 />
               </label>
               <label className="bake-form-field bake-filter-field">
-                <span className="bake-filter-label">结束日期</span>
+                <span className="bake-filter-label">新增结束日期</span>
                 <input
                   className="bake-input"
                   type="date"
@@ -253,7 +261,9 @@ const BakeTemplatesTab: React.FC<{
           <div className="bake-kv bake-knowledge-detail">
             <div>
               <div className="bake-title" style={{ fontSize: 18 }}>{selected.title}</div>
-              <div className="bake-muted" style={{ marginTop: 4 }}>{selected.docType} · ID: {selected.id} · 最近更新 {selected.updatedAt || '—'}</div>
+              <div className="bake-muted" style={{ marginTop: 4 }}>
+                {selected.docType} · ID: {selected.id} · 新增时间 {formatTemplateTime(selected.createdAtMs, selected.createdAt)} · 最近更新 {formatTemplateTime(selected.updatedAtMs, selected.updatedAt)}
+              </div>
             </div>
 
             {selected.sourceUrl && (
@@ -263,7 +273,7 @@ const BakeTemplatesTab: React.FC<{
                   href={selected.sourceUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  style={{ color: '#2563EB', textDecoration: 'underline', wordBreak: 'break-all' }}
+                  className="bake-source-url-link"
                 >
                   {selected.sourceUrl}
                 </a>

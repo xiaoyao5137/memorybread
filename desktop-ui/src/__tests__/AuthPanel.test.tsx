@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import AuthPanel from '../components/AuthPanel'
 import { useAppStore } from '../store/useAppStore'
 import { toLocalDateKey } from '../utils/workProfile'
@@ -9,6 +9,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
@@ -187,6 +188,45 @@ describe('AuthPanel', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: '手机号注册' }))
     expect(screen.getByLabelText('手机号')).not.toHaveAttribute('placeholder')
+    expect(screen.getByText('请关注来自“恒创联众”的验证码短信')).toBeInTheDocument()
+    const phoneInput = screen.getByLabelText('手机号')
+    const codeInput = screen.getByLabelText('短信验证码')
+    const nicknameInput = screen.getByLabelText('昵称')
+    expect(phoneInput.compareDocumentPosition(codeInput) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(codeInput.compareDocumentPosition(nicknameInput) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('手机号验证码发送后显示实时有效期并锁定重复发送', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-12T14:00:00Z'))
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: {
+          retry_after_seconds: 60,
+          expires_in_seconds: 600,
+        },
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<AuthPanel />)
+
+    fireEvent.click(screen.getByRole('tab', { name: '验证码登录' }))
+    fireEvent.change(screen.getByLabelText('手机号'), { target: { value: '13800138000' } })
+    fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(screen.getByRole('status')).toHaveTextContent('已发送验证码 · 10:00 后失效')
+    expect(screen.getByRole('button', { name: '60s' })).toBeDisabled()
+    act(() => vi.advanceTimersByTime(1_000))
+    expect(screen.getByRole('status')).toHaveTextContent('09:59 后失效')
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://memorybread.cn/v1/auth/phone/send-code',
+      expect.objectContaining({ method: 'POST' }),
+    )
   })
 
   it('邮箱注册仅提交邮箱标识，不再提交独立账户名', async () => {
@@ -229,7 +269,7 @@ describe('AuthPanel', () => {
     fireEvent.click(screen.getByRole('tab', { name: '注册' }))
     fireEvent.change(screen.getByLabelText('邮箱地址'), { target: { value: 'xiaomai@memorybread.local' } })
     fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
-    expect(await screen.findByRole('status')).toHaveTextContent('验证码已发送')
+    expect(await screen.findByRole('status')).toHaveTextContent('已发送验证码')
     fireEvent.change(screen.getByLabelText('邮箱验证码'), { target: { value: '123456' } })
     fireEvent.change(screen.getByLabelText('昵称'), { target: { value: '小麦' } })
     fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'MemoryBread@2026!' } })
@@ -344,13 +384,13 @@ describe('AuthPanel', () => {
     expect(screen.getByRole('tablist', { name: '验证方式' })).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('邮箱地址'), { target: { value: 'xiaomai@example.com' } })
     fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
-    expect(await screen.findByRole('status')).toHaveTextContent('验证码已发送')
+    expect(await screen.findByRole('status')).toHaveTextContent('已发送验证码')
     fireEvent.change(screen.getByLabelText('验证码'), { target: { value: '123456' } })
     fireEvent.change(screen.getByLabelText('新密码'), { target: { value: 'MemoryBread@2026!' } })
     fireEvent.change(screen.getByLabelText('确认新密码'), { target: { value: 'MemoryBread@2026!' } })
     fireEvent.click(screen.getByRole('button', { name: '重置密码' }))
 
-    expect(await screen.findByRole('status')).toHaveTextContent('密码已重置')
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('密码已重置'))
     expect(screen.getByLabelText('邮箱或手机号')).toHaveValue('xiaomai@example.com')
     expect(useAppStore.getState().authToken).toBeNull()
     const sendRequest = fetchMock.mock.calls[0]?.[1] as RequestInit

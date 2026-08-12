@@ -192,7 +192,7 @@ describe('detectFloatingAssistTaskFromOcr', () => {
       显示器 1:
       Chrome
       文件 编辑 显示 历史记录 书签 个人资料 标签页 窗口 帮助
-      docs.corp.kuaishou.com/d/home/fcADwrgzZADJvmjK7gCpxTs5v
+      docs.example.com/d/home/sample-document
       记忆面包 MemoryBread
       运营控制台|记忆面包
       可编辑
@@ -232,7 +232,7 @@ describe('detectFloatingAssistTaskFromOcr', () => {
   it('云文档里的明确待办只进入确认态', () => {
     const result = detectFloatingAssistTaskFromOcr(`
       Chrome
-      docs.corp.kuaishou.com/d/home/example
+      docs.example.com/d/home/example
       所有改动已自动保存
       TODO
       - [ ] 修复登录页验证码错误

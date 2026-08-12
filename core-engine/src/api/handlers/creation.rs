@@ -1239,11 +1239,11 @@ mod tests {
             current,
             Some("写一份周年员工的礼物指南"),
         );
-        ensure_current_creation_instruction(&mut merged, &stored, "参考快手员工周年礼物方案");
+        ensure_current_creation_instruction(&mut merged, &stored, "参考示例公司员工周年礼物方案");
 
         assert_eq!(merged[0]["id"], "user-1");
         assert_eq!(merged[0]["runIds"][0], "run-1");
-        assert_eq!(merged[2]["content"], "参考快手员工周年礼物方案");
+        assert_eq!(merged[2]["content"], "参考示例公司员工周年礼物方案");
         assert!(merged[2]["id"]
             .as_str()
             .is_some_and(|value| value.starts_with("server-user-")));

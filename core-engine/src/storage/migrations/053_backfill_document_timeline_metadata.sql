@@ -18,8 +18,7 @@ WHERE t.activity_type IS NULL
       FROM captures c
       WHERE c.timeline_id = t.id
         AND (
-            LOWER(COALESCE(c.url, '')) LIKE '%docs.corp%'
-            OR LOWER(COALESCE(c.url, '')) LIKE '%/k/home/%'
+            LOWER(COALESCE(c.url, '')) LIKE '%/k/home/%'
         )
         AND LENGTH(
             REPLACE(REPLACE(

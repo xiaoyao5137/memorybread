@@ -1458,7 +1458,6 @@ def _looks_like_document_url(url: str) -> bool:
     return any(
         marker in lowered
         for marker in (
-            "docs.corp.",
             "/docs/",
             "docs.google.",
             "/document/",

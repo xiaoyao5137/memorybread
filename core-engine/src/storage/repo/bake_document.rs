@@ -627,11 +627,11 @@ mod tests {
         let mgr = make_mgr();
         let mut document = sample_document();
         document.source_url =
-            Some("https://Docs.Corp.Example/d/home/ABC123?section=one#comment".to_string());
+            Some("https://Docs.Example.Com/d/home/ABC123?section=one#comment".to_string());
         let id = mgr.insert_bake_document(&document).unwrap();
 
         let found = mgr
-            .find_document_by_source_url("http://docs.corp.example/d/home/abc123?section=two")
+            .find_document_by_source_url("http://docs.example.com/d/home/abc123?section=two")
             .unwrap()
             .unwrap();
 
@@ -642,12 +642,12 @@ mod tests {
     fn test_active_document_identity_is_unique() {
         let mgr = make_mgr();
         let mut first = sample_document();
-        first.source_url = Some("https://docs.corp.example/d/home/abc123?section=one".to_string());
+        first.source_url = Some("https://docs.example.com/d/home/abc123?section=one".to_string());
         mgr.insert_bake_document(&first).unwrap();
 
         let mut duplicate = sample_document();
         duplicate.source_url =
-            Some("https://docs.corp.example/d/home/ABC123#section=two".to_string());
+            Some("https://docs.example.com/d/home/ABC123#section=two".to_string());
         assert!(mgr.insert_bake_document(&duplicate).is_err());
     }
 

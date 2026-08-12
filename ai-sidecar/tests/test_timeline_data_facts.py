@@ -11,6 +11,7 @@ from knowledge.extractor_v2 import (
     DATA_FACT_PROMPT,
     KnowledgeExtractorV2,
     _data_fact_retry_needed,
+    _fact_specific_statement,
     _validated_data_facts,
 )
 
@@ -168,6 +169,59 @@ def test_deduplicates_repeated_screenshot_facts_by_semantic_key():
 
     assert rejected == 0
     assert len(accepted) == 1
+
+
+def test_rewrites_shared_batch_summary_into_fact_specific_statements():
+    source = (
+        "图生视频 badcase拦截率：72.3%，badcase漏审率8.93%，"
+        "goodcase误杀率：35.77%"
+    )
+    shared_statement = (
+        "图生视频中 high case 的误杀率为 35.77%，low case 漏审率为 8.93%。"
+    )
+    facts = []
+    for metric, value, evidence in [
+        ("badcase拦截率", "72.3", "图生视频 badcase拦截率：72.3%"),
+        ("badcase漏审率", "8.93", "图生视频 badcase漏审率8.93%"),
+        ("goodcase误杀率", "35.77", "图生视频 goodcase误杀率：35.77%"),
+    ]:
+        facts.append({
+            "title": f"图生视频 {metric}",
+            "subject": "图生视频",
+            "action": "审核",
+            "target_context": "视频评测",
+            "dimension": "",
+            "metric": metric,
+            "value": value,
+            "unit": "%",
+            "statement": shared_statement,
+            "evidence_quote": evidence,
+            "confidence": "high",
+        })
+
+    accepted, rejected = _validated_data_facts(facts, source)
+
+    assert rejected == 0
+    assert len(accepted) == 3
+    assert len({fact["statement"] for fact in accepted}) == 3
+    assert all(fact["value"] in fact["statement"] for fact in accepted)
+    assert all(fact["metric"] in fact["statement"] for fact in accepted)
+
+
+def test_fact_specific_statement_keeps_metric_and_value_when_context_is_too_long():
+    statement = _fact_specific_statement({
+        "subject": "图生视频",
+        "action": "审核",
+        "target_context": "评测场景" * 200,
+        "dimension": "当前批次" * 200,
+        "metric": "badcase拦截率",
+        "value": "72.3",
+        "unit": "%",
+    })
+
+    assert len(statement) <= 500
+    assert "badcase拦截率" in statement
+    assert "72.3%" in statement
 
 
 def test_generic_field_or_task_anchor_requires_a_specific_scene():

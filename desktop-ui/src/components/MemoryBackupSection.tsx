@@ -297,8 +297,11 @@ const MemoryBackupSection: React.FC = () => {
   const cloudBackupAccessState: CloudBackupAccessState = isSignedIn ? 'available' : 'signed-out'
 
   const ensureCloudDevice = async () => {
-    if (!authToken) throw new Error('请先登录账户')
-    return (await registerCurrentDevice(adminApiBaseUrl, authToken)).id
+    if (!authToken || !currentUser) throw new Error('请先登录账户')
+    return (await registerCurrentDevice(adminApiBaseUrl, authToken, {
+      environment: serviceEnvironment,
+      userId: currentUser.id,
+    })).id
   }
 
   const handleExportMemoryPackage = async () => {

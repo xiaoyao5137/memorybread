@@ -3,7 +3,9 @@
 
 import sys
 import os
-sys.path.insert(0, '/Users/xianjiaqi/Documents/mygit/cy/gzdz/ai-sidecar')
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ai-sidecar"))
 
 from ocr.backends.paddle import PaddleBackend
 

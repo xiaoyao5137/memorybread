@@ -9,7 +9,7 @@ from creation.service import CreationOptions, CreationService
 def document_408() -> dict:
     return {
         "id": 408,
-        "title": "快手员工周年礼物领取指南",
+        "title": "示例公司员工周年礼物领取指南",
         "doc_type": "资料参考",
         "summary": "面向员工周年场景的礼物领取参考资料",
         "full_content": "员工可按周年节点自主选择并领取礼物。",

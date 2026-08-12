@@ -1397,8 +1397,8 @@ mod tests {
                 (1, '其他', NULL, NULL, NULL, NULL, 1),
                 (2, '其他', NULL, NULL, NULL, NULL, 1);
              INSERT INTO captures VALUES
-                (10, 1, 'https://docs.corp.kuaishou.com/k/home/space/doc-id', replace(hex(zeroblob(300)), '00', '文'), NULL),
-                (20, 2, 'https://docs.corp.kuaishou.com/k/home/space/short-id', '只有标题', NULL);
+                (10, 1, 'https://docs.example.com/k/home/space/doc-id', replace(hex(zeroblob(300)), '00', '文'), NULL),
+                (20, 2, 'https://docs.example.com/k/home/space/short-id', '只有标题', NULL);
              INSERT INTO bake_retry_state VALUES
                 (1, 3, '旧错误', 1),
                 (2, 3, '旧错误', 1);",
@@ -1531,9 +1531,9 @@ mod tests {
                  created_at_ms INTEGER
              );
              INSERT INTO bake_documents (id, source_url, deleted_at) VALUES
-                 (10, 'https://Docs.Corp.Example/d/home/ABC123?section=one', NULL),
-                 (11, 'http://docs.corp.example/d/home/abc123#section=two', NULL),
-                 (12, 'https://docs.corp.example/d/home/deleted', 123);",
+                 (10, 'https://Docs.Example.Com/d/home/ABC123?section=one', NULL),
+                 (11, 'http://docs.example.com/d/home/abc123#section=two', NULL),
+                 (12, 'https://docs.example.com/d/home/deleted', 123);",
         )
         .unwrap();
 
@@ -1567,14 +1567,14 @@ mod tests {
         assert_eq!(
             claimed,
             vec![
-                (10, Some("docs.corp.example/d/home/abc123".to_string())),
+                (10, Some("docs.example.com/d/home/abc123".to_string())),
                 (11, None),
             ]
         );
         assert!(conn
             .execute(
                 "UPDATE bake_documents
-                 SET document_identity = 'docs.corp.example/d/home/abc123'
+                 SET document_identity = 'docs.example.com/d/home/abc123'
                  WHERE id = 11",
                 [],
             )

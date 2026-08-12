@@ -13,11 +13,10 @@ use crate::storage::document_identity::{
     canonical_document_identity, canonical_document_source_title, is_generic_document_source_title,
 };
 use crate::storage::models::CaptureRecord;
-use crate::storage::repo::bake_run::{load_bake_production_events, BakeProductionEventRecord};
 use crate::storage::{
     now_ms, BakeActivityRecord, BakeDocumentRecord, BakeKnowledgeRecord, BakeMemorySourceRecord,
-    BakeOverviewRecord, BakeRunRecord, DataSourceRecord, NewBakeDocument, NewBakeKnowledge,
-    NewBakeRun, NewBakeSop, NewTimeline, StorageError, StorageManager, TimelineRecord,
+    BakeOverviewRecord, BakeRunRecord, NewBakeDocument, NewBakeKnowledge, NewBakeRun, NewBakeSop,
+    NewTimeline, StorageError, StorageManager, TimelineRecord,
 };
 
 const BAKE_STYLE_CONFIG_KEY: &str = "bake.style.config";
@@ -211,6 +210,7 @@ pub struct BakeDocumentPayload {
     pub created_at: String,
     pub created_at_ms: i64,
     pub updated_at: String,
+    pub updated_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -650,9 +650,9 @@ impl BakeService {
             .filter(|record| {
                 filter
                     .from_ts
-                    .map_or(true, |from| record.updated_at >= from)
+                    .map_or(true, |from| record.created_at >= from)
             })
-            .filter(|record| filter.to_ts.map_or(true, |to| record.updated_at <= to))
+            .filter(|record| filter.to_ts.map_or(true, |to| record.created_at <= to))
             .map(map_document_record)
             .collect::<Vec<_>>();
 
@@ -2925,12 +2925,29 @@ impl BakeService {
         let latest_run = self.storage.get_latest_bake_run()?;
         let memory_count = self.storage.count_timelines(None)?;
         let data_sources = self.storage.list_data_sources(None, 5000, 0)?.0;
-        let production_events = self
-            .storage
-            .with_conn(|conn| load_bake_production_events(conn, 0))?;
         let data_count = data_sources.len() as i64;
-        let inventory_trend =
-            build_inventory_trend(&memory_entries, &data_sources, &production_events);
+        let inventory_trend = build_inventory_trend(
+            &memory_entries
+                .iter()
+                .map(|record| record.created_at_ms)
+                .collect::<Vec<_>>(),
+            &data_sources
+                .iter()
+                .map(|record| record.created_at)
+                .collect::<Vec<_>>(),
+            &knowledge_entries
+                .iter()
+                .map(|record| record.created_at_ms)
+                .collect::<Vec<_>>(),
+            &templates
+                .iter()
+                .map(|record| record.created_at)
+                .collect::<Vec<_>>(),
+            &sop_entries
+                .iter()
+                .map(|record| record.created_at_ms)
+                .collect::<Vec<_>>(),
+        );
 
         let pending_candidates = 0;
 
@@ -3978,12 +3995,20 @@ fn bake_document_record_to_new(record: BakeDocumentRecord) -> NewBakeDocument {
 }
 
 fn map_document_record(record: BakeDocumentRecord) -> BakeDocumentPayload {
-    use chrono::{DateTime, Utc};
+    use chrono::{DateTime, Local, Utc};
     let created_at = DateTime::<Utc>::from_timestamp(record.created_at / 1000, 0)
-        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+        .map(|dt| {
+            dt.with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
         .unwrap_or_else(|| record.created_at.to_string());
     let updated_at = DateTime::<Utc>::from_timestamp(record.updated_at / 1000, 0)
-        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+        .map(|dt| {
+            dt.with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
         .unwrap_or_else(|| record.updated_at.to_string());
 
     BakeDocumentPayload {
@@ -4017,6 +4042,7 @@ fn map_document_record(record: BakeDocumentRecord) -> BakeDocumentPayload {
         created_at,
         created_at_ms: record.created_at,
         updated_at,
+        updated_at_ms: record.updated_at,
     }
 }
 
@@ -4486,7 +4512,6 @@ fn reserve_document_task(
 fn looks_like_document_url(url: &str) -> bool {
     let lowered = url.trim().to_lowercase();
     [
-        "docs.corp",
         "/docs/",
         "docs.google",
         "/document/",
@@ -4506,20 +4531,24 @@ fn looks_like_document_url(url: &str) -> bool {
 }
 
 fn build_inventory_trend(
-    memories: &[TimelineRecord],
-    data_sources: &[DataSourceRecord],
-    production_events: &[BakeProductionEventRecord],
+    memory_created_at: &[i64],
+    data_created_at: &[i64],
+    knowledge_created_at: &[i64],
+    document_created_at: &[i64],
+    sop_created_at: &[i64],
 ) -> Vec<BakeInventoryTrendBucketPayload> {
     // 运营台趋势图支持 7/30/90 天范围：最近 90 天必须按天分桶，
     // 否则多日桶会被 UI 整体归到桶起始日，造成单日吞吐失真（
     // 如把一周产出堆到某一天，其余天显示为 0）。
     const DAILY_WINDOW_DAYS: i64 = 90;
 
-    let timestamps = memories
+    let timestamps = memory_created_at
         .iter()
-        .map(|record| record.created_at_ms)
-        .chain(data_sources.iter().map(|record| record.created_at))
-        .chain(production_events.iter().map(|event| event.occurred_at_ms))
+        .chain(data_created_at.iter())
+        .chain(knowledge_created_at.iter())
+        .chain(document_created_at.iter())
+        .chain(sop_created_at.iter())
+        .copied()
         .filter(|ts| *ts > 0)
         .collect::<Vec<_>>();
 
@@ -4530,7 +4559,7 @@ fn build_inventory_trend(
         return Vec::new();
     };
 
-    // 监控页的“今日完成”按本地自然日计算，这里必须使用同一天界。
+    // 各资产列表的日期筛选按本地自然日计算，这里必须使用同一天界。
     // 之前直接用 Unix 毫秒整除会以 UTC 0 点分桶，例如上海时间 00:00-08:00
     // 生成的产物会被记忆页算到前一天。
     let Some(start_day) = local_day_start_ms(min_ts) else {
@@ -4546,32 +4575,29 @@ fn build_inventory_trend(
         start_ts,
         end_ts: end_exclusive_ts - 1,
         memory_count: count_records_in_bucket(
-            memories.iter().map(|record| record.created_at_ms),
+            memory_created_at.iter().copied(),
             start_ts,
             end_exclusive_ts,
         ),
         data_count: count_records_in_bucket(
-            data_sources.iter().map(|record| record.created_at),
+            data_created_at.iter().copied(),
             start_ts,
             end_exclusive_ts,
         ),
-        knowledge_count: sum_production_events_in_bucket(
-            production_events,
+        knowledge_count: count_records_in_bucket(
+            knowledge_created_at.iter().copied(),
             start_ts,
             end_exclusive_ts,
-            |event| event.knowledge_count,
         ),
-        template_count: sum_production_events_in_bucket(
-            production_events,
+        template_count: count_records_in_bucket(
+            document_created_at.iter().copied(),
             start_ts,
             end_exclusive_ts,
-            |event| event.document_count,
         ),
-        sop_count: sum_production_events_in_bucket(
-            production_events,
+        sop_count: count_records_in_bucket(
+            sop_created_at.iter().copied(),
             start_ts,
             end_exclusive_ts,
-            |event| event.sop_count,
         ),
     };
 
@@ -4631,22 +4657,6 @@ where
     timestamps
         .filter(|ts| *ts > 0 && *ts >= start_ts && *ts < end_ts)
         .count() as i64
-}
-
-fn sum_production_events_in_bucket<F>(
-    events: &[BakeProductionEventRecord],
-    start_ts: i64,
-    end_ts: i64,
-    count: F,
-) -> i64
-where
-    F: Fn(&BakeProductionEventRecord) -> i64,
-{
-    events
-        .iter()
-        .filter(|event| event.occurred_at_ms >= start_ts && event.occurred_at_ms < end_ts)
-        .map(count)
-        .sum()
 }
 
 fn format_trend_bucket_label(start_ts: i64, end_exclusive_ts: i64) -> String {
@@ -5060,40 +5070,13 @@ fn default_style_config() -> BakeStyleConfig {
 mod tests {
     use super::*;
 
-    fn data_source_for_trend(created_at: i64) -> DataSourceRecord {
-        DataSourceRecord {
-            id: created_at,
-            title: "趋势测试数据".to_string(),
-            source_kind: "work_memory".to_string(),
-            source_url: None,
-            access_mode: "memory_only".to_string(),
-            refresh_policy: "never".to_string(),
-            realtime_level: "observed".to_string(),
-            source_app_name: None,
-            source_window_title: None,
-            tags: Vec::new(),
-            first_seen_at: created_at,
-            last_seen_at: created_at,
-            last_collected_at: Some(created_at),
-            last_success_at: Some(created_at),
-            last_error_code: None,
-            status: "active".to_string(),
-            created_at,
-            updated_at: created_at,
-            latest_snapshot: None,
-        }
-    }
-
     #[test]
     fn test_inventory_trend_counts_data_sources_by_creation_time() {
         const DAY_MS: i64 = 86_400_000;
         let first_day = (1_710_000_000_000 / DAY_MS) * DAY_MS;
-        let data_sources = vec![
-            data_source_for_trend(first_day + 1_000),
-            data_source_for_trend(first_day + DAY_MS + 1_000),
-        ];
+        let data_sources = vec![first_day + 1_000, first_day + DAY_MS + 1_000];
 
-        let buckets = build_inventory_trend(&[], &data_sources, &[]);
+        let buckets = build_inventory_trend(&[], &data_sources, &[], &[], &[]);
 
         assert_eq!(
             buckets.iter().map(|bucket| bucket.data_count).sum::<i64>(),
@@ -5114,12 +5097,9 @@ mod tests {
             .earliest()
             .unwrap()
             .timestamp_millis();
-        let data_sources = vec![
-            data_source_for_trend(local_midnight - 1),
-            data_source_for_trend(local_midnight + 1),
-        ];
+        let data_sources = vec![local_midnight - 1, local_midnight + 1];
 
-        let buckets = build_inventory_trend(&[], &data_sources, &[]);
+        let buckets = build_inventory_trend(&[], &data_sources, &[], &[], &[]);
 
         let previous_day = buckets
             .iter()
@@ -5142,13 +5122,13 @@ mod tests {
             .unwrap()
             .timestamp_millis();
         let data_sources = vec![
-            data_source_for_trend(newest_day + 1_000),
-            data_source_for_trend(add_local_days(newest_day, -1) + 1_000),
+            newest_day + 1_000,
+            add_local_days(newest_day, -1) + 1_000,
             // 90 天窗口之外的早期数据落入周聚合桶，不与每日桶重叠。
-            data_source_for_trend(add_local_days(newest_day, -120) + 1_000),
+            add_local_days(newest_day, -120) + 1_000,
         ];
 
-        let buckets = build_inventory_trend(&[], &data_sources, &[]);
+        let buckets = build_inventory_trend(&[], &data_sources, &[], &[], &[]);
 
         assert_eq!(
             buckets.iter().map(|bucket| bucket.data_count).sum::<i64>(),
@@ -5176,20 +5156,15 @@ mod tests {
     }
 
     #[test]
-    fn test_inventory_trend_counts_merged_artifact_on_production_day() {
-        let production_day = Local
+    fn test_inventory_trend_counts_each_new_asset_once_on_creation_day() {
+        let creation_day = Local
             .with_ymd_and_hms(2026, 8, 10, 0, 0, 0)
             .earliest()
             .unwrap()
             .timestamp_millis();
-        let events = vec![BakeProductionEventRecord {
-            occurred_at_ms: production_day + 17 * 60 * 60 * 1000,
-            knowledge_count: 0,
-            document_count: 1,
-            sop_count: 0,
-        }];
+        let documents = vec![creation_day + 17 * 60 * 60 * 1000];
 
-        let buckets = build_inventory_trend(&[], &[], &events);
+        let buckets = build_inventory_trend(&[], &[], &[], &documents, &[]);
 
         let today = buckets
             .iter()
@@ -5198,6 +5173,56 @@ mod tests {
         assert_eq!(today.template_count, 1);
         assert_eq!(today.knowledge_count, 0);
         assert_eq!(today.sop_count, 0);
+    }
+
+    #[test]
+    fn test_document_date_filter_uses_creation_time_instead_of_update_time() {
+        let service = make_service();
+        let document_id = service
+            .storage
+            .insert_bake_document(&NewBakeDocument::with_defaults(
+                "历史文档".to_string(),
+                "技术文档".to_string(),
+            ))
+            .unwrap();
+        let today = Local
+            .with_ymd_and_hms(2026, 8, 11, 0, 0, 0)
+            .earliest()
+            .unwrap()
+            .timestamp_millis();
+        let yesterday = add_local_days(today, -1);
+        let updated_at = today + 35 * 60 * 1000;
+        service
+            .storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE bake_documents SET created_at = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![yesterday + 1_000, updated_at, document_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let today_page = service
+            .list_documents_paginated(BakeListFilter {
+                from_ts: Some(today),
+                to_ts: Some(add_local_days(today, 1) - 1),
+                limit: 20,
+                ..BakeListFilter::default()
+            })
+            .unwrap();
+        assert_eq!(today_page.total, 0);
+
+        let yesterday_page = service
+            .list_documents_paginated(BakeListFilter {
+                from_ts: Some(yesterday),
+                to_ts: Some(today - 1),
+                limit: 20,
+                ..BakeListFilter::default()
+            })
+            .unwrap();
+        assert_eq!(yesterday_page.total, 1);
+        assert_eq!(yesterday_page.items[0].updated_at_ms, updated_at);
     }
 
     #[test]
@@ -5452,9 +5477,8 @@ mod tests {
         );
         let timeline_id = seed_knowledge(&service, "文档", capture_id, 2, 1);
         let mut candidate = make_candidate(&service, timeline_id);
-        candidate.capture_url = Some(
-            "https://docs.corp.kuaishou.com/k/home/space/document-id?from=home#section".to_string(),
-        );
+        candidate.capture_url =
+            Some("https://docs.example.com/k/home/space/document-id?from=home#section".to_string());
         candidate.capture_ax_text = Some("文档正文".repeat(80));
         candidate.timeline.history_view = false;
         candidate.timeline.activity_type = None;
@@ -5467,7 +5491,7 @@ mod tests {
         assert!(evidence.allows_auto_create);
         assert_eq!(
             substantive_document_url(&candidate).as_deref(),
-            Some("https://docs.corp.kuaishou.com/k/home/space/document-id")
+            Some("https://docs.example.com/k/home/space/document-id")
         );
     }
 
@@ -5483,7 +5507,7 @@ mod tests {
         let timeline_id = seed_knowledge(&service, "文档", capture_id, 2, 1);
         let mut candidate = make_candidate(&service, timeline_id);
         candidate.capture_url =
-            Some("https://docs.corp.kuaishou.com/k/home/space/document-id".to_string());
+            Some("https://docs.example.com/k/home/space/document-id".to_string());
         candidate.capture_ax_text = Some("文档标题".to_string());
         candidate.timeline.history_view = false;
         candidate.timeline.activity_type = None;
@@ -5526,7 +5550,7 @@ mod tests {
 
         let mut chat_with_document_link = candidate.clone();
         chat_with_document_link.capture_url =
-            Some("https://docs.corp.kuaishou.com/d/home/document-id".to_string());
+            Some("https://docs.example.com/d/home/document-id".to_string());
         let linked_evidence = document_evidence(&chat_with_document_link);
         assert!(linked_evidence.has_document_url);
         assert_eq!(linked_evidence.kind, BakeDocumentEvidenceKind::Insufficient);
@@ -5634,7 +5658,7 @@ mod tests {
         candidate.capture_webpage_title = Some("知识库".to_string());
         candidate.preferred_source_title = Some("商业化大模型例行压测介绍 - 云文档".to_string());
         candidate.capture_url =
-            Some("https://docs.corp.kuaishou.com/k/home/space/document-id".to_string());
+            Some("https://docs.example.com/k/home/space/document-id".to_string());
         candidate.capture_ax_text = Some("压测文档正文".repeat(80));
 
         let payload = parse_bake_document_payload(
@@ -5677,15 +5701,15 @@ mod tests {
     fn test_title_fallback_accepts_missing_url_but_rejects_different_urls() {
         assert!(document_urls_compatible_for_title_match(
             None,
-            Some("https://docs.corp.example/d/home/abc123?section=one"),
+            Some("https://docs.example.com/d/home/abc123?section=one"),
         ));
         assert!(document_urls_compatible_for_title_match(
-            Some("https://docs.corp.example/d/home/ABC123#one"),
-            Some("http://docs.corp.example/d/home/abc123?section=two"),
+            Some("https://docs.example.com/d/home/ABC123#one"),
+            Some("http://docs.example.com/d/home/abc123?section=two"),
         ));
         assert!(!document_urls_compatible_for_title_match(
-            Some("https://docs.corp.example/d/home/abc123"),
-            Some("https://docs.corp.example/d/home/other456"),
+            Some("https://docs.example.com/d/home/abc123"),
+            Some("https://docs.example.com/d/home/other456"),
         ));
     }
 
@@ -5741,10 +5765,10 @@ mod tests {
         let mut first = make_candidate(&service, timeline_id);
         first.capture_ax_text = Some("文档正文".repeat(80));
         first.capture_url =
-            Some("https://docs.corp.kuaishou.com/k/home/space/document-id?from=home".to_string());
+            Some("https://docs.example.com/k/home/space/document-id?from=home".to_string());
         let mut second = first.clone();
         second.capture_url =
-            Some("https://docs.corp.kuaishou.com/k/home/space/document-id#section".to_string());
+            Some("https://docs.example.com/k/home/space/document-id#section".to_string());
         let mut queued = std::collections::HashSet::new();
 
         assert!(reserve_document_task(&first, &mut queued));
@@ -5752,7 +5776,7 @@ mod tests {
         assert_eq!(
             queued,
             std::collections::HashSet::from([String::from(
-                "https://docs.corp.kuaishou.com/k/home/space/document-id"
+                "https://docs.example.com/k/home/space/document-id"
             )])
         );
     }
@@ -6121,8 +6145,7 @@ mod tests {
             .unwrap();
 
         let mut candidate = make_candidate(&service, timeline_id);
-        candidate.capture_url =
-            Some("https://docs.corp.kuaishou.com/d/home/fcAAmNeDmIOF15Y6K80NVq0Wq".to_string());
+        candidate.capture_url = Some("https://docs.example.com/d/home/sample-document".to_string());
         let existing = service
             .storage
             .get_bake_document(document_id)
@@ -6140,7 +6163,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             updated.source_url.as_deref(),
-            Some("https://docs.corp.kuaishou.com/d/home/fcAAmNeDmIOF15Y6K80NVq0Wq")
+            Some("https://docs.example.com/d/home/sample-document")
         );
         let source_capture_ids = parse_json_vec_string(&updated.source_capture_ids);
         assert!(source_capture_ids.contains(&primary.to_string()));

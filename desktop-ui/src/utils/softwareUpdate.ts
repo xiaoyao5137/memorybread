@@ -1,7 +1,7 @@
-import type { CloudDevice } from '../types'
+import type { CloudDevice, ServiceEnvironment } from '../types'
 import { invoke } from '@tauri-apps/api/core'
 import { serviceEnvironmentHeaders } from '../store/useAppStore'
-import { upsertCloudDevice } from './authApi'
+import { cloudApiErrorCode, upsertCloudDevice } from './authApi'
 import { getAppMetadata, type AppMetadata } from './appMetadata'
 
 export interface SoftwareRelease {
@@ -51,10 +51,44 @@ export interface SoftwareUpdateProgress {
 
 export const CLOUD_DEVICE_ID_KEY = 'memory-bread_cloud_device_id'
 export const CLOUD_DEVICE_PUBLIC_KEY = 'memory-bread_cloud_device_public_key'
+export const CLOUD_DEVICE_REPORT_STATUS_KEY = 'memory-bread_cloud_device_report_status'
 export const SOFTWARE_UPDATE_SNOOZE_KEY = 'memory-bread_software_update_snooze'
 export const SOFTWARE_UPDATE_COHORT_KEY = 'memory-bread_software_update_cohort'
 export const SOFTWARE_UPDATE_REQUEST_EVENT = 'memory-bread:software-update-requested'
 const SOFTWARE_UPDATE_SNOOZE_MS = 24 * 60 * 60 * 1000
+
+export interface CloudDeviceRegistrationScope {
+  environment: ServiceEnvironment
+  userId: string
+}
+
+interface CloudDeviceReportStatus {
+  status: 'success' | 'error'
+  attempted_at: string
+  client_version: string
+  error_code?: string
+}
+
+const scopedStorageKey = (
+  baseKey: string,
+  scope: CloudDeviceRegistrationScope,
+): string => `${baseKey}:${scope.environment}:${encodeURIComponent(scope.userId)}`
+
+export const cloudDeviceStorageKey = (scope: CloudDeviceRegistrationScope): string =>
+  scopedStorageKey(CLOUD_DEVICE_ID_KEY, scope)
+
+export const cloudDevicePublicKeyStorageKey = (scope: CloudDeviceRegistrationScope): string =>
+  scopedStorageKey(CLOUD_DEVICE_PUBLIC_KEY, scope)
+
+export const cloudDeviceReportStatusStorageKey = (scope: CloudDeviceRegistrationScope): string =>
+  scopedStorageKey(CLOUD_DEVICE_REPORT_STATUS_KEY, scope)
+
+const writeDeviceReportStatus = (
+  scope: CloudDeviceRegistrationScope,
+  status: CloudDeviceReportStatus,
+): void => {
+  window.localStorage.setItem(cloudDeviceReportStatusStorageKey(scope), JSON.stringify(status))
+}
 
 export function getSoftwareUpdateCohort(): string {
   const stored = window.localStorage.getItem(SOFTWARE_UPDATE_COHORT_KEY)?.trim().toLowerCase()
@@ -163,28 +197,70 @@ export function requestSoftwareUpdate(update: SoftwareUpdateCheck): void {
 export async function registerCurrentDevice(
   adminApiBaseUrl: string,
   authToken: string,
+  scope: CloudDeviceRegistrationScope,
   signal?: AbortSignal,
 ): Promise<CloudDevice> {
   const metadata = await getAppMetadata()
-  let deviceId = window.localStorage.getItem(CLOUD_DEVICE_ID_KEY)
+  const deviceIdKey = cloudDeviceStorageKey(scope)
+  const publicKeyKey = cloudDevicePublicKeyStorageKey(scope)
+  let deviceId = window.localStorage.getItem(deviceIdKey)
+    || window.localStorage.getItem(CLOUD_DEVICE_ID_KEY)
   if (!deviceId) {
     deviceId = randomUuid()
-    window.localStorage.setItem(CLOUD_DEVICE_ID_KEY, deviceId)
   }
-  let publicKey = window.localStorage.getItem(CLOUD_DEVICE_PUBLIC_KEY)
+  let publicKey = window.localStorage.getItem(publicKeyKey)
+    || window.localStorage.getItem(CLOUD_DEVICE_PUBLIC_KEY)
   if (!publicKey) {
     publicKey = randomBase64()
-    window.localStorage.setItem(CLOUD_DEVICE_PUBLIC_KEY, publicKey)
   }
-  const device = await upsertCloudDevice(adminApiBaseUrl, authToken, {
-    device_id: deviceId,
-    name: `${metadata.product_name} ${metadata.platform}`,
-    platform: metadata.platform,
-    client_version: metadata.version,
-    public_key_base64: publicKey,
-  }, signal)
-  window.localStorage.setItem(CLOUD_DEVICE_ID_KEY, device.id)
-  return device
+  // 先持久化本次候选身份，避免服务端已写入但客户端丢失响应时，
+  // 下次重试生成新 ID 而留下重复设备。归属冲突时会在重试前覆盖为新身份。
+  window.localStorage.setItem(deviceIdKey, deviceId)
+  window.localStorage.setItem(publicKeyKey, publicKey)
+
+  const upsert = (nextDeviceId: string, nextPublicKey: string) => upsertCloudDevice(
+    adminApiBaseUrl,
+    authToken,
+    {
+      device_id: nextDeviceId,
+      name: `${metadata.product_name} ${metadata.platform}`,
+      platform: metadata.platform,
+      client_version: metadata.version,
+      public_key_base64: nextPublicKey,
+    },
+    signal,
+    scope.environment,
+  )
+
+  try {
+    let device: CloudDevice
+    try {
+      device = await upsert(deviceId, publicKey)
+    } catch (error) {
+      if (cloudApiErrorCode(error) !== 'DEVICE_OWNERSHIP_CONFLICT') throw error
+      deviceId = randomUuid()
+      publicKey = randomBase64()
+      window.localStorage.setItem(deviceIdKey, deviceId)
+      window.localStorage.setItem(publicKeyKey, publicKey)
+      device = await upsert(deviceId, publicKey)
+    }
+    window.localStorage.setItem(deviceIdKey, device.id)
+    window.localStorage.setItem(publicKeyKey, publicKey)
+    writeDeviceReportStatus(scope, {
+      status: 'success',
+      attempted_at: new Date().toISOString(),
+      client_version: metadata.version,
+    })
+    return device
+  } catch (error) {
+    writeDeviceReportStatus(scope, {
+      status: 'error',
+      attempted_at: new Date().toISOString(),
+      client_version: metadata.version,
+      error_code: cloudApiErrorCode(error) || 'DEVICE_REPORT_FAILED',
+    })
+    throw error
+  }
 }
 
 export function shouldShowSoftwareUpdate(update: SoftwareUpdateCheck): boolean {

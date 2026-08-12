@@ -759,6 +759,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   reset: () => set(initialState),
 }))
 
-export const serviceEnvironmentHeaders = (): Record<string, string> => ({
-  'X-MemoryBread-Environment': useAppStore.getState().serviceEnvironment,
+export const serviceEnvironmentHeaders = (
+  environment: ServiceEnvironment = useAppStore.getState().serviceEnvironment,
+): Record<string, string> => ({
+  'X-MemoryBread-Environment': environment,
 })

@@ -214,7 +214,7 @@ const InventoryTrendChart: React.FC<{ overview: BakeOverview }> = ({ overview })
   return (
     <BakeCard>
       <BakeSectionHeader
-        title="记忆生产历程"
+        title="记忆新增趋势"
         right={(
           <div className="bake-trend-header-tools">
             <div className="bake-trend-range" role="radiogroup" aria-label="趋势时间范围">
@@ -246,12 +246,12 @@ const InventoryTrendChart: React.FC<{ overview: BakeOverview }> = ({ overview })
       />
 
       {overview.inventoryTrend.length === 0 ? (
-        <div className="bake-trend-empty">暂无可展示的生产时间分布</div>
+        <div className="bake-trend-empty">暂无可展示的新增时间分布</div>
       ) : (
         <div
           className="bake-trend-chart"
           role="img"
-          aria-label="记忆生产历程数量趋势图"
+          aria-label="记忆新增数量趋势图"
           onPointerMove={handlePointerMove}
           onMouseMove={handlePointerMove}
           onPointerLeave={() => setHoverIndex(null)}
@@ -357,7 +357,7 @@ const InventoryTrendChart: React.FC<{ overview: BakeOverview }> = ({ overview })
               style={{ left: tooltipLeft }}
             >
               <div className="bake-trend-tooltip__title">{getTooltipTitle(hoveredBucket)}</div>
-              <div className="bake-trend-tooltip__total">合计 {getBucketTotal(hoveredBucket)}</div>
+              <div className="bake-trend-tooltip__total">新增合计 {getBucketTotal(hoveredBucket)}</div>
               {trendSeries.map(series => (
                 <div key={series.key} className="bake-trend-tooltip__row">
                   <span className="bake-trend-tooltip__label">

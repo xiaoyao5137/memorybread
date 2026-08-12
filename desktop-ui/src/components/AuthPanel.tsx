@@ -11,6 +11,12 @@ import './AuthPanel.css'
 type AuthMode = 'login' | 'register' | 'reset'
 type LoginMethod = 'email' | 'phone'
 
+const formatCountdown = (seconds: number): string => {
+  const minutes = Math.floor(seconds / 60)
+  const remainder = seconds % 60
+  return `${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
+}
+
 interface AuthPanelProps {
   initialProfileSection?: AccountProfileSection
   highlightedAchievementKeys?: string[]
@@ -43,17 +49,21 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
   const [emailCode, setEmailCode] = useState('')
   const [emailChallengeId, setEmailChallengeId] = useState<string | null>(null)
   const [emailCodeSent, setEmailCodeSent] = useState(false)
-  const [emailExpiresInSeconds, setEmailExpiresInSeconds] = useState(600)
   const [emailRetryUntil, setEmailRetryUntil] = useState<number | null>(null)
+  const [emailExpiresUntil, setEmailExpiresUntil] = useState<number | null>(null)
   const [clock, setClock] = useState(() => Date.now())
   const [phone, setPhone] = useState('')
   const [phoneCode, setPhoneCode] = useState('')
   const [codeSent, setCodeSent] = useState(false)
+  const [phoneRetryUntil, setPhoneRetryUntil] = useState<number | null>(null)
+  const [phoneExpiresUntil, setPhoneExpiresUntil] = useState<number | null>(null)
   const [password, setPassword] = useState('')
   const [resetChallengeId, setResetChallengeId] = useState<string | null>(null)
   const [resetCode, setResetCode] = useState('')
   const [resetCodeSent, setResetCodeSent] = useState(false)
   const [resetRetryUntil, setResetRetryUntil] = useState<number | null>(null)
+  const [resetExpiresUntil, setResetExpiresUntil] = useState<number | null>(null)
+  const [authRetryUntil, setAuthRetryUntil] = useState<number | null>(null)
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -63,31 +73,53 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
   const emailRetrySeconds = emailRetryUntil
     ? Math.max(0, Math.ceil((emailRetryUntil - clock) / 1_000))
     : 0
+  const emailValiditySeconds = emailExpiresUntil
+    ? Math.max(0, Math.ceil((emailExpiresUntil - clock) / 1_000))
+    : 0
+  const phoneRetrySeconds = phoneRetryUntil
+    ? Math.max(0, Math.ceil((phoneRetryUntil - clock) / 1_000))
+    : 0
+  const phoneValiditySeconds = phoneExpiresUntil
+    ? Math.max(0, Math.ceil((phoneExpiresUntil - clock) / 1_000))
+    : 0
   const resetRetrySeconds = resetRetryUntil
     ? Math.max(0, Math.ceil((resetRetryUntil - clock) / 1_000))
     : 0
+  const resetValiditySeconds = resetExpiresUntil
+    ? Math.max(0, Math.ceil((resetExpiresUntil - clock) / 1_000))
+    : 0
+  const authRetrySeconds = authRetryUntil
+    ? Math.max(0, Math.ceil((authRetryUntil - clock) / 1_000))
+    : 0
 
   useEffect(() => {
-    if (!emailRetryUntil) return
-    setClock(Date.now())
+    const deadlines = [
+      emailRetryUntil,
+      emailExpiresUntil,
+      phoneRetryUntil,
+      phoneExpiresUntil,
+      resetRetryUntil,
+      resetExpiresUntil,
+      authRetryUntil,
+    ].filter((deadline): deadline is number => deadline !== null)
+    const now = Date.now()
+    if (!deadlines.some((deadline) => deadline > now)) return
+    setClock(now)
     const timer = window.setInterval(() => {
-      const now = Date.now()
-      setClock(now)
-      if (now >= emailRetryUntil) setEmailRetryUntil(null)
+      const nextNow = Date.now()
+      setClock(nextNow)
+      if (deadlines.every((deadline) => deadline <= nextNow)) window.clearInterval(timer)
     }, 1_000)
     return () => window.clearInterval(timer)
-  }, [emailRetryUntil])
-
-  useEffect(() => {
-    if (!resetRetryUntil) return
-    setClock(Date.now())
-    const timer = window.setInterval(() => {
-      const now = Date.now()
-      setClock(now)
-      if (now >= resetRetryUntil) setResetRetryUntil(null)
-    }, 1_000)
-    return () => window.clearInterval(timer)
-  }, [resetRetryUntil])
+  }, [
+    authRetryUntil,
+    emailExpiresUntil,
+    emailRetryUntil,
+    phoneExpiresUntil,
+    phoneRetryUntil,
+    resetExpiresUntil,
+    resetRetryUntil,
+  ])
 
   const refreshBalance = async () => {
     if (!authToken || !currentUser) return
@@ -166,6 +198,12 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
       )
       setAuthSession(session)
     } catch (err) {
+      const retryAfter = (err as { retryAfterSeconds?: number } | null)?.retryAfterSeconds
+      if (retryAfter) {
+        const now = Date.now()
+        setClock(now)
+        setAuthRetryUntil(now + retryAfter * 1_000)
+      }
       setError(toUserFacingError(err, '登录失败，请检查网络或账户信息'))
     } finally {
       setLoading(false)
@@ -174,11 +212,13 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
 
   const handleEmailChange = (value: string) => {
     setEmail(value)
+    setAuthRetryUntil(null)
     if (emailChallengeId || emailCodeSent) {
       setEmailCode('')
       setEmailChallengeId(null)
       setEmailCodeSent(false)
       setEmailRetryUntil(null)
+      setEmailExpiresUntil(null)
       setError(null)
     }
     if (mode === 'reset' && (resetChallengeId || resetCodeSent)) {
@@ -189,6 +229,11 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
 
   const handlePhoneChange = (value: string) => {
     setPhone(value)
+    setAuthRetryUntil(null)
+    if (codeSent || phoneRetryUntil || phoneExpiresUntil) {
+      resetPhoneVerification()
+      setError(null)
+    }
     if (mode === 'reset' && (resetChallengeId || resetCodeSent)) {
       resetPasswordVerification()
       setError(null)
@@ -201,6 +246,14 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
     setEmailChallengeId(null)
     setEmailCodeSent(false)
     setEmailRetryUntil(null)
+    setEmailExpiresUntil(null)
+  }
+
+  const resetPhoneVerification = () => {
+    setPhoneCode('')
+    setCodeSent(false)
+    setPhoneRetryUntil(null)
+    setPhoneExpiresUntil(null)
   }
 
   const resetPasswordVerification = () => {
@@ -208,6 +261,7 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
     setResetCode('')
     setResetCodeSent(false)
     setResetRetryUntil(null)
+    setResetExpiresUntil(null)
     setNewPassword('')
     setConfirmPassword('')
   }
@@ -216,15 +270,19 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
     setMode(nextMode)
     setError(null)
     setNotice(null)
+    setAuthRetryUntil(null)
     if (nextMode !== 'register') resetEmailVerification()
     if (nextMode !== 'reset') resetPasswordVerification()
+    resetPhoneVerification()
   }
 
   const handleLoginMethodChange = (nextMethod: LoginMethod) => {
     setLoginMethod(nextMethod)
     setError(null)
     setNotice(null)
+    setAuthRetryUntil(null)
     if (nextMethod !== 'email') resetEmailVerification()
+    if (nextMethod !== 'phone') resetPhoneVerification()
     if (mode === 'reset') resetPasswordVerification()
   }
 
@@ -236,10 +294,10 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
       setEmailChallengeId(challenge.challenge_id)
       setEmailCode('')
       setEmailCodeSent(true)
-      setEmailExpiresInSeconds(challenge.expires_in_seconds)
       const now = Date.now()
       setClock(now)
       setEmailRetryUntil(now + challenge.retry_after_seconds * 1_000)
+      setEmailExpiresUntil(now + challenge.expires_in_seconds * 1_000)
     } catch (err) {
       const retryAfter = (err as { retryAfterSeconds?: number } | null)?.retryAfterSeconds
       if (retryAfter) {
@@ -267,8 +325,7 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
       const now = Date.now()
       setClock(now)
       setResetRetryUntil(now + challenge.retry_after_seconds * 1_000)
-      const expiryMinutes = Math.max(1, Math.ceil(challenge.expires_in_seconds / 60))
-      setNotice(`验证码已发送，${expiryMinutes} 分钟内有效。若该账户存在，请查看${loginMethod === 'email' ? '邮箱' : '短信'}。`)
+      setResetExpiresUntil(now + challenge.expires_in_seconds * 1_000)
     } catch (err) {
       const retryAfter = (err as { retryAfterSeconds?: number } | null)?.retryAfterSeconds
       if (retryAfter) {
@@ -288,12 +345,24 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
   }
 
   const handleSendPhoneCode = async () => {
+    if (phoneRetrySeconds > 0) return
     setLoading(true)
     setError(null)
     try {
-      await sendPhoneVerificationCode(adminApiBaseUrl, phone)
+      const challenge = await sendPhoneVerificationCode(adminApiBaseUrl, phone)
       setCodeSent(true)
+      setPhoneCode('')
+      const now = Date.now()
+      setClock(now)
+      setPhoneRetryUntil(now + challenge.retry_after_seconds * 1_000)
+      setPhoneExpiresUntil(now + challenge.expires_in_seconds * 1_000)
     } catch (err) {
+      const retryAfter = (err as { retryAfterSeconds?: number } | null)?.retryAfterSeconds
+      if (retryAfter) {
+        const now = Date.now()
+        setClock(now)
+        setPhoneRetryUntil(now + retryAfter * 1_000)
+      }
       setError(toUserFacingError(err, '验证码发送失败'))
     } finally {
       setLoading(false)
@@ -437,8 +506,10 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
               </button>
             </div>
             {emailCodeSent && (
-              <small className="auth-panel__verification-note" role="status">
-                验证码已发送，{Math.max(1, Math.ceil(emailExpiresInSeconds / 60))} 分钟内有效。未收到时请检查垃圾邮件。
+              <small className={emailValiditySeconds > 0 ? 'auth-panel__verification-note' : 'auth-panel__verification-note auth-panel__verification-note--expired'} role="status">
+                {emailValiditySeconds > 0
+                  ? <>已发送验证码 · <time>{formatCountdown(emailValiditySeconds)}</time> 后失效。未收到时请检查垃圾邮件。</>
+                  : '验证码已失效，请重新获取。'}
               </small>
             )}
           </label>
@@ -446,10 +517,14 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
 
         {loginMethod === 'phone' && (
           <label>
-            <span>手机号</span>
+            <span className="auth-panel__field-heading">
+              <span>手机号</span>
+              {mode !== 'reset' && <small>请关注来自“恒创联众”的验证码短信</small>}
+            </span>
             <div className="auth-panel__input-with-icon">
               <Smartphone size={16} aria-hidden />
               <input
+                aria-label="手机号"
                 autoComplete="tel"
                 onChange={(event) => handlePhoneChange(event.target.value)}
                 placeholder={mode === 'login' ? '请输入手机号' : undefined}
@@ -458,6 +533,42 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
                 value={phone}
               />
             </div>
+          </label>
+        )}
+
+        {loginMethod === 'phone' && mode !== 'reset' && (
+          <label>
+            <span>验证码</span>
+            <div className="auth-panel__code-row">
+              <div className="auth-panel__input-with-icon">
+                <KeyRound size={16} aria-hidden />
+                <input
+                  aria-label="短信验证码"
+                  autoComplete="one-time-code"
+                  inputMode="numeric"
+                  maxLength={8}
+                  onChange={(event) => setPhoneCode(event.target.value)}
+                  placeholder={codeSent ? '请输入短信验证码' : '先获取验证码'}
+                  required
+                  value={phoneCode}
+                />
+              </div>
+              <button
+                className="auth-panel__code-button"
+                disabled={loading || !phone.trim() || phoneRetrySeconds > 0}
+                onClick={() => void handleSendPhoneCode()}
+                type="button"
+              >
+                {phoneRetrySeconds > 0 ? `${phoneRetrySeconds}s` : codeSent ? '重新发送' : '获取验证码'}
+              </button>
+            </div>
+            {codeSent && (
+              <small className={phoneValiditySeconds > 0 ? 'auth-panel__verification-note' : 'auth-panel__verification-note auth-panel__verification-note--expired'} role="status">
+                {phoneValiditySeconds > 0
+                  ? <>已发送验证码 · <time>{formatCountdown(phoneValiditySeconds)}</time> 后失效。</>
+                  : '验证码已失效，请重新获取。'}
+              </small>
+            )}
           </label>
         )}
 
@@ -522,34 +633,6 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
           </button>
         )}
 
-        {loginMethod === 'phone' && mode !== 'reset' && (
-          <label>
-            <span>验证码</span>
-            <div className="auth-panel__code-row">
-              <div className="auth-panel__input-with-icon">
-                <KeyRound size={16} aria-hidden />
-                <input
-                  autoComplete="one-time-code"
-                  inputMode="numeric"
-                  maxLength={8}
-                  onChange={(event) => setPhoneCode(event.target.value)}
-                  placeholder={codeSent ? '请输入短信验证码' : '先获取验证码'}
-                  required
-                  value={phoneCode}
-                />
-              </div>
-              <button
-                className="auth-panel__code-button"
-                disabled={loading || !phone.trim()}
-                onClick={handleSendPhoneCode}
-                type="button"
-              >
-                {codeSent ? '重新发送' : '获取验证码'}
-              </button>
-            </div>
-          </label>
-        )}
-
         {mode === 'reset' && (
           <>
             <label>
@@ -558,6 +641,7 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
                 <div className="auth-panel__input-with-icon">
                   <KeyRound size={16} aria-hidden />
                   <input
+                    aria-label="验证码"
                     autoComplete="one-time-code"
                     inputMode="numeric"
                     maxLength={loginMethod === 'email' ? 6 : 8}
@@ -576,6 +660,13 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
                   {resetRetrySeconds > 0 ? `${resetRetrySeconds}s` : resetCodeSent ? '重新发送' : '获取验证码'}
                 </button>
               </div>
+              {resetCodeSent && (
+                <small className={resetValiditySeconds > 0 ? 'auth-panel__verification-note' : 'auth-panel__verification-note auth-panel__verification-note--expired'} role="status">
+                  {resetValiditySeconds > 0
+                    ? <>已发送验证码 · <time>{formatCountdown(resetValiditySeconds)}</time> 后失效。若该账户存在，请查看{loginMethod === 'email' ? '邮箱' : '短信'}。</>
+                    : '验证码已失效，请重新获取。'}
+                </small>
+              )}
             </label>
             <label>
               <span>新密码</span>
@@ -613,8 +704,16 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
         {error && <div className="auth-panel__error" role="alert">{error}</div>}
         {notice && <div className="auth-panel__notice" role="status">{notice}</div>}
 
-        <button className="auth-panel__submit" disabled={loading} type="submit">
-          {loading ? '处理中...' : mode === 'reset' ? '重置密码' : mode === 'login' ? '登录' : '注册并登录'}
+        <button className="auth-panel__submit" disabled={loading || authRetrySeconds > 0} type="submit">
+          {loading
+            ? '处理中...'
+            : authRetrySeconds > 0
+              ? `请稍后重试 (${authRetrySeconds}s)`
+              : mode === 'reset'
+                ? '重置密码'
+                : mode === 'login'
+                  ? '登录'
+                  : '注册并登录'}
           <ArrowRight size={16} aria-hidden />
         </button>
       </form>

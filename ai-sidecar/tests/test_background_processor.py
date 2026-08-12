@@ -174,7 +174,7 @@ def test_fragment_grouper_splits_history_review_from_live_chat() -> None:
 
 def test_fragment_grouper_merges_same_document_url() -> None:
     grouper = FragmentGrouper()
-    doc_url = "https://docs.corp.kuaishou.com/d/home/fcAAAAAA"
+    doc_url = "https://docs.example.com/d/home/sample-document-a"
     captures = [
         {
             "id": 1,
@@ -211,7 +211,7 @@ def test_fragment_grouper_splits_different_or_empty_document_url() -> None:
             "window_title": "方案 A - 云文档",
             "ax_text": "方案正文内容",
             "ocr_text": None,
-            "url": "https://docs.corp.kuaishou.com/d/home/fcAAAAAA",
+            "url": "https://docs.example.com/d/home/sample-document-a",
         },
         {
             "id": 2,
@@ -220,7 +220,7 @@ def test_fragment_grouper_splits_different_or_empty_document_url() -> None:
             "window_title": "方案 B - 云文档",
             "ax_text": "方案正文内容",
             "ocr_text": None,
-            "url": "https://docs.corp.kuaishou.com/d/home/fcBBBBBB",
+            "url": "https://docs.example.com/d/home/sample-document-b",
         },
         {
             "id": 3,
@@ -364,8 +364,8 @@ async def _skip_vectorization(*_args, **_kwargs):
 def test_similar_merge_rejects_different_document_url(tmp_path, monkeypatch) -> None:
     db_path = str(tmp_path / "captures.db")
     _init_db(db_path)
-    doc_a = "https://docs.corp.kuaishou.com/k/home/docA/fcAAAAAA"
-    doc_b = "https://docs.corp.kuaishou.com/k/home/docB/fcBBBBBB"
+    doc_a = "https://docs.example.com/k/home/docA/sample-document-a"
+    doc_b = "https://docs.example.com/k/home/docB/sample-document-b"
     conn = sqlite3.connect(db_path)
     _seed_timeline(conn, doc_a)
     conn.execute(
@@ -410,7 +410,7 @@ def test_similar_merge_rejects_different_document_url(tmp_path, monkeypatch) -> 
 def test_similar_merge_allows_same_document_and_syncs_capture_ids(tmp_path, monkeypatch) -> None:
     db_path = str(tmp_path / "captures.db")
     _init_db(db_path)
-    doc_a = "https://docs.corp.kuaishou.com/k/home/docA/fcAAAAAA"
+    doc_a = "https://docs.example.com/k/home/docA/sample-document-a"
     conn = sqlite3.connect(db_path)
     _seed_timeline(conn, doc_a)
     conn.execute(
@@ -456,7 +456,7 @@ def test_similar_merge_allows_same_document_and_syncs_capture_ids(tmp_path, monk
 def test_forced_cross_batch_merge_still_runs_model_extraction(tmp_path, monkeypatch) -> None:
     db_path = str(tmp_path / "captures.db")
     _init_db(db_path)
-    doc_a = "https://docs.corp.kuaishou.com/k/home/docA/fcAAAAAA"
+    doc_a = "https://docs.example.com/k/home/docA/sample-document-a"
     conn = sqlite3.connect(db_path)
     _seed_timeline(conn, doc_a)
     conn.execute(
@@ -500,7 +500,7 @@ def test_forced_cross_batch_merge_still_runs_model_extraction(tmp_path, monkeypa
 def test_similar_merge_rejects_empty_document_url(tmp_path, monkeypatch) -> None:
     db_path = str(tmp_path / "captures.db")
     _init_db(db_path)
-    doc_a = "https://docs.corp.kuaishou.com/k/home/docA/fcAAAAAA"
+    doc_a = "https://docs.example.com/k/home/docA/sample-document-a"
     conn = sqlite3.connect(db_path)
     _seed_timeline(conn, doc_a)
     conn.execute(
@@ -855,6 +855,7 @@ def test_trigger_unified_bake_pipeline_defers_while_inference_is_busy(
     assert result == {
         "triggered": False,
         "reason": "inference_busy",
+        "actionable_count": 1,
     }
 
 
@@ -884,6 +885,88 @@ def test_battery_backlog_keeps_rate_limited_batch_size(tmp_path) -> None:
     )()
 
     assert processor._timeline_batch_limit(profile, 500) == 4
+
+
+def test_dual_backlog_uses_bounded_work_quanta(tmp_path) -> None:
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    charging_profile = type(
+        "_Profile",
+        (),
+        {
+            "mode": "charging",
+            "timeline_batch_size": 20,
+            "bake_interval_secs": 30,
+            "bake_limit": 10,
+        },
+    )()
+    battery_profile = type(
+        "_Profile",
+        (),
+        {
+            "mode": "battery",
+            "timeline_batch_size": 4,
+            "bake_interval_secs": 1800,
+            "bake_limit": 1,
+        },
+    )()
+
+    assert processor._capture_group_quantum(135, 224) == 3
+    assert processor._scheduled_bake_limit(charging_profile, 135) == 3
+    assert processor._scheduled_bake_limit(battery_profile, 135) == 1
+    assert processor._bake_burst_run_limit(135, 224) == 1
+    assert processor._scheduled_bake_interval_secs(
+        battery_profile,
+        135,
+        224,
+    ) == 120.0
+
+    assert processor._capture_group_quantum(19, 224) is None
+    assert processor._capture_group_quantum(135, 19) is None
+    assert processor._bake_burst_run_limit(19, 224) == 3
+
+
+def test_capture_batch_stops_at_semantic_group_quantum(tmp_path, monkeypatch) -> None:
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    groups = [[{"id": group_id}] for group_id in range(1, 6)]
+    processed_ids = []
+
+    monkeypatch.setattr(
+        processor,
+        "_process_batch_sync",
+        lambda *args: {
+            "groups_to_process": groups,
+            "fetched_count": 5,
+            "merge_first_group_into": None,
+        },
+    )
+    monkeypatch.setattr(
+        "model_registry_global.check_memory_pressure",
+        lambda: "normal",
+    )
+    monkeypatch.setattr(processor, "_acquire_process_file_lock", lambda: 7)
+    monkeypatch.setattr(processor, "_release_process_file_lock", lambda fd: None)
+
+    async def _process_group(group, **kwargs):
+        processed_ids.append(group[0]["id"])
+        return True
+
+    async def _noop_async(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(processor, "_process_capture_group", _process_group)
+    monkeypatch.setattr(processor, "_process_vectorization_batch", _noop_async)
+    monkeypatch.setattr("background_processor.asyncio.sleep", _noop_async)
+
+    result = asyncio.run(
+        processor._run_batch(max_groups=3, trigger_bake=False)
+    )
+
+    assert processed_ids == [1, 2, 3]
+    assert result["processed_count"] == 3
 
 
 def test_periodic_bake_check_uses_core_queue_status_as_single_source(tmp_path, monkeypatch) -> None:
@@ -959,7 +1042,7 @@ def test_periodic_bake_check_runs_before_long_capture_batch(tmp_path, monkeypatc
 
     asyncio.run(processor.run())
 
-    assert events == [("bake", 10, 1)]
+    assert events == [("bake", 3, 1)]
 
 
 def test_large_bake_backlog_runs_bounded_burst_before_capture_turn(
@@ -1000,6 +1083,61 @@ def test_large_bake_backlog_runs_bounded_burst_before_capture_turn(
 
     assert holds == [True, True, True, True, False]
     assert processor._consecutive_backlog_bake_runs == 3
+
+
+def test_dual_backlog_rotates_below_single_bake_burst_threshold(
+    tmp_path, monkeypatch
+) -> None:
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    profile = type(
+        "_Profile",
+        (),
+        {
+            "mode": "charging",
+            "bake_interval_secs": 30,
+            "bake_limit": 10,
+            "bake_concurrency": 1,
+        },
+    )()
+    results = iter([
+        {"triggered": True, "actionable_count": 99},
+        {
+            "triggered": False,
+            "reason": "run_in_progress",
+            "actionable_count": 99,
+        },
+    ])
+
+    async def _fake_periodic_bake(*, limit, max_concurrency):
+        assert limit == 3
+        return next(results)
+
+    monkeypatch.setattr(processor, "_maybe_trigger_periodic_bake", _fake_periodic_bake)
+
+    _, first_hold = asyncio.run(
+        processor._run_periodic_bake_check(
+            profile,
+            0.0,
+            now=0.0,
+            pending_capture_count=135,
+        )
+    )
+    assert first_hold is False
+    assert processor._consecutive_backlog_bake_runs == 1
+
+    # capture 工作片消费公平配额后，运行中的 bake 必须重新获得槽位。
+    processor._consecutive_backlog_bake_runs = 0
+    _, second_hold = asyncio.run(
+        processor._run_periodic_bake_check(
+            profile,
+            0.0,
+            now=1.0,
+            pending_capture_count=135,
+        )
+    )
+    assert second_hold is True
 
 
 def test_trigger_unified_bake_pipeline_skips_core_backoff_before_model_queue(
@@ -1137,7 +1275,7 @@ def test_document_url_with_substantive_body_gets_deterministic_metadata() -> Non
         "evidence_strength": None,
     }
     captures = [{
-        "url": "https://docs.corp.kuaishou.com/k/home/space/document-id",
+        "url": "https://docs.example.com/k/home/space/document-id",
         "ax_text": "文档正文" * 80,
         "ocr_text": "",
     }]
@@ -1160,7 +1298,7 @@ def test_document_metadata_fallback_requires_substantive_body() -> None:
     applied = BackgroundProcessor._apply_document_metadata_defaults(
         knowledge,
         [{
-            "url": "https://docs.corp.kuaishou.com/k/home/space/document-id",
+            "url": "https://docs.example.com/k/home/space/document-id",
             "ax_text": "仅有标题",
         }],
     )
@@ -1344,7 +1482,7 @@ def _gpu_capture_group() -> list:
             "ts": 1700000000000,
             "app_name": "Google Chrome",
             "window_title": "电商GPU信息平台 - GPU使用情况一览",
-            "url": "https://kwaishop-sre.corp.example.com/kwaishop/gpu/info",
+            "url": "https://gpu.example.com/reports/usage",
             "webpage_title": "电商GPU信息平台 - GPU使用情况一览",
         }
     ]
@@ -1364,7 +1502,7 @@ def test_register_data_pages_posts_in_group_report_url(tmp_path, monkeypatch) ->
     processor = BackgroundProcessor(db_path=str(tmp_path / "pages.db"))
     knowledge = _data_pages_knowledge([
         {
-            "url": "https://kwaishop-sre.corp.example.com/kwaishop/gpu/info",
+            "url": "https://gpu.example.com/reports/usage",
             "page_kind": "data_report",
             "title": "电商GPU信息平台",
         }
@@ -1379,7 +1517,7 @@ def test_register_data_pages_posts_in_group_report_url(tmp_path, monkeypatch) ->
     assert payload["capture_id"] == 21603
     assert payload["timeline_id"] == 2160
     assert payload["page_kind"] == "data_report"
-    assert payload["url"] == "https://kwaishop-sre.corp.example.com/kwaishop/gpu/info"
+    assert payload["url"] == "https://gpu.example.com/reports/usage"
 
 
 def test_register_data_pages_rejects_hallucinated_url(tmp_path, monkeypatch) -> None:
@@ -1414,7 +1552,7 @@ def test_register_data_pages_skips_data_content_and_missing_contract(tmp_path, m
 
     content_only = _data_pages_knowledge([
         {
-            "url": "https://kwaishop-sre.corp.example.com/kwaishop/gpu/info",
+            "url": "https://gpu.example.com/reports/usage",
             "page_kind": "data_content",
             "title": "含数据的普通页面",
         }
@@ -1423,7 +1561,7 @@ def test_register_data_pages_skips_data_content_and_missing_contract(tmp_path, m
 
     no_contract = _data_pages_knowledge([
         {
-            "url": "https://kwaishop-sre.corp.example.com/kwaishop/gpu/info",
+            "url": "https://gpu.example.com/reports/usage",
             "page_kind": "data_report",
             "title": "缺契约",
         }
@@ -1443,7 +1581,7 @@ def test_register_data_pages_survives_core_engine_outage(tmp_path, monkeypatch) 
     processor = BackgroundProcessor(db_path=str(tmp_path / "pages.db"))
     knowledge = _data_pages_knowledge([
         {
-            "url": "https://kwaishop-sre.corp.example.com/kwaishop/gpu/info",
+            "url": "https://gpu.example.com/reports/usage",
             "page_kind": "data_platform",
             "title": "电商GPU信息平台",
         }

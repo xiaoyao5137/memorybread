@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 import glob
+import os
 
 # Swift OCR 脚本
 SWIFT_OCR_SCRIPT = r"""
@@ -116,7 +117,7 @@ def test_apple_vision_ocr(image_path):
 
 if __name__ == "__main__":
     # 获取最新截图
-    screenshots = sorted(glob.glob('/Users/xianjiaqi/.memory-bread/captures/screenshots/*.jpg'))
+    screenshots = sorted(glob.glob(os.path.expanduser('~/.memory-bread/captures/screenshots/*.jpg')))
 
     if not screenshots:
         print("❌ 没有找到截图")

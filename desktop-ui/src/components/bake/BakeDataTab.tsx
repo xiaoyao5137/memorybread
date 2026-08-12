@@ -313,7 +313,7 @@ const BakeDataTab: React.FC<{
                       href={selected.source_url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      style={{ color: '#2563EB', textDecoration: 'underline', wordBreak: 'break-all' }}
+                      className="bake-source-url-link"
                     >
                       {selected.source_url}
                     </a>

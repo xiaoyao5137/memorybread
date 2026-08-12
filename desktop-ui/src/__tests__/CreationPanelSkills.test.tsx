@@ -371,6 +371,26 @@ describe('技能安装与使用', () => {
     expect(within(editor).getByText(/手工新建从空白开始/)).toBeInTheDocument()
   })
 
+  it('我的技能卡片不显示手工新建来源标签', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills' && (!init?.method || init.method === 'GET')) {
+        return Response.json([{ ...rawSkill, source_kind: 'manual', source_id: 'manual-2' }])
+      }
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /技能/ }))
+    const card = screen.getByText(rawSkill.title).closest('article')!
+    expect(within(card).queryByText('手工新建')).not.toBeInTheDocument()
+    expect(within(card).getByText('未安装')).toBeInTheDocument()
+  })
+
   it('删除技能前要求二次确认', async () => {
     let deleteCount = 0
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {

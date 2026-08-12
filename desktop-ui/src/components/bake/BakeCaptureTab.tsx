@@ -407,7 +407,7 @@ const BakeCaptureTab: React.FC<{
                       href={selected.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      style={{ color: '#2563EB', textDecoration: 'underline', wordBreak: 'break-all' }}
+                      className="bake-source-url-link"
                     >
                       {selected.url}
                     </a>

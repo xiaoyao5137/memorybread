@@ -2880,8 +2880,7 @@ pub async fn monitor_pipeline_dag(
                           SELECT 1 FROM captures dc
                           WHERE dc.timeline_id = t.id
                             AND (
-                                 LOWER(COALESCE(dc.url, '')) LIKE '%docs.corp%'
-                              OR LOWER(COALESCE(dc.url, '')) LIKE '%/docs/%'
+                                 LOWER(COALESCE(dc.url, '')) LIKE '%/docs/%'
                               OR LOWER(COALESCE(dc.url, '')) LIKE '%docs.google%'
                               OR LOWER(COALESCE(dc.url, '')) LIKE '%/document/%'
                               OR LOWER(COALESCE(dc.url, '')) LIKE '%yuque.com%'

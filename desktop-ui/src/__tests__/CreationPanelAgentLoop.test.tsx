@@ -1479,7 +1479,7 @@ describe('创作 Agent 多轮 Loop', () => {
 
     render(<CreationPanel />)
     const input = screen.getByPlaceholderText(/继续告诉 Agent 如何修改当前文档/)
-    fireEvent.change(input, { target: { value: '参考快手员工周年礼物方案' } })
+    fireEvent.change(input, { target: { value: '参考示例公司员工周年礼物方案' } })
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
 
     const intermediateText = await screen.findByText('中间版本内容。')
@@ -1490,6 +1490,6 @@ describe('创作 Agent 多轮 Loop', () => {
 
     await screen.findByLabelText('本轮改动')
     expect(screen.getByText('等待审校。')).toHaveClass('creation-latest-change')
-    expect(screen.getByLabelText('本轮改动')).toHaveTextContent('参考快手员工周年礼物方案')
+    expect(screen.getByLabelText('本轮改动')).toHaveTextContent('参考示例公司员工周年礼物方案')
   })
 })

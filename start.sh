@@ -1014,10 +1014,6 @@ clean_stale_tauri_cache() {
     local tauri_target="$tauri_root/target"
     local stale_marker=""
     local dependency_file
-    local old_paths=(
-        "/Users/xianjiaqi/Documents/mygit/MemoryBread/desktop-ui/src-tauri"
-        "/Users/xianjiaqi/Documents/mygit/cy/gzdz/desktop-ui/src-tauri"
-    )
     local dependency_files=(
         "$tauri_target/debug/memory-bread-desktop.d"
         "$tauri_target/debug/libmemory_bread_desktop_lib.d"
@@ -1027,19 +1023,13 @@ clean_stale_tauri_cache() {
         return 0
     fi
 
-    for old_path in "${old_paths[@]}"; do
-        if [ "$old_path" = "$tauri_root" ]; then
-            continue
+    # Cargo 的 .d 文件会记录当前 crate 的绝对源码路径。若仓库迁移后记录中
+    # 不再包含当前路径，清理缓存即可，无需保存开发者本机的历史目录。
+    for dependency_file in "${dependency_files[@]}"; do
+        if [ -f "$dependency_file" ] && ! grep -Fq "$tauri_root" "$dependency_file"; then
+            stale_marker="relocated source path"
+            break
         fi
-
-        # Cargo 的 .d 文件已经记录本 crate 的绝对源码与生成物路径。
-        # 检查它们即可判断仓库是否迁移，无需递归扫描数 GB 的 target。
-        for dependency_file in "${dependency_files[@]}"; do
-            if [ -f "$dependency_file" ] && grep -Fq "$old_path" "$dependency_file"; then
-                stale_marker="$old_path"
-                break 2
-            fi
-        done
     done
 
     if [ -z "$stale_marker" ] && [ -f "$UI_LOG" ]; then

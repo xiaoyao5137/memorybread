@@ -35,6 +35,10 @@ const template: ArticleTemplate = {
   reviewStatus: 'confirmed',
   matchScore: 0.98,
   matchLevel: 'high',
+  createdAt: '2026-08-11 00:35:45',
+  createdAtMs: new Date(2026, 7, 11, 0, 35, 45).getTime(),
+  updatedAt: '2026-08-11 14:18:36',
+  updatedAtMs: new Date(2026, 7, 11, 14, 18, 36).getTime(),
 }
 
 const draftTemplate: ArticleTemplate = {
@@ -125,6 +129,41 @@ const relatedSkill: LocalCreationSkill = {
 }
 
 describe('Bake 详情展示优化', () => {
+  it('超长来源网址使用可换行的受限宽度样式', () => {
+    const longSourceUrl = 'https://docs.example.com/d/home/a-very-long-document-identifier-without-natural-breaks?section=another-very-long-section-identifier'
+
+    render(
+      <BakeTemplatesTab
+        templates={[{ ...template, sourceUrl: longSourceUrl }]}
+        total={1}
+        limit={20}
+        offset={0}
+        query=""
+        from=""
+        to=""
+        draftQuery=""
+        draftFrom=""
+        draftTo=""
+        selectedTemplateId={template.id}
+        onSelectTemplate={noop}
+        onCreateTemplate={noop}
+        onUpdateTemplate={noop}
+        onToggleTemplateStatus={noop}
+        onDeleteTemplate={noop}
+        onViewSourceMemory={noop}
+        onPageChange={noop}
+        onLimitChange={noop}
+        onDraftQueryChange={noop}
+        onDraftFromChange={noop}
+        onDraftToChange={noop}
+        onSearch={noop}
+        onClearFilters={noop}
+      />,
+    )
+
+    expect(screen.getByRole('link', { name: longSourceUrl })).toHaveClass('bake-source-url-link')
+  })
+
   it('模板详情使用更明确的结构/风格说明文案', () => {
     const onOpenSkill = vi.fn()
     render(
@@ -167,6 +206,7 @@ describe('Bake 详情展示优化', () => {
     expect(screen.queryByText('high')).not.toBeInTheDocument()
     expect(screen.queryByText(/匹配分|匹配等级|来源记忆|提炼状态/)).not.toBeInTheDocument()
     expect(screen.getByText('关联技能')).toBeInTheDocument()
+    expect(screen.getByText(/新增时间.*2026.*8.*11.*00:35:45.*最近更新.*2026.*8.*11.*14:18:36/)).toBeInTheDocument()
     expect(screen.getByText('跨部门技术沟通会文档')).toBeInTheDocument()
     expect(screen.getByText('已安装')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /跨部门技术沟通会文档/ }))

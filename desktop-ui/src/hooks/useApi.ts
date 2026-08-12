@@ -1520,6 +1520,7 @@ function mapBakeTemplate(item: any): ArticleTemplate {
     createdAt: item.created_at ?? '',
     createdAtMs,
     updatedAt: item.updated_at,
+    updatedAtMs: toTimestampMs(item.updated_at_ms ?? item.updated_at),
   }
 }
 

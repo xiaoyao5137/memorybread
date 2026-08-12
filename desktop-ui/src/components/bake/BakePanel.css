@@ -1402,6 +1402,19 @@ button.bake-list-item.bake-list-item--active {
   color: #111111;
 }
 
+.bake-source-url-link {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  color: #2563EB;
+  line-height: 1.6;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .bake-inline-meta {
   display: flex;
   justify-content: space-between;
@@ -1990,6 +2003,7 @@ button.bake-list-item.bake-list-item--active {
 
 .bake-knowledge-detail__section {
   display: grid;
+  min-width: 0;
   gap: 8px;
 }
 

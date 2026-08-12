@@ -19,8 +19,7 @@ WITH source_urls AS (
     WHERE deleted_at IS NULL
       AND trim(coalesce(source_url, '')) <> ''
       AND (
-           lower(source_url) LIKE '%docs.corp%'
-        OR lower(source_url) LIKE '%/docs/%'
+           lower(source_url) LIKE '%/docs/%'
         OR lower(source_url) LIKE '%docs.google%'
         OR lower(source_url) LIKE '%/document/%'
         OR lower(source_url) LIKE '%yuque.com%'

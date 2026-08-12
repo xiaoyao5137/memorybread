@@ -2764,12 +2764,21 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                   {localSkills.map(skill => {
                     const fromMarket = skill.sourceKind === 'market'
                     const imported = skill.sourceKind === 'imported'
+                    const sourceStatus = fromMarket
+                      ? '来自市场'
+                      : imported
+                        ? '手工上传'
+                        : skill.sourceKind === 'manual'
+                          ? null
+                          : skill.published
+                            ? '已发布'
+                            : skill.status === 'draft'
+                              ? '草稿'
+                              : '已保存'
                     return (
                       <article key={skill.id}>
                         <div className="creation-skill-library__status-row">
-                          <div className="creation-skill-library__status">
-                            {fromMarket ? '来自市场' : imported ? '手工上传' : skill.sourceKind === 'manual' ? '手工新建' : skill.published ? '已发布' : skill.status === 'draft' ? '草稿' : '已保存'}
-                          </div>
+                          {sourceStatus && <div className="creation-skill-library__status">{sourceStatus}</div>}
                           <span className={skill.installed ? 'is-installed' : ''}>{skill.installed ? '已安装' : '未安装'}</span>
                         </div>
                         <button

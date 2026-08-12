@@ -36,7 +36,7 @@ class FakeIntentLlm:
 def test_floating_assist_question_ignores_bare_url_with_query_string():
     ocr_text = "\n".join(
         [
-            "docs.corp.kuaishou.com/k/home/page?ro=false#section=h.s1",
+            "docs.example.com/k/home/page?ro=false#section=h.s1",
             "Loop Engineering 怎么落地到 Top5 任务？",
         ]
     )
@@ -45,7 +45,7 @@ def test_floating_assist_question_ignores_bare_url_with_query_string():
 
 
 def test_floating_assist_rag_query_does_not_use_url_as_core_question():
-    raw_query = "你是记忆面包的工作场景助手。\n当前屏幕 OCR：\ndocs.corp.kuaishou.com/k/home/page?ro=false#section=h.s1"
+    raw_query = "你是记忆面包的工作场景助手。\n当前屏幕 OCR：\ndocs.example.com/k/home/page?ro=false#section=h.s1"
     metadata = {"source": "floating_assist"}
 
     assert _build_floating_assist_rag_query(raw_query, metadata) == raw_query
@@ -92,7 +92,7 @@ def test_floating_assist_model_intent_understands_ocr_before_rag_query():
         }
         """
     )
-    raw_query = "你是记忆面包的工作场景助手。\n当前屏幕 OCR：\ndocs.corp.kuaishou.com/k/home/page?ro=false\nLoop Engineering 怎么落地？"
+    raw_query = "你是记忆面包的工作场景助手。\n当前屏幕 OCR：\ndocs.example.com/k/home/page?ro=false\nLoop Engineering 怎么落地？"
 
     intent = _analyze_floating_assist_intent(raw_query, {"source": "floating_assist"}, llm)
     rag_query = _build_floating_assist_rag_query_from_intent(raw_query, intent)

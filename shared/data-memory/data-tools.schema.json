@@ -42,7 +42,12 @@
           "maxLength": 24,
           "description": "单一原始单位；复合时长的单位保留在 value 中且本字段为空"
         },
-        "statement": {"type": "string", "minLength": 1, "maxLength": 500},
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "description": "仅描述当前原子事实，必须包含当前事实的语义锚点与指标值；不得复用同批其他事实的汇总句"
+        },
         "evidence_quote": {"type": "string", "minLength": 1, "maxLength": 500},
         "confidence": {"type": "string", "enum": ["low", "medium", "high"]}
       },
@@ -53,6 +58,10 @@
       "required": ["extraction_version", "semantic_origin", "title", "summary", "semantic_subject", "semantic_identity", "metric_rows"],
       "properties": {
         "extraction_version": {"const": "data-memory.v15"},
+        "content_render_version": {
+          "const": "fact-specific.v1",
+          "description": "存在时表示快照正文由当前事实的结构化指标与逐字证据生成，不直接信任模型汇总句"
+        },
         "semantic_origin": {"type": "string", "enum": ["model_structured_fact", "legacy_parser"]},
         "title": {
           "type": "string",

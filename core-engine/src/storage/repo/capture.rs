@@ -62,7 +62,6 @@ const CATEGORY_MINUTES_SQL: &str = "WITH ordered AS (
                     'dev.zed.zed',
                     'com.openai.codex',
                     'com.aliyun.lingma.ide',
-                    'com.kuaishou.codeflicker.editor',
                     'com.github.githubdesktop'
                 ) OR bundle_key LIKE 'com.jetbrains.%' THEN 'coding'
                 WHEN bundle_key IN (

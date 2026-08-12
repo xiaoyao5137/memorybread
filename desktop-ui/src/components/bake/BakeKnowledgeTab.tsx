@@ -143,7 +143,7 @@ const BakeKnowledgeTab: React.FC<{
             </div>
             <div className="bake-list-toolbar__repository-row bake-list-toolbar__repository-row--dates">
               <label className="bake-form-field bake-filter-field">
-                <span className="bake-filter-label">开始日期</span>
+                <span className="bake-filter-label">新增开始日期</span>
                 <input
                   className="bake-input"
                   type="date"
@@ -152,7 +152,7 @@ const BakeKnowledgeTab: React.FC<{
                 />
               </label>
               <label className="bake-form-field bake-filter-field">
-                <span className="bake-filter-label">结束日期</span>
+                <span className="bake-filter-label">新增结束日期</span>
                 <input
                   className="bake-input"
                   type="date"

@@ -359,8 +359,6 @@ def _rank_keyword_chunks(chunks: list["RetrievedChunk"], terms: list[str], prefe
             score += 24
         if metadata.get("source_type") in {"document", "operation", "bake_knowledge"}:
             score += 2
-        if "docs.corp.kuaishou.com" in url:
-            score += 3
         score += min(float(chunk.score or 0) / 2.0, 80.0)
         time_value = int(metadata.get("time") or metadata.get("ts") or 0)
         return score, chunk.score, time_value

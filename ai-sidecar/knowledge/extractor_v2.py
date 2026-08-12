@@ -1155,8 +1155,8 @@ BAKE_SHARED_PROMPT = """你在执行 bake pipeline 的类别特异提炼。输�
 你会收到候选的 summary / overview / details / entities，以及关联 capture 的上下文文本。可以综合这些信息，但必须只基于输入证据，不要臆测。
 
 **必须 reject 的情形（无论内容看起来多有价值）**:
-- 内容来源是界面上渲染的历史操作记录、变更日志、动态消息流（例如"某某于X月X日更新了…"、"某某创建了…"、"某某评论了…"等格式），这类内容描述的是过去某个时间点他人或系统的动作，不是当前用户正在进行的工作
-- 判断依据:capture_context 中出现"[人名/角色] 于 [日期] [动词]了 [对象]"句式，且该日期明显早于 capture_ts 对应的时间
+- 内容仅是界面自动生成的历史操作元数据、变更日志壳或动态通知（例如"某某于X月X日更新了…"、"某某创建了…"、"某某评论了…"等格式），没有说明具体项目进度、工作状态、执行结果、结论或其他可复用事实
+- 判断依据:capture_context 只有"[人名/角色] 于 [日期] [动词]了 [对象]"一类动作壳，且没有可独立理解的业务事实。若消息正文明确陈述了进度、结果或结论，不得仅因记录来自过去、他人、群聊或动态流而拒绝；必须保留真实主体与时间，不能冒充当前用户刚完成的工作
 
 输出要求:
 - 必须返回且只返回 1 个 JSON 对象
@@ -1506,7 +1506,6 @@ BAKE_DESIGN_MARKERS = (
 )
 
 DOCUMENT_URL_MARKERS = (
-    "docs.corp",
     "/docs/",
     "docs.google",
     "/document/",
@@ -1609,11 +1608,17 @@ BAKE_MISMATCH_MAX_SCORE = 0.49
 
 BAKE_KNOWLEDGE_PROMPT = """类别:knowledge
 
-只提炼未来工作中需要回想起来参照使用的有用知识。
+只提炼未来工作中需要回想起来参照使用的有用知识。知识既包括长期稳定的解释、经验、约束、决策、结论和方法理解，也包括有明确对象、时间与证据的工作事实。
 当你理解该时间线及对应采集记录描述的信息，是未来工作中会被拿来参考的事实、经验、约束、决策、结论、方法理解，或未来工作中需要参考某个设计方案的知识时，accepted=true。
+事实不要求永远不变：项目进度、工作状态和执行结果只要在观测时点明确成立，未来需要据此继续推进、追溯变化或避免重复确认，就属于知识。典型事实包括：
+- 某项工作已完成、尚未完成、正在处理、被阻塞、等待协作或已取消；
+- 功能是否上线、集成或测试是否完成、问题是否解决、验收是否通过，以及其他明确的执行结果；
+- 已确认的结论、决定、责任人、截止时间、依赖关系、风险和下一步承诺；
+- 群聊、会议或任务沟通中对上述事实的明确同步。不能仅因为载体是聊天或内容以后可能更新就 reject。
+例如“Agent Demo 尚未挂到 AIGC 页面，负责人计划两天内处理”和“导演 Agent 集成遇到单 Tool 性能问题，正在测试”都是应提炼的项目进度事实。
 如果只是噪声或零散操作，没有形成任何可复用的知识点，就 reject。
 
-本类别只承接以稳定解释、经验、约束、决策或结论为主要复用价值的内容。若候选的主要价值是会随时间变化的数值、指标卡、表格、查询结果或状态快照，即使页面附带字段定义、计算公式、换算说明，也不要把这些数据上下文另建为 knowledge。
+本类别承接以事实、解释、经验、约束、决策或结论为主要复用价值的内容。若候选的主要价值是结构化数值观测、指标卡、表格、报表、查询结果，或以“对象 + 指标 + 数值”为核心的业务/系统状态快照，则交给 data，不要把数据上下文另建为 knowledge。项目或任务的语义状态、进度、结果和结论不是这里所说的数据状态快照，不得仅因它会随时间变化而排除出 knowledge。
 
 accepted=true 时，payload schema:
 {
@@ -1639,6 +1644,9 @@ accepted=true 时，payload schema:
 约束:
 - `summary` 必须体现沉淀后的知识点，不要直接照抄流水账
 - `details` 必须是可渲染 Markdown，建议包含 `## 适用场景`、`## 可参考内容`、`## 证据依据`
+- 提炼进度或结果事实时，`summary` 和 `details` 必须写清事实对象及观测时点成立的状态/结果/结论；来源明确写出的阻塞、责任人、截止时间和下一步承诺应一并保留
+- 严格区分已发生事实与计划、预计、建议、猜测：可以记录“已承诺/计划/预计做什么”这一事实，但不得把计划中的动作改写成已经完成
+- 只有“同步一下进度”“后续再看”等没有给出具体对象和实际状态的空泛消息才应 reject；来源明确、可归因的事实即使只出现一次也可以 accepted=true
 - 输入即使含有写作模板特征或行动步骤，只要其中存在独立可复用的事实/经验/约束/决策/结论，就在 knowledge 中保留这部分；模板部分会由 design 处理，步骤部分由 sop 处理，不要替对方做拒绝判断
 - `match_score` 使用 0-1 小数
 - 接受的结果统一使用 `auto_created`
@@ -1739,15 +1747,17 @@ accepted=true 时，payload schema:
 BAKE_BUNDLE_PROMPT = f"""你在执行一次性 bake bundle 提炼。输入是一条时间线候选工作片段。
 
 第一步必须先判断候选的主资产类型 `classification.primary_type`，再评估稳定资产：
-- data：主要价值是会随时间变化的观测值、业务指标、价格/用量/成本、指标卡、表格、报表、查询结果或状态快照；
-- knowledge：主要价值是数字变化后仍成立的解释、经验、约束、决策或结论；
+- data：主要价值是结构化数值观测、业务指标、价格/用量/成本、指标卡、表格、报表、查询结果，或以“对象 + 指标 + 数值”为核心的业务/系统状态快照；
+- knowledge：主要价值是有明确对象和证据的事实、解释、经验、约束、决策或结论；事实包括项目进度、工作状态变化、非数值执行结果、阻塞、责任人、截止时间和下一步承诺，不要求永久不变；
 - document：主要价值是一份成体系、可整体复用的正文；
 - sop：主要价值是来源明确记录的多步行动路线；
 - none：没有足够可复用内容。
 
+分类边界：项目/任务“已完成、未完成、进行中、被阻塞、已上线、测试通过/失败、问题已解决/未解决”等语义状态和结果应优先归 knowledge，并保留观测时间；不能因为它们会变化或来自聊天就归 data/none。只有主要价值可独立表达为结构化测量值、指标序列或报表快照时才归 data。计划和预计可以作为“已经形成的承诺/安排”进入 knowledge，但不得被改写成已经执行完成。
+
 必须按候选的主导复用价值只选一个主类型，不能因为页面同时出现说明文字、公式、按钮或菜单就改变主体。数据页面上的字段定义、计算公式、换算说明通常是理解数据的上下文，不应脱离页面另建知识或操作。若 `primary_type=data`，knowledge、design、sop 必须全部 reject；数据资产已由同一提炼流水线的 `data_pages` 与 `data_facts` 承接。其余类型仍须只基于候选证据保守判断，禁止把一个主体重复沉淀到多个类别。
 
-必须拒绝把界面中渲染的历史操作记录、变更日志或动态消息流当成当前用户产出。
+不能把界面中渲染的历史操作记录、变更日志或动态消息流冒充当前用户产出；但其中明确陈述的项目进度、执行结果或结论仍可作为对应主体在对应时点成立的 knowledge 事实。只有没有实质事实的自动动作壳才 reject。
 
 最终只返回一个 JSON 对象，顶层固定为 classification、knowledge、design、sop。classification 固定为：
 {{"primary_type":"data|knowledge|document|sop|none","reason":"一句话说明主导复用价值"}}
@@ -2347,6 +2357,46 @@ def _value_like_fact_subject(subject: str, value: str) -> bool:
     return len(meaningful_residue) <= 4
 
 
+def _fact_value_is_stated(fact: Dict[str, Any]) -> bool:
+    statement = _normalize_fact_evidence(fact.get("statement"))
+    value = _normalize_fact_evidence(fact.get("value"))
+    if not statement or not value:
+        return False
+    if value in statement:
+        return True
+    value_tokens = re.findall(r"[0-9][0-9:.%]*", value)
+    return bool(value_tokens) and all(token in statement for token in value_tokens)
+
+
+def _fact_specific_statement(fact: Dict[str, Any]) -> str:
+    """用已回证的原子字段生成展示句，避免多个事实共享模型汇总句。"""
+    subject = str(fact.get("subject") or "").strip()
+    action = str(fact.get("action") or "").strip()
+    target_context = str(fact.get("target_context") or "").strip()
+    dimension = str(fact.get("dimension") or "").strip()
+    metric = str(fact.get("metric") or "").strip()
+    value = str(fact.get("value") or "").strip()
+    unit = str(fact.get("unit") or "").strip()
+
+    context = subject
+    if target_context and target_context not in context:
+        context = f"{context}在{target_context}中"
+    if action and action not in context:
+        context = f"{context}{action}"
+    metric_label = f"{dimension}{metric}" if dimension else metric
+    display_value = value if not unit or value.endswith(unit) else f"{value}{unit}"
+    statement = f"{context}的{metric_label}为{display_value}。"
+    if len(statement) <= 500:
+        return statement
+
+    # statement 的契约上限是 500 字符。超长时优先丢弃执行上下文，再截断
+    # dimension；metric/value 始终保留，避免边界裁剪再次生成不含自身值的句子。
+    suffix = f"{metric}为{display_value}。"
+    prefix = f"{subject}的"
+    dimension_budget = max(0, 500 - len(prefix) - len(suffix))
+    return f"{prefix}{dimension[:dimension_budget]}{suffix}"
+
+
 def _validated_data_facts(raw_facts: Any, source_text: str, relaxed_subject: bool = False) -> tuple[List[Dict[str, Any]], int]:
     """验证模型事实；不修补语义，只接受能够逐字回证的完整结构。
 
@@ -2533,6 +2583,21 @@ def _validated_data_facts(raw_facts: Any, source_text: str, relaxed_subject: boo
             continue
         accepted_keys.add(semantic_key)
         accepted.append(fact)
+
+    # statement 是展示字段，不能成为结构化事实之间的串线入口。小模型偶尔会把
+    # 同批多个指标写成同一句汇总：其中一条可能不含自己的值，其余条虽然碰巧
+    # 含值，仍会在数据详情里展示成完全相同的内容。对缺少当前值或被多个原子
+    # 事实复用的句子，用已经过上述回证门禁的字段确定性重写；逐字证据继续单独
+    # 保存在 evidence_quote，不损失来源可追溯性。
+    statement_counts: Dict[str, int] = {}
+    for fact in accepted:
+        normalized_statement = _normalize_fact_evidence(fact["statement"])
+        statement_counts[normalized_statement] = statement_counts.get(normalized_statement, 0) + 1
+    for fact in accepted:
+        normalized_statement = _normalize_fact_evidence(fact["statement"])
+        if statement_counts.get(normalized_statement, 0) > 1 or not _fact_value_is_stated(fact):
+            fact["statement"] = _fact_specific_statement(fact)
+
     if rejected:
         logger.info(
             "data_facts 校验拒绝 %d/%d 条，原因分布: %s",

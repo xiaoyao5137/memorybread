@@ -405,21 +405,21 @@ def test_metric_governance_uses_report_reference_as_a_data_probe():
     assert "data_search" in [step["id"] for step in resolve_planned(loop, state)]
     state.environment["references"] = [
         {
-            "title": "LangBridge 模型中心运营看板 - KwaiBI | 可视化",
-            "source_url": "https://kwaibi.example.com/dashboard?id=2119187",
+            "title": "LangBridge 模型中心运营看板 - 示例 BI | 可视化",
+            "source_url": "https://bi.example.com/dashboard?id=2119187",
             "summary": "历史摘要",
             "content": "历史 GPU 利用率 45%",
         }
     ]
     query = loop._step_context_query(state, {"id": "data_search"})
     assert query.startswith("LangBridge 模型中心运营看板")
-    assert "https://kwaibi.example.com/dashboard?id=2119187" in query
+    assert "https://bi.example.com/dashboard?id=2119187" in query
 
     loop._apply_data_freshness_to_references(
         state,
         [
             {
-                "source_url": "https://kwaibi.example.com/dashboard?id=2119187",
+                "source_url": "https://bi.example.com/dashboard?id=2119187",
                 "freshness_class": "missing",
                 "collected_at": None,
                 "refresh_required": True,
@@ -458,7 +458,7 @@ def test_dashboard_lookup_intent_triggers_data_search_and_browser_refresh_chain(
         {
             "source_id": 9,
             "source_kind": "report_url",
-            "source_url": "https://kwaibi.example.com/dashboard?id=2119187",
+            "source_url": "https://bi.example.com/dashboard?id=2119187",
             "refresh_required": True,
             "can_use": False,
             "content_excerpt": "历史 token 用量",
@@ -1823,7 +1823,7 @@ async def test_skill_workflow_keeps_authored_three_step_order_and_materializes_o
             "source_id": 1617,
             "title": "电商GPU信息平台总卡数（X40折算）",
             "source_kind": "work_memory",
-            "source_url": "https://kwaishop.example.com/gpu/project",
+            "source_url": "https://gpu.example.com/projects/usage",
             "refresh_required": False,
             "can_use": True,
             "content_excerpt": "总卡数 1803.59（按 X40 折算）",
@@ -1832,7 +1832,7 @@ async def test_skill_workflow_keeps_authored_three_step_order_and_materializes_o
             "source_id": 1584,
             "title": "电商GPU信息平台 - GPU项目用量管理",
             "source_kind": "report_url",
-            "source_url": "https://kwaishop.example.com/gpu/project",
+            "source_url": "https://gpu.example.com/projects/usage",
             "refresh_required": True,
             "can_use": False,
             "content_excerpt": None,
@@ -1846,7 +1846,7 @@ async def test_skill_workflow_keeps_authored_three_step_order_and_materializes_o
                 "collector": "browser_attach",
                 "collected_at": 1786271177838,
                 "title": "电商GPU信息平台 - GPU项目用量管理",
-                "url": "https://kwaishop.example.com/gpu/project",
+                "url": "https://gpu.example.com/projects/usage",
                 "verified_claim_count": 1,
                 "evidence": {
                     "validation_status": "verified",
@@ -2536,13 +2536,13 @@ async def test_soft_quality_warning_does_not_regenerate_an_already_complete_revi
     service = CompleteRevisionService()
     events = await collect_events(
         CreationAgentLoop(service).run(
-            user_message="参考快手员工周年礼物方案",
+            user_message="参考示例公司员工周年礼物方案",
             root_request="写一份周年员工的礼物指南",
             current_document=original,
             conversation=[
                 {"role": "user", "content": "写一份周年员工的礼物指南"},
                 {"role": "assistant", "content": "文档已更新"},
-                {"role": "user", "content": "参考快手员工周年礼物方案"},
+                {"role": "user", "content": "参考示例公司员工周年礼物方案"},
             ],
             selected_skills=[],
             options=CreationOptions(enable_rag=False),

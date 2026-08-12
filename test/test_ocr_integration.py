@@ -12,9 +12,10 @@ import struct
 import sys
 import time
 import uuid
+from pathlib import Path
 
 # 添加 ai-sidecar 到 Python 路径
-sys.path.insert(0, '/Users/xianjiaqi/Documents/mygit/cy/gzdz/ai-sidecar')
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ai-sidecar"))
 
 from memory_bread_ipc import IpcRequest, IpcResponse, OcrRequest
 

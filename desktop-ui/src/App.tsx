@@ -426,7 +426,10 @@ const App: React.FC = () => {
       reporting = true
       const request = createOptionalCloudRequestSignal(lifecycleController.signal)
       try {
-        await registerCurrentDevice(adminApiBaseUrl, authToken, request.signal)
+        await registerCurrentDevice(adminApiBaseUrl, authToken, {
+          environment: serviceEnvironment,
+          userId: currentUser.id,
+        }, request.signal)
       } catch {
         // 设备版本上报是可重试的后台动作，不影响离线使用。
       } finally {

@@ -14,7 +14,7 @@
 ### 方式 1: 完整工作区一键重启（登录与云服务联调推荐）
 
 ```bash
-cd /Users/xianjiaqi/Documents/mygit/mb-all
+cd /path/to/mb-all
 ./start.sh restart
 ```
 

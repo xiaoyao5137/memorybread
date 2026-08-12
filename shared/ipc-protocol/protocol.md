@@ -121,7 +121,7 @@ Rust 端在运行时自动检测平台，选择对应的连接方式。Python �
 {
   "type":            "ocr",
   "capture_id":      42,
-  "screenshot_path": "/Users/xxx/.memory-bread/captures/2026/03/04/1709510400000.jpg"
+  "screenshot_path": "/path/to/user-home/.memory-bread/captures/2026/03/04/1709510400000.jpg"
 }
 ```
 
@@ -149,7 +149,7 @@ Rust 端在运行时自动检测平台，选择对应的连接方式。Python �
 {
   "type":        "asr",
   "capture_id":  42,
-  "audio_path":  "/Users/xxx/.memory-bread/audio/1709510400000.wav",
+  "audio_path":  "/path/to/user-home/.memory-bread/audio/1709510400000.wav",
   "language":    "zh"
 }
 ```
@@ -175,7 +175,7 @@ Rust 端在运行时自动检测平台，选择对应的连接方式。Python �
 {
   "type":            "vlm",
   "capture_id":      42,
-  "screenshot_path": "/Users/xxx/.memory-bread/captures/2026/03/04/1709510400000.jpg",
+  "screenshot_path": "/path/to/user-home/.memory-bread/captures/2026/03/04/1709510400000.jpg",
   "prompt":          "用一句话描述用户当前正在进行什么工作"
 }
 ```

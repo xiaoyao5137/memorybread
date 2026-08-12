@@ -18,6 +18,7 @@ use crate::storage::{
 const REPORT_FRESH_SECONDS: i64 = 15 * 60;
 const DATA_TEXT_MAX_CHARS: usize = 80_000;
 const DATA_MEMORY_VERSION: &str = "data-memory.v15";
+const DATA_CONTENT_RENDER_VERSION: &str = "fact-specific.v1";
 const CURRENT_TIMELINE_DATA_FACT_VERSION: &str = "timeline-data-fact.v3";
 const DATA_PERIOD_GRANULARITY: &str = "week";
 const WEEK_MILLIS: i64 = 7 * 24 * 60 * 60 * 1000;
@@ -726,6 +727,15 @@ fn regenerate_legacy_data_memories(
            AND (
                COALESCE(json_extract(snapshot.structured_data, '$.extraction_version'), '') <> ?1
                OR (
+                   COALESCE(json_extract(snapshot.structured_data, '$.semantic_origin'), '') = 'model_structured_fact'
+                   AND COALESCE(
+                       json_extract(snapshot.structured_data, '$.metric_statements[0].fact_contract'), ''
+                   ) = ?2
+                   AND COALESCE(
+                       json_extract(snapshot.structured_data, '$.content_render_version'), ''
+                   ) <> ?3
+               )
+               OR (
                    COALESCE(json_extract(snapshot.structured_data, '$.semantic_origin'), '') = 'legacy_parser'
                    AND EXISTS (
                        SELECT 1
@@ -745,13 +755,14 @@ fn regenerate_legacy_data_memories(
                )
            )
          ORDER BY source.id ASC
-         LIMIT ?3",
+         LIMIT ?4",
     )?;
     let source_ids = stmt
         .query_map(
             params![
                 DATA_MEMORY_VERSION,
                 CURRENT_TIMELINE_DATA_FACT_VERSION,
+                DATA_CONTENT_RENDER_VERSION,
                 limit as i64
             ],
             |row| row.get::<_, i64>(0),
@@ -810,6 +821,11 @@ fn regenerate_legacy_data_memories_inner(
                 .get("semantic_origin")
                 .and_then(Value::as_str)
                 == Some("model_structured_fact")
+            && snapshot
+                .structured_data
+                .get("content_render_version")
+                .and_then(Value::as_str)
+                == Some(DATA_CONTENT_RENDER_VERSION)
         {
             summary.regenerated_count += 1;
             continue;
@@ -1215,6 +1231,19 @@ fn semantic_view_matches_legacy_snapshot(
     snapshot: &DataSnapshotRecord,
     view: &SemanticDataView,
 ) -> bool {
+    if snapshot
+        .structured_data
+        .get("semantic_origin")
+        .and_then(Value::as_str)
+        == Some("model_structured_fact")
+        && snapshot
+            .structured_data
+            .get("semantic_identity")
+            .and_then(Value::as_str)
+            == Some(view.identity.as_str())
+    {
+        return true;
+    }
     let haystack = normalize_evidence_text(&format!(
         "{}\n{}",
         snapshot.content_text, snapshot.structured_data
@@ -2122,9 +2151,21 @@ fn semantic_views_from_model_facts(
     }
     for view in &mut views {
         view.title = clip_text(&view.title, 120);
-        view.summary = clip_text(&view.summary, 500);
         view.rows.truncate(120);
         view.statements.truncate(80);
+        // 模型的 statement 可能错误复用同批多指标的汇总句。摘要必须从当前
+        // 语义视图的结构化行确定性生成，不能让展示层再次发生跨事实串线。
+        // 模型标题不一定逐字包含 subject；摘要仍需补齐它，保持既有的
+        // “脱离来源卡片也能说明数据对象”门禁。
+        let summary_title = if !view.subject.trim().is_empty()
+            && !normalize_identity_text(&view.title)
+                .contains(&normalize_identity_text(&view.subject))
+        {
+            format!("{} {}", view.subject.trim(), view.title)
+        } else {
+            view.title.clone()
+        };
+        view.summary = clip_text(&semantic_summary(&summary_title, &view.rows, None), 500);
     }
     views.sort_by(|left, right| {
         right
@@ -2978,7 +3019,7 @@ fn stable_timeline_topic(semantic_context: &str) -> Option<String> {
 }
 
 fn explicit_product_subject(statement: &str) -> Option<String> {
-    // “智能风控体系RiskOS”这类写法中，产品名位于体系/系统/平台等载体词之后。
+    // “智能风控体系GuardOS”这类写法中，产品名位于体系/系统/平台等载体词之后。
     // 优先恢复这个显式对象，避免把相邻的 HC -300、HITL 等数值片段或方法论
     // 缩写误当成数据主题。
     let mut ascii_span_start = None;
@@ -3845,6 +3886,27 @@ fn semantic_summary(title: &str, rows: &[SemanticMetricRow], insight: Option<&st
 }
 
 fn semantic_view_content(view: &SemanticDataView) -> String {
+    let is_model_fact = view.statements.iter().any(|statement| {
+        statement
+            .get("fact_contract")
+            .and_then(Value::as_str)
+            .is_some()
+    });
+    if is_model_fact {
+        let mut lines = Vec::new();
+        let mut seen = HashSet::new();
+        for value in std::iter::once(view.summary.as_str()).chain(
+            view.statements
+                .iter()
+                .filter_map(|item| item.get("evidence_quote").and_then(Value::as_str)),
+        ) {
+            let value = value.trim();
+            if !value.is_empty() && seen.insert(value.to_string()) {
+                lines.push(value.to_string());
+            }
+        }
+        return lines.join("\n");
+    }
     view.statements
         .iter()
         .filter_map(|item| item.get("statement").and_then(Value::as_str))
@@ -3880,6 +3942,7 @@ fn semantic_view_to_json(view: SemanticDataView) -> Value {
     };
     json!({
         "extraction_version": DATA_MEMORY_VERSION,
+        "content_render_version": DATA_CONTENT_RENDER_VERSION,
         "semantic_origin": semantic_origin,
         "title": view.title,
         "summary": view.summary,
@@ -6372,47 +6435,47 @@ mod tests {
 
         let risk_recovery = semantic_views_from_statements(
             &[json!({
-                "statement": "此外还提及了 RiskOS 风控体系建设以降低人力成本并挽回资损超过 3.96 亿的目标",
+                "statement": "此外还提及了 GuardOS 风控体系建设以降低人力成本并挽回资损超过 1.23 亿的目标",
                 "observed_at": 1785817532850_i64,
             })],
-            "timeline_topic:记录了商业化技术部 AI 业务月会纪要，总结了效果投放、线索广告及品牌营销\nwindow_title:商业化技术部AI业务月会-2026年7月 副本 - 云文档",
+            "timeline_topic:记录了示例业务团队 AI 月会纪要，总结了客户增长、内容运营及质量建设\nwindow_title:示例业务团队AI月会-2026年7月 副本 - 云文档",
         );
         assert_eq!(risk_recovery.len(), 1);
-        assert_eq!(risk_recovery[0].subject, "RiskOS");
+        assert_eq!(risk_recovery[0].subject, "GuardOS");
         assert_eq!(risk_recovery[0].rows[0].metric, "资损挽回金额");
-        assert_eq!(risk_recovery[0].rows[0].value, "3.96 亿");
-        assert_eq!(risk_recovery[0].title, "RiskOS 资损挽回金额");
+        assert_eq!(risk_recovery[0].rows[0].value, "1.23 亿");
+        assert_eq!(risk_recovery[0].title, "GuardOS 资损挽回金额");
 
         let workforce = semantic_views_from_statements(
             &[json!({
-                "statement": "RiskOS 预计降低人力成本超 300 人并挽回资损近 4 亿元",
+                "statement": "GuardOS 预计降低人力成本超 30 人并挽回资损近 1.3 亿元",
                 "observed_at": 1785817532850_i64,
             })],
-            "window_title:商业化技术部AI业务月会-2026年7月 - 云文档",
+            "window_title:示例业务团队AI月会-2026年7月 - 云文档",
         );
         assert_eq!(workforce.len(), 1);
         assert!(workforce[0]
             .rows
             .iter()
-            .any(|row| row.metric == "人力缩减目标" && row.value == "300 人"));
+            .any(|row| row.metric == "人力缩减目标" && row.value == "30 人"));
         assert!(workforce[0]
             .rows
             .iter()
-            .any(|row| row.metric == "资损挽回金额" && row.value == "4 亿元"));
+            .any(|row| row.metric == "资损挽回金额" && row.value == "1.3 亿元"));
         assert!(!workforce[0].summary.contains("目标人力缩减目标"));
 
         let explicit_system = semantic_views_from_statements(
             &[json!({
-                "statement": "O2 建设行业领先的大模型+Agent智能风控体系RiskOS，推动人机协同（HITL）范式变革，全年HC降低>300，商业化年度成本资损挽回>3.96亿KR1：【KwaiBLM】商审大模型，统一内容理解+生成，构建Deepfake检测能力，账户/投中/复审全机审，HC -300，人+机总成本yoy-1%",
+                "statement": "目标2 建设大模型+Agent智能风控体系GuardOS，推动人机协同（HITL）范式变革，全年HC降低>30，年度资损挽回>1.23亿；子目标1：【ReviewLM】审核大模型统一内容理解与生成，构建Deepfake检测能力，HC -30，人+机总成本yoy-1%",
                 "observed_at": 1785817532850_i64,
             })],
             "window_title:Docs\napplication:Google Chrome",
         );
         assert_eq!(explicit_system.len(), 1);
-        assert_eq!(explicit_system[0].subject, "RiskOS");
+        assert_eq!(explicit_system[0].subject, "GuardOS");
         assert_eq!(
             explicit_system[0].title,
-            "RiskOS 资损挽回金额与人+机总成本同比降幅"
+            "GuardOS 资损挽回金额与人+机总成本同比降幅"
         );
 
         let missing_comparison_subject = semantic_views_from_statements(
@@ -7021,10 +7084,53 @@ mod tests {
         assert_eq!(views[0].subject, "生服模特库");
         assert_eq!(views[0].rows[0].metric, "成本节省金额");
         assert_eq!(views[0].rows[0].value, "6.28万");
+        assert!(views[0].summary.contains("6.28万"));
+        assert!(semantic_view_content(&views[0]).contains("6.28万"));
         assert_eq!(
             semantic_view_to_json(views[0].clone())["semantic_origin"],
             "model_structured_fact"
         );
+    }
+
+    #[test]
+    fn renders_shared_model_summary_as_distinct_fact_content() {
+        let evidence = "图生视频 badcase拦截率：72.3%，badcase漏审率8.93%，goodcase误杀率：35.77%";
+        let shared_statement = "图生视频中 high case 的误杀率为35.77%，low case 漏审率为8.93%。";
+        let facts = [
+            ("图生视频 badcase 拦截率", "badcase拦截率", "72.3"),
+            ("图生视频 badcase 漏审率", "badcase漏审率", "8.93"),
+            ("图生视频 goodcase 误杀率", "goodcase误杀率", "35.77"),
+        ]
+        .into_iter()
+        .map(|(title, metric, value)| ModelDataFact {
+            title: title.to_string(),
+            subject: "图生视频".to_string(),
+            action: "审核".to_string(),
+            target_context: "视频评测".to_string(),
+            dimension: String::new(),
+            metric: metric.to_string(),
+            value: value.to_string(),
+            unit: "%".to_string(),
+            statement: shared_statement.to_string(),
+            evidence_quote: evidence.to_string(),
+            confidence: "high".to_string(),
+            observed_at: Some(1),
+        })
+        .collect::<Vec<_>>();
+
+        let views =
+            semantic_views_from_model_facts(&facts, evidence, CURRENT_TIMELINE_DATA_FACT_VERSION);
+        let contents = views.iter().map(semantic_view_content).collect::<Vec<_>>();
+
+        assert_eq!(views.len(), 3);
+        assert_eq!(contents.iter().collect::<HashSet<_>>().len(), 3);
+        for (view, content) in views.iter().zip(contents) {
+            assert!(view.rows.iter().all(|row| content.contains(&row.value)));
+            assert!(view
+                .rows
+                .iter()
+                .all(|row| view.summary.contains(&row.value)));
+        }
     }
 
     #[test]
@@ -7438,6 +7544,129 @@ mod tests {
             invalid_count,
         );
         assert_eq!(invalid_count, 0);
+    }
+
+    #[test]
+    fn regenerates_stale_model_content_in_place() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        let observed_at = 1_700_000_000_000_i64;
+        let period = weekly_period_tag(observed_at);
+        let evidence = "图生视频 badcase拦截率：72.3%";
+        let shared_statement = "图生视频中 high case 的误杀率为35.77%，low case 漏审率为8.93%。";
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO captures (
+                        id, ts, app_name, win_title, event_type, ocr_text, timeline_id
+                     ) VALUES (700, ?1, 'Kim', '视频会议', 'auto', ?2, 500)",
+                    params![observed_at, evidence],
+                )?;
+                conn.execute(
+                    "INSERT INTO timelines (
+                        id, capture_id, capture_ids, summary, overview, details,
+                        observed_at, created_at_ms, updated_at_ms
+                     ) VALUES (
+                        500, 700, '[700]', '图生视频评测', '图生视频评测指标', ?1,
+                        ?2, ?2, ?2
+                     )",
+                    params![evidence, observed_at],
+                )?;
+                conn.execute(
+                    "INSERT INTO data_sources (
+                        id, canonical_key, title, source_kind, access_mode, refresh_policy,
+                        realtime_level, source_app_name, source_window_title, tags,
+                        first_seen_at, last_seen_at, last_collected_at, last_success_at,
+                        status, created_at, updated_at
+                     ) VALUES (
+                        1, 'memory:stale-render', '图生视频 badcase 拦截率', 'work_memory',
+                        'memory_only', 'never', 'observed', 'Kim', '视频会议',
+                        '[\"work_memory\"]', ?1, ?1, ?1, ?1, 'active', ?1, ?1
+                     )",
+                    [observed_at],
+                )?;
+                conn.execute(
+                    "INSERT INTO data_snapshots (
+                        source_id, collected_at, observed_at, period_granularity, period_key,
+                        period_start_at, period_end_at, collector, content_text,
+                        structured_data, content_hash, provenance, source_capture_ids,
+                        source_timeline_ids, status, created_at
+                     ) VALUES (
+                        1, ?1, ?1, 'week', ?2, ?3, ?4, 'memory_extract', ?5,
+                        ?6, 'stale-hash', '{}', '[700]', '[500]', 'success', ?1
+                     )",
+                    params![
+                        observed_at,
+                        &period.key,
+                        period.start_at,
+                        period.end_at,
+                        shared_statement,
+                        json!({
+                            "extraction_version": DATA_MEMORY_VERSION,
+                            "semantic_origin": "model_structured_fact",
+                            "title": "图生视频 badcase 拦截率",
+                            "summary": shared_statement,
+                            "semantic_subject": "图生视频",
+                            "semantic_identity": "图生视频:审核:视频评测:badcase拦截率",
+                            "metric_rows": [{
+                                "dimension": "",
+                                "metric": "badcase拦截率",
+                                "value": "72.3%",
+                                "note": "",
+                                "statement": shared_statement,
+                                "observed_at": observed_at
+                            }],
+                            "metric_statements": [{
+                                "statement": shared_statement,
+                                "evidence_quote": evidence,
+                                "fact_contract": CURRENT_TIMELINE_DATA_FACT_VERSION,
+                                "observed_at": observed_at
+                            }]
+                        })
+                        .to_string(),
+                    ],
+                )?;
+                conn.execute(
+                    "INSERT INTO timeline_data_fact_runs (
+                        timeline_id, contract_version, accepted_count, rejected_count,
+                        created_at, updated_at
+                     ) VALUES (500, ?1, 1, 0, ?2, ?2)",
+                    params![CURRENT_TIMELINE_DATA_FACT_VERSION, observed_at],
+                )?;
+                conn.execute(
+                    "INSERT INTO timeline_data_facts (
+                        timeline_id, fact_key, title, subject, action, target_context,
+                        dimension, metric, value, unit, statement, evidence_quote,
+                        confidence, observed_at, source_capture_ids, created_at, updated_at
+                     ) VALUES (
+                        500, 'badcase-block-rate', '图生视频 badcase 拦截率',
+                        '图生视频', '审核', '视频评测', '', 'badcase拦截率',
+                        '72.3', '%', ?1, ?2, 'high', ?3, '[700]', ?3, ?3
+                     )",
+                    params![shared_statement, evidence, observed_at],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let summary = storage.regenerate_historical_data_memories(100).unwrap();
+        let source = storage.get_data_source(1).unwrap().unwrap();
+        let snapshot = source.latest_snapshot.unwrap();
+
+        assert_eq!(summary.historical_regenerated_count, 1);
+        assert_eq!(source.id, 1);
+        assert!(snapshot.content_text.contains("72.3%"));
+        assert_ne!(snapshot.content_text, shared_statement);
+        assert_eq!(
+            snapshot.structured_data["content_render_version"],
+            DATA_CONTENT_RENDER_VERSION
+        );
+        assert!(snapshot.structured_data["summary"]
+            .as_str()
+            .unwrap()
+            .contains("72.3%"));
+
+        let second = storage.regenerate_historical_data_memories(100).unwrap();
+        assert_eq!(second.historical_regenerated_count, 0);
     }
 
     #[test]
@@ -8200,14 +8429,14 @@ mod tests {
                         refresh_policy, realtime_level, tags, first_seen_at, last_seen_at,
                         status, created_at, updated_at
                     ) VALUES
-                        (1584, 'report:https://kwaishop.example.com/gpu/project',
+                        (1584, 'report:https://gpu.example.com/projects/usage',
                          '电商GPU信息平台 - GPU项目用量管理', 'report_url',
-                         'https://kwaishop.example.com/gpu/project', 'browser_session',
+                         'https://gpu.example.com/projects/usage', 'browser_session',
                          'on_demand', 'live', '["report"]', 1786168119642,
                          1786168119642, 'active', 1786168119642, 1786168119642),
                         (1617, 'memory:gpu-platform:total-cards',
                          '电商GPU信息平台总卡数（X40折算）', 'work_memory',
-                         'https://kwaishop.example.com/gpu/project', 'memory_only',
+                         'https://gpu.example.com/projects/usage', 'memory_only',
                          'never', 'observed', '["work_memory"]', 1786168119642,
                          1786168119642, 'active', 1786168119642, 1786168119642);
 
@@ -8465,7 +8694,7 @@ mod tests {
                         webpage_title, is_sensitive, pii_scrubbed
                      ) VALUES (?1, 1700000000000, 'Google Chrome',
                                '电商GPU信息平台 - GPU使用情况一览', 'browser_navigation',
-                               'https://kwaishop-sre.corp.example.com/kwaishop/gpu/info',
+                               'https://gpu.example.com/reports/usage',
                                '电商GPU信息平台 - GPU使用情况一览', ?2, 0)",
                     params![id, is_sensitive],
                 )?;
@@ -8489,7 +8718,7 @@ mod tests {
         let storage = StorageManager::open_in_memory().unwrap();
         seed_discovery_capture(&storage, 21603, 0);
 
-        let url = "https://kwaishop-sre.corp.example.com/kwaishop/gpu/info?token=abc&page=2";
+        let url = "https://gpu.example.com/reports/usage?token=abc&page=2";
         let first = storage
             .register_discovered_report_source(url, "电商GPU信息平台", 21603, Some(2160), 0)
             .unwrap();

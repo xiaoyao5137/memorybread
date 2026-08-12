@@ -70,7 +70,7 @@ Apple 依据：[Developer ID](https://developer.apple.com/support/developer-id/)
 - macOS 与完整 Xcode，而不是只有 Command Line Tools。
 - Node.js/npm、Rust 与项目要求一致。
 - 项目所需 Python 环境；若修改了打包内 Python，必须以 Python 3.9 为兼容基线检查。
-- 在 `/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui` 执行构建命令。
+- 在 `/path/to/mb-all/MemoryBread/desktop-ui` 执行构建命令。
 
 ### 4.2 正式发布凭据
 
@@ -138,7 +138,7 @@ desktop-ui/src-tauri/target/<target>/release/bundle/macos/*.app.tar.gz.sig
 只验证另一台 Mac 的安装与初始化时，可以不配置正式证书和 updater 密钥，直接运行：
 
 ```bash
-cd /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui
+cd /path/to/mb-all/MemoryBread/desktop-ui
 npm run version:check
 npm run macos:build:dmg
 ```

@@ -1061,7 +1061,7 @@ body {
 .creation-skill-library__status.is-official { border: 1px solid #e8c991; background: #fff6df; color: #8b4d18; }
 
 .creation-skill-library__status-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.creation-skill-library__status-row > span { color: #98a2b3; font-size: 10px; font-weight: 650; }
+.creation-skill-library__status-row > span { margin-left: auto; color: #98a2b3; font-size: 10px; font-weight: 650; }
 .creation-skill-library__status-row > span.is-installed { color: #a45d22; }
 
 .creation-skill-library__title { margin: 12px 0 0; padding: 0; border: 0; background: transparent; color: #172033; font: inherit; font-size: 16px; font-weight: 700; line-height: 1.4; text-align: left; cursor: pointer; }

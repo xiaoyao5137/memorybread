@@ -2349,7 +2349,13 @@ function serializeLocalSkill(skill: Omit<LocalCreationSkill, 'id' | 'createdAt' 
 }
 
 function mapLocalSkill(item: any): LocalCreationSkill {
-  const legacyContent = !item.section_headings || !item.field_examples || !String(item.example_document || '').trim()
+  // 新版允许完整示例文档和各类仿写示例留空。不能再用空值判断旧数据，
+  // 否则保存后的响应会被映射成内置默认配方，表现为用户修改没有生效。
+  const modernRecipeKeys = ['common_titles', 'title_style', 'text_style', 'diagram_style', 'writing_guidelines']
+  const legacyContent = !item?.section_headings
+    || !item?.field_examples
+    || !modernRecipeKeys.every(key => Object.prototype.hasOwnProperty.call(item.section_headings, key))
+    || !modernRecipeKeys.every(key => Object.prototype.hasOwnProperty.call(item.field_examples, key))
   const legacyTitleFields = item?.section_headings?.common_titles === '这类文档标题通常怎么命名'
     || item?.section_headings?.title_style === '标题如何传递重点'
   const legacyDefaults = buildLegacyGeneralizedContent(String(item.title || ''))
@@ -2402,12 +2408,14 @@ function mapLocalSkill(item: any): LocalCreationSkill {
     sectionHeadings: mapSectionHeadings(item.section_headings),
     fieldExamples: legacyTitleFields && legacyTitleExamples.length
       ? {
-        ...mapFieldExamples(item.field_examples),
+        ...mapFieldExamples(item.field_examples, legacyContent),
         commonTitles: legacyTitleExamples,
         titleStyle: legacyTitleExamples,
       }
-      : mapFieldExamples(item.field_examples),
-    exampleDocument: item.example_document?.trim() || DEFAULT_CREATION_SKILL_EXAMPLE_DOCUMENT,
+      : mapFieldExamples(item.field_examples, legacyContent),
+    exampleDocument: legacyContent
+      ? item.example_document?.trim() || DEFAULT_CREATION_SKILL_EXAMPLE_DOCUMENT
+      : String(item.example_document || '').trim(),
     packageFiles: Array.isArray(item.package_files)
       ? item.package_files.map((file: any) => ({
         path: String(file.path || ''),
@@ -2567,7 +2575,7 @@ function mapSectionHeadings(_item: any): CreationSkillSectionHeadings {
   }
 }
 
-function mapFieldExamples(item: any): CreationSkillFieldExamples {
+function mapFieldExamples(item: any, fallbackOnEmpty = true): CreationSkillFieldExamples {
   const normalize = (value: unknown, fallback: string[], key: string) => {
     const mapped = Array.isArray(value)
       ? value.map(entry => coerceCreationSkillStringItem(entry, key)).filter(Boolean)
@@ -2575,9 +2583,9 @@ function mapFieldExamples(item: any): CreationSkillFieldExamples {
     if (key === 'common_titles' || key === 'title_style') {
       const repaired = mapped.map(fictionalizeCreationSkillHeadingExample)
         .filter(isCompleteCreationSkillHeadingExample)
-      return repaired.length ? repaired : [...fallback]
+      return repaired.length ? repaired : fallbackOnEmpty ? [...fallback] : []
     }
-    return mapped.length ? mapped : [...fallback]
+    return mapped.length ? mapped : fallbackOnEmpty ? [...fallback] : []
   }
   return {
     commonTitles: normalize(item?.common_titles, DEFAULT_CREATION_SKILL_FIELD_EXAMPLES.commonTitles, 'common_titles'),

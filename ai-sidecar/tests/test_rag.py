@@ -420,7 +420,7 @@ class TestRagPipeline:
             metadata={
                 "source_type": "capture",
                 "doc_key": "capture:77",
-                "url": "https://docs.corp.kuaishou.com/k/home/example?from=search",
+                "url": "https://docs.example.com/k/home/example?from=search",
                 "webpage_title": "潮汐调度说明",
             },
         )
@@ -430,7 +430,7 @@ class TestRagPipeline:
 
         assert len(result.contexts) == 1
         assert result.contexts[0].metadata["source_type"] == "pending_document"
-        assert result.contexts[0].doc_key == "document_url:https://docs.corp.kuaishou.com/k/home/example"
+        assert result.contexts[0].doc_key == "document_url:https://docs.example.com/k/home/example"
         assert deep_keyword in result.contexts[0].text[:800]
 
     def test_linked_knowledge_document_is_promoted_before_context_selection(self):
@@ -1330,7 +1330,7 @@ class TestSqliteRetrievers:
                 1_710_000_000_000,
                 "Chrome",
                 "潮汐调度说明",
-                "https://docs.corp.kuaishou.com/k/home/example",
+                "https://docs.example.com/k/home/example",
                 "潮汐调度说明",
                 "",
                 ax_text,
@@ -1362,7 +1362,7 @@ class TestSqliteRetrievers:
                 1,
                 "Chrome",
                 "Wenz 更新日志",
-                "https://docs.corp.kuaishou.com/d/home/wenz",
+                "https://docs.example.com/d/home/wenz",
                 "Wenz 更新日志",
                 "",
                 "稳柱是一款业务指标异动归因系统，包含 V2.0 到 V2.2 的版本演进。",

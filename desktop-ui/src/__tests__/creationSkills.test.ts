@@ -894,4 +894,67 @@ describe('技能本地生成与类目容错', () => {
     expect(skill.executionSteps[0].tools).toEqual(['memory_search'])
     expect(skill.executionSteps.every(step => step.retainWebpageScreenshot === true)).toBe(true)
   })
+
+  it('读取新版保存结果时保留空示例文档和用户修改的仿写示例', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json([{
+      id: 17,
+      client_skill_key: 'manual-skill-17',
+      cloud_skill_id: null,
+      source_kind: 'manual',
+      source_id: 'manual-17',
+      title: '方案写作技能',
+      summary: '用于整理方案文档。',
+      category_id: null,
+      common_titles: [],
+      title_style: '',
+      text_style: '',
+      diagram_style: '',
+      writing_guidelines: [],
+      distinctive_sections: [],
+      section_headings: {
+        common_titles: '标题设计风格',
+        title_style: '标题设计风格',
+        text_style: '行文设计思路',
+        diagram_style: '图片生成方式',
+        writing_guidelines: '话术表达风格',
+      },
+      field_examples: {
+        common_titles: ['用户修改后的标题仿写示例'],
+        title_style: ['用户修改后的标题仿写示例'],
+        text_style: ['用户修改后的行文仿写示例'],
+        diagram_style: [],
+        writing_guidelines: [],
+      },
+      example_document: '',
+      skill_description: {
+        purpose: '用于整理方案文档。',
+        document_types: ['方案文档'],
+        problems: ['整理方案'],
+        domains: [],
+        deliverables: ['方案文档'],
+      },
+      execution_steps: [{
+        id: 'draft',
+        title: '起草方案',
+        objective: '按要求完成方案。',
+        output: '',
+        agents: [],
+        skills: [],
+        tools: [],
+      }],
+      status: 'saved',
+      installed: false,
+      published: false,
+      created_at: 1,
+      updated_at: 2,
+    }])))
+
+    const [skill] = await listLocalCreationSkills('http://127.0.0.1:7070')
+
+    expect(skill.fieldExamples.commonTitles).toEqual(['用户修改后的标题仿写示例'])
+    expect(skill.fieldExamples.textStyle).toEqual(['用户修改后的行文仿写示例'])
+    expect(skill.fieldExamples.diagramStyle).toEqual([])
+    expect(skill.fieldExamples.writingGuidelines).toEqual([])
+    expect(skill.exampleDocument).toBe('')
+  })
 })

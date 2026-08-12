@@ -577,8 +577,7 @@ impl StorageManager {
                             SELECT 1 FROM captures dc
                             WHERE dc.timeline_id = t.id
                               AND (
-                                   LOWER(COALESCE(dc.url, '')) LIKE '%docs.corp%'
-                                OR LOWER(COALESCE(dc.url, '')) LIKE '%/docs/%'
+                                   LOWER(COALESCE(dc.url, '')) LIKE '%/docs/%'
                                 OR LOWER(COALESCE(dc.url, '')) LIKE '%docs.google%'
                                 OR LOWER(COALESCE(dc.url, '')) LIKE '%/document/%'
                                 OR LOWER(COALESCE(dc.url, '')) LIKE '%yuque.com%'
@@ -635,7 +634,8 @@ impl StorageManager {
                         'BAKE_MODEL_UPSTREAM_ERROR', 'BAKE_UNCLASSIFIED_UPSTREAM_ERROR'
                     )), 0),
                     MIN(CASE WHEN failure_count = 0 AND candidate_ts > watermark_ts THEN candidate_ts END),
-                    MIN(CASE WHEN failure_count > 0 THEN candidate_ts END),
+                    MIN(CASE WHEN failure_count > 0 AND failure_count < ?1
+                        THEN candidate_ts END),
                     MIN(CASE WHEN
                         (failure_count = 0 AND candidate_ts > watermark_ts)
                         OR (failure_count > 0 AND failure_count < ?1 AND next_retry_at_ms <= ?2)

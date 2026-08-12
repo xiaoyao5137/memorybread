@@ -3593,7 +3593,6 @@ class CreationAgentLoop:
                         "grafana",
                         "tableau",
                         "powerbi",
-                        "kwaibi",
                     )
                 ):
                     continue

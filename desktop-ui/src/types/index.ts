@@ -596,6 +596,7 @@ export interface ArticleTemplate {
   createdAt?: string
   createdAtMs?: number
   updatedAt?: string
+  updatedAtMs?: number
 }
 
 export interface WritingStyleConfig {

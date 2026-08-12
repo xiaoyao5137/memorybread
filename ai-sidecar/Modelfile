@@ -1,4 +1,4 @@
-FROM "/Users/xianjiaqi/.workbuddy/models/Qwen/Qwen2___5-3B-Instruct-GGUF/qwen2.5-3b-instruct-q4_k_m.gguf"
+FROM "./models/local-instruct-q4_k_m.gguf"
 
 TEMPLATE """{{ if .System }}<|im_start|>system
 {{ .System }}<|im_end|>

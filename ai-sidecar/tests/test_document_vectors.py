@@ -157,7 +157,7 @@ def test_document_chunking_keeps_content_after_old_500_character_cutoff() -> Non
 def test_document_snapshot_uses_canonical_url_and_full_ax_text() -> None:
     capture = {
         "id": 9,
-        "url": "https://docs.corp.kuaishou.com/k/home/ABC_123?from=recent#section",
+        "url": "https://docs.example.com/k/home/sample-document?from=recent#section",
         "window_title": "调度文档",
         "ax_text": "前言。" * 120 + "潮汐特性在正文后部。",
         "ocr_text": "短 OCR",
@@ -165,7 +165,7 @@ def test_document_snapshot_uses_canonical_url_and_full_ax_text() -> None:
     snapshot = build_document_snapshot(capture)
 
     assert snapshot is not None
-    assert snapshot.canonical_url == "https://docs.corp.kuaishou.com/k/home/ABC_123"
+    assert snapshot.canonical_url == "https://docs.example.com/k/home/sample-document"
     assert snapshot.doc_key == f"document_url:{snapshot.canonical_url}"
     assert "潮汐特性" in snapshot.body
     assert canonicalize_document_url(capture["url"]) == snapshot.canonical_url
@@ -178,9 +178,9 @@ def test_document_vector_storage_is_idempotent_and_replaces_old_version(tmp_path
     qdrant = _FakeQdrant()
     monkeypatch.setattr(storage, "_get_qdrant_client", lambda: qdrant)
     metadata = {
-        "doc_key": "document_url:https://docs.corp.kuaishou.com/k/home/ABC_123",
+        "doc_key": "document_url:https://docs.example.com/k/home/sample-document",
         "content_hash": "version-one",
-        "url": "https://docs.corp.kuaishou.com/k/home/ABC_123",
+        "url": "https://docs.example.com/k/home/sample-document",
         "title": "调度文档",
         "ts": 1234,
     }
@@ -305,14 +305,14 @@ def test_bake_document_snapshot_does_not_need_a_capture() -> None:
             "title": "SMACT 指标说明",
             "full_content": "SMACT 用于衡量空分利用率。" * 40,
             "sections_json": "[]",
-            "source_url": "https://docs.corp.kuaishou.com/d/home/ABC?x=1",
+            "source_url": "https://docs.example.com/d/home/ABC?x=1",
         }
     )
 
     assert snapshot is not None
     assert snapshot.document_id == 80
     assert snapshot.doc_key == (
-        "document_url:https://docs.corp.kuaishou.com/d/home/ABC"
+        "document_url:https://docs.example.com/d/home/ABC"
     )
     assert any("SMACT" in chunk for chunk in snapshot.chunks)
 
@@ -404,7 +404,7 @@ def test_background_vectorization_routes_document_chunks_to_document_domain(
         "ts": 1234,
         "app_name": "Google Chrome",
         "window_title": "潮汐调度说明",
-        "url": "https://docs.corp.kuaishou.com/k/home/ABC_123",
+        "url": "https://docs.example.com/k/home/sample-document",
         "ax_text": "背景信息。" * 100 + "潮汐特性用于调节后台任务。" * 60,
         "ocr_text": "",
     }
@@ -467,7 +467,7 @@ def test_background_backfills_vectors_from_bake_document_without_capture(
                 "SMACT 指标说明",
                 "技术文档",
                 "SMACT 用于衡量空分利用率。" * 40,
-                "https://docs.corp.kuaishou.com/d/home/ABC",
+                "https://docs.example.com/d/home/ABC",
                 1234,
             ),
         )

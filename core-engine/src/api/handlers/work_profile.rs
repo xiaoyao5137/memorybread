@@ -54,7 +54,7 @@ pub struct WorkProfileResponse {
     pub days: Vec<WorkDaySummary>,
 }
 
-/// 标签卡片只消费本地计算后的时长峰值与分类时长，不包含任何工作内容。
+/// 面包屑规则只消费本地计算后的时长峰值与分类时长，不包含任何工作内容。
 ///
 /// 分类时长字段在旧核心进程上可能缺失，客户端必须按可选字段处理。
 #[derive(Debug, Serialize)]

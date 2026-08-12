@@ -7,13 +7,17 @@ import pytest
 
 from inference_queue import QueueEvictedError
 from knowledge.extractor_v2 import (
+    BAKE_BUNDLE_PROMPT,
     BAKE_BUNDLE_RESPONSE_SCHEMA,
+    BAKE_COMPACT_BUNDLE_PROMPT,
     BAKE_COMPACT_BUNDLE_RESPONSE_SCHEMA,
     BAKE_CONTEXT_WINDOW_TOKENS,
     BAKE_INPUT_TOKEN_BUDGET,
+    BAKE_KNOWLEDGE_PROMPT,
     BAKE_NUM_PREDICT,
     BAKE_RETRY_NUM_PREDICT,
     BAKE_RETRY_REPEAT_PENALTY,
+    BAKE_SHARED_PROMPT,
     BAKE_TIMEOUT_BUNDLE_RESPONSE_SCHEMA,
     BAKE_TIMEOUT_RETRY_NUM_PREDICT,
     BAKE_TIMEOUT_RETRY_REPEAT_PENALTY,
@@ -426,6 +430,77 @@ def test_extract_bake_bundle_uses_primary_data_classification_to_prevent_duplica
     }
 
 
+def test_bake_prompts_classify_progress_results_and_conclusions_as_knowledge_facts():
+    """进度事实必须稳定落在 knowledge，不能再被泛化的“状态快照”挤到 data。"""
+    assert "事实不要求永远不变" in BAKE_KNOWLEDGE_PROMPT
+    assert "项目进度、工作状态和执行结果" in BAKE_KNOWLEDGE_PROMPT
+    assert "不能仅因为载体是聊天" in BAKE_KNOWLEDGE_PROMPT
+    assert "不得把计划中的动作改写成已经完成" in BAKE_KNOWLEDGE_PROMPT
+    assert "Agent Demo 尚未挂到 AIGC 页面" in BAKE_KNOWLEDGE_PROMPT
+    assert "已确认的结论、决定、责任人" in BAKE_KNOWLEDGE_PROMPT
+
+    assert "项目进度、工作状态变化、非数值执行结果" in BAKE_BUNDLE_PROMPT
+    assert "语义状态和结果应优先归 knowledge" in BAKE_BUNDLE_PROMPT
+    assert "以“对象 + 指标 + 数值”为核心" in BAKE_BUNDLE_PROMPT
+    assert "不能因为它们会变化或来自聊天就归 data/none" in BAKE_BUNDLE_PROMPT
+    assert "只有没有实质事实的自动动作壳才 reject" in BAKE_BUNDLE_PROMPT
+    assert "不得仅因记录来自过去、他人、群聊或动态流而拒绝" in BAKE_SHARED_PROMPT
+
+    # 失败后的紧凑重试复用同一分类契约，不能在重试时丢失事实边界。
+    assert BAKE_BUNDLE_PROMPT in BAKE_COMPACT_BUNDLE_PROMPT
+
+
+def test_extract_bake_bundle_preserves_work_progress_primary_knowledge():
+    extractor = make_extractor()
+    response_payload = {
+        "classification": {
+            "primary_type": "knowledge",
+            "reason": "主体是有明确对象、当前状态和后续承诺的项目进度事实",
+        },
+        "knowledge": {
+            "accepted": True,
+            "reason": None,
+            "payload": {
+                "summary": "Agent Demo 尚未上线，导演 Agent 集成仍在测试",
+                "details": (
+                    "Agent Demo 尚未挂到 AIGC 页面，负责人计划两天内处理；"
+                    "导演 Agent 集成存在单 Tool 性能问题，当前正在测试。"
+                ),
+                "match_score": 0.9,
+                "match_level": "high",
+                "review_status": "auto_created",
+            },
+        },
+        "design": {"accepted": False, "reason": "not_a_document", "payload": None},
+        "sop": {"accepted": False, "reason": "not_a_sop", "payload": None},
+    }
+    client = DummyClient({
+        "model": "mock-model",
+        "message": {"content": json.dumps(response_payload, ensure_ascii=False)},
+        "prompt_eval_count": 9,
+        "eval_count": 12,
+    })
+    extractor._ollama_chat = client.chat
+
+    result = extractor.extract_bake_bundle({
+        **SAMPLE_CANDIDATE,
+        "source_timeline_id": 4168,
+        "summary": "同步两个 Agent 项目的上线进度",
+        "capture_app_name": "Kim",
+        "capture_win_title": "Kim",
+        "capture_ax_text": (
+            "Agent Demo 尚未挂到 AIGC 页面，计划两天内处理。"
+            "导演 Agent 集成存在单 Tool 性能问题，当前正在测试。"
+        ),
+    })
+
+    assert result["primary_type"] == "knowledge"
+    assert result["knowledge"]["accepted"] is True
+    assert "尚未上线" in result["knowledge"]["payload"]["summary"]
+    assert result["design"]["accepted"] is False
+    assert result["sop"]["accepted"] is False
+
+
 def test_extract_bake_bundle_rejects_chat_document_mentions_even_if_model_accepts_design():
     extractor = make_extractor()
     response_payload = {
@@ -500,7 +575,7 @@ def test_document_evidence_fallback_accepts_real_browser_document():
         "capture_app_name": "Google Chrome",
         "capture_win_title": "AIGC 剧本创作规范 - 云文档",
         "capture_webpage_title": "AIGC 剧本创作规范 - 云文档",
-        "capture_url": "https://docs.corp.kuaishou.com/d/home/document-id",
+        "capture_url": "https://docs.example.com/d/home/document-id",
         "capture_ax_text": "文档正文" * 80,
     })
 
@@ -516,7 +591,7 @@ def test_document_evidence_fallback_rejects_chat_with_document_link_but_no_docum
         "capture_app_name": "Kim",
         "capture_win_title": "Kim",
         "capture_webpage_title": None,
-        "capture_url": "https://docs.corp.kuaishou.com/d/home/document-id",
+        "capture_url": "https://docs.example.com/d/home/document-id",
         "capture_ax_text": "聊天中分享了一份云文档，请大家看一下。" * 40,
     })
 
