@@ -649,10 +649,22 @@ impl StorageManager {
         sources.extend(pending);
         let mut histories =
             self.with_conn(|conn| load_snapshot_histories(conn, DATA_HISTORY_LIMIT))?;
+        let terminal_source_ids = sources
+            .iter()
+            .filter(|source| {
+                looks_like_terminal_report_source(
+                    source,
+                    histories.get(&source.id).and_then(|items| items.first()),
+                )
+            })
+            .map(|source| source.id)
+            .collect::<HashSet<_>>();
         let terms = keyword_terms(query);
         let mut results = sources
             .into_iter()
-            .filter(|source| source.status != "disabled")
+            .filter(|source| {
+                source.status != "disabled" && !terminal_source_ids.contains(&source.id)
+            })
             .map(|source| {
                 let history = histories.remove(&source.id).unwrap_or_default();
                 score_data_source(source, history, query, &terms, need_fresh, as_of_ms)
@@ -4521,11 +4533,13 @@ fn candidate_title(candidate: &CaptureCandidate) -> &str {
 }
 
 fn looks_like_data_url(url: &str, title: &str, text: &str) -> bool {
+    if looks_like_static_document_url(url) {
+        return false;
+    }
     let url_lower = url.to_lowercase();
     let title_lower = title.to_lowercase();
     let url_markers = [
         "dashboard",
-        "report",
         "analytics",
         "metric",
         "grafana",
@@ -4556,7 +4570,24 @@ fn looks_like_data_url(url: &str, title: &str, text: &str) -> bool {
         "report",
         "analytics",
     ];
+    let parsed_url = reqwest::Url::parse(url).ok();
+    let report_identity = parsed_url.as_ref().is_some_and(|parsed| {
+        parsed.path_segments().is_some_and(|segments| {
+            segments.filter(|segment| !segment.is_empty()).any(|segment| {
+                matches!(
+                    segment.to_lowercase().as_str(),
+                    "report" | "reports" | "metric" | "metrics" | "dashboard" | "dashboards"
+                )
+            })
+        }) || parsed.query_pairs().any(|(key, _)| {
+            matches!(
+                key.to_lowercase().as_str(),
+                "reportid" | "dashboardid" | "chartid" | "metricid"
+            )
+        })
+    });
     url_markers.iter().any(|marker| url_lower.contains(marker))
+        || report_identity
         || title_markers
             .iter()
             .any(|marker| title_lower.contains(marker))
@@ -4564,6 +4595,84 @@ fn looks_like_data_url(url: &str, title: &str, text: &str) -> bool {
             && ["sheet", "spreadsheet", "base", "table"]
                 .iter()
                 .any(|marker| url_lower.contains(marker)))
+}
+
+fn looks_like_static_document_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let host = parsed.host_str().unwrap_or_default().to_lowercase();
+    let path = parsed.path().to_lowercase();
+    if (["github.com", "gitlab.com"].iter().any(|item| host == *item)
+        && ["/blob/", "/tree/", "/raw/"].iter().any(|item| path.contains(item)))
+    {
+        return true;
+    }
+    let extension = path
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.rsplit_once('.').map(|(_, extension)| extension));
+    extension.is_some_and(|value| {
+        matches!(
+            value,
+            "md"
+                | "markdown"
+                | "txt"
+                | "pdf"
+                | "doc"
+                | "docx"
+                | "ppt"
+                | "pptx"
+                | "csv"
+                | "tsv"
+                | "xls"
+                | "xlsx"
+                | "json"
+                | "yaml"
+                | "yml"
+                | "xml"
+                | "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "webp"
+                | "zip"
+                | "gz"
+                | "tgz"
+                | "rar"
+        )
+    })
+}
+
+fn looks_like_terminal_report_source(
+    source: &DataSourceRecord,
+    latest_snapshot: Option<&DataSnapshotRecord>,
+) -> bool {
+    if source.source_kind != "report_url" {
+        return false;
+    }
+    if source.last_error_code.as_deref() == Some("SCRAPE_NOT_FOUND") {
+        return true;
+    }
+    let normalized_title = source
+        .title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    if matches!(
+        normalized_title.as_str(),
+        "404" | "404 not found" | "page not found" | "file not found" | "not found"
+    ) {
+        return true;
+    }
+    latest_snapshot.is_some_and(|snapshot| {
+        let content = snapshot.content_text.to_lowercase();
+        content.contains("404 - page not found")
+            || content.contains("does not contain the path")
+            || content.contains("页面不存在")
+            || content.contains("文件不存在")
+    })
 }
 
 fn is_concrete_data_statement(text: &str) -> bool {
