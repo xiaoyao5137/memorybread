@@ -845,6 +845,7 @@ fn scrape_with_browser(
                             &session,
                             evidence_path,
                             &javascript,
+                            &readiness_javascript,
                         )?;
                         if let Ok(primary_payload) = serde_json::from_slice::<Value>(&output.stdout)
                         {
@@ -1522,11 +1523,57 @@ fn merge_browser_payloads(mut primary: Value, segments: &[Value]) -> Value {
 }
 
 #[cfg(target_os = "macos")]
+fn wait_for_background_browser_segment(
+    adapter: BrowserAdapter,
+    session: &BrowserWindowSession,
+    readiness_javascript: &str,
+) -> Result<(), DataToolError> {
+    let mut last_length = 0_i64;
+    let mut stable_reads = 0_usize;
+    for _ in 0..BROWSER_SCROLL_READY_POLL_ATTEMPTS {
+        let output = run_browser_script(&build_background_browser_evaluate_script(
+            adapter,
+            &session.apple_script_id,
+            readiness_javascript,
+        ))?;
+        if !output.status.success() {
+            return Err(DataToolError::new(
+                StatusCode::BAD_GATEWAY,
+                "SCREENSHOT_FAILED",
+                "网页滚动后的动态数据状态无法读取",
+            ));
+        }
+        let current_length = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<i64>()
+            .unwrap_or(0);
+        if current_length >= 200 {
+            if current_length == last_length {
+                stable_reads += 1;
+            } else {
+                stable_reads = 0;
+            }
+            if stable_reads >= 2 {
+                return Ok(());
+            }
+        } else {
+            stable_reads = 0;
+        }
+        last_length = current_length;
+        thread::sleep(Duration::from_millis(300));
+    }
+    // 超时时仍继续提取：页面可能只有局部图表长时间加载，已就绪
+    // 的指标将在 Sidecar 中逐项校验，不应被整页拒绝。
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 fn capture_background_browser_long_screenshot(
     adapter: BrowserAdapter,
     session: &BrowserWindowSession,
     path: &std::path::Path,
     extraction_javascript: &str,
+    readiness_javascript: &str,
 ) -> Result<Vec<Value>, DataToolError> {
     use image::{imageops, Rgba, RgbaImage};
 
@@ -1551,6 +1598,7 @@ fn capture_background_browser_long_screenshot(
             path,
             geometry,
             extraction_javascript,
+            readiness_javascript,
         );
     }
     let positions = browser_scroll_positions(&geometry);
@@ -1572,7 +1620,11 @@ fn capture_background_browser_long_screenshot(
                 "网页分段滚动失败",
             ));
         }
-        thread::sleep(Duration::from_millis(220));
+        wait_for_background_browser_segment(
+            adapter,
+            session,
+            readiness_javascript,
+        )?;
         let payload = run_browser_script(&build_background_browser_evaluate_script(
             adapter,
             &session.apple_script_id,
@@ -1648,6 +1700,7 @@ fn capture_scrollable_element_screenshot(
     path: &std::path::Path,
     geometry: BrowserPageGeometry,
     extraction_javascript: &str,
+    readiness_javascript: &str,
 ) -> Result<Vec<Value>, DataToolError> {
     use image::{imageops, Rgba, RgbaImage};
 
@@ -1675,7 +1728,11 @@ fn capture_scrollable_element_screenshot(
                     "看板内部区域滚动失败",
                 ));
             }
-            thread::sleep(Duration::from_millis(320));
+            wait_for_background_browser_segment(
+                adapter,
+                session,
+                readiness_javascript,
+            )?;
             let payload = run_browser_script(&build_background_browser_evaluate_script(
                 adapter,
                 &session.apple_script_id,
