@@ -89,6 +89,7 @@ MANAGED_OLLAMA_MODELS_ROOT="$INITIALIZATION_ROOT/models"
 CORE_PORT=7070
 MODEL_API_PORT=7071
 CREATION_PORT=8001
+CREATION_STARTUP_RETRIES=180
 UI_PORT=1420
 OLLAMA_PORT=11434
 DEBUG_MODE=false
@@ -706,6 +707,29 @@ wait_for_http() {
     return 1
 }
 
+wait_for_managed_http() {
+    local url=$1
+    local label=$2
+    local pid_file=$3
+    local retries=${4:-20}
+    local delay=${5:-1}
+
+    for ((i=1; i<=retries; i++)); do
+        if curl -fsS "$url" > /dev/null 2>&1; then
+            log_success "${label} 健康检查通过"
+            return 0
+        fi
+        if ! is_running "$pid_file"; then
+            log_warn "${label} 进程已退出，健康检查终止"
+            return 1
+        fi
+        sleep "$delay"
+    done
+
+    log_warn "${label} 健康检查超时，请查看日志"
+    return 1
+}
+
 is_http_ok() {
     local url=$1
     curl -fsS "$url" > /dev/null 2>&1
@@ -1147,7 +1171,7 @@ start_creation_service() {
             stop_managed_process "$CREATION_PID_FILE" "Creation Service"
         else
             log_info "Creation Service 已在运行且代码未变化，复用现有进程"
-            wait_for_http "http://localhost:${CREATION_PORT}/health" "Creation Service" 10 1 || log_warn "现有 Creation Service 进程健康检查失败，建议执行 ./start.sh restart"
+            wait_for_http "http://127.0.0.1:${CREATION_PORT}/health" "Creation Service" 10 1 || log_warn "现有 Creation Service 进程健康检查失败，建议执行 ./start.sh restart"
             return 0
         fi
     fi
@@ -1173,8 +1197,17 @@ start_creation_service() {
 
     log_success "Creation Service 已启动 (PID: $(cat "$CREATION_PID_FILE"))"
     log_info "Creation Service 日志文件: $CREATION_LOG"
+    log_info "等待 Creation Service 初始化（首次加载本地模型时最多需要三分钟）..."
 
-    wait_for_http "http://localhost:${CREATION_PORT}/health" "Creation Service" 30 1 || {
+    # Creation Service 导入本地 embedding 与模型注册表；冷启动明显慢于普通
+    # HTTP 服务。等待期间同时观察受管进程，真实崩溃时立即失败，仍在初始化时
+    # 最多等待三分钟，避免留下“脚本报失败、服务稍后却可用”的假失败状态。
+    wait_for_managed_http \
+        "http://127.0.0.1:${CREATION_PORT}/health" \
+        "Creation Service" \
+        "$CREATION_PID_FILE" \
+        "$CREATION_STARTUP_RETRIES" \
+        1 || {
         log_error "Creation Service 启动失败，请查看日志: $CREATION_LOG"
         if ! ps -p "$(cat "$CREATION_PID_FILE" 2>/dev/null)" > /dev/null 2>&1; then
             rm -f "$CREATION_PID_FILE"

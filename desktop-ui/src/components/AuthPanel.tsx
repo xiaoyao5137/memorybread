@@ -663,7 +663,7 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
               {resetCodeSent && (
                 <small className={resetValiditySeconds > 0 ? 'auth-panel__verification-note' : 'auth-panel__verification-note auth-panel__verification-note--expired'} role="status">
                   {resetValiditySeconds > 0
-                    ? <>已发送验证码 · <time>{formatCountdown(resetValiditySeconds)}</time> 后失效。若该账户存在，请查看{loginMethod === 'email' ? '邮箱' : '短信'}。</>
+                    ? <>已发送验证码 · <time>{formatCountdown(resetValiditySeconds)}</time> 后失效，请查看{loginMethod === 'email' ? '邮箱' : '短信'}。</>
                     : '验证码已失效，请重新获取。'}
                 </small>
               )}

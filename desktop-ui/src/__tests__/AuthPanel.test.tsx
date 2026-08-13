@@ -408,6 +408,29 @@ describe('AuthPanel', () => {
     })
   })
 
+  it('忘记密码账号不存在时显示错误且不启动验证码倒计时', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      json: async () => ({
+        error: {
+          code: 'PASSWORD_RESET_ACCOUNT_NOT_FOUND',
+          message: '账号不存在',
+        },
+      }),
+    }))
+    render(<AuthPanel />)
+
+    fireEvent.click(screen.getByRole('button', { name: '忘记密码？' }))
+    fireEvent.change(screen.getByLabelText('邮箱地址'), { target: { value: 'missing@example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('账号不存在')
+    expect(screen.getByRole('button', { name: '获取验证码' })).toBeEnabled()
+    expect(screen.getByLabelText('验证码')).toHaveAttribute('placeholder', '先获取验证码')
+    expect(screen.queryByText('已发送验证码')).not.toBeInTheDocument()
+  })
+
   it('使用顶部多 Tab 展示全宽内容，并在个人信息中显示账户资料', async () => {
     useAppStore.getState().setAuthSession({
       access_token: 'mbs_test_token',
