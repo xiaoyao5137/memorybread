@@ -1,13 +1,23 @@
 //! Memory package export/import.
 //!
-//! These snapshots intentionally exclude raw capture payloads (OCR text,
-//! keyboard input, screenshot paths, audio text). Timelines still require a
-//! `captures.id` foreign key, so export includes redacted capture references
-//! that can be restored as sensitive placeholder rows.
+//! Format v2 contains a consistent copy of the complete local SQLite database
+//! plus user-owned files from the MemoryBread data directory. Runtime binaries,
+//! downloaded models, logs, volatile state and previous backups are deliberately
+//! omitted because they can be regenerated and would otherwise make a backup
+//! recursive. Format v1 remains importable for backwards compatibility.
 
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::{Read, Write},
+    path::{Component, Path, PathBuf},
+    time::Duration,
+};
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use rusqlite::{
+    backup::Backup,
     params, params_from_iter,
     types::{Value as SqlValue, ValueRef},
     Connection, OptionalExtension,
@@ -18,8 +28,19 @@ use sha2::{Digest, Sha256};
 
 use crate::storage::{db::current_ts_ms, error::StorageError, StorageManager};
 
-pub const ASSET_SNAPSHOT_FORMAT_VERSION: i32 = 1;
-pub const ASSET_SNAPSHOT_SCHEMA_VERSION: i32 = 4;
+pub const ASSET_SNAPSHOT_FORMAT_VERSION: i32 = 2;
+pub const ASSET_SNAPSHOT_SCHEMA_VERSION: i32 = 5;
+const LEGACY_ASSET_SNAPSHOT_FORMAT_VERSION: i32 = 1;
+const DATABASE_FILE_NAME: &str = "memory-bread.db";
+
+const EXCLUDED_LOCAL_PATHS: &[&str] = &[
+    "backups",
+    "captures",
+    "floating-screenshots",
+    "initialization",
+    "logs",
+    "state",
+];
 
 const EXCLUDED_RAW_CAPTURE_COLUMNS: &[&str] = &[
     "ax_text",
@@ -146,7 +167,16 @@ const ASSET_TABLES: &[AssetTableSpec] = &[
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetSnapshot {
     pub manifest: AssetSnapshotManifest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<DatabaseSnapshot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_files: Vec<LocalFileSnapshot>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub client_state: BTreeMap<String, String>,
+    // v1 compatibility payload. New exports keep these collections empty.
+    #[serde(default)]
     pub capture_refs: Vec<JsonRow>,
+    #[serde(default)]
     pub tables: Vec<TableSnapshot>,
 }
 
@@ -159,8 +189,36 @@ pub struct AssetSnapshotManifest {
     pub source_db_path: String,
     pub excluded_tables: Vec<String>,
     pub excluded_capture_columns: Vec<String>,
+    #[serde(default)]
+    pub excluded_local_paths: Vec<String>,
+    #[serde(default)]
+    pub database_size_bytes: u64,
+    #[serde(default)]
+    pub local_file_count: usize,
+    #[serde(default)]
+    pub local_file_size_bytes: u64,
+    #[serde(default)]
+    pub client_state_entry_count: usize,
     pub table_summaries: Vec<TableSnapshotSummary>,
     pub payload_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseSnapshot {
+    pub file_name: String,
+    pub compression: String,
+    pub content_base64: String,
+    pub uncompressed_size_bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalFileSnapshot {
+    /// Slash-separated path relative to the active `.memory-bread` directory.
+    pub relative_path: String,
+    pub content_base64: String,
+    pub size_bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,8 +251,18 @@ pub struct AssetSnapshotImportReport {
     pub file_sha256: String,
     pub payload_sha256: String,
     pub dry_run: bool,
+    pub database_replaced: bool,
+    pub local_files: LocalFileImportReport,
+    pub client_state: BTreeMap<String, String>,
     pub capture_refs: TableImportReport,
     pub tables: Vec<TableImportReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LocalFileImportReport {
+    pub incoming: usize,
+    pub written: usize,
+    pub unchanged: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -211,7 +279,15 @@ impl StorageManager {
         &self,
         path: &Path,
     ) -> Result<AssetSnapshotExportResult, StorageError> {
-        let mut snapshot = self.export_asset_snapshot()?;
+        self.export_asset_snapshot_to_path_with_client_state(path, BTreeMap::new())
+    }
+
+    pub fn export_asset_snapshot_to_path_with_client_state(
+        &self,
+        path: &Path,
+        client_state: BTreeMap<String, String>,
+    ) -> Result<AssetSnapshotExportResult, StorageError> {
+        let mut snapshot = self.export_asset_snapshot_with_client_state(client_state)?;
         snapshot.manifest.payload_sha256 = snapshot_payload_sha256(&snapshot)?;
         let bytes = serde_json::to_vec_pretty(&snapshot)?;
 
@@ -258,51 +334,66 @@ impl StorageManager {
     }
 
     pub fn export_asset_snapshot(&self) -> Result<AssetSnapshot, StorageError> {
-        self.with_conn(|conn| {
-            let capture_refs = export_capture_refs(conn)?;
-            let mut tables = Vec::new();
-            let mut table_summaries = Vec::new();
+        self.export_asset_snapshot_with_client_state(BTreeMap::new())
+    }
 
-            for spec in ASSET_TABLES {
-                if !table_exists(conn, spec.name)? {
-                    continue;
-                }
-                let table = export_table(conn, spec)?;
-                table_summaries.push(TableSnapshotSummary {
-                    name: table.name.clone(),
-                    row_count: table.rows.len(),
-                    identity_columns: table.identity_columns.clone(),
-                });
-                tables.push(table);
-            }
+    pub fn export_asset_snapshot_with_client_state(
+        &self,
+        client_state: BTreeMap<String, String>,
+    ) -> Result<AssetSnapshot, StorageError> {
+        let (database, source_db_path, data_root, table_summaries) = self.with_conn(|conn| {
+            let source_db_path = conn
+                .path()
+                .map(|path| path.to_string())
+                .unwrap_or_else(|| ":memory:".to_string());
+            let data_root = conn
+                .path()
+                .and_then(|path| Path::new(path).parent())
+                .map(Path::to_path_buf);
+            Ok((
+                export_database_snapshot(conn)?,
+                source_db_path,
+                data_root,
+                export_all_table_summaries(conn)?,
+            ))
+        })?;
+        let local_files = match data_root.as_deref() {
+            Some(root) => export_local_files(root)?,
+            None => Vec::new(),
+        };
+        let local_file_size_bytes = local_files.iter().map(|file| file.size_bytes).sum();
 
-            let mut snapshot = AssetSnapshot {
-                manifest: AssetSnapshotManifest {
-                    app: "MemoryBread".to_string(),
-                    format_version: ASSET_SNAPSHOT_FORMAT_VERSION,
-                    schema_version: ASSET_SNAPSHOT_SCHEMA_VERSION,
-                    exported_at_ms: current_ts_ms(),
-                    source_db_path: conn
-                        .path()
-                        .map(|path| path.to_string())
-                        .unwrap_or(":memory:".into()),
-                    excluded_tables: EXCLUDED_TABLES
-                        .iter()
-                        .map(|name| name.to_string())
-                        .collect(),
-                    excluded_capture_columns: EXCLUDED_RAW_CAPTURE_COLUMNS
-                        .iter()
-                        .map(|name| name.to_string())
-                        .collect(),
-                    table_summaries,
-                    payload_sha256: String::new(),
-                },
-                capture_refs,
-                tables,
-            };
-            snapshot.manifest.payload_sha256 = snapshot_payload_sha256(&snapshot)?;
-            Ok(snapshot)
-        })
+        let mut snapshot = AssetSnapshot {
+            manifest: AssetSnapshotManifest {
+                app: "MemoryBread".to_string(),
+                format_version: ASSET_SNAPSHOT_FORMAT_VERSION,
+                schema_version: ASSET_SNAPSHOT_SCHEMA_VERSION,
+                exported_at_ms: current_ts_ms(),
+                source_db_path,
+                excluded_tables: vec!["capture_attempts".to_string(), "vector_index".to_string()],
+                excluded_capture_columns: EXCLUDED_RAW_CAPTURE_COLUMNS
+                    .iter()
+                    .map(|column| column.to_string())
+                    .collect(),
+                excluded_local_paths: EXCLUDED_LOCAL_PATHS
+                    .iter()
+                    .map(|path| path.to_string())
+                    .collect(),
+                database_size_bytes: database.uncompressed_size_bytes,
+                local_file_count: local_files.len(),
+                local_file_size_bytes,
+                client_state_entry_count: client_state.len(),
+                table_summaries,
+                payload_sha256: String::new(),
+            },
+            database: Some(database),
+            local_files,
+            client_state,
+            capture_refs: Vec::new(),
+            tables: Vec::new(),
+        };
+        snapshot.manifest.payload_sha256 = snapshot_payload_sha256(&snapshot)?;
+        Ok(snapshot)
     }
 
     pub fn import_asset_snapshot(
@@ -310,7 +401,9 @@ impl StorageManager {
         snapshot: &AssetSnapshot,
         dry_run: bool,
     ) -> Result<AssetSnapshotImportReport, StorageError> {
-        if snapshot.manifest.format_version != ASSET_SNAPSHOT_FORMAT_VERSION {
+        if snapshot.manifest.format_version != ASSET_SNAPSHOT_FORMAT_VERSION
+            && snapshot.manifest.format_version != LEGACY_ASSET_SNAPSHOT_FORMAT_VERSION
+        {
             return Err(StorageError::MigrationFailed {
                 version: "asset_snapshot_import",
                 reason: format!(
@@ -328,6 +421,15 @@ impl StorageManager {
                 version: "asset_snapshot_import",
                 reason: "资产快照 payload_sha256 校验失败".to_string(),
             });
+        }
+
+        if let Some(database) = snapshot.database.as_ref() {
+            return self.import_complete_snapshot(
+                snapshot,
+                database,
+                dry_run,
+                actual_payload_sha256,
+            );
         }
 
         self.with_conn(|conn| {
@@ -421,6 +523,401 @@ impl StorageManager {
             Ok(report)
         })
     }
+
+    fn import_complete_snapshot(
+        &self,
+        snapshot: &AssetSnapshot,
+        database: &DatabaseSnapshot,
+        dry_run: bool,
+        actual_payload_sha256: String,
+    ) -> Result<AssetSnapshotImportReport, StorageError> {
+        let database_bytes = decode_database_snapshot(database)?;
+        let decoded_files = decode_local_files(&snapshot.local_files)?;
+        let mut report = AssetSnapshotImportReport {
+            payload_sha256: actual_payload_sha256,
+            dry_run,
+            database_replaced: !dry_run,
+            local_files: LocalFileImportReport {
+                incoming: decoded_files.len(),
+                ..Default::default()
+            },
+            client_state: snapshot.client_state.clone(),
+            tables: snapshot
+                .manifest
+                .table_summaries
+                .iter()
+                .map(|summary| TableImportReport {
+                    name: summary.name.clone(),
+                    incoming: summary.row_count,
+                    inserted: if dry_run { 0 } else { summary.row_count },
+                    skipped: if dry_run { summary.row_count } else { 0 },
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        if dry_run {
+            report.local_files.unchanged = decoded_files.len();
+            return Ok(report);
+        }
+
+        let data_root = self.with_conn(|conn| {
+            Ok(conn
+                .path()
+                .and_then(|path| Path::new(path).parent())
+                .map(Path::to_path_buf))
+        })?;
+        if let Some(root) = data_root.as_deref() {
+            report.local_files = restore_local_files(root, &decoded_files)?;
+        }
+
+        restore_database_snapshot(self, &database_bytes)?;
+        Ok(report)
+    }
+}
+
+#[derive(Debug)]
+struct DecodedLocalFile {
+    relative_path: PathBuf,
+    bytes: Vec<u8>,
+}
+
+fn export_database_snapshot(conn: &Connection) -> Result<DatabaseSnapshot, StorageError> {
+    let temp_dir = tempfile::tempdir()?;
+    let database_path = temp_dir.path().join(DATABASE_FILE_NAME);
+    {
+        let mut destination = Connection::open(&database_path)?;
+        let backup = Backup::new(conn, &mut destination)?;
+        backup.run_to_completion(100, Duration::from_millis(5), None)?;
+        drop(backup);
+        sanitize_export_database(&destination)?;
+        destination.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    }
+
+    let bytes = fs::read(&database_path)?;
+    let compressed = gzip_bytes(&bytes)?;
+    Ok(DatabaseSnapshot {
+        file_name: DATABASE_FILE_NAME.to_string(),
+        compression: "gzip".to_string(),
+        content_base64: BASE64.encode(compressed),
+        uncompressed_size_bytes: bytes.len() as u64,
+        sha256: sha256_hex(&bytes),
+    })
+}
+
+fn sanitize_export_database(conn: &Connection) -> Result<(), StorageError> {
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    for table in ["capture_attempts", "vector_index", "vector_deletion_queue"] {
+        if table_exists(conn, table)? {
+            conn.execute(&format!("DELETE FROM {}", quote_identifier(table)), [])?;
+        }
+    }
+
+    if table_exists(conn, "captures")? {
+        let mut references = Vec::new();
+        for (table, column) in [
+            ("timelines", "capture_id"),
+            ("data_source_links", "capture_id"),
+            ("integration_import_items", "capture_id"),
+            ("knowledge_entries_backup", "capture_id"),
+        ] {
+            if table_exists(conn, table)?
+                && table_columns(conn, table)?
+                    .iter()
+                    .any(|value| value == column)
+            {
+                references.push(format!(
+                    "SELECT {column} FROM {} WHERE {column} IS NOT NULL",
+                    quote_identifier(table)
+                ));
+            }
+        }
+        if references.is_empty() {
+            conn.execute("DELETE FROM captures", [])?;
+        } else {
+            conn.execute(
+                &format!(
+                    "DELETE FROM captures WHERE id NOT IN ({})",
+                    references.join(" UNION ")
+                ),
+                [],
+            )?;
+        }
+        conn.execute_batch(
+            "UPDATE captures
+             SET app_name = NULL,
+                 app_bundle_id = NULL,
+                 win_title = NULL,
+                 event_type = 'snapshot_ref',
+                 ax_text = NULL,
+                 ax_focused_role = NULL,
+                 ax_focused_id = NULL,
+                 ocr_text = NULL,
+                 screenshot_path = NULL,
+                 input_text = NULL,
+                 audio_text = NULL,
+                 is_sensitive = 1,
+                 pii_scrubbed = 1,
+                 url = NULL,
+                 webpage_title = NULL,
+                 screenshot_source = NULL;",
+        )?;
+        if table_exists(conn, "captures_fts")? {
+            conn.execute_batch("INSERT INTO captures_fts(captures_fts) VALUES ('rebuild');")?;
+        }
+    }
+    conn.execute_batch("PRAGMA foreign_keys = ON; VACUUM;")?;
+    Ok(())
+}
+
+fn decode_database_snapshot(database: &DatabaseSnapshot) -> Result<Vec<u8>, StorageError> {
+    if database.file_name != DATABASE_FILE_NAME || database.compression != "gzip" {
+        return Err(snapshot_import_error("完整数据库快照格式不受支持"));
+    }
+    let compressed = BASE64
+        .decode(&database.content_base64)
+        .map_err(|_| snapshot_import_error("完整数据库快照 Base64 校验失败"))?;
+    let mut decoder = GzDecoder::new(compressed.as_slice());
+    let mut bytes = Vec::new();
+    decoder.read_to_end(&mut bytes)?;
+    if bytes.len() as u64 != database.uncompressed_size_bytes {
+        return Err(snapshot_import_error("完整数据库快照大小校验失败"));
+    }
+    if sha256_hex(&bytes) != database.sha256 {
+        return Err(snapshot_import_error("完整数据库快照 SHA-256 校验失败"));
+    }
+    Ok(bytes)
+}
+
+fn restore_database_snapshot(
+    storage: &StorageManager,
+    database_bytes: &[u8],
+) -> Result<(), StorageError> {
+    let temp_dir = tempfile::tempdir()?;
+    let database_path = temp_dir.path().join(DATABASE_FILE_NAME);
+    fs::write(&database_path, database_bytes)?;
+    let source = Connection::open(&database_path)?;
+    let integrity: String = source.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(snapshot_import_error(&format!(
+            "完整数据库快照完整性检查失败：{integrity}"
+        )));
+    }
+
+    let mut target = storage.conn.lock()?;
+    target.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA foreign_keys = OFF;")?;
+    {
+        let backup = Backup::new(&source, &mut target)?;
+        backup.run_to_completion(100, Duration::from_millis(5), None)?;
+    }
+    target.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         PRAGMA wal_checkpoint(TRUNCATE);",
+    )?;
+    Ok(())
+}
+
+fn export_all_table_summaries(
+    conn: &Connection,
+) -> Result<Vec<TableSnapshotSummary>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+         ORDER BY name ASC",
+    )?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut summaries = Vec::new();
+    for name in names {
+        if is_derived_or_raw_table(&name) {
+            continue;
+        }
+        let count_sql = format!("SELECT COUNT(*) FROM {}", quote_identifier(&name));
+        let row_count = conn.query_row(&count_sql, [], |row| row.get::<_, i64>(0))?;
+        let identity_columns = table_identity_columns(conn, &name)?;
+        summaries.push(TableSnapshotSummary {
+            name,
+            row_count: row_count.max(0) as usize,
+            identity_columns,
+        });
+    }
+    Ok(summaries)
+}
+
+fn table_identity_columns(conn: &Connection, table: &str) -> Result<Vec<String>, StorageError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", quote_identifier(table)))?;
+    let mut columns = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(5)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    columns.retain(|(position, _)| *position > 0);
+    columns.sort_by_key(|(position, _)| *position);
+    Ok(columns.into_iter().map(|(_, name)| name).collect())
+}
+
+fn is_derived_or_raw_table(name: &str) -> bool {
+    name == "captures"
+        || name == "capture_attempts"
+        || name == "schema_migrations"
+        || name == "vector_index"
+        || name == "vector_deletion_queue"
+        || name.contains("_fts")
+}
+
+fn export_local_files(root: &Path) -> Result<Vec<LocalFileSnapshot>, StorageError> {
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    collect_local_files(root, root, &mut files)?;
+    files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(files)
+}
+
+fn collect_local_files(
+    root: &Path,
+    directory: &Path,
+    files: &mut Vec<LocalFileSnapshot>,
+) -> Result<(), StorageError> {
+    let mut entries = fs::read_dir(directory)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| snapshot_import_error("本地文件路径不在数据目录中"))?;
+        if is_excluded_local_path(relative) {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_local_files(root, &path, files)?;
+        } else if file_type.is_file() {
+            let bytes = fs::read(&path)?;
+            files.push(LocalFileSnapshot {
+                relative_path: portable_relative_path(relative)?,
+                content_base64: BASE64.encode(&bytes),
+                size_bytes: bytes.len() as u64,
+                sha256: sha256_hex(&bytes),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn decode_local_files(files: &[LocalFileSnapshot]) -> Result<Vec<DecodedLocalFile>, StorageError> {
+    files
+        .iter()
+        .map(|file| {
+            let relative_path = validated_relative_path(&file.relative_path)?;
+            if is_excluded_local_path(&relative_path) {
+                return Err(snapshot_import_error("备份包含不允许恢复的运行时路径"));
+            }
+            let bytes = BASE64
+                .decode(&file.content_base64)
+                .map_err(|_| snapshot_import_error("本地文件 Base64 校验失败"))?;
+            if bytes.len() as u64 != file.size_bytes || sha256_hex(&bytes) != file.sha256 {
+                return Err(snapshot_import_error("本地文件完整性校验失败"));
+            }
+            Ok(DecodedLocalFile {
+                relative_path,
+                bytes,
+            })
+        })
+        .collect()
+}
+
+fn restore_local_files(
+    root: &Path,
+    files: &[DecodedLocalFile],
+) -> Result<LocalFileImportReport, StorageError> {
+    let mut report = LocalFileImportReport {
+        incoming: files.len(),
+        ..Default::default()
+    };
+    for file in files {
+        let target = root.join(&file.relative_path);
+        if target.is_file() && sha256_hex(&fs::read(&target)?) == sha256_hex(&file.bytes) {
+            report.unchanged += 1;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let temporary = target.with_extension(format!("memorybread-restore-{}", current_ts_ms()));
+        fs::write(&temporary, &file.bytes)?;
+        fs::rename(&temporary, &target)?;
+        report.written += 1;
+    }
+    Ok(report)
+}
+
+fn is_excluded_local_path(path: &Path) -> bool {
+    let portable = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    portable == DATABASE_FILE_NAME
+        || portable == format!("{DATABASE_FILE_NAME}-wal")
+        || portable == format!("{DATABASE_FILE_NAME}-shm")
+        || file_name.starts_with(&format!("{DATABASE_FILE_NAME}.backup"))
+        || EXCLUDED_LOCAL_PATHS
+            .iter()
+            .any(|excluded| portable == *excluded || portable.starts_with(&format!("{excluded}/")))
+}
+
+fn portable_relative_path(path: &Path) -> Result<String, StorageError> {
+    let parts = path
+        .components()
+        .map(|component| match component {
+            Component::Normal(value) => Ok(value.to_string_lossy().into_owned()),
+            _ => Err(snapshot_import_error("本地文件相对路径不合法")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if parts.is_empty() {
+        return Err(snapshot_import_error("本地文件相对路径不能为空"));
+    }
+    Ok(parts.join("/"))
+}
+
+fn validated_relative_path(value: &str) -> Result<PathBuf, StorageError> {
+    let path = Path::new(value);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(snapshot_import_error("备份中的本地文件路径不合法"));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn gzip_bytes(bytes: &[u8]) -> Result<Vec<u8>, StorageError> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(bytes)?;
+    encoder.finish().map_err(StorageError::Io)
+}
+
+fn quote_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn snapshot_import_error(reason: &str) -> StorageError {
+    StorageError::MigrationFailed {
+        version: "asset_snapshot_import",
+        reason: reason.to_string(),
+    }
 }
 
 fn dry_run_report(name: &str, incoming: usize) -> TableImportReport {
@@ -434,20 +931,42 @@ fn dry_run_report(name: &str, incoming: usize) -> TableImportReport {
 
 fn snapshot_payload_sha256(snapshot: &AssetSnapshot) -> Result<String, StorageError> {
     #[derive(Serialize)]
-    struct PayloadForHash<'a> {
+    struct LegacyPayloadForHash<'a> {
         format_version: i32,
         schema_version: i32,
         capture_refs: &'a [JsonRow],
         tables: &'a [TableSnapshot],
     }
 
-    let payload = PayloadForHash {
-        format_version: snapshot.manifest.format_version,
-        schema_version: snapshot.manifest.schema_version,
-        capture_refs: &snapshot.capture_refs,
-        tables: &snapshot.tables,
+    #[derive(Serialize)]
+    struct CompletePayloadForHash<'a> {
+        format_version: i32,
+        schema_version: i32,
+        database: &'a Option<DatabaseSnapshot>,
+        local_files: &'a [LocalFileSnapshot],
+        client_state: &'a BTreeMap<String, String>,
+        capture_refs: &'a [JsonRow],
+        tables: &'a [TableSnapshot],
+    }
+
+    let bytes = if snapshot.manifest.format_version == LEGACY_ASSET_SNAPSHOT_FORMAT_VERSION {
+        serde_json::to_vec(&LegacyPayloadForHash {
+            format_version: snapshot.manifest.format_version,
+            schema_version: snapshot.manifest.schema_version,
+            capture_refs: &snapshot.capture_refs,
+            tables: &snapshot.tables,
+        })?
+    } else {
+        serde_json::to_vec(&CompletePayloadForHash {
+            format_version: snapshot.manifest.format_version,
+            schema_version: snapshot.manifest.schema_version,
+            database: &snapshot.database,
+            local_files: &snapshot.local_files,
+            client_state: &snapshot.client_state,
+            capture_refs: &snapshot.capture_refs,
+            tables: &snapshot.tables,
+        })?
     };
-    let bytes = serde_json::to_vec(&payload)?;
     Ok(sha256_hex(&bytes))
 }
 
@@ -1389,45 +1908,102 @@ mod tests {
             .unwrap();
     }
 
+    fn export_legacy_snapshot(storage: &StorageManager) -> AssetSnapshot {
+        storage
+            .with_conn(|conn| {
+                let capture_refs = export_capture_refs(conn)?;
+                let tables = ASSET_TABLES
+                    .iter()
+                    .filter(|spec| table_exists(conn, spec.name).unwrap_or(false))
+                    .map(|spec| export_table(conn, spec))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let table_summaries = tables
+                    .iter()
+                    .map(|table| TableSnapshotSummary {
+                        name: table.name.clone(),
+                        row_count: table.rows.len(),
+                        identity_columns: table.identity_columns.clone(),
+                    })
+                    .collect();
+                let mut snapshot = AssetSnapshot {
+                    manifest: AssetSnapshotManifest {
+                        app: "MemoryBread".to_string(),
+                        format_version: LEGACY_ASSET_SNAPSHOT_FORMAT_VERSION,
+                        schema_version: 4,
+                        exported_at_ms: current_ts_ms(),
+                        source_db_path: ":memory:".to_string(),
+                        excluded_tables: EXCLUDED_TABLES
+                            .iter()
+                            .map(|table| table.to_string())
+                            .collect(),
+                        excluded_capture_columns: EXCLUDED_RAW_CAPTURE_COLUMNS
+                            .iter()
+                            .map(|column| column.to_string())
+                            .collect(),
+                        excluded_local_paths: Vec::new(),
+                        database_size_bytes: 0,
+                        local_file_count: 0,
+                        local_file_size_bytes: 0,
+                        client_state_entry_count: 0,
+                        table_summaries,
+                        payload_sha256: String::new(),
+                    },
+                    database: None,
+                    local_files: Vec::new(),
+                    client_state: BTreeMap::new(),
+                    capture_refs,
+                    tables,
+                };
+                snapshot.manifest.payload_sha256 = snapshot_payload_sha256(&snapshot)?;
+                Ok(snapshot)
+            })
+            .unwrap()
+    }
+
     #[test]
-    fn asset_snapshot_excludes_raw_capture_payloads_and_imports_idempotently() {
+    fn complete_snapshot_restores_all_content_but_excludes_raw_captures() {
         let source = StorageManager::open_in_memory().unwrap();
         seed_assets(&source);
+        source
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO captures (
+                        id, ts, app_name, event_type, ax_text, ocr_text, screenshot_path
+                     ) VALUES (43, 1700000000001, 'UnreferencedApp', 'auto', 'raw', 'raw', 'raw.jpg')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("assets.mbsnapshot.json");
 
-        let export = source.export_asset_snapshot_to_path(&path).unwrap();
+        let client_state = BTreeMap::from([(
+            "memory-bread_creation_tools_v1".to_string(),
+            "[{\"id\":\"local-tool\"}]".to_string(),
+        )]);
+        let export = source
+            .export_asset_snapshot_to_path_with_client_state(&path, client_state.clone())
+            .unwrap();
         assert!(export.file_size_bytes > 0);
 
         let snapshot: AssetSnapshot =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert!(snapshot.tables.iter().all(|table| table.name != "captures"));
-        assert!(snapshot.tables.iter().all(|table| matches!(
-            table.name.as_str(),
-            "breadcrumb_definitions"
-                | "breadcrumb_rules"
-                | "breadcrumb_inventory"
-                | "breadcrumb_awards"
-                | "breadcrumb_equipment"
-                | "timelines"
-                | "bake_knowledge"
-                | "bake_documents"
-                | "bake_document_sections"
-                | "bake_sops"
-                | "creation_skills"
-                | "data_sources"
-                | "data_snapshots"
-                | "data_source_links"
-        )));
-        assert_eq!(snapshot.capture_refs.len(), 1);
-        assert!(snapshot.capture_refs[0].get("ax_text").is_none());
-        assert!(snapshot.capture_refs[0].get("screenshot_path").is_none());
+        assert_eq!(
+            snapshot.manifest.format_version,
+            ASSET_SNAPSHOT_FORMAT_VERSION
+        );
+        assert!(snapshot.database.is_some());
+        assert!(snapshot.capture_refs.is_empty());
+        assert!(snapshot.tables.is_empty());
+        assert_eq!(snapshot.client_state, client_state);
+        assert!(snapshot
+            .manifest
+            .excluded_local_paths
+            .contains(&"captures".to_string()));
 
         let target = StorageManager::open_in_memory().unwrap();
         let first = target
-            .import_asset_snapshot_from_path(&path, false)
-            .unwrap();
-        let second = target
             .import_asset_snapshot_from_path(&path, false)
             .unwrap();
 
@@ -1457,16 +2033,17 @@ mod tests {
                 .map_err(StorageError::Sqlite)
             })
             .unwrap();
-        let capture_text: Option<String> = target
+        let restored_capture: (Option<String>, Option<String>, String, i64) = target
             .with_conn(|conn| {
-                conn.query_row("SELECT ax_text FROM captures WHERE id = 42", [], |row| {
-                    row.get(0)
-                })
-                .optional()
+                conn.query_row(
+                    "SELECT ax_text, screenshot_path, event_type, is_sensitive
+                     FROM captures WHERE id = 42",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
                 .map_err(StorageError::Sqlite)
             })
-            .unwrap()
-            .flatten();
+            .unwrap();
         let restored_skill = target
             .list_creation_skills()
             .unwrap()
@@ -1491,16 +2068,75 @@ mod tests {
         assert_eq!(restored_skill.package_files[0].path, "SKILL.md");
         assert_eq!(restored_skill.distinctive_sections.len(), 1);
         assert_eq!(restored_skill.distinctive_sections[0].title, "定义先行");
-        assert!(capture_text.is_none());
-        assert!(first.capture_refs.inserted >= 1);
-        assert_eq!(second.capture_refs.skipped, 1);
+        assert!(restored_capture.0.is_none());
+        assert!(restored_capture.1.is_none());
+        assert_eq!(restored_capture.2, "snapshot_ref");
+        assert_eq!(restored_capture.3, 1);
+        assert_eq!(count_table(&target, "captures"), 1);
+        assert!(first.database_replaced);
+        assert_eq!(first.client_state, client_state);
+    }
+
+    #[test]
+    fn complete_snapshot_restores_user_files_but_not_capture_screenshots() {
+        let dir = tempdir().unwrap();
+        let source_root = dir.path().join("source");
+        fs::create_dir_all(source_root.join("captures/screenshots")).unwrap();
+        fs::create_dir_all(source_root.join("creation-evidence")).unwrap();
+        fs::create_dir_all(source_root.join("initialization/models")).unwrap();
+        fs::create_dir_all(source_root.join("logs")).unwrap();
+        fs::write(
+            source_root.join("captures/screenshots/raw.jpg"),
+            b"raw-capture",
+        )
+        .unwrap();
+        fs::write(
+            source_root.join("creation-evidence/report.jpg"),
+            b"creation-evidence",
+        )
+        .unwrap();
+        fs::write(source_root.join("user-content.txt"), b"keep-user-content").unwrap();
+        fs::write(source_root.join("logs/core.log"), b"runtime-log").unwrap();
+        fs::write(
+            source_root.join("initialization/models/model.bin"),
+            b"downloaded-model",
+        )
+        .unwrap();
+
+        let source = StorageManager::open(&source_root.join(DATABASE_FILE_NAME)).unwrap();
+        seed_assets(&source);
+        let snapshot = source.export_asset_snapshot().unwrap();
+        let paths = snapshot
+            .local_files
+            .iter()
+            .map(|file| file.relative_path.as_str())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&"creation-evidence/report.jpg"));
+        assert!(paths.contains(&"user-content.txt"));
+        assert!(!paths.contains(&"captures/screenshots/raw.jpg"));
+        assert!(!paths.contains(&"logs/core.log"));
+        assert!(!paths.contains(&"initialization/models/model.bin"));
+
+        let target_root = dir.path().join("target");
+        let target = StorageManager::open(&target_root.join(DATABASE_FILE_NAME)).unwrap();
+        let report = target.import_asset_snapshot(&snapshot, false).unwrap();
+        assert_eq!(
+            fs::read(target_root.join("creation-evidence/report.jpg")).unwrap(),
+            b"creation-evidence"
+        );
+        assert_eq!(
+            fs::read(target_root.join("user-content.txt")).unwrap(),
+            b"keep-user-content"
+        );
+        assert!(!target_root.join("captures/screenshots/raw.jpg").exists());
+        assert_eq!(report.local_files.written, 2);
     }
 
     #[test]
     fn asset_snapshot_remaps_data_assets_when_local_ids_are_occupied() {
         let source = StorageManager::open_in_memory().unwrap();
         seed_assets(&source);
-        let snapshot = source.export_asset_snapshot().unwrap();
+        let snapshot = export_legacy_snapshot(&source);
 
         let target = StorageManager::open_in_memory().unwrap();
         target
@@ -1640,10 +2276,21 @@ mod tests {
             count_table(&target, "data_source_links"),
             summary_count(&export.manifest, "data_source_links")
         );
-        assert_eq!(
-            count_table(&target, "captures"),
-            report.capture_refs.inserted as i64
-        );
+        let raw_capture_count: i64 = target
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM captures
+                     WHERE ax_text IS NOT NULL OR ocr_text IS NOT NULL
+                        OR input_text IS NOT NULL OR audio_text IS NOT NULL
+                        OR screenshot_path IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::Sqlite)
+            })
+            .unwrap();
+        assert_eq!(raw_capture_count, 0);
+        assert!(report.database_replaced);
     }
 
     fn summary_count(manifest: &AssetSnapshotManifest, table: &str) -> i64 {

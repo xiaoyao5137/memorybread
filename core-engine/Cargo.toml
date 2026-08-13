@@ -14,7 +14,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # SQLite
-rusqlite   = { version = "0.31", features = ["bundled"] }
+rusqlite   = { version = "0.31", features = ["backup", "bundled"] }
 
 # 异步运行时
 tokio      = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
@@ -26,6 +26,8 @@ serde_json = "1"
 # 客户端快照加密
 aes-gcm    = "0.10"
 base64     = "0.22"
+flate2     = "1"
+tempfile   = "3"
 
 # Hash
 sha2       = "0.10"
@@ -81,5 +83,4 @@ core-graphics = "0.23"
 
 [dev-dependencies]
 tokio          = { version = "1", features = ["full"] }
-tempfile       = "3"
 http-body-util = "0.1"

@@ -775,11 +775,11 @@ export function useExecuteAction() {
 export function useExportMemoryPackage() {
   const apiBaseUrl = useAppStore((s) => normalizeLocalApiBaseUrl(s.apiBaseUrl))
 
-  return useCallback(async (): Promise<MemoryPackageExportResult> => {
+  return useCallback(async (clientState: Record<string, string> = {}): Promise<MemoryPackageExportResult> => {
     const resp = await fetchWithLocalhostFallback(`${apiBaseUrl}/api/snapshots/assets/export`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ client_state: clientState }),
     })
     if (!resp.ok) {
       throw new Error(await parseApiErrorMessage(resp, `memory package export failed: ${resp.status}`))
@@ -812,6 +812,7 @@ export function useBackupMemoryPackageToCloud() {
     service_environment: 'production' | 'staging'
     access_token: string
     device_id: string
+    client_state?: Record<string, string>
   }): Promise<CloudMemoryPackageBackupResult> => {
     const resp = await fetchWithLocalhostFallback(`${apiBaseUrl}/api/snapshots/cloud/backup`, {
       method: 'POST',

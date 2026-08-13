@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -518,6 +519,83 @@ def test_evidence_validation_requires_matching_metadata_value_and_label():
     assert mismatched["verified_claims"] == []
 
 
+def test_langbridge_requires_all_six_token_metrics_for_the_requested_week():
+    query = (
+        "获取LangBridge模型中心运营看板里第二个tab下筛选本周的独立部署输入Tokens、"
+        "独立部署输出Tokens、公共部署输入Tokens、公共部署输出tokens、"
+        "商业模型输入Tokens、商业模型输出Tokens"
+    )
+    required = CreationService._extract_required_metrics(query)
+    claims = [
+        {
+            "claim_type": "metric",
+            "label": metric,
+            "value": str(index + 1),
+            "statement": f"{metric} {index + 1}",
+            "statistical_period": "2026-08-10 至 2026-08-16",
+        }
+        for index, metric in enumerate(required)
+    ]
+
+    complete = CreationService._apply_required_metric_coverage(
+        {"verified_claims": claims},
+        required,
+        {"start": "2026-08-10", "end": "2026-08-16"},
+    )
+    incomplete = CreationService._apply_required_metric_coverage(
+        {"verified_claims": claims[:-1]},
+        required,
+        {"start": "2026-08-10", "end": "2026-08-16"},
+    )
+    wrong_period_claims = [
+        {**claim, "statistical_period": "2026-08-03 至 2026-08-09"}
+        for claim in claims
+    ]
+    wrong_period = CreationService._apply_required_metric_coverage(
+        {"verified_claims": wrong_period_claims},
+        required,
+        {"start": "2026-08-10", "end": "2026-08-16"},
+    )
+
+    assert required == [
+        "独立部署输入Token",
+        "独立部署输出Token",
+        "公共部署输入Token",
+        "公共部署输出Token",
+        "商业模型输入Token",
+        "商业模型输出Token",
+    ]
+    assert complete["requirements_satisfied"] is True
+    assert complete["required_metric_coverage"] == 1.0
+    assert incomplete["requirements_satisfied"] is False
+    assert incomplete["reason"] == "required_metrics_incomplete"
+    assert wrong_period["requirements_satisfied"] is False
+    assert wrong_period["reason"] == "statistical_period_mismatch"
+
+
+def test_langbridge_preview_source_wins_over_edit_source_for_same_dashboard():
+    selected = CreationService._select_canonical_report_sources(
+        [
+            {
+                "source_id": 260,
+                "source_url": (
+                    "https://bi.example.com/pc/dashboard/edit?"
+                    "dashboardId=2119187&sheetId=285011"
+                ),
+            },
+            {
+                "source_id": 214,
+                "source_url": (
+                    "https://bi.example.com/pc/dashboard/preview?"
+                    "dashboardId=2119187&sheetId=285011&tabIds=904433"
+                ),
+            },
+        ]
+    )
+
+    assert [item["source_id"] for item in selected] == [214]
+
+
 def test_evidence_validation_also_supports_document_style_pages():
     payload = {
         "title": "容量治理说明",
@@ -629,6 +707,124 @@ def test_dashboard_metric_cards_accept_compound_currency_and_multiplier_units():
         "12178.4万元",
         "39.86x",
     }
+
+
+def test_canvas_dashboard_values_use_ocr_only_when_dom_labels_match():
+    payload = {
+        "title": "LangBridge模型中心运营看板",
+        "url": "https://bi.example.com/dashboard",
+        "collected_at": 1770000000000,
+        "content_text": (
+            "Token总量\n公共部署模型Token计费成本总计\n"
+            "独立部署GPU计费成本总计\n商业模型Token计费成本总计"
+        ),
+        "structured_data": {
+            "dom_content_text": (
+                "Token总量\n公共部署模型Token计费成本总计\n"
+                "独立部署GPU计费成本总计\n商业模型Token计费成本总计"
+            )
+        },
+        "evidence": {
+            "page_title": "LangBridge模型中心运营看板",
+            "source_url": "https://bi.example.com/dashboard",
+            "captured_at": 1770000000000,
+        },
+    }
+    ocr_text = """Token总量
+2026-08-12至2026-08-
+12
+3,732.62亿
+公共部署模型Token计
+费成本总计
+2026-08-12至2026-08-12
+8,010.14
+独立部署GPU计费
+成本总计
+2026-08-12至2026-08-
+12
+58,643
+商业模型Token计费成本总计
+2026-08-12至2026-08-12
+6,404.98"""
+
+    ocr_validation = CreationService._compare_scrape_with_ocr(payload, ocr_text)
+    merged = CreationService._merge_canvas_ocr_validation(
+        {"reason": "no_verified_metric", "verified_claims": []},
+        ocr_validation,
+        0.69,
+    )
+
+    assert ocr_validation["loading_marker_count"] == 0
+    assert {claim["value"] for claim in merged["verified_claims"]} == {
+        "3,732.62亿",
+        "8,010.14",
+        "58,643",
+        "6,404.98",
+    }
+    assert {claim["label"] for claim in merged["verified_claims"]} == {
+        "Token总量",
+        "公共部署模型Token计费成本总计",
+        "独立部署GPU计费成本总计",
+        "商业模型Token计费成本总计",
+    }
+    assert merged["reason"] == "ocr_dom_label_matched"
+    assert merged["primary_channel"] == "screenshot_ocr"
+    assert all(
+        claim["evidence_origin"] == "screenshot_ocr_dom_label"
+        for claim in merged["verified_claims"]
+    )
+
+
+def test_canvas_dashboard_still_loading_is_not_promoted_by_ocr():
+    validation = CreationService._merge_canvas_ocr_validation(
+        {"reason": "no_verified_metric", "verified_claims": []},
+        {
+            "loading_marker_count": 2,
+            "verified_claims": [
+                {
+                    "claim_type": "metric",
+                    "label": "Token总量",
+                    "value": "31,608.43亿",
+                    "statement": "Token总量 31,608.43亿",
+                }
+            ],
+        },
+        0.68,
+    )
+
+    assert validation["verified_claims"] == []
+    assert validation["reason"] == "page_still_loading"
+
+
+def test_canvas_dashboard_accepts_only_locally_loaded_cards_on_partial_page():
+    validation = CreationService._merge_canvas_ocr_validation(
+        {"reason": "page_still_loading", "verified_claims": []},
+        {
+            "loading_marker_count": 3,
+            "verified_claims": [
+                {
+                    "claim_type": "metric",
+                    "label": "Token总量",
+                    "value": "31,608.43亿",
+                    "statement": "Token总量 31,608.43亿",
+                    "loading_marker_nearby": False,
+                },
+                {
+                    "claim_type": "metric",
+                    "label": "公共部署模型Token计费成本总计",
+                    "value": "222,111.32",
+                    "statement": "公共部署模型Token计费成本总计 222,111.32",
+                    "loading_marker_nearby": True,
+                },
+            ],
+        },
+        0.68,
+    )
+
+    assert validation["reason"] == "ocr_dom_label_matched_partial"
+    assert [claim["value"] for claim in validation["verified_claims"]] == [
+        "31,608.43亿"
+    ]
 
 
 def test_programmatic_validation_prefers_accessibility_and_matches_dom_claims():
@@ -867,6 +1063,7 @@ def test_verified_evidence_card_is_inserted_below_the_claim_block():
         "page_title": "GPU 实时看板",
         "captured_at": 1770000000000,
         "image_url": "/api/creation/evidence/evidence-1/image",
+        "display_image_url": "/api/creation/evidence/evidence-1/image?crop=10,20,600,280",
         "validation_status": "verified",
         "validation": {
             "verified_claims": [
@@ -880,7 +1077,79 @@ def test_verified_evidence_card_is_inserted_below_the_claim_block():
     assert len(applied) == 1
     assert updated.index("国内 GPU 利用率为 42%") < updated.index("![证据截图")
     assert updated.index("![证据截图") < updated.index("## 后续动作")
-    assert "/api/creation/evidence/evidence-1/image" in updated
+    assert "?crop=10,20,600,280" in updated
+    assert "查看原始全图" in updated
+
+
+def test_gpu_and_token_evidence_are_accumulated_across_skill_steps():
+    gpu = {
+        "id": "gpu-evidence",
+        "page_title": "GPU 算力看板",
+        "validation_status": "verified",
+    }
+    token = {
+        "id": "token-evidence",
+        "page_title": "LangBridge 模型中心运营看板",
+        "validation_status": "verified",
+    }
+
+    merged = CreationAgentLoop._merge_evidence_items([gpu], [token])
+
+    assert [item["id"] for item in merged] == ["gpu-evidence", "token-evidence"]
+
+
+def test_evidence_display_crop_focuses_on_verified_claim_region():
+    crop = CreationService._derive_evidence_display_crop(
+        {"structured_data": {}},
+        {"width": 1200, "height": 800},
+        {
+            "verified_claims": [
+                {
+                    "claim_type": "metric",
+                    "label": "国内 GPU 利用率",
+                    "value": "42%",
+                }
+            ]
+        },
+        [
+            SimpleNamespace(
+                text="国内 GPU 利用率 42%",
+                bbox=[[200, 300], [700, 300], [700, 400], [200, 400]],
+            )
+        ],
+    )
+
+    assert crop is not None
+    assert crop["x"] < 200
+    assert crop["y"] < 300
+    assert crop["width"] < 1200
+    assert crop["height"] < 800
+
+
+def test_generated_week_placeholder_is_corrected_and_metric_placeholder_removed():
+    document = (
+        "# 周报\n\n本周（2025年第X周）完成两项优化。\n\n"
+        "| 指标 | 数值 |\n| --- | --- |\n| 独立部署输入Token | 数据未明确区分 |\n"
+    )
+    requirement = {
+        "time_context": CreationService._relative_time_context(
+            "本周",
+            now=datetime.fromisoformat("2026-08-13T20:20:00+08:00"),
+        )
+    }
+
+    updated, audit = CreationAgentLoop._guard_generated_placeholders(
+        document,
+        requirement,
+    )
+
+    assert "2026年第33周（2026-08-10 至 2026-08-16）" in updated
+    assert "2025年第X周" not in updated
+    assert "数据未明确区分" not in updated
+    assert {item["kind"] for item in audit} == {
+        "relative_time_corrected",
+        "unsupported_placeholder_removed",
+    }
 
 
 def test_quality_gate_decision_uses_user_facing_summary():
@@ -1962,7 +2231,12 @@ async def test_skill_workflow_keeps_authored_three_step_order_and_materializes_o
         "build-metrics-table",
     ]
     assert len(service.data_queries) == 1
-    assert service.data_queries[0].startswith("当前数据检索步骤：GPU算力数据")
+    assert service.data_queries[0].startswith("当前步骤：GPU算力数据")
+    assert service.reference_queries[1].startswith("当前步骤：AIGC进度总结")
+    assert "AIGC 项目进度" in service.reference_queries[1]
+    assert service.reference_queries[1].endswith(
+        "整体创作背景：请使用@GPU成本优化周报创作法 创作下本周的周报"
+    )
     assert "电商GPU信息平台" in service.data_queries[0]
     assert "创作下本周的周报" not in service.data_queries[0]
 

@@ -666,9 +666,98 @@ impl StorageManager {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| right.collected_at.cmp(&left.collected_at))
         });
+        results = deduplicate_logical_report_sources(results);
         results.truncate(limit.clamp(1, 50));
         Ok(results)
     }
+}
+
+fn deduplicate_logical_report_sources(results: Vec<DataSearchResult>) -> Vec<DataSearchResult> {
+    let mut deduplicated = Vec::with_capacity(results.len());
+    let mut report_indexes = HashMap::new();
+    for result in results {
+        let identity = if result.source_kind == "report_url" {
+            result
+                .source_url
+                .as_deref()
+                .and_then(logical_report_identity)
+        } else {
+            None
+        };
+        let Some(identity) = identity else {
+            deduplicated.push(result);
+            continue;
+        };
+        if let Some(index) = report_indexes.get(&identity).copied() {
+            if report_variant_preference(&result) > report_variant_preference(&deduplicated[index])
+            {
+                deduplicated[index] = result;
+            }
+            continue;
+        }
+        report_indexes.insert(identity, deduplicated.len());
+        deduplicated.push(result);
+    }
+    deduplicated
+}
+
+fn logical_report_identity(raw: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(raw.trim()).ok()?;
+    let mut dashboard_id = None;
+    let mut sheet_id = None;
+    for (key, value) in parsed.query_pairs() {
+        if key.eq_ignore_ascii_case("dashboardId") {
+            dashboard_id = Some(value.into_owned());
+        } else if key.eq_ignore_ascii_case("sheetId") {
+            sheet_id = Some(value.into_owned());
+        }
+    }
+    let dashboard_id = dashboard_id?;
+    let host = parsed.host_str()?.to_lowercase();
+    let port = parsed
+        .port()
+        .map(|value| format!(":{value}"))
+        .unwrap_or_default();
+    Some(format!(
+        "{}://{}{}|dashboard:{}|sheet:{}",
+        parsed.scheme().to_lowercase(),
+        host,
+        port,
+        dashboard_id,
+        sheet_id.unwrap_or_default()
+    ))
+}
+
+fn report_variant_preference(result: &DataSearchResult) -> i32 {
+    let Some(url) = result
+        .source_url
+        .as_deref()
+        .and_then(|value| reqwest::Url::parse(value).ok())
+    else {
+        return 0;
+    };
+    let path = url.path().to_lowercase();
+    let query_keys = url
+        .query_pairs()
+        .map(|(key, _)| key.to_lowercase())
+        .collect::<HashSet<_>>();
+    let mut score = 0;
+    if path.contains("/preview") {
+        score += 40;
+    }
+    if path.contains("/edit") {
+        score -= 40;
+    }
+    if query_keys.contains("tabids") {
+        score += 20;
+    }
+    if !query_keys.contains("filterconfig") {
+        score += 8;
+    }
+    if !query_keys.contains("insight-chart") {
+        score += 4;
+    }
+    score
 }
 
 fn load_snapshot_histories(
@@ -1974,6 +2063,12 @@ fn is_presentable_data_source(source: &DataSourceRecord) -> bool {
     let Some(snapshot) = source.latest_snapshot.as_ref() else {
         return false;
     };
+    // report_url 是后续实时刷新的入口，不是只有历史快照含结构化指标时才
+    // 存在的数据事实。上次刷新处于加载中或证据未通过时仍必须保留入口，
+    // 否则一次失败会让看板永久退出 data_search，无法在下一轮自动重试。
+    if source.source_kind == "report_url" {
+        return true;
+    }
     snapshot
         .structured_data
         .get("metric_rows")
@@ -8224,6 +8319,95 @@ mod tests {
             Some("https://bi.example.com/report?team=a#chart")
         );
         assert!(canonical_data_url("file:///tmp/report.html").is_none());
+    }
+
+    #[test]
+    fn search_collapses_url_variants_of_the_same_logical_dashboard() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    r#"
+                    INSERT INTO data_sources (
+                        id, canonical_key, title, source_kind, source_url, access_mode,
+                        refresh_policy, realtime_level, tags, first_seen_at, last_seen_at,
+                        status, created_at, updated_at
+                    ) VALUES
+                        (1, 'report:edit', 'LangBridge模型中心运营看板', 'report_url',
+                         'https://bi.example.com/pc/dashboard/edit?dashboardId=2119187&sheetId=285011',
+                         'browser_session', 'on_demand', 'live', '[]', 1, 5, 'active', 1, 1),
+                        (2, 'report:tab', 'LangBridge模型中心运营看板', 'report_url',
+                         'https://bi.example.com/pc/dashboard/preview?dashboardId=2119187&sheetId=285011&tabIds=904433',
+                         'browser_session', 'on_demand', 'live', '[]', 1, 4, 'active', 1, 1),
+                        (3, 'report:chart', 'LangBridge模型中心运营看板', 'report_url',
+                         'https://bi.example.com/pc/dashboard/preview?dashboardId=2119187&sheetId=285011&tabIds=904433&filterConfig=50106995&insight-chart=8933627',
+                         'browser_session', 'on_demand', 'live', '[]', 1, 3, 'active', 1, 1),
+                        (4, 'report:filter', 'LangBridge模型中心运营看板', 'report_url',
+                         'https://bi.example.com/pc/dashboard/preview?dashboardId=2119187&sheetId=285011&filterConfig=50106962',
+                         'browser_session', 'on_demand', 'live', '[]', 1, 2, 'active', 1, 1);
+                    "#,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let results = storage
+            .search_data_sources("LangBridge模型中心运营看板", true, 1_700_000_000_000, 10)
+            .unwrap();
+        let reports = results
+            .iter()
+            .filter(|item| item.source_kind == "report_url")
+            .collect::<Vec<_>>();
+
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].source_id, 2);
+        assert!(reports[0]
+            .source_url
+            .as_deref()
+            .unwrap_or_default()
+            .contains("tabIds=904433"));
+    }
+
+    #[test]
+    fn report_with_rejected_metric_snapshot_remains_refreshable_in_search() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    r#"
+                    INSERT INTO data_sources (
+                        id, canonical_key, title, source_kind, source_url, access_mode,
+                        refresh_policy, realtime_level, tags, first_seen_at, last_seen_at,
+                        status, created_at, updated_at
+                    ) VALUES (
+                        1, 'report:langbridge', 'LangBridge模型中心运营看板', 'report_url',
+                        'https://bi.example.com/dashboard/preview?dashboardId=1&sheetId=2',
+                        'browser_session', 'on_demand', 'live', '[]', 1, 1,
+                        'active', 1, 1
+                    );
+                    INSERT INTO data_snapshots (
+                        source_id, collected_at, observed_at, collector, content_text,
+                        structured_data, content_hash, freshness_ttl_seconds, provenance,
+                        source_capture_ids, source_timeline_ids, status, created_at
+                    ) VALUES (
+                        1, 10, 10, 'browser_attach', 'LangBridge模型中心运营看板 加载中...',
+                        '{"metric_rows":[],"rejection_reason":"no_semantic_metric"}',
+                        'loading', 0, '{}', '[]', '[]', 'success', 10
+                    );
+                    "#,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let results = storage
+            .search_data_sources("LangBridge模型中心运营看板", true, 1_700_000_000_000, 10)
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].source_id, 1);
+        assert!(results[0].refresh_required);
+        assert!(!results[0].can_use);
     }
 
     #[test]

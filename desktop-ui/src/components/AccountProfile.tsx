@@ -57,6 +57,7 @@ import {
   type SyncWorkProfileEventDetail,
 } from '../utils/workProfileCloud'
 import MessagePanel from './MessagePanel'
+import AccountContactBindings from './AccountContactBindings'
 import { useAppStore } from '../store/useAppStore'
 import './AccountProfile.css'
 
@@ -851,6 +852,13 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
                   {balanceError && <small role="alert">{balanceError}</small>}
                 </div>
               </dl>
+
+              <AccountContactBindings
+                adminApiBaseUrl={adminApiBaseUrl}
+                authToken={authToken}
+                onUserChange={onUserChange}
+                user={user}
+              />
 
               <div className="account-profile__logout-area">
                 <button

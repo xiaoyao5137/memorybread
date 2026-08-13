@@ -408,6 +408,21 @@ class CreationAgentLoop:
         ]
         quality_warnings = [*hard_failures, *soft_warnings]
         document = str(state.environment.get("document") or state.current_document)
+        document, placeholder_audit = self._guard_generated_placeholders(
+            document,
+            state.environment.get("requirement", {}),
+        )
+        if placeholder_audit:
+            state.environment["document"] = document
+            state.current_document = document
+            state.environment["placeholder_audit"] = placeholder_audit
+            yield self._event(
+                state,
+                "document.placeholders.validated",
+                f"已校正或移除 {len(placeholder_audit)} 处错误时间/无数据占位内容",
+                status="completed",
+                data={"content": document, "audit": placeholder_audit},
+            )
         document, citation_audit = self._guard_data_citations(
             document,
             [
@@ -958,7 +973,10 @@ class CreationAgentLoop:
 
         results = [
             item
-            for item in state.environment.get("data_results", [])
+            for item in (
+                state.environment.get("current_data_results")
+                or state.environment.get("data_results", [])
+            )
             if isinstance(item, dict)
         ]
         refreshable_count = sum(
@@ -1742,18 +1760,36 @@ class CreationAgentLoop:
 
         if action == "memory_search":
             options = CreationOptions(**state.options)
-            requirement = state.environment["requirement"]
+            query = self._step_context_query(state, step)
+            # Skill 步骤目标必须重新进入需求解析；根请求画像只适合路由，不能
+            # 继续支配“AIGC 共建项目”等步骤级检索对象。
+            requirement = self.service.analyze_requirement(query, options)
             references = self.service.retrieve_references(
-                self._step_context_query(state, step),
+                query,
                 requirement,
                 options,
             )
-            state.environment["references"] = [self._reference_to_state(item) for item in references]
-            state.environment["reference_summaries"] = [
+            batch_references = [
+                {
+                    **self._reference_to_state(item),
+                    "retrieval_query": query,
+                    "skill_step_id": step.get("skill_step_id"),
+                    "skill_step_title": step.get("skill_step_title"),
+                }
+                for item in references
+            ]
+            state.environment["references"] = self._merge_reference_states(
+                list(state.environment.get("references") or []),
+                batch_references,
+                limit=30,
+            )
+            batch_summaries = [
                 {
                     "id": item.id,
                     "title": item.title,
                     "doc_type": item.doc_type,
+                    "source_type": item.source_type,
+                    "source_id": item.source_id,
                     "reason": item.reason,
                     "final_weight": round(item.final_weight, 4),
                     "relevance_score": round(item.relevance_score, 4),
@@ -1765,15 +1801,30 @@ class CreationAgentLoop:
                     "usage_count": item.usage_count,
                     "summary": self.service._clip(item.summary, 600),
                     "source_url": item.source_url,
+                    "observed_at": item.observed_at,
+                    "skill_step_id": step.get("skill_step_id"),
+                    "skill_step_title": step.get("skill_step_title"),
                 }
                 for item in references
             ]
+            state.environment["reference_summaries"] = self._merge_reference_states(
+                list(state.environment.get("reference_summaries") or []),
+                batch_summaries,
+                limit=30,
+            )
+            source_counts: dict[str, int] = {}
+            for item in references:
+                source_counts[item.source_type] = source_counts.get(item.source_type, 0) + 1
             state.environment.setdefault("tool_results", []).append(
                 {
                     "tool_id": MEMORY_SEARCH_TOOL_ID,
                     "status": "completed",
                     "result_count": len(references),
                     "result_limit": options.max_references,
+                    "source_counts": source_counts,
+                    "query": query,
+                    "keywords": requirement.get("keywords", []),
+                    "time_context": requirement.get("time_context", {}),
                 }
             )
             self._update_goal(state)
@@ -1787,6 +1838,9 @@ class CreationAgentLoop:
                 data={
                     "result_count": len(references),
                     "result_limit": options.max_references,
+                    "source_counts": source_counts,
+                    "query": query,
+                    "keywords": requirement.get("keywords", []),
                 },
             )
             return
@@ -1821,13 +1875,22 @@ class CreationAgentLoop:
             return
 
         if action == DATA_SEARCH_TOOL_ID:
+            query = self._step_context_query(state, step)
+            step_requirement = self.service.analyze_requirement(
+                query,
+                CreationOptions(**state.options),
+            )
             results = await self.service.retrieve_data_context(
-                self._step_context_query(state, step),
-                state.environment["requirement"],
+                query,
+                step_requirement,
                 limit=int(state.options.get("data_search_limit") or 30),
             )
             self._enforce_report_evidence_policy(results)
-            state.environment["data_results"] = results
+            state.environment["current_data_results"] = results
+            state.environment["data_results"] = self._merge_data_results(
+                list(state.environment.get("data_results") or []),
+                results,
+            )
             self._apply_data_freshness_to_references(state, results)
             refresh_count = sum(
                 1 for item in results if item.get("refresh_required") is True
@@ -1841,6 +1904,8 @@ class CreationAgentLoop:
                         state.options.get("data_search_limit") or 30
                     ),
                     "refresh_required_count": refresh_count,
+                    "query": query,
+                    "time_context": step_requirement.get("time_context", {}),
                 }
             )
             self._update_goal(state)
@@ -1897,7 +1962,11 @@ class CreationAgentLoop:
             )
             preview_sources = [
                 item
-                for item in list(state.environment.get("data_results") or [])
+                for item in list(
+                    state.environment.get("current_data_results")
+                    or state.environment.get("data_results")
+                    or []
+                )
                 if item.get("source_kind") == "report_url"
                 and item.get("source_url")
                 and item.get("source_id") is not None
@@ -1923,9 +1992,16 @@ class CreationAgentLoop:
                     data={"previews": previews},
                 )
             outcome = await self.service.scrape_data_context(
-                list(state.environment.get("data_results") or []),
+                list(
+                    state.environment.get("current_data_results")
+                    or state.environment.get("data_results")
+                    or []
+                ),
                 self._step_context_query(state, step),
-                state.environment["requirement"],
+                self.service.analyze_requirement(
+                    self._step_context_query(state, step),
+                    CreationOptions(**state.options),
+                ),
                 run_id=state.run_id,
                 session_id=state.session_id,
                 preview_ids={
@@ -1937,9 +2013,16 @@ class CreationAgentLoop:
             scrapes = list(outcome.get("scrapes") or [])
             refreshed = list(outcome.get("refreshed_data") or [])
             self._enforce_report_evidence_policy(refreshed)
-            state.environment["webpage_scrapes"] = scrapes
-            state.environment["data_results"] = refreshed
-            state.environment["creation_evidence"] = [
+            state.environment["webpage_scrapes"] = [
+                *list(state.environment.get("webpage_scrapes") or []),
+                *scrapes,
+            ]
+            state.environment["current_data_results"] = refreshed
+            state.environment["data_results"] = self._merge_data_results(
+                list(state.environment.get("data_results") or []),
+                refreshed,
+            )
+            new_evidence = [
                 item["evidence"]
                 for item in scrapes
                 if item.get("status") == "completed"
@@ -1947,12 +2030,21 @@ class CreationAgentLoop:
                 and item["evidence"].get("validation_status") == "verified"
                 and item["evidence"].get("image_url")
             ]
+            state.environment["creation_evidence"] = self._merge_evidence_items(
+                list(state.environment.get("creation_evidence") or []),
+                new_evidence,
+            )
             self._apply_data_freshness_to_references(state, refreshed)
             completed_count = sum(
                 1 for item in scrapes if item.get("status") == "completed"
             )
             failed_count = sum(
                 1 for item in scrapes if item.get("status") in {"failed", "rejected"}
+            )
+            loading_timeout_count = sum(
+                1
+                for item in scrapes
+                if item.get("validation_reason") == "page_still_loading"
             )
             scrape_summaries = [
                 {
@@ -1983,11 +2075,16 @@ class CreationAgentLoop:
                 evidence_suffix = "，并保留网页截图" if retain_screenshot else ""
                 summary = (
                     f"浏览器访问 {len(scrapes)} 个报表，"
-                    f"{completed_count} 个来源通过 AX/DOM 结构校验{evidence_suffix}"
+                    f"{completed_count} 个来源通过页面结构与截图交叉校验{evidence_suffix}"
+                )
+            elif loading_timeout_count:
+                summary = (
+                    f"浏览器访问 {len(scrapes)} 个报表，其中 {loading_timeout_count} 个"
+                    "达到等待上限后仍在加载；本轮不把未完成渲染的数值当作当前事实"
                 )
             elif scrapes:
                 summary = (
-                    f"浏览器访问 {len(scrapes)} 个报表，但没有指标通过 AX/DOM 结构校验，"
+                    f"浏览器访问 {len(scrapes)} 个报表，但没有指标通过页面结构与截图交叉校验，"
                     "本轮不采用这些页面的数值"
                 )
             else:
@@ -2606,6 +2703,76 @@ class CreationAgentLoop:
                 if cell and marker.fullmatch(cell):
                     count += 1
         return count
+
+    @staticmethod
+    def _guard_generated_placeholders(
+        document: str,
+        requirement: dict[str, Any],
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """阻止模型把错误周次或无数据占位文案写进最终交付物。"""
+        if not document.strip():
+            return document, []
+        audit: list[dict[str, Any]] = []
+        result = document
+        time_context = (
+            requirement.get("time_context", {})
+            if isinstance(requirement, dict)
+            else {}
+        )
+        if time_context.get("period_kind") in {"current_week", "previous_week"}:
+            display = str(time_context.get("display") or "").strip()
+            iso_year = int(time_context.get("iso_year") or 0)
+            iso_week = int(time_context.get("iso_week") or 0)
+            if display and iso_year > 0 and iso_week > 0:
+                patterns = (
+                    r"本周[（(]\s*20\d{2}\s*年第\s*(?:[Xx?？]+|\d+)\s*周\s*[）)]",
+                    r"20\d{2}\s*年第\s*[Xx?？]+\s*周",
+                )
+                replacement_values = (f"本周（{display}）", display)
+                for pattern, replacement in zip(patterns, replacement_values):
+                    updated, count = re.subn(pattern, replacement, result)
+                    if count:
+                        audit.append(
+                            {
+                                "kind": "relative_time_corrected",
+                                "count": count,
+                                "replacement": replacement,
+                            }
+                        )
+                        result = updated
+
+        removed_lines: list[str] = []
+        kept_lines: list[str] = []
+        for line in result.splitlines():
+            normalized = "".join(line.split())
+            is_metric_placeholder = (
+                "数据未明确区分" in normalized
+                or "数据未明确" in normalized
+                or "数据未获取" in normalized
+                or "未获取到数据" in normalized
+                or "指标未获取" in normalized
+            )
+            is_empty_progress_placeholder = bool(
+                re.search(
+                    r"(?:本周暂无(?:相关|明确)?(?:会议记录|进展记录|进展)|"
+                    r"未检索到本周.*(?:会议纪要|进展))",
+                    normalized,
+                )
+            )
+            if is_metric_placeholder or is_empty_progress_placeholder:
+                removed_lines.append(line)
+                continue
+            kept_lines.append(line)
+        if removed_lines:
+            audit.append(
+                {
+                    "kind": "unsupported_placeholder_removed",
+                    "count": len(removed_lines),
+                }
+            )
+            result = "\n".join(kept_lines)
+            result = re.sub(r"\n{3,}", "\n\n", result).strip() + "\n"
+        return result, audit
 
     @staticmethod
     def _quality_issue(
@@ -3473,7 +3640,7 @@ class CreationAgentLoop:
 章节设计 Agent 已给出章节蓝图时，以蓝图作为初稿骨架；信息缺乏支持时省略无法确认的内容，不能用套话把章节撑满。
 对于已安装的技能，优先复刻 title_design_style 中的子标题句式、writing_design 中的行文推进、voice_style 中的惯用话术和 image_generation 中的代码生图方式；field_examples 只用于学习写法，不得照抄主题或事实。示例文档不会进入运行时事实环境。不要把这些鲜明特征稀释成通用公文。
 除非用户要求或当前 Skill execution_steps 的目标/产出明确要求分析证据状态，否则不要输出“证据不足”“证据缺口”“证据完备”“待核验说明”等元说明。
-要求：保留可验证事实；不编造政策编号、指标或来源；对外部信息给出链接；数据、文档、知识、操作和互联网线索是平权证据，不因所属模块获得额外优先级，按相关性、可靠性、时效和口径适配度取舍；使用数据时写明统计周期和采集时间，`can_use=false` 或陈旧快照不得写成当前结论；数据来源名称、URL 与采集时间只能逐字取自同一条可用数据结果，不能根据相邻参考资料猜测或拼接，页面筛选日期只能写成统计周期，不能冒充浏览器采集时间；无法确认归属时省略相关事实与“数据来源”行；环境包含 PlantUML 画图约束时必须输出对应的 ```plantuml 代码块，否则技术关系优先使用 Mermaid；只输出文档正文。"""
+要求：保留可验证事实；不编造政策编号、指标或来源；对外部信息给出链接；数据、文档、知识、操作和互联网线索是平权证据，不因所属模块获得额外优先级，按相关性、可靠性、时效和口径适配度取舍；“本周/今日”等相对时间只能使用环境给出的确定日期、年份和周次，禁止输出“第X周”等占位符；使用数据时写明统计周期和采集时间，`can_use=false` 或陈旧快照不得写成当前结论；数据来源名称、URL 与采集时间只能逐字取自同一条可用数据结果，不能根据相邻参考资料猜测或拼接，页面筛选日期只能写成统计周期，不能冒充浏览器采集时间；无法确认归属时省略相关事实与“数据来源”行；缺失指标直接省略，不得写“数据未明确区分”等占位值；环境包含 PlantUML 画图约束时必须输出对应的 ```plantuml 代码块，否则技术关系优先使用 Mermaid；只输出文档正文。"""
             if state.mode == "revision":
                 intent = state.environment.get("edit_intent", {})
                 targets = [str(item) for item in intent.get("target_sections", [])]
@@ -3511,11 +3678,12 @@ class CreationAgentLoop:
 当前步骤声明的 Tool 已由 Harness 在你开始处理前执行。objective 中“用 @某 Tool 获取”表示直接消费当前环境中的“Tool 执行回执”及对应结果，不是要求你再次调用 Tool；不得声称工具列表缺少接口、自己无法调用 Tool，或要求后续再调用已经执行完成的 Tool。
 只使用当前环境中已有的 Tool 结果、上一步产出和用户材料，按照当前步骤的 objective 形成明确中间产物；预期产出为空时，根据步骤标题和目标给出最适合后续拼接的结构。
 结果必须可直接交给下一个 Skill 步骤或最终文档撰写 Agent：保留有依据的事实、数字、来源和时间口径，不得把不同来源的名称、时间与数值混拼，不得补造信息。
+“本周/今日”等相对时间必须逐字服从环境中的当前确定时间；禁止输出“第X周”等占位符。缺失的指标或进展直接省略，不得写“数据未明确区分”“暂无明确进展”等占位内容。
 除非用户要求或当前 Skill 步骤的 objective/output 明确要求分析证据状态，否则不要输出“证据不足”“证据缺口”“证据完备”“待核验说明”等元说明；结果无法支持某项事实时，直接省略该事实，只保留有依据的内容。
 只输出本步骤产出正文，不输出思考过程、JSON、完整成稿或与本步骤无关的章节。"""
         else:
             role_instructions = {
-                "data_analysis_agent": "优先使用网页实时采集后且已通过 AX 或 DOM 结构化校验的数据；截图与 OCR 只用于补充留证，不得作为结构化网页数据可用性的唯一门槛。其次使用数据检索中 can_use=true 的工作记忆。需要趋势、环比或历史比较时，必须读取同一结果的 history，并按 period_key/period_start_at/period_end_at 对齐阶段；同一自然周内的数据视为一个阶段，不同阶段不得覆盖或混写。每个数字都要与同一结果中的 source_id、title、source_url、collected_at/observed_at 绑定；页面筛选日期是统计周期，不是采集时间。不同来源、周期或口径不得擅自拼接。工作记忆只能按 observed_at 加权，陈旧数据必须标注。禁止编造数字或来源，只输出有支持的‘结论—指标—统计阶段—采集时间—来源’，不主动生成证据缺口或待核验说明。",
+                "data_analysis_agent": "优先使用网页实时采集后且已通过 AX 或 DOM 结构化校验的数据；截图与 OCR 只用于补充留证，不得作为结构化网页数据可用性的唯一门槛。其次使用数据检索中 can_use=true 的工作记忆。目标列出多个指标时逐项消费已校验成功的值：可用几项就展示几项，不因其他指标缺失拒绝整个来源，也不为缺失项生成占位行。需要趋势、环比或历史比较时，必须读取同一结果的 history，并按 period_key/period_start_at/period_end_at 对齐阶段；同一自然周内的数据视为一个阶段，不同阶段不得覆盖或混写。每个数字都要与同一结果中的 source_id、title、source_url、collected_at/observed_at 绑定；页面筛选日期是统计周期，不是采集时间。不同来源、周期或口径不得擅自拼接。工作记忆只能按 observed_at 加权，陈旧数据必须标注。禁止编造数字或来源，只输出有支持的‘结论—指标—统计阶段—采集时间—来源’，不主动生成证据缺口或待核验说明。",
                 "industry_research_agent": "综合互联网检索结果，只提炼有来源支持的行业现状、趋势与约束，每条外部结论保留来源 URL；省略无法确认的事实，不主动生成证据缺口或待核验说明。",
                 "solution_design_agent": "围绕目标、约束和证据设计可落地方案，明确边界、关键决策、组件关系、实施步骤、风险和验证方式。",
                 "chapter_design_agent": "先设计章节，再交给文档撰写 Agent。结合目标、读者、文档类型、证据和 Skill，输出有顺序的章节蓝图；每章写明目的、要回答的问题、可用证据、建议表达形式和完成标准。章节必须互斥且共同覆盖目标，不写正文，不补造事实。",
@@ -3557,21 +3725,36 @@ class CreationAgentLoop:
             for item in step.get("skill_step_skills", [])
             if str(item).strip()
         ]
-        if str(step.get("id") or "") == DATA_SEARCH_TOOL_ID:
+        step_specific_query = "\n".join(
+            item
+            for item in (
+                f"当前步骤：{step_title}" if step_title else "",
+                objective,
+                f"需要产出：{output}" if output else "",
+                f"协同 Skill：{'、'.join(skills)}" if skills else "",
+            )
+            if item
+        )
+        step_id = str(step.get("id") or "")
+        if (
+            step.get("skill_step_id")
+            and step_id in {MEMORY_SEARCH_TOOL_ID, DATA_SEARCH_TOOL_ID}
+            and step_specific_query
+        ):
+            # Tool 的首要检索对象来自 execution_steps，而非“使用 @某 Skill”
+            # 这类根请求包装。记忆检索可把根请求放到末尾补充语境；数据检索
+            # 必须完全隔离其他步骤主题，避免报表 Top-K 再次被周报名称稀释。
+            context_query = (
+                "\n".join(
+                    [step_specific_query, f"整体创作背景：{context_query}"]
+                )
+                if step_id == MEMORY_SEARCH_TOOL_ID
+                else step_specific_query
+            )
+        if step_id == DATA_SEARCH_TOOL_ID:
             # Skill 内的数据检索必须服从当前步骤自己的目标。若把整篇创作请求
             # 混在检索词最前面，周报名称和其他步骤主题会稀释明确的数据对象，
             # 使 Skill 指定的数据反而掉出 Top-K。
-            if step.get("skill_step_id") and (step_title or objective or output):
-                context_query = "\n".join(
-                    item
-                    for item in (
-                        f"当前数据检索步骤：{step_title}" if step_title else "",
-                        objective,
-                        f"需要产出：{output}" if output else "",
-                        f"协同 Skill：{'、'.join(skills)}" if skills else "",
-                    )
-                    if item
-                )
             # data_search 位于 memory_search 之后时，优先带上已经命中的报表标题。
             # 这样“GPU 利用率治理”既能召回旧资料，也能把其中引用的运营看板
             # 解析成需要即时刷新的数据源。
@@ -3606,6 +3789,8 @@ class CreationAgentLoop:
                 context_query = "\n".join([*report_titles, context_query])
             if step.get("skill_step_id"):
                 return context_query
+        if step_id == MEMORY_SEARCH_TOOL_ID and step.get("skill_step_id"):
+            return context_query
         if not objective and not output and not skills:
             return context_query
         return "\n".join(
@@ -3920,8 +4105,11 @@ class CreationAgentLoop:
         for evidence in evidence_items:
             if evidence.get("validation_status") != "verified":
                 continue
-            image_url = str(evidence.get("image_url") or "").strip()
-            if not image_url or image_url in document:
+            original_image_url = str(evidence.get("image_url") or "").strip()
+            image_url = str(
+                evidence.get("display_image_url") or original_image_url
+            ).strip()
+            if not image_url or image_url in document or original_image_url in document:
                 continue
             validation = evidence.get("validation") or {}
             claims = validation.get("verified_claims") or []
@@ -3973,10 +4161,15 @@ class CreationAgentLoop:
                 else "创作时"
             )
             source_markdown = f"[{title}](<{source_url}>)" if source_url else title
+            original_link = (
+                f" · [查看原始全图](<{original_image_url}>)"
+                if original_image_url and image_url != original_image_url
+                else ""
+            )
             card = (
                 f"\n\n![证据截图：{title}]({image_url})\n\n"
                 f"> 证据截图 · 来源：{source_markdown} · 采集于 {captured_label} · "
-                "页面数据与截图文字已通过一致性校验"
+                f"页面数据与截图文字已通过一致性校验{original_link}"
             )
             blocks[matched_index] = f"{blocks[matched_index].rstrip()}{card}"
             applied.append(evidence)
@@ -4002,7 +4195,14 @@ class CreationAgentLoop:
         return tokens[:24]
 
     def _prompt_environment(self, state: LoopState) -> str:
+        requirement = state.environment.get("requirement", {})
+        time_context = (
+            requirement.get("time_context", {})
+            if isinstance(requirement, dict)
+            else {}
+        )
         blocks = [
+            f"当前确定时间（本机时区，禁止自行猜测）：{time_context}",
             f"原始需求：{state.root_request}",
             f"本轮编辑意图：{state.environment.get('edit_intent', {})}",
             f"任务画像：{state.environment.get('requirement', {})}",
@@ -4068,6 +4268,8 @@ class CreationAgentLoop:
     def _reference_to_state(self, item: ReferenceDocument) -> dict[str, Any]:
         return {
             "id": item.id,
+            "source_id": item.source_id,
+            "source_type": item.source_type,
             "title": item.title,
             "doc_type": item.doc_type,
             "summary": self.service._clip(item.summary, 600),
@@ -4077,7 +4279,94 @@ class CreationAgentLoop:
             "reason": item.reason,
             "final_weight": round(item.final_weight, 4),
             "source_url": item.source_url,
+            "observed_at": item.observed_at,
         }
+
+    @staticmethod
+    def _merge_reference_states(
+        existing: list[dict[str, Any]],
+        incoming: list[dict[str, Any]],
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        positions: dict[str, int] = {}
+        for raw in [*existing, *incoming]:
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            source_type = str(item.get("source_type") or "document")
+            source_id = item.get("source_id")
+            if source_id is None:
+                source_id = item.get("id")
+            key = f"{source_type}:{source_id}"
+            position = positions.get(key)
+            if position is None:
+                positions[key] = len(merged)
+                item["matched_skill_steps"] = [
+                    str(item.get("skill_step_id"))
+                ] if item.get("skill_step_id") else []
+                merged.append(item)
+                continue
+            current = merged[position]
+            step_id = str(item.get("skill_step_id") or "").strip()
+            matched_steps = list(current.get("matched_skill_steps") or [])
+            if step_id and step_id not in matched_steps:
+                matched_steps.append(step_id)
+            current["matched_skill_steps"] = matched_steps
+            if float(item.get("final_weight") or 0) > float(
+                current.get("final_weight") or 0
+            ):
+                preserved_steps = current["matched_skill_steps"]
+                merged[position] = {**item, "matched_skill_steps": preserved_steps}
+        return merged[: max(1, limit)]
+
+    @staticmethod
+    def _merge_data_results(
+        existing: list[dict[str, Any]],
+        incoming: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        positions: dict[str, int] = {}
+        for raw in [*existing, *incoming]:
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            source_id = item.get("source_id")
+            key = (
+                f"source:{source_id}"
+                if source_id is not None
+                else f"url:{str(item.get('source_url') or '').strip()}"
+            )
+            position = positions.get(key)
+            if position is None:
+                positions[key] = len(merged)
+                merged.append(item)
+            else:
+                merged[position] = {**merged[position], **item}
+        return merged[:100]
+
+    @staticmethod
+    def _merge_evidence_items(
+        existing: list[dict[str, Any]],
+        incoming: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        positions: dict[str, int] = {}
+        for raw in [*existing, *incoming]:
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            evidence_id = str(item.get("id") or "").strip()
+            if not evidence_id:
+                continue
+            position = positions.get(evidence_id)
+            if position is None:
+                positions[evidence_id] = len(merged)
+                merged.append(item)
+            else:
+                merged[position] = {**merged[position], **item}
+        return merged[:50]
 
     def _needs_confirmation(self, state: LoopState) -> bool:
         compact = "".join(state.user_message.split())

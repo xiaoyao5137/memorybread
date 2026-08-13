@@ -12,9 +12,10 @@ import sqlite3
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import AsyncIterator, Iterable, Optional
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse
 from uuid import uuid4
 
 import httpx
@@ -36,6 +37,8 @@ logger = logging.getLogger(__name__)
 ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
 CORE_ENGINE_DEFAULT_BASE_URL = "http://127.0.0.1:7070"
 MAX_REPORT_REFRESH_SOURCES = 5
+REPORT_REFRESH_HTTP_TIMEOUT_SECONDS = 140.0
+MIN_CANVAS_OCR_CONFIDENCE = 0.60
 
 CREATION_SKILL_ANALYSIS_SCHEMA = {
     "type": "object",
@@ -223,6 +226,9 @@ class ReferenceDocument:
     freshness_score: float
     final_weight: float
     reason: str
+    source_type: str = "document"
+    source_id: Optional[int] = None
+    observed_at: Optional[int] = None
 
 
 @dataclass
@@ -326,20 +332,34 @@ class CreationService:
         retain_screenshot: bool = True,
     ) -> dict:
         """刷新 Top-K 报表源，以 AX/DOM 校验数据并按需保留截图证据。"""
-        report_sources = [
+        report_sources = self._select_canonical_report_sources([
             item
             for item in data_results
             if item.get("source_kind") == "report_url"
             and item.get("source_url")
             and item.get("source_id") is not None
-        ][: max(1, min(int(limit), MAX_REPORT_REFRESH_SOURCES))]
+        ])[: max(1, min(int(limit), MAX_REPORT_REFRESH_SOURCES))]
         if not report_sources:
             return {"scrapes": [], "refreshed_data": data_results}
+
+        requested_metrics = self._extract_requested_metrics(query)
+        time_context = parsed_requirement.get("time_context") or {}
+        expected_period = (
+            {
+                "start": str(time_context.get("period_start") or ""),
+                "end": str(time_context.get("period_end") or ""),
+                "display": str(time_context.get("display") or ""),
+            }
+            if time_context.get("has_relative_time")
+            else {}
+        )
 
         scrapes: list[dict] = []
         payload_by_source: dict[int, dict] = {}
         evidence_by_source: dict[int, dict] = {}
-        async with httpx.AsyncClient(timeout=45.0) as client:
+        async with httpx.AsyncClient(
+            timeout=REPORT_REFRESH_HTTP_TIMEOUT_SECONDS
+        ) as client:
             for item in report_sources:
                 source_id = int(item["source_id"])
                 preview_id = str((preview_ids or {}).get(source_id) or uuid4())
@@ -354,6 +374,10 @@ class CreationService:
                             "run_id": run_id,
                             "session_id": session_id,
                             "preview_id": preview_id,
+                            "objective": query,
+                            "requested_metrics": requested_metrics,
+                            "expected_period_start": expected_period.get("start"),
+                            "expected_period_end": expected_period.get("end"),
                         },
                     )
                     if response.is_success:
@@ -363,6 +387,8 @@ class CreationService:
                             client,
                             payload,
                             require_metric=True,
+                            required_metrics=requested_metrics,
+                            expected_period=expected_period,
                         )
                         evidence_by_source[source_id] = evidence
                         verified_claims = (
@@ -429,6 +455,97 @@ class CreationService:
             {int(item["source_id"]) for item in report_sources},
         )
         return {"scrapes": scrapes, "refreshed_data": refreshed}
+
+    @staticmethod
+    def _select_canonical_report_sources(items: list[dict]) -> list[dict]:
+        """同一 BI 看板优先只读 preview，避免把 edit 配置页当作数据页。"""
+        selected: list[dict] = []
+        positions: dict[str, int] = {}
+        for raw in items:
+            item = dict(raw)
+            url = str(item.get("source_url") or "").strip()
+            try:
+                parsed = urlparse(url)
+                query = parse_qs(parsed.query)
+            except ValueError:
+                parsed = urlparse("")
+                query = {}
+            dashboard_id = "".join(query.get("dashboardId", [])[:1])
+            sheet_id = "".join(query.get("sheetId", [])[:1])
+            key = (
+                f"{parsed.netloc.lower()}:{dashboard_id}:{sheet_id}"
+                if parsed.netloc and dashboard_id
+                else f"source:{item.get('source_id')}"
+            )
+            score = (
+                3
+                if "/preview" in parsed.path
+                else 0
+                if "/edit" in parsed.path
+                else 1
+            )
+            position = positions.get(key)
+            if position is None:
+                item["_report_page_score"] = score
+                positions[key] = len(selected)
+                selected.append(item)
+                continue
+            if score > int(selected[position].get("_report_page_score") or 0):
+                item["_report_page_score"] = score
+                selected[position] = item
+        return [
+            {key: value for key, value in item.items() if key != "_report_page_score"}
+            for item in selected
+            if "/edit" not in urlparse(str(item.get("source_url") or "")).path
+            or int(item.get("_report_page_score") or 0) > 0
+        ]
+
+    @staticmethod
+    def _extract_requested_metrics(query: str) -> list[str]:
+        """从步骤目标中通用地提取用户希望展示的指标。
+
+        指标列表是“定向选取”，不是“全部成功门禁”。这里只识别逗号、
+        顿号分隔的度量短语，不感知任何特定看板、Tab 或部署类型。
+        """
+        normalized = query.replace("Ｔ", "T")
+        metric_signal = re.compile(
+            r"(?:tokens?|gpu|qps|tps|tp\d+|ttft|算力|利用率|成本|收益|收入|"
+            r"用量|总量|数量|占比|费用|计费|额度|延迟|耗时|吞吐|并发|"
+            r"错误率|成功率|可用性|内存|显存|带宽|流量|使用率|命中率)",
+            re.IGNORECASE,
+        )
+        metrics: list[str] = []
+        for raw in re.split(r"[、,，;；\n]", normalized):
+            candidate = " ".join(raw.split()).strip()
+            if not candidate or not metric_signal.search(candidate):
+                continue
+            # 首个枚举项往往带有“在某页筛选本周的”语境，只保留最后
+            # 一个“的”之后的度量短语。
+            if "的" in candidate:
+                tail = candidate.rsplit("的", 1)[-1].strip()
+                if metric_signal.search(tail):
+                    candidate = tail
+            candidate = re.sub(
+                r"^(?:筛选)?(?:本周|这周|当前周)?(?:的)?",
+                "",
+                candidate,
+            )
+            candidate = re.sub(
+                r"(?:并)?(?:添加|写入|展示|输出|放入|纳入).*$",
+                "",
+                candidate,
+            ).strip(" ：:-")
+            if not candidate or len(candidate) > 80:
+                continue
+            candidate = re.sub(r"tokens?", "Token", candidate, flags=re.IGNORECASE)
+            if candidate not in metrics:
+                metrics.append(candidate)
+        return metrics[:24]
+
+    @staticmethod
+    def _extract_required_metrics(query: str) -> list[str]:
+        """兼容旧调用名；语义已改为可部分取得的 requested metrics。"""
+        return CreationService._extract_requested_metrics(query)
 
     @staticmethod
     def _merge_scrape_results(
@@ -527,6 +644,8 @@ class CreationService:
         scrape_payload: dict,
         *,
         require_metric: bool = False,
+        required_metrics: Optional[list[str]] = None,
+        expected_period: Optional[dict] = None,
     ) -> dict:
         validation = self._compare_scrape_programmatic_channels(scrape_payload)
         if require_metric:
@@ -539,13 +658,31 @@ class CreationService:
             ]
             validation["verified_claims"] = metric_claims
             if not metric_claims:
-                validation["reason"] = "no_verified_metric"
+                structured = scrape_payload.get("structured_data") or {}
+                page_state = (
+                    structured.get("page_state", {})
+                    if isinstance(structured, dict)
+                    else {}
+                )
+                validation["reason"] = (
+                    "page_still_loading"
+                    if isinstance(page_state, dict)
+                    and page_state.get("likely_loading") is True
+                    else "no_verified_metric"
+                )
+        validation = self._apply_required_metric_coverage(
+            validation,
+            required_metrics or [],
+            expected_period or {},
+        )
 
         evidence = scrape_payload.get("evidence")
         if not isinstance(evidence, dict) or not evidence.get("id"):
             return {
                 "validation_status": (
-                    "verified" if validation.get("verified_claims") else "rejected"
+                    "verified"
+                    if self._validation_is_verified(validation)
+                    else "rejected"
                 ),
                 "evidence_kind": "structured_page",
                 "validation": validation,
@@ -571,7 +708,9 @@ class CreationService:
             return await self._persist_evidence_validation(
                 client,
                 evidence,
-                "verified" if validation.get("verified_claims") else "rejected",
+                "verified"
+                if self._validation_is_verified(validation)
+                else "rejected",
                 validation,
             )
 
@@ -586,15 +725,40 @@ class CreationService:
                 self._ocr_engine = OcrEngine.create_default()
             output = await asyncio.to_thread(self._ocr_engine.process, temp_path)
             ocr_validation = self._compare_scrape_with_ocr(scrape_payload, output.text)
-            validation["ocr_confidence"] = round(float(output.confidence), 4)
+            ocr_confidence = float(output.confidence)
+            validation["ocr_confidence"] = round(ocr_confidence, 4)
             validation["ocr_verified_claim_count"] = len(
                 ocr_validation.get("verified_claims", [])
+            )
+            validation["ocr_loading_marker_count"] = int(
+                ocr_validation.get("loading_marker_count") or 0
             )
             validation["screenshot_status"] = (
                 "matched"
                 if ocr_validation.get("verified_claims")
                 else "retained_unmatched"
             )
+            validation = self._merge_canvas_ocr_validation(
+                validation,
+                ocr_validation,
+                ocr_confidence,
+            )
+            validation = self._apply_required_metric_coverage(
+                validation,
+                required_metrics or [],
+                expected_period or {},
+            )
+            display_crop = self._derive_evidence_display_crop(
+                scrape_payload,
+                evidence,
+                validation,
+                getattr(output, "boxes", []),
+            )
+            if display_crop:
+                validation["display_crop"] = display_crop
+                validation["display_crop_parent_hash"] = str(
+                    evidence.get("content_hash") or ""
+                )
         except Exception as exc:
             logger.warning("创作证据 OCR 失败: %s", exc)
             validation["screenshot_status"] = "ocr_failed"
@@ -605,8 +769,249 @@ class CreationService:
                 except OSError:
                     pass
 
-        status = "verified" if validation.get("verified_claims") else "rejected"
+        status = "verified" if self._validation_is_verified(validation) else "rejected"
         return await self._persist_evidence_validation(client, evidence, status, validation)
+
+    @staticmethod
+    def _validation_is_verified(validation: dict) -> bool:
+        return bool(validation.get("verified_claims")) and validation.get(
+            "requirements_satisfied", True
+        ) is True
+
+    @classmethod
+    def _apply_required_metric_coverage(
+        cls,
+        validation: dict,
+        required_metrics: list[str],
+        expected_period: dict,
+    ) -> dict:
+        merged = dict(validation)
+        requested = list(
+            dict.fromkeys(
+                str(item).strip()
+                for item in required_metrics
+                if str(item).strip()
+            )
+        )
+        if not requested:
+            merged["requirements_satisfied"] = True
+            return merged
+        claims = [
+            item
+            for item in merged.get("verified_claims", [])
+            if isinstance(item, dict) and item.get("claim_type") == "metric"
+        ]
+        matched: dict[str, dict] = {}
+        for metric in requested:
+            for claim in claims:
+                if cls._claim_matches_required_metric(claim, metric):
+                    matched[metric] = claim
+                    break
+        missing = [metric for metric in requested if metric not in matched]
+        period_mismatches: list[str] = []
+        start = str(expected_period.get("start") or "").strip()
+        end = str(expected_period.get("end") or "").strip()
+        if start and end:
+            for metric, claim in matched.items():
+                period = str(claim.get("statistical_period") or "")
+                if period and not cls._statistical_period_overlaps(period, start, end):
+                    period_mismatches.append(metric)
+        usable = {
+            metric: claim
+            for metric, claim in matched.items()
+            if metric not in period_mismatches
+        }
+        coverage = len(usable) / max(1, len(requested))
+        satisfied = bool(usable)
+        # 当前步骤明确点名了指标时，只把已命中且周期相容的值
+        # 交给 Writer；其他页面数字不能借“部分通过”混入文档。
+        merged["verified_claims"] = list(usable.values())
+        merged.update(
+            {
+                "requested_metrics": requested,
+                # 保留旧字段，便于读取已保存的校验记录。
+                "required_metrics": requested,
+                "matched_requested_metrics": list(usable),
+                "matched_required_metrics": list(usable),
+                "missing_requested_metrics": missing,
+                "missing_required_metrics": missing,
+                "required_metric_coverage": round(coverage, 4),
+                "expected_statistical_period": expected_period,
+                "period_mismatch_metrics": period_mismatches,
+                "requirements_satisfied": satisfied,
+            }
+        )
+        if not usable:
+            merged["reason"] = (
+                "requested_metrics_period_mismatch"
+                if period_mismatches
+                else "requested_metrics_unavailable"
+            )
+        elif missing or period_mismatches:
+            merged["reason"] = "requested_metrics_partial"
+        else:
+            merged["reason"] = "requested_metrics_verified"
+        return merged
+
+    @staticmethod
+    def _statistical_period_overlaps(period: str, start: str, end: str) -> bool:
+        def parse_dates(value: str) -> list[datetime]:
+            normalized = value.replace("年", "-").replace("月", "-").replace("日", "")
+            dates: list[datetime] = []
+            for match in re.findall(r"20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}", normalized):
+                try:
+                    dates.append(datetime.strptime(match.replace("/", "-"), "%Y-%m-%d"))
+                except ValueError:
+                    continue
+            return dates
+
+        claim_dates = parse_dates(period)
+        expected_dates = parse_dates(f"{start} {end}")
+        if not claim_dates or len(expected_dates) < 2:
+            # 页面没有可解析周期时保留这条指标，但 Writer 不得猜测周期。
+            return True
+        claim_start = min(claim_dates)
+        claim_end = max(claim_dates)
+        expected_start = min(expected_dates)
+        expected_end = max(expected_dates)
+        return claim_end >= expected_start and claim_start <= expected_end
+
+    @classmethod
+    def _claim_matches_required_metric(cls, claim: dict, required: str) -> bool:
+        haystack = cls._normalize_evidence_text(
+            f"{claim.get('label') or ''} {claim.get('statement') or ''}"
+        ).replace("tokens", "token")
+        target = cls._normalize_evidence_text(required).replace("tokens", "token")
+        if target and (target in haystack or haystack in target):
+            return True
+        tokens = cls._evidence_match_tokens(required)
+        if not tokens:
+            return False
+        matched = [
+            token
+            for token in tokens
+            if cls._normalize_evidence_text(token) in haystack
+        ]
+        return len(matched) >= 2 and len(matched) / len(tokens) >= 0.7
+
+    @classmethod
+    def _derive_evidence_display_crop(
+        cls,
+        scrape_payload: dict,
+        evidence: dict,
+        validation: dict,
+        ocr_boxes: Iterable[object],
+    ) -> Optional[dict]:
+        image_width = int(evidence.get("width") or 0)
+        image_height = int(evidence.get("height") or 0)
+        if image_width <= 0 or image_height <= 0:
+            return None
+        claims = [
+            item
+            for item in validation.get("verified_claims", [])
+            if isinstance(item, dict)
+        ]
+        claim_text = " ".join(
+            f"{item.get('label') or ''} {item.get('value') or ''}"
+            for item in claims
+        )
+        claim_tokens = cls._evidence_match_tokens(claim_text)
+        claim_values = [
+            cls._normalize_evidence_text(str(item.get("value") or ""))
+            for item in claims
+            if str(item.get("value") or "").strip()
+        ]
+        rectangles: list[tuple[float, float, float, float]] = []
+
+        for box in ocr_boxes or []:
+            text = str(getattr(box, "text", "") or "")
+            normalized = cls._normalize_evidence_text(text)
+            if not normalized or not (
+                any(value and value in normalized for value in claim_values)
+                or any(
+                    cls._normalize_evidence_text(token) in normalized
+                    for token in claim_tokens
+                )
+            ):
+                continue
+            points = getattr(box, "bbox", None) or []
+            if not isinstance(points, list) or len(points) < 2:
+                continue
+            try:
+                xs = [float(point[0]) for point in points]
+                ys = [float(point[1]) for point in points]
+            except (TypeError, ValueError, IndexError):
+                continue
+            if max(xs + ys, default=0) <= 1.5:
+                xs = [value * image_width for value in xs]
+                ys = [value * image_height for value in ys]
+            rectangles.append((min(xs), min(ys), max(xs), max(ys)))
+
+        structured = scrape_payload.get("structured_data") or {}
+        scroll_capture = (
+            structured.get("scroll_capture", {})
+            if isinstance(structured, dict)
+            else {}
+        )
+        aggregated_scroll = (
+            isinstance(scroll_capture, dict)
+            and scroll_capture.get("aggregated") is True
+        )
+        regions = structured.get("evidence_regions", []) if isinstance(structured, dict) else []
+        page_state = structured.get("page_state", {}) if isinstance(structured, dict) else {}
+        outer_width = float(page_state.get("outer_width") or 0)
+        outer_height = float(page_state.get("outer_height") or 0)
+        inner_height = float(page_state.get("inner_height") or 0)
+        scale = image_width / outer_width if outer_width > 0 else 0.0
+        chrome_height = max(0.0, outer_height - inner_height)
+        if scale > 0 and not aggregated_scroll:
+            # 拼接截图中的 DOM 坐标可能属于不同滚动分段，不再直接
+            # 映射；OCR box 已位于最终拼接图坐标系，仍可安全生成聚焦裁剪。
+            for region in regions if isinstance(regions, list) else []:
+                if not isinstance(region, dict):
+                    continue
+                text = str(region.get("text") or "")
+                normalized = cls._normalize_evidence_text(text)
+                if not normalized or not (
+                    any(value and value in normalized for value in claim_values)
+                    or any(
+                        cls._normalize_evidence_text(token) in normalized
+                        for token in claim_tokens
+                    )
+                ):
+                    continue
+                try:
+                    left = float(region.get("x") or 0) * scale
+                    top = (
+                        float(region.get("document_y") or region.get("y") or 0)
+                        + chrome_height
+                    ) * scale
+                    right = left + float(region.get("width") or 0) * scale
+                    bottom = top + float(region.get("height") or 0) * scale
+                except (TypeError, ValueError):
+                    continue
+                if right > left and bottom > top:
+                    rectangles.append((left, top, right, bottom))
+        if not rectangles:
+            return None
+        padding = max(24, int(min(image_width, image_height) * 0.025))
+        left = max(0, int(min(item[0] for item in rectangles)) - padding)
+        top = max(0, int(min(item[1] for item in rectangles)) - padding)
+        right = min(image_width, int(max(item[2] for item in rectangles)) + padding)
+        bottom = min(image_height, int(max(item[3] for item in rectangles)) + padding)
+        width = right - left
+        height = bottom - top
+        if width < 120 or height < 80:
+            return None
+        if width * height >= image_width * image_height * 0.9:
+            return None
+        return {
+            "x": left,
+            "y": top,
+            "width": width,
+            "height": height,
+            "purpose": "document_display",
+        }
 
     @classmethod
     def _compare_scrape_programmatic_channels(cls, scrape_payload: dict) -> dict:
@@ -693,10 +1098,34 @@ class CreationService:
                 json={"status": status, "validation": validation},
             )
             if response.is_success:
-                return response.json()
+                return self._attach_display_image_url(response.json())
         except Exception as exc:
             logger.warning("保存创作证据校验状态失败: %s", exc)
-        return {**evidence, "validation_status": status, "validation": validation}
+        return self._attach_display_image_url(
+            {**evidence, "validation_status": status, "validation": validation}
+        )
+
+    @staticmethod
+    def _attach_display_image_url(evidence: dict) -> dict:
+        item = dict(evidence)
+        validation = item.get("validation") or {}
+        crop = validation.get("display_crop") if isinstance(validation, dict) else None
+        image_url = str(item.get("image_url") or "").strip()
+        if not image_url or not isinstance(crop, dict):
+            return item
+        try:
+            values = [
+                int(crop.get("x") or 0),
+                int(crop.get("y") or 0),
+                int(crop.get("width") or 0),
+                int(crop.get("height") or 0),
+            ]
+        except (TypeError, ValueError):
+            return item
+        if values[2] <= 0 or values[3] <= 0:
+            return item
+        item["display_image_url"] = f"{image_url}?crop={','.join(str(value) for value in values)}"
+        return item
 
     @classmethod
     def _compare_scrape_with_ocr(cls, scrape_payload: dict, ocr_text: str) -> dict:
@@ -714,6 +1143,13 @@ class CreationService:
             }
 
         normalized_ocr = cls._normalize_evidence_text(ocr_text)
+        loading_marker_count = len(
+            re.findall(
+                r"(?:加载中|数据加载中|loading)(?:[.。…]*)",
+                ocr_text,
+                re.IGNORECASE,
+            )
+        )
         verified_claims: list[dict] = []
         for claim in cls._scrape_claim_candidates(scrape_payload):
             if claim.get("claim_type") == "text":
@@ -747,11 +1183,303 @@ class CreationService:
                 verified_claims.append(claim)
             if len(verified_claims) >= 20:
                 break
+        seen_metric_keys = {
+            (
+                cls._normalize_evidence_text(str(claim.get("label") or "")),
+                cls._normalize_evidence_text(str(claim.get("value") or "")),
+            )
+            for claim in verified_claims
+            if claim.get("claim_type") == "metric"
+        }
+        for claim in cls._canvas_ocr_metric_candidates(scrape_payload, ocr_text):
+            key = (
+                cls._normalize_evidence_text(str(claim.get("label") or "")),
+                cls._normalize_evidence_text(str(claim.get("value") or "")),
+            )
+            if key in seen_metric_keys:
+                continue
+            seen_metric_keys.add(key)
+            verified_claims.append(claim)
+            if len(verified_claims) >= 20:
+                break
         return {
-            "reason": "matched" if verified_claims else "dom_ocr_mismatch",
+            "reason": (
+                "matched"
+                if verified_claims
+                else "page_still_loading"
+                if loading_marker_count
+                else "dom_ocr_mismatch"
+            ),
             "metadata_match": True,
+            "loading_marker_count": loading_marker_count,
             "verified_claims": verified_claims,
         }
+
+    @classmethod
+    def _merge_canvas_ocr_validation(
+        cls,
+        validation: dict,
+        ocr_validation: dict,
+        ocr_confidence: float,
+    ) -> dict:
+        merged = dict(validation)
+        existing_metrics = [
+            claim
+            for claim in merged.get("verified_claims", [])
+            if isinstance(claim, dict)
+            and claim.get("claim_type") == "metric"
+            and str(claim.get("value") or "").strip()
+        ]
+        ocr_metrics = [
+            claim
+            for claim in ocr_validation.get("verified_claims", [])
+            if isinstance(claim, dict)
+            and claim.get("claim_type") == "metric"
+            and str(claim.get("value") or "").strip()
+        ]
+        loading_marker_count = int(
+            ocr_validation.get("loading_marker_count") or 0
+        )
+        if loading_marker_count > 0:
+            # 大型 BI 看板允许部分指标卡已完成、另一些卡仍在加载。只接纳
+            # 生成器明确标记为“局部上下文无加载提示”的 OCR 指标；不能用
+            # 全页其他卡片的加载状态误伤已返回值，也不能放行加载遮罩下的值。
+            ocr_metrics = [
+                claim
+                for claim in ocr_metrics
+                if claim.get("loading_marker_nearby") is False
+            ]
+            if not ocr_metrics:
+                merged["reason"] = "page_still_loading"
+                return merged
+        if ocr_confidence < MIN_CANVAS_OCR_CONFIDENCE or not ocr_metrics:
+            return merged
+        if existing_metrics:
+            existing_claims = [
+                claim
+                for claim in merged.get("verified_claims", [])
+                if isinstance(claim, dict)
+            ]
+            seen = {
+                (
+                    cls._normalize_evidence_text(str(claim.get("label") or "")),
+                    cls._normalize_evidence_text(str(claim.get("value") or "")),
+                )
+                for claim in existing_claims
+            }
+            for claim in ocr_metrics:
+                key = (
+                    cls._normalize_evidence_text(str(claim.get("label") or "")),
+                    cls._normalize_evidence_text(str(claim.get("value") or "")),
+                )
+                if key not in seen:
+                    existing_claims.append(claim)
+                    seen.add(key)
+            merged["verified_claims"] = existing_claims[:40]
+            merged["reason"] = "dom_ocr_augmented"
+            return merged
+        merged.update(
+            {
+                "reason": (
+                    "ocr_dom_label_matched_partial"
+                    if loading_marker_count > 0
+                    else "ocr_dom_label_matched"
+                ),
+                "primary_channel": "screenshot_ocr",
+                "secondary_channel": "dom_label",
+                "verified_claims": ocr_metrics[:20],
+            }
+        )
+        return merged
+
+    @classmethod
+    def _canvas_ocr_metric_candidates(
+        cls,
+        scrape_payload: dict,
+        ocr_text: str,
+    ) -> list[dict]:
+        """从 Canvas 截图 OCR 取值，并要求指标名同时存在于本次 DOM。"""
+        structured = scrape_payload.get("structured_data") or {}
+        dom_text = (
+            str(structured.get("dom_content_text") or "")
+            if isinstance(structured, dict)
+            else ""
+        ) or str(scrape_payload.get("content_text") or "")
+        metric_markers = (
+            "总量",
+            "总计",
+            "成本",
+            "用量",
+            "利用率",
+            "占比",
+            "额度",
+            "收入",
+            "数量",
+            "计费",
+        )
+        dom_labels: list[str] = []
+        for raw_line in dom_text.splitlines()[:1200]:
+            line = " ".join(raw_line.split()).strip()
+            if (
+                not 2 <= len(line) <= 100
+                or re.search(r"\d", line)
+                or cls._is_scrape_noise(line)
+                or not any(marker.lower() in line.lower() for marker in metric_markers)
+            ):
+                continue
+            if line not in dom_labels:
+                dom_labels.append(line)
+        if not dom_labels:
+            return []
+
+        ocr_lines = [
+            " ".join(line.split()).strip()
+            for line in ocr_text.splitlines()[:1200]
+            if " ".join(line.split()).strip()
+        ]
+        value_pattern = re.compile(
+            r"^[+-]?\d[\d,]*(?:\.\d+)?(?:%|亿元|万元|亿|万|千|百|卡|个|次|元|秒|ms|s|x)?$",
+            re.IGNORECASE,
+        )
+        candidates: list[dict] = []
+        for index, line in enumerate(ocr_lines):
+            previous_line = ocr_lines[index - 1] if index > 0 else ""
+            if (
+                not value_pattern.fullmatch(line)
+                or re.search(r"20\d{2}[-/.年]", line)
+                or re.search(r"20\d{2}[-/.]\d{1,2}[-/.]$", previous_line)
+                or cls._is_unhelpful_metric_value(line)
+            ):
+                continue
+            nearby_lines = ocr_lines[max(0, index - 8) : index]
+            if any("同比" in value for value in nearby_lines[-3:]):
+                continue
+            ocr_label = cls._ocr_metric_label(nearby_lines)
+            if not ocr_label:
+                continue
+            ocr_tokens = cls._evidence_match_tokens(ocr_label)
+            label_line_index = max(
+                (
+                    position
+                    for position, value in enumerate(nearby_lines)
+                    if any(
+                        cls._normalize_evidence_text(token)
+                        in cls._normalize_evidence_text(value)
+                        for token in ocr_tokens
+                    )
+                ),
+                default=0,
+            )
+            if any(
+                re.search(
+                    r"(?:加载中|数据加载中|loading)(?:[.。…]*)",
+                    value,
+                    re.IGNORECASE,
+                )
+                for value in nearby_lines[label_line_index:]
+            ):
+                continue
+            best_support_label = ""
+            best_score = 0.0
+            for dom_label in dom_labels:
+                normalized_dom = cls._normalize_evidence_text(dom_label)
+                matched = [
+                    token
+                    for token in ocr_tokens
+                    if cls._normalize_evidence_text(token) in normalized_dom
+                ]
+                if not matched:
+                    continue
+                score = len(matched) / max(1, len(ocr_tokens))
+                if score > best_score:
+                    best_support_label = dom_label
+                    best_score = score
+            if not best_support_label or best_score < 0.35:
+                continue
+            period = cls._ocr_statistical_period(nearby_lines)
+            candidates.append(
+                {
+                    "claim_type": "metric",
+                    "label": ocr_label[:240],
+                    "value": line,
+                    "statement": " ".join(
+                        part for part in (ocr_label, period, line) if part
+                    )[:500],
+                    "statistical_period": period,
+                    "evidence_origin": "screenshot_ocr_dom_label",
+                    "dom_support_label": best_support_label[:240],
+                    "loading_marker_nearby": False,
+                }
+            )
+
+        deduplicated: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for candidate in candidates:
+            key = (
+                cls._normalize_evidence_text(candidate["label"]),
+                cls._normalize_evidence_text(candidate["value"]),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduplicated.append(candidate)
+        return deduplicated[:20]
+
+    @classmethod
+    def _ocr_metric_label(cls, nearby_lines: list[str]) -> str:
+        lines = list(nearby_lines)
+        while lines:
+            current = lines[-1]
+            if re.search(r"20\d{2}[-/.年]", current):
+                lines.pop()
+                continue
+            if (
+                re.fullmatch(r"\d{1,2}", current)
+                and len(lines) >= 2
+                and re.search(r"20\d{2}[-/.]\d{1,2}[-/.]$", lines[-2])
+            ):
+                lines.pop()
+                continue
+            break
+
+        fragments: list[str] = []
+        continuation_prefixes = ("费", "成本", "总计", "总量", "计")
+        for current in reversed(lines[-5:]):
+            normalized = " ".join(current.split()).strip(" ：:()（）")
+            if not normalized:
+                continue
+            if any(
+                marker in normalized
+                for marker in ("同比", "变化", "前1周", "加载中", "loading")
+            ):
+                if fragments:
+                    break
+                continue
+            if re.search(r"\d", normalized) or cls._is_scrape_noise(normalized):
+                if fragments:
+                    break
+                continue
+            if not re.search(r"[A-Za-z\u4e00-\u9fff]", normalized):
+                continue
+            fragments.append(normalized)
+            if len(fragments) == 1 and (
+                len(normalized) >= 4
+                and not normalized.startswith(continuation_prefixes)
+            ):
+                break
+            if len(fragments) >= 2:
+                break
+        label = "".join(reversed(fragments))
+        label = re.sub(r"成本[店占]计$", "成本总计", label)
+        return label if 2 <= len(label) <= 120 else ""
+
+    @staticmethod
+    def _ocr_statistical_period(lines: list[str]) -> str:
+        context = "".join(lines[-6:]).replace("年", "-").replace("月", "-").replace("日", "")
+        dates = re.findall(r"20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}", context)
+        if len(dates) >= 2:
+            return f"{dates[-2]} 至 {dates[-1]}"
+        return dates[-1] if dates else ""
 
     @classmethod
     def _scrape_claim_candidates(cls, scrape_payload: dict) -> list[dict]:
@@ -836,6 +1564,10 @@ class CreationService:
         ]
         statistical_period = cls._content_statistical_period(content_lines)
         date_pattern = re.compile(r"^20\d{2}[-/.年]\d{1,2}(?:[-/.月]\d{1,2}日?)?$")
+        date_range_pattern = re.compile(
+            r"20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?\s*(?:至|到|[-—~])\s*"
+            r"20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?"
+        )
         value_pattern = re.compile(
             r"^[+-]?\d[\d,]*(?:\.\d+)?(?:%|亿元|万元|亿|万|千|百|卡|个|次|元|秒|ms|s|x)?$",
             re.IGNORECASE,
@@ -848,7 +1580,7 @@ class CreationService:
             label = ""
             nearest_date = ""
             for previous in reversed(content_lines[max(0, index - 4) : index]):
-                if date_pattern.fullmatch(previous):
+                if date_pattern.fullmatch(previous) or date_range_pattern.search(previous):
                     nearest_date = nearest_date or previous
                     continue
                 if value_pattern.fullmatch(previous) or previous in {"至", "到", "-", "—"}:
@@ -859,7 +1591,7 @@ class CreationService:
                 break
             if not label:
                 continue
-            period = statistical_period or nearest_date
+            period = nearest_date or statistical_period
             statement = " ".join(part for part in (label, period, line) if part)
             candidates.append(
                 {
@@ -888,6 +1620,14 @@ class CreationService:
     @staticmethod
     def _content_statistical_period(lines: list[str]) -> str:
         date_pattern = re.compile(r"^20\d{2}[-/.年]\d{1,2}(?:[-/.月]\d{1,2}日?)?$")
+        date_range_pattern = re.compile(
+            r"20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?\s*(?:至|到|[-—~])\s*"
+            r"20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?"
+        )
+        for line in lines:
+            match = date_range_pattern.search(line)
+            if match:
+                return match.group(0)
         for index in range(len(lines) - 2):
             if (
                 date_pattern.fullmatch(lines[index])
@@ -3338,6 +4078,7 @@ flowchart LR
         doc_type = options.doc_type.strip() or self._infer_doc_type(text)
         audience = options.audience.strip() or self._infer_audience(text)
         keywords = self._extract_keywords(text)
+        time_context = self._relative_time_context(text)
 
         return {
             "topic": self._infer_topic(text),
@@ -3345,9 +4086,72 @@ flowchart LR
             "audience": audience,
             "keywords": keywords,
             "style": self._infer_style(text),
-            "needs_latest": any(word in text for word in ["最新", "政策", "趋势", "行业", "联网", "互联网"]),
+            "needs_latest": bool(time_context.get("has_relative_time"))
+            or any(
+                word in text
+                for word in ["最新", "政策", "趋势", "行业", "联网", "互联网"]
+            ),
             "needs_images": options.enable_image_generation
             or any(word in text for word in ["图片", "配图", "架构图", "流程图", "插图", "封面图"]),
+            "time_context": time_context,
+        }
+
+    @staticmethod
+    def _relative_time_context(text: str, now: Optional[datetime] = None) -> dict:
+        """把“本周”等相对时间固定为本机时区下的确定边界。"""
+        current = (now or datetime.now().astimezone()).astimezone()
+        current_date = current.date()
+        period_kind = ""
+        period_start = current_date
+        period_end = current_date
+        if any(marker in text for marker in ("上周", "上一周")):
+            period_kind = "previous_week"
+            this_monday = current_date - timedelta(days=current.weekday())
+            period_start = this_monday - timedelta(days=7)
+            period_end = this_monday - timedelta(days=1)
+        elif any(marker in text for marker in ("本周", "这周", "这一周", "当前周")):
+            period_kind = "current_week"
+            period_start = current_date - timedelta(days=current.weekday())
+            period_end = period_start + timedelta(days=6)
+        elif any(marker in text for marker in ("今天", "今日", "当天")):
+            period_kind = "today"
+        elif any(marker in text for marker in ("本月", "这个月", "当前月")):
+            period_kind = "current_month"
+            period_start = current_date.replace(day=1)
+            next_month = (
+                period_start.replace(year=period_start.year + 1, month=1)
+                if period_start.month == 12
+                else period_start.replace(month=period_start.month + 1)
+            )
+            period_end = next_month - timedelta(days=1)
+
+        start_dt = datetime.combine(period_start, datetime.min.time()).replace(
+            tzinfo=current.tzinfo
+        )
+        end_dt = datetime.combine(period_end, datetime.max.time()).replace(
+            tzinfo=current.tzinfo
+        )
+        current_iso_year, current_iso_week, _ = current.isocalendar()
+        period_iso_year, period_iso_week, _ = period_start.isocalendar()
+        return {
+            "has_relative_time": bool(period_kind),
+            "period_kind": period_kind,
+            "timezone": str(current.tzinfo or "local"),
+            "current_date": current_date.isoformat(),
+            "iso_year": int(period_iso_year),
+            "iso_week": int(period_iso_week),
+            "current_iso_year": int(current_iso_year),
+            "current_iso_week": int(current_iso_week),
+            "period_start": period_start.isoformat(),
+            "period_end": period_end.isoformat(),
+            "period_start_ms": int(start_dt.timestamp() * 1000),
+            "period_end_ms": int(end_dt.timestamp() * 1000),
+            "display": (
+                f"{period_iso_year}年第{period_iso_week}周（{period_start.isoformat()} 至 "
+                f"{period_end.isoformat()}）"
+                if period_kind in {"current_week", "previous_week"}
+                else f"{period_start.isoformat()} 至 {period_end.isoformat()}"
+            ),
         }
 
     def retrieve_references(
@@ -3362,9 +4166,13 @@ flowchart LR
             logger.warning("知识库数据库不存在: %s", db)
             return []
 
-        # 路径1: 关键词召回
+        # 路径1: 文档、知识、操作、数据与尚未完成提炼的近期文档采集统一召回。
         try:
-            keyword_rows = self._query_document_rows(user_prompt, parsed_requirement, options)
+            keyword_rows = self._query_memory_rows(
+                user_prompt,
+                parsed_requirement,
+                options,
+            )
         except Exception as exc:
             logger.warning("关键词召回失败: %s", exc)
             keyword_rows = []
@@ -3379,15 +4187,27 @@ flowchart LR
 
         # 合并去重。向量相似度必须保留下来参与统一评分；否则同一文档先被
         # 关键词路径命中时，后到的向量证据会在去重时被静默丢弃。
-        merged_by_id: dict[int, dict] = {}
+        merged_by_id: dict[str, dict] = {}
         for row in keyword_rows + vector_rows:
             doc_id = int(row.get("id") or 0)
             if not doc_id:
                 continue
             candidate = dict(row)
-            existing = merged_by_id.get(doc_id)
+            identity = self._memory_row_identity(candidate)
+            existing = merged_by_id.get(identity)
             if existing is None:
-                merged_by_id[doc_id] = candidate
+                merged_by_id[identity] = candidate
+                continue
+            # 同一云文档的原始采集比旧提炼文档新时，优先让创作直接看到本轮
+            # 完整页面；后台完成合并后，再自然回到持久文档版本。
+            if int(candidate.get("updated_at") or 0) > int(
+                existing.get("updated_at") or 0
+            ):
+                candidate["_vector_similarity"] = max(
+                    float(existing.get("_vector_similarity") or 0),
+                    float(candidate.get("_vector_similarity") or 0),
+                )
+                merged_by_id[identity] = candidate
                 continue
             existing["_vector_similarity"] = max(
                 float(existing.get("_vector_similarity") or 0),
@@ -3445,11 +4265,338 @@ flowchart LR
                     freshness_score=freshness,
                     final_weight=final,
                     reason=self._build_reason(relevance, quality, completeness, usage, format_score),
+                    source_type=str(row.get("source_type") or "document"),
+                    source_id=int(row.get("source_id") or row["id"]),
+                    observed_at=(
+                        int(row.get("observed_at"))
+                        if row.get("observed_at") is not None
+                        else None
+                    ),
                 )
             )
 
         refs.sort(key=lambda item: item.final_weight, reverse=True)
         return refs[: max(1, min(options.max_references, 30))]
+
+    def _query_memory_rows(
+        self,
+        user_prompt: str,
+        parsed_requirement: dict,
+        options: CreationOptions,
+    ) -> list[dict]:
+        rows: list[dict] = []
+        try:
+            rows.extend(
+                self._query_document_rows(user_prompt, parsed_requirement, options)
+            )
+        except Exception as exc:
+            # 单个记忆域迁移未完成时，不能让它拖垮其余三个域的召回。
+            logger.warning("文档记忆召回失败，继续检索其他记忆域: %s", exc)
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            domains = (
+                (
+                    "知识",
+                    lambda: self._query_bake_artifact_rows(
+                        conn,
+                        "bake_knowledge",
+                        "knowledge",
+                        user_prompt,
+                        parsed_requirement,
+                        options,
+                    ),
+                ),
+                (
+                    "操作",
+                    lambda: self._query_bake_artifact_rows(
+                        conn,
+                        "bake_sops",
+                        "operation",
+                        user_prompt,
+                        parsed_requirement,
+                        options,
+                    ),
+                ),
+                (
+                    "数据",
+                    lambda: self._query_data_memory_rows(
+                        conn,
+                        user_prompt,
+                        parsed_requirement,
+                        options,
+                    ),
+                ),
+                (
+                    "待提炼文档采集",
+                    lambda: self._query_pending_capture_rows(
+                        conn,
+                        user_prompt,
+                        parsed_requirement,
+                        options,
+                    ),
+                ),
+            )
+            for domain_name, query_domain in domains:
+                try:
+                    rows.extend(query_domain())
+                except Exception as exc:
+                    logger.warning(
+                        "%s记忆召回失败，继续使用其他记忆域: %s",
+                        domain_name,
+                        exc,
+                    )
+        finally:
+            conn.close()
+        return rows
+
+    @staticmethod
+    def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        if not exists:
+            return set()
+        return {
+            str(row[1])
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+
+    @staticmethod
+    def _memory_like_terms(user_prompt: str, parsed_requirement: dict) -> list[str]:
+        terms = [
+            str(item).strip()
+            for item in parsed_requirement.get("keywords", [])
+            if len(str(item).strip()) >= 2
+        ]
+        if not terms:
+            compact = " ".join(user_prompt.split()).strip()
+            if compact:
+                terms.append(compact[:80])
+        return list(dict.fromkeys(terms))[:16]
+
+    def _query_bake_artifact_rows(
+        self,
+        conn: sqlite3.Connection,
+        table: str,
+        source_type: str,
+        user_prompt: str,
+        parsed_requirement: dict,
+        options: CreationOptions,
+    ) -> list[dict]:
+        columns = self._table_columns(conn, table)
+        if not columns:
+            return []
+        searchable = [
+            column
+            for column in ("title", "summary", "content", "detailed_content", "entities")
+            if column in columns
+        ]
+        if not searchable:
+            return []
+        terms = self._memory_like_terms(user_prompt, parsed_requirement)
+        expression = " || ' ' || ".join(
+            f"COALESCE({column}, '')" for column in searchable
+        )
+        clauses = [f"LOWER({expression}) LIKE ?" for _ in terms]
+        params: list[object] = [f"%{term.lower()}%" for term in terms]
+        where = f"({' OR '.join(clauses)})" if clauses else "1=1"
+        content_parts = [
+            f"COALESCE({column}, '')"
+            for column in ("content", "detailed_content")
+            if column in columns
+        ]
+        full_content = (
+            " || CASE WHEN COALESCE(content, '') <> '' AND "
+            "COALESCE(detailed_content, '') <> '' THEN '\n' ELSE '' END || ".join(
+                content_parts
+            )
+            if len(content_parts) > 1
+            else content_parts[0]
+            if content_parts
+            else "COALESCE(summary, '')"
+        )
+        updated_at = (
+            "COALESCE(updated_at_ms, created_at_ms, 0)"
+            if "updated_at_ms" in columns
+            else "0"
+        )
+        importance = "COALESCE(importance, 3)" if "importance" in columns else "3"
+        verified = "COALESCE(user_verified, 0)" if "user_verified" in columns else "0"
+        rows = conn.execute(
+            f"""
+            SELECT id, title, '{source_type}' AS doc_type,
+                   COALESCE(summary, '') AS summary,
+                   {full_content} AS full_content,
+                   '[]' AS sections_json, '[]' AS style_phrases,
+                   '' AS prompt_hint, 0 AS usage_count,
+                   CASE WHEN {verified} = 1 THEN 'verified' ELSE 'auto_created' END
+                       AS review_status,
+                   {updated_at} AS updated_at, NULL AS source_url,
+                   '{source_type}' AS source_type, id AS source_id,
+                   {updated_at} AS observed_at, {importance} AS importance
+            FROM {table}
+            WHERE {where}
+            ORDER BY {updated_at} DESC, id DESC
+            LIMIT ?
+            """,
+            [*params, max(options.max_references * 8, 80)],
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _query_data_memory_rows(
+        self,
+        conn: sqlite3.Connection,
+        user_prompt: str,
+        parsed_requirement: dict,
+        options: CreationOptions,
+    ) -> list[dict]:
+        if not self._table_columns(conn, "data_sources") or not self._table_columns(
+            conn, "data_snapshots"
+        ):
+            return []
+        terms = self._memory_like_terms(user_prompt, parsed_requirement)
+        expression = (
+            "LOWER(COALESCE(source.title, '') || ' ' || "
+            "COALESCE(snapshot.content_text, '') || ' ' || "
+            "COALESCE(snapshot.structured_data, ''))"
+        )
+        clauses = [f"{expression} LIKE ?" for _ in terms]
+        where = f"({' OR '.join(clauses)})" if clauses else "1=1"
+        params: list[object] = [f"%{term.lower()}%" for term in terms]
+        time_context = parsed_requirement.get("time_context") or {}
+        period_clause = ""
+        if time_context.get("has_relative_time"):
+            period_clause = (
+                " AND COALESCE(snapshot.period_end_at, snapshot.observed_at, "
+                "snapshot.collected_at) >= ? AND COALESCE(snapshot.period_start_at, "
+                "snapshot.observed_at, snapshot.collected_at) <= ?"
+            )
+            params.extend(
+                [
+                    int(time_context.get("period_start_ms") or 0),
+                    int(time_context.get("period_end_ms") or 0),
+                ]
+            )
+        rows = conn.execute(
+            f"""
+            SELECT source.id AS id, source.title AS title, 'data' AS doc_type,
+                   SUBSTR(snapshot.content_text, 1, 600) AS summary,
+                   snapshot.content_text || '\n' || snapshot.structured_data AS full_content,
+                   '[]' AS sections_json, '[]' AS style_phrases,
+                   '' AS prompt_hint, 0 AS usage_count,
+                   snapshot.status AS review_status,
+                   snapshot.collected_at AS updated_at, source.source_url AS source_url,
+                   'data' AS source_type, source.id AS source_id,
+                   COALESCE(snapshot.observed_at, snapshot.collected_at) AS observed_at
+            FROM data_sources source
+            JOIN data_snapshots snapshot ON snapshot.source_id = source.id
+            WHERE source.deleted_at IS NULL AND source.status = 'active'
+              AND snapshot.id = (
+                  SELECT latest.id FROM data_snapshots latest
+                  WHERE latest.source_id = source.id
+                  ORDER BY latest.collected_at DESC, latest.id DESC LIMIT 1
+              )
+              AND {where}{period_clause}
+            ORDER BY snapshot.collected_at DESC, source.id DESC
+            LIMIT ?
+            """,
+            [*params, max(options.max_references * 6, 60)],
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _query_pending_capture_rows(
+        self,
+        conn: sqlite3.Connection,
+        user_prompt: str,
+        parsed_requirement: dict,
+        options: CreationOptions,
+    ) -> list[dict]:
+        columns = self._table_columns(conn, "captures")
+        required = {"id", "ts", "ax_text", "ocr_text", "url"}
+        if not required.issubset(columns):
+            return []
+        terms = self._memory_like_terms(user_prompt, parsed_requirement)
+        expression = (
+            "LOWER(COALESCE(webpage_title, '') || ' ' || COALESCE(win_title, '') || "
+            "' ' || COALESCE(ax_text, '') || ' ' || COALESCE(ocr_text, '') || "
+            "' ' || COALESCE(input_text, '') || ' ' || COALESCE(audio_text, ''))"
+        )
+        clauses = [f"{expression} LIKE ?" for _ in terms]
+        where = f"({' OR '.join(clauses)})" if clauses else "1=1"
+        params: list[object] = [f"%{term.lower()}%" for term in terms]
+        time_context = parsed_requirement.get("time_context") or {}
+        if time_context.get("has_relative_time"):
+            params.extend(
+                [
+                    int(time_context.get("period_start_ms") or 0),
+                    int(time_context.get("period_end_ms") or 0),
+                ]
+            )
+            time_clause = "AND ts BETWEEN ? AND ?"
+        else:
+            time_clause = "AND ts >= ?"
+            params.append(int(time.time() * 1000) - 14 * 86_400_000)
+        rows = conn.execute(
+            f"""
+            SELECT id, COALESCE(webpage_title, win_title, '近期文档采集') AS title,
+                   'pending_document' AS doc_type,
+                   SUBSTR(COALESCE(ax_text, ocr_text, input_text, audio_text, ''), 1, 600)
+                       AS summary,
+                   COALESCE(ax_text, '') || '\n' || COALESCE(ocr_text, '') || '\n' ||
+                       COALESCE(input_text, '') || '\n' || COALESCE(audio_text, '')
+                       AS full_content,
+                   '[]' AS sections_json, '[]' AS style_phrases,
+                   '' AS prompt_hint, 0 AS usage_count,
+                   'raw_capture' AS review_status, ts AS updated_at, url AS source_url,
+                   'pending_document' AS source_type, id AS source_id,
+                   ts AS observed_at
+            FROM captures
+            WHERE COALESCE(is_sensitive, 0) = 0
+              AND COALESCE(url, '') <> ''
+              AND LENGTH(COALESCE(ax_text, '') || COALESCE(ocr_text, '')) >= 200
+              AND {where} {time_clause}
+            ORDER BY ts DESC, id DESC
+            LIMIT ?
+            """,
+            [*params, max(options.max_references * 20, 200)],
+        ).fetchall()
+
+        # 同一页面连续采集只保留信息量最大且较新的一个版本。
+        by_url: dict[str, dict] = {}
+        for raw in rows:
+            item = dict(raw)
+            identity = self._canonical_memory_url(str(item.get("source_url") or ""))
+            current = by_url.get(identity)
+            if current is None or (
+                len(str(item.get("full_content") or "")),
+                int(item.get("updated_at") or 0),
+            ) > (
+                len(str(current.get("full_content") or "")),
+                int(current.get("updated_at") or 0),
+            ):
+                by_url[identity] = item
+        return list(by_url.values())[: max(options.max_references * 3, 30)]
+
+    @classmethod
+    def _memory_row_identity(cls, row: dict) -> str:
+        source_type = str(row.get("source_type") or "document")
+        source_url = str(row.get("source_url") or "").strip()
+        if source_url and source_type in {"document", "pending_document"}:
+            return f"document_url:{cls._canonical_memory_url(source_url)}"
+        return f"{source_type}:{int(row.get('source_id') or row.get('id') or 0)}"
+
+    @staticmethod
+    def _canonical_memory_url(value: str) -> str:
+        try:
+            parsed = urlparse(value)
+        except ValueError:
+            return value.strip().lower()
+        if not parsed.netloc:
+            return value.strip().lower()
+        path = (parsed.path or "/").rstrip("/") or "/"
+        return f"{parsed.netloc.lower()}{path.lower()}"
 
     async def collect_web_context(
         self,
@@ -3541,14 +4688,9 @@ flowchart LR
         options: CreationOptions,
     ) -> list[dict]:
         keywords = parsed_requirement.get("keywords") or []
-        like_terms = keywords[:8] or [user_prompt[:24]]
+        like_terms = keywords[:12] or [user_prompt[:80]]
         params: list[object] = []
         clauses: list[str] = ["deleted_at IS NULL"]
-
-        if parsed_requirement.get("doc_type"):
-            clauses.append("(doc_type = ? OR title LIKE ? OR COALESCE(prompt_hint, '') LIKE ?)")
-            doc_type = parsed_requirement["doc_type"]
-            params.extend([doc_type, f"%{doc_type}%", f"%{doc_type}%"])
 
         keyword_clauses = []
         for term in like_terms:
@@ -3559,12 +4701,14 @@ flowchart LR
             )
             params.extend([pattern] * 3)
         if keyword_clauses:
-            min_matches = max(1, len(like_terms) // 2)  # 至少匹配一半关键词
-            clauses.append(f"({' + '.join(keyword_clauses)}) >= {min_matches}")
+            # 候选生成只要求命中一个有辨识度的步骤词，严格相关性统一在后续
+            # 评分完成。这里要求“一半关键词”会让同义表达和长 Skill 目标漏召回。
+            clauses.append(f"({' + '.join(keyword_clauses)}) >= 1")
 
         sql = f"""
             SELECT id, title, doc_type, summary, full_content, sections_json, style_phrases,
-                   prompt_hint, usage_count, review_status, updated_at, source_url
+                   prompt_hint, usage_count, review_status, updated_at, source_url,
+                   'document' AS source_type, id AS source_id, updated_at AS observed_at
             FROM bake_documents
             WHERE {' AND '.join(clauses)}
             ORDER BY usage_count DESC, updated_at DESC, id DESC
@@ -3583,7 +4727,9 @@ flowchart LR
                 for row in conn.execute(
                     """
                     SELECT id, title, doc_type, summary, full_content, sections_json, style_phrases,
-                           prompt_hint, usage_count, review_status, updated_at, source_url
+                           prompt_hint, usage_count, review_status, updated_at, source_url,
+                           'document' AS source_type, id AS source_id,
+                           updated_at AS observed_at
                     FROM bake_documents
                     WHERE deleted_at IS NULL
                     ORDER BY usage_count DESC, updated_at DESC, id DESC
@@ -3766,7 +4912,8 @@ flowchart LR
                 blocks.extend(
                     [
                         f"### R{index}. {ref.title} (ref-id: {ref.id})",
-                        f"- 文档类型：{ref.doc_type or '未知'}",
+                        f"- 记忆类型：{ref.source_type} / {ref.doc_type or '未知'}",
+                        f"- 观察/更新时间：{ref.observed_at or ref.updated_at}",
                         f"- 综合权重：{ref.final_weight:.2f}",
                         f"- 推荐原因：{ref.reason}",
                         f"- 使用热度：{ref.usage_count}",
@@ -3913,40 +5060,102 @@ flowchart LR
         return "专业清晰"
 
     def _extract_keywords(self, text: str) -> list[str]:
-        try:
-            import jieba
-            tokens = list(jieba.cut(text))
-        except (ImportError, Exception):
-            # 无 jieba 时使用可预测的中文片段和二元词，避免把
-            # “写一份周年员工礼物指南”切成无法命中文档的畸形长词。
-            text_clean = re.sub(
-                r"(?:请|帮我|帮忙|给我|写一份|生成一份|生成|撰写|输出|制作)",
-                " ",
-                text,
-            )
-            segments = [
+        # @Skill/@Tool 名称是执行指令，不是事实主题。先去掉这些包装，再保留
+        # 步骤 objective 中真正的数据对象；否则长 Skill 名会占满前 12 个词。
+        text_clean = re.sub(r"@[A-Za-z0-9_\-\u4e00-\u9fff]+", " ", text)
+        text_clean = re.sub(
+            r"(?i:\btool\b)|(?:请|帮我|帮忙|给我|写一份|生成一份|生成|撰写|"
+            r"输出|制作|创作下|创作|使用|用|工具获取|获取|工具)",
+            " ",
+            text_clean,
+        )
+        text_clean = re.sub(r"(?:本周|这周|这一周|当前周|上周|上一周)", " ", text_clean)
+
+        tokens: list[str] = []
+        tokens.extend(re.findall(r"[A-Za-z][A-Za-z0-9._+\-/]{1,}", text_clean))
+        chinese_runs = re.findall(r"[\u4e00-\u9fff]{2,}", text_clean)
+        for run in chinese_runs:
+            pieces = [
                 item
-                for item in re.split(r"[\s，。；：、,.!?！？的了是在]+", text_clean)
+                for item in re.split(
+                    r"(?:以及|并且|同时|相关|关于|里面|里|中的|中|的|和|及|与|为|并)",
+                    run,
+                )
                 if len(item) >= 2
             ]
-            tokens = []
-            for segment in segments:
-                tokens.append(segment)
-                if len(segment) > 2:
-                    tokens.extend(
-                        segment[index:index + 2]
-                        for index in range(len(segment) - 1)
-                    )
+            for piece in pieces:
+                tokens.append(piece)
+                # 长句保留有辨识度的实体片段，而不是从句首生成一串二元词。
+                for marker in (
+                    "共建项目周报",
+                    "共建项目",
+                    "推理性能优化",
+                    "性能成本优化周会",
+                    "模型中心运营看板",
+                    "输入Token",
+                    "输出Token",
+                    "GPU算力",
+                    "GPU利用率",
+                ):
+                    if marker.lower() in piece.lower():
+                        tokens.append(marker)
+                if 3 <= len(piece) <= 12:
+                    continue
+                for size in (6, 4, 3, 2):
+                    for index in range(0, len(piece) - size + 1):
+                        candidate = piece[index:index + size]
+                        if candidate.startswith(("以及", "关于", "相关")):
+                            continue
+                        tokens.append(candidate)
+                    if len(tokens) >= 40:
+                        break
 
-        stop = {"帮我", "生成", "一份", "关于", "根据", "参考", "文档", "内容", "格式", "需要", "本次"}
+        stop = {
+            "帮我",
+            "生成",
+            "一份",
+            "关于",
+            "根据",
+            "参考",
+            "文档",
+            "内容",
+            "格式",
+            "需要",
+            "本次",
+            "总结",
+            "展示",
+            "列表形式",
+            "列表",
+            "添加",
+            "表格",
+            "最新",
+            "周报",
+            "当前步骤",
+            "进度总结",
+            "以列表形式展示",
+            "最多",
+            "行文字",
+            "整体",
+            "背景",
+            "整体创作背景",
+            "需要产出",
+            "协同",
+        }
         seen: set[str] = set()
         result: list[str] = []
         for token in tokens:
-            if token in stop or len(token) < 2 or token in seen:
+            normalized = token.strip()
+            key = normalized.lower()
+            if (
+                normalized in stop
+                or len(normalized) < 2
+                or key in seen
+                or normalized.isdigit()
+            ):
                 continue
-            seen.add(token)
-            result.append(token)
-        return result[:12]
+            seen.add(key)
+            result.append(normalized)
+        return result[:16]
 
     def _score_relevance(self, row: dict, parsed_requirement: dict) -> float:
         vector_similarity = min(

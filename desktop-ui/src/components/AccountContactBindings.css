@@ -1,0 +1,259 @@
+.account-contact {
+  margin-top: 24px;
+  padding-top: 22px;
+  border-top: 1px solid #e8e2dc;
+}
+
+.account-contact > header {
+  margin-bottom: 14px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.account-contact > header h3,
+.account-contact > header p,
+.account-contact__title-row h4,
+.account-contact__summary p {
+  margin: 0;
+}
+
+.account-contact > header h3 {
+  color: #382e28;
+  font-size: 15px;
+  letter-spacing: -.01em;
+}
+
+.account-contact > header p {
+  margin-top: 5px;
+  color: #7a7068;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.account-contact > header > svg {
+  color: #9f4522;
+}
+
+.account-contact__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.account-contact__card {
+  min-width: 0;
+  padding: 15px;
+  border: 1px solid #e2dcd5;
+  border-radius: 13px;
+  background: #fff;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.account-contact__card--editing {
+  grid-column: 1 / -1;
+  border-color: #d7b49f;
+  box-shadow: 0 9px 26px rgb(83 54 39 / 8%);
+}
+
+.account-contact__summary {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+}
+
+.account-contact__icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
+  background: #f4e8df;
+  color: #94401f;
+  display: grid;
+  place-items: center;
+}
+
+.account-contact__title-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.account-contact__title-row h4 {
+  color: #3b302a;
+  font-size: 13px;
+}
+
+.account-contact__status {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #f2efec;
+  color: #847970;
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.account-contact__status--bound {
+  background: #edf5e9;
+  color: #4c6c40;
+}
+
+.account-contact__summary p {
+  margin-top: 4px;
+  color: #766c64;
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.account-contact__open,
+.account-contact__code-field button,
+.account-contact__actions button {
+  min-height: 34px;
+  padding: 0 11px;
+  border: 1px solid #d8c8bb;
+  border-radius: 9px;
+  background: #fffdfb;
+  color: #7f3a20;
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 730;
+}
+
+.account-contact__open:hover,
+.account-contact__code-field button:hover:not(:disabled),
+.account-contact__actions button:hover:not(:disabled) {
+  border-color: #b75c34;
+  background: #fff5ee;
+}
+
+.account-contact button:focus-visible,
+.account-contact input:focus-visible {
+  outline: 3px solid rgb(184 87 47 / 20%);
+  outline-offset: 2px;
+}
+
+.account-contact__form {
+  margin-top: 15px;
+  padding-top: 15px;
+  border-top: 1px solid #eee6df;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 13px;
+}
+
+.account-contact__form label {
+  min-width: 0;
+  color: #6f6259;
+  display: grid;
+  gap: 7px;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.account-contact__form input {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 11px;
+  border: 1px solid #d9c8bb;
+  border-radius: 9px;
+  background: #fffdfb;
+  color: #342a24;
+}
+
+.account-contact__code-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.account-contact__code-field button {
+  min-width: 84px;
+}
+
+.account-contact__hint,
+.account-contact__error,
+.account-contact__success {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.account-contact__hint { color: #6b7460; }
+.account-contact__hint--expired { color: #9a4a2b; }
+
+.account-contact__error,
+.account-contact__success {
+  padding: 9px 10px;
+  border-radius: 9px;
+}
+
+.account-contact__error {
+  border: 1px solid #e3b6a0;
+  background: #fff1e9;
+  color: #8f3f20;
+}
+
+.account-contact__success {
+  margin-top: 12px;
+  border: 1px solid #bdd2b2;
+  background: #f3faef;
+  color: #3d5c32;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.account-contact__actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.account-contact__actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.account-contact__actions button:last-child {
+  border-color: #9f4522;
+  background: #9f4522;
+  color: #fffaf6;
+}
+
+.account-contact button:disabled {
+  cursor: not-allowed;
+  opacity: .58;
+}
+
+@media (max-width: 760px) {
+  .account-contact__grid,
+  .account-contact__form {
+    grid-template-columns: 1fr;
+  }
+
+  .account-contact__card--editing {
+    grid-column: auto;
+  }
+
+  .account-contact__summary {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .account-contact__open {
+    grid-column: 2;
+    justify-self: start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .account-contact__card { transition: none; }
+}

@@ -203,6 +203,70 @@ export async function authenticateWithPhoneCode(
   return payload.data as AuthSession
 }
 
+export type AccountContactChannel = 'email' | 'phone'
+
+export interface AccountContactVerificationChallenge {
+  challenge_id?: string
+  retry_after_seconds: number
+  expires_in_seconds: number
+}
+
+export async function sendAccountContactVerificationCode(
+  adminApiBaseUrl: string,
+  token: string,
+  channel: AccountContactChannel,
+  identifier: string,
+): Promise<AccountContactVerificationChallenge> {
+  const response = await fetch(`${adminApiBaseUrl}/v1/auth/bind/${channel}/send-code`, {
+    method: 'POST',
+    headers: {
+      ...serviceEnvironmentHeaders(),
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(channel === 'email' ? { email: identifier } : { phone: identifier }),
+  }).catch((error) => {
+    throw normalizeAuthFetchError(error, adminApiBaseUrl)
+  })
+  const payload = await response.json().catch(() => null)
+  if (!response.ok) {
+    throw cloudApiError(payload, `send contact code failed: ${response.status}`, response.status)
+  }
+  return payload.data as AccountContactVerificationChallenge
+}
+
+export async function bindAccountContact(
+  adminApiBaseUrl: string,
+  token: string,
+  channel: AccountContactChannel,
+  identifier: string,
+  code: string,
+  challengeId?: string,
+): Promise<CloudUser> {
+  const body = channel === 'email'
+    ? {
+        email: identifier,
+        email_verification: { challenge_id: challengeId, code: code.trim() },
+      }
+    : { phone: identifier, code: code.trim() }
+  const response = await fetch(`${adminApiBaseUrl}/v1/auth/bind/${channel}`, {
+    method: 'POST',
+    headers: {
+      ...serviceEnvironmentHeaders(),
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  }).catch((error) => {
+    throw normalizeAuthFetchError(error, adminApiBaseUrl)
+  })
+  const payload = await response.json().catch(() => null)
+  if (!response.ok) {
+    throw cloudApiError(payload, `contact binding failed: ${response.status}`, response.status)
+  }
+  return payload.data as CloudUser
+}
+
 export async function updateUserProfile(
   adminApiBaseUrl: string,
   token: string,

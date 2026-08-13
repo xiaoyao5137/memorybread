@@ -225,12 +225,35 @@
           "default": "auto"
         },
         "capture_evidence": {"type": "boolean", "default": false},
+        "retain_screenshot": {
+          "type": "boolean",
+          "default": true,
+          "description": "是否把本轮浏览器截图保留为创作文档证据"
+        },
         "run_id": {"type": ["string", "null"]},
         "session_id": {"type": ["string", "null"]},
         "preview_id": {
           "type": ["string", "null"],
           "format": "uuid",
           "description": "本轮后台浏览器缩略预览与最终证据共用的本机标识"
+        },
+        "objective": {
+          "type": ["string", "null"],
+          "maxLength": 12000,
+          "description": "当前 Skill 步骤的原始采集目标；用于选择指定 Tab 与页面筛选器"
+        },
+        "required_metrics": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "description": "必须完整取得并逐项通过校验的指标名；缺少任一项时证据不得通过"
+        },
+        "expected_period_start": {
+          "type": ["string", "null"],
+          "format": "date"
+        },
+        "expected_period_end": {
+          "type": ["string", "null"],
+          "format": "date"
         }
       },
       "additionalProperties": false

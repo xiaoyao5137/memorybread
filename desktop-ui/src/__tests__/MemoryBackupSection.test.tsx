@@ -58,6 +58,7 @@ vi.mock('../utils/authApi', () => ({
 }))
 
 beforeEach(() => {
+  window.localStorage.clear()
   Object.values(mocks).forEach(mock => mock.mockReset())
   vi.mocked(invoke).mockReset().mockResolvedValue(undefined)
   mocks.fetchMemories.mockResolvedValue({ items: [], total: 0 })
@@ -87,12 +88,13 @@ describe('MemoryBackupSection', () => {
       file_size_bytes: 2048,
       manifest: {
         app: 'memory-bread',
-        format_version: 1,
-        schema_version: 1,
+        format_version: 2,
+        schema_version: 5,
         exported_at_ms: 1,
         source_db_path: '/tmp/memorybread-test/.memory-bread/memory.db',
         excluded_tables: [],
         excluded_capture_columns: [],
+        local_file_count: 2,
         payload_sha256: 'payload-sha256',
         table_summaries: [
           { name: 'timelines', row_count: 3, identity_columns: ['id'] },
@@ -100,6 +102,7 @@ describe('MemoryBackupSection', () => {
           { name: 'data_sources', row_count: 4, identity_columns: ['canonical_key'] },
           { name: 'data_snapshots', row_count: 4, identity_columns: ['id'] },
           { name: 'data_source_links', row_count: 7, identity_columns: ['source_ref_key'] },
+          { name: 'creation_skills', row_count: 6, identity_columns: ['client_skill_key'] },
         ],
       },
     })
@@ -107,13 +110,12 @@ describe('MemoryBackupSection', () => {
     render(<MemoryBackupSection />)
     fireEvent.click(screen.getByRole('button', { name: '导出记忆包' }))
 
-    const notice = await screen.findByText(/记忆包已保存：/)
+    const notice = await screen.findByText(/完整备份包已保存：/)
     expect(notice).toHaveTextContent('memory-package-1.mbmemory.json')
-    expect(notice).toHaveTextContent('操作 2')
-    expect(notice).toHaveTextContent('数据记录 4')
-    expect(notice).toHaveTextContent('数据快照 4')
-    expect(notice).toHaveTextContent('数据来源关系 7')
-    expect(notice).not.toHaveTextContent('data_sources')
+    expect(notice).toHaveTextContent('6 个数据表')
+    expect(notice).toHaveTextContent('2 个本地文件')
+    expect(notice).toHaveTextContent('6 个 Skill')
+    expect(notice).toHaveTextContent('不含原始采集')
     fireEvent.click(screen.getByRole('button', { name: '打开文件夹' }))
 
     await waitFor(() => {
@@ -167,6 +169,29 @@ describe('MemoryBackupSection', () => {
     fireEvent.click(detailLink)
 
     expect(useAppStore.getState()).toMatchObject({ windowMode: 'bake', bakeTab: 'data' })
+  })
+
+  it('完整备份恢复客户端设置并重启软件加载全部内容', async () => {
+    mocks.importMemoryPackage.mockResolvedValue({
+      file_sha256: 'file-sha256',
+      payload_sha256: 'payload-sha256',
+      dry_run: false,
+      database_replaced: true,
+      local_files: { incoming: 2, written: 2, unchanged: 0 },
+      client_state: { 'memory-bread_creation_tools_v1': '[{"id":"restored-tool"}]' },
+      capture_refs: { name: 'capture_refs', incoming: 0, inserted: 0, updated: 0, skipped: 0 },
+      tables: [{ name: 'creation_skills', incoming: 3, inserted: 3, updated: 0, skipped: 0 }],
+    })
+    render(<MemoryBackupSection />)
+    const file = new File(['{}'], 'complete.mbmemory.json', { type: 'application/json' })
+    Object.defineProperty(file, 'text', { value: vi.fn().mockResolvedValue('{}') })
+    fireEvent.change(screen.getByLabelText('选择本机记忆包'), { target: { files: [file] } })
+
+    expect(await screen.findByText(/已恢复完整内容/)).toHaveTextContent('软件将自动重启')
+    expect(window.localStorage.getItem('memory-bread_creation_tools_v1')).toContain('restored-tool')
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('restart_application')
+    }, { timeout: 1000 })
   })
 
   it('不再出现在采集页面', async () => {

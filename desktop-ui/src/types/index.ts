@@ -346,6 +346,11 @@ export interface MemoryPackageManifest {
   source_db_path: string
   excluded_tables: string[]
   excluded_capture_columns: string[]
+  excluded_local_paths?: string[]
+  database_size_bytes?: number
+  local_file_count?: number
+  local_file_size_bytes?: number
+  client_state_entry_count?: number
   table_summaries: MemoryPackageTableSummary[]
   payload_sha256: string
 }
@@ -369,6 +374,13 @@ export interface MemoryPackageImportReport {
   file_sha256: string
   payload_sha256: string
   dry_run: boolean
+  database_replaced?: boolean
+  local_files?: {
+    incoming: number
+    written: number
+    unchanged: number
+  }
+  client_state?: Record<string, string>
   capture_refs: MemoryPackageTableImportReport
   tables: MemoryPackageTableImportReport[]
 }

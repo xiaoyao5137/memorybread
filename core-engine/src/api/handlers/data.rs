@@ -30,6 +30,8 @@ use crate::{
 use uuid::Uuid;
 
 const MAX_SCRAPED_CHARS: usize = 80_000;
+const BROWSER_DATA_READY_POLL_ATTEMPTS: usize = 40;
+const BROWSER_SCROLL_READY_POLL_ATTEMPTS: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrowserScriptKind {
@@ -163,6 +165,18 @@ pub struct RefreshDataSourceRequest {
     pub session_id: Option<String>,
     #[serde(default)]
     pub preview_id: Option<String>,
+    #[serde(default)]
+    pub objective: Option<String>,
+    #[serde(default)]
+    pub requested_metrics: Vec<String>,
+    /// 旧客户端字段；只作为 requested_metrics 的兼容别名，不再表示
+    /// “任一项缺失就拒绝整条证据”。
+    #[serde(default)]
+    pub required_metrics: Vec<String>,
+    #[serde(default)]
+    pub expected_period_start: Option<String>,
+    #[serde(default)]
+    pub expected_period_end: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -186,6 +200,11 @@ pub struct ValidateEvidenceRequest {
     pub status: String,
     #[serde(default)]
     pub validation: Value,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct EvidenceImageQuery {
+    pub crop: Option<String>,
 }
 
 #[derive(Debug)]
@@ -478,6 +497,9 @@ pub async fn refresh_data_source(
             source.source_app_name.clone(),
             preview_token.clone(),
             evidence_path.clone(),
+            body.objective.clone(),
+            body.expected_period_start.clone(),
+            body.expected_period_end.clone(),
         )
     };
 
@@ -511,6 +533,19 @@ pub async fn refresh_data_source(
             return Err(error);
         }
     };
+    if looks_like_terminal_page(&result.title, &result.url, &result.content_text) {
+        cleanup_pending_evidence(evidence_capture.as_ref());
+        let storage = state.storage.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            storage.mark_data_source_error(id, "SCRAPE_NOT_FOUND")
+        })
+        .await;
+        return Err(DataToolError::new(
+            StatusCode::NOT_FOUND,
+            "SCRAPE_NOT_FOUND",
+            "页面已不存在，本次未生成数据快照",
+        ));
+    }
     if result.content_text.trim().is_empty() {
         cleanup_pending_evidence(evidence_capture.as_ref());
         return Err(DataToolError::new(
@@ -603,6 +638,7 @@ pub async fn refresh_data_source(
 pub async fn get_creation_evidence_image(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(query): Query<EvidenceImageQuery>,
 ) -> Result<Response, ApiError> {
     let storage = state.storage.clone();
     let asset = tokio::task::spawn_blocking(move || storage.get_creation_evidence_asset(&id))
@@ -610,18 +646,53 @@ pub async fn get_creation_evidence_image(
         .map_err(|error| ApiError::Internal(error.to_string()))??
         .ok_or_else(|| ApiError::NotFound("创作证据不存在".to_string()))?;
     let path = evidence_dir().join(&asset.image_path);
-    let bytes = tokio::fs::read(path)
+    let mut bytes = tokio::fs::read(path)
         .await
         .map_err(|_| ApiError::NotFound("创作证据图片不存在".to_string()))?;
+    let mut mime_type = asset.mime_type;
+    if let Some(crop) = query.crop.as_deref().and_then(parse_evidence_crop) {
+        let source = image::load_from_memory(&bytes)
+            .map_err(|_| ApiError::BadRequest("创作证据图片无法裁剪".to_string()))?;
+        let (x, y, width, height) = crop;
+        if x >= source.width()
+            || y >= source.height()
+            || width == 0
+            || height == 0
+            || x.saturating_add(width) > source.width()
+            || y.saturating_add(height) > source.height()
+        {
+            return Err(ApiError::BadRequest("创作证据裁剪范围无效".to_string()));
+        }
+        let cropped = source.crop_imm(x, y, width, height);
+        let mut encoded = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, 88)
+            .encode_image(&cropped)
+            .map_err(|_| ApiError::Internal("创作证据裁剪失败".to_string()))?;
+        bytes = encoded;
+        mime_type = "image/jpeg".to_string();
+    }
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, asset.mime_type)
+        .header(header::CONTENT_TYPE, mime_type)
         .header(
             header::CACHE_CONTROL,
             "private, max-age=31536000, immutable",
         )
         .body(Body::from(bytes))
         .map_err(|error| ApiError::Internal(error.to_string()))
+}
+
+fn parse_evidence_crop(value: &str) -> Option<(u32, u32, u32, u32)> {
+    let values = value
+        .split(',')
+        .map(str::trim)
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if values.len() != 4 || values[2] == 0 || values[3] == 0 {
+        return None;
+    }
+    Some((values[0], values[1], values[2], values[3]))
 }
 
 pub async fn get_browser_preview_image(Path(id): Path<String>) -> Result<Response, ApiError> {
@@ -667,6 +738,9 @@ async fn scrape_browser_async(
     source_app_name: Option<String>,
     preview_token: Option<String>,
     evidence_path: Option<PathBuf>,
+    objective: Option<String>,
+    expected_period_start: Option<String>,
+    expected_period_end: Option<String>,
 ) -> Result<ScrapeResult, DataToolError> {
     tokio::task::spawn_blocking(move || {
         scrape_with_browser(
@@ -675,6 +749,9 @@ async fn scrape_browser_async(
             source_app_name.as_deref(),
             preview_token.as_deref(),
             evidence_path.as_deref(),
+            objective.as_deref(),
+            expected_period_start.as_deref(),
+            expected_period_end.as_deref(),
         )
     })
     .await
@@ -687,6 +764,9 @@ fn scrape_with_browser(
     source_app_name: Option<&str>,
     preview_token: Option<&str>,
     evidence_path: Option<&std::path::Path>,
+    objective: Option<&str>,
+    expected_period_start: Option<&str>,
+    expected_period_end: Option<&str>,
 ) -> Result<ScrapeResult, DataToolError> {
     #[cfg(not(target_os = "macos"))]
     {
@@ -696,6 +776,9 @@ fn scrape_with_browser(
             source_app_name,
             preview_token,
             evidence_path,
+            objective,
+            expected_period_start,
+            expected_period_end,
         );
         return Err(DataToolError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -710,6 +793,11 @@ fn scrape_with_browser(
             resolve_browser_adapter(browser_candidates(browser_preference, source_app_name))?;
         let javascript = browser_extraction_javascript();
         let readiness_javascript = browser_readiness_javascript();
+        let interaction_javascript = browser_interaction_javascript(
+            objective.unwrap_or_default(),
+            expected_period_start.unwrap_or_default(),
+            expected_period_end.unwrap_or_default(),
+        );
         let evidence_path_string = evidence_path.map(|path| path.to_string_lossy().into_owned());
         let (output, accessibility_text) = if let Some(preview_token) = preview_token {
             let session =
@@ -724,10 +812,11 @@ fn scrape_with_browser(
                 let script = build_background_browser_extract_script(
                     adapter,
                     &session.apple_script_id,
+                    &interaction_javascript,
                     &readiness_javascript,
                     &javascript,
                 );
-                let output = run_browser_script(&script)?;
+                let mut output = run_browser_script(&script)?;
                 let accessibility_text = if output.status.success() {
                     let payload: Value = serde_json::from_slice(&output.stdout).unwrap_or_default();
                     let page_title = payload
@@ -751,11 +840,20 @@ fn scrape_with_browser(
                     if let Some(evidence_path) = evidence_path {
                         prepare_background_browser_window_for_capture(adapter, &session)?;
                         thread::sleep(Duration::from_millis(500));
-                        capture_background_browser_long_screenshot(
+                        let segment_payloads = capture_background_browser_long_screenshot(
                             adapter,
                             &session,
                             evidence_path,
+                            &javascript,
                         )?;
+                        if let Ok(primary_payload) = serde_json::from_slice::<Value>(&output.stdout)
+                        {
+                            output.stdout = serde_json::to_vec(&merge_browser_payloads(
+                                primary_payload,
+                                &segment_payloads,
+                            ))
+                            .map_err(|_| internal_scrape_error())?;
+                        }
                     }
                 }
                 Ok::<_, DataToolError>((output, accessibility_text))
@@ -764,12 +862,20 @@ fn scrape_with_browser(
             capture_result?
         } else {
             let script = match adapter.script_kind {
-                BrowserScriptKind::Chromium => {
-                    build_chromium_scrape_script(adapter, url, &readiness_javascript, &javascript)
-                }
-                BrowserScriptKind::Safari => {
-                    build_safari_scrape_script(adapter, url, &readiness_javascript, &javascript)
-                }
+                BrowserScriptKind::Chromium => build_chromium_scrape_script(
+                    adapter,
+                    url,
+                    &interaction_javascript,
+                    &readiness_javascript,
+                    &javascript,
+                ),
+                BrowserScriptKind::Safari => build_safari_scrape_script(
+                    adapter,
+                    url,
+                    &interaction_javascript,
+                    &readiness_javascript,
+                    &javascript,
+                ),
             };
             (run_browser_script(&script)?, None)
         };
@@ -1279,15 +1385,33 @@ fn write_browser_image_atomic(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct BrowserPageGeometry {
+    #[serde(default)]
+    scroll_mode: String,
+    #[serde(default)]
+    outer_width: u32,
     outer_height: u32,
+    #[serde(default)]
+    inner_width: u32,
     inner_height: u32,
+    #[serde(default)]
+    viewport_height: u32,
+    #[serde(default)]
+    scroll_width: u32,
     scroll_height: u32,
+    #[serde(default)]
+    target_x: f64,
+    #[serde(default)]
+    target_y: f64,
+    #[serde(default)]
+    target_width: f64,
+    #[serde(default)]
+    target_height: f64,
 }
 
-fn browser_scroll_positions(geometry: BrowserPageGeometry) -> Vec<u32> {
+fn browser_scroll_positions(geometry: &BrowserPageGeometry) -> Vec<u32> {
     const MAX_SEGMENTS: usize = 20;
     let viewport = geometry.inner_height.max(1);
     let max_scroll = geometry.scroll_height.saturating_sub(viewport);
@@ -1313,18 +1437,103 @@ fn browser_scroll_positions(geometry: BrowserPageGeometry) -> Vec<u32> {
     positions
 }
 
+fn browser_axis_positions(content_size: u32, viewport_size: u32, limit: usize) -> Vec<u32> {
+    let viewport = viewport_size.max(1);
+    let maximum = content_size.saturating_sub(viewport);
+    if maximum == 0 {
+        return vec![0];
+    }
+    let mut positions = Vec::new();
+    let mut position = 0_u32;
+    while positions.len() < limit.max(1) {
+        positions.push(position);
+        if position >= maximum {
+            break;
+        }
+        position = position.saturating_add(viewport).min(maximum);
+    }
+    if positions.last().copied() != Some(maximum) {
+        if positions.len() == limit.max(1) {
+            positions.pop();
+        }
+        positions.push(maximum);
+    }
+    positions
+}
+
+fn merge_browser_payloads(mut primary: Value, segments: &[Value]) -> Value {
+    let Some(primary_object) = primary.as_object_mut() else {
+        return primary;
+    };
+    let mut text_parts = Vec::new();
+    if let Some(text) = primary_object.get("text").and_then(Value::as_str) {
+        if !text.trim().is_empty() {
+            text_parts.push(text.to_string());
+        }
+    }
+    let structured = primary_object
+        .entry("structured_data")
+        .or_insert_with(|| json!({}));
+    if !structured.is_object() {
+        *structured = json!({});
+    }
+    let structured_object = structured
+        .as_object_mut()
+        .expect("object initialized above");
+    for key in ["tables", "metric_labels", "text_blocks", "evidence_regions"] {
+        if !structured_object.get(key).is_some_and(Value::is_array) {
+            structured_object.insert(key.to_string(), json!([]));
+        }
+    }
+    for segment in segments {
+        if let Some(text) = segment.get("text").and_then(Value::as_str) {
+            if !text.trim().is_empty() && !text_parts.iter().any(|item| item == text) {
+                text_parts.push(text.to_string());
+            }
+        }
+        let Some(segment_structured) = segment.get("structured_data").and_then(Value::as_object)
+        else {
+            continue;
+        };
+        for key in ["tables", "metric_labels", "text_blocks", "evidence_regions"] {
+            let Some(values) = segment_structured.get(key).and_then(Value::as_array) else {
+                continue;
+            };
+            let target = structured_object
+                .get_mut(key)
+                .and_then(Value::as_array_mut)
+                .expect("array initialized above");
+            for value in values {
+                if !target.contains(value) {
+                    target.push(value.clone());
+                }
+            }
+        }
+    }
+    structured_object.insert(
+        "scroll_capture".to_string(),
+        json!({"segment_count": segments.len(), "aggregated": !segments.is_empty()}),
+    );
+    primary_object.insert(
+        "text".to_string(),
+        Value::String(clip_text(&text_parts.join("\n"), MAX_SCRAPED_CHARS)),
+    );
+    primary
+}
+
 #[cfg(target_os = "macos")]
 fn capture_background_browser_long_screenshot(
     adapter: BrowserAdapter,
     session: &BrowserWindowSession,
     path: &std::path::Path,
-) -> Result<(), DataToolError> {
+    extraction_javascript: &str,
+) -> Result<Vec<Value>, DataToolError> {
     use image::{imageops, Rgba, RgbaImage};
 
     let geometry_output = run_browser_script(&build_background_browser_evaluate_script(
         adapter,
         &session.apple_script_id,
-        "JSON.stringify({outerHeight:Math.max(1,window.outerHeight||0),innerHeight:Math.max(1,window.innerHeight||0),scrollHeight:Math.max(document.documentElement?document.documentElement.scrollHeight:0,document.body?document.body.scrollHeight:0,window.innerHeight||0)})",
+        "(function(){var visible=function(node){var style=window.getComputedStyle(node);var rect=node.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&rect.width>200&&rect.height>120;};var candidates=Array.prototype.slice.call(document.querySelectorAll('body *'),0,8000).filter(function(node){if(!visible(node))return false;var style=window.getComputedStyle(node);return ((node.scrollHeight>node.clientHeight+40)&&/(auto|scroll)/.test(style.overflowY))||((node.scrollWidth>node.clientWidth+40)&&/(auto|scroll)/.test(style.overflowX));});candidates.sort(function(a,b){var ar=a.getBoundingClientRect(),br=b.getBoundingClientRect();var as=(a.scrollHeight-a.clientHeight+ a.scrollWidth-a.clientWidth)*ar.width*ar.height;var bs=(b.scrollHeight-b.clientHeight+ b.scrollWidth-b.clientWidth)*br.width*br.height;return bs-as;});var root=candidates[0]||null;Array.prototype.slice.call(document.querySelectorAll('[data-memorybread-scroll-root]')).forEach(function(node){node.removeAttribute('data-memorybread-scroll-root');});if(root){root.setAttribute('data-memorybread-scroll-root','true');var rect=root.getBoundingClientRect();return JSON.stringify({scrollMode:'element',outerWidth:Math.max(1,window.outerWidth||0),outerHeight:Math.max(1,window.outerHeight||0),innerWidth:Math.max(1,root.clientWidth||0),innerHeight:Math.max(1,root.clientHeight||0),viewportHeight:Math.max(1,window.innerHeight||0),scrollWidth:Math.max(root.scrollWidth||0,root.clientWidth||0),scrollHeight:Math.max(root.scrollHeight||0,root.clientHeight||0),targetX:rect.left,targetY:rect.top,targetWidth:rect.width,targetHeight:rect.height});}return JSON.stringify({scrollMode:'window',outerWidth:Math.max(1,window.outerWidth||0),outerHeight:Math.max(1,window.outerHeight||0),innerWidth:Math.max(1,window.innerWidth||0),innerHeight:Math.max(1,window.innerHeight||0),viewportHeight:Math.max(1,window.innerHeight||0),scrollWidth:Math.max(document.documentElement?document.documentElement.scrollWidth:0,document.body?document.body.scrollWidth:0,window.innerWidth||0),scrollHeight:Math.max(document.documentElement?document.documentElement.scrollHeight:0,document.body?document.body.scrollHeight:0,window.innerHeight||0),targetX:0,targetY:0,targetWidth:window.innerWidth||0,targetHeight:window.innerHeight||0});})()",
     ))?;
     if !geometry_output.status.success() {
         return Err(DataToolError::new(
@@ -1335,8 +1544,18 @@ fn capture_background_browser_long_screenshot(
     }
     let geometry: BrowserPageGeometry =
         serde_json::from_slice(&geometry_output.stdout).map_err(|_| internal_scrape_error())?;
-    let positions = browser_scroll_positions(geometry);
+    if geometry.scroll_mode == "element" {
+        return capture_scrollable_element_screenshot(
+            adapter,
+            session,
+            path,
+            geometry,
+            extraction_javascript,
+        );
+    }
+    let positions = browser_scroll_positions(&geometry);
     let mut segments: Vec<(u32, RgbaImage)> = Vec::with_capacity(positions.len());
+    let mut payloads: Vec<Value> = Vec::with_capacity(positions.len());
     for position in &positions {
         let scroll_script = format!(
             "window.scrollTo(0,{position});JSON.stringify({{scrollY:Math.round(window.scrollY||0)}})"
@@ -1354,6 +1573,16 @@ fn capture_background_browser_long_screenshot(
             ));
         }
         thread::sleep(Duration::from_millis(220));
+        let payload = run_browser_script(&build_background_browser_evaluate_script(
+            adapter,
+            &session.apple_script_id,
+            extraction_javascript,
+        ))?;
+        if payload.status.success() {
+            if let Ok(value) = serde_json::from_slice(&payload.stdout) {
+                payloads.push(value);
+            }
+        }
         segments.push((
             *position,
             capture_background_browser_image(adapter, session, true)?,
@@ -1408,7 +1637,111 @@ fn capture_background_browser_long_screenshot(
         imageops::overlay(&mut stitched, &segment, 0, y);
         y += i64::from(segment.height());
     }
-    write_browser_image_atomic(session, path, stitched)
+    write_browser_image_atomic(session, path, stitched)?;
+    Ok(payloads)
+}
+
+#[cfg(target_os = "macos")]
+fn capture_scrollable_element_screenshot(
+    adapter: BrowserAdapter,
+    session: &BrowserWindowSession,
+    path: &std::path::Path,
+    geometry: BrowserPageGeometry,
+    extraction_javascript: &str,
+) -> Result<Vec<Value>, DataToolError> {
+    use image::{imageops, Rgba, RgbaImage};
+
+    let x_positions = browser_axis_positions(geometry.scroll_width, geometry.inner_width, 4);
+    let y_limit = (20 / x_positions.len().max(1)).max(1);
+    let y_positions =
+        browser_axis_positions(geometry.scroll_height, geometry.inner_height, y_limit);
+    let mut rows: Vec<Vec<RgbaImage>> = Vec::new();
+    let mut payloads: Vec<Value> = Vec::new();
+    for y_position in &y_positions {
+        let mut row = Vec::new();
+        for x_position in &x_positions {
+            let scroll_script = format!(
+                "(function(){{var root=document.querySelector('[data-memorybread-scroll-root]');if(!root)return JSON.stringify({{ok:false}});root.scrollTo({x_position},{y_position});return JSON.stringify({{ok:true,scrollLeft:Math.round(root.scrollLeft||0),scrollTop:Math.round(root.scrollTop||0)}});}})()"
+            );
+            let output = run_browser_script(&build_background_browser_evaluate_script(
+                adapter,
+                &session.apple_script_id,
+                &scroll_script,
+            ))?;
+            if !output.status.success() {
+                return Err(DataToolError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "SCREENSHOT_FAILED",
+                    "看板内部区域滚动失败",
+                ));
+            }
+            thread::sleep(Duration::from_millis(320));
+            let payload = run_browser_script(&build_background_browser_evaluate_script(
+                adapter,
+                &session.apple_script_id,
+                extraction_javascript,
+            ))?;
+            if payload.status.success() {
+                if let Ok(value) = serde_json::from_slice(&payload.stdout) {
+                    payloads.push(value);
+                }
+            }
+            let image = capture_background_browser_image(adapter, session, true)?;
+            let scale = image.height() as f64 / geometry.outer_height.max(1) as f64;
+            let chrome_css = geometry
+                .outer_height
+                .saturating_sub(geometry.viewport_height.max(1));
+            let left = (geometry.target_x.max(0.0) * scale).round() as u32;
+            let top = ((geometry.target_y.max(0.0) + chrome_css as f64) * scale).round() as u32;
+            let width = (geometry.target_width.max(1.0) * scale).round() as u32;
+            let height = (geometry.target_height.max(1.0) * scale).round() as u32;
+            let bounded_width = width.min(image.width().saturating_sub(left));
+            let bounded_height = height.min(image.height().saturating_sub(top));
+            if bounded_width == 0 || bounded_height == 0 {
+                return Err(internal_scrape_error());
+            }
+            row.push(
+                imageops::crop_imm(&image, left, top, bounded_width, bounded_height).to_image(),
+            );
+        }
+        rows.push(row);
+    }
+    let _ = run_browser_script(&build_background_browser_evaluate_script(
+        adapter,
+        &session.apple_script_id,
+        "(function(){var root=document.querySelector('[data-memorybread-scroll-root]');if(root)root.scrollTo(0,0);return JSON.stringify({ok:true});})()",
+    ));
+
+    let cell_width = rows
+        .iter()
+        .flat_map(|row| row.iter())
+        .map(RgbaImage::width)
+        .max()
+        .unwrap_or(0);
+    let cell_height = rows
+        .iter()
+        .flat_map(|row| row.iter())
+        .map(RgbaImage::height)
+        .max()
+        .unwrap_or(0);
+    if cell_width == 0 || cell_height == 0 {
+        return Err(internal_scrape_error());
+    }
+    let total_width = cell_width.saturating_mul(x_positions.len() as u32);
+    let total_height = cell_height.saturating_mul(y_positions.len() as u32);
+    let mut stitched = RgbaImage::from_pixel(total_width, total_height, Rgba([255, 255, 255, 255]));
+    for (row_index, row) in rows.into_iter().enumerate() {
+        for (column_index, image) in row.into_iter().enumerate() {
+            imageops::overlay(
+                &mut stitched,
+                &image,
+                i64::from(cell_width) * column_index as i64,
+                i64::from(cell_height) * row_index as i64,
+            );
+        }
+    }
+    write_browser_image_atomic(session, path, stitched)?;
+    Ok(payloads)
 }
 
 #[cfg(target_os = "macos")]
@@ -1493,6 +1826,15 @@ fn browser_extraction_javascript() -> String {
     format!(
         r#"(function() {{
             var clean = function(v) {{ return String(v || '').replace(/\s+/g, ' ').trim(); }};
+            var isVisibleLoadingNode = function(node) {{
+                if (!node || node.childElementCount > 0) return false;
+                var value = clean(node.innerText || node.textContent);
+                if (!/^(?:加载中|数据加载中|loading)(?:[.。…]*)$/i.test(value)) return false;
+                var style = window.getComputedStyle ? window.getComputedStyle(node) : null;
+                if (style && (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0)) return false;
+                var rect = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+                return !rect || (rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < (window.innerHeight || 0));
+            }};
             var rawText = String(document.body ? (document.body.innerText || document.body.textContent) : '');
             var text = rawText.split(/\r?\n/).map(clean).filter(Boolean).join('\n');
             if (text.length > {max_chars}) text = text.substring(0, {max_chars});
@@ -1508,23 +1850,38 @@ fn browser_extraction_javascript() -> String {
                 .map(function(node) {{ return clean(node.innerText || node.textContent); }})
                 .filter(function(value) {{ return value.length >= 6 && value.length <= 500; }})
                 .slice(0, 500);
-            var loadingMarkerCount = (text.match(/加载中|数据加载中|loading(?:\.\.\.)?/ig) || []).length;
+            var evidenceRegions = Array.prototype.slice.call(document.querySelectorAll('body *'), 0, 8000).map(function(node) {{
+                var value=clean(node.innerText||node.textContent);
+                if(!value||value.length<2||value.length>240||!/\d/.test(value))return null;
+                var rect=node.getBoundingClientRect?node.getBoundingClientRect():null;
+                var style=window.getComputedStyle?window.getComputedStyle(node):null;
+                if(!rect||rect.width<20||rect.height<10||rect.width>(window.innerWidth||0)*0.95||rect.height>(window.innerHeight||0)*0.9)return null;
+                if(style&&(style.display==='none'||style.visibility==='hidden'||Number(style.opacity||1)===0))return null;
+                return {{text:value,x:Math.max(0,rect.left),y:rect.top,document_y:rect.top+(window.scrollY||0),width:rect.width,height:rect.height}};
+            }}).filter(Boolean).slice(0,500);
+            var loadingMarkerCount = Array.prototype.slice.call(document.querySelectorAll('body *'), 0, 5000).filter(isVisibleLoadingNode).length;
+            var rawLoadingMarkerCount = (text.match(/加载中|数据加载中|loading(?:\.\.\.)?/ig) || []).length;
             var numericTokenCount = (text.match(/[+-]?\d[\d,]*(?:\.\d+)?%?/g) || []).length;
-            return JSON.stringify({{title: clean(document.title), url: location.href, text: text, structured_data: {{tables: tables, metric_labels: labels, text_blocks: textBlocks, page_state: {{loading_marker_count: loadingMarkerCount, numeric_token_count: numericTokenCount, likely_loading: loadingMarkerCount > 0}}}}}});
+            var readinessPollCount = Number(window.__memoryBreadReadinessPollCount || 0);
+            var readinessTimedOut = loadingMarkerCount > 0 && readinessPollCount >= {ready_poll_attempts};
+            return JSON.stringify({{title: clean(document.title), url: location.href, text: text, structured_data: {{tables: tables, metric_labels: labels, text_blocks: textBlocks, evidence_regions:evidenceRegions, interaction:window.__memoryBreadInteraction||{{}}, page_state: {{loading_marker_count: loadingMarkerCount, raw_loading_marker_count: rawLoadingMarkerCount, numeric_token_count: numericTokenCount, likely_loading: loadingMarkerCount > 0, readiness_poll_count: readinessPollCount, readiness_timed_out: readinessTimedOut, outer_width:Math.max(1,window.outerWidth||0), outer_height:Math.max(1,window.outerHeight||0), inner_width:Math.max(1,window.innerWidth||0), inner_height:Math.max(1,window.innerHeight||0), scroll_height:Math.max(document.documentElement?document.documentElement.scrollHeight:0,document.body?document.body.scrollHeight:0,window.innerHeight||0)}}}}}});
         }})()"#,
         max_chars = MAX_SCRAPED_CHARS,
+        ready_poll_attempts = BROWSER_DATA_READY_POLL_ATTEMPTS,
     )
 }
 
 fn browser_readiness_javascript() -> String {
-    // SPA 报表往往先渲染数千字菜单壳层，再异步加载指标。仅按文字长度
-    // 判断会在“加载中”阶段提前截图；仍返回数字以保持 AppleScript 简单。
-    "(function(){var text=String(document.body ? (document.body.innerText || document.body.textContent || '') : '').replace(/\\s+/g,' ').trim();var loading=(text.match(/加载中|数据加载中|loading(?:\\.\\.\\.)?/ig)||[]).length;return loading>0?0:text.length;})()".to_string()
+    // SPA 报表往往先渲染菜单壳层，再异步绘制 Canvas 指标。这里只统计当前
+    // 视口内真实可见的叶子加载节点，避免隐藏 Tab 的占位文字永久阻塞；轮询
+    // 次数写回页面，最终采集可明确区分“无数据”和“等待超时”。
+    "(function(){var clean=function(v){return String(v||'').replace(/\\s+/g,' ').trim();};var visible=function(node){if(!node||node.childElementCount>0)return false;var value=clean(node.innerText||node.textContent);if(!/^(?:加载中|数据加载中|loading)(?:[.。…]*)$/i.test(value))return false;var style=window.getComputedStyle?window.getComputedStyle(node):null;if(style&&(style.display==='none'||style.visibility==='hidden'||Number(style.opacity||1)===0))return false;var rect=node.getBoundingClientRect?node.getBoundingClientRect():null;return !rect||(rect.width>0&&rect.height>0&&rect.bottom>0&&rect.top<(window.innerHeight||0));};window.__memoryBreadReadinessPollCount=Number(window.__memoryBreadReadinessPollCount||0)+1;var text=clean(document.body?(document.body.innerText||document.body.textContent||''):'');var loading=Array.prototype.slice.call(document.querySelectorAll('body *'),0,5000).filter(visible).length;return loading>0?0:text.length;})()".to_string()
 }
 
 fn build_chromium_scrape_script(
     adapter: BrowserAdapter,
     url: &str,
+    interaction_javascript: &str,
     readiness_javascript: &str,
     javascript: &str,
 ) -> String {
@@ -1543,9 +1900,11 @@ fn build_chromium_scrape_script(
                     if loading of report_tab is false then exit repeat
                     delay 0.25
                 end repeat
+                execute report_tab javascript "{interaction_javascript}"
+                delay 1
                 set last_text_length to 0
                 set stable_read_count to 0
-                repeat 36 times
+                repeat {readiness_poll_attempts} times
                     set current_text_length to execute report_tab javascript "{readiness_javascript}"
                     if current_text_length is greater than or equal to 500 then
                         if current_text_length is last_text_length then
@@ -1575,7 +1934,9 @@ fn build_chromium_scrape_script(
         "#,
         app_name = adapter.app_name,
         url = escape_applescript_string(url),
+        interaction_javascript = escape_applescript_string(interaction_javascript),
         readiness_javascript = escape_applescript_string(readiness_javascript),
+        readiness_poll_attempts = BROWSER_DATA_READY_POLL_ATTEMPTS,
         javascript = escape_applescript_string(javascript),
     )
 }
@@ -1583,6 +1944,7 @@ fn build_chromium_scrape_script(
 fn build_safari_scrape_script(
     adapter: BrowserAdapter,
     url: &str,
+    interaction_javascript: &str,
     readiness_javascript: &str,
     javascript: &str,
 ) -> String {
@@ -1603,9 +1965,11 @@ fn build_safari_scrape_script(
                     end try
                     delay 0.25
                 end repeat
+                do JavaScript "{interaction_javascript}" in report_tab
+                delay 1
                 set last_text_length to 0
                 set stable_read_count to 0
-                repeat 36 times
+                repeat {readiness_poll_attempts} times
                     set current_text_length to do JavaScript "{readiness_javascript}" in report_tab
                     if current_text_length is greater than or equal to 500 then
                         if current_text_length is last_text_length then
@@ -1635,7 +1999,9 @@ fn build_safari_scrape_script(
         "#,
         app_name = adapter.app_name,
         url = escape_applescript_string(url),
+        interaction_javascript = escape_applescript_string(interaction_javascript),
         readiness_javascript = escape_applescript_string(readiness_javascript),
+        readiness_poll_attempts = BROWSER_DATA_READY_POLL_ATTEMPTS,
         javascript = escape_applescript_string(javascript),
     )
 }
@@ -1643,6 +2009,7 @@ fn build_safari_scrape_script(
 fn build_background_browser_extract_script(
     adapter: BrowserAdapter,
     apple_script_id: &str,
+    interaction_javascript: &str,
     readiness_javascript: &str,
     javascript: &str,
 ) -> String {
@@ -1657,9 +2024,11 @@ fn build_background_browser_extract_script(
                     if loading of report_tab is false then exit repeat
                     delay 0.25
                 end repeat
+                execute report_tab javascript "{interaction_javascript}"
+                delay 1
                 set last_text_length to 0
                 set stable_read_count to 0
-                repeat 36 times
+                repeat {readiness_poll_attempts} times
                     set current_text_length to execute report_tab javascript "{readiness_javascript}"
                     if current_text_length is greater than or equal to 500 then
                         if current_text_length is last_text_length then
@@ -1677,7 +2046,9 @@ fn build_background_browser_extract_script(
             "#,
             app_name = adapter.app_name,
             window_id = window_id,
+            interaction_javascript = escape_applescript_string(interaction_javascript),
             readiness_javascript = escape_applescript_string(readiness_javascript),
+            readiness_poll_attempts = BROWSER_DATA_READY_POLL_ATTEMPTS,
             javascript = escape_applescript_string(javascript),
         ),
         BrowserScriptKind::Safari => format!(
@@ -1691,9 +2062,11 @@ fn build_background_browser_extract_script(
                     end try
                     delay 0.25
                 end repeat
+                do JavaScript "{interaction_javascript}" in report_tab
+                delay 1
                 set last_text_length to 0
                 set stable_read_count to 0
-                repeat 36 times
+                repeat {readiness_poll_attempts} times
                     set current_text_length to do JavaScript "{readiness_javascript}" in report_tab
                     if current_text_length is greater than or equal to 500 then
                         if current_text_length is last_text_length then
@@ -1711,7 +2084,9 @@ fn build_background_browser_extract_script(
             "#,
             app_name = adapter.app_name,
             window_id = window_id,
+            interaction_javascript = escape_applescript_string(interaction_javascript),
             readiness_javascript = escape_applescript_string(readiness_javascript),
+            readiness_poll_attempts = BROWSER_DATA_READY_POLL_ATTEMPTS,
             javascript = escape_applescript_string(javascript),
         ),
     }
@@ -1910,6 +2285,83 @@ fn browser_scripting_is_disabled(stderr: &str) -> bool {
             || stderr.contains("turned off")
             || stderr.contains("disabled")
             || stderr.contains("develop menu"))
+}
+
+fn browser_interaction_javascript(
+    objective: &str,
+    expected_period_start: &str,
+    expected_period_end: &str,
+) -> String {
+    let objective_json = serde_json::to_string(objective).unwrap_or_else(|_| "\"\"".to_string());
+    let start_json =
+        serde_json::to_string(expected_period_start).unwrap_or_else(|_| "\"\"".to_string());
+    let end_json =
+        serde_json::to_string(expected_period_end).unwrap_or_else(|_| "\"\"".to_string());
+    let tab_index = if ["第二个tab", "第2个tab", "第二个 tab", "第2个 tab"]
+        .iter()
+        .any(|marker| objective.to_lowercase().contains(marker))
+    {
+        1_i32
+    } else {
+        -1_i32
+    };
+    format!(
+        r#"(function(){{
+            var objective={objective};
+            var expectedStart={expected_start};
+            var expectedEnd={expected_end};
+            var clean=function(v){{return String(v||'').replace(/\s+/g,' ').trim();}};
+            var visible=function(node){{
+                if(!node||!node.getBoundingClientRect)return false;
+                var style=window.getComputedStyle?window.getComputedStyle(node):null;
+                var rect=node.getBoundingClientRect();
+                return (!style||(style.display!=='none'&&style.visibility!=='hidden'&&Number(style.opacity||1)>0))&&rect.width>8&&rect.height>8&&rect.bottom>0&&rect.top<(window.innerHeight||0);
+            }};
+            var actions=[];
+            var tabIndex={tab_index};
+            if(tabIndex>=0){{
+                var tabs=Array.prototype.slice.call(document.querySelectorAll('[role="tab"],.ant-tabs-tab,.el-tabs__item,.semi-tabs-tab,.arco-tabs-header-title'))
+                    .filter(visible);
+                var unique=[];
+                tabs.forEach(function(node){{
+                    var rect=node.getBoundingClientRect();
+                    var key=Math.round(rect.left)+':'+Math.round(rect.top)+':'+clean(node.innerText||node.textContent);
+                    if(!unique.some(function(item){{return item.key===key;}}))unique.push({{key:key,node:node}});
+                }});
+                if(unique[tabIndex]){{
+                    unique[tabIndex].node.click();
+                    actions.push({{kind:'tab',index:tabIndex+1,label:clean(unique[tabIndex].node.innerText||unique[tabIndex].node.textContent)}});
+                }}else{{actions.push({{kind:'tab_missing',index:tabIndex+1}});}}
+            }}
+            if(expectedStart&&expectedEnd&&/(?:本周|这周|当前周)/.test(objective)){{
+                var inputs=Array.prototype.slice.call(document.querySelectorAll('input')).filter(function(node){{
+                    if(!visible(node))return false;
+                    var value=clean(node.value||node.getAttribute('value'));
+                    var hint=clean(node.getAttribute('placeholder'));
+                    return /20\d{{2}}[-/.年]\d{{1,2}}/.test(value)||/(?:日期|开始|结束|时间)/.test(hint);
+                }});
+                var setValue=function(node,value){{
+                    var descriptor=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value');
+                    if(descriptor&&descriptor.set)descriptor.set.call(node,value);else node.value=value;
+                    ['input','change','blur'].forEach(function(name){{node.dispatchEvent(new Event(name,{{bubbles:true}}));}});
+                }};
+                if(inputs.length>=2){{
+                    setValue(inputs[0],expectedStart);
+                    setValue(inputs[1],expectedEnd);
+                    actions.push({{kind:'period',start:expectedStart,end:expectedEnd}});
+                    var buttons=Array.prototype.slice.call(document.querySelectorAll('button,[role="button"]')).filter(visible);
+                    var apply=buttons.find(function(node){{return /^(?:查询|应用|确定|搜索)$/.test(clean(node.innerText||node.textContent));}});
+                    if(apply){{apply.click();actions.push({{kind:'apply',label:clean(apply.innerText||apply.textContent)}});}}
+                }}else{{actions.push({{kind:'period_inputs_missing',start:expectedStart,end:expectedEnd}});}}
+            }}
+            window.__memoryBreadInteraction={{objective:objective,actions:actions,expected_period:{{start:expectedStart,end:expectedEnd}}}};
+            return JSON.stringify(window.__memoryBreadInteraction);
+        }})()"#,
+        objective = objective_json,
+        expected_start = start_json,
+        expected_end = end_json,
+        tab_index = tab_index,
+    )
 }
 
 async fn scrape_http(url: &str) -> Result<ScrapeResult, DataToolError> {
@@ -2115,6 +2567,33 @@ fn looks_like_auth_page(title: &str, url: &str, content: &str) -> bool {
     .any(|marker| evidence.contains(marker))
 }
 
+fn looks_like_terminal_page(title: &str, url: &str, content: &str) -> bool {
+    let normalized_title = title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    if matches!(
+        normalized_title.as_str(),
+        "404" | "404 not found" | "page not found" | "file not found" | "not found"
+    ) {
+        return true;
+    }
+    let evidence = format!("{title}\n{url}\n{}", clip_text(content, 2400)).to_lowercase();
+    [
+        "404 - page not found",
+        "404 page not found",
+        "the page you requested could not be found",
+        "does not contain the path",
+        "repository or file not found",
+        "页面不存在",
+        "文件不存在",
+        "该内容已被删除",
+    ]
+    .iter()
+    .any(|marker| evidence.contains(marker))
+}
+
 fn clip_text(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.trim().to_string();
@@ -2218,15 +2697,18 @@ mod tests {
     fn browser_scripts_keep_the_temporary_tab_in_the_background() {
         let javascript = browser_extraction_javascript();
         let readiness_javascript = browser_readiness_javascript();
+        let interaction_javascript = browser_interaction_javascript("", "", "");
         let chromium = build_chromium_scrape_script(
             BROWSER_ADAPTERS[0],
             "https://example.com",
+            &interaction_javascript,
             &readiness_javascript,
             &javascript,
         );
         let safari = build_safari_scrape_script(
             *BROWSER_ADAPTERS.last().unwrap(),
             "https://example.com",
+            &interaction_javascript,
             &readiness_javascript,
             &javascript,
         );
@@ -2240,8 +2722,13 @@ mod tests {
             .contains("if current tab of target_window is not report_tab then close report_tab"));
         assert!(chromium.contains("stable_read_count"));
         assert!(safari.contains("stable_read_count"));
+        assert!(chromium.contains("repeat 120 times"));
+        assert!(safari.contains("repeat 120 times"));
         assert!(javascript.contains("loading_marker_count"));
+        assert!(javascript.contains("readiness_timed_out"));
         assert!(javascript.contains("likely_loading"));
+        assert!(readiness_javascript.contains("getBoundingClientRect"));
+        assert!(readiness_javascript.contains("__memoryBreadReadinessPollCount"));
         assert!(readiness_javascript.contains("loading>0?0"));
     }
 
@@ -2249,6 +2736,7 @@ mod tests {
     fn evidence_scripts_use_a_dedicated_background_window_and_restore_focus() {
         let javascript = browser_extraction_javascript();
         let readiness_javascript = browser_readiness_javascript();
+        let interaction_javascript = browser_interaction_javascript("", "", "");
         let preview_id = "2d870d80-e2a2-4424-a732-069e174f2796";
         let chromium_start = build_background_browser_start_script(
             BROWSER_ADAPTERS[0],
@@ -2263,12 +2751,14 @@ mod tests {
         let chromium_extract = build_background_browser_extract_script(
             BROWSER_ADAPTERS[0],
             "12345",
+            &interaction_javascript,
             &readiness_javascript,
             &javascript,
         );
         let safari_extract = build_background_browser_extract_script(
             *BROWSER_ADAPTERS.last().unwrap(),
             "54321",
+            &interaction_javascript,
             &readiness_javascript,
             &javascript,
         );
@@ -2384,22 +2874,61 @@ mod tests {
 
     #[test]
     fn long_screenshot_positions_cover_regular_pages_and_keep_the_last_boundary() {
+        let geometry = |scroll_height| BrowserPageGeometry {
+            scroll_mode: "window".to_string(),
+            outer_width: 1200,
+            outer_height: 740,
+            inner_width: 1200,
+            inner_height: 650,
+            viewport_height: 650,
+            scroll_width: 1200,
+            scroll_height,
+            target_x: 0.0,
+            target_y: 0.0,
+            target_width: 1200.0,
+            target_height: scroll_height as f64,
+        };
         assert_eq!(
-            browser_scroll_positions(BrowserPageGeometry {
-                outer_height: 740,
-                inner_height: 650,
-                scroll_height: 1_800,
-            }),
+            browser_scroll_positions(&geometry(1_800)),
             vec![0, 650, 1_150]
         );
-        let very_tall = browser_scroll_positions(BrowserPageGeometry {
-            outer_height: 740,
-            inner_height: 650,
-            scroll_height: 50_000,
-        });
+        let very_tall = browser_scroll_positions(&geometry(50_000));
         assert_eq!(very_tall.first(), Some(&0));
         assert_eq!(very_tall.last(), Some(&(50_000 - 650)));
         assert!(very_tall.len() <= 20);
+    }
+
+    #[test]
+    fn evidence_crop_parser_rejects_invalid_or_empty_regions() {
+        assert_eq!(
+            parse_evidence_crop("12,34,500,240"),
+            Some((12, 34, 500, 240))
+        );
+        assert_eq!(parse_evidence_crop("12,34,0,240"), None);
+        assert_eq!(parse_evidence_crop("12,34,500"), None);
+        assert_eq!(parse_evidence_crop("bad,34,500,240"), None);
+    }
+
+    #[test]
+    fn dashboard_interaction_uses_requested_tab_and_week_range() {
+        let script = browser_interaction_javascript(
+            "从第二个tab获取本周独立部署、公共部署和商业模型输入输出 Token",
+            "2026-08-10",
+            "2026-08-16",
+        );
+        assert!(script.contains("var tabIndex=1"));
+        assert!(script.contains("2026-08-10"));
+        assert!(script.contains("2026-08-16"));
+        assert!(script.contains("period_inputs_missing"));
+    }
+
+    #[test]
+    fn internal_scroll_axis_covers_both_boundaries() {
+        assert_eq!(browser_axis_positions(1_800, 650, 20), vec![0, 650, 1_150]);
+        let very_wide = browser_axis_positions(50_000, 1_200, 8);
+        assert_eq!(very_wide.first(), Some(&0));
+        assert_eq!(very_wide.last(), Some(&(50_000 - 1_200)));
+        assert!(very_wide.len() <= 8);
     }
 
     #[test]
@@ -2468,6 +2997,9 @@ mod tests {
             Some("Google Chrome"),
             Some("2d870d80-e2a2-4424-a732-069e174f2796"),
             Some(&evidence_path),
+            None,
+            None,
+            None,
         )
         .unwrap();
         server.join().unwrap();

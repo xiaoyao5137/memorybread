@@ -23,6 +23,8 @@ use crate::{
 #[derive(Debug, Deserialize)]
 pub struct ExportAssetSnapshotRequest {
     pub output_path: Option<String>,
+    #[serde(default)]
+    pub client_state: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,6 +42,8 @@ pub struct CloudBackupRequest {
     pub access_token: String,
     pub device_id: String,
     pub output_path: Option<String>,
+    #[serde(default)]
+    pub client_state: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,14 +117,17 @@ pub async fn export_asset_snapshot(
     Json(body): Json<ExportAssetSnapshotRequest>,
 ) -> Result<Json<AssetSnapshotExportResult>, ApiError> {
     let storage = state.storage.clone();
+    let client_state = body.client_state;
     let path = body
         .output_path
         .map(PathBuf::from)
         .unwrap_or_else(default_asset_snapshot_path);
 
-    let result = tokio::task::spawn_blocking(move || storage.export_asset_snapshot_to_path(&path))
-        .await
-        .map_err(|error| ApiError::Internal(error.to_string()))??;
+    let result = tokio::task::spawn_blocking(move || {
+        storage.export_asset_snapshot_to_path_with_client_state(&path, client_state)
+    })
+    .await
+    .map_err(|error| ApiError::Internal(error.to_string()))??;
 
     Ok(Json(result))
 }
@@ -163,8 +170,9 @@ pub async fn backup_asset_snapshot_to_cloud(
         .unwrap_or_else(default_cloud_encrypted_path);
 
     let storage = state.storage.clone();
+    let client_state = body.client_state;
     let plaintext = tokio::task::spawn_blocking(move || {
-        let snapshot = storage.export_asset_snapshot()?;
+        let snapshot = storage.export_asset_snapshot_with_client_state(client_state)?;
         serde_json::to_vec_pretty(&snapshot).map_err(crate::storage::StorageError::from)
     })
     .await

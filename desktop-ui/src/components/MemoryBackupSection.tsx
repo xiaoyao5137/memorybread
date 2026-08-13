@@ -7,9 +7,16 @@ import {
   useImportMemoryPackage,
   useRestoreMemoryPackageFromCloud,
 } from '../hooks/useApi'
-import { useAppStore } from '../store/useAppStore'
+import { CREATION_MODEL_KEY, useAppStore } from '../store/useAppStore'
 import type { CloudSnapshot, MemoryPackageImportReport } from '../types'
 import { fetchCloudSnapshots } from '../utils/authApi'
+import { CREATION_TOOLS_STORAGE_KEY } from '../utils/creationTools'
+import {
+  FLOATING_ASSIST_AUTO_TASK_CONFIG_KEY,
+  FLOATING_ASSIST_AUTO_TASK_KEY,
+  FLOATING_ASSIST_ENABLED_KEY,
+} from '../utils/floatingAssistAutoTask'
+import { INTERACTION_SETTINGS_KEY } from '../utils/interactionSettings'
 import { registerCurrentDevice } from '../utils/softwareUpdate'
 import { toUserFacingError } from '../utils/userFacingError'
 import { BakeButton, BakeCard, BakePill, BakeSectionHeader } from './bake/BakeShared'
@@ -32,6 +39,29 @@ const tableLabels: Record<string, string> = {
   data_source_links: '数据来源关系',
 }
 
+const clientStateBackupKeys = [
+  CREATION_MODEL_KEY,
+  CREATION_TOOLS_STORAGE_KEY,
+  FLOATING_ASSIST_ENABLED_KEY,
+  FLOATING_ASSIST_AUTO_TASK_KEY,
+  FLOATING_ASSIST_AUTO_TASK_CONFIG_KEY,
+  INTERACTION_SETTINGS_KEY,
+]
+
+const collectClientStateForBackup = () => Object.fromEntries(
+  clientStateBackupKeys
+    .map(key => [key, window.localStorage.getItem(key)] as const)
+    .filter((entry): entry is readonly [string, string] => entry[1] !== null),
+)
+
+const restoreClientStateFromBackup = (state?: Record<string, string>) => {
+  if (!state) return
+  clientStateBackupKeys.forEach(key => {
+    const value = state[key]
+    if (typeof value === 'string') window.localStorage.setItem(key, value)
+  })
+}
+
 const importDetailTabs: Record<string, { windowMode: 'knowledge' } | { windowMode: 'bake'; bakeTab: 'templates' | 'knowledge' | 'sop' | 'data' }> = {
   timelines: { windowMode: 'knowledge' },
   bake_knowledge: { windowMode: 'bake', bakeTab: 'knowledge' },
@@ -51,6 +81,11 @@ const formatBytes = (bytes: number) => {
 }
 
 const summarizeImportReport = (report: MemoryPackageImportReport) => {
+  if (report.database_replaced) {
+    const tableCount = report.tables.filter(item => item.incoming > 0).length
+    const localFiles = report.local_files?.incoming || 0
+    return `已恢复完整内容（${tableCount} 个数据表，${localFiles} 个本地文件）`
+  }
   const rows = [report.capture_refs, ...report.tables]
   const inserted = rows.reduce((sum, item) => sum + (item.inserted || 0), 0)
   const updated = rows.reduce((sum, item) => sum + (item.updated || 0), 0)
@@ -133,7 +168,7 @@ export const MemoryBackupCard: React.FC<MemoryBackupCardProps> = ({
             </span>
             <div>
               <div id="local-backup-title" className="bake-memory-package-group__title">本机备份</div>
-              <div className="bake-muted">随时导出到本机，或从已有记忆包恢复。</div>
+              <div className="bake-muted">备份全部用户内容、设置与本地 Skill；不包含原始采集记录和采集截图。</div>
             </div>
           </div>
           <div className="bake-actions bake-actions--secondary bake-memory-package-actions">
@@ -161,7 +196,7 @@ export const MemoryBackupCard: React.FC<MemoryBackupCardProps> = ({
             </span>
             <div>
               <div id="cloud-backup-title" className="bake-memory-package-group__title">云端备份</div>
-              <div className="bake-muted">跨设备传输加密记忆包，每个账号默认 50MB。</div>
+              <div className="bake-muted">把同一份完整内容包加密上传，换机后可直接恢复；占用账户云空间。</div>
             </div>
           </div>
 
@@ -308,12 +343,16 @@ const MemoryBackupSection: React.FC = () => {
     setMemoryPackageBusy('export')
     setLastImportReport(null)
     try {
-      const result = await exportMemoryPackage()
-      const tables = result.manifest.table_summaries
-        .map(item => `${tableLabels[item.name] ?? item.name} ${item.row_count}`)
-        .join(' / ')
+      const result = await exportMemoryPackage(collectClientStateForBackup())
+      const skillCount = result.manifest.table_summaries
+        .find(item => item.name === 'creation_skills')?.row_count || 0
+      const contentSummary = [
+        `${result.manifest.table_summaries.length} 个数据表`,
+        `${result.manifest.local_file_count || 0} 个本地文件`,
+        `${skillCount} 个 Skill`,
+      ].join(' / ')
       setStatusMessage(
-        `记忆包已保存：${result.path}（${formatBytes(result.file_size_bytes)}，${tables || '暂无数据'}）`,
+        `完整备份包已保存：${result.path}（${formatBytes(result.file_size_bytes)}，${contentSummary}；不含原始采集）`,
         result.path,
       )
     } catch (error) {
@@ -330,9 +369,13 @@ const MemoryBackupSection: React.FC = () => {
     try {
       const content = await file.text()
       const report = await importMemoryPackage(content, false)
+      restoreClientStateFromBackup(report.client_state)
       setLastImportReport(report)
-      setStatusMessage(`记忆包导入完成：${summarizeImportReport(report)}`)
+      setStatusMessage(`备份包导入完成：${summarizeImportReport(report)}${report.database_replaced ? '，软件将自动重启以加载全部内容' : ''}`)
       setBakeMemoryOffset(0)
+      if (report.database_replaced) {
+        window.setTimeout(() => void invoke('restart_application'), 300)
+      }
     } catch (error) {
       setStatusMessage(toUserFacingError(error, '记忆包导入失败'))
     } finally {
@@ -418,6 +461,7 @@ const MemoryBackupSection: React.FC = () => {
         service_environment: serviceEnvironment,
         access_token: authToken,
         device_id: deviceId,
+        client_state: collectClientStateForBackup(),
       })
       setCloudSnapshots(prev => [result.snapshot, ...prev.filter(item => item.id !== result.snapshot.id)])
       setSelectedCloudSnapshotId(result.snapshot.id)
@@ -451,11 +495,15 @@ const MemoryBackupSection: React.FC = () => {
         import_to_local: true,
         dry_run: false,
       })
+      restoreClientStateFromBackup(result.import_report?.client_state)
       setLastImportReport(result.import_report ?? null)
       setStatusMessage(result.import_report
-        ? `云端下载并导入完成：${summarizeImportReport(result.import_report)}`
+        ? `云端下载并恢复完成：${summarizeImportReport(result.import_report)}${result.import_report.database_replaced ? '，软件将自动重启以加载全部内容' : ''}`
         : '云端记忆包已下载')
       setBakeMemoryOffset(0)
+      if (result.import_report?.database_replaced) {
+        window.setTimeout(() => void invoke('restart_application'), 300)
+      }
     } catch (error) {
       setStatusMessage(toUserFacingError(error, '云端下载失败'))
     } finally {

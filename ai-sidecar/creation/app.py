@@ -319,6 +319,8 @@ async def preview_references(request: ReferenceRequest):
             "references": [
                 {
                     "id": ref.id,
+                    "source_id": ref.source_id,
+                    "source_type": ref.source_type,
                     "title": ref.title,
                     "doc_type": ref.doc_type,
                     "final_weight": round(ref.final_weight, 4),
@@ -332,6 +334,7 @@ async def preview_references(request: ReferenceRequest):
                     "reason": ref.reason,
                     "summary": ref.summary,
                     "source_url": ref.source_url,
+                    "observed_at": ref.observed_at,
                 }
                 for ref in references
             ],

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   authenticateWithPassword,
+  bindAccountContact,
   confirmPasswordReset,
   completeCloudSnapshotUpload,
   fetchCloudDevices,
@@ -9,6 +10,7 @@ import {
   markAllCloudMessagesRead,
   markCloudMessageRead,
   sendEmailVerificationCode,
+  sendAccountContactVerificationCode,
   sendPhoneVerificationCode,
   sendPasswordResetCode,
   upsertCloudDevice,
@@ -123,6 +125,63 @@ describe('cloud device and snapshot API', () => {
       status: 429,
       code: 'VERIFICATION_SEND_THROTTLED',
       retryAfterSeconds: 42,
+    })
+  })
+
+  it('sends and confirms an authenticated email binding challenge', async () => {
+    const updatedUser = {
+      id: '018f0000-0000-7000-8000-000000000004',
+      email: 'xiaomai@example.com',
+      status: 'active',
+      roles: ['user'],
+      locale: 'zh-CN',
+      timezone: 'Asia/Shanghai',
+      created_at: '2026-07-07T00:00:00Z',
+    }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        data: {
+          challenge_id: '019c2c7e-706e-7a91-a61a-cd2a582cbb51',
+          retry_after_seconds: 60,
+          expires_in_seconds: 600,
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse({ data: updatedUser }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const challenge = await sendAccountContactVerificationCode(
+      'http://127.0.0.1:8080',
+      'mbs_token',
+      'email',
+      'xiaomai@example.com',
+    )
+    await expect(bindAccountContact(
+      'http://127.0.0.1:8080',
+      'mbs_token',
+      'email',
+      'xiaomai@example.com',
+      '123456',
+      challenge.challenge_id,
+    )).resolves.toEqual(updatedUser)
+
+    expect(fetchMock.mock.calls[0]).toEqual([
+      'http://127.0.0.1:8080/v1/auth/bind/email/send-code',
+      expect.objectContaining({
+        method: 'POST',
+        headers: {
+          'X-MemoryBread-Environment': 'production',
+          Authorization: 'Bearer mbs_token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ email: 'xiaomai@example.com' }),
+      }),
+    ])
+    expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))).toEqual({
+      email: 'xiaomai@example.com',
+      email_verification: {
+        challenge_id: '019c2c7e-706e-7a91-a61a-cd2a582cbb51',
+        code: '123456',
+      },
     })
   })
 
