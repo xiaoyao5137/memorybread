@@ -2320,13 +2320,24 @@ fn browser_interaction_javascript(
             var actions=[];
             var tabIndex={tab_index};
             if(tabIndex>=0){{
-                var tabs=Array.prototype.slice.call(document.querySelectorAll('[role="tab"],.ant-tabs-tab,.el-tabs__item,.semi-tabs-tab,.arco-tabs-header-title'))
-                    .filter(visible);
+                var tabs=Array.prototype.slice.call(document.querySelectorAll('[role="tab"],[class*="tab"],[class*="Tab"]'))
+                    .filter(function(node){{
+                        if(!visible(node))return false;
+                        var label=clean(node.innerText||node.textContent);
+                        if(!label||label.length>60)return false;
+                        var role=clean(node.getAttribute('role')).toLowerCase();
+                        var className=clean(node.className).toLowerCase();
+                        return role==='tab'||className.indexOf('tab')>=0;
+                    }});
                 var unique=[];
                 tabs.forEach(function(node){{
                     var rect=node.getBoundingClientRect();
                     var key=Math.round(rect.left)+':'+Math.round(rect.top)+':'+clean(node.innerText||node.textContent);
                     if(!unique.some(function(item){{return item.key===key;}}))unique.push({{key:key,node:node}});
+                }});
+                unique.sort(function(a,b){{
+                    var ar=a.node.getBoundingClientRect(),br=b.node.getBoundingClientRect();
+                    return Math.abs(ar.top-br.top)>8?ar.top-br.top:ar.left-br.left;
                 }});
                 if(unique[tabIndex]){{
                     unique[tabIndex].node.click();
@@ -2334,25 +2345,66 @@ fn browser_interaction_javascript(
                 }}else{{actions.push({{kind:'tab_missing',index:tabIndex+1}});}}
             }}
             if(expectedStart&&expectedEnd&&/(?:本周|这周|当前周)/.test(objective)){{
-                var inputs=Array.prototype.slice.call(document.querySelectorAll('input')).filter(function(node){{
+                var dateInputs=function(){{return Array.prototype.slice.call(document.querySelectorAll('input')).filter(function(node){{
                     if(!visible(node))return false;
                     var value=clean(node.value||node.getAttribute('value'));
                     var hint=clean(node.getAttribute('placeholder'));
-                    return /20\d{{2}}[-/.年]\d{{1,2}}/.test(value)||/(?:日期|开始|结束|时间)/.test(hint);
-                }});
+                    var context=clean((node.parentElement&&node.parentElement.className)||'');
+                    return /20\d{{2}}[-/.年]\d{{1,2}}/.test(value)||/(?:日期|开始|结束|时间|date)/i.test(hint+' '+context);
+                }});}};
+                var inputs=dateInputs();
                 var setValue=function(node,value){{
                     var descriptor=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value');
                     if(descriptor&&descriptor.set)descriptor.set.call(node,value);else node.value=value;
                     ['input','change','blur'].forEach(function(name){{node.dispatchEvent(new Event(name,{{bubbles:true}}));}});
                 }};
+                var periodApplied=false;
                 if(inputs.length>=2){{
                     setValue(inputs[0],expectedStart);
                     setValue(inputs[1],expectedEnd);
                     actions.push({{kind:'period',start:expectedStart,end:expectedEnd}});
+                    periodApplied=true;
+                }}else{{
+                    var allNodes=Array.prototype.slice.call(document.querySelectorAll('body *'),0,8000);
+                    var dateDisplay=allNodes.find(function(node){{
+                        if(!visible(node))return false;
+                        var own=clean(node.innerText||node.textContent);
+                        return own.length<=60&&/20\d{{2}}[-/.年]\d{{1,2}}(?:[-/.月]\d{{1,2}})?\s*(?:至|到|[-—~])\s*20\d{{2}}[-/.年]\d{{1,2}}/.test(own);
+                    }});
+                    if(dateDisplay){{
+                        var clickable=dateDisplay;
+                        for(var depth=0;depth<5&&clickable;depth++){{
+                            var role=clean(clickable.getAttribute&&clickable.getAttribute('role')).toLowerCase();
+                            var cls=clean(clickable.className).toLowerCase();
+                            var style=window.getComputedStyle?window.getComputedStyle(clickable):null;
+                            if(clickable.tabIndex>=0||role==='button'||/(?:date|calendar|picker)/.test(cls)||(style&&style.cursor==='pointer'))break;
+                            clickable=clickable.parentElement;
+                        }}
+                        if(clickable)clickable.click();
+                    }}
+                    var shortcut=Array.prototype.slice.call(document.querySelectorAll('body *'),0,8000).find(function(node){{
+                        if(!visible(node)||node.childElementCount>2)return false;
+                        return /^(?:本周|this week|current week)$/i.test(clean(node.innerText||node.textContent));
+                    }});
+                    if(shortcut){{
+                        shortcut.click();
+                        actions.push({{kind:'period_shortcut',label:clean(shortcut.innerText||shortcut.textContent),start:expectedStart,end:expectedEnd}});
+                        periodApplied=true;
+                    }}else{{
+                        inputs=dateInputs();
+                        if(inputs.length>=2){{
+                            setValue(inputs[0],expectedStart);
+                            setValue(inputs[1],expectedEnd);
+                            actions.push({{kind:'period_popup_inputs',start:expectedStart,end:expectedEnd}});
+                            periodApplied=true;
+                        }}
+                    }}
+                }}
+                if(periodApplied){{
                     var buttons=Array.prototype.slice.call(document.querySelectorAll('button,[role="button"]')).filter(visible);
                     var apply=buttons.find(function(node){{return /^(?:查询|应用|确定|搜索)$/.test(clean(node.innerText||node.textContent));}});
                     if(apply){{apply.click();actions.push({{kind:'apply',label:clean(apply.innerText||apply.textContent)}});}}
-                }}else{{actions.push({{kind:'period_inputs_missing',start:expectedStart,end:expectedEnd}});}}
+                }}else{{actions.push({{kind:'period_control_missing',start:expectedStart,end:expectedEnd}});}}
             }}
             window.__memoryBreadInteraction={{objective:objective,actions:actions,expected_period:{{start:expectedStart,end:expectedEnd}}}};
             return JSON.stringify(window.__memoryBreadInteraction);
