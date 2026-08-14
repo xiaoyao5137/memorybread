@@ -34,6 +34,12 @@ SCHEMA_VERSION = "creation.agent.v1"
 MAX_LOOP_STEPS = 64
 MAX_QUALITY_CYCLES = 3
 MAX_SKILL_STEP_RESOURCES = 4
+MAX_PROMPT_ENVIRONMENT_CHARS = 56000
+MAX_PROMPT_DATA_RESULTS_CHARS = 22000
+MAX_PROMPT_REFERENCE_CHARS = 9000
+MAX_PROMPT_SKILL_CHARS = 7000
+MAX_PROMPT_COMPLETED_STEPS_CHARS = 9000
+MAX_PROMPT_SCRAPE_CHARS = 5000
 KNOWN_SECTION_TITLES = (
     "行业调研",
     "市场调研",
@@ -979,11 +985,8 @@ class CreationAgentLoop:
             )
             if isinstance(item, dict)
         ]
-        refreshable_count = sum(
-            1
-            for item in results
-            if item.get("source_kind") == "report_url"
-            and item.get("source_url")
+        refreshable_count = len(
+            CreationService._select_refreshable_report_sources(results)
         )
         analyzable_count = sum(1 for item in results if self._has_analyzable_data(item))
         scheduled_steps: list[dict[str, Any]] = []
@@ -1960,17 +1963,13 @@ class CreationAgentLoop:
             retain_screenshot = bool(
                 step.get("skill_step_retain_webpage_screenshot", True)
             )
-            preview_sources = [
-                item
-                for item in list(
+            preview_sources = CreationService._select_refreshable_report_sources(
+                list(
                     state.environment.get("current_data_results")
                     or state.environment.get("data_results")
                     or []
                 )
-                if item.get("source_kind") == "report_url"
-                and item.get("source_url")
-                and item.get("source_id") is not None
-            ][:5]
+            )[:5]
             previews = [
                 {
                     "id": str(uuid4()),
@@ -3632,7 +3631,7 @@ class CreationAgentLoop:
     def _model_prompts(
         self, state: LoopState, step: dict[str, Any]
     ) -> tuple[str, str]:
-        environment = self._prompt_environment(state)
+        environment = self._prompt_environment(state, step)
         agent_id = step["id"]
         if step["action"] == "writer":
             system = """你是 MemoryBread 的文档撰写 Agent。请依据目标、子 Agent 结论、Tool 证据和 Skill 规则，输出完整 Markdown 文档。
@@ -4194,31 +4193,278 @@ class CreationAgentLoop:
                     tokens.append(token)
         return tokens[:24]
 
-    def _prompt_environment(self, state: LoopState) -> str:
+    @classmethod
+    def _compact_prompt_value(cls, value: Any, depth: int = 0) -> Any:
+        """把运行时完整对象转为有界的模型事实视图。
+
+        完整 DOM、截图区域、滚动与交互调试状态保留在环境/数据库中，
+        但不属于 Agent 需要消费的事实。这里只按通用数据形态裁剪，
+        不感知看板名、业务字段或具体指标。
+        """
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            text = " ".join(value.split()).strip()
+            return text if len(text) <= 600 else text[:600].rstrip() + "..."
+        if isinstance(value, dict):
+            if depth >= 4:
+                return "[nested object omitted]"
+            omitted_keys = {
+                "dom_content_text",
+                "raw_html",
+                "html",
+                "evidence_regions",
+                "scroll_capture",
+                "interaction",
+                "page_state",
+                "browser_script",
+                "screenshot",
+            }
+            compacted: dict[str, Any] = {}
+            for key, item in list(value.items())[:32]:
+                key_text = str(key)
+                if key_text.lower() in omitted_keys:
+                    continue
+                compacted[key_text] = cls._compact_prompt_value(item, depth + 1)
+            return compacted
+        if isinstance(value, (list, tuple)):
+            if depth >= 4:
+                return ["[nested items omitted]"]
+            return [
+                cls._compact_prompt_value(item, depth + 1)
+                for item in list(value)[:24]
+            ]
+        return cls._compact_prompt_value(str(value), depth + 1)
+
+    @classmethod
+    def _prompt_data_results(cls, results: Any) -> list[dict[str, Any]]:
+        compacted: list[dict[str, Any]] = []
+        used_chars = 2
+        for raw in list(results or [])[:30]:
+            if not isinstance(raw, dict):
+                continue
+            item = {
+                key: raw.get(key)
+                for key in (
+                    "source_id",
+                    "title",
+                    "source_kind",
+                    "source_url",
+                    "observed_at",
+                    "collected_at",
+                    "freshness_class",
+                    "freshness_score",
+                    "refresh_required",
+                    "can_use",
+                    "evidence_status",
+                    "evidence_reason",
+                    "unavailable_reason",
+                )
+                if raw.get(key) is not None
+            }
+            # 不可用的报表只向 Agent 暴露来源身份与动作状态。
+            # 可用结果才带有界的事实、来源和少量历史阶段。
+            if raw.get("can_use") is True:
+                excerpt = str(raw.get("content_excerpt") or "").strip()
+                if excerpt:
+                    item["content_excerpt"] = cls._compact_prompt_value(excerpt)
+                if raw.get("structured_data") is not None:
+                    item["structured_data"] = cls._compact_prompt_value(
+                        raw.get("structured_data")
+                    )
+                if raw.get("provenance") is not None:
+                    item["provenance"] = cls._compact_prompt_value(
+                        raw.get("provenance")
+                    )
+                history = raw.get("history")
+                if isinstance(history, list) and history:
+                    item["history"] = cls._compact_prompt_value(history[:3])
+            candidate_size = len(str(item))
+            if compacted and used_chars + candidate_size > MAX_PROMPT_DATA_RESULTS_CHARS:
+                break
+            compacted.append(item)
+            used_chars += candidate_size
+        return compacted
+
+    @classmethod
+    def _prompt_references(cls, references: Any) -> list[dict[str, Any]]:
+        compacted: list[dict[str, Any]] = []
+        used_chars = 2
+        for raw in list(references or [])[:16]:
+            if not isinstance(raw, dict):
+                continue
+            item = {
+                key: cls._compact_prompt_value(raw.get(key))
+                for key in (
+                    "id",
+                    "source_id",
+                    "source_type",
+                    "title",
+                    "summary",
+                    "content",
+                    "reason",
+                    "final_weight",
+                    "source_url",
+                    "observed_at",
+                    "data_use_policy",
+                    "data_freshness",
+                )
+                if raw.get(key) is not None
+            }
+            candidate_size = len(str(item))
+            if compacted and used_chars + candidate_size > MAX_PROMPT_REFERENCE_CHARS:
+                break
+            compacted.append(item)
+            used_chars += candidate_size
+        return compacted
+
+    @classmethod
+    def _prompt_bounded_items(
+        cls,
+        values: Any,
+        *,
+        char_budget: int,
+        item_limit: int,
+    ) -> list[Any]:
+        compacted: list[Any] = []
+        used_chars = 2
+        for raw in list(values or [])[:item_limit]:
+            item = cls._compact_prompt_value(raw)
+            candidate_size = len(str(item))
+            if compacted and used_chars + candidate_size > char_budget:
+                break
+            compacted.append(item)
+            used_chars += candidate_size
+        return compacted
+
+    @classmethod
+    def _prompt_webpage_scrapes(
+        cls,
+        scrapes: Any,
+        source_ids: set[Any],
+    ) -> list[dict[str, Any]]:
+        compacted: list[dict[str, Any]] = []
+        used_chars = 2
+        for raw in list(scrapes or []):
+            if not isinstance(raw, dict):
+                continue
+            if source_ids and raw.get("source_id") not in source_ids:
+                continue
+            evidence = raw.get("evidence") or {}
+            validation = (
+                evidence.get("validation")
+                if isinstance(evidence, dict)
+                and isinstance(evidence.get("validation"), dict)
+                else {}
+            )
+            item = {
+                key: raw.get(key)
+                for key in (
+                    "source_id",
+                    "status",
+                    "title",
+                    "url",
+                    "collector",
+                    "collected_at",
+                    "validation_reason",
+                    "verified_claim_count",
+                )
+                if raw.get(key) is not None
+            }
+            if isinstance(evidence, dict):
+                item["evidence"] = {
+                    key: evidence.get(key)
+                    for key in (
+                        "id",
+                        "validation_status",
+                        "page_title",
+                        "source_url",
+                        "captured_at",
+                        "display_image_url",
+                        "image_url",
+                    )
+                    if evidence.get(key) is not None
+                }
+                item["evidence"]["validation"] = {
+                    key: validation.get(key)
+                    for key in (
+                        "reason",
+                        "requirements_satisfied",
+                        "screenshot_status",
+                        "matched_requested_metrics",
+                        "missing_requested_metrics",
+                    )
+                    if validation.get(key) is not None
+                }
+            candidate_size = len(str(item))
+            if compacted and used_chars + candidate_size > MAX_PROMPT_SCRAPE_CHARS:
+                break
+            compacted.append(item)
+            used_chars += candidate_size
+        return compacted[-8:]
+
+    def _prompt_environment(
+        self,
+        state: LoopState,
+        step: Optional[dict[str, Any]] = None,
+    ) -> str:
         requirement = state.environment.get("requirement", {})
         time_context = (
             requirement.get("time_context", {})
             if isinstance(requirement, dict)
             else {}
         )
+        all_data_results = list(state.environment.get("data_results") or [])
+        current_data_results = list(
+            state.environment.get("current_data_results") or []
+        )
+        is_scoped_skill_step = bool(step and step.get("action") == "skill_step")
+        prompt_data_results = (
+            current_data_results
+            if is_scoped_skill_step and current_data_results
+            else all_data_results
+        )
+        current_source_ids = {
+            item.get("source_id")
+            for item in prompt_data_results
+            if isinstance(item, dict) and item.get("source_id") is not None
+        }
+        compact_data_results = self._prompt_data_results(prompt_data_results)
+        compact_scrapes = self._prompt_webpage_scrapes(
+            state.environment.get("webpage_scrapes", []),
+            current_source_ids if is_scoped_skill_step else set(),
+        )
+        compact_references = self._prompt_references(
+            state.environment.get("references", [])
+        )
+        compact_skills = self._prompt_bounded_items(
+            state.environment.get("applied_skills", []),
+            char_budget=MAX_PROMPT_SKILL_CHARS,
+            item_limit=8,
+        )
+        compact_completed_steps = self._prompt_bounded_items(
+            state.environment.get("completed_skill_steps", []),
+            char_budget=MAX_PROMPT_COMPLETED_STEPS_CHARS,
+            item_limit=16,
+        )
         blocks = [
             f"当前确定时间（本机时区，禁止自行猜测）：{time_context}",
             f"原始需求：{state.root_request}",
             f"本轮编辑意图：{state.environment.get('edit_intent', {})}",
             f"任务画像：{state.environment.get('requirement', {})}",
-            f"已应用 Skill：{state.environment.get('applied_skills', [])}",
-            f"已激活的 Skill 步骤：{state.environment.get('completed_skill_steps', [])}",
-            f"本轮质检动态激活 Skill：{state.environment.get('activated_quality_skills', [])}",
+            f"当前步骤数据事实：{compact_data_results}",
+            f"当前步骤网页采集回执：{compact_scrapes}",
             (
                 "Tool 执行回执（Tool 已由 Harness 调用，Agent 直接消费结果）："
-                f"{state.environment.get('tool_results', [])}"
+                f"{self._prompt_bounded_items(state.environment.get('tool_results', []), char_budget=5000, item_limit=20)}"
             ),
-            f"本地参考：{state.environment.get('references', [])}",
-            f"互联网资料：{state.environment.get('web_results', [])}",
-            f"GitHub 公开仓库：{state.environment.get('github_results', [])}",
-            f"PlantUML 画图约束：{state.environment.get('plantuml_diagram', {})}",
-            f"数据检索结果：{state.environment.get('data_results', [])}",
-            f"网页实时采集记录：{state.environment.get('webpage_scrapes', [])}",
+            f"已激活的 Skill 步骤：{compact_completed_steps}",
+            f"本地参考：{compact_references}",
+            f"已应用 Skill：{compact_skills}",
+            f"本轮质检动态激活 Skill：{self._compact_prompt_value(state.environment.get('activated_quality_skills', []))}",
+            f"互联网资料：{self._compact_prompt_value(state.environment.get('web_results', []))}",
+            f"GitHub 公开仓库：{self._compact_prompt_value(state.environment.get('github_results', []))}",
+            f"PlantUML 画图约束：{self._compact_prompt_value(state.environment.get('plantuml_diagram', {}))}",
             f"数据分析：{state.environment.get('data_analysis', '')}",
             f"行业调研：{state.environment.get('industry_research', '')}",
             f"方案设计：{state.environment.get('solution_design', '')}",
@@ -4237,7 +4483,8 @@ class CreationAgentLoop:
             )
         if state.conversation:
             blocks.append(f"关键对话：{self._conversation_for_prompt(state.conversation)}")
-        return "\n\n".join(blocks)
+        environment = "\n\n".join(blocks)
+        return self.service._clip(environment, MAX_PROMPT_ENVIRONMENT_CHARS)
 
     def _document_patch_context(
         self,

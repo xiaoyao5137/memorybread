@@ -14,9 +14,10 @@ use crate::storage::document_identity::{
 };
 use crate::storage::models::CaptureRecord;
 use crate::storage::{
-    now_ms, BakeActivityRecord, BakeDocumentRecord, BakeKnowledgeRecord, BakeMemorySourceRecord,
-    BakeOverviewRecord, BakeRunRecord, NewBakeDocument, NewBakeKnowledge, NewBakeRun, NewBakeSop,
-    NewTimeline, StorageError, StorageManager, TimelineRecord,
+    now_ms, BakeActionTraceRecord, BakeActivityRecord, BakeDocumentRecord, BakeKnowledgeRecord,
+    BakeMemorySourceRecord, BakeOverviewRecord, BakeRunRecord, NewBakeCandidateAudit,
+    NewBakeDocument, NewBakeKnowledge, NewBakeRun, NewBakeSop, NewTimeline, StorageError,
+    StorageManager, TimelineRecord,
 };
 
 const BAKE_STYLE_CONFIG_KEY: &str = "bake.style.config";
@@ -36,6 +37,7 @@ const BAKE_RUN_MAX_TOTAL_SECS: u64 = 30 * 60;
 /// 超时和模型结构化输出截断会先把批次标记为 deferred，由后台调度按退避策略
 /// 重新触发；达到此上限后才进入终态，避免一次偶发慢请求直接丢失候选。
 pub(crate) const MAX_BAKE_RETRY_FAILURES: i64 = 3;
+const BAKE_SOP_ZERO_OUTPUT_ELIGIBLE_ALERT_THRESHOLD: i64 = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BakePagedResponse<T> {
@@ -349,6 +351,9 @@ pub struct BakeExtractCandidatePayload {
     /// 处理，由 sidecar 保守降级为单帧。
     #[serde(default)]
     pub source_capture_count: i64,
+    /// 未经页面壳去重、严格按时间排序后实际送入模型的帧数。
+    #[serde(default)]
+    pub effective_capture_count: i64,
     pub timeline_category: String,
     pub summary: String,
     pub overview: Option<String>,
@@ -359,6 +364,12 @@ pub struct BakeExtractCandidatePayload {
     pub observed_at: Option<i64>,
     pub event_time_start: Option<i64>,
     pub event_time_end: Option<i64>,
+    pub start_time: Option<i64>,
+    pub end_time: Option<i64>,
+    pub duration_minutes: Option<i64>,
+    pub time_range_start: Option<i64>,
+    pub time_range_end: Option<i64>,
+    pub key_timestamps: Option<Value>,
     pub history_view: bool,
     pub content_origin: Option<String>,
     pub activity_type: Option<String>,
@@ -374,6 +385,8 @@ pub struct BakeExtractCandidatePayload {
     pub capture_webpage_title: Option<String>,
     pub url_aggregated_text: Option<String>,
     pub url_aggregated_capture_count: i64,
+    #[serde(default)]
+    pub action_trace: Vec<BakeActionTraceRecord>,
     pub document_evidence: BakeDocumentEvidencePayload,
 }
 
@@ -411,6 +424,10 @@ pub struct BakeExtractResponse {
     #[serde(rename = "design", alias = "document")]
     pub document: BakeArtifactExtraction,
     pub sop: BakeArtifactExtraction,
+    #[serde(default)]
+    pub primary_type: Option<String>,
+    #[serde(default)]
+    pub classification_reason: Option<String>,
     pub usage: Option<Value>,
     pub model: Option<String>,
     pub degraded: Option<bool>,
@@ -513,6 +530,8 @@ pub struct BakeSopArtifactPayload {
     pub extracted_problem: Option<String>,
     #[serde(default, deserialize_with = "deserialize_string_vec_mixed")]
     pub steps: Vec<String>,
+    #[serde(default)]
+    pub step_evidence: Vec<BakeSopStepEvidencePayload>,
     #[serde(default, deserialize_with = "deserialize_string_vec_mixed")]
     pub linked_knowledge_ids: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_optional_string_mixed")]
@@ -524,6 +543,13 @@ pub struct BakeSopArtifactPayload {
     pub match_level: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_string_mixed")]
     pub review_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BakeSopStepEvidencePayload {
+    pub step_index: i64,
+    #[serde(default, deserialize_with = "deserialize_string_vec_mixed")]
+    pub capture_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -601,6 +627,7 @@ impl BakeService {
             preferred_source_title: None,
             url_aggregated_text: None,
             url_aggregated_capture_count: 0,
+            action_trace: Vec::new(),
             retry_failure_count: 0,
             retry_error_code: None,
             retry_next_at_ms: 0,
@@ -1630,6 +1657,13 @@ impl BakeService {
                     candidate.timeline.is_self_generated,
                     is_substantive_document_candidate(&candidate),
                 );
+                self.storage
+                    .upsert_bake_candidate_audit(&new_bake_candidate_audit(
+                        run_id,
+                        &candidate,
+                        "skipped",
+                        Some("not_high_value"),
+                    ))?;
                 work_queue.push(BakeWorkItem::Skip {
                     timeline_id: candidate.timeline.id,
                     candidate_ts,
@@ -1644,6 +1678,13 @@ impl BakeService {
                     "bake skip: timeline_id={} reason=fingerprint_unchanged",
                     candidate.timeline.id,
                 );
+                self.storage
+                    .upsert_bake_candidate_audit(&new_bake_candidate_audit(
+                        run_id,
+                        &candidate,
+                        "skipped",
+                        Some("fingerprint_unchanged"),
+                    ))?;
                 work_queue.push(BakeWorkItem::Skip {
                     timeline_id: candidate.timeline.id,
                     candidate_ts,
@@ -1658,6 +1699,13 @@ impl BakeService {
                         candidate.timeline.id,
                         document_url,
                     );
+                    self.storage
+                        .upsert_bake_candidate_audit(&new_bake_candidate_audit(
+                            run_id,
+                            &candidate,
+                            "skipped",
+                            Some("document_url_already_queued"),
+                        ))?;
                     work_queue.push(BakeWorkItem::Skip {
                         timeline_id: candidate.timeline.id,
                         candidate_ts,
@@ -1667,6 +1715,10 @@ impl BakeService {
                 }
             }
             initial_candidate_count += 1;
+            self.storage
+                .upsert_bake_candidate_audit(&new_bake_candidate_audit(
+                    run_id, &candidate, "queued", None,
+                ))?;
             work_queue.push(BakeWorkItem::Extract(candidate));
         }
 
@@ -1747,6 +1799,12 @@ impl BakeService {
                     // 前台推理抢占、限流和明确的服务不可用只会延后本批。
                     // 不写候选死信，也不推进 watermark，下一批从同一候选继续。
                     if is_untracked_transient_bake_error(&err) {
+                        self.storage.finalize_bake_candidate_audit(
+                            run_id,
+                            candidate.timeline.id,
+                            "deferred",
+                            Some(bake_retry_error_code(&err)),
+                        )?;
                         return Err(err);
                     }
                     let count = self
@@ -1780,6 +1838,12 @@ impl BakeService {
                             initial_candidate_count,
                             processed_episode_count,
                         );
+                        self.storage.finalize_bake_candidate_audit(
+                            run_id,
+                            candidate.timeline.id,
+                            "retry_scheduled",
+                            Some(bake_retry_error_code(&err)),
+                        )?;
                         continue;
                     }
                     tracing::error!(
@@ -1797,6 +1861,12 @@ impl BakeService {
                     }
                     discarded_count += 1;
                     processed_episode_count += 1;
+                    self.storage.finalize_bake_candidate_audit(
+                        run_id,
+                        candidate.timeline.id,
+                        "failed",
+                        Some(bake_retry_error_code(&err)),
+                    )?;
                     let _ = self.storage.update_bake_run_progress(
                         run_id,
                         initial_candidate_count,
@@ -1805,6 +1875,22 @@ impl BakeService {
                     continue;
                 }
             };
+            let sop_payload_valid = if extracted.sop.accepted {
+                extracted.sop.payload.as_ref().map(|payload| {
+                    serde_json::from_value::<BakeSopArtifactPayload>(payload.clone()).is_ok()
+                })
+            } else {
+                None
+            };
+            self.storage.update_bake_candidate_audit_model(
+                run_id,
+                candidate.timeline.id,
+                extracted.primary_type.as_deref(),
+                extracted.classification_reason.as_deref(),
+                extracted.sop.accepted,
+                extracted.sop.reason.as_deref(),
+                sop_payload_valid,
+            )?;
             let candidate_result = match self
                 .persist_extracted_candidate(
                     None,
@@ -1823,6 +1909,12 @@ impl BakeService {
                     // 文档合并同样会经过 sidecar，可能在持久化阶段被前台任务抢占。
                     // 此时本地已落盘的部分产物保持幂等，候选留给下一批补齐。
                     if is_untracked_transient_bake_error(&err) {
+                        self.storage.finalize_bake_candidate_audit(
+                            run_id,
+                            candidate.timeline.id,
+                            "deferred",
+                            Some(bake_retry_error_code(&err)),
+                        )?;
                         return Err(err);
                     }
                     let count = self
@@ -1853,6 +1945,12 @@ impl BakeService {
                             initial_candidate_count,
                             processed_episode_count,
                         );
+                        self.storage.finalize_bake_candidate_audit(
+                            run_id,
+                            candidate.timeline.id,
+                            "retry_scheduled",
+                            Some(bake_retry_error_code(&err)),
+                        )?;
                         continue;
                     }
                     tracing::error!(
@@ -1870,6 +1968,12 @@ impl BakeService {
                     }
                     discarded_count += 1;
                     processed_episode_count += 1;
+                    self.storage.finalize_bake_candidate_audit(
+                        run_id,
+                        candidate.timeline.id,
+                        "failed",
+                        Some(bake_retry_error_code(&err)),
+                    )?;
                     let _ = self.storage.update_bake_run_progress(
                         run_id,
                         initial_candidate_count,
@@ -1878,6 +1982,15 @@ impl BakeService {
                     continue;
                 }
             };
+
+            self.storage.finalize_bake_candidate_audit(
+                run_id,
+                candidate.timeline.id,
+                candidate_result
+                    .sop_persist_status
+                    .unwrap_or("not_evaluated"),
+                candidate_result.sop_persist_reason.as_deref(),
+            )?;
 
             auto_created_count += candidate_result.auto_created_count;
             candidate_count += candidate_result.candidate_count;
@@ -1927,6 +2040,28 @@ impl BakeService {
             None,
             Some(latency_ms),
         )?;
+        let sop_funnel = self.storage.get_bake_run_sop_funnel_summary(run_id)?;
+        tracing::info!(
+            "bake sop funnel: run_id={} audited={} eligible={} model_accepted={} payload_valid={} persisted={}",
+            run_id,
+            sop_funnel.audited_count,
+            sop_funnel.eligible_count,
+            sop_funnel.model_accepted_count,
+            sop_funnel.payload_valid_count,
+            sop_funnel.persisted_count,
+        );
+        if sop_funnel.eligible_count >= BAKE_SOP_ZERO_OUTPUT_ELIGIBLE_ALERT_THRESHOLD
+            && sop_funnel.persisted_count == 0
+        {
+            tracing::warn!(
+                "bake sop zero-output alert: run_id={} eligible={} model_accepted={} payload_valid={} threshold={}",
+                run_id,
+                sop_funnel.eligible_count,
+                sop_funnel.model_accepted_count,
+                sop_funnel.payload_valid_count,
+                BAKE_SOP_ZERO_OUTPUT_ELIGIBLE_ALERT_THRESHOLD,
+            );
+        }
         let latest = self.storage.get_latest_bake_run()?.ok_or_else(|| {
             ApiError::NotFound(format!("bake run {run_id} not found after completion"))
         })?;
@@ -2736,7 +2871,10 @@ impl BakeService {
                 candidate.timeline.id,
                 source_capture_ids.len(),
             );
-            return Ok(CandidatePersistResult::discarded());
+            return Ok(CandidatePersistResult::sop_outcome(
+                "rejected",
+                "insufficient_multi_capture_evidence",
+            ));
         }
         let source_fingerprint = artifact_source_fingerprint(candidate);
         if let Some(existing_id) = source_fingerprint
@@ -2762,7 +2900,10 @@ impl BakeService {
                     candidate.timeline.id,
                     existing.id,
                 );
-                return Ok(CandidatePersistResult::discarded());
+                return Ok(CandidatePersistResult::sop_outcome(
+                    "reused",
+                    "source_fingerprint_already_seen",
+                ));
             }
         }
         if existing_sources.contains(&candidate.timeline.id) {
@@ -2778,7 +2919,10 @@ impl BakeService {
                 "bake sop discard: timeline_id={} reason=already_has_sop",
                 candidate.timeline.id,
             );
-            return Ok(CandidatePersistResult::discarded());
+            return Ok(CandidatePersistResult::sop_outcome(
+                "reused",
+                "already_has_sop",
+            ));
         }
         if !extraction.accepted {
             tracing::info!(
@@ -2786,7 +2930,13 @@ impl BakeService {
                 candidate.timeline.id,
                 extraction.reason,
             );
-            return Ok(CandidatePersistResult::discarded());
+            return Ok(CandidatePersistResult::sop_outcome(
+                "rejected",
+                extraction
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "sidecar_rejected".to_string()),
+            ));
         }
 
         let payload = extraction
@@ -3122,6 +3272,8 @@ struct CandidatePersistResult {
     knowledge_created_count: i64,
     document_created_count: i64,
     sop_created_count: i64,
+    sop_persist_status: Option<&'static str>,
+    sop_persist_reason: Option<String>,
 }
 
 impl CandidatePersistResult {
@@ -3155,6 +3307,17 @@ impl CandidatePersistResult {
             auto_created_count: if auto_created { 1 } else { 0 },
             candidate_count: if auto_created { 0 } else { 1 },
             sop_created_count: 1,
+            sop_persist_status: Some("created"),
+            sop_persist_reason: Some("created".to_string()),
+            ..Self::default()
+        }
+    }
+
+    fn sop_outcome(status: &'static str, reason: impl Into<String>) -> Self {
+        Self {
+            discarded_count: if status == "created" { 0 } else { 1 },
+            sop_persist_status: Some(status),
+            sop_persist_reason: Some(reason.into()),
             ..Self::default()
         }
     }
@@ -3166,6 +3329,10 @@ impl CandidatePersistResult {
         self.knowledge_created_count += other.knowledge_created_count;
         self.document_created_count += other.document_created_count;
         self.sop_created_count += other.sop_created_count;
+        if other.sop_persist_status.is_some() {
+            self.sop_persist_status = other.sop_persist_status;
+            self.sop_persist_reason = other.sop_persist_reason;
+        }
     }
 }
 
@@ -3177,6 +3344,7 @@ fn map_extract_candidate_payload(
         source_timeline_id: candidate.timeline.id,
         source_capture_id: candidate.timeline.capture_id,
         source_capture_count,
+        effective_capture_count: candidate.action_trace.len() as i64,
         timeline_category: candidate.timeline.category.clone(),
         summary: candidate.timeline.summary.clone(),
         overview: candidate.timeline.overview.clone(),
@@ -3187,6 +3355,16 @@ fn map_extract_candidate_payload(
         observed_at: candidate.timeline.observed_at,
         event_time_start: candidate.timeline.event_time_start,
         event_time_end: candidate.timeline.event_time_end,
+        start_time: candidate.timeline.start_time,
+        end_time: candidate.timeline.end_time,
+        duration_minutes: candidate.timeline.duration_minutes,
+        time_range_start: candidate.timeline.time_range_start,
+        time_range_end: candidate.timeline.time_range_end,
+        key_timestamps: candidate
+            .timeline
+            .key_timestamps
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok()),
         history_view: candidate.timeline.history_view,
         content_origin: candidate.timeline.content_origin.clone(),
         activity_type: candidate.timeline.activity_type.clone(),
@@ -3204,7 +3382,42 @@ fn map_extract_candidate_payload(
             .or_else(|| candidate.capture_webpage_title.clone()),
         url_aggregated_text: candidate.url_aggregated_text.clone(),
         url_aggregated_capture_count: candidate.url_aggregated_capture_count,
+        action_trace: candidate.action_trace.clone(),
         document_evidence: document_evidence(candidate),
+    }
+}
+
+fn new_bake_candidate_audit(
+    run_id: i64,
+    candidate: &BakeMemorySourceRecord,
+    persist_status: &str,
+    persist_reason: Option<&str>,
+) -> NewBakeCandidateAudit {
+    let source_capture_count = source_capture_id_strings(candidate).len() as i64;
+    let effective_capture_count = candidate.action_trace.len() as i64;
+    let (sop_eligible, sop_eligibility_reason) = if persist_status != "queued" {
+        (false, persist_reason.unwrap_or("precheck_skipped"))
+    } else if source_capture_count < 2 {
+        (false, "insufficient_source_capture_count")
+    } else if effective_capture_count < 2 {
+        (false, "insufficient_effective_capture_count")
+    } else {
+        (true, "eligible_multi_capture")
+    };
+    NewBakeCandidateAudit {
+        run_id,
+        timeline_id: candidate.timeline.id,
+        lane: if candidate.retry_failure_count > 0 {
+            "retry".to_string()
+        } else {
+            "fresh".to_string()
+        },
+        source_capture_count,
+        effective_capture_count,
+        sop_eligible,
+        sop_eligibility_reason: Some(sop_eligibility_reason.to_string()),
+        persist_status: persist_status.to_string(),
+        persist_reason: persist_reason.map(ToString::to_string),
     }
 }
 
@@ -3765,6 +3978,39 @@ fn build_bake_sop_entry(
     } else {
         payload.linked_knowledge_ids.clone()
     };
+    let source_capture_id_set = source_capture_ids.iter().cloned().collect::<HashSet<_>>();
+    let mut used_timeline_fallback = false;
+    let step_evidence = payload
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            let step_index = index as i64 + 1;
+            let mut capture_ids = payload
+                .step_evidence
+                .iter()
+                .find(|item| item.step_index == step_index)
+                .map(|item| {
+                    item.capture_ids
+                        .iter()
+                        .filter(|capture_id| source_capture_id_set.contains(*capture_id))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            capture_ids.sort();
+            capture_ids.dedup();
+            if capture_ids.is_empty() {
+                used_timeline_fallback = true;
+                capture_ids = source_capture_ids.to_vec();
+            }
+            json!({
+                "step_index": step_index,
+                "step": step,
+                "capture_ids": capture_ids,
+            })
+        })
+        .collect::<Vec<_>>();
     let details = json!({
         "source_timeline_id": source.timeline.id,
         "source_memory_ids": [source.timeline.id.to_string()],
@@ -3782,6 +4028,8 @@ fn build_bake_sop_entry(
         "confidence": payload.confidence.clone().unwrap_or_else(|| infer_confidence(source.timeline.importance, source.timeline.occurrence_count)),
         "extracted_problem": payload.extracted_problem.clone(),
         "steps": payload.steps,
+        "step_evidence": step_evidence,
+        "step_evidence_mode": if used_timeline_fallback { "timeline_scope_fallback" } else { "model_aligned" },
         "linked_knowledge_ids": linked_knowledge_ids,
         "status": review_status,
     });
@@ -5887,6 +6135,7 @@ mod tests {
             preferred_source_title: None,
             url_aggregated_text: None,
             url_aggregated_capture_count: 0,
+            action_trace: Vec::new(),
             retry_failure_count: 0,
             retry_error_code: None,
             retry_next_at_ms: 0,
@@ -5900,10 +6149,50 @@ mod tests {
         let timeline_id = seed_knowledge(&service, "coding", primary, 4, 1);
         let mut candidate = make_candidate(&service, timeline_id);
         candidate.timeline.capture_ids = Some(format!("[{},{}]", primary, primary + 1));
+        candidate.timeline.start_time = Some(1_710_000_000_000);
+        candidate.timeline.end_time = Some(1_710_000_010_000);
+        candidate.timeline.key_timestamps = Some(format!(
+            r#"[{{"capture_id":{},"ts":1710000000000}}]"#,
+            primary
+        ));
+        candidate.action_trace = vec![
+            BakeActionTraceRecord {
+                capture_id: primary,
+                ts: 1_710_000_000_000,
+                event_type: "manual".to_string(),
+                app_name: Some("Code".to_string()),
+                win_title: Some("开始排查".to_string()),
+                url: None,
+                webpage_title: None,
+                visible_text: Some("检查配置".to_string()),
+                input_text: None,
+                audio_text: None,
+            },
+            BakeActionTraceRecord {
+                capture_id: primary + 1,
+                ts: 1_710_000_010_000,
+                event_type: "manual".to_string(),
+                app_name: Some("Terminal".to_string()),
+                win_title: Some("测试".to_string()),
+                url: None,
+                webpage_title: None,
+                visible_text: Some("验证通过".to_string()),
+                input_text: Some("cargo test".to_string()),
+                audio_text: None,
+            },
+        ];
 
         let payload = map_extract_candidate_payload(&candidate);
 
         assert_eq!(payload.source_capture_count, 2);
+        assert_eq!(payload.effective_capture_count, 2);
+        assert_eq!(payload.action_trace.len(), 2);
+        assert_eq!(
+            payload.action_trace[1].app_name.as_deref(),
+            Some("Terminal")
+        );
+        assert_eq!(payload.start_time, Some(1_710_000_000_000));
+        assert!(payload.key_timestamps.is_some());
     }
 
     #[test]
@@ -6352,6 +6641,26 @@ mod tests {
 
         assert_eq!(service.storage.count_bake_knowledge().unwrap(), 1);
         assert_eq!(service.storage.count_bake_sops().unwrap(), 1);
+        let sop_id = service
+            .storage
+            .find_bake_artifact_by_source_timeline("sop", first_timeline)
+            .unwrap()
+            .unwrap();
+        let sop = service.storage.get_bake_sop(sop_id).unwrap().unwrap();
+        let sop_content = parse_details(sop.content.as_deref());
+        assert_eq!(
+            sop_content
+                .get("step_evidence_mode")
+                .and_then(Value::as_str),
+            Some("timeline_scope_fallback")
+        );
+        assert_eq!(
+            sop_content
+                .get("step_evidence")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(2)
+        );
         assert_eq!(duplicate_knowledge.discarded_count, 1);
         assert_eq!(duplicate_sop.discarded_count, 1);
         assert!(service

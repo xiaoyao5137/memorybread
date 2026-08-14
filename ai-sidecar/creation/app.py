@@ -15,10 +15,12 @@ from pydantic import BaseModel, Field
 from typing import Any, Optional
 import logging
 
+import httpx
+
 from inference_queue import LANE_P0_CREATION, Priority, get_global_queue
 
 from .agent_loop import CreationAgentLoop
-from .service import CreationOptions, CreationService
+from .service import CloudModelRequestError, CreationOptions, CreationService
 from .tools import REQUIRED_CREATION_TOOL_IDS
 
 logging.basicConfig(level=logging.INFO)
@@ -38,6 +40,35 @@ app.add_middleware(
 )
 creation_service = CreationService()
 creation_agent_loop = CreationAgentLoop(creation_service)
+
+
+def _creation_failure_details(exc: Exception) -> tuple[str, str, bool]:
+    """把内部异常收敛为不泄露供应商信息的稳定错误契约。"""
+    if isinstance(exc, httpx.TransportError):
+        return (
+            "MODEL_TRANSPORT_UNAVAILABLE",
+            "模型服务连接暂时中断，自动重试后仍未恢复，请稍后重试",
+            True,
+        )
+    if isinstance(exc, CloudModelRequestError):
+        if exc.status_code == 429:
+            return (
+                "MODEL_RATE_LIMITED",
+                "模型服务当前繁忙，自动重试后仍未恢复，请稍后重试",
+                True,
+            )
+        if exc.status_code >= 500:
+            return (
+                "MODEL_SERVICE_UNAVAILABLE",
+                "模型服务暂时不可用，自动重试后仍未恢复，请稍后重试",
+                True,
+            )
+    message = str(exc).strip()
+    return (
+        "CREATION_AGENT_FAILED",
+        message or "创作执行失败，服务未返回具体原因",
+        False,
+    )
 
 
 class GenerateRequest(BaseModel):
@@ -228,6 +259,7 @@ async def run_creation_agent(request: AgentRunRequest):
                 asyncio.run(produce())
             except Exception as exc:
                 logger.exception("Creation agent loop failed")
+                error_code, failure_summary, retryable = _creation_failure_details(exc)
                 event_queue.put(
                     {
                         "schema_version": "creation.agent.v1",
@@ -243,15 +275,18 @@ async def run_creation_agent(request: AgentRunRequest):
                             "id": "creation_main_agent",
                             "name": "创作主 Agent",
                         },
-                        "summary": str(exc),
+                        "summary": failure_summary,
                         "goal": {
                             "status": "failed",
                             "revision": 0,
                             "remaining_steps": [],
-                            "outcome": str(exc),
+                            "outcome": failure_summary,
                         },
                         "environment_patch": {},
-                        "data": {},
+                        "data": {
+                            "error_code": error_code,
+                            "retryable": retryable,
+                        },
                     }
                 )
             finally:

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     io::BufWriter,
     path::PathBuf,
@@ -15,6 +16,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -30,8 +32,9 @@ use crate::{
 use uuid::Uuid;
 
 const MAX_SCRAPED_CHARS: usize = 80_000;
-const BROWSER_DATA_READY_POLL_ATTEMPTS: usize = 40;
-const BROWSER_SCROLL_READY_POLL_ATTEMPTS: usize = 12;
+const BROWSER_DATA_READY_POLL_ATTEMPTS: usize = 120;
+const BROWSER_INTERACTION_READY_POLL_ATTEMPTS: usize = 80;
+const BROWSER_SCROLL_READY_POLL_ATTEMPTS: usize = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrowserScriptKind {
@@ -389,6 +392,12 @@ pub async fn register_discovered_source(
             source_id: None,
             created: None,
         },
+        DiscoveredSourceOutcome::RejectedNotRefreshable => RegisterDiscoveredSourceResponse {
+            status: "rejected",
+            reason_code: Some("not_refreshable_report"),
+            source_id: None,
+            created: None,
+        },
         DiscoveredSourceOutcome::RejectedCaptureMissing => RegisterDiscoveredSourceResponse {
             status: "rejected",
             reason_code: Some("capture_missing"),
@@ -476,6 +485,20 @@ pub async fn refresh_data_source(
                 "数据源不存在或已停用",
             )
         })?;
+    if source.source_kind != "report_url" || source.refresh_policy == "never" {
+        return Err(DataToolError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "DATA_SOURCE_NOT_REFRESHABLE",
+            "该数据源不是可实时刷新的网页报表",
+        ));
+    }
+    if source.last_error_code.as_deref() == Some("SCRAPE_NOT_FOUND") {
+        return Err(DataToolError::new(
+            StatusCode::GONE,
+            "SCRAPE_NOT_FOUND",
+            "页面已不存在，本次未生成数据快照",
+        ));
+    }
     let url = source.source_url.clone().ok_or_else(|| {
         DataToolError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -817,6 +840,17 @@ fn scrape_with_browser(
                     &javascript,
                 );
                 let mut output = run_browser_script(&script)?;
+                if output.status.success() {
+                    let payload: Value = serde_json::from_slice(&output.stdout)
+                        .map_err(|_| internal_scrape_error())?;
+                    let page_text = payload.get("text").and_then(Value::as_str).unwrap_or("");
+                    ensure_expected_period_visible(
+                        page_text,
+                        payload.get("structured_data"),
+                        expected_period_start.unwrap_or_default(),
+                        expected_period_end.unwrap_or_default(),
+                    )?;
+                }
                 let accessibility_text = if output.status.success() {
                     let payload: Value = serde_json::from_slice(&output.stdout).unwrap_or_default();
                     let page_title = payload
@@ -915,19 +949,19 @@ fn scrape_with_browser(
                 "请先在对应浏览器中完成页面登录",
             ));
         }
-        let screenshot =
-            evidence_path
-                .map(read_browser_screenshot)
-                .transpose()?
-                .map(|mut screenshot| {
-                    screenshot.relative_path = evidence_path_string
-                        .as_deref()
-                        .and_then(|value| std::path::Path::new(value).file_name())
-                        .and_then(|value| value.to_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    screenshot
-                });
+        let screenshot = evidence_path
+            .filter(|path| path.is_file())
+            .map(read_browser_screenshot)
+            .transpose()?
+            .map(|mut screenshot| {
+                screenshot.relative_path = evidence_path_string
+                    .as_deref()
+                    .and_then(|value| std::path::Path::new(value).file_name())
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                screenshot
+            });
         let ax_content_text = accessibility_text
             .as_deref()
             .map(|value| clip_text(value, MAX_SCRAPED_CHARS))
@@ -941,6 +975,15 @@ fn scrape_with_browser(
             structured_data = json!({"payload": structured_data});
         }
         if let Some(object) = structured_data.as_object_mut() {
+            if let Some(scroll_capture) = object
+                .get_mut("scroll_capture")
+                .and_then(Value::as_object_mut)
+            {
+                scroll_capture.insert(
+                    "screenshot_complete".to_string(),
+                    Value::Bool(screenshot.is_some()),
+                );
+            }
             object.insert(
                 "dom_content_text".to_string(),
                 Value::String(clip_text(dom_content_text, MAX_SCRAPED_CHARS)),
@@ -1270,6 +1313,49 @@ fn capture_background_browser_image(
     session: &BrowserWindowSession,
     require_rendered_content: bool,
 ) -> Result<image::RgbaImage, DataToolError> {
+    let previous_front_app = require_rendered_content
+        .then(|| {
+            run_browser_script(&format!(
+                r#"
+                tell application "System Events"
+                    set previous_front_app to name of first application process whose frontmost is true
+                    set frontmost of first application process whose name is "{process_name}" to true
+                    delay 0.25
+                    return previous_front_app
+                end tell
+                "#,
+                process_name = adapter.process_name,
+            ))
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|value| !value.is_empty())
+        })
+        .flatten();
+
+    let result =
+        capture_background_browser_image_while_visible(adapter, session, require_rendered_content);
+    if let Some(previous_front_app) = previous_front_app {
+        let _ = run_browser_script(&format!(
+            r#"
+            tell application "System Events"
+                try
+                    set frontmost of first application process whose name is "{previous_front_app}" to true
+                end try
+            end tell
+            "#,
+            previous_front_app = escape_applescript_string(&previous_front_app),
+        ));
+    }
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn capture_background_browser_image_while_visible(
+    adapter: BrowserAdapter,
+    session: &BrowserWindowSession,
+    require_rendered_content: bool,
+) -> Result<image::RgbaImage, DataToolError> {
     use xcap::Window;
 
     let mut last_error = String::new();
@@ -1412,6 +1498,17 @@ struct BrowserPageGeometry {
     target_height: f64,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct BrowserScrollState {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    scroll_left: u32,
+    #[serde(default)]
+    scroll_top: u32,
+}
+
 fn browser_scroll_positions(geometry: &BrowserPageGeometry) -> Vec<u32> {
     const MAX_SEGMENTS: usize = 20;
     let viewport = geometry.inner_height.max(1);
@@ -1462,6 +1559,40 @@ fn browser_axis_positions(content_size: u32, viewport_size: u32, limit: usize) -
     positions
 }
 
+fn browser_scroll_reached(actual: u32, expected: u32) -> bool {
+    actual.abs_diff(expected) <= 3
+}
+
+#[cfg(target_os = "macos")]
+fn browser_images_look_repeated(previous: &image::RgbaImage, current: &image::RgbaImage) -> bool {
+    if previous.dimensions() != current.dimensions()
+        || current.width() == 0
+        || current.height() == 0
+    {
+        return false;
+    }
+    let step_x = (current.width() / 240).max(1) as usize;
+    let step_y = (current.height() / 160).max(1) as usize;
+    let mut sampled = 0_u64;
+    let mut changed = 0_u64;
+    for y in (0..current.height()).step_by(step_y) {
+        for x in (0..current.width()).step_by(step_x) {
+            sampled += 1;
+            let left = previous.get_pixel(x, y).0;
+            let right = current.get_pixel(x, y).0;
+            if left
+                .iter()
+                .zip(right.iter())
+                .take(3)
+                .any(|(a, b)| a.abs_diff(*b) > 8)
+            {
+                changed += 1;
+            }
+        }
+    }
+    sampled > 0 && changed.saturating_mul(2_000) < sampled
+}
+
 fn merge_browser_payloads(mut primary: Value, segments: &[Value]) -> Value {
     let Some(primary_object) = primary.as_object_mut() else {
         return primary;
@@ -1470,6 +1601,16 @@ fn merge_browser_payloads(mut primary: Value, segments: &[Value]) -> Value {
     if let Some(text) = primary_object.get("text").and_then(Value::as_str) {
         if !text.trim().is_empty() {
             text_parts.push(text.to_string());
+        }
+    }
+    if let Some(viewport_text) = primary_object
+        .get("structured_data")
+        .and_then(Value::as_object)
+        .and_then(|structured| structured.get("visible_viewport_text"))
+        .and_then(Value::as_str)
+    {
+        if !viewport_text.trim().is_empty() {
+            text_parts.push(viewport_text.to_string());
         }
     }
     let structured = primary_object
@@ -1496,6 +1637,16 @@ fn merge_browser_payloads(mut primary: Value, segments: &[Value]) -> Value {
         else {
             continue;
         };
+        if let Some(viewport_text) = segment_structured
+            .get("visible_viewport_text")
+            .and_then(Value::as_str)
+        {
+            if !viewport_text.trim().is_empty()
+                && !text_parts.iter().any(|item| item == viewport_text)
+            {
+                text_parts.push(viewport_text.to_string());
+            }
+        }
         for key in ["tables", "metric_labels", "text_blocks", "evidence_regions"] {
             let Some(values) = segment_structured.get(key).and_then(Value::as_array) else {
                 continue;
@@ -1513,7 +1664,14 @@ fn merge_browser_payloads(mut primary: Value, segments: &[Value]) -> Value {
     }
     structured_object.insert(
         "scroll_capture".to_string(),
-        json!({"segment_count": segments.len(), "aggregated": !segments.is_empty()}),
+        json!({
+            "segment_count": segments.len(),
+            "aggregated": !segments.is_empty(),
+            "scroll_positions": segments.iter().filter_map(|segment| {
+                segment.get("structured_data")?.get("page_state")?
+                    .get("active_scroll_top").cloned()
+            }).collect::<Vec<_>>()
+        }),
     );
     primary_object.insert(
         "text".to_string(),
@@ -1523,11 +1681,66 @@ fn merge_browser_payloads(mut primary: Value, segments: &[Value]) -> Value {
 }
 
 #[cfg(target_os = "macos")]
+fn merge_accessibility_segment_into_payload(
+    adapter: BrowserAdapter,
+    session: &BrowserWindowSession,
+    payload: &mut Value,
+) {
+    let page_title = payload
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let accessibility_text = crate::capture::ax::extract_window_text_by_title(
+        adapter.process_name,
+        &session.preview_token,
+    )
+    .or_else(|| crate::capture::ax::extract_window_text_by_title(adapter.process_name, page_title))
+    .map(|value| clip_text(&value, MAX_SCRAPED_CHARS))
+    .filter(|value| {
+        value
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .count()
+            >= 12
+    });
+    let Some(accessibility_text) = accessibility_text else {
+        return;
+    };
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+    let current = object.get("text").and_then(Value::as_str).unwrap_or("");
+    if !current.contains(&accessibility_text) {
+        object.insert(
+            "text".to_string(),
+            Value::String(clip_text(
+                &format!("{current}\n{accessibility_text}"),
+                MAX_SCRAPED_CHARS,
+            )),
+        );
+    }
+    let structured = object.entry("structured_data").or_insert_with(|| json!({}));
+    if !structured.is_object() {
+        *structured = json!({});
+    }
+    structured
+        .as_object_mut()
+        .expect("object initialized above")
+        .insert(
+            "accessibility_segment_char_count".to_string(),
+            json!(accessibility_text.chars().count()),
+        );
+}
+
+#[cfg(target_os = "macos")]
 fn wait_for_background_browser_segment(
     adapter: BrowserAdapter,
     session: &BrowserWindowSession,
     readiness_javascript: &str,
 ) -> Result<(), DataToolError> {
+    // 虚拟化报表通常在 scroll 事件后的下一批动画帧才挂载新图表。
+    // 先留出一小段绘制时间，避免正文总长度未变时立即误判“稳定”。
+    thread::sleep(Duration::from_millis(650));
     let mut last_length = 0_i64;
     let mut stable_reads = 0_usize;
     for _ in 0..BROWSER_SCROLL_READY_POLL_ATTEMPTS {
@@ -1568,6 +1781,46 @@ fn wait_for_background_browser_segment(
 }
 
 #[cfg(target_os = "macos")]
+fn activate_background_browser_segment_for_render(
+    adapter: BrowserAdapter,
+    session: &BrowserWindowSession,
+) -> Result<(), DataToolError> {
+    // Chromium 会降低完全遮挡窗口的合成与虚拟列表更新频率。滚动后只短暂
+    // 激活专用预览窗口，让当前视口触发真实的异步查询和绘制，再恢复用户
+    // 原先所在应用。这里不依赖页面名称、指标名称或 DOM 业务类名。
+    let output = run_browser_script(&format!(
+        r#"
+        tell application "System Events"
+            set previous_front_app to name of first application process whose frontmost is true
+        end tell
+        tell application "{app_name}"
+            set index of first window whose id is {window_id} to 1
+        end tell
+        tell application "System Events"
+            set frontmost of first application process whose name is "{process_name}" to true
+        end tell
+        delay 0.8
+        tell application "System Events"
+            try
+                set frontmost of first application process whose name is previous_front_app to true
+            end try
+        end tell
+        "#,
+        app_name = adapter.app_name,
+        process_name = adapter.process_name,
+        window_id = applescript_window_id_literal(&session.apple_script_id),
+    ))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(DataToolError::new(
+        StatusCode::BAD_GATEWAY,
+        "SCREENSHOT_FAILED",
+        "网页滚动后无法触发当前视口绘制",
+    ))
+}
+
+#[cfg(target_os = "macos")]
 fn capture_background_browser_long_screenshot(
     adapter: BrowserAdapter,
     session: &BrowserWindowSession,
@@ -1604,7 +1857,10 @@ fn capture_background_browser_long_screenshot(
     let positions = browser_scroll_positions(&geometry);
     let mut segments: Vec<(u32, RgbaImage)> = Vec::with_capacity(positions.len());
     let mut payloads: Vec<Value> = Vec::with_capacity(positions.len());
+    let mut screenshot_complete = true;
+    let mut previous_view: Option<RgbaImage> = None;
     for position in &positions {
+        activate_background_browser_segment_for_render(adapter, session)?;
         let scroll_script = format!(
             "window.scrollTo(0,{position});JSON.stringify({{scrollY:Math.round(window.scrollY||0)}})"
         );
@@ -1620,25 +1876,44 @@ fn capture_background_browser_long_screenshot(
                 "网页分段滚动失败",
             ));
         }
-        wait_for_background_browser_segment(
-            adapter,
-            session,
-            readiness_javascript,
-        )?;
+        wait_for_background_browser_segment(adapter, session, readiness_javascript)?;
         let payload = run_browser_script(&build_background_browser_evaluate_script(
             adapter,
             &session.apple_script_id,
             extraction_javascript,
         ))?;
         if payload.status.success() {
-            if let Ok(value) = serde_json::from_slice(&payload.stdout) {
+            if let Ok(mut value) = serde_json::from_slice(&payload.stdout) {
+                merge_accessibility_segment_into_payload(adapter, session, &mut value);
                 payloads.push(value);
             }
         }
-        segments.push((
-            *position,
-            capture_background_browser_image(adapter, session, true)?,
-        ));
+        if screenshot_complete {
+            let mut captured_view = None;
+            for _capture_attempt in 0..3 {
+                if force_background_browser_window_repaint(adapter, session).is_err() {
+                    continue;
+                }
+                let Ok(image) = capture_background_browser_image(adapter, session, true) else {
+                    continue;
+                };
+                if previous_view
+                    .as_ref()
+                    .is_some_and(|previous| browser_images_look_repeated(previous, &image))
+                {
+                    continue;
+                }
+                captured_view = Some(image);
+                break;
+            }
+            if let Some(image) = captured_view {
+                previous_view = Some(image.clone());
+                segments.push((*position, image));
+            } else {
+                screenshot_complete = false;
+                segments.clear();
+            }
+        }
     }
     let _ = run_browser_script(&build_background_browser_evaluate_script(
         adapter,
@@ -1646,8 +1921,13 @@ fn capture_background_browser_long_screenshot(
         "window.scrollTo(0,0);JSON.stringify({scrollY:0})",
     ));
 
+    if !screenshot_complete {
+        let _ = fs::remove_file(path);
+        return Ok(payloads);
+    }
     let Some((_, first)) = segments.first() else {
-        return Err(internal_scrape_error());
+        let _ = fs::remove_file(path);
+        return Ok(payloads);
     };
     let target_width = first.width();
     let browser_chrome_css = geometry.outer_height.saturating_sub(geometry.inner_height);
@@ -1710,11 +1990,14 @@ fn capture_scrollable_element_screenshot(
         browser_axis_positions(geometry.scroll_height, geometry.inner_height, y_limit);
     let mut rows: Vec<Vec<RgbaImage>> = Vec::new();
     let mut payloads: Vec<Value> = Vec::new();
-    for y_position in &y_positions {
+    let mut previous_view: Option<RgbaImage> = None;
+    let mut screenshot_complete = true;
+    for (row_index, y_position) in y_positions.iter().enumerate() {
         let mut row = Vec::new();
-        for x_position in &x_positions {
+        for (column_index, x_position) in x_positions.iter().enumerate() {
+            activate_background_browser_segment_for_render(adapter, session)?;
             let scroll_script = format!(
-                "(function(){{var root=document.querySelector('[data-memorybread-scroll-root]');if(!root)return JSON.stringify({{ok:false}});root.scrollTo({x_position},{y_position});return JSON.stringify({{ok:true,scrollLeft:Math.round(root.scrollLeft||0),scrollTop:Math.round(root.scrollTop||0)}});}})()"
+                "(function(){{var root=document.querySelector('[data-memorybread-scroll-root]');if(!root)return JSON.stringify({{ok:false}});root.scrollTo({{left:{x_position},top:{y_position},behavior:'auto'}});root.dispatchEvent(new Event('scroll',{{bubbles:true}}));window.dispatchEvent(new Event('scroll'));void root.offsetHeight;return JSON.stringify({{ok:true,scrollLeft:Math.round(root.scrollLeft||0),scrollTop:Math.round(root.scrollTop||0)}});}})()"
             );
             let output = run_browser_script(&build_background_browser_evaluate_script(
                 adapter,
@@ -1728,37 +2011,103 @@ fn capture_scrollable_element_screenshot(
                     "看板内部区域滚动失败",
                 ));
             }
-            wait_for_background_browser_segment(
-                adapter,
-                session,
-                readiness_javascript,
-            )?;
+            let scroll_state: BrowserScrollState =
+                serde_json::from_slice(&output.stdout).map_err(|_| internal_scrape_error())?;
+            if !scroll_state.ok
+                || !browser_scroll_reached(scroll_state.scroll_left, *x_position)
+                || !browser_scroll_reached(scroll_state.scroll_top, *y_position)
+            {
+                return Err(DataToolError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "SCREENSHOT_SCROLL_STALLED",
+                    "看板内部区域没有滚动到预期位置",
+                ));
+            }
+            wait_for_background_browser_segment(adapter, session, readiness_javascript)?;
             let payload = run_browser_script(&build_background_browser_evaluate_script(
                 adapter,
                 &session.apple_script_id,
                 extraction_javascript,
             ))?;
             if payload.status.success() {
-                if let Ok(value) = serde_json::from_slice(&payload.stdout) {
+                if let Ok(mut value) = serde_json::from_slice(&payload.stdout) {
+                    merge_accessibility_segment_into_payload(adapter, session, &mut value);
                     payloads.push(value);
                 }
             }
-            let image = capture_background_browser_image(adapter, session, true)?;
-            let scale = image.height() as f64 / geometry.outer_height.max(1) as f64;
-            let chrome_css = geometry
-                .outer_height
-                .saturating_sub(geometry.viewport_height.max(1));
-            let left = (geometry.target_x.max(0.0) * scale).round() as u32;
-            let top = ((geometry.target_y.max(0.0) + chrome_css as f64) * scale).round() as u32;
-            let width = (geometry.target_width.max(1.0) * scale).round() as u32;
-            let height = (geometry.target_height.max(1.0) * scale).round() as u32;
-            let bounded_width = width.min(image.width().saturating_sub(left));
-            let bounded_height = height.min(image.height().saturating_sub(top));
-            if bounded_width == 0 || bounded_height == 0 {
-                return Err(internal_scrape_error());
+            if !screenshot_complete {
+                continue;
+            }
+            let mut captured_view = None;
+            for _capture_attempt in 0..3 {
+                if force_background_browser_window_repaint(adapter, session).is_err() {
+                    continue;
+                }
+                let Ok(image) = capture_background_browser_image(adapter, session, true) else {
+                    continue;
+                };
+                let scale = image.height() as f64 / geometry.outer_height.max(1) as f64;
+                let chrome_css = geometry
+                    .outer_height
+                    .saturating_sub(geometry.viewport_height.max(1));
+                let left = (geometry.target_x.max(0.0) * scale).round() as u32;
+                let top = ((geometry.target_y.max(0.0) + chrome_css as f64) * scale).round() as u32;
+                let width = (geometry.target_width.max(1.0) * scale).round() as u32;
+                let height = (geometry.target_height.max(1.0) * scale).round() as u32;
+                let bounded_width = width.min(image.width().saturating_sub(left));
+                let bounded_height = height.min(image.height().saturating_sub(top));
+                if bounded_width == 0 || bounded_height == 0 {
+                    return Err(internal_scrape_error());
+                }
+                let view =
+                    imageops::crop_imm(&image, left, top, bounded_width, bounded_height).to_image();
+                if previous_view
+                    .as_ref()
+                    .is_some_and(|previous| browser_images_look_repeated(previous, &view))
+                {
+                    continue;
+                }
+                captured_view = Some(view);
+                break;
+            }
+            let Some(view) = captured_view else {
+                screenshot_complete = false;
+                rows.clear();
+                row.clear();
+                continue;
+            };
+            previous_view = Some(view.clone());
+
+            let crop_left = if column_index == 0 {
+                0
+            } else {
+                let delta = x_position.saturating_sub(x_positions[column_index - 1]);
+                let overlap = geometry.inner_width.saturating_sub(delta);
+                ((overlap as f64 * view.width() as f64 / geometry.inner_width.max(1) as f64).round()
+                    as u32)
+                    .min(view.width())
+            };
+            let crop_top = if row_index == 0 {
+                0
+            } else {
+                let delta = y_position.saturating_sub(y_positions[row_index - 1]);
+                let overlap = geometry.inner_height.saturating_sub(delta);
+                ((overlap as f64 * view.height() as f64 / geometry.inner_height.max(1) as f64)
+                    .round() as u32)
+                    .min(view.height())
+            };
+            if crop_left >= view.width() || crop_top >= view.height() {
+                continue;
             }
             row.push(
-                imageops::crop_imm(&image, left, top, bounded_width, bounded_height).to_image(),
+                imageops::crop_imm(
+                    &view,
+                    crop_left,
+                    crop_top,
+                    view.width() - crop_left,
+                    view.height() - crop_top,
+                )
+                .to_image(),
             );
         }
         rows.push(row);
@@ -1766,36 +2115,41 @@ fn capture_scrollable_element_screenshot(
     let _ = run_browser_script(&build_background_browser_evaluate_script(
         adapter,
         &session.apple_script_id,
-        "(function(){var root=document.querySelector('[data-memorybread-scroll-root]');if(root)root.scrollTo(0,0);return JSON.stringify({ok:true});})()",
+        "(function(){var root=document.querySelector('[data-memorybread-scroll-root]');if(root){root.scrollTo({left:0,top:0,behavior:'auto'});root.dispatchEvent(new Event('scroll',{bubbles:true}));}return JSON.stringify({ok:true});})()",
     ));
 
-    let cell_width = rows
+    if !screenshot_complete {
+        let _ = fs::remove_file(path);
+        return Ok(payloads);
+    }
+
+    let row_widths: Vec<u32> = rows
         .iter()
-        .flat_map(|row| row.iter())
-        .map(RgbaImage::width)
-        .max()
-        .unwrap_or(0);
-    let cell_height = rows
+        .map(|row| {
+            row.iter()
+                .fold(0_u32, |sum, image| sum.saturating_add(image.width()))
+        })
+        .collect();
+    let row_heights: Vec<u32> = rows
         .iter()
-        .flat_map(|row| row.iter())
-        .map(RgbaImage::height)
-        .max()
-        .unwrap_or(0);
-    if cell_width == 0 || cell_height == 0 {
+        .map(|row| row.iter().map(RgbaImage::height).max().unwrap_or(0))
+        .collect();
+    let total_width = row_widths.iter().copied().max().unwrap_or(0);
+    let total_height = row_heights
+        .iter()
+        .fold(0_u32, |sum, height| sum.saturating_add(*height));
+    if total_width == 0 || total_height == 0 {
         return Err(internal_scrape_error());
     }
-    let total_width = cell_width.saturating_mul(x_positions.len() as u32);
-    let total_height = cell_height.saturating_mul(y_positions.len() as u32);
     let mut stitched = RgbaImage::from_pixel(total_width, total_height, Rgba([255, 255, 255, 255]));
+    let mut top = 0_i64;
     for (row_index, row) in rows.into_iter().enumerate() {
-        for (column_index, image) in row.into_iter().enumerate() {
-            imageops::overlay(
-                &mut stitched,
-                &image,
-                i64::from(cell_width) * column_index as i64,
-                i64::from(cell_height) * row_index as i64,
-            );
+        let mut left = 0_i64;
+        for image in row {
+            imageops::overlay(&mut stitched, &image, left, top);
+            left += i64::from(image.width());
         }
+        top += i64::from(row_heights[row_index]);
     }
     write_browser_image_atomic(session, path, stitched)?;
     Ok(payloads)
@@ -1817,6 +2171,26 @@ fn prepare_background_browser_window_for_capture(
         StatusCode::BAD_GATEWAY,
         "SCREENSHOT_FAILED",
         "后台页面已读取，但无法准备截图窗口",
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn force_background_browser_window_repaint(
+    adapter: BrowserAdapter,
+    session: &BrowserWindowSession,
+) -> Result<(), DataToolError> {
+    let output = run_browser_script(&build_background_browser_prepare_capture_script(
+        adapter,
+        &session.apple_script_id,
+    ))?;
+    if output.status.success() {
+        thread::sleep(Duration::from_millis(500));
+        return Ok(());
+    }
+    Err(DataToolError::new(
+        StatusCode::BAD_GATEWAY,
+        "SCREENSHOT_FAILED",
+        "后台页面滚动后无法刷新截图画面",
     ))
 }
 
@@ -1850,6 +2224,7 @@ fn accessibility_text_covers_dom(accessibility_text: &str, dom_text: &str) -> bo
     }
     let mut matches = 0_usize;
     let mut numeric_match = false;
+    let mut matched_lines = HashSet::new();
     for line in dom_text.lines().take(800) {
         let normalized = line
             .chars()
@@ -1857,7 +2232,10 @@ fn accessibility_text_covers_dom(accessibility_text: &str, dom_text: &str) -> bo
             .flat_map(char::to_lowercase)
             .collect::<String>();
         let length = normalized.chars().count();
-        if !(2..=160).contains(&length) || !normalized_ax.contains(&normalized) {
+        if !(2..=160).contains(&length)
+            || !normalized_ax.contains(&normalized)
+            || !matched_lines.insert(normalized.clone())
+        {
             continue;
         }
         matches += 1;
@@ -1892,9 +2270,18 @@ fn browser_extraction_javascript() -> String {
                 var rect = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
                 return !rect || (rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < (window.innerHeight || 0));
             }};
+            var activeScrollRoot=document.querySelector('[data-memorybread-scroll-root]');
+            var visibleText=Array.prototype.slice.call((activeScrollRoot||document.body||document.documentElement).querySelectorAll('*'),0,12000).filter(function(node){{
+                if(!node||node.children.length>0)return false;
+                var style=window.getComputedStyle?window.getComputedStyle(node):null;
+                if(style&&(style.display==='none'||style.visibility==='hidden'||Number(style.opacity||1)===0))return false;
+                var rect=node.getBoundingClientRect?node.getBoundingClientRect():null;
+                return rect&&rect.width>0&&rect.height>0&&rect.bottom>0&&rect.top<(window.innerHeight||0);
+            }}).map(function(node){{return clean(node.innerText||node.textContent);}}).filter(Boolean).join('\n');
             var rawText = String(document.body ? (document.body.innerText || document.body.textContent) : '');
             var text = rawText.split(/\r?\n/).map(clean).filter(Boolean).join('\n');
             if (text.length > {max_chars}) text = text.substring(0, {max_chars});
+            var scanText = text+'\n'+visibleText;
             var tables = Array.prototype.slice.call(document.querySelectorAll('table'), 0, 20).map(function(table) {{
                 return Array.prototype.slice.call(table.querySelectorAll('tr'), 0, 200).map(function(row) {{
                     return Array.prototype.slice.call(row.querySelectorAll('th,td'), 0, 40).map(function(cell) {{ return clean(cell.innerText || cell.textContent); }});
@@ -1917,11 +2304,11 @@ fn browser_extraction_javascript() -> String {
                 return {{text:value,x:Math.max(0,rect.left),y:rect.top,document_y:rect.top+(window.scrollY||0),width:rect.width,height:rect.height}};
             }}).filter(Boolean).slice(0,500);
             var loadingMarkerCount = Array.prototype.slice.call(document.querySelectorAll('body *'), 0, 5000).filter(isVisibleLoadingNode).length;
-            var rawLoadingMarkerCount = (text.match(/加载中|数据加载中|loading(?:\.\.\.)?/ig) || []).length;
-            var numericTokenCount = (text.match(/[+-]?\d[\d,]*(?:\.\d+)?%?/g) || []).length;
+            var rawLoadingMarkerCount = (scanText.match(/加载中|数据加载中|loading(?:\.\.\.)?/ig) || []).length;
+            var numericTokenCount = (scanText.match(/[+-]?\d[\d,]*(?:\.\d+)?%?/g) || []).length;
             var readinessPollCount = Number(window.__memoryBreadReadinessPollCount || 0);
             var readinessTimedOut = loadingMarkerCount > 0 && readinessPollCount >= {ready_poll_attempts};
-            return JSON.stringify({{title: clean(document.title), url: location.href, text: text, structured_data: {{tables: tables, metric_labels: labels, text_blocks: textBlocks, evidence_regions:evidenceRegions, interaction:window.__memoryBreadInteraction||{{}}, page_state: {{loading_marker_count: loadingMarkerCount, raw_loading_marker_count: rawLoadingMarkerCount, numeric_token_count: numericTokenCount, likely_loading: loadingMarkerCount > 0, readiness_poll_count: readinessPollCount, readiness_timed_out: readinessTimedOut, outer_width:Math.max(1,window.outerWidth||0), outer_height:Math.max(1,window.outerHeight||0), inner_width:Math.max(1,window.innerWidth||0), inner_height:Math.max(1,window.innerHeight||0), scroll_height:Math.max(document.documentElement?document.documentElement.scrollHeight:0,document.body?document.body.scrollHeight:0,window.innerHeight||0)}}}}}});
+            return JSON.stringify({{title: clean(document.title), url: location.href, text: text, structured_data: {{tables: tables, metric_labels: labels, text_blocks: textBlocks, evidence_regions:evidenceRegions, visible_viewport_text:visibleText, interaction:window.__memoryBreadInteraction||{{}}, page_state: {{loading_marker_count: loadingMarkerCount, raw_loading_marker_count: rawLoadingMarkerCount, numeric_token_count: numericTokenCount, likely_loading: loadingMarkerCount > 0, readiness_poll_count: readinessPollCount, readiness_timed_out: readinessTimedOut, outer_width:Math.max(1,window.outerWidth||0), outer_height:Math.max(1,window.outerHeight||0), inner_width:Math.max(1,window.innerWidth||0), inner_height:Math.max(1,window.innerHeight||0), scroll_height:Math.max(document.documentElement?document.documentElement.scrollHeight:0,document.body?document.body.scrollHeight:0,window.innerHeight||0), active_scroll_top:activeScrollRoot?Math.round(activeScrollRoot.scrollTop||0):Math.round(window.scrollY||0), active_scroll_left:activeScrollRoot?Math.round(activeScrollRoot.scrollLeft||0):Math.round(window.scrollX||0), active_scroll_class:activeScrollRoot?clean(activeScrollRoot.className).slice(0,240):''}}}}}});
         }})()"#,
         max_chars = MAX_SCRAPED_CHARS,
         ready_poll_attempts = BROWSER_DATA_READY_POLL_ATTEMPTS,
@@ -1957,7 +2344,12 @@ fn build_chromium_scrape_script(
                     if loading of report_tab is false then exit repeat
                     delay 0.25
                 end repeat
-                execute report_tab javascript "{interaction_javascript}"
+                set interaction_ready to 0
+                repeat {interaction_poll_attempts} times
+                    set interaction_ready to execute report_tab javascript "{interaction_javascript}"
+                    if interaction_ready is greater than or equal to 1 then exit repeat
+                    delay 0.25
+                end repeat
                 delay 1
                 set last_text_length to 0
                 set stable_read_count to 0
@@ -1993,6 +2385,7 @@ fn build_chromium_scrape_script(
         url = escape_applescript_string(url),
         interaction_javascript = escape_applescript_string(interaction_javascript),
         readiness_javascript = escape_applescript_string(readiness_javascript),
+        interaction_poll_attempts = BROWSER_INTERACTION_READY_POLL_ATTEMPTS,
         readiness_poll_attempts = BROWSER_DATA_READY_POLL_ATTEMPTS,
         javascript = escape_applescript_string(javascript),
     )
@@ -2022,7 +2415,12 @@ fn build_safari_scrape_script(
                     end try
                     delay 0.25
                 end repeat
-                do JavaScript "{interaction_javascript}" in report_tab
+                set interaction_ready to 0
+                repeat {interaction_poll_attempts} times
+                    set interaction_ready to do JavaScript "{interaction_javascript}" in report_tab
+                    if interaction_ready is greater than or equal to 1 then exit repeat
+                    delay 0.25
+                end repeat
                 delay 1
                 set last_text_length to 0
                 set stable_read_count to 0
@@ -2058,6 +2456,7 @@ fn build_safari_scrape_script(
         url = escape_applescript_string(url),
         interaction_javascript = escape_applescript_string(interaction_javascript),
         readiness_javascript = escape_applescript_string(readiness_javascript),
+        interaction_poll_attempts = BROWSER_INTERACTION_READY_POLL_ATTEMPTS,
         readiness_poll_attempts = BROWSER_DATA_READY_POLL_ATTEMPTS,
         javascript = escape_applescript_string(javascript),
     )
@@ -2081,7 +2480,12 @@ fn build_background_browser_extract_script(
                     if loading of report_tab is false then exit repeat
                     delay 0.25
                 end repeat
-                execute report_tab javascript "{interaction_javascript}"
+                set interaction_ready to 0
+                repeat {interaction_poll_attempts} times
+                    set interaction_ready to execute report_tab javascript "{interaction_javascript}"
+                    if interaction_ready is greater than or equal to 1 then exit repeat
+                    delay 0.25
+                end repeat
                 delay 1
                 set last_text_length to 0
                 set stable_read_count to 0
@@ -2104,6 +2508,7 @@ fn build_background_browser_extract_script(
             app_name = adapter.app_name,
             window_id = window_id,
             interaction_javascript = escape_applescript_string(interaction_javascript),
+            interaction_poll_attempts = BROWSER_INTERACTION_READY_POLL_ATTEMPTS,
             readiness_javascript = escape_applescript_string(readiness_javascript),
             readiness_poll_attempts = BROWSER_DATA_READY_POLL_ATTEMPTS,
             javascript = escape_applescript_string(javascript),
@@ -2119,7 +2524,12 @@ fn build_background_browser_extract_script(
                     end try
                     delay 0.25
                 end repeat
-                do JavaScript "{interaction_javascript}" in report_tab
+                set interaction_ready to 0
+                repeat {interaction_poll_attempts} times
+                    set interaction_ready to do JavaScript "{interaction_javascript}" in report_tab
+                    if interaction_ready is greater than or equal to 1 then exit repeat
+                    delay 0.25
+                end repeat
                 delay 1
                 set last_text_length to 0
                 set stable_read_count to 0
@@ -2142,6 +2552,7 @@ fn build_background_browser_extract_script(
             app_name = adapter.app_name,
             window_id = window_id,
             interaction_javascript = escape_applescript_string(interaction_javascript),
+            interaction_poll_attempts = BROWSER_INTERACTION_READY_POLL_ATTEMPTS,
             readiness_javascript = escape_applescript_string(readiness_javascript),
             readiness_poll_attempts = BROWSER_DATA_READY_POLL_ATTEMPTS,
             javascript = escape_applescript_string(javascript),
@@ -2193,13 +2604,9 @@ fn build_background_browser_start_script(
                 set previous_front_app to name of first application process whose frontmost is true
             end tell
             tell application "{app_name}"
-                set original_front_window to missing value
-                if (count of windows) is greater than 0 then set original_front_window to front window
-                set preview_window to make new window with properties {{visible:false, bounds:{{80, 80, 1280, 820}}}}
+                set preview_window to make new window with properties {{visible:true, bounds:{{80, 80, 1280, 820}}}}
                 set given name of preview_window to "MemoryBread Preview {preview_token}"
                 set URL of active tab of preview_window to "{url}"
-                set visible of preview_window to true
-                if original_front_window is not missing value then set index of original_front_window to 1
                 set preview_window_id to id of preview_window as text
             end tell
             tell application "System Events"
@@ -2219,15 +2626,10 @@ fn build_background_browser_start_script(
                 set previous_front_app to name of first application process whose frontmost is true
             end tell
             tell application "{app_name}"
-                set original_front_window to missing value
-                if (count of windows) is greater than 0 then set original_front_window to front window
                 make new document with properties {{URL:"about:blank"}}
                 set preview_window to front window
-                set visible of preview_window to false
                 set bounds of preview_window to {{80, 80, 1280, 820}}
                 set URL of current tab of preview_window to "{url}"
-                set visible of preview_window to true
-                if original_front_window is not missing value then set index of original_front_window to 1
                 set preview_window_id to id of preview_window as text
             end tell
             tell application "System Events"
@@ -2256,6 +2658,7 @@ fn build_background_browser_prepare_capture_script(
         tell application "{app_name}"
             set index of first window whose id is {window_id} to 1
         end tell
+        delay 0.35
         tell application "System Events"
             try
                 set frontmost of first application process whose name is previous_front_app to true
@@ -2354,14 +2757,9 @@ fn browser_interaction_javascript(
         serde_json::to_string(expected_period_start).unwrap_or_else(|_| "\"\"".to_string());
     let end_json =
         serde_json::to_string(expected_period_end).unwrap_or_else(|_| "\"\"".to_string());
-    let tab_index = if ["第二个tab", "第2个tab", "第二个 tab", "第2个 tab"]
-        .iter()
-        .any(|marker| objective.to_lowercase().contains(marker))
-    {
-        1_i32
-    } else {
-        -1_i32
-    };
+    let tab_index = requested_tab_index(objective)
+        .map(|index| index as i32)
+        .unwrap_or(-1_i32);
     format!(
         r#"(function(){{
             var objective={objective};
@@ -2375,6 +2773,9 @@ fn browser_interaction_javascript(
                 return (!style||(style.display!=='none'&&style.visibility!=='hidden'&&Number(style.opacity||1)>0))&&rect.width>8&&rect.height>8&&rect.bottom>0&&rect.top<(window.innerHeight||0);
             }};
             var actions=[];
+            var state=window.__memoryBreadInteractionState||{{actions:[]}};
+            state.pollCount=Number(state.pollCount||0)+1;
+            var interactionPending=false;
             var tabIndex={tab_index};
             if(tabIndex>=0){{
                 var tabs=Array.prototype.slice.call(document.querySelectorAll('[role="tab"],[class*="tab"],[class*="Tab"]'))
@@ -2384,93 +2785,205 @@ fn browser_interaction_javascript(
                         if(!label||label.length>60)return false;
                         var role=clean(node.getAttribute('role')).toLowerCase();
                         var className=clean(node.className).toLowerCase();
-                        return role==='tab'||className.indexOf('tab')>=0;
+                        return role==='tab'||/(?:^|\s)[^\s]*(?:tabs?__item|tab-item|tab_item|tab__wrapper)(?:\s|$)/i.test(className);
                     }});
-                var unique=[];
+                var groups=[];
                 tabs.forEach(function(node){{
+                    var group=node.closest&&node.closest('[role="tablist"],[class*="tabs__nav"],[class*="draggable-tabs__box"],[class*="tab-list"],[class*="tablist"]');
+                    group=group||node.parentElement;
+                    var groupItem=groups.find(function(item){{return item.node===group;}});
+                    if(!groupItem){{groupItem={{node:group,items:[]}};groups.push(groupItem);}}
                     var rect=node.getBoundingClientRect();
                     var key=Math.round(rect.left)+':'+Math.round(rect.top)+':'+clean(node.innerText||node.textContent);
-                    if(!unique.some(function(item){{return item.key===key;}}))unique.push({{key:key,node:node}});
+                    if(!groupItem.items.some(function(item){{return item.key===key;}}))groupItem.items.push({{key:key,node:node}});
                 }});
-                unique.sort(function(a,b){{
+                groups.forEach(function(group){{group.items.sort(function(a,b){{
                     var ar=a.node.getBoundingClientRect(),br=b.node.getBoundingClientRect();
                     return Math.abs(ar.top-br.top)>8?ar.top-br.top:ar.left-br.left;
+                }});}});
+                groups=groups.filter(function(group){{return group.items.length>tabIndex;}}).sort(function(a,b){{
+                    if(b.items.length!==a.items.length)return b.items.length-a.items.length;
+                    var ar=a.node&&a.node.getBoundingClientRect?a.node.getBoundingClientRect():{{width:0}};
+                    var br=b.node&&b.node.getBoundingClientRect?b.node.getBoundingClientRect():{{width:0}};
+                    return br.width-ar.width;
                 }});
-                if(unique[tabIndex]){{
-                    unique[tabIndex].node.click();
-                    actions.push({{kind:'tab',index:tabIndex+1,label:clean(unique[tabIndex].node.innerText||unique[tabIndex].node.textContent)}});
+                var chosenGroup=groups[0];
+                if(chosenGroup&&chosenGroup.items[tabIndex]){{
+                    var targetTab=chosenGroup.items[tabIndex].node;
+                    var selected=clean(targetTab.getAttribute&&targetTab.getAttribute('aria-selected')).toLowerCase()==='true'||/(?:^|\s)(?:is-)?(?:active|selected)(?:\s|$)/i.test(clean(targetTab.className));
+                    if(!selected){{targetTab.click();interactionPending=true;}}
+                    actions.push({{kind:selected?'tab_current':'tab',index:tabIndex+1,label:clean(targetTab.innerText||targetTab.textContent)}});
                 }}else{{actions.push({{kind:'tab_missing',index:tabIndex+1}});}}
             }}
-            if(expectedStart&&expectedEnd&&/(?:本周|这周|当前周)/.test(objective)){{
-                var dateInputs=function(){{return Array.prototype.slice.call(document.querySelectorAll('input')).filter(function(node){{
+            if(!interactionPending&&expectedStart&&expectedEnd){{
+                var normalizeDate=function(value){{return clean(value).replace(/[年/.]/g,'-').replace(/月/g,'-').replace(/日/g,'').replace(/-+/g,'-').replace(/^-|-$/g,'');}};
+                var valueForInput=function(node,value){{var current=clean(node.value||node.getAttribute('value'));return current.indexOf('.')>=0?value.replace(/-/g,'.'):current.indexOf('/')>=0?value.replace(/-/g,'/'):value;}};
+                var dateInputs=function(){{
+                    var candidates=Array.prototype.slice.call(document.querySelectorAll('input')).filter(function(node){{
                     if(!visible(node))return false;
                     var value=clean(node.value||node.getAttribute('value'));
                     var hint=clean(node.getAttribute('placeholder'));
                     var context=clean((node.parentElement&&node.parentElement.className)||'');
                     return /20\d{{2}}[-/.年]\d{{1,2}}/.test(value)||/(?:日期|开始|结束|时间|date)/i.test(hint+' '+context);
-                }});}};
+                    }});
+                    var valued=candidates.filter(function(node){{return /20\d{{2}}[-/.年]\d{{1,2}}/.test(clean(node.value||node.getAttribute('value')));}});
+                    return valued.length>=2?valued:candidates.filter(function(node){{
+                        var hint=clean(node.getAttribute('placeholder'));
+                        var context=clean((node.parentElement&&node.parentElement.className)||'');
+                        return !/(?:time|时间)/i.test(hint+' '+context);
+                    }});
+                }};
                 var inputs=dateInputs();
                 var setValue=function(node,value){{
                     var descriptor=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value');
-                    if(descriptor&&descriptor.set)descriptor.set.call(node,value);else node.value=value;
+                    var formatted=valueForInput(node,value);
+                    if(descriptor&&descriptor.set)descriptor.set.call(node,formatted);else node.value=formatted;
                     ['input','change','blur'].forEach(function(name){{node.dispatchEvent(new Event(name,{{bubbles:true}}));}});
                 }};
                 var periodApplied=false;
+                var rangeAlreadyCurrent=Array.prototype.slice.call(document.querySelectorAll('body *'),0,8000).some(function(node){{
+                    if(!visible(node))return false;
+                    var value=normalizeDate(node.innerText||node.textContent);
+                    return value.length<=80&&value.indexOf(normalizeDate(expectedStart))>=0&&value.indexOf(normalizeDate(expectedEnd))>=0;
+                }});
                 if(inputs.length>=2){{
-                    setValue(inputs[0],expectedStart);
-                    setValue(inputs[1],expectedEnd);
-                    actions.push({{kind:'period',start:expectedStart,end:expectedEnd}});
+                    state.periodOpenPoll=0;
+                    var inputStart=normalizeDate(inputs[0].value||inputs[0].getAttribute('value'));
+                    var inputEnd=normalizeDate(inputs[1].value||inputs[1].getAttribute('value'));
+                    if(inputStart===normalizeDate(expectedStart)&&inputEnd===normalizeDate(expectedEnd)){{
+                        var popupButtons=Array.prototype.slice.call(document.querySelectorAll('button,[role="button"]')).filter(visible);
+                        var popupConfirm=popupButtons.find(function(node){{return /^(?:确定|确认|ok)$/i.test(clean(node.innerText||node.textContent));}});
+                        if(popupConfirm){{
+                            popupConfirm.click();
+                            actions.push({{kind:'period_confirm',label:clean(popupConfirm.innerText||popupConfirm.textContent)}});
+                            interactionPending=true;
+                        }}else{{
+                            actions.push({{kind:'period_inputs_current',start:expectedStart,end:expectedEnd}});
+                            periodApplied=true;
+                        }}
+                    }}else{{
+                        setValue(inputs[0],expectedStart);
+                        setValue(inputs[1],expectedEnd);
+                        actions.push({{kind:'period',start:expectedStart,end:expectedEnd}});
+                        interactionPending=true;
+                    }}
+                }}else if(rangeAlreadyCurrent){{
+                    state.periodOpenPoll=0;
+                    actions.push({{kind:'period_current',start:expectedStart,end:expectedEnd}});
                     periodApplied=true;
                 }}else{{
                     var allNodes=Array.prototype.slice.call(document.querySelectorAll('body *'),0,8000);
-                    var dateDisplay=allNodes.find(function(node){{
+                    var padDate=function(value){{return String(value).padStart(2,'0');}};
+                    var localDate=function(value){{return value.getFullYear()+'-'+padDate(value.getMonth()+1)+'-'+padDate(value.getDate());}};
+                    var today=new Date();
+                    var weekStart=new Date(today.getFullYear(),today.getMonth(),today.getDate()-((today.getDay()+6)%7));
+                    var weekEnd=new Date(weekStart.getFullYear(),weekStart.getMonth(),weekStart.getDate()+6);
+                    var currentWeekRequested=normalizeDate(expectedStart)===normalizeDate(localDate(weekStart))&&normalizeDate(expectedEnd)===normalizeDate(localDate(weekEnd));
+                    var shortcut=currentWeekRequested?allNodes.find(function(node){{
+                        if(!visible(node)||node.childElementCount>2)return false;
+                        return /^(?:本周|this week|current week)$/i.test(clean(node.innerText||node.textContent));
+                    }}):null;
+                    if(shortcut){{
+                        shortcut.click();
+                        state.periodOpenPoll=0;
+                        actions.push({{kind:'period_shortcut',label:clean(shortcut.innerText||shortcut.textContent),start:expectedStart,end:expectedEnd}});
+                        interactionPending=true;
+                    }}
+                    var dateDisplays=interactionPending?[]:allNodes.filter(function(node){{
                         if(!visible(node))return false;
                         var own=clean(node.innerText||node.textContent);
                         return own.length<=60&&/20\d{{2}}[-/.年]\d{{1,2}}(?:[-/.月]\d{{1,2}})?\s*(?:至|到|[-—~])\s*20\d{{2}}[-/.年]\d{{1,2}}/.test(own);
+                    }}).sort(function(a,b){{
+                        var at=clean(a.innerText||a.textContent),bt=clean(b.innerText||b.textContent);
+                        var af=/(?:日期|时间|date|period)/i.test(at)?0:1,bf=/(?:日期|时间|date|period)/i.test(bt)?0:1;
+                        if(af!==bf)return af-bf;
+                        var ar=a.getBoundingClientRect(),br=b.getBoundingClientRect();
+                        if(Math.abs(ar.top-br.top)>8)return ar.top-br.top;
+                        if(at.length!==bt.length)return at.length-bt.length;
+                        return ar.width*ar.height-br.width*br.height;
                     }});
+                    var dateDisplay=dateDisplays[0];
                     if(dateDisplay){{
-                        var clickable=dateDisplay;
-                        for(var depth=0;depth<5&&clickable;depth++){{
-                            var role=clean(clickable.getAttribute&&clickable.getAttribute('role')).toLowerCase();
-                            var cls=clean(clickable.className).toLowerCase();
-                            var style=window.getComputedStyle?window.getComputedStyle(clickable):null;
-                            if(clickable.tabIndex>=0||role==='button'||/(?:date|calendar|picker)/.test(cls)||(style&&style.cursor==='pointer'))break;
-                            clickable=clickable.parentElement;
-                        }}
-                        if(clickable)clickable.click();
-                    }}
-                    var shortcut=Array.prototype.slice.call(document.querySelectorAll('body *'),0,8000).find(function(node){{
-                        if(!visible(node)||node.childElementCount>2)return false;
-                        return /^(?:本周|this week|current week)$/i.test(clean(node.innerText||node.textContent));
-                    }});
-                    if(shortcut){{
-                        shortcut.click();
-                        actions.push({{kind:'period_shortcut',label:clean(shortcut.innerText||shortcut.textContent),start:expectedStart,end:expectedEnd}});
-                        periodApplied=true;
-                    }}else{{
-                        inputs=dateInputs();
-                        if(inputs.length>=2){{
-                            setValue(inputs[0],expectedStart);
-                            setValue(inputs[1],expectedEnd);
-                            actions.push({{kind:'period_popup_inputs',start:expectedStart,end:expectedEnd}});
-                            periodApplied=true;
+                        var openAge=state.periodOpenPoll?state.pollCount-state.periodOpenPoll:999;
+                        if(openAge>=1&&openAge<=20){{
+                            actions.push({{kind:'period_wait'}});
+                            interactionPending=true;
+                        }}else{{
+                            var nestedRangePattern=/20\d{{2}}[-/.年]\d{{1,2}}(?:[-/.月]\d{{1,2}})?\s*(?:至|到|[-—~])\s*20\d{{2}}[-/.年]\d{{1,2}}/;
+                            var clickCandidates=[dateDisplay].concat(Array.prototype.slice.call(dateDisplay.querySelectorAll?dateDisplay.querySelectorAll('*'):[])).filter(function(node){{return visible(node)&&nestedRangePattern.test(clean(node.innerText||node.textContent));}}).sort(function(a,b){{var ar=a.getBoundingClientRect(),br=b.getBoundingClientRect();return ar.width*ar.height-br.width*br.height;}});
+                            var clickable=clickCandidates[0]||dateDisplay;
+                            if(clickable){{clickable.click();state.periodOpenPoll=state.pollCount;actions.push({{kind:'period_open'}});interactionPending=true;}}
                         }}
                     }}
                 }}
-                if(periodApplied){{
+                if(periodApplied&&!interactionPending){{
                     var buttons=Array.prototype.slice.call(document.querySelectorAll('button,[role="button"]')).filter(visible);
-                    var apply=buttons.find(function(node){{return /^(?:查询|应用|确定|搜索)$/.test(clean(node.innerText||node.textContent));}});
+                    var apply=buttons.find(function(node){{return /^(?:查询|应用|搜索|apply|search)$/i.test(clean(node.innerText||node.textContent));}});
                     if(apply){{apply.click();actions.push({{kind:'apply',label:clean(apply.innerText||apply.textContent)}});}}
-                }}else{{actions.push({{kind:'period_control_missing',start:expectedStart,end:expectedEnd}});}}
+                }}else if(!interactionPending){{actions.push({{kind:'period_control_missing',start:expectedStart,end:expectedEnd}});}}
             }}
-            window.__memoryBreadInteraction={{objective:objective,actions:actions,expected_period:{{start:expectedStart,end:expectedEnd}}}};
-            return JSON.stringify(window.__memoryBreadInteraction);
+            state.actions=(state.actions||[]).concat(actions).slice(-30);
+            window.__memoryBreadInteractionState=state;
+            var missingTab=actions.some(function(action){{return clean(action.kind)==='tab_missing';}});
+            var pending=interactionPending||(missingTab&&state.pollCount<6);
+            window.__memoryBreadInteraction={{objective:objective,actions:state.actions,expected_period:{{start:expectedStart,end:expectedEnd}},pending:pending}};
+            return pending?0:1;
         }})()"#,
         objective = objective_json,
         expected_start = start_json,
         expected_end = end_json,
         tab_index = tab_index,
     )
+}
+
+fn requested_tab_index(objective: &str) -> Option<usize> {
+    let lowered = objective.to_lowercase();
+    let marker_index = lowered.find("tab")?;
+    let prefix = &lowered[..marker_index];
+    let tail = prefix.chars().rev().take(12).collect::<String>();
+    let nearby = tail.chars().rev().collect::<String>();
+
+    let ascii_digits = nearby
+        .chars()
+        .rev()
+        .skip_while(|character| !character.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    if let Ok(value) = ascii_digits.parse::<usize>() {
+        return value.checked_sub(1);
+    }
+
+    let ordinal = nearby.rsplit_once('第')?.1;
+    let chinese = ordinal
+        .chars()
+        .take_while(|character| "零一二两三四五六七八九十".contains(*character))
+        .collect::<String>();
+    parse_chinese_number(&chinese)?.checked_sub(1)
+}
+
+fn parse_chinese_number(value: &str) -> Option<usize> {
+    let digit = |character| match character {
+        '零' => Some(0_usize),
+        '一' => Some(1_usize),
+        '二' | '两' => Some(2_usize),
+        '三' => Some(3_usize),
+        '四' => Some(4_usize),
+        '五' => Some(5_usize),
+        '六' => Some(6_usize),
+        '七' => Some(7_usize),
+        '八' => Some(8_usize),
+        '九' => Some(9_usize),
+        _ => None,
+    };
+    if let Some((left, right)) = value.split_once('十') {
+        let tens = left.chars().next().and_then(digit).unwrap_or(1);
+        let ones = right.chars().next().and_then(digit).unwrap_or(0);
+        return Some(tens * 10 + ones);
+    }
+    value.chars().next().and_then(digit)
 }
 
 async fn scrape_http(url: &str) -> Result<ScrapeResult, DataToolError> {
@@ -2710,6 +3223,95 @@ fn clip_text(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect::<String>() + "…"
 }
 
+fn ensure_expected_period_visible(
+    page_text: &str,
+    structured_data: Option<&Value>,
+    expected_period_start: &str,
+    expected_period_end: &str,
+) -> Result<(), DataToolError> {
+    if expected_period_start.trim().is_empty() || expected_period_end.trim().is_empty() {
+        return Ok(());
+    }
+    let expected_start = parse_calendar_date(expected_period_start);
+    let expected_end = parse_calendar_date(expected_period_end);
+    let (Some(expected_start), Some(expected_end)) = (expected_start, expected_end) else {
+        return Err(period_mismatch_error());
+    };
+    let page_dates = extract_calendar_dates(page_text);
+    if !page_dates.is_empty()
+        && page_dates
+            .iter()
+            .all(|date| *date >= expected_start && *date <= expected_end)
+    {
+        return Ok(());
+    }
+
+    // 有些实时总览是“采集时点快照”，页面没有日期筛选器，也不展示
+    // 统计日期。浏览器交互层明确确认控件不存在、且正文没有任何可解析
+    // 日期时，使用本次 collected_at 作为时效证据；这不同于筛选器存在但
+    // 切换失败，后者仍会被拒绝。
+    if page_dates.is_empty() && interaction_reports_missing_period_control(structured_data) {
+        return Ok(());
+    }
+    Err(period_mismatch_error())
+}
+
+fn parse_calendar_date(value: &str) -> Option<NaiveDate> {
+    let normalized = value
+        .replace(['年', '/', '.'], "-")
+        .replace('月', "-")
+        .replace('日', "");
+    let parts = normalized
+        .split('-')
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return None;
+    }
+    NaiveDate::from_ymd_opt(
+        parts[0].trim().parse().ok()?,
+        parts[1].trim().parse().ok()?,
+        parts[2].trim().parse().ok()?,
+    )
+}
+
+fn extract_calendar_dates(value: &str) -> HashSet<NaiveDate> {
+    let normalized = value
+        .chars()
+        .map(|character| match character {
+            '0'..='9' => character,
+            '-' | '/' | '.' | '年' | '月' => '-',
+            _ => ' ',
+        })
+        .collect::<String>();
+    normalized
+        .split_whitespace()
+        .filter_map(parse_calendar_date)
+        .filter(|date| (2000..=2100).contains(&date.year()))
+        .collect()
+}
+
+fn interaction_reports_missing_period_control(structured_data: Option<&Value>) -> bool {
+    structured_data
+        .and_then(|value| value.get("interaction"))
+        .and_then(|value| value.get("actions"))
+        .and_then(Value::as_array)
+        .map(|actions| {
+            actions.iter().any(|action| {
+                action.get("kind").and_then(Value::as_str) == Some("period_control_missing")
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn period_mismatch_error() -> DataToolError {
+    DataToolError::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "SCRAPE_PERIOD_MISMATCH",
+        "网页筛选区间未切换到本次任务要求，已拒绝错误周期的数据",
+    )
+}
+
 fn internal_scrape_error() -> DataToolError {
     DataToolError::new(
         StatusCode::BAD_GATEWAY,
@@ -2790,6 +3392,20 @@ mod tests {
     }
 
     #[test]
+    fn terminal_page_detection_rejects_missing_files_without_rejecting_valid_reports() {
+        assert!(looks_like_terminal_page(
+            "File not found",
+            "https://github.com/example/repo/blob/main/REPORT.md",
+            "404 - page not found"
+        ));
+        assert!(!looks_like_terminal_page(
+            "经营数据看板",
+            "https://bi.example.com/dashboard",
+            "本周订单 1200"
+        ));
+    }
+
+    #[test]
     fn browser_candidates_prefer_the_source_browser_and_allow_explicit_choice() {
         let automatic = browser_candidates(Some("auto"), Some("Microsoft Edge"));
         assert_eq!(automatic.first().map(|item| item.id), Some("edge"));
@@ -2831,8 +3447,8 @@ mod tests {
             .contains("if current tab of target_window is not report_tab then close report_tab"));
         assert!(chromium.contains("stable_read_count"));
         assert!(safari.contains("stable_read_count"));
-        assert!(chromium.contains("repeat 120 times"));
-        assert!(safari.contains("repeat 120 times"));
+        assert!(chromium.contains("repeat 80 times"));
+        assert!(safari.contains("repeat 80 times"));
         assert!(javascript.contains("loading_marker_count"));
         assert!(javascript.contains("readiness_timed_out"));
         assert!(javascript.contains("likely_loading"));
@@ -2895,12 +3511,12 @@ mod tests {
         for script in [&chromium_start, &safari_start] {
             assert!(script.contains("previous_front_app"));
             assert!(script.contains("frontmost of first application process"));
-            assert!(script.contains("set index of original_front_window to 1"));
+            assert!(!script.contains("original_front_window"));
             assert!(!script.contains("activate"));
         }
-        assert!(chromium_start.contains("visible:false"));
+        assert!(chromium_start.contains("visible:true"));
         assert!(chromium_start.contains("MemoryBread Preview"));
-        assert!(safari_start.contains("set visible of preview_window to false"));
+        assert!(!safari_start.contains("set visible of preview_window to false"));
         for script in [&chromium_extract, &safari_extract] {
             assert!(script.contains("first window whose id is"));
             assert!(script.contains("stable_read_count"));
@@ -2979,6 +3595,63 @@ mod tests {
             "Google Chrome\n地址和搜索栏\n后退\n刷新\n完成更新",
             dom,
         ));
+        let repeated_title_dom = [
+            "LangBridge模型中心运营看板 - KwaiBI | 可视化",
+            "LangBridge模型中心运营看板 - KwaiBI | 可视化",
+            "LangBridge模型中心运营看板 - KwaiBI | 可视化",
+            "LangBridge模型中心运营看板 - KwaiBI | 可视化",
+            "LangBridge模型中心运营看板 - KwaiBI | 可视化",
+            "独立部署输入Tokens",
+            "10,919.04亿",
+            "商业模型输出Tokens",
+            "10亿",
+        ]
+        .join("\n");
+        assert!(!accessibility_text_covers_dom(
+            "MemoryBread Preview - Google Chrome\n地址和搜索栏\nLangBridge模型中心运营看板 - KwaiBI | 可视化\n关闭\n新标签页",
+            &repeated_title_dom,
+        ));
+    }
+
+    #[test]
+    fn merged_scroll_payload_deduplicates_static_page_text_and_keeps_each_viewport() {
+        let primary = json!({
+            "text": "报表标题\n固定筛选条件",
+            "structured_data": {
+                "visible_viewport_text": "第一屏指标 100",
+                "page_state": {"active_scroll_top": 0}
+            }
+        });
+        let segments = vec![
+            json!({
+                "text": "报表标题\n固定筛选条件",
+                "structured_data": {
+                    "visible_viewport_text": "第一屏指标 100",
+                    "page_state": {"active_scroll_top": 0}
+                }
+            }),
+            json!({
+                "text": "报表标题\n固定筛选条件",
+                "structured_data": {
+                    "visible_viewport_text": "第二屏指标 200",
+                    "page_state": {"active_scroll_top": 600}
+                }
+            }),
+        ];
+
+        let merged = merge_browser_payloads(primary, &segments);
+        let text = merged.get("text").and_then(Value::as_str).unwrap();
+        assert_eq!(text.matches("报表标题").count(), 1);
+        assert_eq!(text.matches("第一屏指标 100").count(), 1);
+        assert_eq!(text.matches("第二屏指标 200").count(), 1);
+        assert_eq!(
+            merged
+                .pointer("/structured_data/scroll_capture/scroll_positions")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap(),
+            vec![json!(0), json!(600)]
+        );
     }
 
     #[test]
@@ -3028,7 +3701,85 @@ mod tests {
         assert!(script.contains("var tabIndex=1"));
         assert!(script.contains("2026-08-10"));
         assert!(script.contains("2026-08-16"));
-        assert!(script.contains("period_inputs_missing"));
+        assert!(script.contains("period_shortcut"));
+        assert!(script.contains("period_confirm"));
+        assert!(script.contains("period_wait"));
+        assert!(script.contains("kind:'apply'"));
+        assert!(script.contains("period_control_missing"));
+        assert!(script.contains("[class*=\"tab\"]"));
+        assert!(script.contains("return pending?0:1"));
+        assert!(
+            script.find("kind:'period'").unwrap() < script.find("period_shortcut").unwrap(),
+            "应优先写入契约给出的精确日期，页面快捷项仅作后备"
+        );
+    }
+
+    #[test]
+    fn requested_tab_index_parses_generic_arabic_and_chinese_ordinals() {
+        assert_eq!(requested_tab_index("读取第2个 tab 的数据"), Some(1));
+        assert_eq!(requested_tab_index("读取第二个tab的数据"), Some(1));
+        assert_eq!(requested_tab_index("读取第十二个tab的数据"), Some(11));
+        assert_eq!(requested_tab_index("读取当前看板数据"), None);
+    }
+
+    #[test]
+    fn explicit_period_contract_is_applied_without_prompt_keywords_and_rejects_mismatch() {
+        let script =
+            browser_interaction_javascript("读取第二个 tab 的指标", "2026-08-10", "2026-08-16");
+        assert!(script.contains("if(!interactionPending&&expectedStart&&expectedEnd)"));
+        assert!(ensure_expected_period_visible(
+            "日期\n2026/08/10\n至\n2026年08月16日",
+            None,
+            "2026-08-10",
+            "2026-08-16"
+        )
+        .is_ok());
+        let error = ensure_expected_period_visible(
+            "日期 2026-08-05 至 2026-08-11",
+            None,
+            "2026-08-10",
+            "2026-08-16",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "SCRAPE_PERIOD_MISMATCH");
+    }
+
+    #[test]
+    fn expected_period_accepts_daily_snapshot_inside_requested_week() {
+        assert!(ensure_expected_period_visible(
+            "选择日期：2026-08-11\n数据时效：T-2",
+            None,
+            "2026-08-10",
+            "2026-08-16",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn expected_period_accepts_undated_live_snapshot_without_period_control() {
+        let structured = json!({
+            "interaction": {
+                "actions": [{
+                    "kind": "period_control_missing",
+                    "start": "2026-08-10",
+                    "end": "2026-08-16"
+                }]
+            }
+        });
+        assert!(ensure_expected_period_visible(
+            "在用项目数 102\n总卡数 1803.59\n平均 ROI 39.86x",
+            Some(&structured),
+            "2026-08-10",
+            "2026-08-16",
+        )
+        .is_ok());
+        assert!(ensure_expected_period_visible(
+            "在用项目数 102\n总卡数 1803.59",
+            None,
+            "2026-08-10",
+            "2026-08-16",
+        )
+        .is_err());
     }
 
     #[test]
@@ -3038,6 +3789,26 @@ mod tests {
         assert_eq!(very_wide.first(), Some(&0));
         assert_eq!(very_wide.last(), Some(&(50_000 - 1_200)));
         assert!(very_wide.len() <= 8);
+        assert!(browser_scroll_reached(649, 650));
+        assert!(!browser_scroll_reached(640, 650));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn repeated_scroll_frame_detection_rejects_stale_view_but_keeps_real_change() {
+        use image::{Rgba, RgbaImage};
+
+        let first = RgbaImage::from_pixel(600, 400, Rgba([245, 246, 248, 255]));
+        let repeated = first.clone();
+        let mut changed = first.clone();
+        for y in 100..300 {
+            for x in 120..480 {
+                changed.put_pixel(x, y, Rgba([30, 90, 180, 255]));
+            }
+        }
+
+        assert!(browser_images_look_repeated(&first, &repeated));
+        assert!(!browser_images_look_repeated(&first, &changed));
     }
 
     #[test]

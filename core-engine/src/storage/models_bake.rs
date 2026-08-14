@@ -274,6 +274,10 @@ pub struct BakeMemorySourceRecord {
     pub preferred_source_title: Option<String>,
     pub url_aggregated_text: Option<String>,
     pub url_aggregated_capture_count: i64,
+    /// 同一 timeline 内严格按时间排序的采集轨迹。与面向文档还原的聚合正文分离，
+    /// 不按页面开头去重，避免丢失操作前后状态。
+    #[serde(default)]
+    pub action_trace: Vec<BakeActionTraceRecord>,
     /// 0 表示 fresh lane；大于 0 表示独立于 watermark 的 retry lane。
     #[serde(default)]
     pub retry_failure_count: i64,
@@ -281,6 +285,20 @@ pub struct BakeMemorySourceRecord {
     pub retry_error_code: Option<String>,
     #[serde(default)]
     pub retry_next_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BakeActionTraceRecord {
+    pub capture_id: i64,
+    pub ts: i64,
+    pub event_type: String,
+    pub app_name: Option<String>,
+    pub win_title: Option<String>,
+    pub url: Option<String>,
+    pub webpage_title: Option<String>,
+    pub visible_text: Option<String>,
+    pub input_text: Option<String>,
+    pub audio_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -374,6 +392,49 @@ pub struct BakeRetryStateRecord {
     pub last_error_code: Option<String>,
     pub last_failed_at_ms: i64,
     pub next_retry_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BakeCandidateAuditRecord {
+    pub id: i64,
+    pub run_id: i64,
+    pub timeline_id: i64,
+    pub lane: String,
+    pub source_capture_count: i64,
+    pub effective_capture_count: i64,
+    pub sop_eligible: bool,
+    pub sop_eligibility_reason: Option<String>,
+    pub primary_type: Option<String>,
+    pub classification_reason: Option<String>,
+    pub sop_model_accepted: Option<bool>,
+    pub sop_model_reason: Option<String>,
+    pub sop_payload_valid: Option<bool>,
+    pub persist_status: String,
+    pub persist_reason: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewBakeCandidateAudit {
+    pub run_id: i64,
+    pub timeline_id: i64,
+    pub lane: String,
+    pub source_capture_count: i64,
+    pub effective_capture_count: i64,
+    pub sop_eligible: bool,
+    pub sop_eligibility_reason: Option<String>,
+    pub persist_status: String,
+    pub persist_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BakeSopFunnelSummaryRecord {
+    pub audited_count: i64,
+    pub eligible_count: i64,
+    pub model_accepted_count: i64,
+    pub payload_valid_count: i64,
+    pub persisted_count: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

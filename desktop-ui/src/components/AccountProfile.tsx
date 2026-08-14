@@ -785,7 +785,6 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
               <div className="account-profile__panel-heading account-profile__panel-heading--profile">
                 <div>
                   <h2>个人信息</h2>
-                  <p>账户名保留不变；昵称和公司名称每项每个自然月最多修改 3 次。</p>
                   <p>只会保存个人基础信息和软件心跳，任何工作采集信息不会上传云端</p>
                 </div>
                 {!profileEditing && (

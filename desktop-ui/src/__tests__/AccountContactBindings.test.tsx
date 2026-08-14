@@ -34,7 +34,7 @@ afterEach(() => {
 })
 
 describe('AccountContactBindings', () => {
-  it('masks contacts without exposing a replace action', () => {
+  it('masks contacts and exposes verified replacement actions', () => {
     expect(maskBoundEmail('xiaomai@example.com')).toBe('xi***@example.com')
     expect(maskBoundPhone('+8613800138000')).toBe('+86 138****8000')
 
@@ -49,8 +49,8 @@ describe('AccountContactBindings', () => {
 
     expect(screen.getByText('xi***@example.com')).toBeInTheDocument()
     expect(screen.getByText('+86 138****8000')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '绑定邮箱' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '绑定手机号' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '换绑邮箱' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '换绑手机号' })).toBeInTheDocument()
   })
 
   it('sends a code and binds an unoccupied phone number', async () => {
@@ -93,5 +93,41 @@ describe('AccountContactBindings', () => {
       undefined,
     )
     expect(await screen.findByText('手机号绑定成功。')).toBeInTheDocument()
+  })
+
+  it('replaces a bound email only after verifying the new email', async () => {
+    vi.mocked(sendAccountContactVerificationCode).mockResolvedValue({
+      challenge_id: '019f0000-0000-7000-8000-000000000099',
+      retry_after_seconds: 60,
+      expires_in_seconds: 600,
+    })
+    const updatedUser = { ...user, email: 'new@example.com' }
+    vi.mocked(bindAccountContact).mockResolvedValue(updatedUser)
+    const onUserChange = vi.fn()
+
+    render(
+      <AccountContactBindings
+        adminApiBaseUrl="https://account.example.com"
+        authToken="test-token"
+        onUserChange={onUserChange}
+        user={user}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: '换绑邮箱' }))
+    expect(screen.getByText(/当前邮箱将自动解绑/)).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('邮箱'), { target: { value: 'new@example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
+    await waitFor(() => expect(sendAccountContactVerificationCode).toHaveBeenCalledWith(
+      'https://account.example.com',
+      'test-token',
+      'email',
+      'new@example.com',
+    ))
+    fireEvent.change(screen.getByLabelText('验证码'), { target: { value: '123456' } })
+    fireEvent.click(screen.getByRole('button', { name: '确认绑定' }))
+
+    await waitFor(() => expect(onUserChange).toHaveBeenCalledWith(updatedUser))
+    expect(await screen.findByText('邮箱换绑成功。')).toBeInTheDocument()
   })
 })

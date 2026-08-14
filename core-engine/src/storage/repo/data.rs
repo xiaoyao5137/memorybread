@@ -421,6 +421,11 @@ impl StorageManager {
         let Some(canonical) = canonical_data_url(url) else {
             return Ok(DiscoveredSourceOutcome::RejectedInvalidUrl);
         };
+        // 模型分类只是候选信号，最终注册还必须满足“可刷新的页面入口”契约。
+        // 静态文档、附件和仓库文件即使标题含有 report，也不能进入网页报表队列。
+        if looks_like_document_page(&canonical, title) {
+            return Ok(DiscoveredSourceOutcome::RejectedNotRefreshable);
+        }
         self.with_conn(|conn| {
             let capture = conn
                 .query_row(
@@ -460,6 +465,9 @@ impl StorageManager {
                 },
                 240,
             );
+            if looks_like_document_page(&canonical, &resolved_title) {
+                return Ok(DiscoveredSourceOutcome::RejectedNotRefreshable);
+            }
             let now = current_ts_ms();
             conn.execute(
                 "INSERT INTO data_sources (
@@ -4311,11 +4319,17 @@ fn score_data_source(
         .map(|item| item.content_text.as_str())
         .unwrap_or("");
     let structured_text = snapshot
-        .map(|item| item.structured_data.to_string())
+        .map(|item| searchable_structured_text(&item.structured_data))
         .unwrap_or_default();
     let historical_text = history
         .iter()
-        .map(|item| format!("{}\n{}", item.content_text, item.structured_data))
+        .map(|item| {
+            format!(
+                "{}\n{}",
+                item.content_text,
+                searchable_structured_text(&item.structured_data)
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let content_relevance = relevance_score(
@@ -4336,9 +4350,13 @@ fn score_data_source(
         .map(|timestamp| as_of_ms.saturating_sub(timestamp) / 1000)
         .unwrap_or(i64::MAX);
     let (freshness_class, freshness_score) = freshness_for(&source.source_kind, age_seconds);
+    // `on_demand` 表示“有人明确要最新数据时刷新”，不是“在 TTL
+    // 内就用上一次创作的结果”。创作 Tool 传入 `need_fresh=true`
+    // 时，每轮都必须让实时报表进入受控网页刷新。TTL 仅用于
+    // 非实时查询的新鲜度展示与缺失/过期判定。
     let refresh_required = source.source_kind == "report_url"
         && source.refresh_policy != "never"
-        && (collected_at.is_none() || age_seconds > REPORT_FRESH_SECONDS);
+        && (need_fresh || collected_at.is_none() || age_seconds > REPORT_FRESH_SECONDS);
     let can_use = snapshot.is_some() && !(need_fresh && refresh_required);
     let source_score = if source.source_kind == "report_url" {
         0.95
@@ -4359,15 +4377,63 @@ fn score_data_source(
         collected_at,
         freshness_class: freshness_class.to_string(),
         freshness_score,
+        identity_relevance_score: identity_relevance,
         relevance_score,
         final_score: final_score.clamp(0.0, 1.0),
         refresh_required,
         can_use,
-        content_excerpt: snapshot.map(|item| clip_text(&item.content_text, 2400)),
-        structured_data: snapshot.map(|item| item.structured_data.clone()),
-        provenance: snapshot.map(|item| item.provenance.clone()),
-        history,
+        // 明确要即时刷新的报表只返回来源身份，不把上一次的
+        // 整页 DOM、交互状态和历史快照塞入 Tool 结果。它们既不可作为
+        // 当前事实，也会将后续 Agent 的模型输入放大到数百 KB。
+        content_excerpt: if need_fresh && refresh_required {
+            None
+        } else {
+            snapshot.map(|item| clip_text(&item.content_text, 2400))
+        },
+        structured_data: if need_fresh && refresh_required {
+            None
+        } else {
+            snapshot.map(|item| item.structured_data.clone())
+        },
+        provenance: if need_fresh && refresh_required {
+            None
+        } else {
+            snapshot.map(|item| item.provenance.clone())
+        },
+        history: if need_fresh && refresh_required {
+            Vec::new()
+        } else {
+            history
+        },
     }
+}
+
+/// 只把页面事实字段送入检索，不索引采集请求、交互动作和加载状态。
+///
+/// 若把 `interaction.objective` 混进全文，一个来源被某次错误刷新后就会永久
+/// 命中同一查询，形成“越错刷越相关”的反馈环。白名单基于数据形态而非站点或
+/// 业务名称，可用于任意看板实现。
+fn searchable_structured_text(structured: &Value) -> String {
+    let Some(object) = structured.as_object() else {
+        return String::new();
+    };
+    [
+        "title",
+        "summary",
+        "semantic_subject",
+        "semantic_identity",
+        "dom_content_text",
+        "tables",
+        "metric_labels",
+        "text_blocks",
+        "metric_rows",
+        "metric_statements",
+    ]
+    .iter()
+    .filter_map(|key| object.get(*key))
+    .map(Value::to_string)
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 
 fn source_identity_score(source: &DataSourceRecord, query: &str) -> f64 {
@@ -4398,15 +4464,70 @@ fn source_identity_score(source: &DataSourceRecord, query: &str) -> f64 {
 
     // Skill 的步骤目标通常写成自然语言，例如“获取电商GPU信息平台的最新
     // 算力…”，而数据标题还会继续带上具体指标。稳定的数据对象前缀已经是
-    // 高强度身份信号；只接受至少 8 个字符的前缀，避免“GPU”“本周”等
-    // 短词把无关数据抬进 Top-K。
+    // 高强度身份信号；这里先接受至少 8 个字符的稳定对象前缀。较短的产品
+    // 缩写由下面带字符类型约束的连续片段规则处理。
     if normalized_title.chars().count() >= 8 && !normalized_query.is_empty() {
         let title_prefix = normalized_title.chars().take(8).collect::<String>();
         if normalized_query.contains(&title_prefix) {
             return 0.84;
         }
     }
+    // 标题与目标共享一个足够长的连续片段时，视为来源身份命中。中文至少
+    // 4 字符，纯 ASCII 标识至少 3 字符；这样可识别任意产品名/缩写，又不会
+    // 把“本周”“数据”“进度”这类短通用词当成来源身份。
+    let shared = longest_common_identity_fragment(&normalized_title, &normalized_query);
+    let shared_len = shared.chars().count();
+    let shared_non_ascii = shared.chars().any(|ch| !ch.is_ascii());
+    let title_ascii = ascii_identity_tokens(&normalized_title);
+    let query_ascii = ascii_identity_tokens(&normalized_query);
+    let ascii_identity_hit = title_ascii
+        .iter()
+        .any(|token| token.chars().count() >= 3 && query_ascii.contains(token));
+    if (shared_len >= 4 && shared_non_ascii) || ascii_identity_hit {
+        return 0.72;
+    }
     0.0
+}
+
+fn ascii_identity_tokens(value: &str) -> HashSet<String> {
+    let mut tokens = HashSet::new();
+    let mut current = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            current.push(ch.to_ascii_lowercase());
+        } else if !current.is_empty() {
+            tokens.insert(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.insert(current);
+    }
+    tokens
+}
+
+fn longest_common_identity_fragment(left: &str, right: &str) -> String {
+    let left = left.chars().collect::<Vec<_>>();
+    let right = right.chars().collect::<Vec<_>>();
+    let mut previous = vec![0usize; right.len() + 1];
+    let mut best_len = 0usize;
+    let mut best_end = 0usize;
+    for (left_index, left_char) in left.iter().enumerate() {
+        let mut current = vec![0usize; right.len() + 1];
+        for (right_index, right_char) in right.iter().enumerate() {
+            if left_char == right_char {
+                let length = previous[right_index] + 1;
+                current[right_index + 1] = length;
+                if length > best_len {
+                    best_len = length;
+                    best_end = left_index + 1;
+                }
+            }
+        }
+        previous = current;
+    }
+    left[best_end.saturating_sub(best_len)..best_end]
+        .iter()
+        .collect()
 }
 
 fn normalize_identity_text(value: &str) -> String {
@@ -4533,7 +4654,7 @@ fn candidate_title(candidate: &CaptureCandidate) -> &str {
 }
 
 fn looks_like_data_url(url: &str, title: &str, text: &str) -> bool {
-    if looks_like_static_document_url(url) {
+    if looks_like_document_page(url, title) {
         return false;
     }
     let url_lower = url.to_lowercase();
@@ -4573,12 +4694,14 @@ fn looks_like_data_url(url: &str, title: &str, text: &str) -> bool {
     let parsed_url = reqwest::Url::parse(url).ok();
     let report_identity = parsed_url.as_ref().is_some_and(|parsed| {
         parsed.path_segments().is_some_and(|segments| {
-            segments.filter(|segment| !segment.is_empty()).any(|segment| {
-                matches!(
-                    segment.to_lowercase().as_str(),
-                    "report" | "reports" | "metric" | "metrics" | "dashboard" | "dashboards"
-                )
-            })
+            segments
+                .filter(|segment| !segment.is_empty())
+                .any(|segment| {
+                    matches!(
+                        segment.to_lowercase().as_str(),
+                        "report" | "reports" | "metric" | "metrics" | "dashboard" | "dashboards"
+                    )
+                })
         }) || parsed.query_pairs().any(|(key, _)| {
             matches!(
                 key.to_lowercase().as_str(),
@@ -4603,8 +4726,12 @@ fn looks_like_static_document_url(url: &str) -> bool {
     };
     let host = parsed.host_str().unwrap_or_default().to_lowercase();
     let path = parsed.path().to_lowercase();
-    if (["github.com", "gitlab.com"].iter().any(|item| host == *item)
-        && ["/blob/", "/tree/", "/raw/"].iter().any(|item| path.contains(item)))
+    if ["github.com", "gitlab.com"]
+        .iter()
+        .any(|item| host == *item)
+        && ["/blob/", "/tree/", "/raw/"]
+            .iter()
+            .any(|item| path.contains(item))
     {
         return true;
     }
@@ -4615,8 +4742,7 @@ fn looks_like_static_document_url(url: &str) -> bool {
     extension.is_some_and(|value| {
         matches!(
             value,
-            "md"
-                | "markdown"
+            "md" | "markdown"
                 | "txt"
                 | "pdf"
                 | "doc"
@@ -4644,12 +4770,49 @@ fn looks_like_static_document_url(url: &str) -> bool {
     })
 }
 
+fn looks_like_document_page(url: &str, title: &str) -> bool {
+    if looks_like_static_document_url(url) {
+        return true;
+    }
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let host = parsed.host_str().unwrap_or_default().to_lowercase();
+    let path = parsed.path().to_lowercase();
+    let title = title.to_lowercase();
+    let title_marked = [
+        "文档",
+        "说明书",
+        "使用手册",
+        "documentation",
+        "user guide",
+        "manual",
+        "wiki",
+    ]
+    .iter()
+    .any(|marker| title.contains(marker));
+    let url_marked = host
+        .split('.')
+        .any(|segment| matches!(segment, "doc" | "docs" | "wiki" | "documentation"))
+        || path
+            .split('/')
+            .any(|segment| matches!(segment, "doc" | "docs" | "wiki" | "documentation"));
+    title_marked || url_marked
+}
+
 fn looks_like_terminal_report_source(
     source: &DataSourceRecord,
     latest_snapshot: Option<&DataSnapshotRecord>,
 ) -> bool {
     if source.source_kind != "report_url" {
         return false;
+    }
+    if source
+        .source_url
+        .as_deref()
+        .is_some_and(|url| looks_like_document_page(url, &source.title))
+    {
+        return true;
     }
     if source.last_error_code.as_deref() == Some("SCRAPE_NOT_FOUND") {
         return true;
@@ -6493,6 +6656,16 @@ mod tests {
         assert!(looks_like_data_url(
             "https://bi.example.com/dashboard/weekly",
             "经营看板",
+            ""
+        ));
+        assert!(looks_like_data_url(
+            "https://analytics.example.com/report/weekly",
+            "周度数据",
+            ""
+        ));
+        assert!(!looks_like_data_url(
+            "https://github.com/example/repo/blob/main/OCR_IMPLEMENTATION_REPORT.md",
+            "OCR_IMPLEMENTATION_REPORT.md",
             ""
         ));
         assert!(is_concrete_data_statement("本周订单 1200，环比增长 8%"));
@@ -8520,6 +8693,57 @@ mod tests {
     }
 
     #[test]
+    fn need_fresh_always_refreshes_on_demand_report_and_hides_previous_page_payload() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    r#"
+                    INSERT INTO data_sources (
+                        id, canonical_key, title, source_kind, source_url, access_mode,
+                        refresh_policy, realtime_level, tags, first_seen_at, last_seen_at,
+                        status, created_at, updated_at
+                    ) VALUES (
+                        1, 'report:realtime', '实时经营看板', 'report_url',
+                        'https://bi.example.com/dashboard/realtime', 'browser_session',
+                        'on_demand', 'live', '[]', 1000, 1000, 'active', 1000, 1000
+                    );
+                    INSERT INTO data_snapshots (
+                        source_id, collected_at, observed_at, collector, content_text,
+                        structured_data, content_hash, freshness_ttl_seconds, provenance,
+                        source_capture_ids, source_timeline_ids, status, created_at
+                    ) VALUES (
+                        1, 99000, 99000, 'browser_attach', '实时经营看板 订单 1200',
+                        '{"dom_content_text":"very large previous page","tables":[["orders",1200]]}',
+                        'fresh', 300, '{"collector":"browser"}', '[]', '[]', 'success', 99000
+                    );
+                    "#,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let realtime = storage
+            .search_data_sources("实时经营看板", true, 100_000, 10)
+            .unwrap();
+        assert_eq!(realtime.len(), 1);
+        assert!(realtime[0].refresh_required);
+        assert!(!realtime[0].can_use);
+        assert!(realtime[0].content_excerpt.is_none());
+        assert!(realtime[0].structured_data.is_none());
+        assert!(realtime[0].provenance.is_none());
+        assert!(realtime[0].history.is_empty());
+
+        let cached = storage
+            .search_data_sources("实时经营看板", false, 100_000, 10)
+            .unwrap();
+        assert_eq!(cached.len(), 1);
+        assert!(!cached[0].refresh_required);
+        assert!(cached[0].can_use);
+        assert!(cached[0].structured_data.is_some());
+    }
+
+    #[test]
     fn freshness_weights_live_reports_and_decays_work_memory() {
         assert_eq!(freshness_for("report_url", 60), ("live", 1.0));
         assert_eq!(freshness_for("report_url", 2 * 24 * 3600).0, "stale");
@@ -9118,6 +9342,73 @@ mod tests {
             .register_discovered_report_source("not-a-url", "", 1, None, 0)
             .unwrap();
         assert_eq!(outcome, DiscoveredSourceOutcome::RejectedInvalidUrl);
+    }
+
+    #[test]
+    fn rejects_static_document_misclassified_as_a_live_report() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        seed_discovery_capture(&storage, 1, 0);
+
+        let outcome = storage
+            .register_discovered_report_source(
+                "https://github.com/example/repo/blob/main/WEEKLY_REPORT.md",
+                "周报文档",
+                1,
+                None,
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(outcome, DiscoveredSourceOutcome::RejectedNotRefreshable);
+    }
+
+    #[test]
+    fn document_pages_are_not_treated_as_live_reports() {
+        assert!(looks_like_document_page(
+            "https://docs.example.com/guides/capacity",
+            "Capacity guide"
+        ));
+        assert!(looks_like_document_page(
+            "https://workspace.example.com/item/42",
+            "容量治理 - 云文档"
+        ));
+        assert!(!looks_like_document_page(
+            "https://metrics.example.com/dashboard/42",
+            "容量运营看板"
+        ));
+    }
+
+    #[test]
+    fn identity_fragment_supports_generic_ascii_and_cjk_names() {
+        assert_eq!(
+            longest_common_identity_fragment("productagpuoverview", "本周gpu成本"),
+            "gpu"
+        );
+        assert_eq!(
+            longest_common_identity_fragment("青云运营平台指标", "获取青云运营平台本周数据"),
+            "青云运营平台"
+        );
+        assert!(ascii_identity_tokens("电商GPU信息平台").contains("gpu"));
+        assert!(!ascii_identity_tokens("LangBridge运营看板")
+            .is_disjoint(&ascii_identity_tokens("LangBridge本周数据")));
+        assert!(ascii_identity_tokens("landing pages dashboard")
+            .is_disjoint(&ascii_identity_tokens("LangBridge Token指标")));
+    }
+
+    #[test]
+    fn search_index_excludes_refresh_objective_but_keeps_page_facts() {
+        let structured = json!({
+            "dom_content_text": "订单量 1200",
+            "metric_rows": [{"metric": "订单量", "value": "1200"}],
+            "interaction": {"objective": "完全无关的算力查询"},
+            "page_state": {"loading_marker_count": 3}
+        });
+
+        let indexed = searchable_structured_text(&structured);
+
+        assert!(indexed.contains("订单量"));
+        assert!(!indexed.contains("完全无关"));
+        assert!(!indexed.contains("loading_marker_count"));
     }
 
     fn seed_data_sources_for_query(storage: &StorageManager) {

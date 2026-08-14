@@ -51,6 +51,89 @@ def test_vector_evidence_survives_keyword_dedup_and_relevance_filter(tmp_path):
     assert references[0].relevance_score == 0.82
 
 
+def test_semantic_recall_reranks_every_memory_domain_without_query_synonyms(tmp_path):
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    now_ms = int(time.time() * 1000)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO bake_documents VALUES (?, ?, ?, ?, ?, '[]', '[]', '', 0, "
+        "'auto_created', ?, ?, NULL)",
+        (
+            41,
+            "切换保障资料",
+            "技术文档",
+            "生产割接前的核验与回退说明",
+            "生产割接前完成依赖核验并准备回退方案。",
+            now_ms,
+            "https://docs.example/cutover",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, '', 5, 1, ?, ?)",
+        (
+            42,
+            "交付风险记录",
+            "依赖核验仍有两项待关闭",
+            "依赖核验仍有两项待关闭",
+            "依赖核验仍有两项待关闭",
+            now_ms,
+            now_ms,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO bake_sops VALUES (?, ?, ?, ?, ?, '', 5, 1, ?, ?)",
+        (
+            43,
+            "灰度切流手册",
+            "先小流量验证再扩大范围",
+            "先小流量验证再扩大范围",
+            "先小流量验证再扩大范围",
+            now_ms,
+            now_ms,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO data_sources VALUES (?, ?, ?, 'active', NULL)",
+        (44, "回退演练指标", "https://bi.example/cutover"),
+    )
+    conn.execute(
+        "INSERT INTO data_snapshots VALUES (?, ?, ?, ?, ?, '{}', 'success', ?, ?)",
+        (45, 44, now_ms, now_ms, "回退演练成功率 98%", now_ms, now_ms),
+    )
+    conn.commit()
+    conn.close()
+
+    class Vector:
+        def __init__(self):
+            self.vector = [1.0, 0.0]
+
+    class SemanticModel:
+        def encode(self, texts):
+            return [Vector() for _ in texts]
+
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+    service.enable_vector_recall = True
+    service._embedding_model = SemanticModel()
+    query = "整理客户迁移的上线准备情况"
+    requirement = service.analyze_requirement(query, CreationOptions())
+
+    references = service.retrieve_references(
+        query,
+        requirement,
+        CreationOptions(max_references=10),
+    )
+
+    identities = {(item.source_type, item.source_id) for item in references}
+    assert identities >= {
+        ("document", 41),
+        ("knowledge", 42),
+        ("operation", 43),
+        ("data", 44),
+    }
+
+
 def test_chinese_keyword_fallback_and_doc_type_cover_gift_guide():
     service = CreationService.__new__(CreationService)
 
@@ -59,6 +142,45 @@ def test_chinese_keyword_fallback_and_doc_type_cover_gift_guide():
     assert any("周年" in keyword for keyword in keywords)
     assert any("礼物" in keyword for keyword in keywords)
     assert service._infer_doc_type("写一份周年员工的礼物指南") == "指南"
+
+
+def test_relevance_fuses_independent_lexical_and_semantic_evidence():
+    service = CreationService.__new__(CreationService)
+    row = {
+        "title": "灰度发布检查",
+        "doc_type": "knowledge",
+        "summary": "切流前完成依赖核验",
+        "full_content": "",
+        "sections_json": "[]",
+        "prompt_hint": "",
+        "_vector_similarity": 0.75,
+    }
+
+    score = service._score_relevance(
+        row,
+        {"keywords": ["灰度发布", "上线准备"], "doc_type": ""},
+    )
+
+    assert score > 0.75
+    assert score <= 1.0
+
+
+def test_top_k_diversifies_memory_domains_and_backfills_when_needed():
+    class Reference:
+        def __init__(self, source_type, source_id):
+            self.source_type = source_type
+            self.source_id = source_id
+
+    ranked = [Reference("document", index) for index in range(8)]
+    ranked.extend(Reference("knowledge", index) for index in range(8, 13))
+
+    selected = CreationService._select_diverse_references(ranked, 10)
+    selected_domains = [item.source_type for item in selected]
+    documents_only = CreationService._select_diverse_references(ranked[:8], 8)
+
+    assert selected_domains.count("document") == 5
+    assert selected_domains.count("knowledge") == 5
+    assert len(documents_only) == 8
 
 
 def test_skill_objective_keywords_keep_aigc_project_and_inference_topic():

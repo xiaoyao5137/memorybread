@@ -25,6 +25,37 @@ class AppleVisionBackend(OcrBackend):
     使用 PyObjC 直接调用 Vision Framework，无需 subprocess。
     """
 
+    @staticmethod
+    def _normalized_bbox(observation) -> list[list[float]]:
+        """把 Vision 左下角原点的归一化矩形转为左上角原点四点框。"""
+        try:
+            rect = observation.boundingBox()
+            try:
+                x = float(rect.origin.x)
+                y = float(rect.origin.y)
+                width = float(rect.size.width)
+                height = float(rect.size.height)
+            except AttributeError:
+                (x, y), (width, height) = rect
+                x = float(x)
+                y = float(y)
+                width = float(width)
+                height = float(height)
+        except (AttributeError, TypeError, ValueError):
+            return []
+        if width <= 0 or height <= 0:
+            return []
+        left = max(0.0, min(1.0, x))
+        right = max(left, min(1.0, x + width))
+        top = max(0.0, min(1.0, 1.0 - y - height))
+        bottom = max(top, min(1.0, 1.0 - y))
+        return [
+            [left, top],
+            [right, top],
+            [right, bottom],
+            [left, bottom],
+        ]
+
     def is_available(self) -> bool:
         """检查是否在 macOS 上且 PyObjC 可用"""
         if sys.platform != "darwin":
@@ -99,7 +130,7 @@ class AppleVisionBackend(OcrBackend):
                             OcrBox(
                                 text=text,
                                 confidence=confidence,
-                                bbox=[],  # Vision API 不直接提供简单的 bbox
+                                bbox=self._normalized_bbox(obs),
                             )
                         )
 

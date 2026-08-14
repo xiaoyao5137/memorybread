@@ -110,6 +110,52 @@ describe('技能安装与使用', () => {
     expect(generationPayload.user_prompt).toContain('完全脱离源文档的 few-shot 示例文档')
   })
 
+  it('打开 @ 技能选择框后支持键盘选择，并可点击外部关闭', async () => {
+    const secondSkill = {
+      ...rawSkill,
+      id: 3,
+      client_skill_key: 'skill-weekly-report',
+      title: '项目周报',
+      summary: '整理项目进展、风险和下周计划。',
+      installed: true,
+    }
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') {
+        return Response.json([{ ...rawSkill, installed: true }, secondSkill])
+      }
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+
+    const textarea = await screen.findByPlaceholderText(/输入 @ 可选择已安装的技能/)
+    fireEvent.change(textarea, { target: { value: '@' } })
+    let picker = await screen.findByRole('listbox', { name: '选择技能' })
+    const options = within(picker).getAllByRole('option')
+    expect(options[0]).toHaveAttribute('aria-selected', 'true')
+
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(options[1]).toHaveAttribute('aria-selected', 'true')
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    expect(options[0]).toHaveAttribute('aria-selected', 'true')
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    expect(options[1]).toHaveAttribute('aria-selected', 'true')
+    expect(textarea).toHaveAttribute('aria-activedescendant', options[1].id)
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    expect(textarea).toHaveValue('@项目周报 ')
+    expect(screen.queryByRole('listbox', { name: '选择技能' })).not.toBeInTheDocument()
+
+    fireEvent.change(textarea, { target: { value: '@' } })
+    picker = await screen.findByRole('listbox', { name: '选择技能' })
+    fireEvent.mouseDown(screen.getByRole('main'))
+    expect(picker).not.toBeInTheDocument()
+    expect(textarea).toHaveValue('@')
+  })
+
   it('从 Skill 列表把当前版本发布到创作市场', async () => {
     const user = {
       id: '018f0000-0000-7000-8000-000000000008',

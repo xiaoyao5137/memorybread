@@ -9,9 +9,9 @@ use crate::storage::{
     error::StorageError,
     fts::{build_fts_or_query, fts_candidate_ids, render_in_clause, DEFAULT_FTS_CANDIDATE_CAP},
     models_bake::{
-        BakeDocumentRecord, BakeKnowledgeRecord, BakeMemorySourceRecord, BakeSopRecord,
-        EpisodicMemoryRecord, NewBakeKnowledge, NewBakeSop, NewEpisodicMemory, NewTimeline,
-        TimelineRecord,
+        BakeActionTraceRecord, BakeDocumentRecord, BakeKnowledgeRecord, BakeMemorySourceRecord,
+        BakeSopRecord, EpisodicMemoryRecord, NewBakeKnowledge, NewBakeSop, NewEpisodicMemory,
+        NewTimeline, TimelineRecord,
     },
     StorageManager,
 };
@@ -1060,6 +1060,7 @@ impl StorageManager {
                     preferred_source_title: None,
                     url_aggregated_text: None,
                     url_aggregated_capture_count: 0,
+                    action_trace: Vec::new(),
                     retry_failure_count: row.get(41)?,
                     retry_error_code: row.get(42)?,
                     retry_next_at_ms: row.get(43)?,
@@ -1098,6 +1099,7 @@ impl StorageManager {
                 // 优先聚合 timeline 全部成员 capture 的内容（含文档型成员的正文），
                 // 因为主 capture 常是 IM，代表不了 timeline 里浏览/编辑的文档。
                 let member_ids = parse_capture_ids(record.timeline.capture_ids.as_deref());
+                record.action_trace = load_member_action_trace(conn, &member_ids)?;
                 let member_aggregated = if member_ids.len() > 1 {
                     aggregate_member_capture_text(
                         conn,
@@ -1381,6 +1383,80 @@ const MEMBER_AGGREGATION_MAX_CAPTURES: usize = 40;
 const MEMBER_AGGREGATION_TOTAL_BUDGET_CHARS: usize = 32_000;
 const MEMBER_AGGREGATION_PER_CAPTURE_CAP_CHARS: usize = 16_000;
 const MEMBER_AGGREGATION_DEDUP_HEAD_CHARS: usize = 200;
+const ACTION_TRACE_MAX_CAPTURES: usize = 40;
+const ACTION_TRACE_VISIBLE_TEXT_CHARS: usize = 1_000;
+const ACTION_TRACE_INPUT_TEXT_CHARS: usize = 400;
+const ACTION_TRACE_AUDIO_TEXT_CHARS: usize = 400;
+
+/// 构建操作提炼专用的严格时间序轨迹。
+///
+/// 与文档正文聚合不同，这里不按页面开头去重、不把文档帧提前，确保同一界面
+/// 在操作前后的状态变化，以及 A -> B -> A 的跨应用顺序都能送达 sidecar。
+fn load_member_action_trace(
+    conn: &Connection,
+    capture_ids: &[i64],
+) -> Result<Vec<BakeActionTraceRecord>, StorageError> {
+    if capture_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = capture_ids
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT id, ts, event_type, app_name, win_title, url, webpage_title,
+                ax_text, ocr_text, input_text, audio_text
+         FROM captures
+         WHERE id IN ({placeholders})
+         ORDER BY ts ASC, id ASC
+         LIMIT {ACTION_TRACE_MAX_CAPTURES}"
+    );
+    let params_vec: Vec<&dyn rusqlite::ToSql> = capture_ids
+        .iter()
+        .map(|id| id as &dyn rusqlite::ToSql)
+        .collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_vec.as_slice(), |row| {
+        let ax_text = row.get::<_, Option<String>>(7)?;
+        let ocr_text = row.get::<_, Option<String>>(8)?;
+        let visible_text = combine_distinct_capture_text(ax_text.as_deref(), ocr_text.as_deref());
+        Ok(BakeActionTraceRecord {
+            capture_id: row.get(0)?,
+            ts: row.get(1)?,
+            event_type: row
+                .get::<_, Option<String>>(2)?
+                .unwrap_or_else(|| "auto".to_string()),
+            app_name: truncate_optional_text(row.get(3)?, 100),
+            win_title: truncate_optional_text(row.get(4)?, 180),
+            url: truncate_optional_text(row.get(5)?, 500),
+            webpage_title: truncate_optional_text(row.get(6)?, 180),
+            visible_text: truncate_optional_text(visible_text, ACTION_TRACE_VISIBLE_TEXT_CHARS),
+            input_text: truncate_optional_text(row.get(9)?, ACTION_TRACE_INPUT_TEXT_CHARS),
+            audio_text: truncate_optional_text(row.get(10)?, ACTION_TRACE_AUDIO_TEXT_CHARS),
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::Sqlite)
+}
+
+fn combine_distinct_capture_text(ax_text: Option<&str>, ocr_text: Option<&str>) -> Option<String> {
+    let ax_text = ax_text.map(str::trim).filter(|value| !value.is_empty());
+    let ocr_text = ocr_text.map(str::trim).filter(|value| !value.is_empty());
+    match (ax_text, ocr_text) {
+        (Some(ax), Some(ocr)) if ax == ocr => Some(ax.to_string()),
+        (Some(ax), Some(ocr)) => Some(format!("{ax}\n{ocr}")),
+        (Some(ax), None) => Some(ax.to_string()),
+        (None, Some(ocr)) => Some(ocr.to_string()),
+        (None, None) => None,
+    }
+}
+
+fn truncate_optional_text(value: Option<String>, max_chars: usize) -> Option<String> {
+    value
+        .map(|value| value.trim().chars().take(max_chars).collect::<String>())
+        .filter(|value| !value.is_empty())
+}
 
 /// 聚合一条 timeline 全部成员 capture 的可见文本。
 ///
@@ -2930,6 +3006,101 @@ mod tests {
             mgr.find_existing_knowledge_timeline_ids(&[1000, 1001])
                 .unwrap(),
             std::collections::HashSet::from([1001])
+        );
+    }
+
+    #[test]
+    fn bake_candidate_action_trace_preserves_cross_app_time_order_and_state_changes() {
+        let mgr = make_mgr();
+        let first = seed_capture(&mgr);
+        let second = seed_capture(&mgr);
+        let third = seed_capture(&mgr);
+        mgr.with_conn(|conn| {
+            conn.execute(
+                "UPDATE captures
+                 SET ts = ?2, app_name = ?3, win_title = ?4, ax_text = ?5
+                 WHERE id = ?1",
+                params![
+                    first,
+                    1_700_000_000_000_i64,
+                    "Cursor",
+                    "config.rs",
+                    "相同界面壳：修改前"
+                ],
+            )?;
+            conn.execute(
+                "UPDATE captures
+                 SET ts = ?2, app_name = ?3, win_title = ?4, ax_text = ?5, input_text = ?6
+                 WHERE id = ?1",
+                params![
+                    second,
+                    1_700_000_010_000_i64,
+                    "Terminal",
+                    "cargo test",
+                    "执行测试",
+                    "cargo test bake"
+                ],
+            )?;
+            conn.execute(
+                "UPDATE captures
+                 SET ts = ?2, app_name = ?3, win_title = ?4, ax_text = ?5
+                 WHERE id = ?1",
+                params![
+                    third,
+                    1_700_000_020_000_i64,
+                    "Cursor",
+                    "config.rs",
+                    "相同界面壳：修改后"
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let mut timeline = sample_entry(&mgr, "coding");
+        timeline.capture_id = first;
+        let timeline_id = mgr.insert_timeline_entry(&timeline).unwrap();
+        mgr.with_conn(|conn| {
+            conn.execute(
+                "UPDATE captures SET timeline_id = ?1 WHERE id IN (?2, ?3, ?4)",
+                params![timeline_id, first, second, third],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let candidates = mgr.list_bake_memory_fresh_candidates(0, 20, 3).unwrap();
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.timeline.id == timeline_id)
+            .unwrap();
+        assert_eq!(
+            candidate
+                .action_trace
+                .iter()
+                .map(|item| item.capture_id)
+                .collect::<Vec<_>>(),
+            vec![first, second, third]
+        );
+        assert_eq!(
+            candidate.action_trace[0].app_name.as_deref(),
+            Some("Cursor")
+        );
+        assert_eq!(
+            candidate.action_trace[1].app_name.as_deref(),
+            Some("Terminal")
+        );
+        assert_eq!(
+            candidate.action_trace[2].app_name.as_deref(),
+            Some("Cursor")
+        );
+        assert_eq!(
+            candidate.action_trace[0].visible_text.as_deref(),
+            Some("相同界面壳：修改前")
+        );
+        assert_eq!(
+            candidate.action_trace[2].visible_text.as_deref(),
+            Some("相同界面壳：修改后")
         );
     }
 

@@ -1136,7 +1136,7 @@ body {
 .creation-skill-picker > header { position: sticky; top: 0; z-index: 1; min-height: 38px; padding: 0 12px; border-bottom: 1px solid #eee4d5; background: rgba(255, 253, 249, .96); color: #7a4b20; display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 700; backdrop-filter: blur(8px); }
 .creation-skill-picker > header small { margin-left: auto; color: #a48769; font-weight: 600; }
 .creation-skill-picker > button { width: 100%; padding: 11px 12px; border: 0; border-bottom: 1px solid #f2ebe1; background: transparent; color: #344054; text-align: left; cursor: pointer; display: grid; gap: 4px; }
-.creation-skill-picker > button:hover, .creation-skill-picker > button:focus-visible { outline: none; background: #fff7e9; }
+.creation-skill-picker > button:hover, .creation-skill-picker > button:focus-visible, .creation-skill-picker > button[aria-selected="true"] { outline: none; background: #fff7e9; }
 .creation-skill-picker > button strong { color: #30261e; font-size: 12px; }
 .creation-skill-picker > button span { color: #667085; font-size: 11px; line-height: 1.45; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .creation-skill-picker__empty { padding: 18px 14px; color: #806c58; font-size: 12px; line-height: 1.6; }

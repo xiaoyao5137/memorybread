@@ -9,6 +9,7 @@ use serde_json::Value;
 pub enum DiscoveredSourceOutcome {
     Registered { source_id: i64, created: bool },
     RejectedInvalidUrl,
+    RejectedNotRefreshable,
     RejectedCaptureMissing,
     RejectedCaptureSensitive,
 }
@@ -69,6 +70,8 @@ pub struct DataSearchResult {
     pub collected_at: Option<i64>,
     pub freshness_class: String,
     pub freshness_score: f64,
+    /// 来源标题/URL 与当前查询的身份匹配分；不受历史采集正文影响。
+    pub identity_relevance_score: f64,
     pub relevance_score: f64,
     pub final_score: f64,
     pub refresh_required: bool,

@@ -143,6 +143,7 @@ const AccountContactBindings: React.FC<AccountContactBindingsProps> = ({
     setError(null)
     setMessage(null)
     try {
+      const replacing = Boolean(activeChannel === 'email' ? user.email : user.phone)
       const updatedUser = await bindAccountContact(
         adminApiBaseUrl,
         authToken,
@@ -154,7 +155,7 @@ const AccountContactBindings: React.FC<AccountContactBindingsProps> = ({
       const label = presentation[activeChannel].label
       onUserChange(updatedUser)
       closeEditor()
-      setMessage(`${label}绑定成功。`)
+      setMessage(`${label}${replacing ? '换绑' : '绑定'}成功。`)
     } catch (bindingError) {
       setError(toUserFacingError(bindingError, '绑定失败，请稍后重试'))
     } finally {
@@ -182,15 +183,20 @@ const AccountContactBindings: React.FC<AccountContactBindingsProps> = ({
             </div>
             <p>{masked || `绑定${item.label}后，可用于验证身份和找回账户。`}</p>
           </div>
-          {!masked && !isEditing && (
+          {!isEditing && (
             <button className="account-contact__open" onClick={() => openEditor(channel)} type="button">
-              {item.action}
+              {masked ? `换绑${item.label}` : item.action}
             </button>
           )}
         </div>
 
         {isEditing && (
           <form className="account-contact__form" onSubmit={confirmBinding}>
+            {masked && (
+              <p className="account-contact__replacement-note">
+                验证新{item.label}后，当前{item.label}将自动解绑；换绑完成前仍可正常使用。
+              </p>
+            )}
             <label>
               <span>{item.label}</span>
               <input
@@ -244,7 +250,7 @@ const AccountContactBindings: React.FC<AccountContactBindingsProps> = ({
       <header>
         <div>
           <h3 id="account-contact-title">登录与安全</h3>
-          <p>每个邮箱和手机号只能绑定一个记忆面包账户。</p>
+          <p>每个邮箱和手机号只能绑定一个账户；已绑定信息需验证新联系方式后才能解绑。</p>
         </div>
         <ShieldCheck size={20} aria-hidden />
       </header>

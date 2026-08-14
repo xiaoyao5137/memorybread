@@ -157,8 +157,11 @@
         "source_id",
         "title",
         "source_kind",
+        "access_mode",
+        "refresh_policy",
         "freshness_class",
         "freshness_score",
+        "identity_relevance_score",
         "relevance_score",
         "final_score",
         "refresh_required",
@@ -169,10 +172,13 @@
         "title": {"type": "string"},
         "source_kind": {"$ref": "#/$defs/source_kind"},
         "source_url": {"type": ["string", "null"]},
+        "access_mode": {"type": "string"},
+        "refresh_policy": {"type": "string"},
         "observed_at": {"type": ["integer", "null"]},
         "collected_at": {"type": ["integer", "null"]},
         "freshness_class": {"$ref": "#/$defs/freshness_class"},
         "freshness_score": {"type": "number", "minimum": 0, "maximum": 1},
+        "identity_relevance_score": {"type": "number", "minimum": 0, "maximum": 1},
         "relevance_score": {"type": "number", "minimum": 0, "maximum": 1},
         "final_score": {"type": "number", "minimum": 0, "maximum": 1},
         "refresh_required": {"type": "boolean"},
@@ -242,10 +248,16 @@
           "maxLength": 12000,
           "description": "当前 Skill 步骤的原始采集目标；用于选择指定 Tab 与页面筛选器"
         },
+        "requested_metrics": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "description": "当前步骤希望展示的指标名；逐项校验并返回已取得部分，不因其他项缺失拒绝整条证据"
+        },
         "required_metrics": {
           "type": "array",
           "items": {"type": "string", "minLength": 1},
-          "description": "必须完整取得并逐项通过校验的指标名；缺少任一项时证据不得通过"
+          "deprecated": true,
+          "description": "旧客户端兼容别名，按 requested_metrics 的部分成功语义处理"
         },
         "expected_period_start": {
           "type": ["string", "null"],

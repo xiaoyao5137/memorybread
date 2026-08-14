@@ -176,6 +176,7 @@
 }
 
 .account-contact__hint,
+.account-contact__replacement-note,
 .account-contact__error,
 .account-contact__success {
   grid-column: 1 / -1;
@@ -185,6 +186,12 @@
 }
 
 .account-contact__hint { color: #6b7460; }
+.account-contact__replacement-note {
+  padding: 9px 10px;
+  border-radius: 9px;
+  background: #f7f3ef;
+  color: #6f6259;
+}
 .account-contact__hint--expired { color: #9a4a2b; }
 
 .account-contact__error,

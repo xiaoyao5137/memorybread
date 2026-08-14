@@ -5,6 +5,7 @@ import {
   createMemoryGraphLayout,
   memoryGraphKindMeta,
   memoryGraphRelationMeta,
+  scopeMemoryGraphToDateRange,
   sliceMemoryGraph,
   type MemoryGraphAssets,
   type MemoryGraphEdge,
@@ -65,6 +66,8 @@ const BakeMemoryGraph: React.FC<{
   onClose?: () => void
   onOpenNode?: (node: MemoryGraphNode) => void
   onSearchAssets?: (query: string) => Promise<MemoryGraphAssets>
+  defaultDateRange?: { fromMs: number; toMs: number }
+  defaultScopeLabel?: string
 }> = ({
   assets,
   focusNodeId,
@@ -75,6 +78,8 @@ const BakeMemoryGraph: React.FC<{
   onClose,
   onOpenNode,
   onSearchAssets,
+  defaultDateRange,
+  defaultScopeLabel,
 }) => {
   const [fullscreen, setFullscreen] = useState(false)
   const [enabledKinds, setEnabledKinds] = useState<Set<MemoryGraphNodeKind>>(() => new Set(allKinds))
@@ -100,7 +105,12 @@ const BakeMemoryGraph: React.FC<{
   } | null>(null)
 
   const normalizedSearchQuery = useMemo(() => normalizeSearchText(searchQuery), [searchQuery])
-  const graph = useMemo(() => buildMemoryGraph(searchedAssets ?? assets), [assets, searchedAssets])
+  const completeGraph = useMemo(() => buildMemoryGraph(searchedAssets ?? assets), [assets, searchedAssets])
+  const graph = useMemo(() => (
+    defaultDateRange && !normalizedSearchQuery
+      ? scopeMemoryGraphToDateRange(completeGraph, defaultDateRange)
+      : completeGraph
+  ), [completeGraph, defaultDateRange, normalizedSearchQuery])
   const searchMatchIds = useMemo(() => new Set(
     normalizedSearchQuery
       ? graph.nodes
@@ -376,7 +386,7 @@ const BakeMemoryGraph: React.FC<{
             ? '搜索中…'
             : normalizedSearchQuery
             ? `匹配 ${searchMatchIds.size} 项`
-            : `展示 ${visibleNodes.length}/${slicedGraph.eligibleNodeCount}`}
+            : `${defaultScopeLabel ? `${defaultScopeLabel}展示` : '展示'} ${visibleNodes.length}/${slicedGraph.eligibleNodeCount}`}
         </span>
       </div>
 
@@ -400,7 +410,7 @@ const BakeMemoryGraph: React.FC<{
           </div>
         ) : visibleNodes.length === 0 ? (
           <div className="bake-memory-graph__state">
-            <strong>还没有可连接的记忆资产</strong>
+            <strong>{defaultScopeLabel ? `${defaultScopeLabel}还没有可连接的记忆资产` : '还没有可连接的记忆资产'}</strong>
             <span>先从时间线提炼知识、文档、操作或数据，关联会在这里出现。</span>
           </div>
         ) : (

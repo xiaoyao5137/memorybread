@@ -795,6 +795,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const [currentDocumentSkills, setCurrentDocumentSkills] = useState<LocalCreationSkill[]>([])
   const [skillPickerOpen, setSkillPickerOpen] = useState(false)
   const [skillQuery, setSkillQuery] = useState('')
+  const [activeSkillPickerIndex, setActiveSkillPickerIndex] = useState(0)
   const [pendingConfirmation, setPendingConfirmation] = useState<{
     question: string
     userMessage: string
@@ -812,6 +813,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const skillPackageInputRef = useRef<HTMLInputElement>(null)
   const promptInputRef = useRef<HTMLTextAreaElement>(null)
+  const promptSkillShellRef = useRef<HTMLDivElement>(null)
   const promptImeGuard = useImeCompositionGuard<HTMLTextAreaElement>()
   const activeUserMessageRef = useRef('')
   const activeUserEntryRef = useRef<CreationChatMessage | null>(null)
@@ -1392,6 +1394,34 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       .filter(skill => !query || `${skill.title}\n${skill.summary}`.toLowerCase().includes(query))
       .slice(0, 8)
   }, [installedSkills, skillQuery])
+
+  useEffect(() => {
+    if (!skillPickerOpen) return
+    setActiveSkillPickerIndex(0)
+  }, [skillPickerOpen, skillQuery])
+
+  useEffect(() => {
+    if (!skillPickerOpen) return
+    setActiveSkillPickerIndex(current => Math.min(current, Math.max(0, skillPickerItems.length - 1)))
+  }, [skillPickerItems.length, skillPickerOpen])
+
+  useEffect(() => {
+    if (!skillPickerOpen) return
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!promptSkillShellRef.current?.contains(event.target as Node)) {
+        setSkillPickerOpen(false)
+        setSkillQuery('')
+      }
+    }
+    document.addEventListener('mousedown', handlePointerDown)
+    return () => document.removeEventListener('mousedown', handlePointerDown)
+  }, [skillPickerOpen])
+
+  useEffect(() => {
+    if (!skillPickerOpen || !skillPickerItems.length) return
+    document.getElementById(`creation-skill-option-${skillPickerItems[activeSkillPickerIndex]?.id}`)
+      ?.scrollIntoView?.({ block: 'nearest' })
+  }, [activeSkillPickerIndex, skillPickerItems, skillPickerOpen])
   const messageWithAttachments = (message = prompt) => {
     const attachmentPrompt = buildAttachmentPrompt(attachments)
     return attachmentPrompt ? `${message.trim()}\n\n${attachmentPrompt}` : message.trim()
@@ -3043,7 +3073,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                 </div>
               </div>
             )}
-            <div className="creation-prompt-skill-shell">
+            <div className="creation-prompt-skill-shell" ref={promptSkillShellRef}>
               <MentionHighlightTextarea
                 ref={promptInputRef}
                 value={prompt}
@@ -3056,6 +3086,28 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                   if (event.key === 'Escape' && skillPickerOpen) {
                     event.preventDefault()
                     setSkillPickerOpen(false)
+                    setSkillQuery('')
+                    return
+                  }
+                  if (skillPickerOpen && skillPickerItems.length && !promptImeGuard.isImeEvent(event)) {
+                    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                      event.preventDefault()
+                      const offset = event.key === 'ArrowDown' ? 1 : -1
+                      setActiveSkillPickerIndex(current => (
+                        (current + offset + skillPickerItems.length) % skillPickerItems.length
+                      ))
+                      return
+                    }
+                    if (event.key === 'Home' || event.key === 'End') {
+                      event.preventDefault()
+                      setActiveSkillPickerIndex(event.key === 'Home' ? 0 : skillPickerItems.length - 1)
+                      return
+                    }
+                    if (event.key === 'Enter') {
+                      event.preventDefault()
+                      selectPromptSkill(skillPickerItems[activeSkillPickerIndex])
+                      return
+                    }
                   }
                   if (
                     event.key === 'Enter'
@@ -3078,17 +3130,22 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                 disabled={isGenerating}
                 aria-expanded={skillPickerOpen}
                 aria-controls="creation-skill-picker"
+                aria-activedescendant={skillPickerOpen && skillPickerItems.length
+                  ? `creation-skill-option-${skillPickerItems[activeSkillPickerIndex]?.id}`
+                  : undefined}
               />
               {skillPickerOpen && (
                 <div className="creation-skill-picker" id="creation-skill-picker" role="listbox" aria-label="选择技能">
                   <header><AtSign size={15} /><span>选择已安装的技能</span><small>{skillPickerItems.length} 项</small></header>
-                  {skillPickerItems.length ? skillPickerItems.map(skill => (
+                  {skillPickerItems.length ? skillPickerItems.map((skill, index) => (
                     <button
                       type="button"
                       role="option"
-                      aria-selected="false"
+                      id={`creation-skill-option-${skill.id}`}
+                      aria-selected={index === activeSkillPickerIndex}
                       key={skill.id}
                       onMouseDown={event => event.preventDefault()}
+                      onMouseEnter={() => setActiveSkillPickerIndex(index)}
                       onClick={() => selectPromptSkill(skill)}
                     >
                       <strong>{skill.title}</strong>
@@ -3145,8 +3202,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                 event.currentTarget.value = ''
               }}
             />
-            <div className="creation-composer-actions" style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <div className="creation-model-row" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', flex: '1 1 300px' }}>
+            <div className="creation-composer-actions">
+              <div className="creation-model-row">
                 <ModelSelect
                   label="模型"
                   value={activeCreationModelId}
@@ -3162,18 +3219,20 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                   </span>
                 )}
               </div>
-              <button onClick={handlePreviewReferences} disabled={!prompt.trim() || isPreviewing || isGenerating} style={secondaryButtonStyle}>
-                {isPreviewing ? <Loader2 size={16} className="spin" /> : <FileText size={16} />}
-                预览参考
-              </button>
-              <button onClick={() => fileInputRef.current?.click()} disabled={isGenerating} style={secondaryButtonStyle}>
-                <Paperclip size={16} />
-                附件
-              </button>
-              <button onClick={isGenerating ? handleStopGenerate : handleGenerate} disabled={!isGenerating && !prompt.trim()} style={isGenerating ? dangerButtonStyle : primaryButtonStyle}>
-                {isGenerating ? <Loader2 size={16} className="spin" /> : generatedContent ? <Send size={16} /> : <Sparkles size={16} />}
-                {isGenerating ? '中止' : generatedContent ? '发送' : '开始创作'}
-              </button>
+              <div className="creation-action-buttons">
+                <button onClick={handlePreviewReferences} disabled={!prompt.trim() || isPreviewing || isGenerating} style={secondaryButtonStyle}>
+                  {isPreviewing ? <Loader2 size={16} className="spin" /> : <FileText size={16} />}
+                  预览参考
+                </button>
+                <button onClick={() => fileInputRef.current?.click()} disabled={isGenerating} style={secondaryButtonStyle}>
+                  <Paperclip size={16} />
+                  附件
+                </button>
+                <button onClick={isGenerating ? handleStopGenerate : handleGenerate} disabled={!isGenerating && !prompt.trim()} style={isGenerating ? dangerButtonStyle : primaryButtonStyle}>
+                  {isGenerating ? <Loader2 size={16} className="spin" /> : generatedContent ? <Send size={16} /> : <Sparkles size={16} />}
+                  {isGenerating ? '中止' : generatedContent ? '发送' : '开始创作'}
+                </button>
+              </div>
             </div>
             {isGenerating && (
               <ProgressStrip
@@ -3659,12 +3718,32 @@ const AgentEventSummary = ({
   onOpenReferences: (tab: Extract<BottomTab, 'reference' | 'data'>) => void
 }) => {
   const text = displayAgentText(event.summary)
+  const routingPrefix = '已由模型决定执行链路：'
+  const routingSteps = text.startsWith(routingPrefix)
+    ? text
+      .slice(routingPrefix.length)
+      .split(/[、\n]+/)
+      .map(item => item.trim())
+      .filter(Boolean)
+    : []
   const tab = event.type === 'tool.completed' && event.actor?.id === 'memory_search'
     ? 'reference'
     : event.type === 'tool.completed' && event.actor?.id === 'data_search'
       ? 'data'
       : null
   const resultCount = Number(event.data?.result_count)
+  if (routingSteps.length) {
+    return (
+      <small className="creation-agent-route-summary">
+        <span>{routingPrefix.slice(0, -1)}</span>
+        <span className="creation-agent-route-summary__steps">
+          {routingSteps.map((step, index) => (
+            <span key={`${step}-${index}`}>{step}</span>
+          ))}
+        </span>
+      </small>
+    )
+  }
   if (!tab || !Number.isFinite(resultCount) || resultCount <= 0) return <small>{text}</small>
 
   const match = tab === 'reference'

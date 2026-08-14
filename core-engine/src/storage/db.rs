@@ -332,6 +332,10 @@ static MIGRATIONS: &[(&str, &str)] = &[
         "079_breadcrumb_rule_activation",
         include_str!("../../../shared/db-schema/migrations/079_breadcrumb_rule_activation.sql"),
     ),
+    (
+        "080_bake_candidate_audits",
+        include_str!("migrations/080_bake_candidate_audits.sql"),
+    ),
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────

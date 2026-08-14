@@ -68,7 +68,9 @@ def iter_annotations(tree):
 
 for source_root in source_roots:
     for source_path in sorted(source_root.rglob("*.py")):
-        if excluded_parts.intersection(source_path.parts):
+        if excluded_parts.intersection(source_path.parts) or any(
+            part.startswith(".venv") for part in source_path.parts
+        ):
             continue
         try:
             source = source_path.read_text(encoding="utf-8")

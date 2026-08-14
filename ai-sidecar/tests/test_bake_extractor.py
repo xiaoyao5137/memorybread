@@ -48,6 +48,7 @@ SAMPLE_CANDIDATE = {
     "source_timeline_id": 1,
     "source_capture_id": 10,
     "source_capture_count": 3,
+    "effective_capture_count": 3,
     "summary": "修复 bake pipeline 的 JSON 提炼链路",
     "overview": "定位 sidecar 返回空内容导致 bake 三类产物全部 rejected。",
     "details": "检查 extractor_v2 的 JSON 解析与 response shape 兼容逻辑，并补充测试覆盖。",
@@ -67,6 +68,41 @@ SAMPLE_CANDIDATE = {
     "capture_ocr_text": "bake invalid_json",
     "capture_input_text": "",
     "capture_audio_text": "",
+    "start_time": 1710000000000,
+    "end_time": 1710000060000,
+    "duration_minutes": 1,
+    "key_timestamps": [
+        {"capture_id": 10, "ts": 1710000000000},
+        {"capture_id": 11, "ts": 1710000030000},
+        {"capture_id": 12, "ts": 1710000060000},
+    ],
+    "action_trace": [
+        {
+            "capture_id": 10,
+            "ts": 1710000000000,
+            "event_type": "manual",
+            "app_name": "Cursor",
+            "win_title": "extractor_v2.py",
+            "visible_text": "检查 bake bundle 分类逻辑",
+            "input_text": "定位 primary_type 抑制",
+        },
+        {
+            "capture_id": 11,
+            "ts": 1710000030000,
+            "event_type": "manual",
+            "app_name": "Terminal",
+            "win_title": "pytest",
+            "visible_text": "运行 bundle 测试并发现 SOP 被拒绝",
+        },
+        {
+            "capture_id": 12,
+            "ts": 1710000060000,
+            "event_type": "manual",
+            "app_name": "Terminal",
+            "win_title": "pytest",
+            "visible_text": "修改后测试通过",
+        },
+    ],
     "entities": ["bake", "JSON", "sidecar"],
 }
 
@@ -385,7 +421,7 @@ def test_extract_bake_bundle_uses_one_llm_call_for_three_artifacts():
     assert result["total_elapsed_ms"] >= 0
 
 
-def test_extract_bake_bundle_uses_primary_data_classification_to_prevent_duplicate_assets():
+def test_extract_bake_bundle_primary_type_does_not_suppress_independent_assets():
     extractor = make_extractor()
     response_payload = {
         "classification": {
@@ -395,13 +431,16 @@ def test_extract_bake_bundle_uses_primary_data_classification_to_prevent_duplica
         "knowledge": {
             "accepted": True,
             "reason": None,
-            "payload": {"summary": "模型误收的字段公式"},
+            "payload": {"summary": "指标异常由采集口径变更导致"},
         },
         "design": {"accepted": False, "reason": "not_a_document", "payload": None},
         "sop": {
             "accepted": True,
             "reason": None,
-            "payload": {"summary": "模型误收的按钮操作"},
+            "payload": {
+                "summary": "修复采集口径并验证指标",
+                "steps": ["修改采集配置", "重启采集任务", "检查指标恢复"],
+            },
         },
     }
     client = DummyClient({
@@ -418,16 +457,13 @@ def test_extract_bake_bundle_uses_primary_data_classification_to_prevent_duplica
     })
 
     assert result["primary_type"] == "data"
-    assert result["knowledge"] == {
-        "accepted": False,
-        "reason": "primary_asset_is_data",
-        "payload": None,
-    }
-    assert result["sop"] == {
-        "accepted": False,
-        "reason": "primary_asset_is_data",
-        "payload": None,
-    }
+    assert result["knowledge"]["accepted"] is True
+    assert result["sop"]["accepted"] is True
+    assert result["sop"]["payload"]["step_evidence"] == [
+        {"step_index": 1, "capture_ids": ["10", "11", "12"]},
+        {"step_index": 2, "capture_ids": ["10", "11", "12"]},
+        {"step_index": 3, "capture_ids": ["10", "11", "12"]},
+    ]
 
 
 def test_bake_prompts_classify_progress_results_and_conclusions_as_knowledge_facts():
@@ -444,6 +480,9 @@ def test_bake_prompts_classify_progress_results_and_conclusions_as_knowledge_fac
     assert "以“对象 + 指标 + 数值”为核心" in BAKE_BUNDLE_PROMPT
     assert "不能因为它们会变化或来自聊天就归 data/none" in BAKE_BUNDLE_PROMPT
     assert "只有没有实质事实的自动动作壳才 reject" in BAKE_BUNDLE_PROMPT
+    assert "它不构成其他资产的拒绝理由" in BAKE_BUNDLE_PROMPT
+    assert "可以有多个 accepted=true" in BAKE_BUNDLE_PROMPT
+    assert "禁止使用 not_primary_type" in BAKE_COMPACT_BUNDLE_PROMPT
     assert "不得仅因记录来自过去、他人、群聊或动态流而拒绝" in BAKE_SHARED_PROMPT
 
     # 失败后的紧凑重试复用同一分类契约，不能在重试时丢失事实边界。
@@ -930,11 +969,14 @@ def test_extract_bake_sop_accepts_valid_payload():
 
     artifact, meta = extractor._extract_bake_artifact(SAMPLE_CANDIDATE, "sop", "prompt")
 
-    assert artifact == {
-        "accepted": True,
-        "reason": None,
-        "payload": payload,
-    }
+    assert artifact["accepted"] is True
+    assert artifact["reason"] is None
+    assert artifact["payload"]["steps"] == payload["steps"]
+    assert artifact["payload"]["step_evidence"] == [
+        {"step_index": 1, "capture_ids": ["10", "11", "12"]},
+        {"step_index": 2, "capture_ids": ["10", "11", "12"]},
+        {"step_index": 3, "capture_ids": ["10", "11", "12"]},
+    ]
     assert meta["degraded"] is False
     assert meta["model"] == "mock-model"
     assert meta["elapsed_ms"] >= 0
@@ -1006,7 +1048,11 @@ def test_bake_candidate_exposes_multi_capture_context_to_existing_bundle_call():
     })
 
     assert "source_capture_count: 5" in text
+    assert "effective_capture_count: 3" in text
     assert "multi_capture_context" in text
+    assert "action_trace（严格按 ts 排序" in text
+    assert text.index("capture_id=10") < text.index("capture_id=11") < text.index("capture_id=12")
+    assert 'key_timestamps:' in text
     assert "打开配置页" in text
     assert "运行并验证结果" in text
 

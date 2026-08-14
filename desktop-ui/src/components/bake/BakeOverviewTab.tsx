@@ -383,6 +383,7 @@ const BakeOverviewTab: React.FC<{
   onRetryGraph?: () => void
   onOpenGraphNode?: (node: MemoryGraphNode) => void
   onSearchGraph?: (query: string) => Promise<MemoryGraphAssets>
+  graphDefaultDateRange?: { fromMs: number; toMs: number }
 }> = ({
   overview,
   graphAssets = emptyOverviewGraphAssets,
@@ -391,6 +392,7 @@ const BakeOverviewTab: React.FC<{
   onRetryGraph,
   onOpenGraphNode,
   onSearchGraph,
+  graphDefaultDateRange,
 }) => {
 
   return (
@@ -413,6 +415,8 @@ const BakeOverviewTab: React.FC<{
         onRetry={onRetryGraph}
         onOpenNode={onOpenGraphNode}
         onSearchAssets={onSearchGraph}
+        defaultDateRange={graphDefaultDateRange}
+        defaultScopeLabel="今日"
       />
     </div>
   )

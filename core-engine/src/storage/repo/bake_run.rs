@@ -1,10 +1,11 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::storage::{
     db::current_ts_ms,
     error::StorageError,
     models_bake::{
-        BakeQueueStatusRecord, BakeRetryStateRecord, BakeRunRecord, BakeWatermarkRecord, NewBakeRun,
+        BakeCandidateAuditRecord, BakeQueueStatusRecord, BakeRetryStateRecord, BakeRunRecord,
+        BakeSopFunnelSummaryRecord, BakeWatermarkRecord, NewBakeCandidateAudit, NewBakeRun,
     },
     StorageManager,
 };
@@ -164,6 +165,155 @@ pub fn load_bake_production_events(
 }
 
 impl StorageManager {
+    /// 写入候选的确定性预检状态。审计表只保存计数、分类和原因码，不保存候选正文。
+    pub fn upsert_bake_candidate_audit(
+        &self,
+        audit: &NewBakeCandidateAudit,
+    ) -> Result<(), StorageError> {
+        let now = current_ts_ms();
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO bake_candidate_audits (
+                    run_id, timeline_id, lane, source_capture_count,
+                    effective_capture_count, sop_eligible, sop_eligibility_reason,
+                    persist_status, persist_reason, created_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+                 ON CONFLICT(run_id, timeline_id) DO UPDATE SET
+                    lane = excluded.lane,
+                    source_capture_count = excluded.source_capture_count,
+                    effective_capture_count = excluded.effective_capture_count,
+                    sop_eligible = excluded.sop_eligible,
+                    sop_eligibility_reason = excluded.sop_eligibility_reason,
+                    persist_status = excluded.persist_status,
+                    persist_reason = excluded.persist_reason,
+                    updated_at_ms = excluded.updated_at_ms",
+                params![
+                    audit.run_id,
+                    audit.timeline_id,
+                    audit.lane,
+                    audit.source_capture_count,
+                    audit.effective_capture_count,
+                    audit.sop_eligible,
+                    audit.sop_eligibility_reason,
+                    audit.persist_status,
+                    audit.persist_reason,
+                    now,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn update_bake_candidate_audit_model(
+        &self,
+        run_id: i64,
+        timeline_id: i64,
+        primary_type: Option<&str>,
+        classification_reason: Option<&str>,
+        sop_model_accepted: bool,
+        sop_model_reason: Option<&str>,
+        sop_payload_valid: Option<bool>,
+    ) -> Result<(), StorageError> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE bake_candidate_audits
+                 SET primary_type = ?3,
+                     classification_reason = ?4,
+                     sop_model_accepted = ?5,
+                     sop_model_reason = ?6,
+                     sop_payload_valid = ?7,
+                     persist_status = 'extracted',
+                     updated_at_ms = ?8
+                 WHERE run_id = ?1 AND timeline_id = ?2",
+                params![
+                    run_id,
+                    timeline_id,
+                    primary_type,
+                    classification_reason,
+                    sop_model_accepted,
+                    sop_model_reason,
+                    sop_payload_valid,
+                    current_ts_ms(),
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn finalize_bake_candidate_audit(
+        &self,
+        run_id: i64,
+        timeline_id: i64,
+        persist_status: &str,
+        persist_reason: Option<&str>,
+    ) -> Result<(), StorageError> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE bake_candidate_audits
+                 SET persist_status = ?3, persist_reason = ?4, updated_at_ms = ?5
+                 WHERE run_id = ?1 AND timeline_id = ?2",
+                params![
+                    run_id,
+                    timeline_id,
+                    persist_status,
+                    persist_reason,
+                    current_ts_ms(),
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn get_bake_candidate_audit(
+        &self,
+        run_id: i64,
+        timeline_id: i64,
+    ) -> Result<Option<BakeCandidateAuditRecord>, StorageError> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT id, run_id, timeline_id, lane, source_capture_count,
+                        effective_capture_count, sop_eligible, sop_eligibility_reason,
+                        primary_type, classification_reason, sop_model_accepted,
+                        sop_model_reason, sop_payload_valid, persist_status, persist_reason,
+                        created_at_ms, updated_at_ms
+                 FROM bake_candidate_audits
+                 WHERE run_id = ?1 AND timeline_id = ?2",
+                params![run_id, timeline_id],
+                row_to_bake_candidate_audit,
+            )
+            .optional()
+            .map_err(StorageError::from)
+        })
+    }
+
+    pub fn get_bake_run_sop_funnel_summary(
+        &self,
+        run_id: i64,
+    ) -> Result<BakeSopFunnelSummaryRecord, StorageError> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(sop_eligible = 1), 0),
+                        COALESCE(SUM(sop_model_accepted = 1), 0),
+                        COALESCE(SUM(sop_payload_valid = 1), 0),
+                        COALESCE(SUM(persist_status = 'created'), 0)
+                 FROM bake_candidate_audits
+                 WHERE run_id = ?1",
+                params![run_id],
+                |row| {
+                    Ok(BakeSopFunnelSummaryRecord {
+                        audited_count: row.get(0)?,
+                        eligible_count: row.get(1)?,
+                        model_accepted_count: row.get(2)?,
+                        payload_valid_count: row.get(3)?,
+                        persisted_count: row.get(4)?,
+                    })
+                },
+            )
+            .map_err(StorageError::from)
+        })
+    }
+
     pub fn insert_bake_run(&self, run: &NewBakeRun) -> Result<i64, StorageError> {
         self.with_conn(|conn| insert_bake_run_inner(conn, run))
     }
@@ -883,6 +1033,30 @@ fn row_to_bake_run(row: &rusqlite::Row<'_>) -> Result<BakeRunRecord, StorageErro
     })
 }
 
+fn row_to_bake_candidate_audit(
+    row: &rusqlite::Row<'_>,
+) -> Result<BakeCandidateAuditRecord, rusqlite::Error> {
+    Ok(BakeCandidateAuditRecord {
+        id: row.get(0)?,
+        run_id: row.get(1)?,
+        timeline_id: row.get(2)?,
+        lane: row.get(3)?,
+        source_capture_count: row.get(4)?,
+        effective_capture_count: row.get(5)?,
+        sop_eligible: row.get::<_, i64>(6)? != 0,
+        sop_eligibility_reason: row.get(7)?,
+        primary_type: row.get(8)?,
+        classification_reason: row.get(9)?,
+        sop_model_accepted: row.get::<_, Option<i64>>(10)?.map(|value| value != 0),
+        sop_model_reason: row.get(11)?,
+        sop_payload_valid: row.get::<_, Option<i64>>(12)?.map(|value| value != 0),
+        persist_status: row.get(13)?,
+        persist_reason: row.get(14)?,
+        created_at_ms: row.get(15)?,
+        updated_at_ms: row.get(16)?,
+    })
+}
+
 fn row_to_bake_watermark(row: &rusqlite::Row<'_>) -> Result<BakeWatermarkRecord, StorageError> {
     Ok(BakeWatermarkRecord {
         pipeline_name: row.get(0)?,
@@ -897,6 +1071,58 @@ mod tests {
 
     fn make_mgr() -> StorageManager {
         StorageManager::open_in_memory().expect("内存数据库初始化失败")
+    }
+
+    #[test]
+    fn candidate_audit_persists_sop_funnel_without_candidate_content() {
+        let mgr = make_mgr();
+        let run_id = mgr
+            .insert_bake_run(&NewBakeRun {
+                trigger_reason: "test".to_string(),
+                status: "running".to_string(),
+                started_at: 1_710_000_000_000,
+            })
+            .unwrap();
+        mgr.upsert_bake_candidate_audit(&NewBakeCandidateAudit {
+            run_id,
+            timeline_id: 42,
+            lane: "fresh".to_string(),
+            source_capture_count: 3,
+            effective_capture_count: 3,
+            sop_eligible: true,
+            sop_eligibility_reason: Some("eligible_multi_capture".to_string()),
+            persist_status: "queued".to_string(),
+            persist_reason: None,
+        })
+        .unwrap();
+        mgr.update_bake_candidate_audit_model(
+            run_id,
+            42,
+            Some("knowledge"),
+            Some("事实是主资产，但同时存在操作路线"),
+            true,
+            None,
+            Some(true),
+        )
+        .unwrap();
+        mgr.finalize_bake_candidate_audit(run_id, 42, "created", Some("created"))
+            .unwrap();
+
+        let audit = mgr.get_bake_candidate_audit(run_id, 42).unwrap().unwrap();
+        assert_eq!(audit.source_capture_count, 3);
+        assert_eq!(audit.effective_capture_count, 3);
+        assert!(audit.sop_eligible);
+        assert_eq!(audit.primary_type.as_deref(), Some("knowledge"));
+        assert_eq!(audit.sop_model_accepted, Some(true));
+        assert_eq!(audit.sop_payload_valid, Some(true));
+        assert_eq!(audit.persist_status, "created");
+
+        let funnel = mgr.get_bake_run_sop_funnel_summary(run_id).unwrap();
+        assert_eq!(funnel.audited_count, 1);
+        assert_eq!(funnel.eligible_count, 1);
+        assert_eq!(funnel.model_accepted_count, 1);
+        assert_eq!(funnel.payload_valid_count, 1);
+        assert_eq!(funnel.persisted_count, 1);
     }
 
     #[test]

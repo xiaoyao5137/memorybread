@@ -52,6 +52,14 @@ import './bake/BakePanel.css'
 const PAGE_SIZE = 20
 const GRAPH_ASSET_LIMIT = 100
 
+const getLocalDayRange = (nowMs: number) => {
+  const start = new Date(nowMs)
+  start.setHours(0, 0, 0, 0)
+  const end = new Date(start)
+  end.setDate(end.getDate() + 1)
+  return { fromMs: start.getTime(), toMs: end.getTime() - 1 }
+}
+
 const emptyGraphAssets: MemoryGraphAssets = {
   knowledge: [],
   documents: [],
@@ -242,6 +250,15 @@ const BakePanel: React.FC = () => {
   const [graphError, setGraphError] = useState<string | null>(null)
   const [graphRevision, setGraphRevision] = useState(0)
   const knowledgeRequestSeqRef = useRef(0)
+  const [overviewTodayRange, setOverviewTodayRange] = useState(() => getLocalDayRange(Date.now()))
+
+  useEffect(() => {
+    const delayUntilTomorrow = Math.max(1_000, overviewTodayRange.toMs - Date.now() + 1)
+    const timer = window.setTimeout(() => {
+      setOverviewTodayRange(getLocalDayRange(Date.now()))
+    }, delayUntilTomorrow)
+    return () => window.clearTimeout(timer)
+  }, [overviewTodayRange.toMs])
 
   const searchOverviewGraph = useCallback(async (query: string): Promise<MemoryGraphAssets> => {
     const [knowledgeResult, templatesResult, sopsResult, dataResult] = await Promise.allSettled([
@@ -283,21 +300,62 @@ const BakePanel: React.FC = () => {
     setGraphError(null)
 
     const loadOverviewAssets = async () => {
-      const [memoriesResult, knowledgeResult, templatesResult, sopsResult, dataResult] = await Promise.allSettled([
+      const [
+        memoriesResult,
+        todayKnowledgeResult,
+        knowledgeResult,
+        todayTemplatesResult,
+        templatesResult,
+        todaySopsResult,
+        sopsResult,
+        dataResult,
+      ] = await Promise.allSettled([
         fetchMemories({ limit: 1, offset: 0 }),
+        fetchKnowledge({
+          sort: 'heat',
+          from: overviewTodayRange.fromMs,
+          to: overviewTodayRange.toMs,
+          limit: GRAPH_ASSET_LIMIT,
+          offset: 0,
+        }),
         fetchKnowledge({ sort: 'heat', limit: GRAPH_ASSET_LIMIT, offset: 0 }),
+        fetchTemplates({
+          from: overviewTodayRange.fromMs,
+          to: overviewTodayRange.toMs,
+          limit: GRAPH_ASSET_LIMIT,
+          offset: 0,
+        }),
         fetchTemplates({ limit: GRAPH_ASSET_LIMIT, offset: 0 }),
+        fetchSops({
+          from: overviewTodayRange.fromMs,
+          to: overviewTodayRange.toMs,
+          limit: GRAPH_ASSET_LIMIT,
+          offset: 0,
+        }),
         fetchSops({ limit: GRAPH_ASSET_LIMIT, offset: 0 }),
         fetchDataSources({ limit: GRAPH_ASSET_LIMIT, offset: 0 }),
       ])
       if (cancelled) return
 
-      const knowledge = knowledgeResult.status === 'fulfilled' ? knowledgeResult.value.items : []
-      const templateItems = templatesResult.status === 'fulfilled' ? templatesResult.value.items : []
-      const sops = sopsResult.status === 'fulfilled' ? sopsResult.value.items : []
+      const knowledge = mergeUniqueById(
+        todayKnowledgeResult.status === 'fulfilled' ? todayKnowledgeResult.value.items : [],
+        knowledgeResult.status === 'fulfilled' ? knowledgeResult.value.items : [],
+      )
+      const templateItems = mergeUniqueById(
+        todayTemplatesResult.status === 'fulfilled' ? todayTemplatesResult.value.items : [],
+        templatesResult.status === 'fulfilled' ? templatesResult.value.items : [],
+      )
+      const sops = mergeUniqueById(
+        todaySopsResult.status === 'fulfilled' ? todaySopsResult.value.items : [],
+        sopsResult.status === 'fulfilled' ? sopsResult.value.items : [],
+      )
       const dataItems = dataResult.status === 'fulfilled' ? dataResult.value.items : []
-      const failedGraphRequests = [knowledgeResult, templatesResult, sopsResult, dataResult]
-        .filter(result => result.status === 'rejected').length
+      const failedGraphRequests = [
+        [todayKnowledgeResult, knowledgeResult],
+        [todayTemplatesResult, templatesResult],
+        [todaySopsResult, sopsResult],
+        [dataResult],
+      ].filter(results => results.every(result => result.status === 'rejected')).length
 
       // 趋势只使用 /api/bake/overview 的全量聚合；这些列表最多返回 100 条，
       // 只能用于图谱素材和总数，不能二次推导每日产量。
@@ -334,7 +392,7 @@ const BakePanel: React.FC = () => {
     return () => {
       cancelled = true
     }
-  }, [bakeTab, fetchDataSources, fetchKnowledge, fetchMemories, fetchSops, fetchTemplates, graphRevision])
+  }, [bakeTab, fetchDataSources, fetchKnowledge, fetchMemories, fetchSops, fetchTemplates, graphRevision, overviewTodayRange])
 
   useEffect(() => {
     if (!graphOpen || bakeTab === 'overview') return
@@ -1147,6 +1205,7 @@ const BakePanel: React.FC = () => {
             onRetryGraph={() => setGraphRevision(current => current + 1)}
             onOpenGraphNode={handleOpenGraphNode}
             onSearchGraph={searchOverviewGraph}
+            graphDefaultDateRange={overviewTodayRange}
           />
         )}
         {bakeTab === 'knowledge' && (

@@ -120,6 +120,42 @@ describe('创作 Agent 多轮 Loop', () => {
     })
   })
 
+  it('将模型决定的执行链路逐项换行展示', async () => {
+    useAppStore.getState().setCreationDraft({
+      sessionId: 'session-agent-test',
+      conversation: [{
+        id: 'message-routing-summary',
+        role: 'user',
+        content: '生成一份周报',
+        createdAt: 1_720_000_000_000,
+        runId: 'run-1',
+      }],
+      agentEvents: [event(
+        'agent.completed',
+        2,
+        '已由模型决定执行链路：周报 Skill、记忆搜索 Tool、文档撰写 Agent',
+      )] as any,
+    })
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+
+    const summary = await screen.findByText('已由模型决定执行链路')
+    const routeSummary = summary.closest('.creation-agent-route-summary')
+    expect(routeSummary).not.toBeNull()
+    expect(routeSummary?.querySelectorAll('.creation-agent-route-summary__steps > span')).toHaveLength(3)
+    expect(routeSummary).toHaveTextContent('周报 Skill')
+    expect(routeSummary).toHaveTextContent('记忆搜索 Tool')
+    expect(routeSummary).toHaveTextContent('文档撰写 Agent')
+  })
+
   it('在执行轨迹中展示后台浏览器缩略预览且完成后保留最终截图', async () => {
     const browserTool = { kind: 'tool', id: 'webpage_scrape', name: '网页爬取 Tool' }
     const previewId = '2d870d80-e2a2-4424-a732-069e174f2796'

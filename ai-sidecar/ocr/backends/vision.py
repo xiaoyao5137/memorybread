@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # 内联 Swift 脚本：通过 Apple Vision VNRecognizeTextRequest 识别文字
 # 接收一个参数：图片绝对路径
-# 输出格式：{"results": [{"text": "...", "confidence": 0.95}, ...]}
+# 输出格式：{"results": [{"text": "...", "confidence": 0.95, "bbox": [...]}, ...]}
 _SWIFT_OCR_SCRIPT = r"""
 import Foundation
 import Vision
@@ -50,7 +50,16 @@ let request   = VNRecognizeTextRequest { req, err in
     guard err == nil, let obs = req.results as? [VNRecognizedTextObservation] else { return }
     for ob in obs {
         if let candidate = ob.topCandidates(1).first, !candidate.string.isEmpty {
-            results.append(["text": candidate.string, "confidence": Double(candidate.confidence)])
+            let rect = ob.boundingBox
+            let left = Double(rect.origin.x)
+            let right = Double(rect.origin.x + rect.size.width)
+            let top = Double(1.0 - rect.origin.y - rect.size.height)
+            let bottom = Double(1.0 - rect.origin.y)
+            results.append([
+                "text": candidate.string,
+                "confidence": Double(candidate.confidence),
+                "bbox": [[left, top], [right, top], [right, bottom], [left, bottom]],
+            ])
         }
     }
 }
@@ -118,7 +127,7 @@ class AppleVisionBackend(OcrBackend):
             OcrBox(
                 text=item["text"],
                 confidence=float(item.get("confidence", 0.0)),
-                bbox=[],
+                bbox=item.get("bbox", []),
             )
             for item in data.get("results", [])
             if item.get("text", "").strip()

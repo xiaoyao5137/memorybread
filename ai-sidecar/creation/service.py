@@ -39,6 +39,27 @@ CORE_ENGINE_DEFAULT_BASE_URL = "http://127.0.0.1:7070"
 MAX_REPORT_REFRESH_SOURCES = 5
 REPORT_REFRESH_HTTP_TIMEOUT_SECONDS = 140.0
 MIN_CANVAS_OCR_CONFIDENCE = 0.60
+MAX_VERIFIED_SCRAPE_CLAIMS = 120
+MAX_ADAPTIVE_OCR_TILES = 12
+MAX_SEMANTIC_RERANK_CANDIDATES = 240
+SEMANTIC_RERANK_TEXT_CHARS = 1200
+CLOUD_MODEL_MAX_ATTEMPTS = 3
+CLOUD_MODEL_RETRY_BASE_SECONDS = 0.75
+CLOUD_MODEL_TIMEOUT = httpx.Timeout(
+    connect=15.0,
+    read=300.0,
+    write=30.0,
+    pool=15.0,
+)
+
+
+class CloudModelRequestError(RuntimeError):
+    """云模型返回了非成功状态，保留状态码供统一重试策略判断。"""
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(f"模型请求失败 ({status_code}): {detail}")
 
 CREATION_SKILL_ANALYSIS_SCHEMA = {
     "type": "object",
@@ -332,13 +353,9 @@ class CreationService:
         retain_screenshot: bool = True,
     ) -> dict:
         """刷新 Top-K 报表源，以 AX/DOM 校验数据并按需保留截图证据。"""
-        report_sources = self._select_canonical_report_sources([
-            item
-            for item in data_results
-            if item.get("source_kind") == "report_url"
-            and item.get("source_url")
-            and item.get("source_id") is not None
-        ])[: max(1, min(int(limit), MAX_REPORT_REFRESH_SOURCES))]
+        report_sources = self._select_refreshable_report_sources(data_results)[
+            : max(1, min(int(limit), MAX_REPORT_REFRESH_SOURCES))
+        ]
         if not report_sources:
             return {"scrapes": [], "refreshed_data": data_results}
 
@@ -428,9 +445,22 @@ class CreationService:
                             }
                         )
                         continue
-                    error_payload = response.json()
-                    error_code = str(error_payload.get("error") or "SCRAPE_FAILED")
+                    try:
+                        error_payload = response.json()
+                    except ValueError:
+                        error_payload = {}
+                    error_code = str(
+                        error_payload.get("error")
+                        or f"SCRAPE_HTTP_{response.status_code}"
+                    )
+                except httpx.TimeoutException:
+                    error_code = "SCRAPE_TIMEOUT"
+                except httpx.RequestError:
+                    error_code = "SCRAPE_UNAVAILABLE"
+                except ValueError:
+                    error_code = "SCRAPE_INVALID_RESPONSE"
                 except Exception:
+                    logger.exception("网页报表刷新出现未分类异常 source_id=%s", source_id)
                     error_code = "SCRAPE_FAILED"
                 scrapes.append(
                     {
@@ -500,6 +530,47 @@ class CreationService:
             or int(item.get("_report_page_score") or 0) > 0
         ]
 
+    @classmethod
+    def _select_refreshable_report_sources(cls, items: list[dict]) -> list[dict]:
+        """从检索候选中挑选本轮应刷新的报表。
+
+        当查询已经明确命中一个或多个来源身份时，只刷新同一身份强度层的
+        页面；正文里偶然出现一个通用词的其他看板不跟随刷新。该规则只使用
+        检索分数和页面类型，不依赖业务名或固定关键词。
+        """
+        candidates = cls._select_canonical_report_sources(
+            [
+                item
+                for item in items
+                if item.get("source_kind") == "report_url"
+                and item.get("source_url")
+                and item.get("source_id") is not None
+                and item.get("refresh_required") is True
+                and item.get("refresh_policy") != "never"
+            ]
+        )
+        if not candidates:
+            return []
+
+        def score(item: dict, key: str) -> float:
+            try:
+                return max(0.0, min(float(item.get(key) or 0.0), 1.0))
+            except (TypeError, ValueError):
+                return 0.0
+
+        strongest_identity = max(
+            score(item, "identity_relevance_score") for item in candidates
+        )
+        if strongest_identity >= 0.60:
+            identity_floor = max(0.60, strongest_identity - 0.12)
+            return [
+                item
+                for item in candidates
+                if score(item, "identity_relevance_score") >= identity_floor
+                or score(item, "relevance_score") >= 0.90
+            ]
+        return candidates
+
     @staticmethod
     def _extract_requested_metrics(query: str) -> list[str]:
         """从步骤目标中通用地提取用户希望展示的指标。
@@ -519,19 +590,45 @@ class CreationService:
             candidate = " ".join(raw.split()).strip()
             if not candidate or not metric_signal.search(candidate):
                 continue
+            # 根请求和当前 Skill 步骤会同时进入采集目标。
+            # “使用 @某 Skill/Tool”是调度语句，其名称里即使带有
+            # GPU、成本等度量词，也不是待校验的指标。
+            if re.search(
+                r"(?:请)?(?:使用|调用|应用|use)\s*@[^\s：:]+",
+                candidate,
+                re.IGNORECASE,
+            ):
+                continue
+            # 自然语言目标常用“任务语境：指标1、指标2”开始枚举。
+            # 冒号前的文本只说明数据源/页面，不应并入第一个指标名。
+            for separator in ("：", ":"):
+                if separator in candidate:
+                    tail = candidate.rsplit(separator, 1)[-1].strip()
+                    if metric_signal.search(tail):
+                        candidate = tail
+                    break
             # 首个枚举项往往带有“在某页筛选本周的”语境，只保留最后
             # 一个“的”之后的度量短语。
             if "的" in candidate:
                 tail = candidate.rsplit("的", 1)[-1].strip()
                 if metric_signal.search(tail):
                     candidate = tail
+            # Tab/日期/按钮操作句可能含“用量”等指标信号，但它们
+            # 是采集步骤而非展示字段。按通用交互语法排除这类分句。
+            if re.search(
+                r"(?:选择|切换|点击|打开|进入|设置|查询|筛选)"
+                r".*(?:tab|标签|页签|页面|日期|时间|周期|按钮|控件)",
+                candidate,
+                re.IGNORECASE,
+            ):
+                continue
             candidate = re.sub(
                 r"^(?:筛选)?(?:本周|这周|当前周)?(?:的)?",
                 "",
                 candidate,
             )
             candidate = re.sub(
-                r"(?:并)?(?:添加|写入|展示|输出|放入|纳入).*$",
+                r"(?:并)?(?:添加|写入|展示|放入|纳入).*$",
                 "",
                 candidate,
             ).strip(" ：:-")
@@ -724,30 +821,52 @@ class CreationService:
 
                 self._ocr_engine = OcrEngine.create_default()
             output = await asyncio.to_thread(self._ocr_engine.process, temp_path)
-            ocr_validation = self._compare_scrape_with_ocr(scrape_payload, output.text)
-            ocr_confidence = float(output.confidence)
-            validation["ocr_confidence"] = round(ocr_confidence, 4)
-            validation["ocr_verified_claim_count"] = len(
-                ocr_validation.get("verified_claims", [])
+            # Canvas 图表中的指标名和值不一定进入 DOM/AX。把当前步骤明确
+            # 请求的指标作为 OCR 语义契约传入，但仍要求截图本身同时识别出
+            # 匹配的指标名和值；不依赖任何看板、Tab 或业务字段写死规则。
+            ocr_payload = dict(scrape_payload)
+            raw_structured = scrape_payload.get("structured_data")
+            ocr_structured = (
+                dict(raw_structured) if isinstance(raw_structured, dict) else {}
             )
-            validation["ocr_loading_marker_count"] = int(
-                ocr_validation.get("loading_marker_count") or 0
-            )
-            validation["screenshot_status"] = (
-                "matched"
-                if ocr_validation.get("verified_claims")
-                else "retained_unmatched"
-            )
-            validation = self._merge_canvas_ocr_validation(
-                validation,
-                ocr_validation,
-                ocr_confidence,
-            )
-            validation = self._apply_required_metric_coverage(
-                validation,
+            ocr_structured["requested_metrics"] = list(required_metrics or [])
+            ocr_payload["structured_data"] = ocr_structured
+            base_validation = dict(validation)
+            validation = self._validation_with_ocr_output(
+                base_validation,
+                ocr_payload,
+                output,
                 required_metrics or [],
                 expected_period or {},
+                strategy="full_image",
             )
+
+            # Vision/Paddle 对超长拼接图可能按列而不是按卡片阅读，导致
+            # 明明在图里的“标签 → 日期 → 数值”被拆散。仅在定向指标仍
+            # 未完整命中时，把长图切成有重叠的横向分片并放大重识别。
+            # 该降级只依据图像形态和请求契约，不感知具体看板或字段名。
+            matched_count = len(validation.get("matched_requested_metrics", []))
+            if required_metrics and matched_count < len(required_metrics):
+                adaptive_output, tile_count = await asyncio.to_thread(
+                    self._ocr_long_image_tiles,
+                    temp_path,
+                )
+                if adaptive_output is not None:
+                    adaptive_validation = self._validation_with_ocr_output(
+                        base_validation,
+                        ocr_payload,
+                        adaptive_output,
+                        required_metrics or [],
+                        expected_period or {},
+                        strategy="adaptive_tiles",
+                    )
+                    adaptive_validation["ocr_tile_count"] = tile_count
+                    if self._ocr_validation_score(
+                        adaptive_validation
+                    ) > self._ocr_validation_score(validation):
+                        validation = adaptive_validation
+                        output = adaptive_output
+
             display_crop = self._derive_evidence_display_crop(
                 scrape_payload,
                 evidence,
@@ -772,6 +891,179 @@ class CreationService:
         status = "verified" if self._validation_is_verified(validation) else "rejected"
         return await self._persist_evidence_validation(client, evidence, status, validation)
 
+    @classmethod
+    def _validation_with_ocr_output(
+        cls,
+        base_validation: dict,
+        scrape_payload: dict,
+        output: object,
+        requested_metrics: list[str],
+        expected_period: dict,
+        *,
+        strategy: str,
+    ) -> dict:
+        ocr_validation = cls._compare_scrape_with_ocr(
+            scrape_payload,
+            str(getattr(output, "text", "") or ""),
+        )
+        ocr_confidence = float(getattr(output, "confidence", 0.0) or 0.0)
+        validation = dict(base_validation)
+        validation["ocr_confidence"] = round(ocr_confidence, 4)
+        validation["ocr_strategy"] = strategy
+        validation["ocr_verified_claim_count"] = len(
+            ocr_validation.get("verified_claims", [])
+        )
+        validation["ocr_loading_marker_count"] = int(
+            ocr_validation.get("loading_marker_count") or 0
+        )
+        validation["screenshot_status"] = (
+            "matched"
+            if ocr_validation.get("verified_claims")
+            else "retained_unmatched"
+        )
+        validation = cls._merge_canvas_ocr_validation(
+            validation,
+            ocr_validation,
+            ocr_confidence,
+        )
+        return cls._apply_required_metric_coverage(
+            validation,
+            requested_metrics,
+            expected_period,
+        )
+
+    @staticmethod
+    def _ocr_validation_score(validation: dict) -> tuple[int, float, int, float]:
+        return (
+            len(validation.get("matched_requested_metrics", [])),
+            float(validation.get("required_metric_coverage") or 0.0),
+            len(validation.get("verified_claims", [])),
+            float(validation.get("ocr_confidence") or 0.0),
+        )
+
+    def _ocr_long_image_tiles(self, image_path: str) -> tuple[Optional[object], int]:
+        """把超长证据图切成横向重叠分片 OCR，并映射回原图坐标。"""
+        try:
+            from PIL import Image
+            from ocr.backends.base import OcrBox, OcrOutput
+        except ImportError:
+            return None, 0
+
+        if self._ocr_engine is None:
+            return None, 0
+        try:
+            source = Image.open(image_path)
+        except (OSError, ValueError):
+            return None, 0
+
+        all_boxes: list[object] = []
+        languages: list[str] = []
+        completed_tiles = 0
+        try:
+            width, height = source.size
+            if width <= 0 or height < max(2400, int(width * 2.0)):
+                return None, 0
+
+            base_tile_height = min(1600, max(800, int(width * 2 / 3)))
+            # 12 个分片、20% 重叠最多覆盖约 9.8 个分片高度。
+            coverage_factor = 1.0 + 0.8 * (MAX_ADAPTIVE_OCR_TILES - 1)
+            tile_height = max(
+                base_tile_height,
+                int(math.ceil(height / coverage_factor)),
+            )
+            tile_height = min(height, tile_height)
+            overlap = max(120, int(tile_height * 0.2))
+            stride = max(1, tile_height - overlap)
+            last_start = max(0, height - tile_height)
+            starts = list(range(0, last_start + 1, stride))
+            if not starts or starts[-1] != last_start:
+                starts.append(last_start)
+            starts = starts[:MAX_ADAPTIVE_OCR_TILES]
+
+            resampling = getattr(Image, "Resampling", Image).LANCZOS
+            for start in starts:
+                end = min(height, start + tile_height)
+                actual_height = end - start
+                if actual_height <= 0:
+                    continue
+                crop = source.crop((0, start, width, end))
+                scale = 2 if width * actual_height <= 4_000_000 else 1
+                if scale > 1:
+                    crop = crop.resize(
+                        (width * scale, actual_height * scale),
+                        resampling,
+                    )
+                tile_path = ""
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".png", delete=False
+                    ) as handle:
+                        tile_path = handle.name
+                    crop.save(tile_path, format="PNG")
+                    tile_output = self._ocr_engine.process(tile_path)
+                except Exception as exc:
+                    logger.debug("长图 OCR 分片失败 start=%s: %s", start, exc)
+                    continue
+                finally:
+                    if tile_path:
+                        try:
+                            os.unlink(tile_path)
+                        except OSError:
+                            pass
+
+                completed_tiles += 1
+                language = str(getattr(tile_output, "language", "") or "")
+                if language:
+                    languages.append(language)
+                for box in getattr(tile_output, "boxes", []) or []:
+                    transformed: list[list[float]] = []
+                    raw_bbox = getattr(box, "bbox", None) or []
+                    try:
+                        flat_values = [
+                            float(value)
+                            for point in raw_bbox
+                            for value in point[:2]
+                        ]
+                    except (TypeError, ValueError, IndexError):
+                        flat_values = []
+                    normalized = bool(flat_values) and max(flat_values) <= 1.5
+                    for point in raw_bbox:
+                        try:
+                            x = float(point[0])
+                            y = float(point[1])
+                        except (TypeError, ValueError, IndexError):
+                            continue
+                        if not normalized:
+                            x = x / max(1, width * scale)
+                            y = y / max(1, actual_height * scale)
+                        transformed.append(
+                            [
+                                max(0.0, min(1.0, x)),
+                                max(
+                                    0.0,
+                                    min(1.0, (start + y * actual_height) / height),
+                                ),
+                            ]
+                        )
+                    all_boxes.append(
+                        OcrBox(
+                            text=str(getattr(box, "text", "") or ""),
+                            confidence=float(
+                                getattr(box, "confidence", 0.0) or 0.0
+                            ),
+                            bbox=transformed,
+                        )
+                    )
+        finally:
+            source.close()
+
+        if not all_boxes:
+            return None, completed_tiles
+        return OcrOutput(
+            boxes=all_boxes,
+            language=languages[0] if languages else "zh",
+        ), completed_tiles
+
     @staticmethod
     def _validation_is_verified(validation: dict) -> bool:
         return bool(validation.get("verified_claims")) and validation.get(
@@ -795,6 +1087,7 @@ class CreationService:
         )
         if not requested:
             merged["requirements_satisfied"] = True
+            merged["requested_metric_policy"] = "preference"
             return merged
         claims = [
             item
@@ -802,10 +1095,14 @@ class CreationService:
             if isinstance(item, dict) and item.get("claim_type") == "metric"
         ]
         matched: dict[str, dict] = {}
+        used_claim_indexes: set[int] = set()
         for metric in requested:
-            for claim in claims:
+            for claim_index, claim in enumerate(claims):
+                if claim_index in used_claim_indexes:
+                    continue
                 if cls._claim_matches_required_metric(claim, metric):
                     matched[metric] = claim
+                    used_claim_indexes.add(claim_index)
                     break
         missing = [metric for metric in requested if metric not in matched]
         period_mismatches: list[str] = []
@@ -822,10 +1119,27 @@ class CreationService:
             if metric not in period_mismatches
         }
         coverage = len(usable) / max(1, len(requested))
-        satisfied = bool(usable)
-        # 当前步骤明确点名了指标时，只把已命中且周期相容的值
-        # 交给 Writer；其他页面数字不能借“部分通过”混入文档。
-        merged["verified_claims"] = list(usable.values())
+        if usable:
+            # 只把真正命中本步骤语义的指标交给 Writer。允许部分命中，
+            # 但不能用同页上的费用、总量或其他数字替代用户要的字段。
+            selected_claims = list(usable.values())
+            satisfied = True
+            available_values_retained = False
+        elif matched:
+            # 页面字段已经明确命中请求语义，但统计周期不符时不能降级为
+            # “概念偏好”；否则旧周期数值会借软匹配重新进入文档。
+            selected_claims = []
+            satisfied = False
+            available_values_retained = False
+        else:
+            # requested metrics 是选择偏好，不是字段级硬门禁。自然语言目标
+            # 可能写“算力、收益、稳定性”等概念，而页面展示的是具体字段名；
+            # 此时保留已经通过 DOM/AX 与截图交叉验证的页面事实，由 Writer
+            # 结合步骤语义选择，不能因为零字面命中拒绝整张有效报表。
+            selected_claims = claims
+            satisfied = bool(claims)
+            available_values_retained = bool(claims)
+        merged["verified_claims"] = selected_claims
         merged.update(
             {
                 "requested_metrics": requested,
@@ -839,12 +1153,17 @@ class CreationService:
                 "expected_statistical_period": expected_period,
                 "period_mismatch_metrics": period_mismatches,
                 "requirements_satisfied": satisfied,
+                "requested_metric_policy": "preference",
+                "available_values_retained": available_values_retained,
+                "unrequested_verified_claim_count": max(0, len(claims) - len(usable)),
             }
         )
         if not usable:
             merged["reason"] = (
                 "requested_metrics_period_mismatch"
                 if period_mismatches
+                else "requested_metrics_unmatched"
+                if claims
                 else "requested_metrics_unavailable"
             )
         elif missing or period_mismatches:
@@ -892,7 +1211,7 @@ class CreationService:
             for token in tokens
             if cls._normalize_evidence_text(token) in haystack
         ]
-        return len(matched) >= 2 and len(matched) / len(tokens) >= 0.7
+        return len(matched) >= 2 and len(matched) / len(tokens) >= 0.9
 
     @classmethod
     def _derive_evidence_display_crop(
@@ -916,23 +1235,55 @@ class CreationService:
             for item in claims
         )
         claim_tokens = cls._evidence_match_tokens(claim_text)
-        claim_values = [
-            cls._normalize_evidence_text(str(item.get("value") or ""))
+        claim_matchers = [
+            (
+                cls._normalize_evidence_text(str(item.get("label") or "")),
+                cls._normalize_evidence_text(str(item.get("value") or "")),
+            )
             for item in claims
-            if str(item.get("value") or "").strip()
         ]
-        rectangles: list[tuple[float, float, float, float]] = []
+        claim_values = [value for _, value in claim_matchers if value]
+        claim_labels = [
+            label for label, _ in claim_matchers if len(label) >= 4
+        ]
+        label_rectangles: list[tuple[float, float, float, float]] = []
+        value_rectangles: list[tuple[float, float, float, float]] = []
+        fallback_rectangles: list[tuple[float, float, float, float]] = []
+        label_hits: list[tuple[int, tuple[float, float, float, float]]] = []
+        value_hits: list[tuple[int, tuple[float, float, float, float]]] = []
+
+        def label_matches(normalized: str, label: str) -> bool:
+            if not normalized or not label:
+                return False
+            if label in normalized:
+                return True
+            return (
+                normalized in label
+                and len(normalized) >= 4
+                and len(normalized) / max(1, len(label)) >= 0.6
+            )
 
         for box in ocr_boxes or []:
             text = str(getattr(box, "text", "") or "")
             normalized = cls._normalize_evidence_text(text)
-            if not normalized or not (
-                any(value and value in normalized for value in claim_values)
-                or any(
-                    cls._normalize_evidence_text(token) in normalized
-                    for token in claim_tokens
-                )
-            ):
+            value_match_indexes = [
+                index
+                for index, (_, value) in enumerate(claim_matchers)
+                if normalized and value and value in normalized
+            ]
+            label_match_indexes = [
+                index
+                for index, (label, _) in enumerate(claim_matchers)
+                if len(label) >= 4 and label_matches(normalized, label)
+            ]
+            value_match = bool(value_match_indexes)
+            label_match = bool(label_match_indexes)
+            value_or_label_match = value_match or label_match
+            token_match = bool(normalized) and any(
+                cls._normalize_evidence_text(token) in normalized
+                for token in claim_tokens
+            )
+            if not value_or_label_match and not token_match:
                 continue
             points = getattr(box, "bbox", None) or []
             if not isinstance(points, list) or len(points) < 2:
@@ -945,7 +1296,19 @@ class CreationService:
             if max(xs + ys, default=0) <= 1.5:
                 xs = [value * image_width for value in xs]
                 ys = [value * image_height for value in ys]
-            rectangles.append((min(xs), min(ys), max(xs), max(ys)))
+            rectangle = (min(xs), min(ys), max(xs), max(ys))
+            if label_match:
+                label_rectangles.append(rectangle)
+                label_hits.extend(
+                    (index, rectangle) for index in label_match_indexes
+                )
+            if value_match:
+                value_rectangles.append(rectangle)
+                value_hits.extend(
+                    (index, rectangle) for index in value_match_indexes
+                )
+            if not value_or_label_match:
+                fallback_rectangles.append(rectangle)
 
         structured = scrape_payload.get("structured_data") or {}
         scroll_capture = (
@@ -962,6 +1325,15 @@ class CreationService:
         outer_width = float(page_state.get("outer_width") or 0)
         outer_height = float(page_state.get("outer_height") or 0)
         inner_height = float(page_state.get("inner_height") or 0)
+        if not validation.get("matched_requested_metrics"):
+            structured_crop = cls._derive_structured_region_crop(
+                structured,
+                claims,
+                image_width,
+                image_height,
+            )
+            if structured_crop:
+                return structured_crop
         scale = image_width / outer_width if outer_width > 0 else 0.0
         chrome_height = max(0.0, outer_height - inner_height)
         if scale > 0 and not aggregated_scroll:
@@ -972,13 +1344,24 @@ class CreationService:
                     continue
                 text = str(region.get("text") or "")
                 normalized = cls._normalize_evidence_text(text)
-                if not normalized or not (
-                    any(value and value in normalized for value in claim_values)
-                    or any(
-                        cls._normalize_evidence_text(token) in normalized
-                        for token in claim_tokens
-                    )
-                ):
+                value_match_indexes = [
+                    index
+                    for index, (_, value) in enumerate(claim_matchers)
+                    if normalized and value and value in normalized
+                ]
+                label_match_indexes = [
+                    index
+                    for index, (label, _) in enumerate(claim_matchers)
+                    if len(label) >= 4 and label_matches(normalized, label)
+                ]
+                value_match = bool(value_match_indexes)
+                label_match = bool(label_match_indexes)
+                value_or_label_match = value_match or label_match
+                token_match = bool(normalized) and any(
+                    cls._normalize_evidence_text(token) in normalized
+                    for token in claim_tokens
+                )
+                if not value_or_label_match and not token_match:
                     continue
                 try:
                     left = float(region.get("x") or 0) * scale
@@ -991,7 +1374,29 @@ class CreationService:
                 except (TypeError, ValueError):
                     continue
                 if right > left and bottom > top:
-                    rectangles.append((left, top, right, bottom))
+                    rectangle = (left, top, right, bottom)
+                    if label_match:
+                        label_rectangles.append(rectangle)
+                        label_hits.extend(
+                            (index, rectangle) for index in label_match_indexes
+                        )
+                    if value_match:
+                        value_rectangles.append(rectangle)
+                        value_hits.extend(
+                            (index, rectangle) for index in value_match_indexes
+                        )
+                    if not value_or_label_match:
+                        fallback_rectangles.append(rectangle)
+        if label_hits:
+            rectangles = cls._compact_claim_rectangles(
+                label_hits,
+                value_hits,
+                image_width,
+            ) or label_rectangles
+        elif value_rectangles:
+            rectangles = value_rectangles
+        else:
+            rectangles = fallback_rectangles
         if not rectangles:
             return None
         padding = max(24, int(min(image_width, image_height) * 0.025))
@@ -1010,6 +1415,172 @@ class CreationService:
             "y": top,
             "width": width,
             "height": height,
+            "purpose": "document_display",
+        }
+
+    @staticmethod
+    def _compact_claim_rectangles(
+        label_hits: list[
+            tuple[int, tuple[float, float, float, float]]
+        ],
+        value_hits: list[
+            tuple[int, tuple[float, float, float, float]]
+        ],
+        image_width: int,
+    ) -> list[tuple[float, float, float, float]]:
+        """选择覆盖最多指标标签的最短纵向窗口，并配对最近的指标值。"""
+        if not label_hits:
+            return []
+
+        ordered = sorted(
+            (
+                ((rectangle[1] + rectangle[3]) / 2.0, claim_index, rectangle)
+                for claim_index, rectangle in label_hits
+            ),
+            key=lambda item: item[0],
+        )
+        counts: dict[int, int] = {}
+        left = 0
+        best: Optional[tuple[int, int]] = None
+        best_rank: Optional[tuple[int, float]] = None
+        for right, (right_center, claim_index, _) in enumerate(ordered):
+            counts[claim_index] = counts.get(claim_index, 0) + 1
+            while left < right and counts.get(ordered[left][1], 0) > 1:
+                left_index = ordered[left][1]
+                counts[left_index] -= 1
+                left += 1
+            span = max(0.0, right_center - ordered[left][0])
+            rank = (len(counts), -span)
+            if best_rank is None or rank > best_rank:
+                best_rank = rank
+                best = (left, right)
+        if best is None:
+            return []
+
+        selected_hits = ordered[best[0] : best[1] + 1]
+        cluster_centers = sorted(item[0] for item in selected_hits)
+        cluster_center = cluster_centers[len(cluster_centers) // 2]
+        selected_labels: dict[int, tuple[float, float, float, float]] = {}
+        for center, claim_index, rectangle in selected_hits:
+            current = selected_labels.get(claim_index)
+            if current is None:
+                selected_labels[claim_index] = rectangle
+                continue
+            current_center = (current[1] + current[3]) / 2.0
+            if abs(center - cluster_center) < abs(current_center - cluster_center):
+                selected_labels[claim_index] = rectangle
+
+        rectangles = list(selected_labels.values())
+        max_pair_distance = max(160.0, min(720.0, image_width * 0.3))
+        for claim_index, label_rectangle in selected_labels.items():
+            label_center = (label_rectangle[1] + label_rectangle[3]) / 2.0
+            candidates = [
+                rectangle
+                for value_index, rectangle in value_hits
+                if value_index == claim_index
+            ]
+            if not candidates:
+                continue
+            nearest = min(
+                candidates,
+                key=lambda rectangle: abs(
+                    (rectangle[1] + rectangle[3]) / 2.0 - label_center
+                ),
+            )
+            distance = abs((nearest[1] + nearest[3]) / 2.0 - label_center)
+            if distance <= max_pair_distance:
+                rectangles.append(nearest)
+        return rectangles
+
+    @classmethod
+    def _derive_structured_region_crop(
+        cls,
+        structured: dict,
+        claims: list[dict],
+        image_width: int,
+        image_height: int,
+    ) -> Optional[dict]:
+        """从绝对 DOM 区域选择事实最密集的一块，供长图聚焦展示。"""
+        if not isinstance(structured, dict) or not claims:
+            return None
+        regions = structured.get("evidence_regions") or []
+        page_state = structured.get("page_state") or {}
+        if not isinstance(regions, list) or not isinstance(page_state, dict):
+            return None
+        viewport_width = max(
+            float(page_state.get("outer_width") or 0),
+            float(page_state.get("inner_width") or 0),
+        )
+        if viewport_width <= 8:
+            return None
+        scale = image_width / viewport_width
+        outer_height = float(page_state.get("outer_height") or 0)
+        inner_height = float(page_state.get("inner_height") or 0)
+        chrome_height = max(0.0, outer_height - inner_height)
+        scroll_height = float(page_state.get("scroll_height") or 0)
+        if scroll_height > 0:
+            chrome_height = max(
+                chrome_height,
+                max(0.0, image_height / scale - scroll_height),
+            )
+
+        normalized_claims = []
+        for claim in claims:
+            label = cls._normalize_evidence_text(str(claim.get("label") or ""))
+            value = cls._normalize_evidence_text(str(claim.get("value") or ""))
+            if label and value:
+                normalized_claims.append((label, value))
+
+        best: Optional[tuple[tuple[int, int, float, float], tuple[float, float, float, float]]] = None
+        for region in regions:
+            if not isinstance(region, dict) or region.get("document_y") is None:
+                continue
+            text = cls._normalize_evidence_text(str(region.get("text") or ""))
+            if not text:
+                continue
+            labels: set[str] = set()
+            pair_hits = 0
+            for label, value in normalized_claims:
+                if label in text:
+                    labels.add(label)
+                    if value in text:
+                        pair_hits += 1
+            if pair_hits == 0:
+                continue
+            try:
+                left = float(region.get("x") or 0) * scale
+                top = (float(region.get("document_y") or 0) + chrome_height) * scale
+                width = float(region.get("width") or 0) * scale
+                height = float(region.get("height") or 0) * scale
+            except (TypeError, ValueError):
+                continue
+            if width < 120 or height < 80:
+                continue
+            right = min(float(image_width), left + width)
+            bottom = min(float(image_height), top + height)
+            area = max(0.0, right - left) * max(0.0, bottom - top)
+            if area <= 0 or area >= image_width * image_height * 0.85:
+                continue
+            rank = (len(labels), pair_hits, -area, -top)
+            rectangle = (left, top, right, bottom)
+            if best is None or rank > best[0]:
+                best = (rank, rectangle)
+        if best is None:
+            return None
+
+        left, top, right, bottom = best[1]
+        padding = max(24, int(min(image_width, image_height) * 0.025))
+        crop_left = max(0, int(left) - padding)
+        crop_top = max(0, int(top) - padding)
+        crop_right = min(image_width, int(right) + padding)
+        crop_bottom = min(image_height, int(bottom) + padding)
+        if crop_right - crop_left < 120 or crop_bottom - crop_top < 80:
+            return None
+        return {
+            "x": crop_left,
+            "y": crop_top,
+            "width": crop_right - crop_left,
+            "height": crop_bottom - crop_top,
             "purpose": "document_display",
         }
 
@@ -1048,7 +1619,7 @@ class CreationService:
             "reason": "dom_structured" if candidates else "dom_empty",
             "primary_channel": "dom",
             "secondary_channel": None,
-            "verified_claims": candidates[:20],
+            "verified_claims": candidates[:MAX_VERIFIED_SCRAPE_CLAIMS],
         }
 
     @classmethod
@@ -1081,7 +1652,7 @@ class CreationService:
                     for token in labels
                 ):
                     verified.append(claim)
-            if len(verified) >= 20:
+            if len(verified) >= MAX_VERIFIED_SCRAPE_CLAIMS:
                 break
         return verified
 
@@ -1170,7 +1741,7 @@ class CreationService:
                 )
                 if text_match:
                     verified_claims.append(claim)
-                if len(verified_claims) >= 20:
+                if len(verified_claims) >= MAX_VERIFIED_SCRAPE_CLAIMS:
                     break
                 continue
             value = cls._normalize_evidence_text(str(claim.get("value") or ""))
@@ -1181,7 +1752,7 @@ class CreationService:
             )
             if value_match and label_match:
                 verified_claims.append(claim)
-            if len(verified_claims) >= 20:
+            if len(verified_claims) >= MAX_VERIFIED_SCRAPE_CLAIMS:
                 break
         seen_metric_keys = {
             (
@@ -1200,7 +1771,7 @@ class CreationService:
                 continue
             seen_metric_keys.add(key)
             verified_claims.append(claim)
-            if len(verified_claims) >= 20:
+            if len(verified_claims) >= MAX_VERIFIED_SCRAPE_CLAIMS:
                 break
         return {
             "reason": (
@@ -1275,7 +1846,7 @@ class CreationService:
                 if key not in seen:
                     existing_claims.append(claim)
                     seen.add(key)
-            merged["verified_claims"] = existing_claims[:40]
+            merged["verified_claims"] = existing_claims[:MAX_VERIFIED_SCRAPE_CLAIMS]
             merged["reason"] = "dom_ocr_augmented"
             return merged
         merged.update(
@@ -1287,7 +1858,7 @@ class CreationService:
                 ),
                 "primary_channel": "screenshot_ocr",
                 "secondary_channel": "dom_label",
-                "verified_claims": ocr_metrics[:20],
+                "verified_claims": ocr_metrics[:MAX_VERIFIED_SCRAPE_CLAIMS],
             }
         )
         return merged
@@ -1298,7 +1869,7 @@ class CreationService:
         scrape_payload: dict,
         ocr_text: str,
     ) -> list[dict]:
-        """从 Canvas 截图 OCR 取值，并要求指标名同时存在于本次 DOM。"""
+        """从 Canvas 截图 OCR 取值，并与请求指标或本次 DOM 标签交叉校验。"""
         structured = scrape_payload.get("structured_data") or {}
         dom_text = (
             str(structured.get("dom_content_text") or "")
@@ -1329,7 +1900,16 @@ class CreationService:
                 continue
             if line not in dom_labels:
                 dom_labels.append(line)
-        if not dom_labels:
+        requested_metrics = [
+            " ".join(str(item).split()).strip()
+            for item in (
+                structured.get("requested_metrics", [])
+                if isinstance(structured, dict)
+                else []
+            )
+            if " ".join(str(item).split()).strip()
+        ]
+        if not dom_labels and not requested_metrics:
             return []
 
         ocr_lines = [
@@ -1342,7 +1922,8 @@ class CreationService:
             re.IGNORECASE,
         )
         candidates: list[dict] = []
-        for index, line in enumerate(ocr_lines):
+        for index, raw_line in enumerate(ocr_lines):
+            line = cls._normalize_ocr_metric_value_line(raw_line)
             previous_line = ocr_lines[index - 1] if index > 0 else ""
             if (
                 not value_pattern.fullmatch(line)
@@ -1352,8 +1933,6 @@ class CreationService:
             ):
                 continue
             nearby_lines = ocr_lines[max(0, index - 8) : index]
-            if any("同比" in value for value in nearby_lines[-3:]):
-                continue
             ocr_label = cls._ocr_metric_label(nearby_lines)
             if not ocr_label:
                 continue
@@ -1371,6 +1950,11 @@ class CreationService:
                 default=0,
             )
             if any(
+                "同比" in value
+                for value in nearby_lines[label_line_index + 1 :]
+            ):
+                continue
+            if any(
                 re.search(
                     r"(?:加载中|数据加载中|loading)(?:[.。…]*)",
                     value,
@@ -1379,38 +1963,60 @@ class CreationService:
                 for value in nearby_lines[label_line_index:]
             ):
                 continue
-            best_support_label = ""
-            best_score = 0.0
-            for dom_label in dom_labels:
-                normalized_dom = cls._normalize_evidence_text(dom_label)
-                matched = [
-                    token
-                    for token in ocr_tokens
-                    if cls._normalize_evidence_text(token) in normalized_dom
-                ]
-                if not matched:
+            requested_support = next(
+                (
+                    requested
+                    for requested in requested_metrics
+                    if cls._claim_matches_required_metric(
+                        {"label": ocr_label, "statement": ocr_label},
+                        requested,
+                    )
+                ),
+                "",
+            )
+            best_support_label = requested_support
+            best_score = 1.0 if requested_support else 0.0
+            if not requested_metrics:
+                for dom_label in dom_labels:
+                    normalized_dom = cls._normalize_evidence_text(dom_label)
+                    matched = [
+                        token
+                        for token in ocr_tokens
+                        if cls._normalize_evidence_text(token) in normalized_dom
+                    ]
+                    if not matched:
+                        continue
+                    score = len(matched) / max(1, len(ocr_tokens))
+                    if score > best_score:
+                        best_support_label = dom_label
+                        best_score = score
+                if not best_support_label or best_score < 0.35:
                     continue
-                score = len(matched) / max(1, len(ocr_tokens))
-                if score > best_score:
-                    best_support_label = dom_label
-                    best_score = score
-            if not best_support_label or best_score < 0.35:
+            elif not requested_support:
+                # 有定向指标时，只消费截图中与请求语义匹配的指标卡；同页
+                # 费用、总量、图表刻度等数字仍保留在原图中，不进入 Writer。
                 continue
             period = cls._ocr_statistical_period(nearby_lines)
-            candidates.append(
-                {
-                    "claim_type": "metric",
-                    "label": ocr_label[:240],
-                    "value": line,
-                    "statement": " ".join(
-                        part for part in (ocr_label, period, line) if part
-                    )[:500],
-                    "statistical_period": period,
-                    "evidence_origin": "screenshot_ocr_dom_label",
-                    "dom_support_label": best_support_label[:240],
-                    "loading_marker_nearby": False,
-                }
-            )
+            candidate = {
+                "claim_type": "metric",
+                "label": ocr_label[:240],
+                "value": line,
+                "statement": " ".join(
+                    part for part in (ocr_label, period, line) if part
+                )[:500],
+                "statistical_period": period,
+                "evidence_origin": (
+                    "screenshot_ocr_requested_metric"
+                    if requested_support
+                    else "screenshot_ocr_dom_label"
+                ),
+                "loading_marker_nearby": False,
+            }
+            if requested_support:
+                candidate["requested_metric"] = requested_support[:240]
+            else:
+                candidate["dom_support_label"] = best_support_label[:240]
+            candidates.append(candidate)
 
         deduplicated: list[dict] = []
         seen: set[tuple[str, str]] = set()
@@ -1423,7 +2029,90 @@ class CreationService:
                 continue
             seen.add(key)
             deduplicated.append(candidate)
-        return deduplicated[:20]
+
+        if requested_metrics:
+            requested_order = {
+                cls._normalize_evidence_text(metric): index
+                for index, metric in enumerate(requested_metrics)
+            }
+
+            def candidate_rank(candidate: dict) -> tuple[int, int, int, int, int]:
+                requested = cls._normalize_evidence_text(
+                    str(candidate.get("requested_metric") or "")
+                )
+                value = str(candidate.get("value") or "")
+                has_unit = bool(
+                    re.search(
+                        r"(?:%|亿元|万元|亿|万|千|百|卡|个|次|元|秒|ms|s|x)$",
+                        value,
+                        re.IGNORECASE,
+                    )
+                )
+                has_precision = "." in value or "," in value
+                return (
+                    requested_order.get(requested, len(requested_order)),
+                    -int(has_unit),
+                    -int(bool(candidate.get("statistical_period"))),
+                    -int(has_precision),
+                    -len(str(candidate.get("label") or "")),
+                )
+
+            # 重叠 OCR 分片可能同时给出卡片值和附近坐标轴刻度。相同
+            # 请求指标优先选择带业务单位、周期和精度的候选，但仍保留
+            # 合法的裸整数（包括 0）作为后备。
+            deduplicated.sort(key=candidate_rank)
+        return deduplicated[:MAX_VERIFIED_SCRAPE_CLAIMS]
+
+    @staticmethod
+    def _normalize_ocr_metric_value_line(value: str) -> str:
+        """修正常见的 OCR 单位重复，不改变数值本身。"""
+        normalized = " ".join(str(value).split()).strip()
+        units = (
+            "%",
+            "亿元",
+            "万元",
+            "亿",
+            "万",
+            "千",
+            "百",
+            "卡",
+            "个",
+            "次",
+            "元",
+            "秒",
+            "ms",
+            "s",
+            "x",
+        )
+        unit_pattern = "|".join(
+            re.escape(unit) for unit in sorted(units, key=len, reverse=True)
+        )
+        compound_match = re.fullmatch(
+            rf"([+-]?\d[\d,]*(?:\.\d+)?)\s*({unit_pattern})"
+            rf"((?:\s*\2)*)([^\dA-Za-z%\s]{{0,2}})",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if compound_match:
+            # 小字号长图里单位常被重复识别，末尾还可能多出一两个
+            # 非数字字形。这里只保留完整的“数值 + 已知单位”前缀；
+            # 含额外数字/拉丁字符的尾巴不处理，避免篡改真实数值。
+            normalized = f"{compound_match.group(1)}{compound_match.group(2)}"
+        for unit in units:
+            escaped = re.escape(unit)
+            normalized = re.sub(
+                rf"(?<=\d)\s*({escaped})(?:\s*\1)+$",
+                rf"\1",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+            normalized = re.sub(
+                rf"(?<=\d)\s+({escaped})$",
+                rf"\1",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+        return normalized
 
     @classmethod
     def _ocr_metric_label(cls, nearby_lines: list[str]) -> str:
@@ -1485,6 +2174,14 @@ class CreationService:
     def _scrape_claim_candidates(cls, scrape_payload: dict) -> list[dict]:
         structured = scrape_payload.get("structured_data") or {}
         candidates: list[dict] = []
+        calendar_date_pattern = re.compile(
+            r"^20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?$"
+        )
+        numeric_fragment_pattern = re.compile(
+            r"(?<!\w)[+-]?\d[\d,]*(?:\.\d+)?"
+            r"(?:%|亿元|万元|亿|万|千|百|卡|个|次|元|秒|ms|s|x)?",
+            re.IGNORECASE,
+        )
         tables = structured.get("tables", []) if isinstance(structured, dict) else []
         if (
             isinstance(tables, list)
@@ -1496,14 +2193,74 @@ class CreationService:
         for table in tables:
             if not isinstance(table, list):
                 continue
-            for row in table:
+            header = (
+                [str(cell).strip() for cell in table[0]]
+                if len(table) >= 2 and isinstance(table[0], list)
+                else []
+            )
+            has_header = bool(header) and any(
+                re.search(r"[A-Za-z\u4e00-\u9fff]", cell)
+                for cell in header
+            )
+            for row_index, row in enumerate(table):
                 if not isinstance(row, list):
                     continue
                 cells = [str(cell).strip() for cell in row if str(cell).strip()]
                 row_text = " ".join(cells)
                 if cls._is_scrape_noise(row_text):
                     continue
-                values = re.findall(r"(?<!\w)[+-]?\d[\d,]*(?:\.\d+)?%?", row_text)
+                if has_header and row_index == 0:
+                    continue
+                if has_header:
+                    raw_cells = [str(cell).strip() for cell in row]
+                    periods = [
+                        cell
+                        for cell in raw_cells
+                        if calendar_date_pattern.fullmatch(cell)
+                    ]
+                    dimensions = [
+                        cell
+                        for cell in raw_cells[:3]
+                        if cell
+                        and not calendar_date_pattern.fullmatch(cell)
+                        and not numeric_fragment_pattern.fullmatch(cell)
+                    ][:2]
+                    for column_index, cell in enumerate(raw_cells):
+                        if not cell or calendar_date_pattern.fullmatch(cell):
+                            continue
+                        values = numeric_fragment_pattern.findall(cell)
+                        if not values:
+                            continue
+                        column = (
+                            header[column_index]
+                            if column_index < len(header)
+                            else ""
+                        )
+                        if not column or calendar_date_pattern.fullmatch(column):
+                            continue
+                        label = " ".join(
+                            dict.fromkeys([*dimensions, column])
+                        ).strip()
+                        for value in values:
+                            if cls._is_unhelpful_metric_value(value):
+                                continue
+                            candidates.append(
+                                {
+                                    "claim_type": "metric",
+                                    "label": label[:240],
+                                    "value": (
+                                        cell[:120]
+                                        if len(values) == 1
+                                        else value
+                                    ),
+                                    "statement": row_text[:500],
+                                    "statistical_period": (
+                                        periods[0] if periods else ""
+                                    ),
+                                }
+                            )
+                    continue
+                values = numeric_fragment_pattern.findall(row_text)
                 label = " ".join(cell for cell in cells if not re.fullmatch(r"[+-]?[\d,.]+%?", cell))
                 for value in values:
                     if cls._is_unhelpful_metric_value(value):
@@ -1559,7 +2316,7 @@ class CreationService:
         # 否则真正业务指标会被界面噪声遮蔽。
         content_lines = [
             " ".join(line.split()).strip()
-            for line in str(scrape_payload.get("content_text") or "").splitlines()[:800]
+            for line in str(scrape_payload.get("content_text") or "").splitlines()[:3000]
             if " ".join(line.split()).strip()
         ]
         statistical_period = cls._content_statistical_period(content_lines)
@@ -1615,6 +2372,11 @@ class CreationService:
                 continue
             seen.add(key)
             deduplicated.append(candidate)
+        # 为报表数值保留校验预算。菜单和说明性 text block 可以很多，
+        # 若它们先占满 AX/DOM 比对上限，后面已加载的指标卡会被误丢弃。
+        deduplicated.sort(
+            key=lambda item: 0 if item.get("claim_type") == "metric" else 1
+        )
         return deduplicated[:500]
 
     @staticmethod
@@ -1624,10 +2386,6 @@ class CreationService:
             r"20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?\s*(?:至|到|[-—~])\s*"
             r"20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?"
         )
-        for line in lines:
-            match = date_range_pattern.search(line)
-            if match:
-                return match.group(0)
         for index in range(len(lines) - 2):
             if (
                 date_pattern.fullmatch(lines[index])
@@ -1635,12 +2393,17 @@ class CreationService:
                 and date_pattern.fullmatch(lines[index + 2])
             ):
                 return f"{lines[index]} 至 {lines[index + 2]}"
+        for line in lines:
+            match = date_range_pattern.search(line)
+            if match:
+                return match.group(0)
         return ""
 
     @staticmethod
     def _is_unhelpful_metric_value(value: str) -> bool:
-        normalized = value.strip().replace(",", "").lower()
-        return normalized in {"0", "0.0", "0%", "0.0%"}
+        # 0 是合法业务值，不能因为数值本身为零就删除。缓存开关、分页等
+        # UI 噪声由带语境的 `_is_scrape_noise` 过滤。
+        return False
 
     @staticmethod
     def _is_scrape_noise(value: str) -> bool:
@@ -3910,13 +4673,52 @@ flowchart LR
         api_key: str,
         base_url: str,
     ):
+        """流式调用云模型；仅在尚未产出内容时恢复瞬时传输故障。"""
+        for attempt in range(1, CLOUD_MODEL_MAX_ATTEMPTS + 1):
+            emitted_content = False
+            try:
+                async for chunk in self._generate_cloud_once(
+                    system_prompt,
+                    user_message,
+                    model,
+                    api_key,
+                    base_url,
+                ):
+                    emitted_content = True
+                    yield chunk
+                return
+            except Exception as exc:
+                should_retry = (
+                    not emitted_content
+                    and attempt < CLOUD_MODEL_MAX_ATTEMPTS
+                    and self._is_retryable_cloud_error(exc)
+                )
+                if not should_retry:
+                    raise
+                delay_seconds = CLOUD_MODEL_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+                logger.warning(
+                    "云模型连接暂时不可用，将自动重试 attempt=%s/%s error_type=%s",
+                    attempt,
+                    CLOUD_MODEL_MAX_ATTEMPTS,
+                    type(exc).__name__,
+                )
+                await asyncio.sleep(delay_seconds)
+
+    async def _generate_cloud_once(
+        self,
+        system_prompt: str,
+        user_message: str,
+        model: str,
+        api_key: str,
+        base_url: str,
+    ):
         is_claude = "claude" in model.lower() or "anthropic.com" in base_url
         if is_claude:
             url = self._anthropic_messages_url(base_url)
             headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
             payload = {"model": model, "max_tokens": 8192, "stream": True, "system": system_prompt,
                        "messages": [{"role": "user", "content": user_message}]}
-            async with httpx.AsyncClient(timeout=300.0) as client:
+            async with httpx.AsyncClient(timeout=CLOUD_MODEL_TIMEOUT) as client:
                 async with client.stream("POST", url, headers=headers, json=payload) as resp:
                     await self._raise_for_cloud_error(resp)
                     async for line in resp.aiter_lines():
@@ -3951,7 +4753,7 @@ flowchart LR
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             payload = {"model": model, "stream": True,
                        "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}]}
-            async with httpx.AsyncClient(timeout=300.0) as client:
+            async with httpx.AsyncClient(timeout=CLOUD_MODEL_TIMEOUT) as client:
                 async with client.stream("POST", url, headers=headers, json=payload) as resp:
                     await self._raise_for_cloud_error(resp)
                     async for line in resp.aiter_lines():
@@ -3967,6 +4769,12 @@ flowchart LR
                                 yield content
                         except json.JSONDecodeError:
                             continue
+
+    @staticmethod
+    def _is_retryable_cloud_error(exc: Exception) -> bool:
+        if isinstance(exc, CloudModelRequestError):
+            return exc.status_code in {408, 409, 425, 429} or exc.status_code >= 500
+        return isinstance(exc, httpx.TransportError)
 
     async def _chat_cloud(self, messages: list, model: str, api_key: str, base_url: str):
         """多轮对话，供体验功能使用。"""
@@ -4070,7 +4878,10 @@ flowchart LR
         except json.JSONDecodeError:
             pass
 
-        raise RuntimeError(f"模型请求失败 ({resp.status_code}): {detail or resp.reason_phrase}")
+        raise CloudModelRequestError(
+            resp.status_code,
+            detail or resp.reason_phrase,
+        )
 
     def analyze_requirement(self, user_prompt: str, options: CreationOptions) -> dict:
         """轻量需求解析，先用规则把创作任务结构化。"""
@@ -4177,18 +4988,31 @@ flowchart LR
             logger.warning("关键词召回失败: %s", exc)
             keyword_rows = []
 
-        # 路径2: 向量召回
+        # 路径2: 向量召回。语义查询只保留需求解析后的主题词，避免 Skill、
+        # Tool 和输出格式等执行包装稀释相似度。
+        semantic_query = self._semantic_recall_query(user_prompt, parsed_requirement)
         vector_rows = []
+        semantic_seed_rows = []
         if self.enable_vector_recall and self._embedding_model:
             try:
-                vector_rows = self._vector_recall(user_prompt, options.max_references * 2)
+                vector_rows = self._vector_recall(
+                    semantic_query,
+                    options.max_references * 2,
+                )
             except Exception as exc:
                 logger.warning("向量召回失败: %s", exc)
+            try:
+                semantic_seed_rows = self._query_semantic_seed_rows(
+                    parsed_requirement,
+                    options,
+                )
+            except Exception as exc:
+                logger.warning("跨记忆域语义候选加载失败: %s", exc)
 
         # 合并去重。向量相似度必须保留下来参与统一评分；否则同一文档先被
         # 关键词路径命中时，后到的向量证据会在去重时被静默丢弃。
         merged_by_id: dict[str, dict] = {}
-        for row in keyword_rows + vector_rows:
+        for row in keyword_rows + semantic_seed_rows + vector_rows:
             doc_id = int(row.get("id") or 0)
             if not doc_id:
                 continue
@@ -4217,6 +5041,11 @@ flowchart LR
 
         if not merged_rows:
             return []
+
+        # 对所有记忆域使用同一个 embedding 空间补充语义相关性。这里没有
+        # 业务同义词表；新行业、新项目和不同表达方式都走相同路径。
+        if self.enable_vector_recall and self._embedding_model:
+            self._apply_semantic_similarities(semantic_query, merged_rows)
 
         # 统一评分
         max_usage = max(int(row.get("usage_count") or 0) for row in merged_rows) or 1
@@ -4276,7 +5105,39 @@ flowchart LR
             )
 
         refs.sort(key=lambda item: item.final_weight, reverse=True)
-        return refs[: max(1, min(options.max_references, 30))]
+        return self._select_diverse_references(
+            refs,
+            max(1, min(options.max_references, 30)),
+        )
+
+    @staticmethod
+    def _select_diverse_references(
+        references: list[ReferenceDocument],
+        limit: int,
+    ) -> list[ReferenceDocument]:
+        """避免单一记忆域垄断 Top-K，同时保持全局相关性顺序。"""
+        if len(references) <= limit:
+            return references
+        per_domain_limit = max(1, math.ceil(limit * 0.5))
+        selected: list[ReferenceDocument] = []
+        deferred: list[ReferenceDocument] = []
+        domain_counts: dict[str, int] = {}
+        for reference in references:
+            domain = (
+                "document"
+                if reference.source_type in {"document", "pending_document"}
+                else reference.source_type
+            )
+            if domain_counts.get(domain, 0) >= per_domain_limit:
+                deferred.append(reference)
+                continue
+            selected.append(reference)
+            domain_counts[domain] = domain_counts.get(domain, 0) + 1
+            if len(selected) >= limit:
+                return selected
+        if len(selected) < limit:
+            selected.extend(deferred[: limit - len(selected)])
+        return selected
 
     def _query_memory_rows(
         self,
@@ -4346,6 +5207,54 @@ flowchart LR
                         domain_name,
                         exc,
                     )
+        finally:
+            conn.close()
+        return rows
+
+    def _query_semantic_seed_rows(
+        self,
+        parsed_requirement: dict,
+        options: CreationOptions,
+    ) -> list[dict]:
+        """加载各非文档记忆域的近期候选，交给统一向量模型重排。
+
+        关键词路径负责高精度命中；本路径不要求候选包含查询原词，因此无需
+        为每个业务场景维护同义词。文档域由 `_vector_recall` 独立覆盖。
+        """
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        rows: list[dict] = []
+        try:
+            for table, source_type in (
+                ("bake_knowledge", "knowledge"),
+                ("bake_sops", "operation"),
+            ):
+                rows.extend(
+                    self._query_bake_artifact_rows(
+                        conn,
+                        table,
+                        source_type,
+                        "",
+                        {**parsed_requirement, "keywords": []},
+                        options,
+                    )
+                )
+            rows.extend(
+                self._query_data_memory_rows(
+                    conn,
+                    "",
+                    {**parsed_requirement, "keywords": []},
+                    options,
+                )
+            )
+            rows.extend(
+                self._query_pending_capture_rows(
+                    conn,
+                    "",
+                    {**parsed_requirement, "keywords": []},
+                    options,
+                )
+            )
         finally:
             conn.close()
         return rows
@@ -4746,14 +5655,6 @@ flowchart LR
         if not self._embedding_model:
             return []
 
-        # 生成query向量
-        try:
-            query_emb = self._embedding_model.encode([query])[0]
-            query_vector = query_emb.vector
-        except Exception as e:
-            logger.error("生成query向量失败: %s", e)
-            return []
-
         # 从数据库加载所有文档及其内容
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -4772,21 +5673,32 @@ flowchart LR
             if not rows:
                 return []
 
-            # 计算相似度
-            scored_docs = []
+            documents: list[tuple[dict, str]] = []
             for row in rows:
                 text = (row["summary"] or "") + "\n" + (row["full_content"] or "")[:500]
                 if not text.strip():
                     continue
-                try:
-                    doc_emb = self._embedding_model.encode([text])[0]
-                    doc_vector = doc_emb.vector
-                    similarity = self._cosine_similarity(query_vector, doc_vector)
-                    if similarity > 0.5:  # 相似度阈值
-                        scored_docs.append((dict(row), similarity))
-                except Exception as e:
-                    logger.debug("计算文档 %s 向量失败: %s", row["id"], e)
-                    continue
+                documents.append((dict(row), text))
+
+            if not documents:
+                return []
+            try:
+                embeddings = self._embedding_model.encode(
+                    [query, *[text for _, text in documents]]
+                )
+            except Exception as exc:
+                logger.error("生成召回向量失败: %s", exc)
+                return []
+            if len(embeddings) != len(documents) + 1:
+                logger.warning("向量后端返回数量与文档候选不一致")
+                return []
+
+            query_vector = embeddings[0].vector
+            scored_docs = []
+            for (document, _), embedding in zip(documents, embeddings[1:]):
+                similarity = self._cosine_similarity(query_vector, embedding.vector)
+                if similarity > 0.5:
+                    scored_docs.append((document, similarity))
 
             # 按相似度排序
             scored_docs.sort(key=lambda x: x[1], reverse=True)
@@ -4800,6 +5712,83 @@ flowchart LR
 
         finally:
             conn.close()
+
+    @staticmethod
+    def _semantic_recall_query(user_prompt: str, parsed_requirement: dict) -> str:
+        keywords = [
+            str(item).strip()
+            for item in parsed_requirement.get("keywords", [])
+            if str(item).strip()
+        ]
+        if keywords:
+            return " ".join(keywords)
+        topic = str(parsed_requirement.get("topic") or "").strip()
+        return topic or " ".join(user_prompt.split()).strip()
+
+    @staticmethod
+    def _semantic_row_text(row: dict) -> str:
+        head = [
+            str(row.get(key) or "").strip()
+            for key in ("title", "doc_type", "summary", "prompt_hint")
+        ]
+        body = str(row.get("full_content") or "").strip()
+        return "\n".join(
+            [item for item in head if item]
+            + ([body[:SEMANTIC_RERANK_TEXT_CHARS]] if body else [])
+        )
+
+    @classmethod
+    def _balanced_semantic_candidates(cls, rows: list[dict]) -> list[tuple[dict, str]]:
+        """按记忆域轮询取候选，避免任一大表占满语义重排预算。"""
+        buckets: dict[str, list[tuple[dict, str]]] = {}
+        for row in rows:
+            if float(row.get("_vector_similarity") or 0) > 0:
+                continue
+            text = cls._semantic_row_text(row)
+            if not text:
+                continue
+            source_type = str(row.get("source_type") or "document")
+            buckets.setdefault(source_type, []).append((row, text))
+
+        selected: list[tuple[dict, str]] = []
+        positions = {source_type: 0 for source_type in buckets}
+        while len(selected) < MAX_SEMANTIC_RERANK_CANDIDATES:
+            added = False
+            for source_type, bucket in buckets.items():
+                position = positions[source_type]
+                if position >= len(bucket):
+                    continue
+                selected.append(bucket[position])
+                positions[source_type] = position + 1
+                added = True
+                if len(selected) >= MAX_SEMANTIC_RERANK_CANDIDATES:
+                    break
+            if not added:
+                break
+        return selected
+
+    def _apply_semantic_similarities(self, query: str, rows: list[dict]) -> None:
+        model = getattr(self, "_embedding_model", None)
+        if not model or not hasattr(model, "encode") or not query.strip():
+            return
+        candidates = self._balanced_semantic_candidates(rows)
+        if not candidates:
+            return
+        try:
+            embeddings = model.encode([query, *[text for _, text in candidates]])
+        except Exception as exc:
+            logger.warning("跨记忆域语义重排失败，保留关键词排序: %s", exc)
+            return
+        if len(embeddings) != len(candidates) + 1:
+            logger.warning("语义重排向量数量与候选数量不一致，保留关键词排序")
+            return
+        query_vector = embeddings[0].vector
+        for (row, _), embedding in zip(candidates, embeddings[1:]):
+            similarity = self._cosine_similarity(query_vector, embedding.vector)
+            row["_vector_similarity"] = max(
+                float(row.get("_vector_similarity") or 0),
+                float(similarity),
+            )
 
     def _cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:
         """计算余弦相似度。"""
@@ -5074,41 +6063,31 @@ flowchart LR
         tokens: list[str] = []
         tokens.extend(re.findall(r"[A-Za-z][A-Za-z0-9._+\-/]{1,}", text_clean))
         chinese_runs = re.findall(r"[\u4e00-\u9fff]{2,}", text_clean)
+        phrases: list[str] = []
         for run in chinese_runs:
-            pieces = [
+            phrases.extend(
                 item
                 for item in re.split(
                     r"(?:以及|并且|同时|相关|关于|里面|里|中的|中|的|和|及|与|为|并)",
                     run,
                 )
                 if len(item) >= 2
-            ]
-            for piece in pieces:
-                tokens.append(piece)
-                # 长句保留有辨识度的实体片段，而不是从句首生成一串二元词。
-                for marker in (
-                    "共建项目周报",
-                    "共建项目",
-                    "推理性能优化",
-                    "性能成本优化周会",
-                    "模型中心运营看板",
-                    "输入Token",
-                    "输出Token",
-                    "GPU算力",
-                    "GPU利用率",
-                ):
-                    if marker.lower() in piece.lower():
-                        tokens.append(marker)
-                if 3 <= len(piece) <= 12:
-                    continue
-                for size in (6, 4, 3, 2):
-                    for index in range(0, len(piece) - size + 1):
-                        candidate = piece[index:index + size]
-                        if candidate.startswith(("以及", "关于", "相关")):
-                            continue
-                        tokens.append(candidate)
-                    if len(tokens) >= 40:
-                        break
+            )
+
+        # 先保留所有由语言结构切出的完整短语，再为过长短语生成通用 n-gram
+        # 后备词。这样后面的实体不会被前一段长句产生的大量切片挤掉。
+        tokens.extend(phrases)
+        for phrase in phrases:
+            if 3 <= len(phrase) <= 12:
+                continue
+            for size in (6, 4, 3, 2):
+                for index in range(0, len(phrase) - size + 1):
+                    candidate = phrase[index:index + size]
+                    if candidate.startswith(("以及", "关于", "相关")):
+                        continue
+                    tokens.append(candidate)
+                if len(tokens) >= 40:
+                    break
 
         stop = {
             "帮我",
@@ -5169,15 +6148,38 @@ flowchart LR
         keywords = parsed_requirement.get("keywords") or []
         if not keywords:
             return max(0.35, vector_similarity)
-        hits = sum(1 for word in keywords if word and word in haystack)
-        title_hits = sum(1 for word in keywords if word and word in str(row.get("title") or ""))
-        score = (hits / max(len(keywords), 1)) + min(title_hits, 3) * 0.12
+        title = str(row.get("title") or "")
+        folded_haystack = haystack.casefold()
+        folded_title = title.casefold()
+        folded_keywords = [
+            str(word).strip().casefold()
+            for word in keywords
+            if str(word).strip()
+        ]
+        hits = sum(
+            1
+            for word in folded_keywords
+            if word in folded_haystack
+        )
+        title_hits = sum(
+            1
+            for word in folded_keywords
+            if word in folded_title
+        )
+        score = (hits / max(len(folded_keywords), 1)) + min(title_hits, 3) * 0.12
         if score < 0.4:
             score = 0.0
         if parsed_requirement.get("doc_type") and parsed_requirement["doc_type"] == row.get("doc_type"):
             score += 0.15
-        # 向量召回本身就是独立的相关性证据，不能再被词面分词结果清零。
-        return min(max(score, vector_similarity), 1.0)
+        lexical_score = min(max(score, 0.0), 1.0)
+        # 词面与语义是两条独立证据：仅命中一路时保留该路分数；两路同时
+        # 支持时按概率并集融合。公式不依赖领域词表，也不会要求二者都成功。
+        if lexical_score > 0 and vector_similarity > 0:
+            return min(
+                1.0 - (1.0 - lexical_score) * (1.0 - vector_similarity),
+                1.0,
+            )
+        return max(lexical_score, vector_similarity)
 
     def _score_quality(self, row: dict) -> float:
         status = str(row.get("review_status") or "")

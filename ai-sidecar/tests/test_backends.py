@@ -20,6 +20,7 @@ import pytest
 from ocr.backends.base   import OcrBackend, OcrBox, OcrOutput
 from ocr.backends.paddle import PaddleBackend
 from ocr.backends.vision import AppleVisionBackend
+from ocr.backends.vision_pyobjc import AppleVisionBackend as PyObjCAppleVisionBackend
 from tests.conftest      import MockOcrBackend
 
 
@@ -181,6 +182,17 @@ class TestAppleVisionBackend:
         backend = AppleVisionBackend()
         with pytest.raises(RuntimeError, match="仅在 macOS"):
             backend.run("/tmp/dummy.jpg")
+
+    def test_pyobjc_bbox_is_converted_from_bottom_left_to_top_left(self):
+        observation = types.SimpleNamespace(
+            boundingBox=lambda: ((0.2, 0.1), (0.5, 0.25))
+        )
+
+        bbox = PyObjCAppleVisionBackend._normalized_bbox(observation)
+
+        assert [value for point in bbox for value in point] == pytest.approx(
+            [0.2, 0.65, 0.7, 0.65, 0.7, 0.9, 0.2, 0.9]
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

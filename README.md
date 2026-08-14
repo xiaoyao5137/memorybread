@@ -21,23 +21,9 @@
 
 ## 产品界面
 
-### 工作现场，随时找回
-
-![记忆面包时间线记录与检索界面](https://memorybread.cn/show/timeline-show.png)
-
-### 基于真实工作背景创作文档
-
-![记忆面包创作智能体编写项目周报](https://memorybread.cn/show/creation-show.png)
-
-### 本地运行与隐私保护
-
-![记忆面包敏感内容过滤与应用黑名单设置](https://memorybread.cn/show/privacy-show.png)
-
-## 快速入门视频
-
-[![观看记忆面包快速入门视频](https://memorybread.cn/show/memorybread-quick-start-poster.png)](https://memorybread.cn/#product-demo-video)
-
-点击上方封面前往官网播放完整的快速入门视频。
+| 工作现场，随时找回 | 基于真实工作背景创作文档 | 本地运行与隐私保护 |
+| --- | --- | --- |
+| ![记忆面包时间线记录与检索界面](https://memorybread.cn/show/timeline-show.png) | ![记忆面包创作智能体编写项目周报](https://memorybread.cn/show/creation-show.png) | ![记忆面包敏感内容过滤与应用黑名单设置](https://memorybread.cn/show/privacy-show.png) |
 
 ## 核心能力
 

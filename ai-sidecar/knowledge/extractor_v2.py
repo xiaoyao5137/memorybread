@@ -1292,6 +1292,23 @@ BAKE_SOP_PAYLOAD_SCHEMA = {
         "trigger_keywords": _bounded_string_array(16, 80),
         "extracted_problem": _bounded_string(800, nullable=True),
         "steps": _bounded_string_array(20, 500),
+        "step_evidence": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "step_index": {"type": "integer", "minimum": 1},
+                    "capture_ids": {
+                        "type": "array",
+                        "maxItems": 12,
+                        "items": {"type": ["string", "integer"]},
+                    },
+                },
+                "required": ["step_index", "capture_ids"],
+                "additionalProperties": False,
+            },
+        },
         "linked_knowledge_ids": {
             "type": "array",
             "maxItems": 20,
@@ -1712,8 +1729,8 @@ accepted=true 时，payload schema:
 BAKE_SOP_PROMPT = """类别:sop
 
 只提炼未来遇到相同需求/问题场景时，可以参考给出行动路线建议的操作手册。
-操作必须来自同一条时间线中的至少 2 条采集记录。你需要沿着多帧上下文中已经发生的动作，归纳用户为完成一件事情实际走过的流程，而不是根据单个页面、单帧文字或界面按钮推测可能的操作。
-当 source_capture_count >= 2，且该时间线及多帧采集记录描述的信息是在解决同一个问题或需求的行动动线、触发条件、处理路线、排查/执行步骤、检查点或验证方式时，accepted=true。
+操作必须来自同一条时间线中的至少 2 条采集记录，并且 effective_capture_count >= 2。你需要严格沿着 action_trace 中按时间发生的动作，归纳用户为完成一件事情实际走过的流程，而不是根据单个页面、单帧文字或界面按钮推测可能的操作。
+当 source_capture_count >= 2、effective_capture_count >= 2，且该时间线及多帧采集记录描述的信息是在解决同一个问题或需求的行动动线、触发条件、处理路线、排查/执行步骤、检查点或验证方式时，accepted=true。
 如果完全没有可复用的行动指引（纯事实陈述、纯文档阅读、纯噪声），reject。
 
 本类别只承接来源中确实发生或明确写出的多步行动路线。数据展示界面、文档正文和稳定结论本身都不是操作步骤。
@@ -1727,6 +1744,11 @@ accepted=true 时，payload schema:
   "trigger_keywords": ["触发词1", "触发词2"],
   "extracted_problem": "触发场景/问题",
   "steps": ["步骤1", "步骤2", "步骤3"],
+  "step_evidence": [
+    {"step_index": 1, "capture_ids": ["实际支持步骤1的capture_id"]},
+    {"step_index": 2, "capture_ids": ["实际支持步骤2的capture_id"]},
+    {"step_index": 3, "capture_ids": ["实际支持步骤3的capture_id"]}
+  ],
   "linked_knowledge_ids": [],
   "confidence": "high|medium|low",
   "evidence_summary": "一句话说明步骤依据",
@@ -1736,8 +1758,9 @@ accepted=true 时，payload schema:
 }
 
 约束:
-- `source_capture_count` 小于 2 时必须 reject；任何一条 capture 都不能独立成为 SOP
+- `source_capture_count` 或 `effective_capture_count` 小于 2 时必须 reject；任何一条 capture 都不能独立成为 SOP
 - `steps` 至少 3 条，且必须是可执行动作
+- `step_evidence` 必须与 steps 逐项对应，step_index 从 1 开始；capture_ids 只能引用 action_trace 中真实存在、能够支持该步骤的采集 ID
 - 每条步骤必须能在多帧上下文或时间线已有提炼结果中找到依据；不得把某一帧里的按钮、字段名或帮助文案串成臆造流程
 - `details` 必须是可渲染 Markdown，建议包含 `## 适用场景`、`## 行动路线`、`## 注意事项`、`## 验证方式`
 - 没有明确步骤化流程就 reject
@@ -1746,7 +1769,7 @@ accepted=true 时，payload schema:
 
 BAKE_BUNDLE_PROMPT = f"""你在执行一次性 bake bundle 提炼。输入是一条时间线候选工作片段。
 
-第一步必须先判断候选的主资产类型 `classification.primary_type`，再评估稳定资产：
+第一步先判断候选的主资产类型 `classification.primary_type`，用于描述主导复用价值和后续展示排序；然后独立评估每一种稳定资产：
 - data：主要价值是结构化数值观测、业务指标、价格/用量/成本、指标卡、表格、报表、查询结果，或以“对象 + 指标 + 数值”为核心的业务/系统状态快照；
 - knowledge：主要价值是有明确对象和证据的事实、解释、经验、约束、决策或结论；事实包括项目进度、工作状态变化、非数值执行结果、阻塞、责任人、截止时间和下一步承诺，不要求永久不变；
 - document：主要价值是一份成体系、可整体复用的正文；
@@ -1755,7 +1778,7 @@ BAKE_BUNDLE_PROMPT = f"""你在执行一次性 bake bundle 提炼。输入是一
 
 分类边界：项目/任务“已完成、未完成、进行中、被阻塞、已上线、测试通过/失败、问题已解决/未解决”等语义状态和结果应优先归 knowledge，并保留观测时间；不能因为它们会变化或来自聊天就归 data/none。只有主要价值可独立表达为结构化测量值、指标序列或报表快照时才归 data。计划和预计可以作为“已经形成的承诺/安排”进入 knowledge，但不得被改写成已经执行完成。
 
-必须按候选的主导复用价值只选一个主类型，不能因为页面同时出现说明文字、公式、按钮或菜单就改变主体。数据页面上的字段定义、计算公式、换算说明通常是理解数据的上下文，不应脱离页面另建知识或操作。若 `primary_type=data`，knowledge、design、sop 必须全部 reject；数据资产已由同一提炼流水线的 `data_pages` 与 `data_facts` 承接。其余类型仍须只基于候选证据保守判断，禁止把一个主体重复沉淀到多个类别。
+`primary_type` 只能选择一个，但它不构成其他资产的拒绝理由。knowledge、design、sop 必须各自依据所属类别的证据独立判断；同一候选同时包含可复用事实、成体系正文和实际执行的多步路线时，可以有多个 accepted=true。禁止仅因为 primary_type 不同而返回 not_primary_type。数据页面上的字段定义、计算公式、换算说明通常只是理解数据的上下文，不能据此推测知识或操作；但若 action_trace 另外明确记录了真实多步动作，仍应按 SOP 证据独立判断。
 
 不能把界面中渲染的历史操作记录、变更日志或动态消息流冒充当前用户产出；但其中明确陈述的项目进度、执行结果或结论仍可作为对应主体在对应时点成立的 knowledge 事实。只有没有实质事实的自动动作壳才 reject。
 
@@ -1786,8 +1809,8 @@ BAKE_COMPACT_BUNDLE_PROMPT = (
 - 每个 Markdown 字段只保留最有证据的要点，不复述同一段内容
 - 数组只保留最重要的项目
 - 同一个 JSON 字段只输出一次；禁止重复 key、重复段落或循环扩写
-- classification 必须只选择一个 primary_type；只有该主类型可 accepted=true
-- 另外两个资产必须 accepted=false、reason="not_primary_type"、payload=null
+- classification 必须只选择一个 primary_type，但 knowledge、design、sop 仍按各自证据独立判断，可以同时 accepted=true
+- 禁止使用 not_primary_type 作为拒绝理由；拒绝时写清该资产自身缺少的证据
 - 若内容无法在限制内可靠表达，对相应类别返回 accepted=false
 """
 )
@@ -3128,6 +3151,13 @@ class KnowledgeExtractorV2:
         source_capture_count = self._source_capture_count(candidate)
         capture_url = candidate.get('capture_url') or ''
         webpage_title = candidate.get('capture_webpage_title') or ''
+        action_trace_text = self._render_bake_action_trace(candidate.get('action_trace'))
+        key_timestamps = candidate.get('key_timestamps')
+        key_timestamps_text = (
+            json.dumps(key_timestamps, ensure_ascii=False)
+            if isinstance(key_timestamps, (dict, list))
+            else str(key_timestamps or '')
+        )
         url_block = ''
         if url_aggregated_text:
             context_label = (
@@ -3147,6 +3177,7 @@ class KnowledgeExtractorV2:
             f"source_timeline_id: {candidate.get('source_timeline_id')}\n"
             f"source_capture_id: {candidate.get('source_capture_id')}\n"
             f"source_capture_count: {source_capture_count}\n"
+            f"effective_capture_count: {self._effective_capture_count(candidate)}\n"
             f"timeline_category: {candidate.get('timeline_category') or ''}\n"
             f"work_item: {candidate.get('work_item') or ''}\n"
             f"work_status: {candidate.get('work_status') or ''}\n"
@@ -3159,6 +3190,12 @@ class KnowledgeExtractorV2:
             f"observed_at: {candidate.get('observed_at')}\n"
             f"event_time_start: {candidate.get('event_time_start')}\n"
             f"event_time_end: {candidate.get('event_time_end')}\n"
+            f"start_time: {candidate.get('start_time')}\n"
+            f"end_time: {candidate.get('end_time')}\n"
+            f"duration_minutes: {candidate.get('duration_minutes')}\n"
+            f"time_range_start: {candidate.get('time_range_start')}\n"
+            f"time_range_end: {candidate.get('time_range_end')}\n"
+            f"key_timestamps: {self._truncate_text(key_timestamps_text, 2_000)}\n"
             f"history_view: {bool(candidate.get('history_view', False))}\n"
             f"content_origin: {candidate.get('content_origin') or ''}\n"
             f"activity_type: {candidate.get('activity_type') or ''}\n"
@@ -3171,8 +3208,40 @@ class KnowledgeExtractorV2:
             f"document_evidence: {json.dumps(self._resolve_document_evidence(candidate), ensure_ascii=False)}\n"
             f"entities: {self._truncate_text(entities_text, 160)}\n\n"
             f"capture_context:\n{capture_text}"
+            f"\n\naction_trace（严格按 ts 排序，步骤证据必须引用 capture_id）:\n{action_trace_text}"
             f"{url_block}"
         )
+
+    def _render_bake_action_trace(self, value: Any) -> str:
+        if not isinstance(value, list):
+            return ''
+        rendered = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            header = (
+                f"capture_id={item.get('capture_id')} ts={item.get('ts')} "
+                f"event_type={item.get('event_type') or ''} "
+                f"app={self._truncate_text(item.get('app_name'), 100)} "
+                f"title={self._truncate_text(item.get('win_title'), 180)}"
+            )
+            parts = [header]
+            if item.get('url'):
+                parts.append(f"url={self._truncate_text(item.get('url'), 500)}")
+            if item.get('webpage_title'):
+                parts.append(
+                    f"webpage_title={self._truncate_text(item.get('webpage_title'), 180)}"
+                )
+            for field, label in (
+                ('input_text', 'input'),
+                ('visible_text', 'visible'),
+                ('audio_text', 'audio'),
+            ):
+                text = str(item.get(field) or '').strip()
+                if text:
+                    parts.append(f"{label}: {text}")
+            rendered.append('\n'.join(parts))
+        return '\n---\n'.join(rendered)
 
     @staticmethod
     def _source_capture_count(candidate: Dict[str, Any]) -> int:
@@ -3183,8 +3252,21 @@ class KnowledgeExtractorV2:
             return 1
 
     @classmethod
+    def _effective_capture_count(cls, candidate: Dict[str, Any]) -> int:
+        try:
+            explicit = int(candidate.get('effective_capture_count') or 0)
+        except (TypeError, ValueError):
+            explicit = 0
+        trace = candidate.get('action_trace')
+        trace_count = len(trace) if isinstance(trace, list) else 0
+        return max(explicit, trace_count, cls._source_capture_count(candidate) if not trace else 0)
+
+    @classmethod
     def _sop_has_multiple_source_captures(cls, candidate: Dict[str, Any]) -> bool:
-        return cls._source_capture_count(candidate) >= 2
+        return (
+            cls._source_capture_count(candidate) >= 2
+            and cls._effective_capture_count(candidate) >= 2
+        )
 
     @staticmethod
     def _build_document_source_text(candidate: Dict[str, Any]) -> str:
@@ -3352,6 +3434,67 @@ class KnowledgeExtractorV2:
         adjusted['review_status'] = 'auto_created'
         evidence = str(adjusted.get('evidence_summary') or '').strip()
         adjusted['evidence_summary'] = f"{evidence} | mismatch_guard={reason}" if evidence else f"mismatch_guard={reason}"
+        return adjusted
+
+    def _normalize_sop_step_evidence(
+        self,
+        candidate: Dict[str, Any],
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """把步骤证据限制在真实 capture ID 内；缺失时回退到整条 timeline 的证据域。"""
+        adjusted = dict(payload)
+        source_ids = []
+        trace = candidate.get('action_trace')
+        if isinstance(trace, list):
+            for item in trace:
+                if not isinstance(item, dict):
+                    continue
+                capture_id = str(item.get('capture_id') or '').strip()
+                if capture_id and capture_id not in source_ids:
+                    source_ids.append(capture_id)
+        aggregated_text = str(candidate.get('url_aggregated_text') or '')
+        for capture_id in re.findall(r'capture#(\d+)', aggregated_text):
+            if capture_id not in source_ids:
+                source_ids.append(capture_id)
+        primary_capture_id = str(candidate.get('source_capture_id') or '').strip()
+        if primary_capture_id and primary_capture_id not in source_ids:
+            source_ids.append(primary_capture_id)
+        source_id_set = set(source_ids)
+
+        evidence_by_step = {}
+        raw_evidence = payload.get('step_evidence')
+        if isinstance(raw_evidence, list):
+            for item in raw_evidence:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    step_index = int(item.get('step_index'))
+                except (TypeError, ValueError):
+                    continue
+                capture_ids = item.get('capture_ids')
+                if not isinstance(capture_ids, list):
+                    continue
+                normalized_ids = []
+                for capture_id in capture_ids:
+                    normalized = str(capture_id or '').strip()
+                    if not normalized or normalized in normalized_ids:
+                        continue
+                    if source_id_set and normalized not in source_id_set:
+                        continue
+                    normalized_ids.append(normalized)
+                if normalized_ids:
+                    evidence_by_step[step_index] = normalized_ids
+
+        steps = payload.get('steps')
+        if not isinstance(steps, list):
+            steps = []
+        adjusted['step_evidence'] = [
+            {
+                'step_index': index,
+                'capture_ids': evidence_by_step.get(index) or list(source_ids),
+            }
+            for index in range(1, len(steps) + 1)
+        ]
         return adjusted
 
     def _call_bake_llm(
@@ -3555,6 +3698,8 @@ class KnowledgeExtractorV2:
             }
 
         if accepted:
+            if artifact_type == 'sop':
+                payload = self._normalize_sop_step_evidence(candidate, payload)
             if artifact_type == 'design':
                 document_evidence = self._resolve_document_evidence(candidate)
                 if not document_evidence['allows_auto_create']:
@@ -3702,6 +3847,8 @@ class KnowledgeExtractorV2:
             }
 
         if accepted:
+            if artifact_type == 'sop':
+                payload = self._normalize_sop_step_evidence(candidate, payload)
             if artifact_type == 'design':
                 document_evidence = self._resolve_document_evidence(candidate)
                 if not document_evidence['allows_auto_create']:
@@ -3809,6 +3956,16 @@ class KnowledgeExtractorV2:
         """按一个共享字符预算裁剪 capture 与 URL 聚合正文，避免两份上下文叠加失控。"""
         adjusted = dict(candidate)
         total_budget = max(0, int(context_char_budget))
+        action_trace = candidate.get('action_trace')
+        action_trace_chars = len(
+            json.dumps(action_trace, ensure_ascii=False)
+        ) if isinstance(action_trace, list) else 0
+        action_trace_budget = min(action_trace_chars, total_budget // 2)
+        adjusted['action_trace'] = self._trim_bake_action_trace(
+            action_trace,
+            action_trace_budget,
+        )
+        total_budget = max(0, total_budget - action_trace_budget)
         url_text = str(candidate.get('url_aggregated_text') or '').strip()
 
         if url_text:
@@ -3843,6 +4000,51 @@ class KnowledgeExtractorV2:
             )
         return adjusted
 
+    def _trim_bake_action_trace(self, value: Any, char_budget: int) -> List[Dict[str, Any]]:
+        """裁剪每帧正文但始终保留帧 ID 与时间顺序，供步骤证据引用。"""
+        if not isinstance(value, list):
+            return []
+        frames = [dict(item) for item in value if isinstance(item, dict)]
+        if not frames:
+            return []
+        serialized = json.dumps(frames, ensure_ascii=False)
+        if len(serialized) <= max(0, int(char_budget)):
+            return frames
+
+        minimal = []
+        for frame in frames:
+            minimal.append({
+                'capture_id': frame.get('capture_id'),
+                'ts': frame.get('ts'),
+                'event_type': self._truncate_text(frame.get('event_type'), 32),
+                'app_name': self._truncate_text(frame.get('app_name'), 48),
+                'win_title': self._truncate_text(frame.get('win_title'), 80),
+            })
+        minimal_size = len(json.dumps(minimal, ensure_ascii=False))
+        remaining = max(0, int(char_budget) - minimal_size)
+        per_frame = remaining // len(minimal)
+        if per_frame <= 0:
+            return minimal
+
+        for target, source in zip(minimal, frames):
+            url_budget = min(160, per_frame // 5)
+            text_budget = max(0, per_frame - url_budget)
+            if source.get('url') and url_budget > 0:
+                target['url'] = self._head_tail_context(source.get('url'), url_budget)
+            target['input_text'] = self._head_tail_context(
+                source.get('input_text'),
+                text_budget // 5,
+            )
+            target['visible_text'] = self._head_tail_context(
+                source.get('visible_text'),
+                text_budget * 13 // 20,
+            )
+            target['audio_text'] = self._head_tail_context(
+                source.get('audio_text'),
+                text_budget * 3 // 20,
+            )
+        return minimal
+
     def _prepare_bake_bundle_candidate(
         self,
         candidate: Dict[str, Any],
@@ -3855,6 +4057,7 @@ class KnowledgeExtractorV2:
             return original
 
         context_fields = (
+            'action_trace',
             'url_aggregated_text',
             'capture_ax_text',
             'capture_ocr_text',
@@ -4386,24 +4589,6 @@ class KnowledgeExtractorV2:
             )
             results[artifact_type] = artifact
             result_meta[artifact_type] = artifact_meta
-
-        primary_artifact = {
-            'knowledge': 'knowledge',
-            'document': 'design',
-            'sop': 'sop',
-        }.get(primary_type)
-        if primary_type in {'data', 'none', 'knowledge', 'document', 'sop'}:
-            for artifact_type in ('knowledge', 'design', 'sop'):
-                if artifact_type != primary_artifact and results[artifact_type].get('accepted'):
-                    results[artifact_type] = {
-                        'accepted': False,
-                        'reason': (
-                            'primary_asset_is_data'
-                            if primary_type == 'data'
-                            else 'not_primary_type'
-                        ),
-                        'payload': None,
-                    }
 
         degraded = any(
             bool(item.get('degraded')) for item in result_meta.values()

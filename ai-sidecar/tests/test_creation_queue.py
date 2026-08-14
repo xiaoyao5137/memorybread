@@ -178,3 +178,46 @@ async def test_creation_agent_loop_failure_keeps_event_contract(monkeypatch):
     assert event["run_id"] == "run-failure"
     assert event["actor"]["id"] == "creation_main_agent"
     assert event["goal"]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_creation_agent_transport_failure_returns_retryable_user_message(monkeypatch):
+    async def failing_agent_run(**_kwargs):
+        if False:
+            yield {}
+        raise httpx.ConnectError("")
+
+    class ThreadQueue:
+        def submit(self, _priority, fn, lane=None):
+            future: concurrent.futures.Future = concurrent.futures.Future()
+
+            def run():
+                try:
+                    future.set_result(fn())
+                except Exception as exc:
+                    future.set_exception(exc)
+
+            threading.Thread(target=run, daemon=True).start()
+            return future
+
+    monkeypatch.setattr(creation_app.creation_agent_loop, "run", failing_agent_run)
+    monkeypatch.setattr(creation_app, "get_global_queue", lambda: ThreadQueue())
+
+    transport = httpx.ASGITransport(app=creation_app.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/creation/agent/run",
+            json={
+                "user_prompt": "生成一份方案",
+                "design_templates": [],
+                "enable_rag": False,
+            },
+        )
+
+    event = parse_sse_events(response)[-1]
+    assert event["type"] == "run.failed"
+    assert event["summary"] == "模型服务连接暂时中断，自动重试后仍未恢复，请稍后重试"
+    assert event["data"] == {
+        "error_code": "MODEL_TRANSPORT_UNAVAILABLE",
+        "retryable": True,
+    }

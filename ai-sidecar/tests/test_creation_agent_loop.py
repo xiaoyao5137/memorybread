@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 from datetime import datetime
 from pathlib import Path
@@ -519,7 +520,7 @@ def test_evidence_validation_requires_matching_metadata_value_and_label():
     assert mismatched["verified_claims"] == []
 
 
-def test_langbridge_requires_all_six_token_metrics_for_the_requested_week():
+def test_requested_dashboard_metrics_allow_partial_success_and_filter_wrong_period():
     query = (
         "获取LangBridge模型中心运营看板里第二个tab下筛选本周的独立部署输入Tokens、"
         "独立部署输出Tokens、公共部署输入Tokens、公共部署输出tokens、"
@@ -567,10 +568,109 @@ def test_langbridge_requires_all_six_token_metrics_for_the_requested_week():
     ]
     assert complete["requirements_satisfied"] is True
     assert complete["required_metric_coverage"] == 1.0
-    assert incomplete["requirements_satisfied"] is False
-    assert incomplete["reason"] == "required_metrics_incomplete"
+    assert incomplete["requirements_satisfied"] is True
+    assert incomplete["reason"] == "requested_metrics_partial"
+    assert len(incomplete["verified_claims"]) == 5
     assert wrong_period["requirements_satisfied"] is False
-    assert wrong_period["reason"] == "statistical_period_mismatch"
+    assert wrong_period["reason"] == "requested_metrics_period_mismatch"
+    assert wrong_period["verified_claims"] == []
+
+
+def test_requested_metrics_strip_task_prefix_and_ignore_interaction_clause():
+    query = (
+        "获取某模型运营看板的Token数据：专有环境输入Tokens、"
+        "共享环境输出Tokens；选择第二个tab用量统计，"
+        "统计日期2026-08-10至2026-08-16，点击查询"
+    )
+
+    requested = CreationService._extract_requested_metrics(query)
+
+    assert requested == ["专有环境输入Token", "共享环境输出Token"]
+
+
+def test_requested_metrics_ignore_root_skill_invocation_before_step_objective():
+    query = (
+        "请使用@GPU成本优化周报创作法 创作下本周的周报\n"
+        "当前 Skill 步骤目标：用@数据检索 Tool 获取某看板里第二个tab下"
+        "的独立部署输入Tokens、独立部署输出Tokens、公共部署输入Tokens、"
+        "公共部署输出Tokens、商业模型输入Tokens、商业模型输出Tokens"
+    )
+
+    requested = CreationService._extract_requested_metrics(query)
+
+    assert requested == [
+        "独立部署输入Token",
+        "独立部署输出Token",
+        "公共部署输入Token",
+        "公共部署输出Token",
+        "商业模型输入Token",
+        "商业模型输出Token",
+    ]
+
+
+def test_unmatched_metric_preferences_retain_cross_checked_page_values():
+    available = CreationService._apply_required_metric_coverage(
+        {
+            "verified_claims": [
+                {
+                    "claim_type": "metric",
+                    "label": "在用项目数",
+                    "value": "102",
+                    "statement": "在用项目数 102",
+                }
+            ]
+        },
+        ["本周资源治理概览"],
+        {"start": "2026-08-10", "end": "2026-08-16"},
+    )
+
+    assert available["requirements_satisfied"] is True
+    assert available["requested_metric_policy"] == "preference"
+    assert available["available_values_retained"] is True
+    assert available["reason"] == "requested_metrics_unmatched"
+    assert [claim["value"] for claim in available["verified_claims"]] == ["102"]
+    assert available["unrequested_verified_claim_count"] == 1
+
+
+def test_structured_table_headers_are_bound_to_values_and_periods():
+    payload = {
+        "content_text": "",
+        "structured_data": {
+            "tables": [
+                [
+                    ["日期", "维度", "容量", "峰值利用率", "日均利用率"],
+                    ["2026-08-11", "总体", "2116", "61.67%", "29.39%"],
+                ]
+            ]
+        },
+    }
+
+    claims = CreationService._scrape_claim_candidates(payload)
+
+    assert {
+        (claim["label"], claim["value"], claim["statistical_period"])
+        for claim in claims
+    } == {
+        ("总体 容量", "2116", "2026-08-11"),
+        ("总体 峰值利用率", "61.67%", "2026-08-11"),
+        ("总体 日均利用率", "29.39%", "2026-08-11"),
+    }
+
+
+def test_metric_card_date_range_is_bound_to_its_own_value():
+    payload = {
+        "content_text": (
+            "日期\n2026-08-04\n至\n2026-08-10\n"
+            "独立部署输入Tokens\n2026-08-12至2026-08-12\n28,833.07亿"
+        ),
+        "structured_data": {},
+    }
+
+    claims = CreationService._scrape_claim_candidates(payload)
+    claim = next(item for item in claims if item.get("value") == "28,833.07亿")
+
+    assert claim["label"] == "独立部署输入Tokens"
+    assert claim["statistical_period"] == "2026-08-12至2026-08-12"
 
 
 def test_langbridge_preview_source_wins_over_edit_source_for_same_dashboard():
@@ -594,6 +694,33 @@ def test_langbridge_preview_source_wins_over_edit_source_for_same_dashboard():
     )
 
     assert [item["source_id"] for item in selected] == [214]
+
+
+def test_refresh_selection_prefers_strong_source_identity_without_business_keywords():
+    selected = CreationService._select_refreshable_report_sources(
+        [
+            {
+                "source_id": 1,
+                "source_kind": "report_url",
+                "source_url": "https://metrics.example.com/product-a",
+                "refresh_required": True,
+                "refresh_policy": "on_demand",
+                "identity_relevance_score": 0.72,
+                "relevance_score": 0.72,
+            },
+            {
+                "source_id": 2,
+                "source_kind": "report_url",
+                "source_url": "https://metrics.example.com/product-b",
+                "refresh_required": True,
+                "refresh_policy": "on_demand",
+                "identity_relevance_score": 0.0,
+                "relevance_score": 0.46,
+            },
+        ]
+    )
+
+    assert [item["source_id"] for item in selected] == [1]
 
 
 def test_evidence_validation_also_supports_document_style_pages():
@@ -670,7 +797,14 @@ def test_dashboard_metric_cards_are_extracted_even_when_cache_table_exists():
         "387",
         "99.37%",
     }
-    assert all(claim.get("statistical_period") == "2026-07-24 至 2026-07-30" for claim in metric_claims)
+    periods_by_value = {
+        claim["value"]: claim.get("statistical_period")
+        for claim in metric_claims
+    }
+    assert periods_by_value["1,747"] == "2026-07-30"
+    assert periods_by_value["1,736"] == "2026-07-30"
+    assert periods_by_value["387"] == "2026-07-30"
+    assert periods_by_value["99.37%"] == "2026-07-24 至 2026-07-30"
     assert "0%" not in {claim["value"] for claim in metric_claims}
 
 
@@ -707,6 +841,20 @@ def test_dashboard_metric_cards_accept_compound_currency_and_multiplier_units():
         "12178.4万元",
         "39.86x",
     }
+
+
+def test_zero_metric_value_is_preserved_when_its_label_is_business_data():
+    payload = {
+        "content_text": "失败任务数\n2026-08-14\n0",
+        "structured_data": {},
+    }
+
+    claims = CreationService._scrape_claim_candidates(payload)
+
+    assert any(
+        claim.get("label") == "失败任务数" and claim.get("value") == "0"
+        for claim in claims
+    )
 
 
 def test_canvas_dashboard_values_use_ocr_only_when_dom_labels_match():
@@ -773,6 +921,193 @@ def test_canvas_dashboard_values_use_ocr_only_when_dom_labels_match():
         claim["evidence_origin"] == "screenshot_ocr_dom_label"
         for claim in merged["verified_claims"]
     )
+
+
+def test_canvas_requested_metrics_accept_repeated_ocr_units_and_exclude_other_cards():
+    requested = [
+        "专有环境输入Token量",
+        "专有环境输出Token量",
+        "共享环境输入Token量",
+        "共享环境输出Token量",
+        "商业类型输入Token量",
+        "商业类型输出Token量",
+    ]
+    payload = {
+        "title": "模型运营看板",
+        "url": "https://bi.example.com/dashboard",
+        "collected_at": 1770000000000,
+        "content_text": (
+            "Token总量\n共享环境Token计费成本总计\n"
+            "专有环境GPU计费成本总计\n商业类型Token计费成本总计"
+        ),
+        "structured_data": {
+            "dom_content_text": (
+                "Token总量\n共享环境Token计费成本总计\n"
+                "专有环境GPU计费成本总计\n商业类型Token计费成本总计"
+            ),
+            "requested_metrics": requested,
+        },
+        "evidence": {
+            "page_title": "模型运营看板",
+            "source_url": "https://bi.example.com/dashboard",
+            "captured_at": 1770000000000,
+        },
+    }
+    ocr_text = """Token计费趋势统计（模型维度）
+8,000
+专有环境输入Tokens
+2026-08-13至2026-08-13
+10,919.04亿 亿
+专有环境输出Tokens
+2026-08-13至2026-08-13
+485.8亿 亿
+共享环境输入Tokens
+2026-08-13至2026-08-13
+506.11亿
+共享环境输出Tokens
+2026-08-13至2026-08-13
+32.07亿 亿
+商业类型输入Tokens
+2026-08-13至2026-08-13
+39.11亿亿
+商业类型输出Tokens
+2026-08-13至2026-08-13
+10亿 亿"""
+
+    ocr_validation = CreationService._compare_scrape_with_ocr(payload, ocr_text)
+    covered = CreationService._apply_required_metric_coverage(
+        ocr_validation,
+        requested,
+        {"start": "2026-08-10", "end": "2026-08-16"},
+    )
+
+    assert covered["required_metric_coverage"] == 1.0
+    assert covered["missing_requested_metrics"] == []
+    assert [claim["value"] for claim in covered["verified_claims"]] == [
+        "10,919.04亿",
+        "485.8亿",
+        "506.11亿",
+        "32.07亿",
+        "39.11亿",
+        "10亿",
+    ]
+    assert all(
+        claim["evidence_origin"] == "screenshot_ocr_requested_metric"
+        for claim in covered["verified_claims"]
+    )
+    assert "8,000" not in {claim["value"] for claim in covered["verified_claims"]}
+
+
+def test_ocr_metric_value_cleanup_keeps_numeric_tail_safety():
+    assert CreationService._normalize_ocr_metric_value_line("32.07亿 亿旦") == "32.07亿"
+    assert CreationService._normalize_ocr_metric_value_line("39.11亿亿") == "39.11亿"
+    assert (
+        CreationService._normalize_ocr_metric_value_line("10,919.04亿1z")
+        == "10,919.04亿1z"
+    )
+
+
+@pytest.mark.asyncio
+async def test_long_screenshot_uses_adaptive_tiles_to_recover_requested_metrics():
+    from PIL import Image
+    from ocr.backends.base import OcrBox, OcrOutput
+
+    image_buffer = io.BytesIO()
+    Image.new("RGB", (1000, 3000), "white").save(image_buffer, format="JPEG")
+
+    class ShapeAwareOcrEngine:
+        def process(self, image_path):
+            with Image.open(image_path) as image:
+                if image.height >= 2500:
+                    return OcrOutput(
+                        boxes=[OcrBox(text="运营看板", confidence=0.3)]
+                    )
+            lines = [
+                "私有环境输入Tokens",
+                "2026-08-13至2026-08-13",
+                "128.5亿 亿",
+                "共享环境输出Tokens",
+                "2026-08-13至2026-08-13",
+                "0",
+                "共享环境输出Tokens",
+                "2026-08-13至2026-08-13",
+                "12.6亿 亿回",
+            ]
+            return OcrOutput(
+                boxes=[
+                    OcrBox(
+                        text=line,
+                        confidence=0.9,
+                        bbox=[
+                            [0.1, index * 0.08],
+                            [0.8, index * 0.08],
+                            [0.8, index * 0.08 + 0.04],
+                            [0.1, index * 0.08 + 0.04],
+                        ],
+                    )
+                    for index, line in enumerate(lines)
+                ]
+            )
+
+    class FakeResponse:
+        def __init__(self, *, content=b"", payload=None, success=True):
+            self.content = content
+            self._payload = payload or {}
+            self.is_success = success
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        async def get(self, _url):
+            return FakeResponse(content=image_buffer.getvalue())
+
+        async def post(self, _url, json):
+            return FakeResponse(
+                payload={
+                    **payload["evidence"],
+                    "validation_status": json["status"],
+                    "validation": json["validation"],
+                }
+            )
+
+    requested = ["私有环境输入Token", "共享环境输出Token"]
+    payload = {
+        "title": "通用运营看板",
+        "url": "https://bi.example.com/dashboard",
+        "collected_at": 1770000000000,
+        "content_text": "",
+        "structured_data": {},
+        "evidence": {
+            "id": "evidence-adaptive-ocr",
+            "page_title": "通用运营看板",
+            "source_url": "https://bi.example.com/dashboard",
+            "captured_at": 1770000000000,
+            "image_url": "/api/creation/evidence/evidence-adaptive-ocr/image",
+            "width": 1000,
+            "height": 3000,
+        },
+    }
+    service = CreationService(model="test", enable_vector_recall=False)
+    service._ocr_engine = ShapeAwareOcrEngine()
+
+    result = await service._validate_scrape_evidence(
+        FakeClient(),
+        payload,
+        require_metric=True,
+        required_metrics=requested,
+        expected_period={"start": "2026-08-10", "end": "2026-08-16"},
+    )
+
+    validation = result["validation"]
+    assert result["validation_status"] == "verified"
+    assert validation["ocr_strategy"] == "adaptive_tiles"
+    assert validation["ocr_tile_count"] > 1
+    assert validation["required_metric_coverage"] == 1.0
+    assert [claim["value"] for claim in validation["verified_claims"]] == [
+        "128.5亿",
+        "12.6亿",
+    ]
 
 
 def test_canvas_dashboard_still_loading_is_not_promoted_by_ocr():
@@ -1126,10 +1461,153 @@ def test_evidence_display_crop_focuses_on_verified_claim_region():
     assert crop["height"] < 800
 
 
+def test_evidence_display_crop_uses_final_ocr_coordinates_for_stitched_page():
+    crop = CreationService._derive_evidence_display_crop(
+        {"structured_data": {"scroll_capture": {"aggregated": True}}},
+        {"width": 1200, "height": 5000},
+        {
+            "verified_claims": [
+                {
+                    "claim_type": "metric",
+                    "label": "输入 Token 用量",
+                    "value": "128亿",
+                }
+            ]
+        },
+        [
+            SimpleNamespace(
+                text="输入 Token 用量 128亿",
+                bbox=[[180, 2100], [760, 2100], [760, 2200], [180, 2200]],
+            )
+        ],
+    )
+
+    assert crop is not None
+    assert crop["y"] < 2100
+    assert crop["height"] < 5000
+
+
+def test_evidence_display_crop_ignores_short_label_fragments_elsewhere():
+    crop = CreationService._derive_evidence_display_crop(
+        {"structured_data": {"scroll_capture": {"aggregated": True}}},
+        {"width": 1200, "height": 5000},
+        {
+            "verified_claims": [
+                {
+                    "claim_type": "metric",
+                    "label": "共享环境输出Tokens",
+                    "value": "12.6亿",
+                }
+            ]
+        },
+        [
+            SimpleNamespace(
+                text="共享环境输出Tokens",
+                bbox=[[0.2, 0.3], [0.5, 0.3], [0.5, 0.33], [0.2, 0.33]],
+            ),
+            SimpleNamespace(
+                text="12.6亿",
+                bbox=[[0.2, 0.34], [0.4, 0.34], [0.4, 0.38], [0.2, 0.38]],
+            ),
+            SimpleNamespace(
+                text="Token",
+                bbox=[[0.2, 0.9], [0.4, 0.9], [0.4, 0.93], [0.2, 0.93]],
+            ),
+        ],
+    )
+
+    assert crop is not None
+    assert crop["y"] < 1500
+    assert crop["height"] < 1000
+
+
+def test_evidence_display_crop_excludes_distant_duplicate_value_from_chart():
+    claims = [
+        {"claim_type": "metric", "label": "类别甲输入量", "value": "109.04亿"},
+        {"claim_type": "metric", "label": "类别甲输出量", "value": "10亿"},
+        {"claim_type": "metric", "label": "类别乙输入量", "value": "39.11亿"},
+    ]
+    crop = CreationService._derive_evidence_display_crop(
+        {"structured_data": {"scroll_capture": {"aggregated": True}}},
+        {"width": 2400, "height": 8740},
+        {"verified_claims": claims},
+        [
+            # 趋势图纵轴碰巧与指标值相同，不应拉高最终裁剪框。
+            SimpleNamespace(text="10亿", bbox=[[1326, 1765], [1382, 1793]]),
+            SimpleNamespace(text="类别甲输入量", bbox=[[94, 2817], [356, 2848]]),
+            SimpleNamespace(text="109.04亿", bbox=[[94, 2897], [387, 2954]]),
+            SimpleNamespace(text="类别甲输出量", bbox=[[509, 2848], [771, 2876]]),
+            SimpleNamespace(text="10亿", bbox=[[2093, 2933], [2246, 2985]]),
+            SimpleNamespace(text="类别乙输入量", bbox=[[1678, 2817], [1943, 2848]]),
+            SimpleNamespace(text="39.11亿", bbox=[[1678, 2898], [1887, 2950]]),
+        ],
+    )
+
+    assert crop is not None
+    assert crop["y"] > 2600
+    assert crop["height"] < 500
+
+
+def test_evidence_display_crop_uses_dense_absolute_dom_region_for_long_page():
+    crop = CreationService._derive_evidence_display_crop(
+        {
+            "structured_data": {
+                "scroll_capture": {"aggregated": True},
+                "page_state": {
+                    "outer_width": 1200,
+                    "inner_width": 1200,
+                    "outer_height": 740,
+                    "inner_height": 619,
+                    "scroll_height": 2680,
+                },
+                "evidence_regions": [
+                    {
+                        "x": 252,
+                        "document_y": 101,
+                        "width": 916,
+                        "height": 244,
+                        "text": (
+                            "在用项目数 102 总容量 1803.59 "
+                            "年化成本 12178.4万元 平均 ROI 39.86x"
+                        ),
+                    },
+                    {
+                        "x": 252,
+                        "document_y": 900,
+                        "width": 916,
+                        "height": 180,
+                        "text": "项目甲 119.42 806.4万元 0.00x",
+                    },
+                ],
+            }
+        },
+        {"width": 2400, "height": 5602},
+        {
+            "verified_claims": [
+                {"label": "在用项目数", "value": "102"},
+                {"label": "总容量", "value": "1803.59"},
+                {"label": "年化成本", "value": "12178.4万元"},
+                {"label": "平均 ROI", "value": "39.86x"},
+                {"label": "项目甲", "value": "119.42"},
+                {"label": "项目甲", "value": "806.4万元"},
+                {"label": "项目甲", "value": "0.00x"},
+            ],
+            "matched_requested_metrics": [],
+        },
+        [],
+    )
+
+    assert crop is not None
+    assert crop["y"] < 600
+    assert crop["height"] < 800
+    assert crop["width"] > 1600
+
+
 def test_generated_week_placeholder_is_corrected_and_metric_placeholder_removed():
     document = (
         "# 周报\n\n本周（2025年第X周）完成两项优化。\n\n"
         "| 指标 | 数值 |\n| --- | --- |\n| 独立部署输入Token | 数据未明确区分 |\n"
+        "| 商业模型输出Token | 数据未获取 |\n"
     )
     requirement = {
         "time_context": CreationService._relative_time_context(
@@ -1146,6 +1624,7 @@ def test_generated_week_placeholder_is_corrected_and_metric_placeholder_removed(
     assert "2026年第33周（2026-08-10 至 2026-08-16）" in updated
     assert "2025年第X周" not in updated
     assert "数据未明确区分" not in updated
+    assert "数据未获取" not in updated
     assert {item["kind"] for item in audit} == {
         "relative_time_corrected",
         "unsupported_placeholder_removed",
@@ -1240,8 +1719,8 @@ def test_harness_uses_data_search_feedback_to_choose_the_next_capability():
         {"id": "data_search"},
         status="completed",
     )
-    assert decision["scheduled"] == ["webpage_scrape"]
-    assert fresh_snapshot.plan[fresh_snapshot.cursor]["id"] == "webpage_scrape"
+    assert decision["scheduled"] == []
+    assert decision["reason_code"] == "source_metadata_only"
 
     no_data = state_with([])
     decision = loop._replan_after_feedback(
@@ -1969,6 +2448,102 @@ def test_skill_step_prompt_consumes_harness_tool_result_without_meta_evidence():
     assert "'tool_id': 'memory_search'" in user
     assert "'status': 'completed'" in user
     assert "本周会议纪要" in user
+
+
+def test_skill_step_prompt_uses_scoped_bounded_fact_view_for_large_dashboard_payloads():
+    loop = CreationAgentLoop(FakeCreationService())
+    state = loop._new_state(
+        user_message="请按已安装 Skill 生成本周报表摘要",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        selected_skills=[],
+        options=CreationOptions(),
+        model_mode="local",
+        session_id="session-bounded-dashboard",
+        run_id="run-bounded-dashboard",
+    )
+    previous_result = {
+        "source_id": 1,
+        "title": "上一步骤的大型报表",
+        "source_kind": "report_url",
+        "can_use": True,
+        "structured_data": {"dom_content_text": "x" * 600000},
+    }
+    current_result = {
+        "source_id": 2,
+        "title": "当前步骤的实时报表",
+        "source_kind": "report_url",
+        "source_url": "https://bi.example.com/current",
+        "can_use": True,
+        "refresh_required": False,
+        "structured_data": {
+            "validation": "requested_metrics_verified",
+            "verified_claims": [
+                {
+                    "claim_type": "metric",
+                    "label": "当前请求指标",
+                    "value": "123.45亿",
+                    "statement": "当前请求指标 123.45亿",
+                }
+            ],
+            "dom_content_text": "y" * 600000,
+            "evidence_regions": [{"text": "z" * 10000}],
+        },
+        "history": [
+            {"content_text": "历史阶段 100亿", "structured_data": {}}
+        ],
+    }
+    state.environment["data_results"] = [previous_result, current_result]
+    state.environment["current_data_results"] = [current_result]
+    state.environment["webpage_scrapes"] = [
+        {
+            "source_id": 2,
+            "status": "completed",
+            "title": "当前步骤的实时报表",
+            "evidence": {
+                "id": "evidence-current",
+                "validation_status": "verified",
+                "validation": {
+                    "reason": "requested_metrics_verified",
+                    "verified_claims": [
+                        {"statement": "duplicate" * 100000}
+                    ],
+                },
+            },
+        }
+    ]
+    state.environment["references"] = [
+        {
+            "id": index,
+            "title": f"参考 {index}",
+            "content": "r" * 5000,
+        }
+        for index in range(30)
+    ]
+    step = {
+        "id": "creation_main_agent:metrics",
+        "name": "创作 Agent · 实时指标",
+        "action": "skill_step",
+        "skill_id": "weekly-report",
+        "skill_step_id": "metrics",
+        "skill_step_title": "实时指标",
+        "skill_step_objective": "使用当前页面中已校验的指标",
+        "skill_step_output": "指标表格",
+        "skill_step_skills": [],
+    }
+
+    _, user = loop._model_prompts(state, step)
+
+    assert len(user) < 65000
+    assert "当前步骤的实时报表" in user
+    assert "当前请求指标" in user
+    assert "123.45亿" in user
+    assert "上一步骤的大型报表" not in user
+    assert "x" * 1000 not in user
+    assert "y" * 1000 not in user
+    assert "duplicate" * 100 not in user
+    assert len(state.environment["data_results"][0]["structured_data"]["dom_content_text"]) == 600000
 
 
 def test_skill_workflow_reuses_resources_and_executes_logic_only_step():

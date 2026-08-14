@@ -16,6 +16,7 @@ export interface MemoryGraphNode {
   sourceMemoryIds: string[]
   sourceCaptureIds: string[]
   heatScore: number
+  createdAtMs: number
   updatedAtMs: number
 }
 
@@ -139,6 +140,7 @@ const toNodes = (assets: MemoryGraphAssets): MemoryGraphNode[] => {
       ...(item.captureId ? [item.captureId] : []),
     ]),
     heatScore: Math.max(0, item.occurrenceCount),
+    createdAtMs: item.createdAtMs,
     updatedAtMs: item.updatedAtMs || item.createdAtMs,
   }))
 
@@ -156,6 +158,7 @@ const toNodes = (assets: MemoryGraphAssets): MemoryGraphNode[] => {
     sourceMemoryIds: unique([...item.sourceMemoryIds, ...item.sourceEpisodeIds]),
     sourceCaptureIds: unique(item.sourceCaptureIds),
     heatScore: Math.max(0, item.usageCount),
+    createdAtMs: item.createdAtMs || timestampFromText(item.createdAt),
     updatedAtMs: timestampFromText(item.updatedAt) || item.createdAtMs || 0,
   }))
 
@@ -169,6 +172,7 @@ const toNodes = (assets: MemoryGraphAssets): MemoryGraphNode[] => {
     sourceMemoryIds: item.sourceTimelineId ? [item.sourceTimelineId] : [],
     sourceCaptureIds: item.sourceCaptureId ? [item.sourceCaptureId] : [],
     heatScore: 0,
+    createdAtMs: item.createdAtMs || timestampFromText(item.createdAt),
     updatedAtMs: item.updatedAtMs || item.createdAtMs || timestampFromText(item.updatedAt),
   }))
 
@@ -184,6 +188,7 @@ const toNodes = (assets: MemoryGraphAssets): MemoryGraphNode[] => {
       sourceMemoryIds: unique((item.latest_snapshot?.source_timeline_ids ?? []).map(String)),
       sourceCaptureIds: unique((item.latest_snapshot?.source_capture_ids ?? []).map(String)),
       heatScore: 0,
+      createdAtMs: item.created_at ?? item.first_seen_at,
       updatedAtMs: item.latest_snapshot?.observed_at
         ?? item.latest_snapshot?.collected_at
         ?? item.created_at
@@ -382,6 +387,34 @@ export const buildMemoryGraph = (assets: MemoryGraphAssets): MemoryGraphData => 
     edges,
     graphVersion: stableHash(signature),
     eligibleNodeCount,
+  }
+}
+
+export const scopeMemoryGraphToDateRange = (
+  graph: MemoryGraphData,
+  range: { fromMs: number; toMs: number },
+): MemoryGraphData => {
+  const seedNodeIds = new Set(graph.nodes
+    .filter(node => node.createdAtMs >= range.fromMs && node.createdAtMs <= range.toMs)
+    .map(node => node.id))
+  const includedNodeIds = new Set(seedNodeIds)
+
+  graph.edges.forEach(edge => {
+    if (seedNodeIds.has(edge.source) || seedNodeIds.has(edge.target)) {
+      includedNodeIds.add(edge.source)
+      includedNodeIds.add(edge.target)
+    }
+  })
+
+  const nodes = graph.nodes.filter(node => includedNodeIds.has(node.id))
+  const edges = graph.edges.filter(edge => (
+    includedNodeIds.has(edge.source) && includedNodeIds.has(edge.target)
+  ))
+  return {
+    ...graph,
+    nodes,
+    edges,
+    eligibleNodeCount: nodes.length,
   }
 }
 

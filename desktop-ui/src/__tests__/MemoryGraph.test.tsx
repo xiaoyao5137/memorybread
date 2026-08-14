@@ -4,6 +4,7 @@ import BakeMemoryGraph, { getMemoryGraphWheelScale } from '../components/bake/Ba
 import {
   buildMemoryGraph,
   createMemoryGraphLayout,
+  scopeMemoryGraphToDateRange,
   sliceMemoryGraph,
   type MemoryGraphAssets,
 } from '../components/bake/memoryGraph'
@@ -186,6 +187,45 @@ describe('memoryGraph', () => {
     const slice = sliceMemoryGraph(graph, { maxNodes: 1, preferHeat: true })
     expect(slice.nodes.map(node => node.id)).toEqual(['knowledge:hot'])
   })
+
+  it('日期范围以今日节点为起点，并保留一跳关联的历史节点', () => {
+    const todayStart = 1_000
+    const graph = buildMemoryGraph(assets({
+      knowledge: [knowledge({ createdAtMs: todayStart + 10 })],
+      documents: [document({
+        id: 'historical-related',
+        title: '历史关联文档',
+        createdAtMs: todayStart - 100,
+        linkedKnowledgeIds: ['k1'],
+      })],
+      operations: [operation({
+        id: 'historical-unrelated',
+        extractedProblem: '历史无关操作',
+        triggerKeywords: ['完全不同'],
+        steps: ['处理其他事项'],
+        createdAtMs: todayStart - 100,
+      })],
+      data: [],
+    }))
+
+    const scoped = scopeMemoryGraphToDateRange(graph, {
+      fromMs: todayStart,
+      toMs: todayStart + 999,
+    })
+
+    expect(scoped.nodes.map(node => node.id)).toEqual(expect.arrayContaining([
+      'knowledge:k1',
+      'document:historical-related',
+    ]))
+    expect(scoped.nodes.map(node => node.id)).not.toContain('operation:historical-unrelated')
+    expect(scoped.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: 'document:historical-related',
+        target: 'knowledge:k1',
+        relationType: 'references',
+      }),
+    ]))
+  })
 })
 
 describe('BakeMemoryGraph', () => {
@@ -250,6 +290,35 @@ describe('BakeMemoryGraph', () => {
 
     await waitFor(() => expect(onSearchAssets).toHaveBeenCalledWith('历史预算'))
     expect(await screen.findByRole('button', { name: /知识：历史预算规则/ })).toHaveClass('bake-memory-graph__node--search-match')
+  })
+
+  it('总览默认展示今日节点及其历史关联节点', () => {
+    render(<BakeMemoryGraph
+      assets={assets({
+        knowledge: [knowledge({ createdAtMs: 1_100 })],
+        documents: [document({
+          id: 'historical-related',
+          title: '历史关联文档',
+          createdAtMs: 900,
+          linkedKnowledgeIds: ['k1'],
+        })],
+        operations: [operation({
+          id: 'historical-unrelated',
+          extractedProblem: '历史无关操作',
+          triggerKeywords: ['完全不同'],
+          steps: ['处理其他事项'],
+          createdAtMs: 900,
+        })],
+        data: [],
+      })}
+      defaultDateRange={{ fromMs: 1_000, toMs: 1_999 }}
+      defaultScopeLabel="今日"
+    />)
+
+    expect(screen.getByText('今日展示 2/2')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /知识：GPU 利用率口径/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /文档：历史关联文档/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /操作：历史无关操作/ })).not.toBeInTheDocument()
   })
 
   it('滚轮缩放使用更高灵敏度', () => {
