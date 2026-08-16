@@ -119,9 +119,9 @@ const App: React.FC = () => {
   const [accountNavigation, setAccountNavigation] = useState<AccountNavigationRequest | null>(null)
   const [softwareUpdate, setSoftwareUpdate] = useState<SoftwareUpdateCheck | null>(null)
   const [softwareUpdateNoticeOpen, setSoftwareUpdateNoticeOpen] = useState(false)
-  // v2 完成标记只会在全量质检与冒烟测试通过后写入。已完成用户启动时
-  // 直接放行主界面，再在后台核验 sidecar，避免 DMG 冷启动被本地服务就绪时间阻塞。
-  const [initializationValidated, setInitializationValidated] = useState(hasCompletedSetup)
+  // 首次启动时，即使已完成初始化，也需要先确认 sidecar 可用才能进入主界面。
+  // 这确保 DMG 冷启动时用户在引导界面等待，而不是在业务界面看到"AI 能力尚未就绪"。
+  const [initializationValidated, setInitializationValidated] = useState(false)
 
   const showOnboarding = !initializationValidated || !hasCompletedSetup
   const activeAchievementCelebration = achievementCelebrations[0] ?? null

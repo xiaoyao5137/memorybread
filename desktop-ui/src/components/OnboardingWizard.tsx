@@ -13,8 +13,8 @@ import { useConfirmDialog } from './useConfirmDialog'
 import './OnboardingWizard.css'
 
 const STATUS_POLL_MS = 1_000
-const SIDECAR_RETRY_MS = 1_500
-const MAX_SIDECAR_RETRIES = 12
+const SIDECAR_RETRY_MS = 3_000  // DMG 冷启动需要更长时间
+const MAX_SIDECAR_RETRIES = 120  // 6 分钟重试窗口（3秒 × 120 = 360秒）
 const ESTIMATED_INITIALIZATION_MS = 20 * 60 * 1_000
 const MAX_ESTIMATED_REMAINING_MS = 30 * 60 * 1_000
 
@@ -109,6 +109,7 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
   const [leavingSandbox, setLeavingSandbox] = useState(false)
   const [sandboxExitConfirming, setSandboxExitConfirming] = useState(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
+  const [retryAttempts, setRetryAttempts] = useState(0)
   const completedRunRef = useRef<string | null>(null)
   const previousStateRef = useRef<string | null>(null)
 
@@ -120,7 +121,10 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
     onStatusValidated?.(ready)
     if (ready) {
       setHasCompletedSetup(true)
-      if (previousStateRef.current === 'running') setWindowMode('rag')
+      // 初始化完成后自动进入咨询页面（无论是刚完成还是已经完成的用户）
+      if (previousStateRef.current === 'running' || previousStateRef.current === null) {
+        setWindowMode('rag')
+      }
     } else if (next.test_mode_enabled || next.state !== 'completed') {
       setHasCompletedSetup(false)
     }
@@ -146,9 +150,11 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
         if (cancelled) return
         applyStatus(next)
         attempts = 0
+        setRetryAttempts(0)
       } catch (error) {
         if (cancelled) return
         attempts += 1
+        setRetryAttempts(attempts)
         const errorCode = error && typeof error === 'object' && 'code' in error
           ? String(error.code || '')
           : ''
@@ -266,6 +272,7 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
   const retryConnection = () => {
     setConnecting(true)
     setConnectionError('')
+    setRetryAttempts(0)
     void fetchInitializationStatus().then(applyStatus).catch(error => {
       setConnecting(false)
       setConnectionError(error instanceof Error ? error.message : '本地初始化服务暂时不可用')
@@ -356,7 +363,14 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
             {connecting && (
               <div className="initialization-connection" role="status">
                 <span className="connection-pulse" aria-hidden />
-                正在连接本地初始化服务…
+                {retryAttempts === 0
+                  ? '正在启动本地 AI 服务…'
+                  : retryAttempts < 20
+                    ? '本地 AI 服务首次启动需要 1-2 分钟，请稍候…'
+                    : retryAttempts < 60
+                      ? '仍在启动中，通常在 3 分钟内完成…'
+                      : '启动时间较长，可能需要 5 分钟，请耐心等待…'
+                }
               </div>
             )}
             {connectionError && (
