@@ -119,8 +119,15 @@ prepare_python_helper() {
   "$python_bin" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 9) else 1)' \
     || fail "macOS 发布构建必须使用 Python 3.9，当前为 $($python_bin --version 2>&1)"
 
+  # 确保运行时依赖已安装（PyInstaller 会打包当前环境的所有依赖）
+  echo "[macOS build] 检查运行时依赖..."
+  if ! "$python_bin" -c 'import requests' >/dev/null 2>&1; then
+    echo "[macOS build] 安装运行时依赖（requirements.txt）..."
+    "$python_bin" -m pip install -r "$SIDECAR_DIR/requirements.txt"
+  fi
+
   if ! "$python_bin" -c 'import PyInstaller' >/dev/null 2>&1; then
-    echo "[macOS build] 安装隔离的 PyInstaller 构建依赖..."
+    echo "[macOS build] 安装 PyInstaller 构建依赖..."
     "$python_bin" -m pip install -r "$SIDECAR_DIR/requirements-build.txt"
   fi
 
@@ -195,6 +202,12 @@ prepare_python_helper() {
 
   # Explicitly include rag.llm submodules (PyInstaller sometimes misses them)
   for module in rag.llm rag.llm.base rag.llm.ollama rag.llm.openai_compat rag.llm.cloud; do
+    hidden_args+=(--hidden-import "$module")
+  done
+
+  # Explicitly include third-party runtime dependencies that use lazy imports
+  # (PyInstaller's static analysis can't detect imports inside functions)
+  for module in requests urllib3 certifi charset_normalizer idna; do
     hidden_args+=(--hidden-import "$module")
   done
 
