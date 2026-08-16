@@ -3863,62 +3863,35 @@ fn sop_eligibility(candidate: &BakeMemorySourceRecord) -> SopEligibility {
         };
     }
 
-    let direct_ids = candidate
+    let evidence_ids = candidate
         .action_trace
         .iter()
-        .filter(|record| record.operation_evidence)
+        .filter(|record| matches!(record.evidence_role.as_deref(), Some("action" | "result")))
         .map(|record| record.capture_id)
         .collect::<HashSet<_>>();
-    let has_direct_action = candidate.action_trace.iter().any(|record| {
-        if !record.operation_evidence {
-            return false;
-        }
-        matches!(
-            record.evidence_kind.as_deref(),
-            Some("interaction") | Some("input")
-        ) || matches!(record.event_type.as_str(), "mouse_click" | "key_pause")
+    let action_records = candidate
+        .action_trace
+        .iter()
+        .filter(|record| record.evidence_role.as_deref() == Some("action"))
+        .collect::<Vec<_>>();
+    let result_records = candidate
+        .action_trace
+        .iter()
+        .filter(|record| record.evidence_role.as_deref() == Some("result"))
+        .collect::<Vec<_>>();
+    let has_attributed_result = result_records.iter().any(|result| {
+        action_records.iter().any(|action| {
+            result.ts >= action.ts
+                && result.ts.saturating_sub(action.ts) <= 120_000
+                && result.capture_id != action.capture_id
+        })
     });
-    let direct_result_markers = [
-        "测试通过",
-        "验证通过",
-        "已完成",
-        "完成校验",
-        "生成成功",
-        "发布成功",
-        "失败",
-        "tests passed",
-        "test passed",
-        "verified",
-        "completed",
-        "failed",
-    ];
-    let has_observable_result = candidate.action_trace.iter().any(|record| {
-        let result_text = [
-            record.visible_text.as_deref(),
-            record.input_text.as_deref(),
-            record.audio_text.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("\n")
-        .to_ascii_lowercase();
-        record.operation_evidence
-            && (record
-                .state_delta
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
-                || record.evidence_kind.as_deref() == Some("state_change")
-                || direct_result_markers
-                    .iter()
-                    .any(|marker| result_text.contains(marker)))
-    });
-    if direct_ids.len() >= 2 && has_direct_action && has_observable_result {
+    if evidence_ids.len() >= 2 && !action_records.is_empty() && has_attributed_result {
         return SopEligibility {
             eligible: true,
-            reason: "eligible_direct_interaction",
+            reason: "eligible_direct_action_result",
             mode: Some(SopEvidenceMode::DirectInteraction),
-            effective_capture_count: direct_ids.len() as i64,
+            effective_capture_count: evidence_ids.len() as i64,
         };
     }
 
@@ -3996,20 +3969,47 @@ fn sop_eligibility(candidate: &BakeMemorySourceRecord) -> SopEligibility {
             .any(|marker| semantic_text.contains(marker))
             && !has_verification
             && !completed_work);
-    if execution_surface && has_execution && (has_verification || completed_work) && !plan_only {
+    if execution_surface
+        && has_execution
+        && (has_verification || completed_work)
+        && !plan_only
+        && !action_records.is_empty()
+        && has_attributed_result
+    {
         return SopEligibility {
             eligible: true,
-            reason: "eligible_semantic_workflow",
+            reason: "eligible_semantic_workflow_with_action_anchor",
             mode: Some(SopEvidenceMode::SemanticWorkflow),
-            effective_capture_count: source_capture_count,
+            effective_capture_count: evidence_ids.len() as i64,
         };
     }
 
+    let passive_report_only = candidate.action_trace.iter().all(|record| {
+        record.evidence_role.as_deref() != Some("action")
+            && matches!(
+                record.event_type.as_str(),
+                "app_switch" | "browser_navigation" | "auto" | "key_pause" | "scroll"
+            )
+            && record
+                .input_text
+                .as_deref()
+                .map_or(true, |value| value.trim().is_empty())
+    });
+    let reason = if passive_report_only {
+        "passive_report_only"
+    } else if action_records.is_empty() {
+        "missing_real_action"
+    } else if !has_attributed_result {
+        "missing_attributed_result"
+    } else {
+        "insufficient_sop_evidence"
+    };
+
     SopEligibility {
         eligible: false,
-        reason: "insufficient_sop_evidence",
+        reason,
         mode: None,
-        effective_capture_count: direct_ids.len() as i64,
+        effective_capture_count: evidence_ids.len() as i64,
     }
 }
 
@@ -4209,9 +4209,7 @@ fn validate_bake_sop_evidence(
     let evidence_timestamps = candidate
         .action_trace
         .iter()
-        .filter(|record| {
-            evidence_mode == SopEvidenceMode::SemanticWorkflow || record.operation_evidence
-        })
+        .filter(|record| matches!(record.evidence_role.as_deref(), Some("action" | "result")))
         .map(|record| (record.capture_id.to_string(), record.ts))
         .collect::<HashMap<_, _>>();
     let mut evidence_by_step = HashMap::<i64, &BakeSopStepEvidencePayload>::new();
@@ -4649,6 +4647,18 @@ fn build_bake_sop_entry(
     } else {
         payload.linked_knowledge_ids.clone()
     };
+    let action_capture_ids = source
+        .action_trace
+        .iter()
+        .filter(|record| record.evidence_role.as_deref() == Some("action"))
+        .map(|record| record.capture_id.to_string())
+        .collect::<Vec<_>>();
+    let result_capture_ids = source
+        .action_trace
+        .iter()
+        .filter(|record| record.evidence_role.as_deref() == Some("result"))
+        .map(|record| record.capture_id.to_string())
+        .collect::<Vec<_>>();
     let source_capture_id_set = source_capture_ids.iter().cloned().collect::<HashSet<_>>();
     let step_evidence = payload
         .steps
@@ -4696,7 +4706,10 @@ fn build_bake_sop_entry(
         "steps": payload.steps,
         "step_evidence": step_evidence,
         "step_evidence_mode": "model_aligned",
+        "sop_evidence_contract": "sop-evidence.v2",
         "sop_evidence_mode": sop_eligibility(source).mode.map(SopEvidenceMode::as_str),
+        "action_capture_ids": action_capture_ids,
+        "result_capture_ids": result_capture_ids,
         "linked_knowledge_ids": linked_knowledge_ids,
         "status": review_status,
     });
@@ -7138,7 +7151,16 @@ mod tests {
                 ax_focused_role: Some("AXButton".to_string()),
                 ax_focused_id: Some(format!("step-{}", index + 1)),
                 state_delta: (index > 0).then(|| format!("visible→操作证据 {}", index + 1)),
-                evidence_kind: Some("interaction".to_string()),
+                evidence_kind: Some(if index == 0 { "input" } else { "state_change" }.to_string()),
+                evidence_role: Some(if index == 0 { "action" } else { "result" }.to_string()),
+                evidence_reason: Some(
+                    if index == 0 {
+                        "explicit_input"
+                    } else {
+                        "observable_state_result"
+                    }
+                    .to_string(),
+                ),
                 operation_evidence: true,
             })
             .collect()
@@ -7173,6 +7195,8 @@ mod tests {
                 ax_focused_id: Some("editor".to_string()),
                 state_delta: None,
                 evidence_kind: Some("interaction".to_string()),
+                evidence_role: Some("action".to_string()),
+                evidence_reason: Some("focused_control_interaction".to_string()),
                 operation_evidence: true,
             },
             BakeActionTraceRecord {
@@ -7189,7 +7213,9 @@ mod tests {
                 ax_focused_role: Some("AXTextField".to_string()),
                 ax_focused_id: Some("terminal".to_string()),
                 state_delta: Some("window:Code→Terminal; visible→验证通过".to_string()),
-                evidence_kind: Some("input".to_string()),
+                evidence_kind: Some("state_change".to_string()),
+                evidence_role: Some("result".to_string()),
+                evidence_reason: Some("observable_state_result".to_string()),
                 operation_evidence: true,
             },
         ];
@@ -7219,6 +7245,8 @@ mod tests {
         candidate.action_trace = operation_trace(&[first, second, third]);
         candidate.action_trace[2].operation_evidence = false;
         candidate.action_trace[2].evidence_kind = Some("context".to_string());
+        candidate.action_trace[2].evidence_role = Some("context".to_string());
+        candidate.action_trace[2].evidence_reason = Some("passive_context".to_string());
 
         let audit = new_bake_candidate_audit(1, &candidate, "queued", None);
 
@@ -7226,7 +7254,7 @@ mod tests {
         assert!(audit.sop_eligible);
         assert_eq!(
             audit.sop_eligibility_reason.as_deref(),
-            Some("eligible_direct_interaction")
+            Some("eligible_direct_action_result")
         );
         assert_eq!(
             audit.sop_evidence_mode.as_deref(),
@@ -7246,17 +7274,55 @@ mod tests {
         for record in &mut candidate.action_trace {
             record.event_type = "browser_navigation".to_string();
             record.evidence_kind = Some("navigation".to_string());
+            record.evidence_role = Some("context".to_string());
+            record.evidence_reason = Some("navigation_only".to_string());
+            record.operation_evidence = false;
         }
 
         let eligibility = sop_eligibility(&candidate);
 
         assert!(!eligibility.eligible);
-        assert_eq!(eligibility.reason, "insufficient_sop_evidence");
+        assert_eq!(eligibility.reason, "passive_report_only");
         assert!(eligibility.mode.is_none());
     }
 
     #[test]
-    fn test_sop_eligibility_uses_semantic_workflow_for_execution_and_verification() {
+    fn test_sop_eligibility_rejects_passive_agent_report_like_id_930() {
+        let service = make_service();
+        let first = seed_capture(&service, 1_710_000_000_000, "MyFlicker", "WorkBuddy");
+        let second = seed_capture(&service, 1_710_000_001_000, "MyFlicker", "WorkBuddy");
+        let third = seed_capture(&service, 1_710_000_002_000, "MyFlicker", "WorkBuddy");
+        let timeline_id = seed_knowledge(&service, "coding", first, 4, 1);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.timeline.capture_ids = Some(format!("[{first},{second},{third}]"));
+        candidate.timeline.activity_type = Some("coding".to_string());
+        candidate.timeline.summary = "Agent 汇报已修改代码并且测试通过".to_string();
+        candidate.work_status = Some("completed".to_string());
+        candidate.work_progress = Some("执行完成，Lint 检查通过".to_string());
+        candidate.action_trace = operation_trace(&[first, second, third]);
+        for (record, event_type) in candidate
+            .action_trace
+            .iter_mut()
+            .zip(["app_switch", "key_pause", "auto"])
+        {
+            record.event_type = event_type.to_string();
+            record.input_text = None;
+            record.evidence_kind = Some("context".to_string());
+            record.evidence_role = Some("context".to_string());
+            record.evidence_reason = Some("agent_report_surface".to_string());
+            record.operation_evidence = false;
+        }
+
+        let eligibility = sop_eligibility(&candidate);
+
+        assert!(!eligibility.eligible);
+        assert_eq!(eligibility.reason, "passive_report_only");
+        assert!(eligibility.mode.is_none());
+        assert_eq!(eligibility.effective_capture_count, 0);
+    }
+
+    #[test]
+    fn test_sop_eligibility_rejects_semantic_workflow_without_action_anchor() {
         let service = make_service();
         let first = seed_capture(&service, 1_710_000_000_000, "Code", "修复实现");
         let second = seed_capture(&service, 1_710_000_001_000, "Terminal", "测试通过");
@@ -7273,14 +7339,16 @@ mod tests {
         for record in &mut candidate.action_trace {
             record.operation_evidence = false;
             record.evidence_kind = Some("context".to_string());
+            record.evidence_role = Some("context".to_string());
+            record.evidence_reason = Some("passive_context".to_string());
         }
 
         let eligibility = sop_eligibility(&candidate);
 
-        assert!(eligibility.eligible);
-        assert_eq!(eligibility.reason, "eligible_semantic_workflow");
-        assert_eq!(eligibility.mode, Some(SopEvidenceMode::SemanticWorkflow));
-        assert_eq!(eligibility.effective_capture_count, 2);
+        assert!(!eligibility.eligible);
+        assert_eq!(eligibility.reason, "missing_real_action");
+        assert_eq!(eligibility.mode, None);
+        assert_eq!(eligibility.effective_capture_count, 0);
     }
 
     #[test]

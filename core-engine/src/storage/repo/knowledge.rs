@@ -1449,6 +1449,8 @@ fn load_member_action_trace(
             ax_focused_id: truncate_optional_text(row.get(12)?, ACTION_TRACE_FOCUSED_ID_CHARS),
             state_delta: None,
             evidence_kind: None,
+            evidence_role: None,
+            evidence_reason: None,
             operation_evidence: false,
         })
     })?;
@@ -1463,6 +1465,7 @@ fn annotate_and_compact_action_trace(
 ) -> Vec<BakeActionTraceRecord> {
     let mut annotated = Vec::with_capacity(records.len());
     let mut previous: Option<BakeActionTraceRecord> = None;
+    let mut last_action: Option<BakeActionTraceRecord> = None;
 
     for mut record in records {
         let state_delta = previous
@@ -1474,17 +1477,46 @@ fn annotate_and_compact_action_trace(
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty());
         let has_focus = record.ax_focused_role.is_some() || record.ax_focused_id.is_some();
-        let (evidence_kind, operation_evidence) = match record.event_type.as_str() {
-            "mouse_click" => ("interaction", true),
-            "browser_navigation" | "app_switch" => ("navigation", true),
-            "key_pause" if has_input || has_focus || state_changed => ("input", true),
-            "manual" if has_input || has_focus || state_changed => ("interaction", true),
-            "auto" if state_changed => ("state_change", true),
-            _ => ("context", false),
+        let is_interactive_focus = record
+            .ax_focused_role
+            .as_deref()
+            .is_some_and(is_interactive_ax_role);
+        let has_attributable_action = last_action.as_ref().is_some_and(|action| {
+            record.ts >= action.ts
+                && record.ts.saturating_sub(action.ts) <= 120_000
+                && action_contexts_compatible(action, &record)
+        });
+        let is_agent_report = is_agent_report_surface(&record);
+        let (evidence_kind, evidence_role, evidence_reason) = match record.event_type.as_str() {
+            "browser_navigation" | "app_switch" => {
+                ("navigation", "context", "navigation_only")
+            }
+            "key_pause" if has_input => ("input", "action", "explicit_input"),
+            "manual" if has_input => ("input", "action", "explicit_input"),
+            "mouse_click" if is_interactive_focus => {
+                ("interaction", "action", "focused_control_click")
+            }
+            "manual" if has_focus => ("interaction", "action", "focused_control_interaction"),
+            _ if state_changed && is_agent_report => {
+                ("context", "context", "agent_report_surface")
+            }
+            "auto" if state_changed && has_attributable_action => {
+                ("state_change", "result", "observable_state_result")
+            }
+            _ if state_changed && has_attributable_action => {
+                ("state_change", "result", "observable_state_result")
+            }
+            _ if state_changed => ("context", "context", "unattributed_state_change"),
+            _ => ("context", "context", "passive_context"),
         };
         record.state_delta = state_delta;
         record.evidence_kind = Some(evidence_kind.to_string());
-        record.operation_evidence = operation_evidence;
+        record.evidence_role = Some(evidence_role.to_string());
+        record.evidence_reason = Some(evidence_reason.to_string());
+        record.operation_evidence = matches!(evidence_role, "action" | "result");
+        if evidence_role == "action" {
+            last_action = Some(record.clone());
+        }
         previous = Some(record.clone());
 
         // 连续滚动只保留最后一帧；连续无变化的 auto/context 也只保留最后一帧。
@@ -1507,6 +1539,60 @@ fn annotate_and_compact_action_trace(
     }
 
     annotated
+}
+
+fn is_agent_report_surface(record: &BakeActionTraceRecord) -> bool {
+    let app = record.app_name.as_deref().unwrap_or_default().to_ascii_lowercase();
+    let title = record
+        .win_title
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    ["workbuddy", "chatgpt", "claude", "copilot chat", "agent chat"]
+        .iter()
+        .any(|marker| title.contains(marker))
+        || ["chatgpt", "claude"]
+            .iter()
+            .any(|marker| app.contains(marker))
+}
+
+fn is_interactive_ax_role(role: &str) -> bool {
+    let role = role.to_ascii_lowercase();
+    [
+        "button",
+        "checkbox",
+        "combobox",
+        "link",
+        "menuitem",
+        "radiobutton",
+        "slider",
+        "textfield",
+        "textarea",
+        "toggle",
+    ]
+    .iter()
+    .any(|marker| role.contains(marker))
+}
+
+fn action_contexts_compatible(
+    action: &BakeActionTraceRecord,
+    result: &BakeActionTraceRecord,
+) -> bool {
+    let same_app = action.app_name.as_deref().is_some_and(|app| {
+        result
+            .app_name
+            .as_deref()
+            .is_some_and(|other| app.eq_ignore_ascii_case(other))
+    });
+    let action_app = action.app_name.as_deref().unwrap_or_default().to_ascii_lowercase();
+    let result_app = result.app_name.as_deref().unwrap_or_default().to_ascii_lowercase();
+    let editor_terminal_pair = ["code", "cursor", "terminal", "iterm", "warp"]
+        .iter()
+        .any(|marker| action_app.contains(marker))
+        && ["code", "cursor", "terminal", "iterm", "warp"]
+            .iter()
+            .any(|marker| result_app.contains(marker));
+    same_app || editor_terminal_pair
 }
 
 fn build_action_state_delta(
@@ -3386,6 +3472,14 @@ mod tests {
             .action_trace
             .iter()
             .all(|item| item.operation_evidence));
+        assert_eq!(
+            candidate
+                .action_trace
+                .iter()
+                .map(|item| item.evidence_role.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("action"), Some("action"), Some("result")]
+        );
         assert!(candidate.action_trace[2]
             .state_delta
             .as_deref()
@@ -3410,6 +3504,8 @@ mod tests {
                 ax_focused_id: None,
                 state_delta: None,
                 evidence_kind: None,
+                evidence_role: None,
+                evidence_reason: None,
                 operation_evidence: false,
             })
             .collect();

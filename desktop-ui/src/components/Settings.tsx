@@ -21,6 +21,7 @@ import {
 import type { ConfigCheckItem, ConfigCheckStatus, PreferenceRecord } from '../types'
 import { toUserFacingError } from '../utils/userFacingError'
 import { useAppMetadata } from '../utils/appMetadata'
+import { reportCustomerLogs } from '../utils/customerLogReport'
 import { fetchSoftwareUpdate, requestSoftwareUpdate, type SoftwareUpdateCheck } from '../utils/softwareUpdate'
 import { useImeCompositionGuard } from '../hooks/useImeCompositionGuard'
 import InteractionSettings from './InteractionSettings'
@@ -53,6 +54,7 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
     debugModeEnabled,
     serviceEnvironment,
     currentUser,
+    authToken,
     setApiBaseUrl,
     setDebugModeEnabled,
     setServiceEnvironment,
@@ -76,6 +78,9 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
   const [configActionRunning, setConfigActionRunning] = useState<string | null>(null)
   const [softwareUpdate, setSoftwareUpdate] = useState<SoftwareUpdateCheck | null>(null)
   const [softwareUpdateChecking, setSoftwareUpdateChecking] = useState(false)
+  const [customerLogDescription, setCustomerLogDescription] = useState('')
+  const [customerLogReporting, setCustomerLogReporting] = useState(false)
+  const [customerLogMessage, setCustomerLogMessage] = useState<{ tone: 'success' | 'error'; text: string } | null>(null)
 
   const fetchPrefs = useFetchPreferences()
   const fetchConfigChecks = useFetchConfigChecks()
@@ -148,6 +153,32 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
       setSoftwareUpdateChecking(false)
     }
   }, [adminApiBaseUrl, appMetadata])
+
+  const handleReportCustomerLogs = useCallback(async () => {
+    setCustomerLogReporting(true)
+    setCustomerLogMessage(null)
+    try {
+      const receipt = await reportCustomerLogs({
+        adminApiBaseUrl,
+        localApiBaseUrl: apiBaseUrl,
+        authToken,
+        metadata: appMetadata,
+        description: customerLogDescription,
+      })
+      setCustomerLogDescription('')
+      setCustomerLogMessage({
+        tone: 'success',
+        text: `错误日志已上报，编号 ${receipt.log_id.slice(0, 8)}。`,
+      })
+    } catch (cause) {
+      setCustomerLogMessage({
+        tone: 'error',
+        text: toUserFacingError(cause, '错误日志上报失败，请稍后重试'),
+      })
+    } finally {
+      setCustomerLogReporting(false)
+    }
+  }, [adminApiBaseUrl, apiBaseUrl, appMetadata, authToken, customerLogDescription])
 
   const handleSaveApiUrl = useCallback(() => {
     const trimmed = apiUrlInput.trim()
@@ -308,24 +339,11 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
 
   return (
     <div className={`settings-v2 ${className}`} data-testid="settings-page">
-      {/* 标题栏 */}
-      <div className="settings-v2__header">
+      {/* 标题栏：沿用记忆页的纯文字标题卡片，让页面入口与内容区保持同一层级。 */}
+      <header className="settings-v2__header">
         <div className="settings-v2__title-group">
-          {/* 设置图标 */}
-          <svg
-            width="24"
-            height="24"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-            <circle cx="12" cy="12" r="3" />
-          </svg>
           <h1 className="settings-v2__title">设置</h1>
+          <p className="settings-v2__subtitle">管理身份、快捷操作、采集偏好与应用运行状态</p>
         </div>
 
         <button
@@ -335,22 +353,22 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
           type="button"
           aria-label="关闭设置"
         >
-          {/* X 图标 */}
           <svg
-            width="20"
-            height="20"
+            width="18"
+            height="18"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
             strokeWidth="2"
             strokeLinecap="round"
             strokeLinejoin="round"
+            aria-hidden="true"
           >
             <path d="M18 6 6 18" />
             <path d="m6 6 12 12" />
           </svg>
         </button>
-      </div>
+      </header>
 
       <div className="settings-v2__content">
         {saveMsg && (
@@ -817,6 +835,58 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
           )}
           </section>
         )}
+
+        {/* 错误日志上报 */}
+        <section className="settings-v2__card settings-v2__card--diagnostics" data-testid="settings-customer-log-section">
+          <div className="settings-v2__card-header">
+            <div className="settings-v2__card-icon settings-v2__card-icon--orange">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 9v4" />
+                <path d="M12 17h.01" />
+                <path d="M10.3 3.4 2.7 17a2 2 0 0 0 1.7 3h15.2a2 2 0 0 0 1.7-3L13.7 3.4a2 2 0 0 0-3.4 0Z" />
+              </svg>
+            </div>
+            <div>
+              <h2 className="settings-v2__card-title">上报错误日志</h2>
+            </div>
+          </div>
+
+          <div className="settings-v2__diagnostic-privacy">
+            <strong>隐私说明</strong>
+            <p>仅包含运行日志、客户端版本和系统类型；上传前会隐藏用户目录、邮箱、手机号、Token 与密钥。</p>
+            <p>不会上传截图、采集记录、数据库、记忆、Prompt、回答或其他个人文件。服务端会记录来源 IP，用于排查与防止滥用，日志保留 30 天。</p>
+          </div>
+          <label className="settings-v2__label" htmlFor="customer-log-description">问题描述（选填）</label>
+          <textarea
+            id="customer-log-description"
+            className="settings-v2__textarea"
+            value={customerLogDescription}
+            maxLength={500}
+            rows={3}
+            onChange={(event) => setCustomerLogDescription(event.target.value)}
+            placeholder="例如：点击初始化后一直停在质检阶段。请勿填写密码、验证码或工作内容。"
+            disabled={customerLogReporting}
+          />
+          <div className="settings-v2__diagnostic-actions">
+            <span>{currentUser ? '将关联当前账户，便于支持团队联系你。' : '当前为匿名上报，可直接提交。'}</span>
+            <button
+              type="button"
+              className="settings-v2__btn settings-v2__btn--primary"
+              onClick={() => void handleReportCustomerLogs()}
+              disabled={customerLogReporting}
+            >
+              {customerLogReporting ? '正在收集并上报...' : '上报错误日志'}
+            </button>
+          </div>
+          {customerLogMessage && (
+            <div
+              className={customerLogMessage.tone === 'success' ? 'settings-v2__success-msg' : 'settings-v2__error-msg'}
+              role={customerLogMessage.tone === 'error' ? 'alert' : 'status'}
+            >
+              {customerLogMessage.text}
+            </div>
+          )}
+        </section>
 
         {/* 版本信息 */}
         <section className="settings-v2__card" data-testid="settings-version-section">

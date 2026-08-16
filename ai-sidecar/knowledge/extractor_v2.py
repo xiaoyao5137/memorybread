@@ -1800,13 +1800,13 @@ BAKE_SOP_PROMPT = """类别:sop
 
 只提炼未来遇到相同需求/问题场景时，可以参考给出行动路线建议的操作手册。
 操作必须来自同一条时间线中的至少 2 条采集记录。Core 会给出 `sop_evidence_mode`，只允许以下两条证据通道：
-- direct_interaction：action_trace 里同时存在真实动作和可观察结果变化；步骤证据只能引用 operation_evidence=true 的节点；
-- semantic_workflow：timeline 提炼已经明确识别出同一工作项的执行动作和验证/完成结果；允许结合 work_item/work_status/work_progress、summary/details 与按时间排序的全部 action_trace 还原“执行→验证”路线。代码修改、配置调整、命令执行、排查结论和测试结果的语义记录都是有效行动证据，不要求同时存在点击、输入或 operation_evidence=true 的节点。
-两条通道都不得根据单个页面、按钮名称、计划或说明文字推测用户可能做过的操作。`effective_capture_count` 是 Core 对当前证据通道可用节点/帧数的计算结果，不等于截图总帧数。
+- direct_interaction：action_trace 必须同时存在 `evidence_role=action` 的真实动作和 `evidence_role=result` 的可归因结果；
+- semantic_workflow：允许结合 timeline 语义归纳已经发生的工作，但同样必须存在 action/result 证据锚点，不能仅凭总结、Agent 回复或上下文帧创建操作。
+导航、滚动、应用切换、无输入的 key_pause、Agent/聊天执行汇报以及未归因的页面文字变化都属于 context，不得证明执行步骤或验证结果。两条通道都不得根据页面文字、按钮名称、计划或说明推测用户可能做过的操作。`effective_capture_count` 只统计 action/result 节点。
 当 source_capture_count >= 2、sop_evidence_mode 非空，且证据描述了同一个问题或需求的实际行动动线、触发条件、处理路线、排查/执行步骤和验证方式时，accepted=true。
 如果完全没有可复用的行动指引（纯事实陈述、纯文档阅读、纯噪声），reject。
 
-`sop_evidence_mode` 非空表示 Core 已完成硬证据门禁，模型的职责是组织已有证据，不得再次以“缺少点击/输入/连续 UI 动作”为由拒绝。direct_interaction 从真实交互节点组织路线；semantic_workflow 从时间线语义字段和多帧上下文中组织已经发生的“处理→验证”路线。只有输入与 Core 判定明显矛盾、实际是纯阅读/纯计划/纯噪声，或已有证据确实无法组成 3 条不臆造的步骤时才 reject。
+`sop_evidence_mode` 非空表示 Core 已完成硬证据门禁，模型的职责是组织已有 action/result 证据，不得再次要求额外的连续 UI 动作。只有已有证据确实无法组成 3 条不臆造的步骤时才 reject。
 
 accepted=true 时，payload schema:
 {
@@ -1831,10 +1831,10 @@ accepted=true 时，payload schema:
 约束:
 - `source_capture_count` 小于 2、`sop_evidence_mode` 为空或 `effective_capture_count` 小于 2 时必须 reject；任何一条 capture、重复静态帧或纯滚动序列都不能独立成为 SOP
 - `steps` 必须为 3-8 条，且必须是可执行动作；详细 Markdown 由 Core 根据这些字段确定性生成，不要输出 details
-- `step_evidence` 必须与 steps 逐项对应，step_index 从 1 开始；capture_ids 必须来自 action_trace。direct_interaction 只能引用 `operation_evidence=true` 的节点；semantic_workflow 可引用对应执行/验证语义的上下文节点
-- 每条步骤必须能在多帧上下文或时间线已有提炼结果中找到依据；semantic_workflow 可以把已明确发生的排查、修改/执行、测试/验证整理为步骤，但不得补写证据中没有出现的工具、命令、参数或界面细节
-- direct_interaction 没有明确步骤化流程就 reject；semantic_workflow 只要多个语义证据共同描述了同一工作项的处理动作和验证结果，就应组织为步骤并接受，不得要求额外的鼠标或键盘动作
-- 任何以指标卡、表格、查询结果、状态快照或说明文档为主体的界面都不等于用户操作流程。direct_interaction 不能仅根据页面里的按钮、菜单、字段说明、计算规则或既有教程扩写 SOP；semantic_workflow 则以 Core 已确认的执行/验证语义为准，不受“必须出现 UI 动作”限制
+- `step_evidence` 必须与 steps 逐项对应，step_index 从 1 开始；capture_ids 必须来自 action_trace 且 `evidence_role` 为 action 或 result
+- 每条执行步骤必须能由真实 action/result 节点直接证明；不得从 Agent 汇报、聊天回复或结果文字反推未采集到的修改、命令、工具、参数或界面细节
+- direct_interaction 与 semantic_workflow 都必须有真实动作锚点和可归因结果；semantic_workflow 只能补充组织语义，不能放宽证据角色
+- 指标卡、表格、查询结果、状态快照、Agent 汇报或说明文档都不等于用户操作流程
 - 如果只是经验总结或模板骨架，不要误判成 SOP"""
 
 BAKE_BUNDLE_PROMPT = f"""你在执行一次性 bake bundle 提炼。输入是一条时间线候选工作片段。
@@ -3293,8 +3293,10 @@ class KnowledgeExtractorV2:
             header = (
                 f"capture_id={item.get('capture_id')} ts={item.get('ts')} "
                 f"event_type={item.get('event_type') or ''} "
-                f"operation_evidence={bool(item.get('operation_evidence', True))} "
-                f"evidence_kind={item.get('evidence_kind') or 'legacy'} "
+                f"operation_evidence={bool(item.get('operation_evidence', False))} "
+                f"evidence_kind={item.get('evidence_kind') or 'context'} "
+                f"evidence_role={item.get('evidence_role') or 'context'} "
+                f"evidence_reason={item.get('evidence_reason') or 'missing_contract'} "
                 f"app={self._truncate_text(item.get('app_name'), 100)} "
                 f"title={self._truncate_text(item.get('win_title'), 180)}"
             )
@@ -3317,7 +3319,7 @@ class KnowledgeExtractorV2:
                 )
             for field, label, max_chars in (
                 ('input_text', 'input', 300),
-                ('visible_text', 'visible', 360 if item.get('operation_evidence', True) else 160),
+                ('visible_text', 'visible', 360 if item.get('operation_evidence', False) else 160),
                 ('audio_text', 'audio', 300),
             ):
                 text = str(item.get(field) or '').strip()
@@ -3347,11 +3349,8 @@ class KnowledgeExtractorV2:
                 1
                 for item in trace
                 if isinstance(item, dict)
-                and (
-                    bool(item.get('operation_evidence'))
-                    if 'operation_evidence' in item
-                    else True
-                )
+                and bool(item.get('operation_evidence', False))
+                and str(item.get('evidence_role') or '').strip() in {'action', 'result'}
             )
         if explicit > 0:
             return explicit
@@ -3545,9 +3544,9 @@ class KnowledgeExtractorV2:
         adjusted = dict(payload)
         source_ids = []
         evidence_ids = []
+        evidence_roles = {}
         capture_timestamps = {}
         evidence_mode = str(candidate.get('sop_evidence_mode') or '').strip()
-        semantic_workflow = evidence_mode == 'semantic_workflow'
         trace = candidate.get('action_trace')
         if isinstance(trace, list):
             for item in trace:
@@ -3556,13 +3555,13 @@ class KnowledgeExtractorV2:
                 capture_id = str(item.get('capture_id') or '').strip()
                 if capture_id and capture_id not in source_ids:
                     source_ids.append(capture_id)
-                is_evidence = (
-                    bool(item.get('operation_evidence'))
-                    if 'operation_evidence' in item
-                    else True
-                )
-                if capture_id and (is_evidence or semantic_workflow) and capture_id not in evidence_ids:
+                role = str(item.get('evidence_role') or '').strip()
+                is_evidence = bool(item.get('operation_evidence', False)) and role in {
+                    'action', 'result'
+                }
+                if capture_id and is_evidence and capture_id not in evidence_ids:
                     evidence_ids.append(capture_id)
+                    evidence_roles[capture_id] = role
                     try:
                         capture_timestamps[capture_id] = int(item.get('ts') or 0)
                     except (TypeError, ValueError):
@@ -3579,11 +3578,12 @@ class KnowledgeExtractorV2:
             'direct_interaction', 'semantic_workflow'
         } else 3
         if len(evidence_ids) < required_evidence_count:
-            return None, (
-                'insufficient_semantic_workflow_evidence'
-                if semantic_workflow
-                else 'insufficient_operation_evidence_nodes'
-            )
+            return None, 'insufficient_operation_evidence_nodes'
+        available_roles = set(evidence_roles.values())
+        if 'action' not in available_roles:
+            return None, 'missing_real_action'
+        if 'result' not in available_roles:
+            return None, 'missing_attributed_result'
 
         evidence_by_step = {}
         raw_evidence = payload.get('step_evidence')
@@ -4233,8 +4233,10 @@ class KnowledgeExtractorV2:
                 'capture_id': frame.get('capture_id'),
                 'ts': frame.get('ts'),
                 'event_type': self._truncate_text(frame.get('event_type'), 32),
-                'operation_evidence': bool(frame.get('operation_evidence', True)),
+                'operation_evidence': bool(frame.get('operation_evidence', False)),
                 'evidence_kind': self._truncate_text(frame.get('evidence_kind'), 32),
+                'evidence_role': self._truncate_text(frame.get('evidence_role'), 16),
+                'evidence_reason': self._truncate_text(frame.get('evidence_reason'), 48),
                 'app_name': self._truncate_text(frame.get('app_name'), 48),
                 'win_title': self._truncate_text(frame.get('win_title'), 80),
                 'ax_focused_role': self._truncate_text(frame.get('ax_focused_role'), 48),

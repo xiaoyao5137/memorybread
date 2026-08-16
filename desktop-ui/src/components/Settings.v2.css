@@ -5,18 +5,24 @@
 .settings-v2 {
   width: 100%;
   height: 100%;
+  padding: 16px;
+  box-sizing: border-box;
   background: #F5F5F7;
   overflow-y: auto;
 }
 
-/* 标题栏 */
+/* 标题栏：与记忆页一样使用内容列内的中性白色卡片。 */
 .settings-v2__header {
+  width: 100%;
+  max-width: 1080px;
+  min-height: 82px;
+  margin: 0 auto 16px;
+  padding: 16px;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin: 16px 16px 0;
-  padding: 16px;
   background: #FFFFFF;
   color: #111111;
   border: 1px solid rgba(0, 0, 0, 0.08);
@@ -25,57 +31,58 @@
 }
 
 .settings-v2__title-group {
-  display: flex;
-  align-items: center;
-  gap: 10px;
   min-width: 0;
 }
 
-.settings-v2__title-group > svg {
-  color: #A54F25;
-}
-
 .settings-v2__title {
+  margin: 0;
+  color: #111111;
   font-size: 24px;
   font-weight: 700;
-  margin: 0;
+  line-height: 1.25;
+}
+
+.settings-v2__subtitle {
+  margin: 6px 0 0;
+  color: #6E6E73;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .settings-v2__close-btn {
-  width: 36px;
-  height: 36px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  flex: 0 0 auto;
   border-radius: 10px;
-  background: #F8F5F2;
-  border: 1px solid rgba(104, 64, 39, 0.12);
+  background: #FFFFFF;
+  border: 1px solid rgba(0, 0, 0, 0.1);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #6B4A38;
+  color: #6E6E73;
   cursor: pointer;
-  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease, transform 0.2s ease;
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease, transform 0.18s ease;
 }
 
 .settings-v2__close-btn:hover {
-  background: #FBE9DC;
-  border-color: rgba(165, 79, 37, 0.24);
-  color: #A54F25;
-  transform: translateY(-1px);
+  background: #F3F4F6;
+  border-color: rgba(0, 0, 0, 0.14);
+  color: #111111;
 }
 
 .settings-v2__close-btn:focus-visible {
-  outline: none;
-  border-color: #C46A32;
-  box-shadow: 0 0 0 3px rgba(196, 106, 50, 0.13);
+  outline: 3px solid rgba(0, 122, 255, 0.24);
+  outline-offset: 2px;
 }
 
 .settings-v2__close-btn:active {
-  transform: scale(0.98);
+  transform: scale(0.97);
 }
 
 /* 内容区域 */
 .settings-v2__content {
   width: 100%;
-  padding: 16px;
   max-width: 1080px;
   margin: 0 auto;
 }
@@ -216,7 +223,7 @@
   color: white;
 }
 
-.settings-v2__btn--primary:hover {
+.settings-v2__btn--primary:hover:not(:disabled) {
   background: #0051D5;
   transform: translateY(-1px);
   box-shadow: 0 4px 12px rgba(0, 122, 255, 0.3);
@@ -231,7 +238,7 @@
   color: #000000;
 }
 
-.settings-v2__btn--secondary:hover {
+.settings-v2__btn--secondary:hover:not(:disabled) {
   background: #E5E5EA;
 }
 
@@ -383,6 +390,72 @@
   overflow-wrap: anywhere;
   color: #1D1D1F;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.settings-v2__btn:disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.settings-v2__diagnostic-privacy {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border: 1px solid rgba(180, 111, 42, 0.18);
+  border-radius: 10px;
+  background: #FFF9F0;
+  color: #6B4A25;
+}
+
+.settings-v2__diagnostic-privacy strong {
+  display: block;
+  margin-bottom: 6px;
+  color: #3A2414;
+  font-size: 14px;
+}
+
+.settings-v2__diagnostic-privacy p {
+  margin: 4px 0;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.settings-v2__textarea {
+  width: 100%;
+  min-height: 86px;
+  padding: 10px 12px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  border-radius: 8px;
+  background: #FFFFFF;
+  color: #1D1D1F;
+  resize: vertical;
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+}
+
+.settings-v2__textarea:focus-visible {
+  outline: none;
+  border-color: #C46A32;
+  box-shadow: 0 0 0 3px rgba(196, 106, 50, 0.13);
+}
+
+.settings-v2__textarea:disabled {
+  background: #F5F5F7;
+  color: #8E8E93;
+}
+
+.settings-v2__diagnostic-actions {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.settings-v2__diagnostic-actions > span {
+  color: #6E6E73;
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 /* 成功消息 */
@@ -873,8 +946,17 @@
 }
 
 @media (max-width: 960px) {
+  .settings-v2__diagnostic-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-v2__diagnostic-actions .settings-v2__btn {
+    justify-content: center;
+  }
+
   .settings-v2__content {
-    padding: 16px;
+    padding: 0;
   }
 
   .settings-v2__card {
@@ -887,17 +969,22 @@
 }
 
 @media (max-width: 720px) {
+  .settings-v2 {
+    padding: 12px;
+  }
+
   .settings-v2__header {
-    margin: 12px 12px 0;
+    min-height: 76px;
+    margin-bottom: 12px;
     padding: 14px;
   }
 
-  .settings-v2__title-group {
-    gap: 10px;
+  .settings-v2__subtitle {
+    margin-top: 4px;
   }
 
   .settings-v2__content {
-    padding: 12px;
+    padding: 0;
   }
 
   .settings-v2__card {

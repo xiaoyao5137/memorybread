@@ -326,8 +326,13 @@ pub struct BakeActionTraceRecord {
     /// interaction / input / navigation / state_change / context。
     #[serde(default)]
     pub evidence_kind: Option<String>,
-    /// 是否构成 SOP 的独立动作或结果证据节点。effective_capture_count 只统计
-    /// 该字段为 true 的节点，不再等同于 action_trace 的原始帧数。
+    /// action / result / context。SOP 门禁使用该角色区分真实执行、可归因结果与普通上下文。
+    #[serde(default)]
+    pub evidence_role: Option<String>,
+    /// 稳定的判定原因，供审计和 Sidecar 确定性校验使用。
+    #[serde(default)]
+    pub evidence_reason: Option<String>,
+    /// 是否构成 SOP 的独立动作或结果证据节点。兼容旧契约；新门禁以 evidence_role 为准。
     #[serde(default)]
     pub operation_evidence: bool,
 }

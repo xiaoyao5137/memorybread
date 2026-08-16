@@ -87,6 +87,8 @@ SAMPLE_CANDIDATE = {
             "ax_focused_role": "AXTextArea",
             "ax_focused_id": "editor",
             "evidence_kind": "input",
+            "evidence_role": "action",
+            "evidence_reason": "explicit_input",
             "operation_evidence": True,
             "visible_text": "检查 bake bundle 分类逻辑",
             "input_text": "定位 primary_type 抑制",
@@ -100,6 +102,8 @@ SAMPLE_CANDIDATE = {
             "ax_focused_role": "AXTextField",
             "ax_focused_id": "terminal",
             "evidence_kind": "input",
+            "evidence_role": "action",
+            "evidence_reason": "explicit_input",
             "operation_evidence": True,
             "state_delta": "window:extractor_v2.py→pytest",
             "visible_text": "运行 bundle 测试并发现 SOP 被拒绝",
@@ -111,6 +115,8 @@ SAMPLE_CANDIDATE = {
             "app_name": "Terminal",
             "win_title": "pytest",
             "evidence_kind": "state_change",
+            "evidence_role": "result",
+            "evidence_reason": "observable_state_result",
             "operation_evidence": True,
             "state_delta": "visible→修改后测试通过",
             "visible_text": "修改后测试通过",
@@ -664,8 +670,8 @@ def test_bake_sop_bundle_schema_is_compact_and_requires_step_evidence():
     assert sop_payload["required"] == ["summary", "steps", "step_evidence"]
     assert "sop_evidence_mode" in BAKE_BUNDLE_PROMPT
     assert "effective_capture_count` 小于 2" in BAKE_BUNDLE_PROMPT
-    assert "不得再次以“缺少点击/输入/连续 UI 动作”为由拒绝" in BAKE_BUNDLE_PROMPT
-    assert "不要求同时存在点击、输入或 operation_evidence=true" in BAKE_BUNDLE_PROMPT
+    assert "组织已有 action/result 证据" in BAKE_BUNDLE_PROMPT
+    assert "不能仅凭总结、Agent 回复或上下文帧创建操作" in BAKE_BUNDLE_PROMPT
     assert "不要输出 details" in BAKE_BUNDLE_PROMPT
 
 
@@ -1243,7 +1249,7 @@ def test_extract_bake_sop_rejects_context_frame_as_step_evidence():
     assert artifact["reason"] == "non_operation_sop_step_evidence"
 
 
-def test_semantic_workflow_accepts_two_context_frames_as_step_evidence():
+def test_semantic_workflow_rejects_two_context_frames_as_step_evidence():
     extractor = make_extractor()
     candidate = {
         **SAMPLE_CANDIDATE,
@@ -1260,6 +1266,8 @@ def test_semantic_workflow_accepts_two_context_frames_as_step_evidence():
                 "event_type": "manual",
                 "operation_evidence": False,
                 "evidence_kind": "context",
+                "evidence_role": "context",
+                "evidence_reason": "agent_report_surface",
                 "visible_text": "修改证据门禁并完成实现",
             },
             {
@@ -1268,6 +1276,8 @@ def test_semantic_workflow_accepts_two_context_frames_as_step_evidence():
                 "event_type": "manual",
                 "operation_evidence": False,
                 "evidence_kind": "context",
+                "evidence_role": "context",
+                "evidence_reason": "agent_report_surface",
                 "visible_text": "运行测试，全部通过",
             },
         ],
@@ -1284,9 +1294,8 @@ def test_semantic_workflow_accepts_two_context_frames_as_step_evidence():
 
     normalized, reason = extractor._normalize_sop_step_evidence(candidate, payload)
 
-    assert reason is None
-    assert normalized is not None
-    assert normalized["step_evidence"][2]["capture_ids"] == ["11"]
+    assert normalized is None
+    assert reason == "insufficient_operation_evidence_nodes"
 
 
 def test_extract_bake_sop_rejects_single_capture_even_when_model_accepts():
