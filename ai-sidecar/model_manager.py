@@ -222,10 +222,12 @@ class ModelManager:
     def _is_ollama_running(self, base_url: str = OLLAMA_API_BASE) -> bool:
         url = f"{base_url.rstrip('/')}/api/tags"
         try:
-            import requests
-            resp = requests.get(url, timeout=2)
-            return resp.status_code == 200
-        except Exception:
+            import urllib.request
+            import socket
+            req = urllib.request.Request(url, method='GET')
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                return resp.status == 200
+        except (urllib.error.URLError, urllib.error.HTTPError, socket.timeout, OSError):
             return False
 
     def get_ollama_setup_status(self) -> Dict:
