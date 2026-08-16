@@ -4,7 +4,8 @@ import IntegrationPanel from '../components/IntegrationPanel'
 import { useAppStore } from '../store/useAppStore'
 
 const skillMocks = vi.hoisted(() => ({
-  importCodexSkillPackage: vi.fn(),
+  importAgentSkillPackage: vi.fn(),
+  importAgentSkillZip: vi.fn(),
   listLocalCreationSkills: vi.fn(),
   saveLocalCreationSkill: vi.fn(),
 }))
@@ -24,7 +25,8 @@ const integrationMocks = vi.hoisted(() => ({
 
 vi.mock('../utils/creationSkills', async importOriginal => ({
   ...(await importOriginal<typeof import('../utils/creationSkills')>()),
-  importCodexSkillPackage: skillMocks.importCodexSkillPackage,
+  importAgentSkillPackage: skillMocks.importAgentSkillPackage,
+  importAgentSkillZip: skillMocks.importAgentSkillZip,
   listLocalCreationSkills: skillMocks.listLocalCreationSkills,
   saveLocalCreationSkill: skillMocks.saveLocalCreationSkill,
 }))
@@ -50,9 +52,9 @@ const catalog = [
     version: '1.0.0', inputKind: 'files', accept: '.json,.jsonl', supportsPreview: true, fileCount: 4,
   },
   {
-    id: 'workbody', title: 'Workbody', eyebrow: '办公协作上下文包', description: '生成上下文包。',
-    capability: 'Markdown 交付', badge: '办公', direction: 'output', executor: 'context_export',
-    version: '1.0.0', inputKind: 'query', accept: '', supportsPreview: false, fileCount: 4,
+    id: 'workbuddy', title: 'WorkBuddy', eyebrow: '腾讯办公智能体', description: '生成可上传 Skill。',
+    capability: 'Skill ZIP · 本机即时召回', badge: '腾讯', direction: 'output', executor: 'workbuddy_skill_export',
+    version: '1.0.0', inputKind: 'none', accept: '', supportsPreview: true, fileCount: 5,
   },
   {
     id: 'qianwen-office', title: '千问办公', eyebrow: '中文办公上下文包', description: '生成中文上下文包。',
@@ -97,7 +99,8 @@ const succeededRun = {
 
 beforeEach(() => {
   useAppStore.getState().reset()
-  skillMocks.importCodexSkillPackage.mockReset()
+  skillMocks.importAgentSkillPackage.mockReset()
+  skillMocks.importAgentSkillZip.mockReset()
   skillMocks.listLocalCreationSkills.mockReset().mockResolvedValue([])
   skillMocks.saveLocalCreationSkill.mockReset()
   integrationMocks.listIntegrationSkills.mockReset().mockResolvedValue(catalog)
@@ -137,7 +140,7 @@ describe('IntegrationPanel', () => {
     await screen.findByText('Obsidian')
     fireEvent.click(screen.getByRole('tab', { name: /输出/ }))
 
-    expect(screen.getByText('Workbody')).toBeInTheDocument()
+    expect(screen.getByText('WorkBuddy')).toBeInTheDocument()
     expect(screen.getByText('千问办公')).toBeInTheDocument()
     expect(screen.getByText('Codex')).toBeInTheDocument()
     expect(screen.getByText('Claude Code')).toBeInTheDocument()
@@ -225,7 +228,7 @@ describe('IntegrationPanel', () => {
       packageFiles: [{ path: 'SKILL.md', mediaType: 'text/markdown', contentBase64: 'LS0t', sizeBytes: 3 }],
     }
     const saved = { ...imported, id: 12, categoryId: 'integration-input', createdAt: 1, updatedAt: 1 }
-    skillMocks.importCodexSkillPackage.mockResolvedValue(imported)
+    skillMocks.importAgentSkillPackage.mockResolvedValue(imported)
     skillMocks.saveLocalCreationSkill.mockResolvedValue(saved)
 
     render(<IntegrationPanel />)

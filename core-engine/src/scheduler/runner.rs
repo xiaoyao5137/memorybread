@@ -146,7 +146,7 @@ impl Scheduler {
         let resp = client
             .post(PYTHON_EXECUTOR_URL)
             .json(&serde_json::json!({ "task_id": task_id }))
-            .timeout(std::time::Duration::from_secs(300)) // 最长等待5分钟
+            .timeout(std::time::Duration::from_secs(1800)) // 创作智能体单轮耗时更长，最长等待30分钟
             .send()
             .await?;
 

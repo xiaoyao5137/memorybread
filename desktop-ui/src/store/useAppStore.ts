@@ -41,6 +41,9 @@ export interface CreationReferenceItem {
   reason: string
   summary?: string
   source_url?: string
+  source_type?: string
+  source_id?: number
+  skill_step_title?: string
 }
 
 export interface CreationReferencePreview {
@@ -139,6 +142,8 @@ export interface AppState {
   selectedTemplateId: string | null
   selectedSopId: string | null
   selectedKnowledgeId: string | null
+  /** 任务页请求打开的创作记录 id（跨面板跳转目标） */
+  creationHistoryOpenTarget: number | null
   selectedCaptureId: string | null
   repositoryMemoryFocusId: string | null
   bakeTemplateFocusId: string | null
@@ -166,6 +171,7 @@ export interface AppState {
   repositoryMemoryTo: string
   repositoryMemoryLimit: number
   repositoryCaptureQuery: string
+  repositoryCaptureApp: string
   repositoryCaptureFrom: string
   repositoryCaptureTo: string
   repositoryCaptureLimit: number
@@ -215,6 +221,7 @@ export interface AppState {
   setSelectedTemplateId: (id: string | null) => void
   setSelectedSopId:      (id: string | null) => void
   setSelectedKnowledgeId:(id: string | null) => void
+  setCreationHistoryOpenTarget: (id: number | null) => void
   setSelectedCaptureId:  (id: string | null) => void
   setRepositoryMemoryFocusId: (id: string | null) => void
   setBakeTemplateFocusId: (id: string | null) => void
@@ -242,6 +249,7 @@ export interface AppState {
   setRepositoryMemoryTo:    (value: string) => void
   setRepositoryMemoryLimit: (limit: number) => void
   setRepositoryCaptureQuery: (query: string) => void
+  setRepositoryCaptureApp:   (app: string) => void
   setRepositoryCaptureFrom:  (value: string) => void
   setRepositoryCaptureTo:    (value: string) => void
   setRepositoryCaptureLimit: (limit: number) => void
@@ -435,6 +443,7 @@ const initialState = {
   selectedTemplateId:  null,
   selectedSopId:       null,
   selectedKnowledgeId: null,
+  creationHistoryOpenTarget: null,
   selectedCaptureId:   null,
   repositoryMemoryFocusId: null,
   bakeTemplateFocusId: null,
@@ -462,6 +471,7 @@ const initialState = {
   repositoryMemoryTo:    '',
   repositoryMemoryLimit: 20,
   repositoryCaptureQuery: '',
+  repositoryCaptureApp:   '',
   repositoryCaptureFrom:  '',
   repositoryCaptureTo:    '',
   repositoryCaptureLimit: 20,
@@ -505,6 +515,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setRepositoryTab: (tab) => set({ repositoryTab: tab }),
 
   setSelectedMemoryId: (id) => set({ selectedMemoryId: id }),
+
+  setCreationHistoryOpenTarget: (id) => set({ creationHistoryOpenTarget: id }),
 
   setSelectedTemplateId: (id) => set({ selectedTemplateId: id }),
 
@@ -565,6 +577,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setRepositoryMemoryLimit: (limit) => set({ repositoryMemoryLimit: limit, bakeMemoryOffset: 0 }),
 
   setRepositoryCaptureQuery: (query) => set({ repositoryCaptureQuery: query, bakeCaptureOffset: 0 }),
+
+  setRepositoryCaptureApp: (app) => set({ repositoryCaptureApp: app, bakeCaptureOffset: 0 }),
 
   setRepositoryCaptureFrom: (value) => set({ repositoryCaptureFrom: value, bakeCaptureOffset: 0 }),
 

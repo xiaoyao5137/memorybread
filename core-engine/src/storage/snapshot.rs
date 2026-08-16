@@ -1903,6 +1903,14 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+        for (kind, id) in [
+            ("knowledge", 9),
+            ("operation", 10),
+            ("document", 11),
+            ("data", 91),
+        ] {
+            assert!(storage.set_memory_favorite(kind, id, true).unwrap());
+        }
         storage
             .upsert_preference("snapshot.test", "user-value", "user", 1.0)
             .unwrap();
@@ -2063,6 +2071,15 @@ mod tests {
         assert_eq!(count_table(&target, "breadcrumb_inventory"), 1);
         assert_eq!(count_table(&target, "breadcrumb_awards"), 1);
         assert_eq!(count_table(&target, "breadcrumb_equipment"), 1);
+        assert_eq!(count_table(&target, "memory_favorites"), 4);
+        for (kind, id) in [
+            ("knowledge", 9),
+            ("operation", 10),
+            ("document", 11),
+            ("data", 91),
+        ] {
+            assert!(target.is_memory_favorite(kind, id).unwrap());
+        }
         assert_eq!(restored_skill.title, "架构文档写作法");
         assert_eq!(restored_skill.package_files.len(), 1);
         assert_eq!(restored_skill.package_files[0].path, "SKILL.md");

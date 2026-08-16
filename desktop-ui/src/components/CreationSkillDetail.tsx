@@ -10,6 +10,7 @@ import type {
 import {
   CREATION_SKILL_AGENT_OPTIONS,
   CREATION_SKILL_TOOL_OPTIONS,
+  agentSkillZipBytes,
   codexSkillPackageFiles,
   isTextSkillFile,
   skillFileBytes,
@@ -54,7 +55,7 @@ export function localSkillDetail(
     statusLabel: skill.sourceKind === 'market'
       ? '来自市场'
       : skill.sourceKind === 'imported'
-        ? '手工上传 · Codex 兼容'
+        ? '手工上传 · Codex / Claude Code 兼容'
         : skill.sourceKind === 'manual'
           ? '手工新建'
           : skill.published
@@ -79,7 +80,7 @@ export function marketSkillDetail(
     installed,
     source: 'market' as const,
   }
-  return { ...detail, packageFiles: codexSkillPackageFiles(detail) }
+  return { ...detail, packageFiles: skill.packageFiles.map(file => ({ ...file })) }
 }
 
 export default function CreationSkillDetail({
@@ -89,9 +90,7 @@ export default function CreationSkillDetail({
   primaryAction,
 }: CreationSkillDetailProps) {
   const closeButtonRef = useRef<HTMLButtonElement>(null)
-  const filesSectionRef = useRef<HTMLElement>(null)
   const [selectedFilePath, setSelectedFilePath] = useState('SKILL.md')
-  const [filesHighlighted, setFilesHighlighted] = useState(false)
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -110,23 +109,81 @@ export default function CreationSkillDetail({
     )
   }, [skill.id, skill.packageFiles])
 
-  useEffect(() => {
-    if (!focusFiles) return
-    const timer = window.setTimeout(() => {
-      filesSectionRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
-      setFilesHighlighted(true)
-    }, 120)
-    const fadeTimer = window.setTimeout(() => setFilesHighlighted(false), 2600)
-    return () => {
-      window.clearTimeout(timer)
-      window.clearTimeout(fadeTimer)
-    }
-  }, [focusFiles, skill.id])
-
   const selectedFile = useMemo(
     () => skill.packageFiles.find(file => file.path === selectedFilePath) || skill.packageFiles[0],
     [selectedFilePath, skill.packageFiles],
   )
+
+  if (focusFiles) {
+    const totalBytes = skill.packageFiles.reduce((sum, file) => sum + file.sizeBytes, 0)
+    return (
+      <div className="creation-skill-modal" role="presentation" onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}>
+        <section
+          className="creation-skill-source"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={`creation-skill-source-title-${skill.id}`}
+        >
+          <header className="creation-skill-source__header">
+            <div>
+              <span>Skill 源文件</span>
+              <h2 id={`creation-skill-source-title-${skill.id}`}>{skill.title}</h2>
+              <p>{skill.packageFiles.length} 个文件 · {formatFileSize(totalBytes)} · Codex / Claude Code 兼容</p>
+            </div>
+            <button ref={closeButtonRef} type="button" onClick={onClose} aria-label="关闭源文件">
+              <X size={18} />
+            </button>
+          </header>
+          <div className="creation-skill-source__browser">
+            <aside>
+              <header><strong>源文件</strong><small>{skill.packageFiles.length} 个</small></header>
+              {skill.packageFiles.map(file => (
+                <button
+                  type="button"
+                  key={file.path}
+                  className={file.path === selectedFile?.path ? 'is-active' : ''}
+                  onClick={() => setSelectedFilePath(file.path)}
+                  title={file.path}
+                >
+                  <FileCode2 size={14} />
+                  <span>{file.path}<small>{formatFileSize(file.sizeBytes)}</small></span>
+                </button>
+              ))}
+              {skill.packageFiles.length > 0 && (
+                <button
+                  className="creation-skill-source__download-all"
+                  type="button"
+                  onClick={() => downloadSkillPackage(skill.title, skill.packageFiles)}
+                >
+                  <Download size={14} />下载全部源文件 (.zip)
+                </button>
+              )}
+            </aside>
+            <section>
+              <header>
+                <div>
+                  <strong>{selectedFile?.path || '选择文件'}</strong>
+                  <small>{selectedFile ? `${selectedFile.mediaType} · ${formatFileSize(selectedFile.sizeBytes)}` : '没有可查看的源文件'}</small>
+                </div>
+                {selectedFile && (
+                  <button type="button" onClick={() => downloadSkillFile(selectedFile)}>
+                    <Download size={14} />下载文件
+                  </button>
+                )}
+              </header>
+              <div className="creation-skill-detail__file-preview creation-skill-source__preview">
+                {selectedFile
+                  ? <SkillFilePreview file={selectedFile} hideHeader />
+                  : <p>这份技能还没有可查看的源文件。</p>}
+              </div>
+            </section>
+          </div>
+        </section>
+      </div>
+    )
+  }
 
   const recipeSections = [
     {
@@ -193,7 +250,7 @@ export default function CreationSkillDetail({
                     <p>{step.objective}</p>
                     {step.output.trim() && <small>产出：{step.output}</small>}
                     {step.tools.includes('data_search') && (
-                      <small>网页证据截图：{step.retainWebpageScreenshot === false ? '不保留（仍使用 AX/DOM）' : '保留'}</small>
+                      <small>网页采集：{step.retainWebpageScreenshot === true ? '保留证据截图' : '不保留证据截图（优先静默取数，必要时临时打开浏览器）'}</small>
                     )}
                     {(step.agents.length > 0 || step.skills.length > 0 || step.tools.length > 0) && (
                       <div className="creation-skill-detail__resources" aria-label={`${step.title} 可调用能力`}>
@@ -208,16 +265,18 @@ export default function CreationSkillDetail({
             </div>
           </section>
 
-          <section
-            ref={filesSectionRef}
-            className={`creation-skill-detail__files${filesHighlighted ? ' is-focused' : ''}`}
-          >
+          <section className="creation-skill-detail__files">
             <div className="creation-skill-detail__files-heading">
               <div>
-                <span><PackageOpen size={15} /> Codex 兼容目录</span>
-                <h3>技能文件</h3>
+                <span><PackageOpen size={15} /> Agent Skills 标准目录</span>
+                <h3>源文件</h3>
                 <p>{skill.packageFiles.length} 个文件 · {formatFileSize(skill.packageFiles.reduce((sum, file) => sum + file.sizeBytes, 0))}</p>
               </div>
+              {skill.packageFiles.length > 0 && (
+                <button type="button" onClick={() => downloadSkillPackage(skill.title, skill.packageFiles)}>
+                  <PackageOpen size={14} /> 下载全部源文件 (.zip)
+                </button>
+              )}
               {selectedFile && (
                 <button type="button" onClick={() => downloadSkillFile(selectedFile)}>
                   <Download size={14} /> 下载 {selectedFile.path.split('/').pop()}
@@ -318,12 +377,12 @@ export default function CreationSkillDetail({
   )
 }
 
-function SkillFilePreview({ file }: { file: CreationSkillPackageFile }) {
+function SkillFilePreview({ file, hideHeader = false }: { file: CreationSkillPackageFile; hideHeader?: boolean }) {
   const text = skillFileText(file)
   if (text !== null && isTextSkillFile(file)) {
     return (
       <>
-        <div><strong>{file.path}</strong><span>{file.mediaType}</span></div>
+        {!hideHeader && <div><strong>{file.path}</strong><span>{file.mediaType}</span></div>}
         <pre>{text}</pre>
       </>
     )
@@ -331,7 +390,7 @@ function SkillFilePreview({ file }: { file: CreationSkillPackageFile }) {
   if (file.mediaType.startsWith('image/')) {
     return (
       <>
-        <div><strong>{file.path}</strong><span>{file.mediaType}</span></div>
+        {!hideHeader && <div><strong>{file.path}</strong><span>{file.mediaType}</span></div>}
         <img src={`data:${file.mediaType};base64,${file.contentBase64}`} alt={`${file.path} 预览`} />
       </>
     )
@@ -351,6 +410,17 @@ function downloadSkillFile(file: CreationSkillPackageFile) {
   const anchor = document.createElement('a')
   anchor.href = url
   anchor.download = file.path.split('/').pop() || 'skill-file'
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
+function downloadSkillPackage(name: string, files: CreationSkillPackageFile[]) {
+  const bytes = agentSkillZipBytes(name, files)
+  const blob = new Blob([bytes], { type: 'application/zip' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = `${name.replace(/[^\p{L}\p{N}._-]+/gu, '-').replace(/^-|-$/g, '') || 'skill'}.zip`
   anchor.click()
   URL.revokeObjectURL(url)
 }

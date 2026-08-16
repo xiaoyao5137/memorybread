@@ -1,6 +1,7 @@
 import { fetchWithLocalhostFallback } from '../hooks/useApi'
 import { serviceEnvironmentHeaders } from '../store/useAppStore'
 import { OFFLINE_CREATION_SKILL_CATEGORIES } from '../data/creationSkillCategories'
+import { unzipSync, zipSync } from 'fflate'
 
 export type CreationSkillSourceKind = 'creation_history' | 'bake_document' | 'market' | 'imported' | 'manual'
 
@@ -42,7 +43,7 @@ export interface CreationSkillExecutionStep {
   agents: string[]
   skills: string[]
   tools: string[]
-  /** 默认 true；只控制是否保留网页截图，不影响 AX/DOM 数据读取。 */
+  /** 默认 false；只控制是否保留证据图片，不控制静默优先的即时 DOM/AX 取数。 */
   retainWebpageScreenshot?: boolean
 }
 
@@ -145,6 +146,11 @@ export interface CreationSkillMarketItem extends CreationSkillContent {
   categoryId: string
   categoryPath: CreationSkillCategory[]
   author: CreationSkillMarketAuthor
+  packageFiles: CreationSkillPackageFile[]
+  packageName: string
+  packageFileCount: number
+  packageSizeBytes: number
+  packageSha256: string
   publishedAt?: string | null
   updatedAt: string
 }
@@ -179,7 +185,7 @@ const parseError = async (response: Response, fallback: string) => {
       if (/invalid type/i.test(trimmed)) return '请求字段类型不正确，请刷新页面后重试'
       if (/failed to deserialize the json body/i.test(trimmed)) return '请求内容格式不正确，请刷新页面后重试'
       if (/expected request with `content-type/i.test(trimmed)) return '请求类型不正确，需要 application/json'
-      if (/request body (limit|size)/i.test(trimmed)) return '请求内容过大，请精简技能包或示例文档后重试'
+      if (/request body (limit|size)/i.test(trimmed)) return '请求内容过大，请精简 Skill 源文件或示例文档后重试'
       if (trimmed.length > 0 && trimmed.length <= 120) return trimmed
     }
   }
@@ -244,12 +250,12 @@ export const CREATION_SKILL_AGENT_OPTIONS = [
 ] as const
 
 export const CREATION_SKILL_TOOL_OPTIONS = [
-  { id: 'memory_search', label: '记忆搜索 Tool' },
-  { id: 'internet_search', label: '互联网检索 Tool' },
-  { id: 'data_search', label: '数据检索 Tool' },
-  { id: 'webpage_scrape', label: '网页爬取 Tool' },
-  { id: 'github_search', label: 'GitHub 检索 Tool' },
-  { id: 'plantuml_diagram', label: 'PlantUML 画图 Tool' },
+  { id: 'memory_search', label: '记忆搜索' },
+  { id: 'internet_search', label: '互联网检索' },
+  { id: 'data_search', label: '数据检索' },
+  { id: 'webpage_scrape', label: '网页爬取' },
+  { id: 'github_search', label: 'GitHub 检索' },
+  { id: 'plantuml_diagram', label: 'PlantUML 画图' },
 ] as const
 
 export const DEFAULT_CREATION_SKILL_EXAMPLE_DOCUMENT = `# 共享评审空间：预约流程与协作边界优化方案
@@ -347,7 +353,7 @@ function defaultCreationSkillExecutionSteps(
     agents: [],
     skills: [],
     tools: ['memory_search'],
-    retainWebpageScreenshot: true,
+    retainWebpageScreenshot: false,
   }]
   if (/行业|市场|竞品|研究|调研|政策|趋势/.test(text)) {
     steps.push({
@@ -358,7 +364,7 @@ function defaultCreationSkillExecutionSteps(
       agents: ['industry_research_agent'],
       skills: [],
       tools: ['internet_search'],
-      retainWebpageScreenshot: true,
+      retainWebpageScreenshot: false,
     })
   }
   if (/数据|指标|统计|趋势|成本|收益|测算|分析/.test(text)) {
@@ -370,7 +376,7 @@ function defaultCreationSkillExecutionSteps(
       agents: ['data_analysis_agent'],
       skills: [],
       tools: ['data_search', 'webpage_scrape'],
-      retainWebpageScreenshot: true,
+      retainWebpageScreenshot: false,
     })
   }
   if (/方案|架构|设计|规划|建设|实施/.test(text)) {
@@ -382,7 +388,7 @@ function defaultCreationSkillExecutionSteps(
       agents: ['solution_design_agent'],
       skills: [],
       tools: /架构|流程|链路|交互|模块/.test(text) ? ['plantuml_diagram'] : [],
-      retainWebpageScreenshot: true,
+      retainWebpageScreenshot: false,
     })
   }
   steps.push(
@@ -394,7 +400,7 @@ function defaultCreationSkillExecutionSteps(
       agents: ['chapter_design_agent'],
       skills: [],
       tools: [],
-      retainWebpageScreenshot: true,
+      retainWebpageScreenshot: false,
     },
     {
       id: 'draft-document',
@@ -404,7 +410,7 @@ function defaultCreationSkillExecutionSteps(
       agents: ['document_writer_agent'],
       skills: [],
       tools: [],
-      retainWebpageScreenshot: true,
+      retainWebpageScreenshot: false,
     },
     {
       id: 'review-delivery',
@@ -414,7 +420,7 @@ function defaultCreationSkillExecutionSteps(
       agents: ['quality_review_agent'],
       skills: [],
       tools: [],
-      retainWebpageScreenshot: true,
+      retainWebpageScreenshot: false,
     },
   )
   return steps
@@ -472,7 +478,7 @@ function mapExecutionSteps(
         tools: resources(item?.tools, allowedTools),
         retainWebpageScreenshot: item?.retainWebpageScreenshot
           ?? item?.retain_webpage_screenshot
-          ?? true,
+          ?? false,
       }
       // 步骤目标与产出已合并为“执行动作”，产出允许为空。
       return step.title && step.objective ? step : null
@@ -528,16 +534,16 @@ function readFrontmatterValue(frontmatter: string, key: string) {
   return ''
 }
 
-export async function importCodexSkillPackage(
+export async function importAgentSkillPackage(
   files: File[] | FileList,
 ): Promise<Omit<LocalCreationSkill, 'id' | 'createdAt' | 'updatedAt'>> {
   const selectedFiles = Array.from(files).filter(file => file.name !== '.DS_Store')
   if (selectedFiles.length === 0) throw new Error('请选择一个包含 SKILL.md 的技能文件夹')
   if (selectedFiles.length > MAX_SKILL_PACKAGE_FILES) {
-    throw new Error(`技能包文件数量不能超过 ${MAX_SKILL_PACKAGE_FILES} 个`)
+    throw new Error(`Skill 源文件数量不能超过 ${MAX_SKILL_PACKAGE_FILES} 个`)
   }
   const totalBytes = selectedFiles.reduce((sum, file) => sum + file.size, 0)
-  if (totalBytes > MAX_SKILL_PACKAGE_BYTES) throw new Error('技能包总大小不能超过 10 MB')
+  if (totalBytes > MAX_SKILL_PACKAGE_BYTES) throw new Error('Skill 源文件总大小不能超过 10 MB')
 
   const rawPaths = selectedFiles.map(file => {
     const relativePath = String((file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name)
@@ -546,19 +552,22 @@ export async function importCodexSkillPackage(
     validateSkillFilePath(relativePath)
     return relativePath
   })
-  const rootNames = new Set(rawPaths.filter(path => path.includes('/')).map(path => path.split('/')[0]))
-  if (rootNames.size > 1 || (rootNames.size === 1 && rawPaths.some(path => !path.includes('/')))) {
+  const hasRootSkillMarkdown = rawPaths.includes('SKILL.md')
+  const rootNames = hasRootSkillMarkdown
+    ? new Set<string>()
+    : new Set(rawPaths.filter(path => path.includes('/')).map(path => path.split('/')[0]))
+  if (!hasRootSkillMarkdown && (rootNames.size > 1 || (rootNames.size === 1 && rawPaths.some(path => !path.includes('/'))))) {
     throw new Error('请一次只选择一个技能文件夹')
   }
   const rootName = rootNames.size === 1 ? [...rootNames][0] : ''
   const normalizedPaths = rawPaths.map(path => rootName ? path.slice(rootName.length + 1) : path)
   normalizedPaths.forEach(validateSkillFilePath)
   if (new Set(normalizedPaths).size !== normalizedPaths.length) {
-    throw new Error('技能包包含重复文件路径')
+    throw new Error('Skill 源文件包含重复文件路径')
   }
 
   const markdownIndex = normalizedPaths.findIndex(path => path === 'SKILL.md')
-  if (markdownIndex < 0) throw new Error('技能包根目录缺少 SKILL.md')
+  if (markdownIndex < 0) throw new Error('Skill 源文件根目录缺少 SKILL.md')
   if (selectedFiles[markdownIndex].size > MAX_SKILL_MARKDOWN_BYTES) {
     throw new Error('SKILL.md 不能超过 512 KB')
   }
@@ -589,6 +598,11 @@ export async function importCodexSkillPackage(
   packageFiles.sort((left, right) => (
     left.path === 'SKILL.md' ? -1 : right.path === 'SKILL.md' ? 1 : left.path.localeCompare(right.path)
   ))
+  const memoryBreadProfile = readMemoryBreadPackageProfile(
+    packageFiles,
+    metadata.name,
+    metadata.description,
+  )
 
   const suffix = Date.now().toString(36)
   return {
@@ -599,14 +613,14 @@ export async function importCodexSkillPackage(
     title: metadata.name,
     summary: metadata.description,
     categoryId: null,
-    skillDescription: {
+    skillDescription: memoryBreadProfile?.skillDescription || {
       purpose: metadata.description,
       documentTypes: ['SKILL.md 定义的文档或交付物'],
-      problems: ['按技能包中的专业工作流和输出要求完成创作任务'],
+      problems: ['按 Skill 源文件中的专业工作流和输出要求完成创作任务'],
       domains: [],
       deliverables: ['符合 SKILL.md 验收要求的完整交付物'],
     },
-    executionSteps: [
+    executionSteps: memoryBreadProfile?.executionSteps || [
       {
         id: 'read-skill',
         title: '读取技能说明',
@@ -653,20 +667,80 @@ export async function importCodexSkillPackage(
         tools: [],
       },
     ],
-    commonTitles: [metadata.name],
-    titleStyle: '遵循 SKILL.md 中的标题与输出要求。',
-    textStyle: metadata.instructions || '严格遵循 SKILL.md 中定义的工作流与输出要求。',
-    diagramStyle: '仅在 SKILL.md 或引用文件明确要求时生成图示。',
-    writingGuidelines: ['优先遵循 SKILL.md；引用其他文件时使用技能根目录相对路径。'],
-    distinctiveSections: [],
-    sectionHeadings: { ...DEFAULT_CREATION_SKILL_SECTION_HEADINGS },
-    fieldExamples: cloneFieldExamples(DEFAULT_CREATION_SKILL_FIELD_EXAMPLES),
-    exampleDocument: DEFAULT_CREATION_SKILL_EXAMPLE_DOCUMENT,
+    commonTitles: memoryBreadProfile?.commonTitles || [metadata.name],
+    titleStyle: memoryBreadProfile?.titleStyle || '遵循 SKILL.md 中的标题与输出要求。',
+    textStyle: memoryBreadProfile?.textStyle || metadata.instructions || '严格遵循 SKILL.md 中定义的工作流与输出要求。',
+    diagramStyle: memoryBreadProfile?.diagramStyle || '仅在 SKILL.md 或引用文件明确要求时生成图示。',
+    writingGuidelines: memoryBreadProfile?.writingGuidelines || ['优先遵循 SKILL.md；引用其他文件时使用技能根目录相对路径。'],
+    distinctiveSections: memoryBreadProfile?.distinctiveSections || [],
+    sectionHeadings: memoryBreadProfile?.sectionHeadings || { ...DEFAULT_CREATION_SKILL_SECTION_HEADINGS },
+    fieldExamples: memoryBreadProfile?.fieldExamples || cloneFieldExamples(DEFAULT_CREATION_SKILL_FIELD_EXAMPLES),
+    exampleDocument: memoryBreadProfile?.exampleDocument || DEFAULT_CREATION_SKILL_EXAMPLE_DOCUMENT,
     status: 'saved',
     installed: true,
     published: false,
     packageFiles,
   }
+}
+
+function readMemoryBreadPackageProfile(
+  files: CreationSkillPackageFile[],
+  title: string,
+  summary: string,
+): CreationSkillContent | null {
+  const profileFile = files.find(file => file.path === 'references/memorybread-creation.json')
+  if (!profileFile) return null
+  try {
+    const payload = JSON.parse(skillFileText(profileFile) || '')
+    if (payload?.kind !== 'memorybread.creation-profile' || !payload?.content) return null
+    const content = payload.content
+    const exampleFile = files.find(file => file.path === 'references/example.md')
+    return {
+      skillDescription: mapSkillDescription(content.skill_description, title, summary),
+      executionSteps: mapExecutionSteps(content.execution_steps, title, summary),
+      commonTitles: Array.isArray(content.common_titles) ? content.common_titles.map(String) : [],
+      titleStyle: String(content.title_style || ''),
+      textStyle: String(content.text_style || ''),
+      diagramStyle: String(content.diagram_style || ''),
+      writingGuidelines: Array.isArray(content.writing_guidelines)
+        ? content.writing_guidelines.map(String)
+        : [],
+      distinctiveSections: mapDistinctiveSections(content.distinctive_sections),
+      sectionHeadings: mapSectionHeadings(content.section_headings),
+      fieldExamples: mapFieldExamples(content.field_examples),
+      exampleDocument: exampleFile
+        ? skillFileText(exampleFile) || DEFAULT_CREATION_SKILL_EXAMPLE_DOCUMENT
+        : String(content.example_document || '') || DEFAULT_CREATION_SKILL_EXAMPLE_DOCUMENT,
+    }
+  } catch {
+    return null
+  }
+}
+
+/** 保留旧名称作为兼容别名；实际读取的是通用 Agent Skills 目录。 */
+export const importCodexSkillPackage = importAgentSkillPackage
+
+export async function importAgentSkillZip(
+  archive: File,
+): Promise<Omit<LocalCreationSkill, 'id' | 'createdAt' | 'updatedAt'>> {
+  if (!/\.zip$/i.test(archive.name)) throw new Error('请选择 Skill 源文件 ZIP')
+  if (archive.size > MAX_SKILL_PACKAGE_BYTES) throw new Error('Skill 源文件总大小不能超过 10 MB')
+  let entries: Record<string, Uint8Array>
+  try {
+    entries = unzipSync(await readBrowserFileBytes(archive))
+  } catch {
+    throw new Error('无法解压 Skill 源文件，请确认 ZIP 文件完整')
+  }
+  const files = Object.entries(entries)
+    .filter(([path]) => !path.endsWith('/') && !path.endsWith('/.DS_Store') && path !== '.DS_Store')
+    .map(([path, bytes]) => {
+      const file = new File([arrayBufferFromBytes(bytes)], path.split('/').pop() || 'skill-file', {
+        type: inferSkillFileMediaType(path),
+      })
+      Object.defineProperty(file, 'webkitRelativePath', { value: path })
+      return file
+    })
+  return importAgentSkillPackage(files)
 }
 
 async function readBrowserFileBytes(file: File): Promise<Uint8Array> {
@@ -699,7 +773,7 @@ function validateSkillFilePath(path: string) {
     || /[\u0000-\u001f\u007f]/.test(path)
     || parts.some(part => !part || part === '.' || part === '..')
   ) {
-    throw new Error(`技能包包含无效文件路径：${path || '空路径'}`)
+    throw new Error(`Skill 源文件包含无效文件路径：${path || '空路径'}`)
   }
 }
 
@@ -750,7 +824,7 @@ export function isTextSkillFile(file: CreationSkillPackageFile) {
     || /\.(?:md|mdx|txt|py|sh|js|jsx|ts|tsx|json|ya?ml|toml|csv|svg|html|css)$/i.test(file.path)
 }
 
-export function codexSkillPackageFiles(
+export function agentSkillPackageFiles(
   skill: CreationSkillContent & {
     id: string | number
     clientSkillKey?: string
@@ -761,7 +835,7 @@ export function codexSkillPackageFiles(
 ): CreationSkillPackageFile[] {
   if (skill.packageFiles?.length) return [...skill.packageFiles]
   const name = codexSkillName(skill.clientSkillKey || skill.title, skill.id)
-  const description = [
+  const description = ([
     skill.skillDescription.purpose,
     skill.skillDescription.documentTypes.length
       ? `用于创作：${skill.skillDescription.documentTypes.join('、')}。`
@@ -769,7 +843,7 @@ export function codexSkillPackageFiles(
     skill.skillDescription.problems.length
       ? `适合解决：${skill.skillDescription.problems.join('；')}。`
       : '',
-  ].filter(Boolean).join(' ').slice(0, 1_024)
+  ].filter(Boolean).join(' ') || skill.summary).slice(0, 1_024)
   const markdown = `---
 name: ${name}
 description: ${JSON.stringify(description)}
@@ -796,44 +870,89 @@ ${step.output.trim() ? `- 产出：${step.output}\n` : ''}- Agent：${step.agent
 - Skill：${step.skills.join('、') || '无'}
 - Tool：${step.tools.join('、') || '无'}`).join('\n\n')}
 
-## 标题设计风格
+## References
 
-${skill.commonTitles.map(item => `- ${item}`).join('\n')}
+- Read \`references/memorybread-creation.json\` for the complete structured writing profile.
+${skill.exampleDocument.trim() ? '- Read `references/example.md` when a complete output example is useful.' : ''}
 
-## 行文设计思路
-
-${skill.textStyle}
-
-## 图片生成方式
-
-${skill.diagramStyle}
-
-## 话术表达风格
-
-${skill.writingGuidelines.length
-    ? skill.writingGuidelines.map(item => `- ${item}`).join('\n')
-    : '- 没有额外话术约束。'}
-
-${(skill.distinctiveSections || []).map(section => `## 特色亮点：${section.title}
-
-${section.description}
-
-复刻指引：${section.guidance}
-
-示例：
-${section.examples.map(example => `- ${example}`).join('\n')}`).join('\n\n')}
-
-## 示例
-
-${skill.exampleDocument}
+Follow the user's facts and constraints. Treat reference examples as style guidance, never as facts for the new document.
 `
-  const bytes = new TextEncoder().encode(markdown)
-  return [{
-    path: 'SKILL.md',
-    mediaType: 'text/markdown',
-    contentBase64: bytesToBase64(bytes),
-    sizeBytes: bytes.byteLength,
-  }]
+  const profile = JSON.stringify({
+    schema_version: 1,
+    kind: 'memorybread.creation-profile',
+    content: {
+      skill_description: {
+        purpose: skill.skillDescription.purpose,
+        document_types: skill.skillDescription.documentTypes,
+        problems: skill.skillDescription.problems,
+        domains: skill.skillDescription.domains,
+        deliverables: skill.skillDescription.deliverables,
+      },
+      execution_steps: skill.executionSteps.map(step => ({
+        id: step.id,
+        title: step.title,
+        objective: step.objective,
+        output: step.output,
+        agents: step.agents,
+        skills: step.skills,
+        tools: step.tools,
+        retain_webpage_screenshot: step.retainWebpageScreenshot === true,
+      })),
+      common_titles: skill.commonTitles,
+      title_style: skill.titleStyle,
+      text_style: skill.textStyle,
+      diagram_style: skill.diagramStyle,
+      writing_guidelines: skill.writingGuidelines,
+      distinctive_sections: skill.distinctiveSections || [],
+      section_headings: {
+        common_titles: skill.sectionHeadings.commonTitles,
+        title_style: skill.sectionHeadings.titleStyle,
+        text_style: skill.sectionHeadings.textStyle,
+        diagram_style: skill.sectionHeadings.diagramStyle,
+        writing_guidelines: skill.sectionHeadings.writingGuidelines,
+      },
+      field_examples: {
+        common_titles: skill.fieldExamples.commonTitles,
+        title_style: skill.fieldExamples.titleStyle,
+        text_style: skill.fieldExamples.textStyle,
+        diagram_style: skill.fieldExamples.diagramStyle,
+        writing_guidelines: skill.fieldExamples.writingGuidelines,
+      },
+      example_document: '',
+    },
+  }, null, 2)
+  const files = [
+    textSkillPackageFile('SKILL.md', 'text/markdown', markdown),
+    textSkillPackageFile('references/memorybread-creation.json', 'application/json', profile),
+  ]
+  if (skill.exampleDocument.trim()) {
+    files.push(textSkillPackageFile('references/example.md', 'text/markdown', skill.exampleDocument.trim()))
+  }
+  return files
+}
+
+/** 兼容旧调用方；生成物同时兼容 Codex 与 Claude Code。 */
+export const codexSkillPackageFiles = agentSkillPackageFiles
+
+function textSkillPackageFile(path: string, mediaType: string, content: string): CreationSkillPackageFile {
+  const bytes = new TextEncoder().encode(content)
+  return { path, mediaType, contentBase64: bytesToBase64(bytes), sizeBytes: bytes.byteLength }
+}
+
+export function agentSkillZipBytes(
+  name: string,
+  files: CreationSkillPackageFile[],
+) {
+  const skillMarkdown = files.find(file => file.path === 'SKILL.md')
+  const root = skillMarkdown
+    ? parseCodexSkillMarkdown(skillFileText(skillMarkdown) || '').name
+    : codexSkillName(name, 'skill')
+  const entries = Object.fromEntries(files.map(file => [`${root}/${file.path}`, skillFileBytes(file)]))
+  return arrayBufferFromBytes(zipSync(entries, { level: 6 }))
+}
+
+function arrayBufferFromBytes(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
 }
 
 function codexSkillName(value: string, id: string | number) {
@@ -844,7 +963,15 @@ function codexSkillName(value: string, id: string | number) {
     .replace(/^-|-$/g, '')
     .slice(0, 64)
     .replace(/-$/g, '')
-  return normalized || `memorybread-skill-${id}`
+  if (normalized) return normalized
+  const suffix = String(id)
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 44)
+    .replace(/-$/g, '')
+  return `memorybread-skill-${suffix || 'portable'}`
 }
 
 const inFlightCreationSkillAnalyses = new Map<string, Promise<CreationSkillAnalysis>>()
@@ -1251,12 +1378,24 @@ export async function saveLocalCreationSkill(
   input: Omit<LocalCreationSkill, 'id' | 'createdAt' | 'updatedAt'>,
   id?: number,
 ): Promise<LocalCreationSkill> {
+  const preservePackage = (input.sourceKind === 'imported' || input.sourceKind === 'market')
+    && Boolean(input.packageFiles?.length)
+  const normalizedInput = preservePackage
+    ? input
+    : {
+      ...input,
+      packageFiles: agentSkillPackageFiles({
+        ...input,
+        id: id || input.clientSkillKey,
+        packageFiles: [],
+      }),
+    }
   const response = await fetchWithLocalhostFallback(
     `${apiBaseUrl}/api/creation/skills${id ? `/${id}` : ''}`,
     {
       method: id ? 'PUT' : 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(serializeLocalSkill(input)),
+      body: JSON.stringify(serializeLocalSkill(normalizedInput)),
     },
   )
   if (!response.ok) throw new Error(await parseError(response, '保存技能失败'))
@@ -1335,6 +1474,28 @@ export async function searchCreationSkillMarket(
   }
 }
 
+export async function fetchCreationSkillMarketDetail(
+  adminApiBaseUrl: string,
+  id: string,
+): Promise<CreationSkillMarketItem> {
+  const controller = new AbortController()
+  const timeout = globalThis.setTimeout(() => controller.abort(), CREATION_SKILL_MARKET_TIMEOUT_MS)
+  try {
+    const response = await fetch(`${adminApiBaseUrl}/v1/creation-skills/${encodeURIComponent(id)}`, {
+      headers: serviceEnvironmentHeaders(),
+      signal: controller.signal,
+    })
+    if (!response.ok) throw new Error(await parseError(response, '读取技能详情失败'))
+    const payload = await response.json()
+    return mapMarketSkill(payload?.data || {})
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('技能详情请求超时，请稍后重试')
+    throw error
+  } finally {
+    globalThis.clearTimeout(timeout)
+  }
+}
+
 export function marketCreationSkillToLocalInput(
   skill: CreationSkillMarketItem,
 ): Omit<LocalCreationSkill, 'id' | 'createdAt' | 'updatedAt'> {
@@ -1358,7 +1519,7 @@ export function marketCreationSkillToLocalInput(
       agents: [...step.agents],
       skills: [...step.skills],
       tools: [...step.tools],
-      retainWebpageScreenshot: step.retainWebpageScreenshot !== false,
+      retainWebpageScreenshot: step.retainWebpageScreenshot === true,
     })),
     commonTitles: [...skill.commonTitles],
     titleStyle: skill.titleStyle,
@@ -1375,7 +1536,7 @@ export function marketCreationSkillToLocalInput(
     status: 'saved',
     installed: true,
     published: false,
-    packageFiles: [],
+    packageFiles: skill.packageFiles.map(file => ({ ...file })),
   }
 }
 
@@ -1432,6 +1593,15 @@ export async function publishCreationSkill(
           },
           example_document: skill.exampleDocument,
         },
+        package_files: agentSkillPackageFiles({
+          ...skill,
+          id: skill.clientSkillKey,
+        }).map(file => ({
+          path: file.path,
+          media_type: file.mediaType,
+          content_base64: file.contentBase64,
+          size_bytes: file.sizeBytes,
+        })),
         published,
       }),
     },
@@ -1612,7 +1782,13 @@ export function matchCreationSkills(
 
   const explicit = matches.filter(match => match.reason === 'mentioned')
   const automatic = matches.filter(match => match.reason === 'automatic')
-  return [...explicit, ...automatic].slice(0, Math.max(1, limit))
+  // @ 提及代表用户已经选定主 Skill。此时再叠加名称相近的自动匹配模板，
+  // 会把每个模板的 execution_steps 都当成并列主流程执行；一次 4 步周报
+  // 会因此膨胀成十几步，并把其它模板的章节写进成稿。
+  if (explicit.length) return explicit.slice(0, Math.max(1, limit))
+  // 没有显式选择时也只采用得分最高的一个主 Skill。组合能力必须由主 Skill
+  // 在 execution_steps[].skills 中明确声明，不能靠模糊匹配静默拼接多套流程。
+  return automatic.slice(0, 1)
 }
 
 export function resolveCreationSkillDependencies(
@@ -1676,49 +1852,46 @@ export function buildCreationSkillInstruction(
       step.skills.length ? `可调用 Skill：${step.skills.join('、')}` : '',
       step.tools.length ? `可调用 Tool：${step.tools.join('、')}` : '',
     ].filter(Boolean).join('；')).join('\n')
-    const importedSkillContext = skill.sourceKind === 'imported'
-      ? buildImportedSkillContext(skill)
-      : ''
-    if (importedSkillContext) {
-      return [
-        `S#${index + 1} ${skill.title}（${reason === 'mentioned' ? '用户明确选择' : '根据需求自动匹配'}）`,
-        `适用场景与目标：${skill.summary}`,
-        category ? `创作类目：${category}` : '',
-        descriptionContext,
-        `执行工作流：\n${workflowContext}`,
-        importedSkillContext,
-      ].filter(Boolean).join('\n')
-    }
+    const packageContext = buildAgentSkillContext(skill)
+    const hasMemoryBreadProfile = codexSkillPackageFiles(skill)
+      .some(file => file.path === 'references/memorybread-creation.json')
+    const includeStructuredProjection = skill.sourceKind !== 'imported' || hasMemoryBreadProfile
     return [
       `S#${index + 1} ${skill.title}（${reason === 'mentioned' ? '用户明确选择' : '根据需求自动匹配'}）`,
       `适用场景与目标：${skill.summary}`,
       category ? `创作类目：${category}` : '',
       descriptionContext,
       `执行工作流：\n${workflowContext}`,
-      `标题设计风格：${skill.commonTitles.join('；')}`,
-      `源标题脱敏仿写：${skill.fieldExamples.commonTitles.join('；')}`,
-      `行文设计思路：${skill.textStyle}`,
-      `行文仿写示例：${skill.fieldExamples.textStyle.join('；')}`,
-      `图片生成方式：${skill.diagramStyle}`,
-      `代码生图示例：${skill.fieldExamples.diagramStyle.join('；')}`,
-      skill.writingGuidelines.length ? `话术表达风格：${skill.writingGuidelines.join('；')}` : '',
-      `话术仿写示例：${skill.fieldExamples.writingGuidelines.join('；')}`,
-      ...(skill.distinctiveSections || []).map(section => [
+      '严格结构契约：execution_steps 是唯一的执行流程和一级章节白名单。必须按声明顺序逐步执行，每一步单独形成对应产出；不得跳步、调换步骤或合并不同步骤的数据与表格。除非用户本轮明确要求，否则不得添加 Skill 未声明的结论、重点进展、风险阻塞、后续计划或其它通用模板章节。',
+      ...(includeStructuredProjection ? [
+        `标题设计风格：${skill.commonTitles.join('；')}`,
+        `源标题脱敏仿写：${skill.fieldExamples.commonTitles.join('；')}`,
+        `行文设计思路：${skill.textStyle}`,
+        `行文仿写示例：${skill.fieldExamples.textStyle.join('；')}`,
+        `图片生成方式：${skill.diagramStyle}`,
+        `代码生图示例：${skill.fieldExamples.diagramStyle.join('；')}`,
+        skill.writingGuidelines.length ? `话术表达风格：${skill.writingGuidelines.join('；')}` : '',
+        `话术仿写示例：${skill.fieldExamples.writingGuidelines.join('；')}`,
+      ] : []),
+      ...(includeStructuredProjection ? (skill.distinctiveSections || []).map(section => [
         `特色亮点｜${section.title}`,
         `特征说明：${section.description}`,
         `复刻指引：${section.guidance}`,
         `仿写示例：${section.examples.join('；')}`,
-      ].join('\n')),
-      `完全脱离源文档的 few-shot 示例文档：\n${skill.exampleDocument}`,
+      ].join('\n')) : []),
+      packageContext,
     ].filter(Boolean).join('\n')
   })
-  return `\n\n已安装并匹配的技能：\n${recipes.join('\n\n')}\n上传的 Codex 技能优先遵循其 SKILL.md 和引用文件；脚本内容只可作为说明阅读，不得声称已经执行脚本。其余技能优先复刻可识别的标题句式、行文推进、惯用话术和图片生成方式。只替换本次主题和业务对象，不要把鲜明风格稀释成通用公文。示例只作为 few-shot 学习结构与表达，不得照抄其中主题；技能只约束表达与结构，不要虚构业务事实。`
+  return `\n\n已安装并匹配的技能：\n${recipes.join('\n\n')}\nSkill 的 SKILL.md、execution_steps 和引用规则高于通用文档模板。只输出 Skill 明确声明的步骤产出和章节，不得按文档类型自行补齐常见栏目；脚本内容只可作为说明阅读，不得声称已经执行脚本。示例文档不进入本轮事实与结构上下文；不得虚构业务事实。`
 }
 
-function buildImportedSkillContext(skill: LocalCreationSkill) {
+function buildAgentSkillContext(skill: LocalCreationSkill) {
   const sections: string[] = []
   let remaining = MAX_IMPORTED_SKILL_CONTEXT_CHARS
   for (const file of codexSkillPackageFiles(skill)) {
+    // 示例文档可能带有只为展示写法而虚构的主题和章节，不能进入运行时
+    // 结构上下文，否则模型会把示例中的通用栏目误当成当前 Skill 要求。
+    if (file.path === 'references/example.md') continue
     const text = skillFileText(file)
     if (text === null || !text.trim()) continue
     const heading = `[技能文件：${file.path}]\n`
@@ -1731,7 +1904,7 @@ function buildImportedSkillContext(skill: LocalCreationSkill) {
       break
     }
   }
-  return sections.length ? `Codex 技能目录内容：\n${sections.join('\n\n')}` : ''
+  return sections.length ? `Agent Skills 目录内容：\n${sections.join('\n\n')}` : ''
 }
 
 export function buildClientCreationSkillFallback(
@@ -2308,7 +2481,7 @@ function serializeLocalSkill(skill: Omit<LocalCreationSkill, 'id' | 'createdAt' 
       agents: step.agents,
       skills: step.skills,
       tools: step.tools,
-      retain_webpage_screenshot: step.retainWebpageScreenshot !== false,
+      retain_webpage_screenshot: step.retainWebpageScreenshot === true,
     })),
     common_titles: skill.commonTitles,
     title_style: skill.titleStyle,
@@ -2366,7 +2539,7 @@ function mapLocalSkill(item: any): LocalCreationSkill {
     ...(Array.isArray(item?.field_examples?.common_titles) ? item.field_examples.common_titles : []),
     ...(Array.isArray(item?.field_examples?.title_style) ? item.field_examples.title_style : []),
   ].map(value => String(value).trim()).filter(Boolean))).slice(0, 6)
-  return {
+  const mapped: LocalCreationSkill = {
     id: Number(item.id),
     clientSkillKey: item.client_skill_key,
     cloudSkillId: item.cloud_skill_id,
@@ -2430,6 +2603,10 @@ function mapLocalSkill(item: any): LocalCreationSkill {
     createdAt: Number(item.created_at),
     updatedAt: Number(item.updated_at),
   }
+  if (mapped.packageFiles?.length === 0 && mapped.sourceKind !== 'imported') {
+    mapped.packageFiles = agentSkillPackageFiles(mapped)
+  }
+  return mapped
 }
 
 function repairStoredCreationSkillTitle(item: any) {
@@ -2502,6 +2679,18 @@ function mapMarketSkill(item: any): CreationSkillMarketItem {
       id: String(item?.author?.id || ''),
       nickname: String(item?.author?.nickname || '匿名面包师'),
     },
+    packageFiles: Array.isArray(item.package_files)
+      ? item.package_files.map((file: any) => ({
+        path: String(file.path || ''),
+        mediaType: String(file.media_type || 'application/octet-stream'),
+        contentBase64: String(file.content_base64 || ''),
+        sizeBytes: Number(file.size_bytes || 0),
+      })).filter((file: CreationSkillPackageFile) => file.path && file.contentBase64)
+      : [],
+    packageName: String(item.package_name || ''),
+    packageFileCount: Number(item.package_file_count || 0),
+    packageSizeBytes: Number(item.package_size_bytes || 0),
+    packageSha256: String(item.package_sha256 || ''),
     skillDescription: mapSkillDescription(
       content.skill_description,
       title,

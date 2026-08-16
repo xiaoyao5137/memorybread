@@ -40,7 +40,7 @@ export interface CreationToolState {
 export const CREATION_TOOL_DEFINITIONS: readonly CreationToolDefinition[] = [
   {
     id: 'internet_search',
-    name: '互联网检索 Tool',
+    name: '互联网检索',
     summary: '检索公开网页，为行业、政策、标准和时效性信息补充可核验来源。',
     capability: '按任务意图自动调用 · 外部资料保留来源链接',
     required: true,
@@ -48,7 +48,7 @@ export const CREATION_TOOL_DEFINITIONS: readonly CreationToolDefinition[] = [
   },
   {
     id: 'memory_search',
-    name: '记忆搜索 Tool',
+    name: '记忆搜索',
     summary: '检索本机记忆、知识和历史文档，让创作延续你的真实上下文。',
     capability: '本地执行 · 原始记忆不上传',
     required: true,
@@ -57,7 +57,7 @@ export const CREATION_TOOL_DEFINITIONS: readonly CreationToolDefinition[] = [
   },
   {
     id: 'data_search',
-    name: '数据检索 Tool',
+    name: '数据检索',
     summary: '从本机数据模块召回报表来源与工作数据快照，并按采集时间判断可用性。',
     capability: '本地检索 · 返回时效与来源证据',
     required: true,
@@ -66,7 +66,7 @@ export const CREATION_TOOL_DEFINITIONS: readonly CreationToolDefinition[] = [
   },
   {
     id: 'webpage_scrape',
-    name: '网页爬取 Tool',
+    name: '网页爬取',
     summary: '按需刷新报表网页；优先复用现有 Chrome 登录会话，不保存浏览器 Cookie。',
     capability: 'Chrome 会话优先 · HTTP 降级',
     required: true,
@@ -74,7 +74,7 @@ export const CREATION_TOOL_DEFINITIONS: readonly CreationToolDefinition[] = [
   },
   {
     id: 'plantuml_diagram',
-    name: 'PlantUML 画图 Tool',
+    name: 'PlantUML 画图',
     summary: '在架构、流程和时序类任务中生成可继续编辑的 PlantUML 图示代码。',
     capability: '按需调用 · 输出代码图示',
     required: false,
@@ -82,7 +82,7 @@ export const CREATION_TOOL_DEFINITIONS: readonly CreationToolDefinition[] = [
   },
   {
     id: 'github_search',
-    name: 'GitHub 检索 Tool',
+    name: 'GitHub 检索',
     summary: '搜索公开 GitHub 仓库，为技术选型和开源方案调研补充项目线索。',
     capability: '按需调用 · 仅检索公开仓库',
     required: false,

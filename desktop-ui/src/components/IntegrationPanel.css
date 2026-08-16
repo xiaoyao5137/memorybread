@@ -320,12 +320,13 @@
 .integration-skill-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: 1fr;
   gap: 12px;
 }
 
 .integration-skill-card {
   min-width: 0;
-  min-height: 224px;
+  height: 100%;
   padding: 15px;
   border: 1px solid rgba(105, 67, 35, 0.13);
   border-radius: 14px;
@@ -373,6 +374,11 @@
   color: #745b47;
   font-size: 9px;
   font-weight: 750;
+}
+
+.integration-skill-card__badge--skill {
+  background: rgba(0, 122, 255, 0.1);
+  color: #007aff;
 }
 
 .integration-skill-card h3 {
@@ -774,6 +780,11 @@
   color: #6e6e73;
 }
 
+.integration-skill-card__badge--skill {
+  background: rgba(0, 122, 255, 0.1);
+  color: #007aff;
+}
+
 .integration-skill-card__footer > span {
   color: #8e8e93;
 }
@@ -905,6 +916,87 @@
   }
 }
 
+/* 下载完成提示：固定在窗口右上角，避免被页面滚动容器裁剪 */
+.integration-download-toast {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 1400;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  max-width: min(430px, calc(100vw - 36px));
+  padding: 12px 14px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.16);
+  color: #111111;
+  animation: integration-download-toast-in 0.22s ease;
+}
+
+.integration-download-toast > svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: #34c759;
+}
+
+.integration-download-toast__copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.integration-download-toast__copy strong {
+  font-size: 12px;
+}
+
+.integration-download-toast__copy small {
+  font-size: 10px;
+  color: #6e6e73;
+  word-break: break-all;
+}
+
+.integration-download-toast__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 4px;
+  flex-shrink: 0;
+}
+
+.integration-download-toast__actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 0 9px;
+  border: 1px solid rgba(0, 122, 255, 0.24);
+  border-radius: 8px;
+  background: rgba(0, 122, 255, 0.08);
+  color: #007aff;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.integration-download-toast__actions button:hover {
+  background: rgba(0, 122, 255, 0.14);
+}
+
+.integration-download-toast__actions button:last-child {
+  padding: 0 4px;
+  border-color: transparent;
+  background: transparent;
+  color: #8e8e93;
+}
+
+@keyframes integration-download-toast-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 @media (prefers-color-scheme: dark) {
   .integration-panel {
     --integration-ink: #f1e7dc;
@@ -955,5 +1047,31 @@
   .integration-custom-empty {
     background: #242220;
     border-color: rgba(255, 255, 255, 0.09);
+  }
+
+  .integration-download-toast {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: #252321;
+    color: #f1e7dc;
+  }
+
+  .integration-download-toast__copy small {
+    color: #b9a99b;
+  }
+
+  .integration-download-toast__actions button {
+    border-color: rgba(0, 122, 255, 0.34);
+    background: rgba(0, 122, 255, 0.16);
+    color: #6ab0ff;
+  }
+
+  .integration-download-toast__actions button:hover {
+    background: rgba(0, 122, 255, 0.24);
+  }
+
+  .integration-download-toast__actions button:last-child {
+    border-color: transparent;
+    background: transparent;
+    color: #8e8e93;
   }
 }

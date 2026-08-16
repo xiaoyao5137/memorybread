@@ -12,7 +12,9 @@ import {
   useFetchBakeSop,
   useFetchBakeSops,
   useFetchBakeTemplates,
+  useFetchDataSources,
   useFetchRagHistory,
+  useUpdateMemoryFavorite,
 } from '../hooks/useApi'
 import { useAppStore } from '../store/useAppStore'
 
@@ -324,6 +326,70 @@ describe('useFetchBakeMemories', () => {
   })
 })
 
+describe('记忆收藏 API', () => {
+  beforeEach(() => {
+    useAppStore.getState().reset()
+    useAppStore.getState().setApiBaseUrl('http://localhost:7070')
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('数据列表保留收藏状态和其他筛选参数', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
+      items: [{ id: 22, title: '经营数据', is_favorite: true }],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { result } = renderHook(() => useFetchDataSources())
+    const data = await result.current({
+      q: '经营',
+      source_kind: 'work_memory',
+      from: 100,
+      to: 200,
+      favorite: true,
+      limit: 20,
+      offset: 0,
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://localhost:7070/api/data/sources?q=%E7%BB%8F%E8%90%A5&source_kind=work_memory&from=100&to=200&favorite=true&limit=20&offset=0',
+      undefined,
+    )
+    expect(data.items[0]).toMatchObject({ id: 22, is_favorite: true })
+  })
+
+  it('通过统一 PUT 接口更新四类记忆的收藏状态', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
+      resource_kind: 'document',
+      resource_id: 3,
+      is_favorite: true,
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { result } = renderHook(() => useUpdateMemoryFavorite())
+    const updated = await result.current('document', '3', true)
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://localhost:7070/api/memory-favorites/document/3',
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_favorite: true }),
+      },
+    )
+    expect(updated).toEqual({
+      resource_kind: 'document',
+      resource_id: 3,
+      is_favorite: true,
+    })
+  })
+})
+
 describe('useFetchBakeKnowledge', () => {
   beforeEach(() => {
     useAppStore.getState().reset()
@@ -338,6 +404,7 @@ describe('useFetchBakeKnowledge', () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
       items: [{
         id: 9,
+        is_favorite: true,
         capture_id: 12,
         summary: '已提炼知识',
         overview: '概述',
@@ -358,13 +425,14 @@ describe('useFetchBakeKnowledge', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const { result } = renderHook(() => useFetchBakeKnowledge())
-    const data = await result.current({ q: '芝士', from: 100, to: 200, limit: 50, offset: 10 })
+    const data = await result.current({ q: '芝士', from: 100, to: 200, favorite: true, limit: 50, offset: 10 })
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://localhost:7070/api/bake/knowledge?q=%E8%8A%9D%E5%A3%AB&from=100&to=200&limit=50&offset=10',
+      'http://localhost:7070/api/bake/knowledge?q=%E8%8A%9D%E5%A3%AB&from=100&to=200&favorite=true&limit=50&offset=10',
     )
     expect(data.items[0]).toMatchObject({
       id: '9',
+      isFavorite: true,
       captureId: '12',
       category: 'bake_knowledge',
       summary: '已提炼知识',
@@ -418,6 +486,7 @@ describe('useFetchBakeTemplates', () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
       items: [{
         id: 3,
+        is_favorite: false,
         title: '文档模板',
         doc_type: 'article',
         status: 'draft',
@@ -442,13 +511,14 @@ describe('useFetchBakeTemplates', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const { result } = renderHook(() => useFetchBakeTemplates())
-    const data = await result.current({ q: '模板', from: 100, to: 200, limit: 20, offset: 0 })
+    const data = await result.current({ q: '模板', from: 100, to: 200, favorite: false, limit: 20, offset: 0 })
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://localhost:7070/api/bake/documents?q=%E6%A8%A1%E6%9D%BF&from=100&to=200&limit=20&offset=0',
+      'http://localhost:7070/api/bake/documents?q=%E6%A8%A1%E6%9D%BF&from=100&to=200&favorite=false&limit=20&offset=0',
     )
     expect(data.items[0]).toMatchObject({
       id: '3',
+      isFavorite: false,
       title: '文档模板',
       docType: 'article',
     })
@@ -469,6 +539,7 @@ describe('useFetchBakeSops', () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
       items: [{
         id: 5,
+        is_favorite: true,
         source_capture_id: '',
         source_timeline_id: '5',
         trigger_keywords: ['导出'],
@@ -492,13 +563,14 @@ describe('useFetchBakeSops', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const { result } = renderHook(() => useFetchBakeSops())
-    const data = await result.current({ q: '导出', from: 100, to: 200, limit: 20, offset: 0 })
+    const data = await result.current({ q: '导出', from: 100, to: 200, favorite: true, limit: 20, offset: 0 })
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://localhost:7070/api/bake/sops?q=%E5%AF%BC%E5%87%BA&from=100&to=200&limit=20&offset=0',
+      'http://localhost:7070/api/bake/sops?q=%E5%AF%BC%E5%87%BA&from=100&to=200&favorite=true&limit=20&offset=0',
     )
     expect(data.items[0]).toMatchObject({
       id: '5',
+      isFavorite: true,
       extractedProblem: '导出文档',
     })
   })

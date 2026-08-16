@@ -230,18 +230,33 @@
           "enum": ["auto", "chrome", "chrome_canary", "edge", "brave", "chromium", "vivaldi", "safari"],
           "default": "auto"
         },
-        "capture_evidence": {"type": "boolean", "default": false},
+        "capture_evidence": {
+          "type": "boolean",
+          "default": false,
+          "description": "是否生成可持久化的截图证据；仅与 retain_screenshot 同为 true 时生成图片资产"
+        },
         "retain_screenshot": {
           "type": "boolean",
-          "default": true,
-          "description": "是否把本轮浏览器截图保留为创作文档证据"
+          "default": false,
+          "description": "是否把本轮浏览器截图保留为创作文档证据；关闭不影响 DOM/AX 即时取数"
+        },
+        "allow_foreground_refresh": {
+          "type": "boolean",
+          "default": false,
+          "description": "静默读取无法取得有效指标时，是否允许用一次专用浏览器会话完成页面加载与筛选；不表示需要截图"
+        },
+        "focus_policy": {
+          "type": "string",
+          "enum": ["never", "allow_once"],
+          "default": "never",
+          "description": "前台焦点硬门禁；静默尝试使用 never，专用浏览器刷新或截图使用 allow_once；用户在会话期间切走时不得抢回焦点"
         },
         "run_id": {"type": ["string", "null"]},
         "session_id": {"type": ["string", "null"]},
         "preview_id": {
           "type": ["string", "null"],
           "format": "uuid",
-          "description": "本轮后台浏览器缩略预览与最终证据共用的本机标识"
+          "description": "本轮专用浏览器会话、缩略预览与最终证据共用的本机标识"
         },
         "objective": {
           "type": ["string", "null"],
@@ -281,7 +296,9 @@
           "type": ["string", "null"],
           "enum": ["chrome", "chrome_canary", "edge", "brave", "chromium", "vivaldi", "safari", null]
         },
-        "interaction_mode": {"type": "string", "enum": ["background_tab", "background_browser_window", "temporary_foreground_tab", "none"]},
+        "interaction_mode": {"type": "string", "enum": ["background_tab", "background_browser_window", "temporary_foreground_tab", "temporary_foreground_window", "none"]},
+        "focus_policy": {"type": "string", "enum": ["never", "allow_once"]},
+        "focus_takeover_count": {"type": "integer", "minimum": 0, "maximum": 1},
         "collected_at": {"type": "integer", "minimum": 0},
         "title": {"type": "string"},
         "url": {"type": "string"},

@@ -49,6 +49,7 @@ SAMPLE_CANDIDATE = {
     "source_capture_id": 10,
     "source_capture_count": 3,
     "effective_capture_count": 3,
+    "sop_evidence_mode": "direct_interaction",
     "summary": "修复 bake pipeline 的 JSON 提炼链路",
     "overview": "定位 sidecar 返回空内容导致 bake 三类产物全部 rejected。",
     "details": "检查 extractor_v2 的 JSON 解析与 response shape 兼容逻辑，并补充测试覆盖。",
@@ -83,6 +84,10 @@ SAMPLE_CANDIDATE = {
             "event_type": "manual",
             "app_name": "Cursor",
             "win_title": "extractor_v2.py",
+            "ax_focused_role": "AXTextArea",
+            "ax_focused_id": "editor",
+            "evidence_kind": "input",
+            "operation_evidence": True,
             "visible_text": "检查 bake bundle 分类逻辑",
             "input_text": "定位 primary_type 抑制",
         },
@@ -92,6 +97,11 @@ SAMPLE_CANDIDATE = {
             "event_type": "manual",
             "app_name": "Terminal",
             "win_title": "pytest",
+            "ax_focused_role": "AXTextField",
+            "ax_focused_id": "terminal",
+            "evidence_kind": "input",
+            "operation_evidence": True,
+            "state_delta": "window:extractor_v2.py→pytest",
             "visible_text": "运行 bundle 测试并发现 SOP 被拒绝",
         },
         {
@@ -100,6 +110,9 @@ SAMPLE_CANDIDATE = {
             "event_type": "manual",
             "app_name": "Terminal",
             "win_title": "pytest",
+            "evidence_kind": "state_change",
+            "operation_evidence": True,
+            "state_delta": "visible→修改后测试通过",
             "visible_text": "修改后测试通过",
         },
     ],
@@ -421,6 +434,145 @@ def test_extract_bake_bundle_uses_one_llm_call_for_three_artifacts():
     assert result["total_elapsed_ms"] >= 0
 
 
+def test_extract_bake_bundle_recovers_single_object_artifact_arrays():
+    extractor = make_extractor()
+    response_payload = {
+        "classification": {"primary_type": "sop", "reason": "实际执行了三步排查"},
+        "knowledge": [
+            {"accepted": False, "reason": "not_a_knowledge", "payload": None}
+        ],
+        "design": [
+            {"accepted": False, "reason": "not_a_document", "payload": None}
+        ],
+        "sop": [
+            {
+                "accepted": True,
+                "reason": None,
+                "payload": {
+                    "summary": "排查并验证 bake 输出",
+                    "steps": ["检查结构", "修复解析", "运行验证"],
+                    "step_evidence": [
+                        {"step_index": 1, "capture_ids": [10]},
+                        {"step_index": 2, "capture_ids": [11]},
+                        {"step_index": 3, "capture_ids": [12]},
+                    ],
+                },
+            }
+        ],
+    }
+    client = DummyClient({
+        "model": "mock-model",
+        "message": {"content": json.dumps(response_payload, ensure_ascii=False)},
+        "prompt_eval_count": 7,
+        "eval_count": 8,
+        "done_reason": "stop",
+    })
+    extractor._ollama_chat = client.chat
+
+    result = extractor.extract_bake_bundle(SAMPLE_CANDIDATE)
+
+    assert len(client.calls) == 1
+    assert result["sop"]["accepted"] is True
+    assert result["sop"]["payload"]["summary"] == "排查并验证 bake 输出"
+    assert result["degraded"] is False
+
+
+def test_extract_bake_bundle_recovers_sop_when_later_knowledge_json_is_broken():
+    extractor = make_extractor()
+    sop = {
+        "accepted": True,
+        "reason": None,
+        "payload": {
+            "summary": "修复并验证 bake 输出",
+            "steps": ["检查结构", "修复解析", "运行验证"],
+            "step_evidence": [
+                {"step_index": 1, "capture_ids": [10]},
+                {"step_index": 2, "capture_ids": [11]},
+                {"step_index": 3, "capture_ids": [12]},
+            ],
+        },
+    }
+    raw = (
+        '{"classification":{"primary_type":"sop","reason":"实际执行并验证"},'
+        f'"sop":{json.dumps(sop, ensure_ascii=False)},'
+        '"knowledge":{"accepted":true,"reason":null,"payload":'
+        '{"summary":"损坏的知识","details":"模型输出了未转义的"引号"}}'
+    )
+    calls = []
+
+    def fake_call(*_args, **_kwargs):
+        calls.append(1)
+        return None, {
+            "usage": {},
+            "model": "mock-model",
+            "raw_content": raw,
+            "empty_content": False,
+            "done_reason": "stop",
+            "elapsed_ms": 1,
+        }
+
+    extractor._call_bake_llm = fake_call
+
+    result = extractor.extract_bake_bundle(SAMPLE_CANDIDATE)
+
+    assert len(calls) == 1
+    assert result["sop"]["accepted"] is True
+    assert result["sop"]["payload"]["summary"] == "修复并验证 bake 输出"
+    assert result["knowledge"]["accepted"] is False
+    assert result["bundle_fragment_recovered"] is True
+    assert result["degraded"] is True
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        (None, "artifact_absent"),
+        ([], "empty_artifact"),
+        (["bad"], "artifact_malformed"),
+        (
+            [
+                {"accepted": True, "reason": None, "payload": {}},
+                {"accepted": True, "reason": None, "payload": {}},
+            ],
+            "ambiguous_artifact_array",
+        ),
+    ],
+)
+def test_bundle_artifact_shape_failures_have_stable_reason_codes(value, reason):
+    extractor = make_extractor()
+
+    artifact, meta = extractor._normalize_bake_artifact_result(
+        SAMPLE_CANDIDATE,
+        "knowledge",
+        value,
+        {"usage": {}, "model": "mock-model", "elapsed_ms": 1},
+        caller_id="bundle:1",
+    )
+
+    assert artifact == {"accepted": False, "reason": reason, "payload": None}
+    assert meta["degraded"] is True
+
+
+def test_bundle_artifact_array_with_one_accepted_item_is_recovered_deterministically():
+    extractor = make_extractor()
+
+    artifact, meta = extractor._normalize_bake_artifact_result(
+        SAMPLE_CANDIDATE,
+        "knowledge",
+        [
+            {"accepted": False, "reason": "no", "payload": None},
+            {"accepted": True, "reason": None, "payload": {"summary": "有效事实"}},
+        ],
+        {"usage": {}, "model": "mock-model", "elapsed_ms": 1},
+        caller_id="bundle:1",
+    )
+
+    assert artifact["accepted"] is True
+    assert artifact["payload"]["summary"] == "有效事实"
+    assert meta["degraded"] is False
+    assert meta["compatibility_recovered"] is True
+
+
 def test_extract_bake_bundle_primary_type_does_not_suppress_independent_assets():
     extractor = make_extractor()
     response_payload = {
@@ -440,6 +592,11 @@ def test_extract_bake_bundle_primary_type_does_not_suppress_independent_assets()
             "payload": {
                 "summary": "修复采集口径并验证指标",
                 "steps": ["修改采集配置", "重启采集任务", "检查指标恢复"],
+                "step_evidence": [
+                    {"step_index": 1, "capture_ids": [10]},
+                    {"step_index": 2, "capture_ids": [11]},
+                    {"step_index": 3, "capture_ids": [12]},
+                ],
             },
         },
     }
@@ -460,9 +617,9 @@ def test_extract_bake_bundle_primary_type_does_not_suppress_independent_assets()
     assert result["knowledge"]["accepted"] is True
     assert result["sop"]["accepted"] is True
     assert result["sop"]["payload"]["step_evidence"] == [
-        {"step_index": 1, "capture_ids": ["10", "11", "12"]},
-        {"step_index": 2, "capture_ids": ["10", "11", "12"]},
-        {"step_index": 3, "capture_ids": ["10", "11", "12"]},
+        {"step_index": 1, "capture_ids": ["10"]},
+        {"step_index": 2, "capture_ids": ["11"]},
+        {"step_index": 3, "capture_ids": ["12"]},
     ]
 
 
@@ -487,6 +644,29 @@ def test_bake_prompts_classify_progress_results_and_conclusions_as_knowledge_fac
 
     # 失败后的紧凑重试复用同一分类契约，不能在重试时丢失事实边界。
     assert BAKE_BUNDLE_PROMPT in BAKE_COMPACT_BUNDLE_PROMPT
+
+
+def test_bake_sop_bundle_schema_is_compact_and_requires_step_evidence():
+    assert list(BAKE_BUNDLE_RESPONSE_SCHEMA["properties"]) == [
+        "classification",
+        "sop",
+        "knowledge",
+        "design",
+    ]
+    sop_payload = BAKE_BUNDLE_RESPONSE_SCHEMA["properties"]["sop"]["properties"][
+        "payload"
+    ]
+
+    assert "details" not in sop_payload["properties"]
+    assert "linked_knowledge_ids" not in sop_payload["properties"]
+    assert sop_payload["properties"]["steps"]["minItems"] == 3
+    assert sop_payload["properties"]["steps"]["maxItems"] == 8
+    assert sop_payload["required"] == ["summary", "steps", "step_evidence"]
+    assert "sop_evidence_mode" in BAKE_BUNDLE_PROMPT
+    assert "effective_capture_count` 小于 2" in BAKE_BUNDLE_PROMPT
+    assert "不得再次以“缺少点击/输入/连续 UI 动作”为由拒绝" in BAKE_BUNDLE_PROMPT
+    assert "不要求同时存在点击、输入或 operation_evidence=true" in BAKE_BUNDLE_PROMPT
+    assert "不要输出 details" in BAKE_BUNDLE_PROMPT
 
 
 def test_extract_bake_bundle_preserves_work_progress_primary_knowledge():
@@ -948,6 +1128,11 @@ def test_extract_bake_sop_accepts_valid_payload():
             {"index": 2, "action": "检查端口监听", "expected": "端口处于 LISTEN"},
             {"index": 3, "action": "查看错误日志", "expected": "定位异常堆栈"},
         ],
+        "step_evidence": [
+            {"step_index": 1, "capture_ids": [10]},
+            {"step_index": 2, "capture_ids": [11]},
+            {"step_index": 3, "capture_ids": [12]},
+        ],
         "checkpoints": ["health ok", "port ok"],
         "outcome": "定位问题原因并给出修复建议",
     }
@@ -973,13 +1158,135 @@ def test_extract_bake_sop_accepts_valid_payload():
     assert artifact["reason"] is None
     assert artifact["payload"]["steps"] == payload["steps"]
     assert artifact["payload"]["step_evidence"] == [
-        {"step_index": 1, "capture_ids": ["10", "11", "12"]},
-        {"step_index": 2, "capture_ids": ["10", "11", "12"]},
-        {"step_index": 3, "capture_ids": ["10", "11", "12"]},
+        {"step_index": 1, "capture_ids": ["10"]},
+        {"step_index": 2, "capture_ids": ["11"]},
+        {"step_index": 3, "capture_ids": ["12"]},
     ]
     assert meta["degraded"] is False
     assert meta["model"] == "mock-model"
     assert meta["elapsed_ms"] >= 0
+
+
+def test_extract_bake_sop_rejects_missing_step_evidence_without_timeline_fallback():
+    extractor = make_extractor()
+    payload = {
+        "summary": "缺少证据的流程",
+        "steps": ["检查配置", "执行修复", "验证结果"],
+        "step_evidence": [
+            {"step_index": 1, "capture_ids": [10]},
+            {"step_index": 3, "capture_ids": [12]},
+        ],
+    }
+    extractor._call_bake_llm = types.MethodType(
+        lambda self, caller_id, system_prompt, user_prompt: (
+            {"accepted": True, "reason": None, "payload": payload},
+            {
+                "usage": {},
+                "model": "mock-model",
+                "empty_content": False,
+                "elapsed_ms": 1,
+            },
+        ),
+        extractor,
+    )
+
+    artifact, meta = extractor._extract_bake_artifact(
+        SAMPLE_CANDIDATE,
+        "sop",
+        "prompt",
+    )
+
+    assert artifact == {
+        "accepted": False,
+        "reason": "missing_sop_step_evidence",
+        "payload": None,
+    }
+    assert meta["degraded"] is False
+
+
+def test_extract_bake_sop_rejects_context_frame_as_step_evidence():
+    extractor = make_extractor()
+    candidate = {
+        **SAMPLE_CANDIDATE,
+        "action_trace": [
+            *SAMPLE_CANDIDATE["action_trace"],
+            {
+                "capture_id": 13,
+                "ts": 1710000090000,
+                "event_type": "scroll",
+                "operation_evidence": False,
+                "evidence_kind": "context",
+                "visible_text": "静态说明页",
+            },
+        ],
+    }
+    payload = {
+        "summary": "错误引用静态帧",
+        "steps": ["检查配置", "执行修复", "验证结果"],
+        "step_evidence": [
+            {"step_index": 1, "capture_ids": [10]},
+            {"step_index": 2, "capture_ids": [13]},
+            {"step_index": 3, "capture_ids": [12]},
+        ],
+    }
+    extractor._call_bake_llm = types.MethodType(
+        lambda self, caller_id, system_prompt, user_prompt: (
+            {"accepted": True, "reason": None, "payload": payload},
+            {"usage": {}, "model": "mock-model", "empty_content": False, "elapsed_ms": 1},
+        ),
+        extractor,
+    )
+
+    artifact, _ = extractor._extract_bake_artifact(candidate, "sop", "prompt")
+
+    assert artifact["accepted"] is False
+    assert artifact["reason"] == "non_operation_sop_step_evidence"
+
+
+def test_semantic_workflow_accepts_two_context_frames_as_step_evidence():
+    extractor = make_extractor()
+    candidate = {
+        **SAMPLE_CANDIDATE,
+        "source_capture_count": 2,
+        "effective_capture_count": 2,
+        "sop_evidence_mode": "semantic_workflow",
+        "work_item": "MemoryBread-操作提炼",
+        "work_status": "completed",
+        "work_progress": "已完成修复，测试通过",
+        "action_trace": [
+            {
+                "capture_id": 10,
+                "ts": 1710000000000,
+                "event_type": "manual",
+                "operation_evidence": False,
+                "evidence_kind": "context",
+                "visible_text": "修改证据门禁并完成实现",
+            },
+            {
+                "capture_id": 11,
+                "ts": 1710000030000,
+                "event_type": "manual",
+                "operation_evidence": False,
+                "evidence_kind": "context",
+                "visible_text": "运行测试，全部通过",
+            },
+        ],
+    }
+    payload = {
+        "summary": "改造并验证操作提炼",
+        "steps": ["确认门禁问题", "修改双证据逻辑", "运行测试验证"],
+        "step_evidence": [
+            {"step_index": 1, "capture_ids": [10]},
+            {"step_index": 2, "capture_ids": [10]},
+            {"step_index": 3, "capture_ids": [11]},
+        ],
+    }
+
+    normalized, reason = extractor._normalize_sop_step_evidence(candidate, payload)
+
+    assert reason is None
+    assert normalized is not None
+    assert normalized["step_evidence"][2]["capture_ids"] == ["11"]
 
 
 def test_extract_bake_sop_rejects_single_capture_even_when_model_accepts():
@@ -993,6 +1300,11 @@ def test_extract_bake_sop_rejects_single_capture_even_when_model_accepts():
         "trigger_keywords": ["设置"],
         "extracted_problem": "如何配置选项",
         "steps": ["打开设置", "修改选项", "保存"],
+        "step_evidence": [
+            {"step_index": 1, "capture_ids": [10]},
+            {"step_index": 2, "capture_ids": [11]},
+            {"step_index": 3, "capture_ids": [12]},
+        ],
         "linked_knowledge_ids": [],
         "confidence": "high",
         "evidence_summary": "单个设置页面。",
@@ -1052,6 +1364,10 @@ def test_bake_candidate_exposes_multi_capture_context_to_existing_bundle_call():
     assert "multi_capture_context" in text
     assert "action_trace（严格按 ts 排序" in text
     assert text.index("capture_id=10") < text.index("capture_id=11") < text.index("capture_id=12")
+    assert "operation_evidence=True" in text
+    assert "evidence_kind=input" in text
+    assert "focus=AXTextArea:editor" in text
+    assert "state_delta:" in text
     assert 'key_timestamps:' in text
     assert "打开配置页" in text
     assert "运行并验证结果" in text
@@ -1457,6 +1773,9 @@ def test_extract_bake_sop_downgrades_template_like_high_score_payload():
     extractor = make_extractor()
     template_like_candidate = {
         **TEMPLATE_ONLY_CANDIDATE,
+        "source_capture_count": 3,
+        "effective_capture_count": 3,
+        "action_trace": SAMPLE_CANDIDATE["action_trace"],
         "summary": "周报模板结构沉淀",
         "details": "模板骨架包含背景、进展、风险、计划四段；按槽位填写。",
         "entities": ["模板", "骨架", "槽位"],
@@ -1468,6 +1787,11 @@ def test_extract_bake_sop_downgrades_template_like_high_score_payload():
         "trigger_keywords": ["周报", "产出"],
         "extracted_problem": "如何稳定产出周报",
         "steps": ["收集素材", "填充结构", "输出结果"],
+        "step_evidence": [
+            {"step_index": 1, "capture_ids": [10]},
+            {"step_index": 2, "capture_ids": [11]},
+            {"step_index": 3, "capture_ids": [12]},
+        ],
         "linked_knowledge_ids": [],
         "confidence": "high",
         "evidence_summary": "候选中出现模板骨架",

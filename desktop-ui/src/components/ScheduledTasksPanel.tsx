@@ -1,10 +1,17 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { emit } from '@tauri-apps/api/event'
 import type { NotificationChannel, ScheduledTask, TaskExecution, TaskTemplate } from '../types'
 import { useAppStore } from '../store/useAppStore'
 import { useImeCompositionGuard } from '../hooks/useImeCompositionGuard'
 import { BUILTIN_TEMPLATES, CATEGORY_COLORS, groupTemplatesByCategory } from '../data/taskTemplates'
+import TutorialLink, { TUTORIAL_URLS } from './TutorialLink'
+import { MentionHighlightTextarea } from './MentionHighlightField'
+import {
+  CREATION_SKILL_AGENT_OPTIONS,
+  CREATION_SKILL_TOOL_OPTIONS,
+  listLocalCreationSkills,
+} from '../utils/creationSkills'
 import {
   FLOATING_ASSIST_ENABLED_KEY,
   readFloatingAssistAutoTaskConfig,
@@ -18,7 +25,7 @@ const API = 'http://localhost:7070'
 type TaskForm = {
   name: string
   user_instruction: string
-  cron_expression: string
+  executor_kind: ScheduledTask['executor_kind']
   notification_channel_ids: number[]
 }
 
@@ -31,7 +38,7 @@ type ChannelForm = {
 const emptyTaskForm = (): TaskForm => ({
   name: '',
   user_instruction: '',
-  cron_expression: '0 20 * * *',
+  executor_kind: 'consult',
   notification_channel_ids: [],
 })
 
@@ -48,26 +55,131 @@ function formatTs(ms: number | null): string {
   })
 }
 
-function cronHint(expr: string): string {
+// ── 执行频率的友好交互：cron 表达式与可视化配置互转 ─────────────────────────
+type ScheduleKind = 'daily' | 'weekly' | 'weekdays' | 'monthly' | 'custom'
+
+type ScheduleState = {
+  kind: ScheduleKind
+  time: string              // HH:MM
+  weekdays: number[]        // Vixie 约定：0=周日，1=周一 … 6=周六
+  dayOfMonth: number
+  customExpression: string
+}
+
+const SCHEDULE_KIND_LABELS: Record<ScheduleKind, string> = {
+  daily: '每天',
+  weekly: '每周',
+  weekdays: '工作日',
+  monthly: '每月',
+  custom: '高级',
+}
+
+const WEEKDAY_NAMES = ['日', '一', '二', '三', '四', '五', '六']
+const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0]
+
+const defaultSchedule = (): ScheduleState => ({
+  kind: 'daily',
+  time: '20:00',
+  weekdays: [1],
+  dayOfMonth: 1,
+  customExpression: '0 20 * * *',
+})
+
+// 统一成五段 Vixie 格式（分 时 日 月 周）；六段格式把 cron crate 的星期平移回来
+function cronToFiveFields(expr: string): string[] | null {
   const fields = expr.trim().split(/\s+/)
-  const canonicalDayToFiveField: Record<string, string> = {
-    '1': '0', '2': '1', '3': '2', '4': '3', '5': '4', '6': '5', '7': '6',
-    '2,3,4,5,6': '1-5',
+  if (fields.length === 5) return fields
+  if (fields.length === 6 && fields[0] === '0') {
+    const shiftDay = (token: string): string => {
+      const match = token.match(/^(\d+)(?:-(\d+))?$/)
+      if (!match) return token
+      const toVixie = (day: string) => String((Number(day) - 1) % 7)
+      return match[2] ? `${toVixie(match[1])}-${toVixie(match[2])}` : toVixie(match[1])
+    }
+    return [...fields.slice(1, 5), fields[5].split(',').map(shiftDay).join(',')]
   }
-  const displayExpr = fields.length === 6 && fields[0] === '0'
-    ? [...fields.slice(1, 5), canonicalDayToFiveField[fields[5]] || fields[5]].join(' ')
-    : fields.join(' ')
-  const map: Record<string, string> = {
-    '0 20 * * *': '每天 20:00', '0 18 * * 5': '每周五 18:00',
-    '0 18 28 * *': '每月28日 18:00', '0 21 * * *': '每天 21:00',
-    '0 9 * * *': '每天 09:00', '0 10 * * 0': '每周日 10:00', '0 9 * * 1': '每周一 09:00',
-    '0 9 1 * *': '每月1日 09:00',
-    '0 17 * * 1-5': '工作日 17:00', '0 20 * * 0': '每周日 20:00',
-    '0 19 * * 1-5': '工作日 19:00', '0 12 * * 3': '每周三 12:00',
-    '0 17 * * 5': '每周五 17:00', '0 18 * * 1-5': '工作日 18:00',
-    '0 9 * * 1-5': '工作日 09:00', '0 16 * * 5': '每周五 16:00',
+  return null
+}
+
+function expandWeekdays(dow: string): number[] | null {
+  const days = new Set<number>()
+  for (const item of dow.split(',')) {
+    const match = item.match(/^(\d+)(?:-(\d+))?$/)
+    if (!match) return null
+    const toVixie = (value: number) => (value === 7 ? 0 : value)
+    const start = toVixie(Number(match[1]))
+    const end = toVixie(match[2] !== undefined ? Number(match[2]) : Number(match[1]))
+    if (start > end) return null
+    for (let day = start; day <= end; day += 1) days.add(day)
   }
-  return map[displayExpr] || displayExpr
+  return days.size > 0 ? Array.from(days) : null
+}
+
+function parseCronToSchedule(expr: string): ScheduleState {
+  const fallback: ScheduleState = { ...defaultSchedule(), kind: 'custom', customExpression: expr }
+  const five = cronToFiveFields(expr)
+  if (!five) return fallback
+  const [minute, hour, dom, month, dow] = five
+  if (!/^\d{1,2}$/.test(minute) || !/^\d{1,2}$/.test(hour) || month !== '*') return fallback
+  const base = {
+    time: `${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`,
+    weekdays: [1],
+    dayOfMonth: 1,
+    customExpression: expr,
+  }
+  if (dom === '*' && dow === '*') return { ...base, kind: 'daily' }
+  if (dom === '*') {
+    if (dow === '1-5') return { ...base, kind: 'weekdays' }
+    const days = expandWeekdays(dow)
+    if (days) return { ...base, kind: 'weekly', weekdays: days }
+    return fallback
+  }
+  if (/^\d{1,2}$/.test(dom) && dow === '*') {
+    return { ...base, kind: 'monthly', dayOfMonth: Number(dom) }
+  }
+  return fallback
+}
+
+function buildCronFromSchedule(state: ScheduleState): string | null {
+  if (state.kind === 'custom') return state.customExpression.trim() || null
+  const match = state.time.match(/^(\d{1,2}):(\d{2})$/)
+  if (!match) return null
+  const head = `${Number(match[2])} ${Number(match[1])}`
+  switch (state.kind) {
+    case 'daily':
+      return `${head} * * *`
+    case 'weekdays':
+      return `${head} * * 1-5`
+    case 'weekly': {
+      if (state.weekdays.length === 0) return null
+      const days = [...state.weekdays].sort((a, b) => (a === 0 ? 7 : a) - (b === 0 ? 7 : b))
+      return `${head} * * ${days.join(',')}`
+    }
+    case 'monthly':
+      return `${head} ${state.dayOfMonth} * *`
+    default:
+      return null
+  }
+}
+
+function describeCron(expr: string): string {
+  const five = cronToFiveFields(expr)
+  if (!five) return expr
+  const [minute, hour, dom, month, dow] = five
+  if (!/^\d{1,2}$/.test(minute) || !/^\d{1,2}$/.test(hour) || month !== '*') return expr
+  const time = `${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`
+  if (dom === '*' && dow === '*') return `每天 ${time}`
+  if (dom === '*') {
+    if (dow === '1-5') return `工作日 ${time}`
+    const days = expandWeekdays(dow)
+    if (days) {
+      const sorted = [...days].sort((a, b) => (a === 0 ? 7 : a) - (b === 0 ? 7 : b))
+      return `每周${sorted.map(day => WEEKDAY_NAMES[day]).join('、')} ${time}`
+    }
+    return expr
+  }
+  if (/^\d{1,2}$/.test(dom) && dow === '*') return `每月${Number(dom)}日 ${time}`
+  return expr
 }
 
 function channelTypeLabel(type: NotificationChannel['channel_type']): string {
@@ -129,13 +241,18 @@ const TaskCard: React.FC<{
             <span style={{
               fontSize: 11, padding: '1px 6px', borderRadius: 4,
               background: 'rgba(0,122,255,0.08)', color: '#007AFF',
-            }}>{cronHint(task.cron_expression)}</span>
+            }}>{describeCron(task.cron_expression)}</span>
             {task.is_builtin && (
               <span style={{
                 fontSize: 11, padding: '1px 6px', borderRadius: 4,
                 background: 'rgba(181,122,43,0.1)', color: '#8A5A1F',
               }}>内置日记</span>
             )}
+            <span style={{
+              fontSize: 11, padding: '1px 6px', borderRadius: 4,
+              background: task.executor_kind === 'creation' ? 'rgba(88,86,214,0.1)' : 'rgba(142,142,147,0.12)',
+              color: task.executor_kind === 'creation' ? '#5856D6' : '#6E6E73',
+            }}>{task.executor_kind === 'creation' ? '创作智能体' : '咨询智能体'}</span>
             {task.last_run_status && (
               <span style={{ width: 6, height: 6, borderRadius: '50%', background: statusColor, flexShrink: 0 }} />
             )}
@@ -183,7 +300,7 @@ const TaskCard: React.FC<{
 
 // ── 主组件 ───────────────────────────────────────────────────────────────────
 const ScheduledTasksPanel: React.FC = () => {
-  const { apiBaseUrl } = useAppStore()
+  const { apiBaseUrl, setWindowMode, setCreationHistoryOpenTarget } = useAppStore()
   const base = apiBaseUrl || API
 
   const [tasks, setTasks] = useState<ScheduledTask[]>([])
@@ -200,7 +317,15 @@ const ScheduledTasksPanel: React.FC = () => {
   const [triggerWordDraft, setTriggerWordDraft] = useState('')
   const triggerWordImeGuard = useImeCompositionGuard<HTMLInputElement>()
 
+  // 执行指令的 @ 提及：候选 = 工具 + Agent + 已安装创作技能，交互与创作技能编辑器一致。
+  const [installedSkillTitles, setInstalledSkillTitles] = useState<string[]>([])
+  const [instructionMentionQuery, setInstructionMentionQuery] = useState<string | null>(null)
+  const [instructionMentionActiveIndex, setInstructionMentionActiveIndex] = useState(0)
+  const instructionTextareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const instructionImeGuard = useImeCompositionGuard<HTMLTextAreaElement>()
+
   const [form, setForm] = useState<TaskForm>(emptyTaskForm)
+  const [schedule, setSchedule] = useState<ScheduleState>(defaultSchedule)
   const [channelForm, setChannelForm] = useState<ChannelForm>({
     name: '',
     channel_type: 'feishu',
@@ -316,6 +441,106 @@ const ScheduledTasksPanel: React.FC = () => {
     void loadChannels()
   }, [base])
 
+  useEffect(() => {
+    let cancelled = false
+    listLocalCreationSkills(base, { installed: true })
+      .then(skills => {
+        if (cancelled) return
+        setInstalledSkillTitles(
+          skills.map(skill => skill.title.trim()).filter(Boolean),
+        )
+      })
+      .catch(() => {
+        // 创作技能服务不可用时，@ 候选仅保留内置工具/Agent。
+      })
+    return () => { cancelled = true }
+  }, [base])
+
+  const instructionMentionOptions = [
+    ...CREATION_SKILL_TOOL_OPTIONS.map(option => ({
+      id: `tool:${option.id}`,
+      label: option.label,
+      description: '工具',
+    })),
+    ...CREATION_SKILL_AGENT_OPTIONS.map(option => ({
+      id: `agent:${option.id}`,
+      label: option.label,
+      description: 'Agent',
+    })),
+    ...installedSkillTitles.map(title => ({
+      id: `skill:${title}`,
+      label: title,
+      description: '创作技能',
+    })),
+  ]
+
+  const filteredInstructionMentionOptions = instructionMentionQuery === null
+    ? []
+    : instructionMentionOptions.filter(option => !instructionMentionQuery
+      || option.label.toLowerCase().includes(instructionMentionQuery.toLowerCase()))
+
+  const refreshInstructionMention = (value: string, element: HTMLTextAreaElement) => {
+    const caret = element.selectionStart ?? value.length
+    // 与创作技能编辑器相同：光标前存在未完成的 @ 查询才弹出选择器。
+    const active = value.slice(0, caret).match(/@([^\s@]{0,40})$/)
+    if (active) {
+      setInstructionMentionQuery(active[1])
+      setInstructionMentionActiveIndex(0)
+    } else {
+      setInstructionMentionQuery(null)
+    }
+  }
+
+  const insertInstructionMention = (option: { label: string }) => {
+    if (instructionMentionQuery === null) return
+    const element = instructionTextareaRef.current
+    const value = form.user_instruction
+    const caret = element?.selectionStart ?? value.length
+    // 连 @ 符号一起替换成完整提及 + 尾随空格，避免与后续文字粘连。
+    const start = Math.max(0, caret - instructionMentionQuery.length - 1)
+    const inserted = `@${option.label} `
+    const next = value.slice(0, start) + inserted + value.slice(caret)
+    setForm(f => ({ ...f, user_instruction: next }))
+    setInstructionMentionQuery(null)
+    setInstructionMentionActiveIndex(0)
+    window.requestAnimationFrame(() => {
+      const target = instructionTextareaRef.current
+      if (!target) return
+      target.focus()
+      const position = start + inserted.length
+      target.setSelectionRange(position, position)
+    })
+  }
+
+  const handleInstructionKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (instructionMentionQuery === null
+      || filteredInstructionMentionOptions.length === 0
+      || instructionImeGuard.isImeEvent(event)) return
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      setInstructionMentionActiveIndex(index => (index + 1) % filteredInstructionMentionOptions.length)
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      setInstructionMentionActiveIndex(index =>
+        (index - 1 + filteredInstructionMentionOptions.length) % filteredInstructionMentionOptions.length)
+    } else if (event.key === 'Enter') {
+      event.preventDefault()
+      insertInstructionMention(
+        filteredInstructionMentionOptions[
+          Math.min(instructionMentionActiveIndex, filteredInstructionMentionOptions.length - 1)
+        ],
+      )
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      setInstructionMentionQuery(null)
+    }
+  }
+
+  const handleOpenCreationHistory = (historyId: number) => {
+    setCreationHistoryOpenTarget(historyId)
+    setWindowMode('creation')
+  }
+
   const responseError = async (res: Response, fallback: string) => {
     try {
       const error = await res.json()
@@ -376,22 +601,31 @@ const ScheduledTasksPanel: React.FC = () => {
     setForm({
       name: task.name,
       user_instruction: task.user_instruction,
-      cron_expression: task.cron_expression,
+      executor_kind: task.executor_kind === 'creation' ? 'creation' : 'consult',
       notification_channel_ids: task.notification_channel_ids || [],
     })
+    setSchedule(parseCronToSchedule(task.cron_expression))
     setView('edit')
   }
 
+  const validateSchedule = (): string | null => {
+    if (!form.name || !form.user_instruction) return '请填写所有字段'
+    if (schedule.kind === 'weekly' && schedule.weekdays.length === 0) return '请至少选择一天'
+    if (!buildCronFromSchedule(schedule)) return '请完善执行频率设置'
+    return null
+  }
+
   const handleCreate = async () => {
-    if (!form.name || !form.user_instruction || !form.cron_expression) {
-      showToast('请填写所有字段')
+    const error = validateSchedule()
+    if (error) {
+      showToast(error)
       return
     }
     try {
       const res = await fetch(`${base}/api/tasks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
+        body: JSON.stringify({ ...form, cron_expression: buildCronFromSchedule(schedule) }),
       })
       if (!res.ok) {
         showToast(await responseError(res, '创建失败'))
@@ -399,6 +633,7 @@ const ScheduledTasksPanel: React.FC = () => {
       }
       showToast('任务创建成功')
       setForm(emptyTaskForm())
+      setSchedule(defaultSchedule())
       setView('list')
       void loadTasks()
     } catch {
@@ -407,15 +642,17 @@ const ScheduledTasksPanel: React.FC = () => {
   }
 
   const handleUpdate = async () => {
-    if (!selectedTask || !form.name || !form.user_instruction || !form.cron_expression) {
-      showToast('请填写所有字段')
+    if (!selectedTask) return
+    const error = validateSchedule()
+    if (error) {
+      showToast(error)
       return
     }
     try {
       const res = await fetch(`${base}/api/tasks/${selectedTask.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
+        body: JSON.stringify({ ...form, cron_expression: buildCronFromSchedule(schedule) }),
       })
       if (!res.ok) {
         showToast(await responseError(res, '保存失败'))
@@ -424,6 +661,7 @@ const ScheduledTasksPanel: React.FC = () => {
       showToast('任务已保存')
       setSelectedTask(null)
       setForm(emptyTaskForm())
+      setSchedule(defaultSchedule())
       setView('list')
       void loadTasks()
     } catch {
@@ -435,9 +673,10 @@ const ScheduledTasksPanel: React.FC = () => {
     setForm({
       name: tpl.name,
       user_instruction: tpl.user_instruction,
-      cron_expression: tpl.cron,
+      executor_kind: 'consult',
       notification_channel_ids: [],
     })
+    setSchedule(tpl.cron.trim() ? parseCronToSchedule(tpl.cron) : defaultSchedule())
     setView('create')
   }
 
@@ -509,7 +748,9 @@ const ScheduledTasksPanel: React.FC = () => {
       {/* Header */}
       <div style={{ padding: '16px 16px 0', background: '#F5F5F7' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-          <span style={{ fontSize: 16, fontWeight: 600, color: '#000' }}>定时任务</span>
+          <span className="tutorial-title-row" style={{ fontSize: 16, fontWeight: 600, color: '#000' }}>
+            定时任务<TutorialLink url={TUTORIAL_URLS.tasks} />
+          </span>
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={() => setView('channels')} style={{
               fontSize: 12, padding: '5px 10px', borderRadius: 8, border: '1px solid rgba(0,0,0,0.1)',
@@ -522,6 +763,7 @@ const ScheduledTasksPanel: React.FC = () => {
             <button onClick={() => {
               setSelectedTask(null)
               setForm(emptyTaskForm())
+              setSchedule(defaultSchedule())
               setView('create')
             }} style={{
               fontSize: 12, padding: '5px 10px', borderRadius: 8, border: 'none',
@@ -747,60 +989,163 @@ const ScheduledTasksPanel: React.FC = () => {
             </div>
             <div style={{ marginBottom: 14 }}>
               <label style={labelStyle}>执行指令（自然语言）</label>
-              <textarea value={form.user_instruction}
-                onChange={e => setForm(f => ({ ...f, user_instruction: e.target.value }))}
-                placeholder="描述你希望 AI 做什么，例如：请根据今天的工作记录生成工作日记..."
-                style={{ ...inputStyle, height: 100, resize: 'vertical' as const }} />
+              <div style={{ position: 'relative' }}>
+                <MentionHighlightTextarea
+                  ref={instructionTextareaRef}
+                  mentionLabels={instructionMentionOptions.map(option => option.label)}
+                  value={form.user_instruction}
+                  onChange={e => {
+                    setForm(f => ({ ...f, user_instruction: e.target.value }))
+                    refreshInstructionMention(e.target.value, e.target)
+                  }}
+                  onKeyDown={handleInstructionKeyDown}
+                  onCompositionStart={instructionImeGuard.onCompositionStart}
+                  onCompositionEnd={instructionImeGuard.onCompositionEnd}
+                  onBlur={() => { instructionImeGuard.onBlur(); setInstructionMentionQuery(null) }}
+                  placeholder="描述你希望 AI 做什么，可 @ 工具、Agent 或技能，例如：用 @互联网检索 收集行业资讯后生成晨报..."
+                  style={{ ...inputStyle, height: 100, resize: 'vertical' as const }}
+                />
+                {instructionMentionQuery !== null && filteredInstructionMentionOptions.length > 0 && (
+                  <div style={{
+                    position: 'absolute', left: 0, right: 0, top: '100%', marginTop: 4,
+                    background: 'white', border: '1px solid rgba(0,0,0,0.12)', borderRadius: 8,
+                    boxShadow: '0 6px 18px rgba(0,0,0,0.12)', maxHeight: 200, overflow: 'auto', zIndex: 20,
+                  }}>
+                    {filteredInstructionMentionOptions.map((option, optionIndex) => (
+                      <button
+                        key={option.id}
+                        type="button"
+                        onMouseDown={event => event.preventDefault()}
+                        onClick={() => insertInstructionMention(option)}
+                        style={{
+                          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+                          width: '100%', padding: '7px 10px', border: 'none', textAlign: 'left',
+                          cursor: 'pointer', fontSize: 12,
+                          background: optionIndex === instructionMentionActiveIndex
+                            ? 'rgba(0,122,255,0.08)' : 'transparent',
+                        }}
+                      >
+                        <span style={{ color: '#007AFF', fontWeight: 500 }}>@{option.label}</span>
+                        <span style={{ color: '#AEAEB2', fontSize: 11 }}>{option.description}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div style={{ marginBottom: 14 }}>
+              <label style={labelStyle}>执行智能体</label>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {([
+                  { kind: 'consult', label: '咨询智能体', description: '检索本地知识后生成结果（默认）' },
+                  { kind: 'creation', label: '创作智能体', description: '按创作 Agent 流程生成文档，可在创作页查看执行过程' },
+                ] as const).map(option => (
+                  <button key={option.kind} type="button"
+                    onClick={() => setForm(f => ({ ...f, executor_kind: option.kind }))}
+                    title={option.description}
+                    style={scheduleChipStyle(form.executor_kind === option.kind)}>
+                    {option.label}
+                  </button>
+                ))}
+              </div>
             </div>
             <div style={{ marginBottom: 16 }}>
-              <label style={labelStyle}>执行频率（Cron 表达式）</label>
-              <input value={form.cron_expression}
-                onChange={e => setForm(f => ({ ...f, cron_expression: e.target.value }))}
-                placeholder="0 20 * * *" style={inputStyle} />
-              <div style={{ fontSize: 11, color: '#AEAEB2', marginTop: 4 }}>
-                {cronHint(form.cron_expression)}
-                &nbsp;·&nbsp;常用：每天20点 <code>0 20 * * *</code>，每周五18点 <code>0 18 * * 5</code>
+              <label style={labelStyle}>执行频率</label>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                {(Object.keys(SCHEDULE_KIND_LABELS) as ScheduleKind[]).map(kind => (
+                  <button key={kind} type="button"
+                    onClick={() => setSchedule(s => ({ ...s, kind }))}
+                    style={scheduleChipStyle(schedule.kind === kind)}>
+                    {SCHEDULE_KIND_LABELS[kind]}
+                  </button>
+                ))}
+              </div>
+              {schedule.kind === 'weekly' && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                  {WEEKDAY_ORDER.map(day => (
+                    <button key={day} type="button"
+                      onClick={() => setSchedule(s => ({
+                        ...s,
+                        weekdays: s.weekdays.includes(day)
+                          ? s.weekdays.filter(item => item !== day)
+                          : [...s.weekdays, day],
+                      }))}
+                      style={scheduleChipStyle(schedule.weekdays.includes(day))}>
+                      周{WEEKDAY_NAMES[day]}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {schedule.kind === 'monthly' && (
+                <div style={{ marginBottom: 10 }}>
+                  <select value={schedule.dayOfMonth}
+                    onChange={e => setSchedule(s => ({ ...s, dayOfMonth: Number(e.target.value) }))}
+                    style={{ ...inputStyle, width: 'auto', background: 'white' }}>
+                    {Array.from({ length: 31 }, (_, index) => index + 1).map(day => (
+                      <option key={day} value={day}>每月 {day} 日</option>
+                    ))}
+                  </select>
+                  {schedule.dayOfMonth > 28 && (
+                    <div style={{ fontSize: 11, color: '#AEAEB2', marginTop: 4 }}>
+                      没有这一天的月份（如 2 月）将不会执行
+                    </div>
+                  )}
+                </div>
+              )}
+              {schedule.kind === 'custom' ? (
+                <>
+                  <input value={schedule.customExpression}
+                    onChange={e => setSchedule(s => ({ ...s, customExpression: e.target.value }))}
+                    placeholder="0 20 * * *" style={inputStyle} />
+                  <div style={{ fontSize: 11, color: '#AEAEB2', marginTop: 4 }}>
+                    Cron 表达式（分 时 日 月 周），例如「0 20 * * *」表示每天 20:00
+                  </div>
+                </>
+              ) : (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 12, color: '#6E6E73' }}>执行时间</span>
+                  <input type="time" value={schedule.time}
+                    onChange={e => setSchedule(s => ({ ...s, time: e.target.value }))}
+                    style={{ ...inputStyle, width: 'auto' }} />
+                </div>
+              )}
+              <div style={{ fontSize: 11, color: '#8E8E93', marginTop: 6 }}>
+                当前设置：{(() => {
+                  const cron = buildCronFromSchedule(schedule)
+                  return cron ? describeCron(cron) : '请完善频率设置'
+                })()}
               </div>
             </div>
             <div style={{ marginBottom: 16 }}>
               <label style={labelStyle}>结果推送到</label>
-              {channels.length === 0 ? (
-                <button
-                  type="button"
-                  onClick={() => setView('channels')}
-                  style={{
-                    ...smallPrimaryButtonStyle,
-                    background: 'rgba(181,122,43,0.1)',
-                    color: '#8A5A1F',
-                  }}
-                >
-                  先添加消息渠道
-                </button>
-              ) : (
-                <div style={{ display: 'grid', gap: 8 }}>
-                  {channels.map(channel => (
-                    <label key={channel.id} style={{
-                      display: 'flex', alignItems: 'center', gap: 9, padding: '8px 10px',
-                      border: '1px solid rgba(181,122,43,0.16)', borderRadius: 8,
-                      background: channel.enabled ? '#FFFCF7' : '#F5F5F5',
-                      opacity: channel.enabled ? 1 : 0.58, cursor: channel.enabled ? 'pointer' : 'default',
-                    }}>
-                      <input
-                        type="checkbox"
-                        checked={form.notification_channel_ids.includes(channel.id)}
-                        disabled={!channel.enabled}
-                        onChange={() => toggleFormChannel(channel.id)}
-                      />
-                      <span style={{ fontSize: 12, color: '#2E2115', flex: 1 }}>{channel.name}</span>
-                      <span style={{ fontSize: 11, color: '#8E8E93' }}>
-                        {channelTypeLabel(channel.channel_type)}{channel.enabled ? '' : ' · 已停用'}
-                      </span>
-                    </label>
-                  ))}
+              <div style={{ display: 'grid', gap: 8 }}>
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 9, padding: '8px 10px',
+                  border: '1px solid rgba(181,122,43,0.16)', borderRadius: 8, background: '#FFFCF7',
+                }}>
+                  <input type="checkbox" checked disabled />
+                  <span style={{ fontSize: 12, color: '#2E2115', flex: 1 }}>站内消息</span>
+                  <span style={{ fontSize: 11, color: '#8E8E93' }}>默认渠道</span>
                 </div>
-              )}
-              <div style={{ fontSize: 11, color: '#8E8E93', marginTop: 6 }}>
-                渠道配置仅保存在本机。任务成功后推送，投递失败不会把任务标记为失败。
+                {channels.map(channel => (
+                  <label key={channel.id} style={{
+                    display: 'flex', alignItems: 'center', gap: 9, padding: '8px 10px',
+                    border: '1px solid rgba(181,122,43,0.16)', borderRadius: 8,
+                    background: channel.enabled ? '#FFFCF7' : '#F5F5F5',
+                    opacity: channel.enabled ? 1 : 0.58, cursor: channel.enabled ? 'pointer' : 'default',
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={form.notification_channel_ids.includes(channel.id)}
+                      disabled={!channel.enabled}
+                      onChange={() => toggleFormChannel(channel.id)}
+                    />
+                    <span style={{ fontSize: 12, color: '#2E2115', flex: 1 }}>{channel.name}</span>
+                    <span style={{ fontSize: 11, color: '#8E8E93' }}>
+                      {channelTypeLabel(channel.channel_type)}{channel.enabled ? '' : ' · 已停用'}
+                    </span>
+                  </label>
+                ))}
               </div>
             </div>
             <button onClick={view === 'edit' ? handleUpdate : handleCreate} style={{
@@ -911,7 +1256,7 @@ const ScheduledTasksPanel: React.FC = () => {
                   }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <span style={{ fontSize: 13, fontWeight: 500 }}>{tpl.name}</span>
-                      <span style={{ fontSize: 11, color: '#007AFF' }}>{cronHint(tpl.cron)}</span>
+                      <span style={{ fontSize: 11, color: '#007AFF' }}>{describeCron(tpl.cron)}</span>
                     </div>
                     <p style={{ fontSize: 11, color: '#6E6E73', margin: '4px 0 0',
                       overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -942,10 +1287,23 @@ const ScheduledTasksPanel: React.FC = () => {
                   <span style={{ fontSize: 12, color: exec.status === 'success' ? '#34C759' : '#FF3B30', fontWeight: 500 }}>
                     {exec.status === 'success' ? '成功' : exec.status === 'failed' ? '失败' : '执行中'}
                   </span>
-                  <span style={{ fontSize: 11, color: '#AEAEB2' }}>
-                    {formatTs(exec.started_at)}
-                    {exec.latency_ms && ` · ${(exec.latency_ms / 1000).toFixed(1)}s`}
-                    {exec.knowledge_count && ` · ${exec.knowledge_count} 条知识`}
+                  <span style={{ fontSize: 11, color: '#AEAEB2', display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                    <span>
+                      {formatTs(exec.started_at)}
+                      {exec.latency_ms && ` · ${(exec.latency_ms / 1000).toFixed(1)}s`}
+                      {exec.knowledge_count && ` · ${exec.knowledge_count} 条知识`}
+                    </span>
+                    {exec.creation_history_id != null && (
+                      <button type="button"
+                        onClick={() => handleOpenCreationHistory(exec.creation_history_id as number)}
+                        style={{
+                          fontSize: 11, padding: '2px 8px', borderRadius: 999, cursor: 'pointer',
+                          border: '1px solid rgba(0,122,255,0.25)',
+                          background: 'rgba(0,122,255,0.08)', color: '#007AFF',
+                        }}>
+                        查看执行过程
+                      </button>
+                    )}
                   </span>
                 </div>
                 {exec.result_text && (
@@ -1026,6 +1384,15 @@ const smallDangerButtonStyle: React.CSSProperties = {
   color: '#D70015',
   cursor: 'pointer',
   whiteSpace: 'nowrap',
+}
+
+function scheduleChipStyle(active: boolean): React.CSSProperties {
+  return {
+    fontSize: 12, padding: '5px 12px', borderRadius: 999, cursor: 'pointer',
+    border: active ? '1px solid #007AFF' : '1px solid rgba(0,0,0,0.12)',
+    background: active ? 'rgba(0,122,255,0.1)' : 'white',
+    color: active ? '#007AFF' : '#6E6E73',
+  }
 }
 
 function btnStyle(bg: string): React.CSSProperties {

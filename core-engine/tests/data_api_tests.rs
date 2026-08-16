@@ -33,6 +33,211 @@ async fn data_sources_empty_db_returns_a_page() {
 }
 
 #[tokio::test]
+async fn manual_data_supports_create_and_update() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = StorageManager::open(&temp_dir.path().join("test.db")).unwrap();
+    let router = create_router(AppState::new(storage));
+
+    let created = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/data/sources")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "title":"本周经营指标",
+                        "summary":"本周订单 1200",
+                        "rows":[
+                            {"dimension":"本周","metric":"订单","value":"1200","note":"环比增长 8%"}
+                        ]
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created_body = created.into_body().collect().await.unwrap().to_bytes();
+    let created_json: serde_json::Value = serde_json::from_slice(&created_body).unwrap();
+    let source_id = created_json["id"].as_i64().unwrap();
+    assert_eq!(
+        created_json["latest_snapshot"]["structured_data"]["title"],
+        "本周经营指标"
+    );
+    assert_eq!(
+        created_json["latest_snapshot"]["structured_data"]["manual_entry"],
+        true
+    );
+
+    let updated = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/data/sources/{source_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "title":"本周经营数据",
+                        "summary":"本周订单 1320",
+                        "rows":[
+                            {"dimension":"本周","metric":"订单","value":"1320","note":"已复核"},
+                            {"dimension":"本周","metric":"退款率","value":"1.2%","note":""}
+                        ]
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), StatusCode::OK);
+    let updated_body = updated.into_body().collect().await.unwrap().to_bytes();
+    let updated_json: serde_json::Value = serde_json::from_slice(&updated_body).unwrap();
+    assert_eq!(updated_json["title"], "本周经营数据");
+    assert_eq!(
+        updated_json["latest_snapshot"]["structured_data"]["summary"],
+        "本周订单 1320"
+    );
+    assert_eq!(
+        updated_json["latest_snapshot"]["structured_data"]["metric_rows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let listed = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/data/sources?limit=20&offset=0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    let listed_body = listed.into_body().collect().await.unwrap().to_bytes();
+    let listed_json: serde_json::Value = serde_json::from_slice(&listed_body).unwrap();
+    assert_eq!(listed_json["total"], 1);
+    assert_eq!(
+        listed_json["items"][0]["latest_snapshot"]["structured_data"]["title"],
+        "本周经营数据"
+    );
+}
+
+#[tokio::test]
+async fn data_favorites_are_returned_by_detail_and_filter_both_list_states() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = StorageManager::open(&temp_dir.path().join("test.db")).unwrap();
+    let router = create_router(AppState::new(storage));
+
+    let created = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/data/sources")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "title":"收藏数据",
+                        "summary":"收藏筛选测试",
+                        "rows":[{"metric":"订单","value":"1"}]
+                    }"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created_body = created.into_body().collect().await.unwrap().to_bytes();
+    let created_json: serde_json::Value = serde_json::from_slice(&created_body).unwrap();
+    let favorite_id = created_json["id"].as_i64().unwrap();
+
+    let initially_not_favorite = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/data/sources?favorite=false&limit=20&offset=0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let initially_not_favorite_body = initially_not_favorite
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let initially_not_favorite_json: serde_json::Value =
+        serde_json::from_slice(&initially_not_favorite_body).unwrap();
+    assert_eq!(initially_not_favorite_json["total"], 1);
+    assert_eq!(initially_not_favorite_json["items"][0]["id"], favorite_id);
+    assert_eq!(
+        initially_not_favorite_json["items"][0]["is_favorite"],
+        false
+    );
+
+    let favorite_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/memory-favorites/data/{favorite_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"is_favorite":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(favorite_response.status(), StatusCode::OK);
+
+    let detail = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/data/sources/{favorite_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(detail.status(), StatusCode::OK);
+    let detail_body = detail.into_body().collect().await.unwrap().to_bytes();
+    let detail_json: serde_json::Value = serde_json::from_slice(&detail_body).unwrap();
+    assert_eq!(detail_json["is_favorite"], true);
+
+    for (favorite, expected_total) in [(true, 1), (false, 0)] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/data/sources?favorite={favorite}&limit=20&offset=0"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["total"], expected_total,
+            "favorite={favorite}, body={json}"
+        );
+        if expected_total == 1 {
+            assert_eq!(json["items"][0]["id"], favorite_id);
+            assert_eq!(json["items"][0]["is_favorite"], favorite);
+        }
+    }
+}
+
+#[tokio::test]
 async fn browser_preview_endpoint_rejects_invalid_ids_before_reading_disk() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = StorageManager::open(&temp_dir.path().join("test.db")).unwrap();

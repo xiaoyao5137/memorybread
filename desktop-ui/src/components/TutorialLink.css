@@ -1,0 +1,38 @@
+.tutorial-link {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #8a8f98;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  cursor: pointer;
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+.tutorial-link:hover {
+  background: rgba(138, 90, 31, 0.09);
+  color: #76502a;
+}
+
+.tutorial-link:focus-visible {
+  outline: 2px solid rgba(164, 93, 34, 0.45);
+  outline-offset: 2px;
+}
+
+.tutorial-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.rag-panel__top-tabs > .tutorial-link,
+.creation-top-tabs > .tutorial-link {
+  align-self: center;
+  margin-left: -10px;
+  margin-right: 8px;
+}

@@ -77,6 +77,9 @@ def _init_db(db_path: str) -> None:
             activity_type TEXT,
             is_self_generated INTEGER NOT NULL DEFAULT 0,
             evidence_strength TEXT,
+            work_item TEXT,
+            work_status TEXT,
+            work_progress TEXT,
             created_at_ms INTEGER,
             updated_at_ms INTEGER
         )
@@ -280,16 +283,31 @@ def test_save_knowledge_persists_semantic_fields(tmp_path) -> None:
         "activity_type": "reviewing_history",
         "is_self_generated": False,
         "evidence_strength": "high",
+        "work_item": "MemoryBread-发布安排",
+        "work_status": "completed",
+        "work_progress": "已确认发布安排",
     }
 
     knowledge_id = processor._save_knowledge(conn, knowledge)
     row = conn.execute(
-        "SELECT observed_at, event_time_start, event_time_end, history_view, content_origin, activity_type, is_self_generated, evidence_strength FROM timelines WHERE id = ?",
+        "SELECT observed_at, event_time_start, event_time_end, history_view, content_origin, activity_type, is_self_generated, evidence_strength, work_item, work_status, work_progress FROM timelines WHERE id = ?",
         (knowledge_id,),
     ).fetchone()
     conn.close()
 
-    assert row == (2000, 500, 800, 1, "historical_content", "reviewing_history", 0, "high")
+    assert row == (
+        2000,
+        500,
+        800,
+        1,
+        "historical_content",
+        "reviewing_history",
+        0,
+        "high",
+        "MemoryBread-发布安排",
+        "completed",
+        "已确认发布安排",
+    )
 
 
 class _ImmediateQueue:
@@ -443,8 +461,8 @@ def test_similar_merge_allows_same_document_and_syncs_capture_ids(tmp_path, monk
 
     conn = sqlite3.connect(db_path)
     linked_timeline = conn.execute("SELECT timeline_id FROM captures WHERE id = 2").fetchone()[0]
-    capture_ids, end_time = conn.execute(
-        "SELECT capture_ids, end_time FROM timelines WHERE id = 1"
+    capture_ids, end_time, key_timestamps = conn.execute(
+        "SELECT capture_ids, end_time, key_timestamps FROM timelines WHERE id = 1"
     ).fetchone()
     conn.close()
 
@@ -452,6 +470,59 @@ def test_similar_merge_allows_same_document_and_syncs_capture_ids(tmp_path, monk
     assert linked_timeline == 1
     assert json.loads(capture_ids) == [1, 2]
     assert end_time == 2000
+    # 合并新增 capture 后必须同步补 key_timestamps 段，
+    # 否则详情页片段只覆盖初始采集，与列表页关联采集数不一致。
+    segments = json.loads(key_timestamps)
+    assert len(segments) == 1
+    assert segments[0]["capture_ids"] == [2]
+    assert segments[0]["start_ts"] == 2000
+    assert segments[0]["end_ts"] == 2000
+
+
+def test_cross_batch_append_syncs_key_timestamps(tmp_path) -> None:
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    _seed_timeline(conn, "https://docs.example.com/k/home/docA/sample-document-a")
+    conn.execute(
+        "UPDATE timelines SET key_timestamps = ? WHERE id = 1",
+        (json.dumps([
+            {"capture_ids": [1], "start_ts": 1000, "end_ts": 1000, "summary": "初始片段"},
+        ]),),
+    )
+    conn.execute(
+        """
+        INSERT INTO captures (id, ts, app_name, win_title, ocr_text, ax_text, timeline_id)
+        VALUES (2, 2000, 'Chrome', 'Doc A', 'doc a part 2', '', NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    processor = BackgroundProcessor(db_path=db_path)
+    ok = asyncio.run(processor._append_captures_to_timeline(
+        [{"id": 2, "ts": 2000, "app_name": "Chrome", "window_title": "Doc A"}],
+        1,
+    ))
+
+    conn = sqlite3.connect(db_path)
+    capture_ids, key_timestamps = conn.execute(
+        "SELECT capture_ids, key_timestamps FROM timelines WHERE id = 1"
+    ).fetchone()
+    occurrence_count = conn.execute(
+        "SELECT occurrence_count FROM timelines WHERE id = 1"
+    ).fetchone()[0]
+    conn.close()
+
+    assert ok is True
+    assert json.loads(capture_ids) == [1, 2]
+    assert occurrence_count == 2
+    segments = json.loads(key_timestamps)
+    assert len(segments) == 2
+    assert segments[0]["capture_ids"] == [1]
+    assert segments[1]["capture_ids"] == [2]
+    assert segments[1]["start_ts"] == 2000
+    assert segments[1]["end_ts"] == 2000
 
 
 def test_forced_cross_batch_merge_still_runs_model_extraction(tmp_path, monkeypatch) -> None:

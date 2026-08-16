@@ -234,7 +234,9 @@ describe('BakeMemoryGraph', () => {
     render(<BakeMemoryGraph assets={assets()} focusNodeId="knowledge:k1" onOpenNode={onOpenNode} />)
 
     expect(screen.getByRole('region', { name: '记忆图谱' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: '记忆图谱' })).toBeInTheDocument()
+    expect(screen.getByText('记忆图谱')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '记忆图谱' })).not.toBeInTheDocument()
+    expect(screen.queryByText('语义记忆网络')).not.toBeInTheDocument()
     expect(screen.queryByText('按来源、引用与提炼语义连接知识、文档、操作和数据')).not.toBeInTheDocument()
     const knowledgeNode = screen.getByRole('button', { name: /知识：GPU 利用率口径/ })
     fireEvent.doubleClick(knowledgeNode)
@@ -244,6 +246,28 @@ describe('BakeMemoryGraph', () => {
     expect(screen.getByRole('dialog', { name: '记忆图谱' })).toBeInTheDocument()
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(screen.queryByRole('dialog', { name: '记忆图谱' })).not.toBeInTheDocument()
+  })
+
+  it('dock 模式使用详情抽屉形式，并支持 Escape 和遮罩关闭', () => {
+    const onClose = vi.fn()
+    const { rerender } = render(
+      <BakeMemoryGraph assets={assets()} mode="dock" onClose={onClose} />,
+    )
+
+    const drawer = screen.getByRole('dialog', { name: '记忆图谱' })
+    expect(drawer).toHaveClass('bake-memory-graph--dock')
+    expect(drawer.parentElement).toHaveClass('bake-memory-graph-drawer-overlay')
+    expect(screen.getAllByText('记忆图谱')).toHaveLength(1)
+    expect(screen.queryByText('语义记忆网络')).not.toBeInTheDocument()
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(1)
+
+    onClose.mockClear()
+    fireEvent.mouseDown(drawer.parentElement!)
+    expect(onClose).toHaveBeenCalledTimes(1)
+
+    rerender(<BakeMemoryGraph assets={assets()} mode="dock" onClose={onClose} />)
   })
 
   it('总览支持搜索记忆节点', () => {

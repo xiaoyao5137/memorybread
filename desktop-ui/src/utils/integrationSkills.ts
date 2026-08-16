@@ -229,8 +229,11 @@ export async function selectedFilesToIntegrationInput(
   })))
 }
 
-export async function downloadIntegrationSkillBundle(apiBaseUrl: string, skillId: string) {
-  await downloadFromUrl(
+export async function downloadIntegrationSkillBundle(
+  apiBaseUrl: string,
+  skillId: string,
+): Promise<string | null> {
+  return downloadFromUrl(
     `${apiBaseUrl}/api/integration-skills/${encodeURIComponent(skillId)}/bundle`,
     `memorybread-${skillId}.skill.json`,
   )
@@ -240,17 +243,19 @@ export async function downloadIntegrationSkillFile(
   apiBaseUrl: string,
   skillId: string,
   path: string,
-) {
+): Promise<string | null> {
   const search = new URLSearchParams({ path })
-  await downloadFromUrl(
+  return downloadFromUrl(
     `${apiBaseUrl}/api/integration-skills/${encodeURIComponent(skillId)}/file?${search}`,
     path.split('/').pop() || 'skill-file.txt',
   )
 }
 
-export function downloadIntegrationArtifact(artifact: IntegrationArtifact) {
+export async function downloadIntegrationArtifact(
+  artifact: IntegrationArtifact,
+): Promise<string | null> {
   const bytes = base64ToBytes(artifact.contentBase64)
-  downloadBlob(new Blob([bytes], { type: artifact.mediaType }), artifact.fileName)
+  return saveDownloadedBytes(artifact.fileName, bytes)
 }
 
 export async function copyIntegrationArtifact(artifact: IntegrationArtifact) {
@@ -258,12 +263,52 @@ export async function copyIntegrationArtifact(artifact: IntegrationArtifact) {
   await navigator.clipboard.writeText(text)
 }
 
-async function downloadFromUrl(url: string, fallbackName: string) {
+/** 在访达中定位已下载文件所在的文件夹。 */
+export async function revealDownloadedFile(path: string) {
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('reveal_downloaded_file', { path })
+}
+
+/** 用系统默认应用打开已下载的文件。 */
+export async function openDownloadedFile(path: string) {
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('open_downloaded_file', { path })
+}
+
+const isTauriRuntime = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+
+/**
+ * 弹出系统保存对话框让用户选择下载位置，返回实际保存路径；
+ * 用户取消时返回 null，非桌面端运行时回退到浏览器默认下载。
+ */
+export async function saveDownloadedBytes(
+  fileName: string,
+  bytes: Uint8Array,
+): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    downloadBlob(new Blob([bytes.buffer as ArrayBuffer]), fileName)
+    return null
+  }
+  const { invoke } = await import('@tauri-apps/api/core')
+  const picked = await invoke<string | null>('pick_download_path', {
+    title: '选择下载保存位置',
+    defaultFileName: fileName,
+  })
+  if (typeof picked !== 'string' || !picked.trim()) return null
+  const saved = await invoke<string>('save_downloaded_file', {
+    path: picked,
+    contentBase64: bytesToBase64(bytes),
+  })
+  return saved || picked
+}
+
+async function downloadFromUrl(url: string, fallbackName: string): Promise<string | null> {
   const response = await fetchWithLocalhostFallback(url)
   if (!response.ok) throw new Error(await parseError(response, '下载 Skill 文件失败'))
   const disposition = response.headers.get('content-disposition') || ''
   const match = disposition.match(/filename="?([^";]+)"?/i)
-  downloadBlob(await response.blob(), match?.[1] || fallbackName)
+  const bytes = new Uint8Array(await response.arrayBuffer())
+  return saveDownloadedBytes(match?.[1] || fallbackName, bytes)
 }
 
 function downloadBlob(blob: Blob, fileName: string) {

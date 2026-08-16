@@ -121,6 +121,7 @@
                 "DATA_SOURCE_URL_MISSING",
                 "BROWSER_ATTACH_UNAVAILABLE",
                 "BROWSER_SCRIPTING_DISABLED",
+                "FOCUS_POLICY_BLOCKED",
                 "SCRAPE_AUTH_REQUIRED",
                 "SCRAPE_EMPTY",
                 "SCRAPE_FAILED"
@@ -282,6 +283,76 @@
               }
             }
           ]
+        }
+      }
+    },
+    "thinking_event": {
+      "type": "object",
+      "description": "深度思考事件对：thinking.started 在意图理解、链路决策、内容生成或反馈规划开始时发出，thinking.completed 在该阶段推理结束后发出并携带面向用户的推理摘要。内容生成（generation）包裹文档撰写/润色等大模型内容调用。展示层用两者 timestamp 差计算思考时长；旧记录可能没有该事件，客户端必须向后兼容。",
+      "required": ["schema_version", "type", "status", "actor", "summary", "data"],
+      "properties": {
+        "schema_version": {"const": "creation.agent.v1"},
+        "type": {"type": "string", "enum": ["thinking.started", "thinking.completed"]},
+        "status": {"type": "string", "enum": ["running", "completed"]},
+        "actor": {
+          "type": "object",
+          "required": ["kind", "id", "name"],
+          "properties": {
+            "kind": {"const": "agent"},
+            "id": {"const": "creation_main_agent"},
+            "name": {"type": "string"}
+          }
+        },
+        "summary": {"type": "string"},
+        "data": {
+          "type": "object",
+          "required": ["stage"],
+          "properties": {
+            "stage": {
+              "type": "string",
+              "enum": ["intent", "routing", "generation", "planning"]
+            },
+            "reasoning": {
+              "type": "string",
+              "maxLength": 400,
+              "description": "仅 thinking.completed 携带；该阶段面向用户的推理摘要"
+            }
+          }
+        }
+      }
+    },
+    "phase_event": {
+      "type": "object",
+      "description": "顶层执行阶段事件对：phase.started 在进入一个宏观阶段时发出，phase.completed 在该阶段结束时发出。Skill 流程里同一个 Skill 步骤的 Tool/Agent/Writer 归入同一阶段（phase_kind=skill_step）；无 Skill 时每个计划步骤自成一个宏观阶段（phase_kind=plan_step）。展示层据此把执行过程分成“阶段 → 思考/动作 → 明细”三层；旧记录可能没有该事件，客户端必须向后兼容。",
+      "required": ["schema_version", "type", "status", "actor", "summary", "data"],
+      "properties": {
+        "schema_version": {"const": "creation.agent.v1"},
+        "type": {"type": "string", "enum": ["phase.started", "phase.completed"]},
+        "status": {"type": "string", "enum": ["running", "completed"]},
+        "actor": {
+          "type": "object",
+          "required": ["kind", "id", "name"],
+          "properties": {
+            "kind": {"const": "agent"},
+            "id": {"const": "creation_main_agent"},
+            "name": {"type": "string"}
+          }
+        },
+        "summary": {
+          "type": "string",
+          "description": "阶段标题，如 Skill 步骤标题或宏观计划步骤名"
+        },
+        "data": {
+          "type": "object",
+          "required": ["phase_id", "phase_title", "phase_kind"],
+          "properties": {
+            "phase_id": {"type": "string"},
+            "phase_title": {"type": "string"},
+            "phase_kind": {
+              "type": "string",
+              "enum": ["skill_step", "plan_step"]
+            }
+          }
         }
       }
     }

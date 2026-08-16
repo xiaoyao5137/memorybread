@@ -1,12 +1,13 @@
-import React, { useEffect, useState } from 'react'
+import { Eye, X } from 'lucide-react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '../../store/useAppStore'
 import type { BakeCaptureItem } from '../../types'
-import { BakeButton, BakeCard, BakePill, BakeSectionHeader } from './BakeShared'
+import { BakeButton, BakeCard, BakePill } from './BakeShared'
 
 const formatCaptureTime = (ts?: number) => {
-  if (!ts) return '—'
+  if (!ts) return '时间未知'
   const date = new Date(ts)
-  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { hour12: false })
+  return Number.isNaN(date.getTime()) ? '时间未知' : date.toLocaleString('zh-CN', { hour12: false })
 }
 
 const parseDateInputToMs = (value: string, endOfDay = false) => {
@@ -38,13 +39,25 @@ const captureTitle = (item: BakeCaptureItem) => {
   return appName ? `${appName} · ID #${item.id}` : `ID #${item.id}`
 }
 
-const capturePreview = (item: BakeCaptureItem) => (
-  textOrNull(item.summary) ??
-  textOrNull(item.bestText) ??
-  textOrNull(item.axText) ??
-  textOrNull(item.ocrText) ??
-  '暂无正文'
-)
+const CAPTURE_PREVIEW_PENDING = '正在提炼中'
+
+// OCR/AX 文本里大量硬换行会让摘要每行只剩几个字，折叠成空格后再展示能充分利用列宽
+const flattenPreviewText = (text: string) => text.replace(/\s+/g, ' ').trim()
+
+const capturePreview = (item: BakeCaptureItem) => {
+  const extractedText = [item.axText, item.ocrText, item.inputText, item.audioText]
+    .map(textOrNull)
+    .map((text) => (text ? flattenPreviewText(text) : null))
+    .find((text): text is string => Boolean(text))
+  if (extractedText) return extractedText
+  if (captureNeedsTextRefresh(item)) return CAPTURE_PREVIEW_PENDING
+
+  const title = captureTitle(item)
+  return [item.summary, item.bestText]
+    .map(textOrNull)
+    .map((text) => (text ? flattenPreviewText(text) : null))
+    .find((text): text is string => Boolean(text && text !== title)) ?? '暂无正文'
+}
 
 const captureTextInformation = (item: BakeCaptureItem) => {
   const texts = [item.axText, item.ocrText]
@@ -113,9 +126,11 @@ const BakeCaptureTab: React.FC<{
   limit: number
   offset: number
   query: string
+  app: string
   from: string
   to: string
   draftQuery: string
+  draftApp: string
   draftFrom: string
   draftTo: string
   sourceCaptureId: string | null
@@ -125,23 +140,24 @@ const BakeCaptureTab: React.FC<{
   onPageChange: (offset: number) => void
   onLimitChange: (limit: number) => void
   onDraftQueryChange: (query: string) => void
+  onDraftAppChange: (app: string) => void
   onDraftFromChange: (value: string) => void
   onDraftToChange: (value: string) => void
   onSearch: () => void
   onClearFilters: () => void
   onViewLinkedTimeline: (timelineId?: string | null) => void
   onDeleteCapture: (id: string) => void
-  canGoBack: boolean
-  onGoBack: () => void
 }> = ({
   captures,
   total,
   limit,
   offset,
   query,
+  app,
   from,
   to,
   draftQuery,
+  draftApp,
   draftFrom,
   draftTo,
   sourceCaptureId,
@@ -151,28 +167,54 @@ const BakeCaptureTab: React.FC<{
   onPageChange,
   onLimitChange,
   onDraftQueryChange,
+  onDraftAppChange,
   onDraftFromChange,
   onDraftToChange,
   onSearch,
   onClearFilters,
   onViewLinkedTimeline,
   onDeleteCapture,
-  canGoBack,
-  onGoBack,
 }) => {
   const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
   const debugModeEnabled = useAppStore((s) => s.debugModeEnabled)
   const [pageInput, setPageInput] = useState('')
+  const [isDetailDrawerOpen, setIsDetailDrawerOpen] = useState(false)
   const [isScreenshotOpen, setIsScreenshotOpen] = useState(false)
+  const closeDrawerButtonRef = useRef<HTMLButtonElement>(null)
+  const detailTriggerRef = useRef<HTMLButtonElement | null>(null)
   const selectedListItem = captures.find(item => item.id === selectedCaptureId) ?? null
   // 详情接口返回前继续使用列表项数据，避免选中态停留在上一条记录上
   const selected = selectedCaptureDetail && selectedCaptureDetail.id === selectedCaptureId
     ? selectedCaptureDetail
-    : selectedListItem ?? captures[0] ?? null
+    : selectedListItem
   const page = Math.floor(offset / limit) + 1
   const totalPages = Math.max(1, Math.ceil(total / limit))
   const screenshotUrl = selected?.screenshotPath ? `${apiBaseUrl}/api/bake/captures/${encodeURIComponent(selected.id)}/screenshot` : null
   const triggerMeta = captureTriggerMeta(selected?.eventType)
+  const isDetailLoading = Boolean(
+    isDetailDrawerOpen
+    && selectedCaptureId
+    && selectedCaptureDetail?.id !== selectedCaptureId,
+  )
+  const appSuggestions = Array.from(new Set([
+    app,
+    draftApp,
+    ...captures.map(item => item.appName ?? ''),
+  ].map(value => value.trim()).filter(Boolean))).sort((left, right) => left.localeCompare(right, 'zh-CN'))
+
+  const closeDetailDrawer = () => {
+    const trigger = detailTriggerRef.current
+    setIsScreenshotOpen(false)
+    setIsDetailDrawerOpen(false)
+    onSelectCapture(null)
+    window.setTimeout(() => trigger?.focus(), 0)
+  }
+
+  const openDetailDrawer = (item: BakeCaptureItem, trigger: HTMLButtonElement) => {
+    detailTriggerRef.current = trigger
+    onSelectCapture(item.id)
+    setIsDetailDrawerOpen(true)
+  }
 
   useEffect(() => {
     if (!screenshotUrl && isScreenshotOpen) {
@@ -181,17 +223,34 @@ const BakeCaptureTab: React.FC<{
   }, [isScreenshotOpen, screenshotUrl])
 
   useEffect(() => {
-    if (!isScreenshotOpen) return
+    if (!isDetailDrawerOpen || !selected) return
+    closeDrawerButtonRef.current?.focus()
+  }, [isDetailDrawerOpen, selected])
+
+  useEffect(() => {
+    if (!isDetailDrawerOpen && !isScreenshotOpen) return
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        setIsScreenshotOpen(false)
+        event.preventDefault()
+        if (isScreenshotOpen) {
+          setIsScreenshotOpen(false)
+          return
+        }
+        closeDetailDrawer()
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [isScreenshotOpen])
+  }, [isDetailDrawerOpen, isScreenshotOpen, onSelectCapture])
+
+  useEffect(() => {
+    if (!selectedCaptureId && isDetailDrawerOpen) {
+      setIsDetailDrawerOpen(false)
+      setIsScreenshotOpen(false)
+    }
+  }, [isDetailDrawerOpen, selectedCaptureId])
 
   return (
     <>
@@ -213,11 +272,22 @@ const BakeCaptureTab: React.FC<{
                 placeholder="搜索标题、正文或文本信息"
               />
             </label>
-            <div className="bake-list-toolbar__repository-actions bake-list-toolbar__repository-actions--search">
-              <BakeButton compact primary type="submit">搜索</BakeButton>
-            </div>
           </div>
-          <div className="bake-list-toolbar__repository-row bake-list-toolbar__repository-row--dates">
+          <div className="bake-list-toolbar__repository-row bake-list-toolbar__repository-row--capture-filters">
+            <label className="bake-form-field bake-filter-field bake-filter-field--app">
+              <span className="bake-filter-label">应用</span>
+              <input
+                className="bake-input"
+                value={draftApp}
+                list="bake-capture-app-options"
+                autoComplete="off"
+                onChange={(event) => onDraftAppChange(event.target.value)}
+                placeholder="输入应用名称"
+              />
+              <datalist id="bake-capture-app-options">
+                {appSuggestions.map(option => <option key={option} value={option} />)}
+              </datalist>
+            </label>
             <label className="bake-form-field bake-filter-field">
               <span className="bake-filter-label">开始日期</span>
               <input
@@ -237,48 +307,88 @@ const BakeCaptureTab: React.FC<{
               />
             </label>
             <div className="bake-list-toolbar__repository-actions bake-list-toolbar__repository-actions--secondary">
-              {(draftQuery || draftFrom || draftTo || query || from || to || sourceCaptureId) && (
-                <BakeButton compact onClick={onClearFilters}>清除筛选</BakeButton>
-              )}
+              <div className="bake-list-toolbar__repository-primary-actions">
+                <BakeButton compact type="button" onClick={onClearFilters}>清空</BakeButton>
+                <BakeButton compact primary type="submit">搜索</BakeButton>
+              </div>
             </div>
           </div>
         </div>
       </form>
 
-      <div className="bake-split-list-detail bake-split-list-detail--capture">
-        <BakeCard className="bake-capture-list-card">
-          <BakeSectionHeader
-            title="采集记录"
-            right={canGoBack ? <BakeButton compact onClick={onGoBack}>返回上一步</BakeButton> : undefined}
-          />
-
-        <div className="bake-list bake-capture-list">
+      <BakeCard className="bake-capture-table-card">
+        <div
+          className="bake-capture-table-region"
+          role="region"
+          aria-label="采集记录表格"
+          tabIndex={0}
+        >
           {captures.length === 0 ? (
-            <div className="bake-muted">当前筛选条件下没有可浏览的采集记录。</div>
-          ) : captures.map(item => {
-            const title = captureTitle(item)
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => onSelectCapture(item.id)}
-                className={`bake-list-item bake-capture-list-item ${item.id === selected?.id ? 'bake-list-item--active' : ''}`.trim()}
-              >
-                <div className="bake-list-item__title bake-line-clamp-1">{title}</div>
-                <div className="bake-muted bake-line-clamp-2">{capturePreview(item)}</div>
-                <div className="bake-memory-list-item__meta">
-                  <span>{item.appName || '未知应用'}</span>
-                  <span>{formatCaptureTime(item.ts)}</span>
-                </div>
-              </button>
-            )
-          })}
+            <div className="bake-capture-table-empty">
+              <div className="bake-capture-table-empty__title">暂无采集记录</div>
+              <div className="bake-muted">当前筛选条件下没有可浏览的内容，请调整关键词或日期范围。</div>
+            </div>
+          ) : (
+            <table className="bake-capture-table">
+              <caption className="bake-visually-hidden">当前筛选条件下的采集记录</caption>
+              <thead>
+                <tr>
+                  <th className="bake-capture-table__time" scope="col">采集时间</th>
+                  <th className="bake-capture-table__app" scope="col">应用</th>
+                  <th className="bake-capture-table__title" scope="col">窗口 / 页面</th>
+                  <th className="bake-capture-table__content" scope="col">内容摘要</th>
+                  <th className="bake-capture-table__actions" scope="col">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {captures.map(item => {
+                  const preview = capturePreview(item)
+                  return (
+                    <tr
+                      key={item.id}
+                      className={item.id === selectedCaptureId && isDetailDrawerOpen ? 'bake-capture-table__row--active' : undefined}
+                    >
+                      <td className="bake-capture-table__time">
+                        <time>{formatCaptureTime(item.ts)}</time>
+                        <span className="bake-capture-table__id">ID #{item.id}</span>
+                      </td>
+                      <td className="bake-capture-table__app">
+                        <span className="bake-capture-table__app-label">{item.appName || '未知应用'}</span>
+                      </td>
+                      <td className="bake-capture-table__title">
+                        <div className="bake-capture-table__primary bake-line-clamp-2">{captureTitle(item)}</div>
+                        {item.webpageTitle && item.webpageTitle !== item.winTitle && (
+                          <div className="bake-capture-table__secondary bake-line-clamp-1">{item.webpageTitle}</div>
+                        )}
+                      </td>
+                      <td className="bake-capture-table__content">
+                        <div className={`bake-capture-table__preview bake-line-clamp-2${preview === CAPTURE_PREVIEW_PENDING ? ' bake-capture-table__preview--pending' : ''}`}>{preview}</div>
+                      </td>
+                      <td className="bake-capture-table__actions">
+                        <div className="bake-capture-table__action-group">
+                          <button
+                            type="button"
+                            className="bake-capture-table__action-button"
+                            aria-label={`查看采集记录 #${item.id} 详情`}
+                            title="查看详情"
+                            onClick={(event) => openDetailDrawer(item, event.currentTarget)}
+                          >
+                            <Eye size={15} strokeWidth={1.9} aria-hidden="true" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
         </div>
 
         <div className="bake-pagination bake-pagination--extended">
           <div className="bake-pagination__controls">
-            <BakeButton compact onClick={() => onPageChange(Math.max(0, offset - limit))}>上一页</BakeButton>
-            <BakeButton compact onClick={() => onPageChange(offset + limit)}>{offset + limit >= total ? '已到底' : '下一页'}</BakeButton>
+            <BakeButton compact disabled={offset <= 0} onClick={() => onPageChange(Math.max(0, offset - limit))}>上一页</BakeButton>
+            <BakeButton compact disabled={offset + limit >= total} onClick={() => onPageChange(offset + limit)}>下一页</BakeButton>
           </div>
           <div className="bake-pagination__summary-group bake-muted">
             <span className="bake-pagination__summary">共 {total} 条</span>
@@ -326,111 +436,135 @@ const BakeCaptureTab: React.FC<{
             </div>
           </div>
         </div>
-        </BakeCard>
+      </BakeCard>
 
-        <BakeCard className="bake-capture-detail-card">
-        {selected ? (
-          <div className="bake-kv bake-capture-detail">
-            <div className="bake-inline-meta">
-              <div>
-                <div className="bake-title" style={{ fontSize: 18 }}>{captureTitle(selected)}</div>
-                <div className="bake-muted" style={{ marginTop: 4 }}>{selected.appName || '未知应用'} · {formatCaptureTime(selected.ts)}</div>
+      {isDetailDrawerOpen && selected && (
+        <>
+          <div className="bake-capture-drawer-overlay" aria-hidden="true" onClick={closeDetailDrawer} />
+          <section
+            className="bake-capture-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="bake-capture-drawer-title"
+          >
+            <header className="bake-capture-drawer__header">
+              <div className="bake-capture-drawer__heading">
+                <div className="bake-capture-drawer__eyebrow">采集记录详情</div>
+                <div id="bake-capture-drawer-title" className="bake-capture-drawer__title">{captureTitle(selected)}</div>
+                <div className="bake-capture-drawer__meta">
+                  <span>{selected.appName || '未知应用'}</span>
+                  <span>{formatCaptureTime(selected.ts)}</span>
+                  <BakePill text={`ID #${selected.id}`} />
+                </div>
               </div>
-              <BakePill text={`ID #${selected.id}`} />
-            </div>
+              <button
+                ref={closeDrawerButtonRef}
+                type="button"
+                className="bake-capture-drawer__close"
+                aria-label="关闭采集记录详情"
+                onClick={closeDetailDrawer}
+              >
+                <X size={18} aria-hidden="true" />
+              </button>
+            </header>
 
-            <div className={`bake-grid-2 bake-capture-detail__meta-grid ${debugModeEnabled ? '' : 'bake-capture-detail__meta-grid--single'}`.trim()}>
-              <div className="bake-capture-detail__meta-card">
-                <div className="bake-kv__title">窗口 / 页面</div>
-                <div className="bake-muted" style={{ lineHeight: 1.7 }}>{selected.winTitle || selected.webpageTitle || '—'}</div>
-              </div>
-              {debugModeEnabled && (
-                <div className="bake-capture-detail__meta-card bake-capture-detail__debug-card">
-                  <div className="bake-capture-detail__debug-section">
-                    <div className="bake-kv__title">触发信号</div>
-                    <div className="bake-capture-detail__type-primary">{triggerMeta.label}</div>
-                    <div className="bake-muted">{triggerMeta.description}</div>
+            <div className="bake-capture-drawer__body">
+              {isDetailLoading && (
+                <div className="bake-capture-drawer__loading" role="status">正在加载完整详情…</div>
+              )}
+              <div className="bake-kv bake-capture-detail">
+                <div className={`bake-grid-2 bake-capture-detail__meta-grid ${debugModeEnabled ? '' : 'bake-capture-detail__meta-grid--single'}`.trim()}>
+                  <div className="bake-capture-detail__meta-card">
+                    <div className="bake-kv__title">窗口 / 页面</div>
+                    <div className="bake-muted" style={{ lineHeight: 1.7 }}>{selected.winTitle || selected.webpageTitle || '暂无'}</div>
                   </div>
-                  <div className="bake-capture-detail__debug-section">
-                    <div className="bake-kv__title">片段类型</div>
-                    <div className="bake-capture-detail__type-stack">
-                      <div className="bake-capture-detail__type-primary">{selected.semanticTypeLabel || '未识别类型'}</div>
-                      <div className="bake-muted">原始模态：{rawTypeLabel(selected.rawTypeLabel || selected.eventType)}</div>
+                  {debugModeEnabled && (
+                    <div className="bake-capture-detail__meta-card bake-capture-detail__debug-card">
+                      <div className="bake-capture-detail__debug-section">
+                        <div className="bake-kv__title">触发信号</div>
+                        <div className="bake-capture-detail__type-primary">{triggerMeta.label}</div>
+                        <div className="bake-muted">{triggerMeta.description}</div>
+                      </div>
+                      <div className="bake-capture-detail__debug-section">
+                        <div className="bake-kv__title">片段类型</div>
+                        <div className="bake-capture-detail__type-stack">
+                          <div className="bake-capture-detail__type-primary">{selected.semanticTypeLabel || '未识别类型'}</div>
+                          <div className="bake-muted">原始模态：{rawTypeLabel(selected.rawTypeLabel || selected.eventType)}</div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <div className="bake-kv__title">截图预览</div>
+                  {screenshotUrl ? (
+                    <div className="bake-capture-detail__screenshot-wrap">
+                      <button
+                        type="button"
+                        className="bake-capture-detail__screenshot-button"
+                        onClick={() => setIsScreenshotOpen(true)}
+                      >
+                        <img
+                          className="bake-capture-detail__screenshot-image"
+                          src={screenshotUrl}
+                          alt={captureTitle(selected)}
+                          loading="lazy"
+                        />
+                        <span className="bake-capture-detail__screenshot-hint">点击查看大图</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="bake-muted">当前没有截图文件。</div>
+                  )}
+                </div>
+
+                <div>
+                  <div className="bake-kv__title">文本信息</div>
+                  <div className="bake-capture-detail__text">{captureTextInformation(selected)}</div>
+                </div>
+
+                <div>
+                  <div className="bake-kv__title">输入 / 音频</div>
+                  <div className="bake-capture-detail__text">{selected.inputText || selected.audioText || '暂无输入或音频文本'}</div>
+                </div>
+
+                {(selected.url || selected.webpageTitle) && (
+                  <div>
+                    <div className="bake-kv__title">网址</div>
+                    <div className="bake-capture-detail__text">
+                      {selected.webpageTitle && (
+                        <div style={{ marginBottom: 4 }}>{selected.webpageTitle}</div>
+                      )}
+                      {selected.url && (
+                        <a
+                          href={selected.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="bake-source-url-link"
+                        >
+                          {selected.url}
+                        </a>
+                      )}
                     </div>
                   </div>
-                </div>
-              )}
-            </div>
-
-            <div>
-              <div className="bake-kv__title">截图预览</div>
-              {screenshotUrl ? (
-                <div className="bake-capture-detail__screenshot-wrap">
-                  <button
-                    type="button"
-                    className="bake-capture-detail__screenshot-button"
-                    onClick={() => setIsScreenshotOpen(true)}
-                  >
-                    <img
-                      className="bake-capture-detail__screenshot-image"
-                      src={screenshotUrl}
-                      alt={captureTitle(selected)}
-                      loading="lazy"
-                    />
-                    <span className="bake-capture-detail__screenshot-hint">点击查看大图</span>
-                  </button>
-                </div>
-              ) : (
-                <div className="bake-muted">当前没有截图文件。</div>
-              )}
-            </div>
-
-            <div>
-              <div className="bake-kv__title">文本信息</div>
-              <div className="bake-capture-detail__text">{captureTextInformation(selected)}</div>
-            </div>
-
-            <div>
-              <div className="bake-kv__title">输入 / 音频</div>
-              <div className="bake-capture-detail__text">{selected.inputText || selected.audioText || '暂无输入或音频文本'}</div>
-            </div>
-
-            {(selected.url || selected.webpageTitle) && (
-              <div>
-                <div className="bake-kv__title">网址</div>
-                <div className="bake-capture-detail__text">
-                  {selected.webpageTitle && (
-                    <div style={{ marginBottom: 4 }}>{selected.webpageTitle}</div>
-                  )}
-                  {selected.url && (
-                    <a
-                      href={selected.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="bake-source-url-link"
-                    >
-                      {selected.url}
-                    </a>
-                  )}
-                </div>
+                )}
               </div>
-            )}
+            </div>
 
-            <div className="bake-actions">
-              {selected.linkedTimelineId && (
+            <footer className="bake-capture-drawer__footer">
+              {selected.linkedTimelineId ? (
                 <BakeButton onClick={() => onViewLinkedTimeline(selected.linkedTimelineId)}>
                   查看所属时间线
                 </BakeButton>
-              )}
+              ) : <span className="bake-muted">该记录尚未归入时间线</span>}
               <BakeButton compact danger onClick={() => onDeleteCapture(selected.id)}>删除</BakeButton>
-            </div>
-          </div>
-        ) : (
-          <div className="bake-muted">暂无采集记录详情</div>
-        )}
-        </BakeCard>
+            </footer>
+          </section>
+        </>
+      )}
 
-        {selected && screenshotUrl && isScreenshotOpen && (
+      {selected && screenshotUrl && isScreenshotOpen && (
           <div
             className="bake-capture-lightbox"
             role="dialog"
@@ -458,8 +592,7 @@ const BakeCaptureTab: React.FC<{
               </div>
             </div>
           </div>
-        )}
-      </div>
+      )}
     </>
   )
 }

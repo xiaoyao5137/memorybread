@@ -1,7 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, Network } from 'lucide-react'
+import { ArrowLeft } from 'lucide-react'
 import {
+  useCreateBakeKnowledge,
+  useCreateBakeSop,
   useCreateBakeTemplate,
+  useCreateDataSource,
   useDeleteDataSource,
   useDeleteBakeKnowledge,
   useDeleteBakeSop,
@@ -17,11 +20,15 @@ import {
   useFetchBakeTemplate,
   useFetchBakeTemplates,
   useToggleBakeTemplateStatus,
+  useUpdateBakeKnowledge,
+  useUpdateBakeSop,
   useUpdateBakeTemplate,
+  useUpdateDataSource,
   useRefreshDataSource,
   useModelStatus,
+  useUpdateMemoryFavorite,
 } from '../hooks/useApi'
-import type { BakeOverviewResponse } from '../hooks/useApi'
+import type { BakeOverviewResponse, DataSourceWriteInput } from '../hooks/useApi'
 import { useAppStore, type BakeNavigationTarget } from '../store/useAppStore'
 import { toUserFacingError } from '../utils/userFacingError'
 import { listLocalCreationSkills, type CreationSkillSource, type LocalCreationSkill } from '../utils/creationSkills'
@@ -31,6 +38,7 @@ import type {
   BakeOverview,
   BakeTab,
   DataSource,
+  MemoryFavoriteFilter,
   SopCandidate,
   TimelineItem,
 } from '../types'
@@ -51,6 +59,14 @@ import './bake/BakePanel.css'
 
 const PAGE_SIZE = 20
 const GRAPH_ASSET_LIMIT = 100
+
+const favoriteFilterToQuery = (filter: MemoryFavoriteFilter): boolean | undefined => (
+  filter === 'all' ? undefined : filter === 'favorite'
+)
+
+const favoriteMatchesFilter = (filter: MemoryFavoriteFilter, isFavorite: boolean) => (
+  filter === 'all' || (filter === 'favorite' ? isFavorite : !isFavorite)
+)
 
 const getLocalDayRange = (nowMs: number) => {
   const start = new Date(nowMs)
@@ -80,8 +96,8 @@ const getFallbackOffsetAfterRemoval = (currentCount: number, offset: number, lim
 
 const createDraftTemplate = (): ArticleTemplate => ({
   id: `template-draft-${Date.now()}`,
-  title: '新模板',
-  docType: 'article',
+  title: '新文档',
+  docType: 'general_document',
   status: 'draft',
   tags: [],
   applicableTasks: ['creation'],
@@ -197,6 +213,8 @@ const BakePanel: React.FC = () => {
   const fetchKnowledge = useFetchBakeKnowledge()
   const fetchKnowledgeDetail = useFetchBakeKnowledgeDetail()
   const fetchMemories = useFetchBakeMemories()
+  const createKnowledge = useCreateBakeKnowledge()
+  const updateKnowledge = useUpdateBakeKnowledge()
   const deleteKnowledge = useDeleteBakeKnowledge()
   const fetchTemplates = useFetchBakeTemplates()
   const fetchTemplate = useFetchBakeTemplate()
@@ -206,11 +224,16 @@ const BakePanel: React.FC = () => {
   const deleteTemplate = useDeleteBakeTemplate()
   const fetchSops = useFetchBakeSops()
   const fetchSop = useFetchBakeSop()
+  const createSop = useCreateBakeSop()
+  const updateSop = useUpdateBakeSop()
   const deleteSop = useDeleteBakeSop()
   const fetchDataSource = useFetchDataSource()
   const fetchDataSources = useFetchDataSources()
   const refreshDataSource = useRefreshDataSource()
+  const createDataSource = useCreateDataSource()
+  const updateDataSource = useUpdateDataSource()
   const deleteDataSource = useDeleteDataSource()
+  const updateMemoryFavorite = useUpdateMemoryFavorite()
   const { confirm: confirmDestructive, dialog: confirmDialog } = useConfirmDialog()
 
   const [overview, setOverview] = useState<BakeOverview>(defaultOverview)
@@ -225,6 +248,13 @@ const BakePanel: React.FC = () => {
   const [dataTotal, setDataTotal] = useState(0)
   const [dataQuery, setDataQuery] = useState('')
   const [draftDataQuery, setDraftDataQuery] = useState('')
+  const [dataSourceKind, setDataSourceKind] = useState<'' | DataSource['source_kind']>('')
+  const [draftDataSourceKind, setDraftDataSourceKind] = useState<'' | DataSource['source_kind']>('')
+  const [dataFrom, setDataFrom] = useState('')
+  const [draftDataFrom, setDraftDataFrom] = useState('')
+  const [dataTo, setDataTo] = useState('')
+  const [draftDataTo, setDraftDataTo] = useState('')
+  const [dataFavoriteFilter, setDataFavoriteFilter] = useState<MemoryFavoriteFilter>('all')
   const [dataOffset, setDataOffset] = useState(0)
   const [dataLimit, setDataLimit] = useState(PAGE_SIZE)
   const [selectedDataId, setSelectedDataId] = useState<number | null>(null)
@@ -236,12 +266,17 @@ const BakePanel: React.FC = () => {
   const [draftKnowledgeQuery, setDraftKnowledgeQuery] = useState(bakeKnowledgeQuery)
   const [draftKnowledgeFrom, setDraftKnowledgeFrom] = useState(bakeKnowledgeFrom)
   const [draftKnowledgeTo, setDraftKnowledgeTo] = useState(bakeKnowledgeTo)
+  const [knowledgeFavoriteFilter, setKnowledgeFavoriteFilter] = useState<MemoryFavoriteFilter>('all')
   const [draftTemplateQuery, setDraftTemplateQuery] = useState(bakeTemplateQuery)
   const [draftTemplateFrom, setDraftTemplateFrom] = useState(bakeTemplateFrom)
   const [draftTemplateTo, setDraftTemplateTo] = useState(bakeTemplateTo)
+  const [templateDocType, setTemplateDocType] = useState('')
+  const [draftTemplateDocType, setDraftTemplateDocType] = useState('')
+  const [templateFavoriteFilter, setTemplateFavoriteFilter] = useState<MemoryFavoriteFilter>('all')
   const [draftSopQuery, setDraftSopQuery] = useState(bakeSopQuery)
   const [draftSopFrom, setDraftSopFrom] = useState(bakeSopFrom)
   const [draftSopTo, setDraftSopTo] = useState(bakeSopTo)
+  const [sopFavoriteFilter, setSopFavoriteFilter] = useState<MemoryFavoriteFilter>('all')
   const [creationSkillEditor, setCreationSkillEditor] = useState<{ source?: CreationSkillSource; initialSkill?: LocalCreationSkill } | null>(null)
   const [relatedTemplateSkills, setRelatedTemplateSkills] = useState<LocalCreationSkill[]>([])
   const [graphOpen, setGraphOpen] = useState(false)
@@ -439,6 +474,10 @@ const BakePanel: React.FC = () => {
       ? fetchDataSource(dataFocusId).then(item => ({ items: [item], total: 1 }))
       : fetchDataSources({
           q: dataQuery.trim() || undefined,
+          source_kind: dataSourceKind || undefined,
+          from: parseDateInputToMs(dataFrom),
+          to: parseDateInputToMs(dataTo, true),
+          favorite: favoriteFilterToQuery(dataFavoriteFilter),
           limit: dataLimit,
           offset: dataOffset,
         })
@@ -455,7 +494,7 @@ const BakePanel: React.FC = () => {
       if (!cancelled) setDataLoading(false)
     })
     return () => { cancelled = true }
-  }, [bakeTab, dataFocusId, dataLimit, dataOffset, dataQuery, fetchDataSource, fetchDataSources])
+  }, [bakeTab, dataFavoriteFilter, dataFocusId, dataFrom, dataLimit, dataOffset, dataQuery, dataSourceKind, dataTo, fetchDataSource, fetchDataSources])
 
   useEffect(() => {
     if (!['templates', 'knowledge', 'sop'].includes(bakeTab)) return
@@ -490,6 +529,7 @@ const BakePanel: React.FC = () => {
       q: bakeKnowledgeQuery.trim() || undefined,
       from: parseDateInputToMs(bakeKnowledgeFrom),
       to: parseDateInputToMs(bakeKnowledgeTo, true),
+      favorite: favoriteFilterToQuery(knowledgeFavoriteFilter),
       limit: bakeKnowledgeLimit,
       offset: bakeKnowledgeOffset,
     }).then((data) => {
@@ -500,7 +540,7 @@ const BakePanel: React.FC = () => {
       if (requestSeq !== knowledgeRequestSeqRef.current) return
       setStatusMessage(toUserFacingError(error, '知识加载失败'))
     })
-  }, [bakeKnowledgeFocusId, bakeKnowledgeFrom, bakeKnowledgeLimit, bakeKnowledgeOffset, bakeKnowledgeQuery, bakeKnowledgeTo, bakeTab, fetchKnowledge, fetchKnowledgeDetail, setSelectedKnowledgeId])
+  }, [bakeKnowledgeFocusId, bakeKnowledgeFrom, bakeKnowledgeLimit, bakeKnowledgeOffset, bakeKnowledgeQuery, bakeKnowledgeTo, bakeTab, fetchKnowledge, fetchKnowledgeDetail, knowledgeFavoriteFilter, setSelectedKnowledgeId])
 
   useEffect(() => {
     if (bakeTab !== 'templates') return
@@ -518,8 +558,10 @@ const BakePanel: React.FC = () => {
     }
     void fetchTemplates({
       q: bakeTemplateQuery.trim() || undefined,
+      doc_type: templateDocType || undefined,
       from: parseDateInputToMs(bakeTemplateFrom),
       to: parseDateInputToMs(bakeTemplateTo, true),
+      favorite: favoriteFilterToQuery(templateFavoriteFilter),
       limit: bakeTemplateLimit,
       offset: bakeTemplateOffset,
     }).then((data) => {
@@ -528,7 +570,7 @@ const BakePanel: React.FC = () => {
     }).catch((error) => {
       setStatusMessage(toUserFacingError(error, '文档加载失败'))
     })
-  }, [bakeTab, bakeTemplateFocusId, bakeTemplateFrom, bakeTemplateLimit, bakeTemplateOffset, bakeTemplateQuery, bakeTemplateTo, fetchTemplate, fetchTemplates, setSelectedTemplateId])
+  }, [bakeTab, bakeTemplateFocusId, bakeTemplateFrom, bakeTemplateLimit, bakeTemplateOffset, bakeTemplateQuery, bakeTemplateTo, fetchTemplate, fetchTemplates, setSelectedTemplateId, templateDocType, templateFavoriteFilter])
 
   useEffect(() => {
     if (bakeTab !== 'templates' || !selectedTemplateId) return
@@ -558,6 +600,7 @@ const BakePanel: React.FC = () => {
       q: bakeSopQuery.trim() || undefined,
       from: parseDateInputToMs(bakeSopFrom),
       to: parseDateInputToMs(bakeSopTo, true),
+      favorite: favoriteFilterToQuery(sopFavoriteFilter),
       limit: bakeSopLimit,
       offset: bakeSopOffset,
     }).then((data) => {
@@ -566,7 +609,7 @@ const BakePanel: React.FC = () => {
     }).catch((error) => {
       setStatusMessage(toUserFacingError(error, '操作手册加载失败'))
     })
-  }, [bakeSopFocusId, bakeSopFrom, bakeSopLimit, bakeSopOffset, bakeSopQuery, bakeSopTo, bakeTab, fetchSop, fetchSops, setSelectedSopId])
+  }, [bakeSopFocusId, bakeSopFrom, bakeSopLimit, bakeSopOffset, bakeSopQuery, bakeSopTo, bakeTab, fetchSop, fetchSops, setSelectedSopId, sopFavoriteFilter])
 
   useEffect(() => {
     if (!statusMessage) return
@@ -674,6 +717,7 @@ const BakePanel: React.FC = () => {
       q: bakeKnowledgeQuery.trim() || undefined,
       from: parseDateInputToMs(bakeKnowledgeFrom),
       to: parseDateInputToMs(bakeKnowledgeTo, true),
+      favorite: favoriteFilterToQuery(knowledgeFavoriteFilter),
       limit: bakeKnowledgeLimit,
       offset,
     })
@@ -684,8 +728,10 @@ const BakePanel: React.FC = () => {
   const refreshTemplates = async (offset = bakeTemplateOffset) => {
     const data = await fetchTemplates({
       q: bakeTemplateQuery.trim() || undefined,
+      doc_type: templateDocType || undefined,
       from: parseDateInputToMs(bakeTemplateFrom),
       to: parseDateInputToMs(bakeTemplateTo, true),
+      favorite: favoriteFilterToQuery(templateFavoriteFilter),
       limit: bakeTemplateLimit,
       offset,
     })
@@ -698,6 +744,7 @@ const BakePanel: React.FC = () => {
       q: bakeSopQuery.trim() || undefined,
       from: parseDateInputToMs(bakeSopFrom),
       to: parseDateInputToMs(bakeSopTo, true),
+      favorite: favoriteFilterToQuery(sopFavoriteFilter),
       limit: bakeSopLimit,
       offset,
     })
@@ -708,6 +755,10 @@ const BakePanel: React.FC = () => {
   const refreshData = async (offset = dataOffset) => {
     const data = await fetchDataSources({
       q: dataQuery.trim() || undefined,
+      source_kind: dataSourceKind || undefined,
+      from: parseDateInputToMs(dataFrom),
+      to: parseDateInputToMs(dataTo, true),
+      favorite: favoriteFilterToQuery(dataFavoriteFilter),
       limit: dataLimit,
       offset,
     })
@@ -758,6 +809,37 @@ const BakePanel: React.FC = () => {
     setStatusMessage('已返回上一步页面')
   }
 
+  const handleKnowledgeFavoriteFilterChange = (value: MemoryFavoriteFilter) => {
+    clearBakeNavigationStack()
+    setKnowledgeFavoriteFilter(value)
+    setBakeKnowledgeFocusId(null)
+    setSelectedKnowledgeId(null)
+    setBakeKnowledgeOffset(0)
+  }
+
+  const handleTemplateFavoriteFilterChange = (value: MemoryFavoriteFilter) => {
+    clearBakeNavigationStack()
+    setTemplateFavoriteFilter(value)
+    setBakeTemplateFocusId(null)
+    setSelectedTemplateId(null)
+    setBakeTemplateOffset(0)
+  }
+
+  const handleSopFavoriteFilterChange = (value: MemoryFavoriteFilter) => {
+    clearBakeNavigationStack()
+    setSopFavoriteFilter(value)
+    setBakeSopFocusId(null)
+    setSelectedSopId(null)
+    setBakeSopOffset(0)
+  }
+
+  const handleDataFavoriteFilterChange = (value: MemoryFavoriteFilter) => {
+    setDataFavoriteFilter(value)
+    setDataFocusId(null)
+    setSelectedDataId(null)
+    setDataOffset(0)
+  }
+
   const handleSearchKnowledge = () => {
     clearBakeNavigationStack()
     setSelectedKnowledgeId(null)
@@ -775,6 +857,7 @@ const BakePanel: React.FC = () => {
     setDraftKnowledgeQuery('')
     setDraftKnowledgeFrom('')
     setDraftKnowledgeTo('')
+    setKnowledgeFavoriteFilter('all')
     setSelectedKnowledgeId(null)
     useAppStore.setState({
       bakeKnowledgeFocusId: null,
@@ -789,6 +872,7 @@ const BakePanel: React.FC = () => {
     clearBakeNavigationStack()
     setSelectedTemplateId(null)
     setBakeTemplateFocusId(null)
+    setTemplateDocType(draftTemplateDocType)
     useAppStore.setState({
       bakeTemplateQuery: draftTemplateQuery,
       bakeTemplateFrom: draftTemplateFrom,
@@ -802,6 +886,9 @@ const BakePanel: React.FC = () => {
     setDraftTemplateQuery('')
     setDraftTemplateFrom('')
     setDraftTemplateTo('')
+    setDraftTemplateDocType('')
+    setTemplateDocType('')
+    setTemplateFavoriteFilter('all')
     setSelectedTemplateId(null)
     useAppStore.setState({
       bakeTemplateFocusId: null,
@@ -829,6 +916,7 @@ const BakePanel: React.FC = () => {
     setDraftSopQuery('')
     setDraftSopFrom('')
     setDraftSopTo('')
+    setSopFavoriteFilter('all')
     setSelectedSopId(null)
     useAppStore.setState({
       bakeSopFocusId: null,
@@ -843,12 +931,22 @@ const BakePanel: React.FC = () => {
     setDataFocusId(null)
     setDataOffset(0)
     setDataQuery(draftDataQuery)
+    setDataSourceKind(draftDataSourceKind)
+    setDataFrom(draftDataFrom)
+    setDataTo(draftDataTo)
   }
 
   const handleClearDataSearch = () => {
     setDataFocusId(null)
     setDraftDataQuery('')
     setDataQuery('')
+    setDraftDataSourceKind('')
+    setDataSourceKind('')
+    setDraftDataFrom('')
+    setDataFrom('')
+    setDraftDataTo('')
+    setDataTo('')
+    setDataFavoriteFilter('all')
     setDataOffset(0)
   }
 
@@ -877,8 +975,36 @@ const BakePanel: React.FC = () => {
     }
   }
 
-  const handleDeleteData = async (sourceId: number) => {
-    if (!(await confirmDestructive({ title: '删除这条数据？', description: '删除后不会影响来源时间线和采集记录。' }))) return
+  const handleCreateData = async (input: DataSourceWriteInput): Promise<boolean> => {
+    try {
+      const created = await createDataSource(input)
+      setDataItems(previous => [created, ...previous.filter(item => item.id !== created.id)])
+      setDataTotal(previous => previous + 1)
+      setSelectedDataId(created.id)
+      setDataOffset(0)
+      setStatusMessage(`已新建数据「${input.title}」`)
+      await refreshOverview()
+      return true
+    } catch (error) {
+      setStatusMessage(toUserFacingError(error, '新建数据失败'))
+      return false
+    }
+  }
+
+  const handleUpdateData = async (sourceId: number, input: DataSourceWriteInput): Promise<boolean> => {
+    try {
+      const updated = await updateDataSource(sourceId, input)
+      setDataItems(previous => previous.map(item => item.id === sourceId ? updated : item))
+      setStatusMessage(`已保存数据「${input.title}」`)
+      return true
+    } catch (error) {
+      setStatusMessage(toUserFacingError(error, '保存数据失败'))
+      return false
+    }
+  }
+
+  const handleDeleteData = async (sourceId: number): Promise<boolean> => {
+    if (!(await confirmDestructive({ title: '删除这条数据？', description: '删除后不会影响来源时间线和采集记录。' }))) return false
     setDeletingDataId(sourceId)
     try {
       await deleteDataSource(sourceId)
@@ -895,8 +1021,10 @@ const BakePanel: React.FC = () => {
       if (dataFocusId === sourceId) setDataFocusId(null)
       setStatusMessage('已删除数据')
       await refreshOverview()
+      return true
     } catch (error) {
       setStatusMessage(toUserFacingError(error, '删除数据失败'))
+      return false
     } finally {
       setDeletingDataId(null)
     }
@@ -905,7 +1033,17 @@ const BakePanel: React.FC = () => {
   const handleBakeTabChange = (tab: BakeTab) => {
     if (tab === bakeTab) return
     clearBakeNavigationStack()
+    setGraphOpen(false)
     setBakeTab(tab)
+  }
+
+  const handleOpenAssetGraph = (kind: MemoryGraphNode['kind'], assetId: string | number) => {
+    setGraphOpen(true)
+    const id = String(assetId)
+    if (kind === 'knowledge') setSelectedKnowledgeId(id)
+    else if (kind === 'document') setSelectedTemplateId(id)
+    else if (kind === 'operation') setSelectedSopId(id)
+    else setSelectedDataId(Number(assetId))
   }
 
   const handleOpenGraphNode = (node: MemoryGraphNode) => {
@@ -946,17 +1084,114 @@ const BakePanel: React.FC = () => {
     setStatusMessage(`已从记忆图谱打开「${node.label}」`)
   }
 
-  const handleCreateTemplate = async () => {
+  const handleToggleKnowledgeFavorite = async (
+    item: BakeKnowledgeItem,
+    isFavorite: boolean,
+  ): Promise<boolean> => {
     try {
-      const created = await createTemplate(createDraftTemplate())
+      await updateMemoryFavorite('knowledge', item.id, isFavorite)
+      const remainsVisible = favoriteMatchesFilter(knowledgeFavoriteFilter, isFavorite)
+      setKnowledgeItems(previous => remainsVisible
+        ? previous.map(entry => entry.id === item.id ? { ...entry, isFavorite } : entry)
+        : previous.filter(entry => entry.id !== item.id))
+      if (!remainsVisible) {
+        setKnowledgeTotal(previous => Math.max(0, previous - 1))
+        setSelectedKnowledgeId(null)
+      }
+      setStatusMessage(isFavorite ? '已收藏知识' : '已取消收藏知识')
+      return true
+    } catch (error) {
+      setStatusMessage(toUserFacingError(error, '更新知识收藏状态失败'))
+      return false
+    }
+  }
+
+  const handleToggleTemplateFavorite = async (
+    item: ArticleTemplate,
+    isFavorite: boolean,
+  ): Promise<boolean> => {
+    try {
+      await updateMemoryFavorite('document', item.id, isFavorite)
+      const remainsVisible = favoriteMatchesFilter(templateFavoriteFilter, isFavorite)
+      setTemplates(previous => remainsVisible
+        ? previous.map(entry => entry.id === item.id ? { ...entry, isFavorite } : entry)
+        : previous.filter(entry => entry.id !== item.id))
+      if (!remainsVisible) {
+        setTemplateTotal(previous => Math.max(0, previous - 1))
+        setSelectedTemplateId(null)
+      }
+      setStatusMessage(isFavorite ? '已收藏文档' : '已取消收藏文档')
+      return true
+    } catch (error) {
+      setStatusMessage(toUserFacingError(error, '更新文档收藏状态失败'))
+      return false
+    }
+  }
+
+  const handleToggleSopFavorite = async (
+    item: SopCandidate,
+    isFavorite: boolean,
+  ): Promise<boolean> => {
+    try {
+      await updateMemoryFavorite('operation', item.id, isFavorite)
+      const remainsVisible = favoriteMatchesFilter(sopFavoriteFilter, isFavorite)
+      setSopCandidates(previous => remainsVisible
+        ? previous.map(entry => entry.id === item.id ? { ...entry, isFavorite } : entry)
+        : previous.filter(entry => entry.id !== item.id))
+      if (!remainsVisible) {
+        setSopTotal(previous => Math.max(0, previous - 1))
+        setSelectedSopId(null)
+      }
+      setStatusMessage(isFavorite ? '已收藏操作' : '已取消收藏操作')
+      return true
+    } catch (error) {
+      setStatusMessage(toUserFacingError(error, '更新操作收藏状态失败'))
+      return false
+    }
+  }
+
+  const handleToggleDataFavorite = async (
+    item: DataSource,
+    isFavorite: boolean,
+  ): Promise<boolean> => {
+    try {
+      await updateMemoryFavorite('data', item.id, isFavorite)
+      const remainsVisible = favoriteMatchesFilter(dataFavoriteFilter, isFavorite)
+      setDataItems(previous => remainsVisible
+        ? previous.map(entry => entry.id === item.id ? { ...entry, is_favorite: isFavorite } : entry)
+        : previous.filter(entry => entry.id !== item.id))
+      if (!remainsVisible) {
+        setDataTotal(previous => Math.max(0, previous - 1))
+        setSelectedDataId(null)
+      }
+      setStatusMessage(isFavorite ? '已收藏数据' : '已取消收藏数据')
+      return true
+    } catch (error) {
+      setStatusMessage(toUserFacingError(error, '更新数据收藏状态失败'))
+      return false
+    }
+  }
+
+  const handleCreateTemplate = async (
+    input: Pick<ArticleTemplate, 'title' | 'docType' | 'fullContent'>,
+  ): Promise<boolean> => {
+    try {
+      const created = await createTemplate({
+        ...createDraftTemplate(),
+        title: input.title,
+        docType: input.docType,
+        fullContent: input.fullContent,
+      })
       setTemplates(prev => [created, ...prev.filter(item => item.id !== created.id)])
       setBakeTab('templates')
       setBakeTemplateOffset(0)
       setSelectedTemplateId(created.id)
-      setStatusMessage(`已新建模板「${created.title}」`)
+      setStatusMessage(`已新建文档「${created.title}」`)
       await refreshOverview()
+      return true
     } catch (error) {
       setStatusMessage(toUserFacingError(error, '新建文档失败'))
+      return false
     }
   }
 
@@ -978,16 +1213,18 @@ const BakePanel: React.FC = () => {
     setStatusMessage('当前内容没有可打开的原文或关联采集记录')
   }
 
-  const handleUpdateTemplate = async (templateId: string, updater: (template: ArticleTemplate) => ArticleTemplate) => {
+  const handleUpdateTemplate = async (templateId: string, updater: (template: ArticleTemplate) => ArticleTemplate): Promise<boolean> => {
     const target = templates.find(item => item.id === templateId)
-    if (!target) return
+    if (!target) return false
     try {
       const updated = await updateTemplate(updater(target))
       setTemplates(prev => prev.map(item => item.id === templateId ? updated : item))
-      setStatusMessage(`已更新模板「${updated.title}」`)
+      setStatusMessage(`已保存文档「${updated.title}」`)
       await refreshOverview()
+      return true
     } catch (error) {
       setStatusMessage(toUserFacingError(error, '更新文档失败'))
+      return false
     }
   }
 
@@ -995,15 +1232,15 @@ const BakePanel: React.FC = () => {
     try {
       const updated = await toggleTemplateStatus(templateId)
       setTemplates(prev => prev.map(item => item.id === templateId ? updated : item))
-      setStatusMessage(`模板状态已切换为「${updated.status}」`)
+      setStatusMessage(`文档状态已切换为「${updated.status}」`)
       await refreshOverview()
     } catch (error) {
       setStatusMessage(toUserFacingError(error, '更新文档状态失败'))
     }
   }
 
-  const handleDeleteTemplate = async (templateId: string) => {
-    if (!(await confirmDestructive({ title: '删除这份文档？', description: '删除后无法恢复，来源时间线和其他内容会保留。' }))) return
+  const handleDeleteTemplate = async (templateId: string): Promise<boolean> => {
+    if (!(await confirmDestructive({ title: '删除这份文档？', description: '删除后无法恢复，来源时间线和其他内容会保留。' }))) return false
     try {
       await deleteTemplate(templateId)
       const nextOffset = getFallbackOffsetAfterRemoval(templates.length, bakeTemplateOffset, bakeTemplateLimit)
@@ -1017,14 +1254,16 @@ const BakePanel: React.FC = () => {
       }
       setStatusMessage('已删除文档')
       await refreshOverview()
+      return true
     } catch (error) {
       setStatusMessage(toUserFacingError(error, '删除文档失败'))
+      return false
     }
   }
 
   const handleViewSourceMemory = (memoryId?: string) => {
     if (!memoryId) {
-      setStatusMessage('当前模板还没有关联来源时间线')
+      setStatusMessage('当前文档还没有关联来源时间线')
       return
     }
     pushBakeNavigationTarget(currentNavigationTarget())
@@ -1064,8 +1303,68 @@ const BakePanel: React.FC = () => {
     setStatusMessage('已切换到关联知识')
   }
 
-  const handleDeleteKnowledge = async (id: string) => {
-    if (!(await confirmDestructive({ title: '删除这条知识？', description: '删除后无法恢复，来源时间线和采集记录会保留。' }))) return
+  const handleCreateKnowledge = async (
+    input: Pick<BakeKnowledgeItem, 'summary' | 'overview' | 'detailedContent' | 'importance'>,
+  ): Promise<boolean> => {
+    try {
+      const created = await createKnowledge(input)
+      setKnowledgeItems(previous => [created, ...previous.filter(item => item.id !== created.id)])
+      setKnowledgeTotal(previous => previous + 1)
+      setBakeKnowledgeOffset(0)
+      setSelectedKnowledgeId(created.id)
+      setStatusMessage(`已新建知识「${created.summary}」`)
+      await refreshOverview()
+      return true
+    } catch (error) {
+      setStatusMessage(toUserFacingError(error, '新建知识失败'))
+      return false
+    }
+  }
+
+  const handleUpdateKnowledge = async (knowledge: BakeKnowledgeItem): Promise<boolean> => {
+    try {
+      const updated = await updateKnowledge(knowledge)
+      setKnowledgeItems(previous => previous.map(item => item.id === updated.id ? updated : item))
+      setStatusMessage(`已保存知识「${updated.summary}」`)
+      return true
+    } catch (error) {
+      setStatusMessage(toUserFacingError(error, '保存知识失败'))
+      return false
+    }
+  }
+
+  const handleCreateSop = async (
+    input: Pick<SopCandidate, 'extractedProblem' | 'detailedContent' | 'steps' | 'triggerKeywords'>,
+  ): Promise<boolean> => {
+    try {
+      const created = await createSop(input)
+      setSopCandidates(previous => [created, ...previous.filter(item => item.id !== created.id)])
+      setSopTotal(previous => previous + 1)
+      setBakeSopOffset(0)
+      setSelectedSopId(created.id)
+      setStatusMessage(`已新建操作「${created.extractedProblem || '未命名操作'}」`)
+      await refreshOverview()
+      return true
+    } catch (error) {
+      setStatusMessage(toUserFacingError(error, '新建操作失败'))
+      return false
+    }
+  }
+
+  const handleUpdateSop = async (sop: SopCandidate): Promise<boolean> => {
+    try {
+      const updated = await updateSop(sop)
+      setSopCandidates(previous => previous.map(item => item.id === updated.id ? updated : item))
+      setStatusMessage(`已保存操作「${updated.extractedProblem || '未命名操作'}」`)
+      return true
+    } catch (error) {
+      setStatusMessage(toUserFacingError(error, '保存操作失败'))
+      return false
+    }
+  }
+
+  const handleDeleteKnowledge = async (id: string): Promise<boolean> => {
+    if (!(await confirmDestructive({ title: '删除这条知识？', description: '删除后无法恢复，来源时间线和采集记录会保留。' }))) return false
     try {
       await deleteKnowledge(id)
       const nextOffset = getFallbackOffsetAfterRemoval(knowledgeItems.length, bakeKnowledgeOffset, bakeKnowledgeLimit)
@@ -1079,13 +1378,15 @@ const BakePanel: React.FC = () => {
       }
       setStatusMessage('已删除知识条目')
       await refreshOverview()
+      return true
     } catch (error) {
       setStatusMessage(toUserFacingError(error, '删除知识失败'))
+      return false
     }
   }
 
-  const handleDeleteSop = async (id: string) => {
-    if (!(await confirmDestructive({ title: '删除这份操作？', description: '删除后无法恢复，来源时间线和采集记录会保留。' }))) return
+  const handleDeleteSop = async (id: string): Promise<boolean> => {
+    if (!(await confirmDestructive({ title: '删除这份操作？', description: '删除后无法恢复，来源时间线和采集记录会保留。' }))) return false
     try {
       await deleteSop(id)
       const nextOffset = getFallbackOffsetAfterRemoval(sopCandidates.length, bakeSopOffset, bakeSopLimit)
@@ -1099,8 +1400,10 @@ const BakePanel: React.FC = () => {
       }
       setStatusMessage('已删除操作手册')
       await refreshOverview()
+      return true
     } catch (error) {
       setStatusMessage(toUserFacingError(error, '删除操作手册失败'))
+      return false
     }
   }
 
@@ -1144,7 +1447,7 @@ const BakePanel: React.FC = () => {
           </button>
         </div>
       )}
-      <BakeHeader />
+      <BakeHeader currentTab={bakeTab} />
       {bakeNavigationStack.length > 0 && (
         <div className="bake-backbar">
           <BakeButton compact onClick={handleGoBack}>
@@ -1180,18 +1483,6 @@ const BakePanel: React.FC = () => {
 
       <div className="bake-tabs-shell">
         <BakeTabs current={bakeTab} onChange={handleBakeTabChange} />
-        {bakeTab !== 'overview' && (
-          <button
-            type="button"
-            className="bake-graph-toggle"
-            aria-pressed={graphOpen}
-            aria-label={graphOpen ? '关闭记忆图谱' : '展开记忆图谱'}
-            onClick={() => setGraphOpen(current => !current)}
-          >
-            <Network size={15} />
-            <span>记忆图谱</span>
-          </button>
-        )}
       </div>
 
       <div className={`bake-graph-workspace ${graphOpen && bakeTab !== 'overview' ? 'bake-graph-workspace--open' : ''}`.trim()}>
@@ -1229,8 +1520,14 @@ const BakePanel: React.FC = () => {
             onDraftToChange={setDraftKnowledgeTo}
             onSearch={handleSearchKnowledge}
             onClearFilters={handleClearKnowledgeFilters}
+            favoriteFilter={knowledgeFavoriteFilter}
+            onFavoriteFilterChange={handleKnowledgeFavoriteFilterChange}
+            onToggleFavorite={handleToggleKnowledgeFavorite}
+            onOpenGraph={(item) => handleOpenAssetGraph('knowledge', item.id)}
             focusId={bakeKnowledgeFocusId}
             onDeleteKnowledge={handleDeleteKnowledge}
+            onCreateKnowledge={handleCreateKnowledge}
+            onUpdateKnowledge={handleUpdateKnowledge}
             onViewSourceTimeline={handleViewSourceMemory}
             sourceTimelineTitle={resolvedKnowledgeItem?.sourceTimelineId ? memoryTitleById.get(resolvedKnowledgeItem.sourceTimelineId) : undefined}
             onOpenCapture={(captureId?: string) => {
@@ -1253,14 +1550,29 @@ const BakePanel: React.FC = () => {
             total={dataTotal}
             offset={dataOffset}
             limit={dataLimit}
+            query={dataQuery}
             draftQuery={draftDataQuery}
+            sourceKind={dataSourceKind}
+            draftSourceKind={draftDataSourceKind}
+            from={dataFrom}
+            to={dataTo}
+            draftFrom={draftDataFrom}
+            draftTo={draftDataTo}
             selectedId={selectedDataId}
+            focusId={dataFocusId}
             loading={dataLoading}
             refreshingId={refreshingDataId}
             deletingId={deletingDataId}
             onDraftQueryChange={setDraftDataQuery}
+            onDraftSourceKindChange={setDraftDataSourceKind}
+            onDraftFromChange={setDraftDataFrom}
+            onDraftToChange={setDraftDataTo}
             onSearch={handleSearchData}
             onClearSearch={handleClearDataSearch}
+            favoriteFilter={dataFavoriteFilter}
+            onFavoriteFilterChange={handleDataFavoriteFilterChange}
+            onToggleFavorite={handleToggleDataFavorite}
+            onOpenGraph={(item) => handleOpenAssetGraph('data', item.id)}
             onSelect={setSelectedDataId}
             onPageChange={setDataOffset}
             onLimitChange={(limit) => {
@@ -1269,6 +1581,8 @@ const BakePanel: React.FC = () => {
             }}
             onRefresh={handleRefreshData}
             onDelete={handleDeleteData}
+            onCreate={handleCreateData}
+            onUpdate={handleUpdateData}
             onViewTimeline={(timelineId) => handleViewSourceMemory(String(timelineId))}
           />
         )}
@@ -1281,9 +1595,11 @@ const BakePanel: React.FC = () => {
             query={bakeTemplateQuery}
             from={bakeTemplateFrom}
             to={bakeTemplateTo}
+            docType={templateDocType}
             draftQuery={draftTemplateQuery}
             draftFrom={draftTemplateFrom}
             draftTo={draftTemplateTo}
+            draftDocType={draftTemplateDocType}
             selectedTemplateId={resolvedTemplateId}
             onSelectTemplate={setSelectedTemplateId}
             onCreateTemplate={handleCreateTemplate}
@@ -1311,8 +1627,13 @@ const BakePanel: React.FC = () => {
             onDraftQueryChange={setDraftTemplateQuery}
             onDraftFromChange={setDraftTemplateFrom}
             onDraftToChange={setDraftTemplateTo}
+            onDraftDocTypeChange={setDraftTemplateDocType}
             onSearch={handleSearchTemplate}
             onClearFilters={handleClearTemplateFilters}
+            favoriteFilter={templateFavoriteFilter}
+            onFavoriteFilterChange={handleTemplateFavoriteFilterChange}
+            onToggleFavorite={handleToggleTemplateFavorite}
+            onOpenGraph={(item) => handleOpenAssetGraph('document', item.id)}
             focusId={bakeTemplateFocusId}
           />
         )}
@@ -1331,6 +1652,8 @@ const BakePanel: React.FC = () => {
             selectedSopId={resolvedSopId}
             onSelectSop={setSelectedSopId}
             onDeleteSop={handleDeleteSop}
+            onCreateSop={handleCreateSop}
+            onUpdateSop={handleUpdateSop}
             onViewSourceTimeline={handleViewSourceMemory}
             sourceTimelineTitle={resolvedSopItem?.sourceTimelineId ? memoryTitleById.get(resolvedSopItem.sourceTimelineId) : undefined}
             onPageChange={setBakeSopOffset}
@@ -1340,6 +1663,10 @@ const BakePanel: React.FC = () => {
             onDraftToChange={setDraftSopTo}
             onSearch={handleSearchSop}
             onClearFilters={handleClearSopFilters}
+            favoriteFilter={sopFavoriteFilter}
+            onFavoriteFilterChange={handleSopFavoriteFilterChange}
+            onToggleFavorite={handleToggleSopFavorite}
+            onOpenGraph={(item) => handleOpenAssetGraph('operation', item.id)}
             focusId={bakeSopFocusId}
           />
         )}

@@ -156,7 +156,27 @@ impl StorageManager {
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<DataSourceRecord>, i64), StorageError> {
+        self.list_data_sources_filtered(query, None, None, None, None, limit, offset)
+    }
+
+    pub fn list_data_sources_filtered(
+        &self,
+        query: Option<&str>,
+        source_kind: Option<&str>,
+        from_ts: Option<i64>,
+        to_ts: Option<i64>,
+        favorite: Option<bool>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<DataSourceRecord>, i64), StorageError> {
         self.with_conn(|conn| {
+            let favorite_ids = {
+                let mut stmt = conn.prepare(
+                    "SELECT resource_id FROM memory_favorites WHERE resource_kind = 'data'",
+                )?;
+                let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+                rows.collect::<Result<HashSet<_>, _>>()?
+            };
             let mut candidates = Vec::new();
             let mut stmt = conn.prepare(
                 "SELECT id, title, source_kind, source_url, access_mode, refresh_policy,
@@ -169,7 +189,9 @@ impl StorageManager {
             )?;
             let rows = stmt.query_map([], map_data_source_row)?;
             for row in rows {
-                candidates.push(row?);
+                let mut record = row?;
+                record.is_favorite = favorite_ids.contains(&record.id);
+                candidates.push(record);
             }
             // FTS5 预筛：data_snapshots_fts 命中快照对应的 source_id 可用时，
             // 在加载快照文本前先收窄候选（source 级字段命中的候选保留）；
@@ -192,6 +214,19 @@ impl StorageManager {
                 }
             }
             candidates.retain(is_presentable_data_source);
+            if let Some(source_kind) = source_kind.map(str::trim).filter(|value| !value.is_empty())
+            {
+                candidates.retain(|source| source.source_kind == source_kind);
+            }
+            if let Some(from_ts) = from_ts {
+                candidates.retain(|source| source.created_at >= from_ts);
+            }
+            if let Some(to_ts) = to_ts {
+                candidates.retain(|source| source.created_at <= to_ts);
+            }
+            if let Some(favorite) = favorite {
+                candidates.retain(|source| source.is_favorite == favorite);
+            }
             if let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) {
                 candidates.retain(|source| data_source_matches_query(source, query));
             }
@@ -265,9 +300,106 @@ impl StorageManager {
             if let Some(record) = &mut record {
                 let latest = latest_snapshot(conn, record)?;
                 record.latest_snapshot = latest;
+                record.is_favorite = conn
+                    .query_row(
+                        "SELECT 1 FROM memory_favorites
+                         WHERE resource_kind = 'data' AND resource_id = ?1",
+                        [record.id],
+                        |_| Ok(true),
+                    )
+                    .optional()?
+                    .unwrap_or(false);
             }
             Ok(record)
         })
+    }
+
+    pub fn create_manual_data_source(
+        &self,
+        title: &str,
+        content_text: &str,
+        structured_data: &Value,
+    ) -> Result<DataSourceRecord, StorageError> {
+        let now = current_ts_ms();
+        let source_id = self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO data_sources (
+                    canonical_key, title, source_kind, access_mode, refresh_policy,
+                    realtime_level, tags, first_seen_at, last_seen_at, status,
+                    created_at, updated_at
+                 ) VALUES (
+                    'manual:' || lower(hex(randomblob(16))), ?1, 'work_memory', 'memory_only',
+                    'never', 'observed', '[\"manual\"]', ?2, ?2, 'active', ?2, ?2
+                 )",
+                params![clip_text(title.trim(), 240), now],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })?;
+        self.save_data_snapshot(
+            source_id,
+            "memory_extract",
+            Some(title),
+            content_text,
+            structured_data,
+            now,
+        )?;
+        self.get_data_source(source_id)?
+            .ok_or_else(|| StorageError::NotFound(format!("data source {source_id}")))
+    }
+
+    pub fn update_data_source_content(
+        &self,
+        source_id: i64,
+        title: &str,
+        content_text: &str,
+        structured_data: &Value,
+    ) -> Result<Option<DataSourceRecord>, StorageError> {
+        let now = current_ts_ms();
+        let updated = self.with_conn(|conn| {
+            let snapshot = raw_latest_snapshot(conn, source_id)?;
+            let Some(snapshot) = snapshot else {
+                return Ok(false);
+            };
+            let normalized_content = clip_text(content_text, DATA_TEXT_MAX_CHARS);
+            let mut structured = structured_data.clone();
+            if structured.get("period").is_none() {
+                if let Some(period) = snapshot.structured_data.get("period") {
+                    structured["period"] = period.clone();
+                }
+            }
+            let structured_json = serde_json::to_string(&structured)?;
+            let content_hash = hash_text(&format!("{normalized_content}\n{structured_json}"));
+            let mut provenance = snapshot.provenance;
+            if !provenance.is_object() {
+                provenance = json!({});
+            }
+            provenance["user_edited"] = json!(true);
+            provenance["local_only"] = json!(true);
+            conn.execute(
+                "UPDATE data_sources
+                 SET title = ?2, last_seen_at = MAX(last_seen_at, ?3), updated_at = ?3
+                 WHERE id = ?1 AND deleted_at IS NULL",
+                params![source_id, clip_text(title.trim(), 240), now],
+            )?;
+            let affected = conn.execute(
+                "UPDATE data_snapshots
+                 SET content_text = ?2, structured_data = ?3, content_hash = ?4,
+                     provenance = ?5
+                 WHERE id = ?1",
+                params![
+                    snapshot.id,
+                    normalized_content,
+                    structured_json,
+                    content_hash,
+                    provenance.to_string(),
+                ],
+            )?;
+            Ok(affected > 0)
+        })?;
+        if !updated {
+            return Ok(None);
+        }
+        self.get_data_source(source_id)
     }
 
     pub fn save_data_snapshot(
@@ -400,6 +532,9 @@ impl StorageManager {
                  WHERE id = ?1 AND deleted_at IS NULL",
                 params![source_id, now],
             )?;
+            if changed > 0 {
+                StorageManager::delete_memory_favorite_with_conn(conn, "data", source_id)?;
+            }
             Ok(changed > 0)
         })
     }
@@ -1275,6 +1410,17 @@ fn regenerate_work_memory_source(
                  WHERE source_id = ?1 OR data_snapshot_id = ?3",
                 params![source.id, target_id, snapshot.id, target_snapshot_id, now],
             )?;
+            conn.execute(
+                "INSERT INTO memory_favorites (
+                    resource_kind, resource_id, created_at, updated_at
+                 )
+                 SELECT 'data', ?2, created_at, ?3
+                 FROM memory_favorites
+                 WHERE resource_kind = 'data' AND resource_id = ?1
+                 ON CONFLICT(resource_kind, resource_id) DO UPDATE
+                 SET updated_at = excluded.updated_at",
+                params![source.id, target_id, now],
+            )?;
         }
         conn.execute(
             "UPDATE data_sources
@@ -1282,6 +1428,7 @@ fn regenerate_work_memory_source(
              WHERE id = ?1 AND deleted_at IS NULL",
             params![source.id, now],
         )?;
+        StorageManager::delete_memory_favorite_with_conn(conn, "data", source.id)?;
     }
     Ok(merged_count)
 }
@@ -6505,17 +6652,24 @@ fn latest_snapshot(
         snapshot.source_capture_ids.dedup();
         snapshot.source_timeline_ids.sort_unstable();
         snapshot.source_timeline_ids.dedup();
-        let semantic_context = semantic_context_for_source(
-            source,
-            None,
-            snapshot
-                .structured_data
-                .get("semantic_subject")
-                .and_then(Value::as_str),
-        );
-        let semantic = semantic_view_for_snapshot(snapshot, &semantic_context)
-            .unwrap_or_else(|| rejected_semantic_view_json("no_semantic_metric"));
-        merge_semantic_view(&mut snapshot.structured_data, semantic);
+        if snapshot
+            .structured_data
+            .get("manual_entry")
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            let semantic_context = semantic_context_for_source(
+                source,
+                None,
+                snapshot
+                    .structured_data
+                    .get("semantic_subject")
+                    .and_then(Value::as_str),
+            );
+            let semantic = semantic_view_for_snapshot(snapshot, &semantic_context)
+                .unwrap_or_else(|| rejected_semantic_view_json("no_semantic_metric"));
+            merge_semantic_view(&mut snapshot.structured_data, semantic);
+        }
     }
     Ok(snapshot)
 }
@@ -6556,6 +6710,7 @@ fn merge_semantic_view(structured: &mut Value, semantic: Value) {
 fn map_data_source_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DataSourceRecord> {
     Ok(DataSourceRecord {
         id: row.get(0)?,
+        is_favorite: false,
         title: row.get(1)?,
         source_kind: row.get(2)?,
         source_url: row.get(3)?,
@@ -6604,6 +6759,57 @@ fn clip_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_data_sources_filters_type_and_creation_range() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    r#"
+                    INSERT INTO data_sources (
+                        id, canonical_key, title, source_kind, source_url, access_mode,
+                        refresh_policy, realtime_level, tags, first_seen_at, last_seen_at,
+                        status, created_at, updated_at
+                    ) VALUES
+                        (1, 'memory:one', '历史工作数据', 'work_memory', NULL, 'memory_only',
+                         'never', 'observed', '[]', 100, 100, 'active', 100, 100),
+                        (2, 'url:two', '实时经营看板', 'report_url', 'https://bi.example.com/live',
+                         'direct_http', 'on_demand', 'live', '[]', 200, 200, 'active', 200, 200);
+                    INSERT INTO data_snapshots (
+                        source_id, collected_at, observed_at, collector, content_text,
+                        structured_data, content_hash, freshness_ttl_seconds, provenance,
+                        source_capture_ids, source_timeline_ids, status, created_at
+                    ) VALUES
+                        (1, 100, 100, 'memory_extract', '订单量 10',
+                         '{"metric_rows":[{"metric":"订单量","value":"10"}]}',
+                         'one', 0, '{}', '[]', '[]', 'success', 100),
+                        (2, 200, 200, 'direct_http', '订单量 20',
+                         '{"metric_rows":[{"metric":"订单量","value":"20"}]}',
+                         'two', 300, '{}', '[]', '[]', 'success', 200);
+                    "#,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let (items, total) = storage
+            .list_data_sources_filtered(None, Some("report_url"), Some(150), Some(250), None, 20, 0)
+            .unwrap();
+
+        assert_eq!(total, 1);
+        assert_eq!(items[0].id, 2);
+        assert_eq!(
+            items[0].source_url.as_deref(),
+            Some("https://bi.example.com/live")
+        );
+
+        let (items, total) = storage
+            .list_data_sources_filtered(Some("bi.example.com/live"), None, None, None, None, 20, 0)
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(items[0].id, 2);
+    }
 
     #[test]
     fn parses_numeric_ranges_with_whitespace_before_the_second_unit() {

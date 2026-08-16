@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { Network } from 'lucide-react'
 import {
   useDeleteBakeCapture,
@@ -30,7 +30,8 @@ import BakeCaptureTab, { captureNeedsTextRefresh, parseDateInputToMs } from './b
 import BakeHeader from './bake/BakeHeader'
 import BakeMemoryGraph from './bake/BakeMemoryGraph'
 import type { MemoryGraphAssets } from './bake/memoryGraph'
-import { BakeButton, BakeCard, BakePill, BakeSectionHeader } from './bake/BakeShared'
+import { BakeDetailDrawer, BakeRecordTable, BakeTableActionButton, type BakeRecordColumn } from './bake/BakeRecordTable'
+import { BakeButton } from './bake/BakeShared'
 import './bake/BakePanel.css'
 
 const getFallbackOffsetAfterRemoval = (currentCount: number, offset: number, limit: number) => (
@@ -80,6 +81,7 @@ const RepositoryPanel: React.FC = () => {
     repositoryMemoryTo,
     repositoryMemoryLimit,
     repositoryCaptureQuery,
+    repositoryCaptureApp,
     repositoryCaptureFrom,
     repositoryCaptureTo,
     repositoryCaptureLimit,
@@ -138,11 +140,12 @@ const RepositoryPanel: React.FC = () => {
     loading: boolean
   }>({ document: null, knowledge: null, sop: null, loading: false })
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
-  const [memoryPageInput, setMemoryPageInput] = useState('')
+  const [memoryDrawerOpen, setMemoryDrawerOpen] = useState(false)
   const [draftMemoryQuery, setDraftMemoryQuery] = useState(repositoryMemoryQuery)
   const [draftMemoryFrom, setDraftMemoryFrom] = useState(repositoryMemoryFrom)
   const [draftMemoryTo, setDraftMemoryTo] = useState(repositoryMemoryTo)
   const [draftCaptureQuery, setDraftCaptureQuery] = useState(repositoryCaptureQuery)
+  const [draftCaptureApp, setDraftCaptureApp] = useState(repositoryCaptureApp)
   const [draftCaptureFrom, setDraftCaptureFrom] = useState(repositoryCaptureFrom)
   const [draftCaptureTo, setDraftCaptureTo] = useState(repositoryCaptureTo)
   const [pendingDeletion, setPendingDeletion] = useState<PendingDeletion | null>(null)
@@ -154,6 +157,7 @@ const RepositoryPanel: React.FC = () => {
   const [graphRevision, setGraphRevision] = useState(0)
   const memoryRequestSeqRef = useRef(0)
   const captureRequestSeqRef = useRef(0)
+  const memoryDetailTriggerRef = useRef<HTMLButtonElement | null>(null)
 
   const refreshMemories = async (offset = bakeMemoryOffset) => {
     const data = await fetchMemories({
@@ -165,7 +169,7 @@ const RepositoryPanel: React.FC = () => {
     })
     setMemories(data.items)
     setMemoryTotal(data.total)
-    setSelectedMemoryId(data.items[0]?.id ?? null)
+    setSelectedMemoryId(null)
   }
 
   const refreshCaptures = async (
@@ -174,6 +178,7 @@ const RepositoryPanel: React.FC = () => {
   ) => {
     const data = await fetchCaptures({
       q: repositoryCaptureQuery.trim() || undefined,
+      app: repositoryCaptureApp.trim() || undefined,
       from: parseDateInputToMs(repositoryCaptureFrom),
       to: parseDateInputToMs(repositoryCaptureTo, true),
       source_capture_id: sourceCaptureId ? Number(sourceCaptureId) : undefined,
@@ -182,7 +187,8 @@ const RepositoryPanel: React.FC = () => {
     })
     setCaptureItems(data.items)
     setCaptureTotal(data.total)
-    setSelectedCaptureId(data.items[0]?.id ?? null)
+    setSelectedCaptureId(null)
+    setCaptureDetail(null)
   }
 
   useEffect(() => {
@@ -238,6 +244,7 @@ const RepositoryPanel: React.FC = () => {
     captureRequestSeqRef.current = requestSeq
     void fetchCaptures({
       q: repositoryCaptureQuery.trim() || undefined,
+      app: repositoryCaptureApp.trim() || undefined,
       from: parseDateInputToMs(repositoryCaptureFrom),
       to: parseDateInputToMs(repositoryCaptureTo, true),
       source_capture_id: repositoryCaptureSourceCaptureId ? Number(repositoryCaptureSourceCaptureId) : undefined,
@@ -254,6 +261,7 @@ const RepositoryPanel: React.FC = () => {
   }, [
     bakeCaptureOffset,
     fetchCaptures,
+    repositoryCaptureApp,
     repositoryCaptureFrom,
     repositoryCaptureLimit,
     repositoryCaptureQuery,
@@ -364,24 +372,28 @@ const RepositoryPanel: React.FC = () => {
 
   useEffect(() => {
     setDraftCaptureQuery(repositoryCaptureQuery)
+    setDraftCaptureApp(repositoryCaptureApp)
     setDraftCaptureFrom(repositoryCaptureFrom)
     setDraftCaptureTo(repositoryCaptureTo)
-  }, [repositoryCaptureFrom, repositoryCaptureQuery, repositoryCaptureTo])
+  }, [repositoryCaptureApp, repositoryCaptureFrom, repositoryCaptureQuery, repositoryCaptureTo])
 
-  const resolvedMemoryId = selectedMemoryId ?? memories[0]?.id ?? null
-  const resolvedCaptureId = selectedCaptureId ?? captureItems[0]?.id ?? null
-  const selectedMemory = memories.find(item => item.id === resolvedMemoryId) ?? (selectedMemoryId ? null : memories[0] ?? null)
+  const resolvedMemoryId = selectedMemoryId
+  const resolvedCaptureId = selectedCaptureId
+  const selectedMemory = memories.find(item => item.id === resolvedMemoryId) ?? null
 
   useEffect(() => {
     if (repositoryTab !== 'memory') return
-    if (memories.length === 0) {
+    if (selectedMemoryId && !memories.some(item => item.id === selectedMemoryId)) {
       setSelectedMemoryId(null)
-      return
-    }
-    if (!selectedMemoryId || !memories.some(item => item.id === selectedMemoryId)) {
-      setSelectedMemoryId(memories[0].id)
+      setMemoryDrawerOpen(false)
     }
   }, [memories, repositoryTab, selectedMemoryId, setSelectedMemoryId])
+
+  useEffect(() => {
+    if (repositoryTab === 'memory' && repositoryMemoryFocusId && selectedMemory?.id === repositoryMemoryFocusId) {
+      setMemoryDrawerOpen(true)
+    }
+  }, [repositoryMemoryFocusId, repositoryTab, selectedMemory?.id])
 
   useEffect(() => {
     if (repositoryTab !== 'memory' || !resolvedMemoryId) {
@@ -421,8 +433,9 @@ const RepositoryPanel: React.FC = () => {
       setCaptureDetail(null)
       return
     }
-    if (!selectedCaptureId || !captureItems.some(item => item.id === selectedCaptureId)) {
-      setSelectedCaptureId(captureItems[0].id)
+    if (selectedCaptureId && !captureItems.some(item => item.id === selectedCaptureId)) {
+      setSelectedCaptureId(null)
+      setCaptureDetail(null)
     }
   }, [captureItems, repositoryTab, selectedCaptureId, setSelectedCaptureId])
 
@@ -437,14 +450,45 @@ const RepositoryPanel: React.FC = () => {
     }).catch(() => setMemoryCaptures([]))
   }, [selectedMemoryId, memories, fetchCapturesRaw])
 
-  const memoryPage = Math.floor(bakeMemoryOffset / repositoryMemoryLimit) + 1
-  const memoryTotalPages = Math.max(1, Math.ceil(memoryTotal / repositoryMemoryLimit))
-  const memoryFilterPills = useMemo(() => {
-    const pills: string[] = []
-    if (repositoryMemoryFrom) pills.push(`开始：${repositoryMemoryFrom}`)
-    if (repositoryMemoryTo) pills.push(`结束：${repositoryMemoryTo}`)
-    return pills
-  }, [repositoryMemoryFrom, repositoryMemoryTo])
+  const openMemoryDrawer = (item: TimelineItem, trigger: HTMLButtonElement) => {
+    memoryDetailTriggerRef.current = trigger
+    setSelectedMemoryId(item.id)
+    setMemoryDrawerOpen(true)
+  }
+
+  const closeMemoryDrawer = () => {
+    const trigger = memoryDetailTriggerRef.current
+    setMemoryDrawerOpen(false)
+    setSelectedMemoryId(null)
+    setRepositoryMemoryFocusId(null)
+    window.setTimeout(() => trigger?.focus(), 0)
+  }
+
+  const memoryColumns: BakeRecordColumn<TimelineItem>[] = [
+    {
+      key: 'created',
+      label: '新增时间',
+      className: 'bake-record-table__time',
+      render: item => <><div>{formatMemoryTime(item)}</div><div className="bake-record-table__secondary">ID #{item.id}</div></>,
+    },
+    {
+      key: 'title',
+      label: '时间线标题',
+      className: 'bake-record-table__title',
+      render: item => <div className="bake-record-table__primary bake-line-clamp-2">{item.title || '未命名时间线'}</div>,
+    },
+    {
+      key: 'summary',
+      label: '内容摘要',
+      render: item => <div className="bake-record-table__preview bake-line-clamp-2">{item.summary || '暂无摘要'}</div>,
+    },
+    {
+      key: 'captures',
+      label: '关联采集',
+      className: 'bake-record-table__status',
+      render: item => <span className="bake-record-table__badge">{item.captureIds?.length ?? 0} 条</span>,
+    },
+  ]
 
   const handleSearchMemories = () => {
     clearBakeNavigationStack()
@@ -480,6 +524,7 @@ const RepositoryPanel: React.FC = () => {
     setCaptureDetail(null)
     useAppStore.setState({
       repositoryCaptureQuery: draftCaptureQuery,
+      repositoryCaptureApp: draftCaptureApp,
       repositoryCaptureFrom: draftCaptureFrom,
       repositoryCaptureTo: draftCaptureTo,
       repositoryCaptureSourceCaptureId: null,
@@ -490,10 +535,12 @@ const RepositoryPanel: React.FC = () => {
   const handleClearCaptureFilters = () => {
     clearBakeNavigationStack()
     setDraftCaptureQuery('')
+    setDraftCaptureApp('')
     setDraftCaptureFrom('')
     setDraftCaptureTo('')
     useAppStore.setState({
       repositoryCaptureQuery: '',
+      repositoryCaptureApp: '',
       repositoryCaptureFrom: '',
       repositoryCaptureTo: '',
       repositoryCaptureSourceCaptureId: null,
@@ -751,9 +798,6 @@ const RepositoryPanel: React.FC = () => {
                       placeholder="搜索时间线标题、摘要或详情"
                     />
                   </label>
-                  <div className="bake-list-toolbar__repository-actions bake-list-toolbar__repository-actions--search">
-                    <BakeButton compact primary type="submit">搜索</BakeButton>
-                  </div>
                 </div>
                 <div className="bake-list-toolbar__repository-row bake-list-toolbar__repository-row--dates">
                   <label className="bake-form-field bake-filter-field">
@@ -775,119 +819,49 @@ const RepositoryPanel: React.FC = () => {
                     />
                   </label>
                   <div className="bake-list-toolbar__repository-actions bake-list-toolbar__repository-actions--secondary">
-                    {(draftMemoryQuery || draftMemoryFrom || draftMemoryTo || repositoryMemoryQuery || repositoryMemoryFrom || repositoryMemoryTo || repositoryMemoryFocusId) && (
-                      <BakeButton compact onClick={handleClearMemoryFilters}>清除筛选</BakeButton>
-                    )}
+                    <div className="bake-list-toolbar__repository-primary-actions">
+                      <BakeButton compact type="button" onClick={handleClearMemoryFilters}>清空</BakeButton>
+                      <BakeButton compact primary type="submit">搜索</BakeButton>
+                    </div>
                   </div>
                 </div>
               </div>
             </form>
 
-            {memoryFilterPills.length > 0 && (
-              <div className="bake-filter-summary">
-                {memoryFilterPills.map(item => <BakePill key={item} text={item} />)}
-              </div>
-            )}
           </>
         )}
         {repositoryTab === 'memory' && (
-          <div className="bake-split-list-detail bake-split-list-detail--memories-fixed">
-            <BakeCard className="bake-memory-list-card bake-memory-list-card--fixed">
-              <BakeSectionHeader
-                title="时间线"
-              />
-
-              {memories.length === 0 ? (
-                <div className="bake-muted">当前筛选条件下没有可浏览的时间线。</div>
-              ) : (
-                <>
-                  <div className="bake-list bake-memory-list bake-memory-list--paged">
-                    {memories.map(item => (
-                      <button
-                        key={item.id}
-                        type="button"
-                        onClick={() => setSelectedMemoryId(item.id)}
-                        className={`bake-list-item bake-memory-list-item bake-memory-list-item--compact ${item.id === selectedMemory?.id ? 'bake-list-item--active' : ''}`.trim()}
-                      >
-                        <div className="bake-list-item__title bake-line-clamp-1">{item.title}</div>
-                        <div className="bake-muted bake-line-clamp-2">{item.summary || '暂无摘要'}</div>
-                        <div className="bake-memory-list-item__meta">
-                          <span>ID #{item.id} · 创建于 {formatMemoryTime(item)}</span>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                  <div className="bake-pagination bake-pagination--extended">
-                    <div className="bake-pagination__controls">
-                      <BakeButton compact onClick={() => setBakeMemoryOffset(Math.max(0, bakeMemoryOffset - repositoryMemoryLimit))}>上一页</BakeButton>
-                      <BakeButton compact onClick={() => setBakeMemoryOffset(bakeMemoryOffset + repositoryMemoryLimit)}>
-                        {bakeMemoryOffset + repositoryMemoryLimit >= memoryTotal ? '已到底' : '下一页'}
-                      </BakeButton>
-                    </div>
-                    <div className="bake-pagination__summary-group bake-muted">
-                      <span className="bake-pagination__summary">共 {memoryTotal} 条</span>
-                      <span className="bake-pagination__summary">第 {memoryPage}/{memoryTotalPages} 页</span>
-                    </div>
-                    <div className="bake-pagination__right">
-                      <label className="bake-pagination__field">
-                        <span className="bake-muted">每页</span>
-                        <select
-                          className="bake-input bake-pagination__select"
-                          value={String(repositoryMemoryLimit)}
-                          aria-label="每页条数"
-                          onChange={(event) => setRepositoryMemoryLimit(Number(event.target.value))}
-                        >
-                          {[10, 20, 50, 100].map(option => (
-                            <option key={option} value={option}>{option} 条</option>
-                          ))}
-                        </select>
-                      </label>
-                      <div className="bake-pagination__jump">
-                        <span className="bake-muted">第</span>
-                        <input
-                          className="bake-input bake-pagination__input"
-                          type="number"
-                          min={1}
-                          max={memoryTotalPages}
-                          value={memoryPageInput}
-                          onChange={(event) => setMemoryPageInput(event.target.value)}
-                          placeholder={String(memoryPage)}
-                          aria-label="跳转页码"
-                        />
-                        <span className="bake-muted">页</span>
-                        <BakeButton
-                          compact
-                          onClick={() => {
-                            const target = Number(memoryPageInput)
-                            if (!Number.isFinite(target) || target < 1) return
-                            const nextPage = Math.min(memoryTotalPages, Math.floor(target))
-                            setBakeMemoryOffset((nextPage - 1) * repositoryMemoryLimit)
-                            setMemoryPageInput('')
-                          }}
-                        >
-                          前往
-                        </BakeButton>
-                      </div>
-                    </div>
-                  </div>
-                </>
+          <>
+            <BakeRecordTable
+              items={memories}
+              total={memoryTotal}
+              limit={repositoryMemoryLimit}
+              offset={bakeMemoryOffset}
+              columns={memoryColumns}
+              getRowId={item => item.id}
+              ariaLabel="时间线表格"
+              emptyTitle={(repositoryMemoryQuery || repositoryMemoryFrom || repositoryMemoryTo || repositoryMemoryFocusId) ? '没有匹配的时间线' : '还没有时间线'}
+              emptyDescription={(repositoryMemoryQuery || repositoryMemoryFrom || repositoryMemoryTo || repositoryMemoryFocusId) ? '调整关键词或日期后再试。' : '采集内容形成时间线后，会展示在这里。'}
+              activeId={memoryDrawerOpen ? selectedMemory?.id : null}
+              itemLabel="条时间线"
+              onPageChange={setBakeMemoryOffset}
+              onLimitChange={setRepositoryMemoryLimit}
+              renderActions={item => (
+                <BakeTableActionButton kind="detail" label={`查看时间线：${item.title || '未命名时间线'}`} onClick={trigger => openMemoryDrawer(item, trigger)} />
               )}
-            </BakeCard>
+            />
 
-            <BakeCard className="bake-memory-detail-card bake-memory-detail-card--stacked">
+            <BakeDetailDrawer
+              open={Boolean(memoryDrawerOpen && selectedMemory)}
+              wide
+              eyebrow="时间线详情"
+              title={selectedMemory?.title || '未命名时间线'}
+              meta={selectedMemory ? <>ID #{selectedMemory.id} · 新增于 {formatMemoryTime(selectedMemory)} · {selectedMemory.captureIds?.length ?? 0} 条采集</> : undefined}
+              closeLabel="关闭时间线详情"
+              onClose={closeMemoryDrawer}
+            >
               {selectedMemory ? (
                 <div className="bake-memory-detail bake-memory-detail--fixed">
-                  <div className="bake-memory-detail__header-block">
-                    <div className="bake-inline-meta">
-                      <div style={{ minWidth: 0 }}>
-                        <div className="bake-title" style={{ fontSize: 20, lineHeight: 1.4 }}>{selectedMemory.title}</div>
-                        <div className="bake-muted bake-line-clamp-1" style={{ marginTop: 6 }}>
-                          ID #{selectedMemory.id || '暂无编号'} · 创建于 {formatMemoryTime(selectedMemory)}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
                   <div className="bake-memory-action-card">
                     <div className="bake-kv__title">时间线摘要</div>
                     <div className="bake-muted" style={{ lineHeight: 1.8 }}>{selectedMemory.summary || '暂无摘要'}</div>
@@ -901,25 +875,10 @@ const RepositoryPanel: React.FC = () => {
                     const timeRange = `${minDate.getMonth() + 1}月${minDate.getDate()}日 ${minDate.getHours()}:${String(minDate.getMinutes()).padStart(2, '0')}-${maxDate.getHours()}:${String(maxDate.getMinutes()).padStart(2, '0')}`
 
                     const segments = selectedMemory.keyTimestamps || []
-                    const items = segments.length > 0 ? segments.map(seg => {
-                      const minDate = new Date(seg.start_ts)
-                      const maxDate = new Date(seg.end_ts)
-                      const segmentCaptureIds = seg.capture_ids.length > 0
-                        ? seg.capture_ids
-                        : memoryCaptures
-                          .filter(capture => capture.ts >= seg.start_ts && capture.ts <= seg.end_ts)
-                          .map(capture => capture.id)
-                      const itemTimeRange = seg.start_ts === seg.end_ts
-                        ? `${minDate.getHours()}:${String(minDate.getMinutes()).padStart(2, '0')}`
-                        : `${minDate.getHours()}:${String(minDate.getMinutes()).padStart(2, '0')}-${maxDate.getHours()}:${String(maxDate.getMinutes()).padStart(2, '0')}`
-                      return {
-                        ids: segmentCaptureIds,
-                        itemTimeRange,
-                        summary: seg.summary
-                      }
-                    }) : (() => {
+                    // 无片段或片段未覆盖全部采集时，按应用/窗口维度分组的兜底展示
+                    const buildCaptureGroupItems = (captures: CaptureRecord[]) => {
                       const itemMap = new Map<string, { ids: number[]; captures: CaptureRecord[] }>()
-                      memoryCaptures.forEach(cap => {
+                      captures.forEach(cap => {
                         const key = `${cap.app_name}|${cap.win_title || ''}`
                         if (!itemMap.has(key)) {
                           itemMap.set(key, { ids: [], captures: [] })
@@ -940,7 +899,36 @@ const RepositoryPanel: React.FC = () => {
                         const summary = text.slice(0, 60) + (text.length > 60 ? '...' : '')
                         return { ids: item.ids, itemTimeRange, summary: summary || `${item.captures[0].app_name}活动` }
                       })
-                    })()
+                    }
+                    const items = segments.length > 0 ? (() => {
+                      const segmentItems = segments.map(seg => {
+                        const minDate = new Date(seg.start_ts)
+                        const maxDate = new Date(seg.end_ts)
+                        const segmentCaptureIds = seg.capture_ids.length > 0
+                          ? seg.capture_ids
+                          : memoryCaptures
+                            .filter(capture => capture.ts >= seg.start_ts && capture.ts <= seg.end_ts)
+                            .map(capture => capture.id)
+                        const itemTimeRange = seg.start_ts === seg.end_ts
+                          ? `${minDate.getHours()}:${String(minDate.getMinutes()).padStart(2, '0')}`
+                          : `${minDate.getHours()}:${String(minDate.getMinutes()).padStart(2, '0')}-${maxDate.getHours()}:${String(maxDate.getMinutes()).padStart(2, '0')}`
+                        return {
+                          ids: segmentCaptureIds,
+                          itemTimeRange,
+                          summary: seg.summary
+                        }
+                      })
+                      // 历史合并数据可能存在 keyTimestamps 只覆盖部分采集的情况，
+                      // 将未被任何片段引用的采集按应用/窗口补齐，保证与列表页关联采集数一致。
+                      const coveredIds = new Set(segments.flatMap(seg => seg.capture_ids))
+                      const uncoveredCaptures = memoryCaptures.filter(capture =>
+                        !coveredIds.has(capture.id)
+                        && !segments.some(seg => capture.ts >= seg.start_ts && capture.ts <= seg.end_ts)
+                      )
+                      return uncoveredCaptures.length > 0
+                        ? [...segmentItems, ...buildCaptureGroupItems(uncoveredCaptures)]
+                        : segmentItems
+                    })() : buildCaptureGroupItems(memoryCaptures)
 
                     return (
                       <div className="bake-memory-action-card">
@@ -1043,8 +1031,8 @@ const RepositoryPanel: React.FC = () => {
               ) : (
                 <div className="bake-muted">暂无时间线详情</div>
               )}
-            </BakeCard>
-          </div>
+            </BakeDetailDrawer>
+          </>
         )}
         {repositoryTab === 'capture' && (
           <BakeCaptureTab
@@ -1053,9 +1041,11 @@ const RepositoryPanel: React.FC = () => {
             limit={repositoryCaptureLimit}
             offset={bakeCaptureOffset}
             query={repositoryCaptureQuery}
+            app={repositoryCaptureApp}
             from={repositoryCaptureFrom}
             to={repositoryCaptureTo}
             draftQuery={draftCaptureQuery}
+            draftApp={draftCaptureApp}
             draftFrom={draftCaptureFrom}
             draftTo={draftCaptureTo}
             sourceCaptureId={repositoryCaptureSourceCaptureId}
@@ -1065,14 +1055,13 @@ const RepositoryPanel: React.FC = () => {
             onPageChange={setBakeCaptureOffset}
             onLimitChange={setRepositoryCaptureLimit}
             onDraftQueryChange={setDraftCaptureQuery}
+            onDraftAppChange={setDraftCaptureApp}
             onDraftFromChange={setDraftCaptureFrom}
             onDraftToChange={setDraftCaptureTo}
             onSearch={handleSearchCaptures}
             onClearFilters={handleClearCaptureFilters}
             onViewLinkedTimeline={handleViewLinkedTimeline}
             onDeleteCapture={(id) => setPendingDeletion({ kind: 'capture', id })}
-            canGoBack={Boolean(captureBackTarget)}
-            onGoBack={handleCaptureGoBack}
           />
         )}
         </div>

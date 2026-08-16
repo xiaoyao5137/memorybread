@@ -147,13 +147,63 @@ describe('创作 Agent 多轮 Loop', () => {
 
     render(<CreationPanel />)
 
-    const summary = await screen.findByText('已由模型决定执行链路')
+    // 行标题为动作描述，展开后才显示逐项换行的执行链路。
+    const routeRow = await screen.findByRole('button', { name: /已由模型决定执行链路/ })
+    fireEvent.click(routeRow)
+    const summary = screen.getByText('已由模型决定执行链路')
     const routeSummary = summary.closest('.creation-agent-route-summary')
     expect(routeSummary).not.toBeNull()
     expect(routeSummary?.querySelectorAll('.creation-agent-route-summary__steps > span')).toHaveLength(3)
     expect(routeSummary).toHaveTextContent('周报 Skill')
-    expect(routeSummary).toHaveTextContent('记忆搜索 Tool')
+    expect(routeSummary).toHaveTextContent('记忆搜索')
+    expect(routeSummary).not.toHaveTextContent('记忆搜索 Tool')
     expect(routeSummary).toHaveTextContent('文档撰写 Agent')
+  })
+
+  it('清理旧历史中的主 Agent 控制空壳并保留具体执行动作', async () => {
+    useAppStore.getState().setCreationDraft({
+      sessionId: 'session-agent-test',
+      conversation: [{
+        id: 'message-legacy-control-event',
+        role: 'user',
+        content: '生成一份周报',
+        createdAt: 1_720_000_000_000,
+        runId: 'run-1',
+      }],
+      agentEvents: [
+        event('agent.started', 1, '创作 Agent 开始执行'),
+        event('agent.started', 2, '创作 Agent 正在组装周报章节'),
+        event(
+          'agent.started',
+          3,
+          '文档撰写 Agent 开始执行',
+          { kind: 'agent', id: 'document_writer_agent', name: '文档撰写 Agent' },
+        ),
+      ] as any,
+    })
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+
+    const trace = await screen.findByLabelText('Agent 执行情况')
+    expect(trace).not.toHaveTextContent('创作 Agent 开始执行')
+    expect(trace).toHaveTextContent('创作 Agent 正在组装周报章节')
+    expect(trace).toHaveTextContent('文档撰写 Agent 开始执行')
+
+    fireEvent.click(screen.getByRole('button', { name: '展开全部' }))
+    const capabilityLabels = Array.from(
+      trace.querySelectorAll('.creation-agent-event__capability'),
+    ).map(node => node.textContent)
+    expect(capabilityLabels).toContain('创作 Agent')
+    expect(capabilityLabels).not.toContain('创作 Agent · Agent')
+    expect(capabilityLabels).toContain('文档撰写 Agent · Agent')
   })
 
   it('在执行轨迹中展示后台浏览器缩略预览且完成后保留最终截图', async () => {
@@ -215,7 +265,10 @@ describe('创作 Agent 多轮 Loop', () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
 
-    const image = screen.getByRole('img', { name: '经营看板后台浏览器缩略图' })
+    // 已完成的动作默认折叠为一行，点开后才能看到浏览器缩略预览。
+    fireEvent.click(screen.getByRole('button', { name: /后台页面采集已结束/ }))
+
+    const image = screen.getByRole('img', { name: '经营看板网页证据缩略图' })
     expect(image).toHaveAttribute(
       'src',
       `http://localhost:7070/api/creation/evidence/${previewId}/image`,
@@ -226,7 +279,7 @@ describe('创作 Agent 多轮 Loop', () => {
       'href',
       expect.stringContaining('/api/creation/evidence/'),
     )
-    expect(screen.getAllByRole('img', { name: '经营看板后台浏览器缩略图' })).toHaveLength(1)
+    expect(screen.getAllByRole('img', { name: '经营看板网页证据缩略图' })).toHaveLength(1)
   })
 
   it('为运行中的 Agent、Tool 和 Skill 展示呼吸状态灯', async () => {
@@ -424,10 +477,16 @@ describe('创作 Agent 多轮 Loop', () => {
             offset + 2,
             '记忆搜索完成，召回 1 条本地资料',
             { kind: 'tool', id: 'memory_search', name: '记忆搜索 Tool' },
-            { result_count: 1 },
+            {
+              result_count: 1,
+              skill_step_title: 'AIGC进度总结',
+              query: '当前步骤：AIGC进度总结 用@记忆搜索 Tool 工具获取本周AIGC共建项目的进展，以及AIGC共建项目周报里关于推理性能优化相关的进展，并以列表形式展示，最多10行文字\n整体创作背景：请使用@GPU成本优化周报创作法完成本周周报',
+            },
             {
               references: [{
                 id: 8,
+                source_id: 2285,
+                source_type: 'knowledge',
                 title: '既有架构决策',
                 doc_type: '架构方案',
                 final_weight: 0.88,
@@ -569,16 +628,43 @@ describe('创作 Agent 多轮 Loop', () => {
 
     await screen.findByRole('heading', { name: 'Agent 架构方案' })
     expect(screen.getByLabelText('用户消息')).toHaveTextContent('设计创作功能')
-    expect(screen.getByLabelText('Agent 执行情况')).toHaveTextContent('记忆搜索 Tool')
     expect(screen.getByLabelText('Agent 执行情况')).toHaveTextContent('架构方案模板 Skill')
     expect(screen.getByLabelText('Agent 执行情况')).toHaveTextContent('方案设计 Agent')
+    // 细节默认折叠，展开全部后才可见能力描述、判断摘要等详情。
+    fireEvent.click(screen.getByRole('button', { name: '展开全部' }))
+    const capabilities = Array.from(
+      screen.getByLabelText('Agent 执行情况').querySelectorAll('.creation-agent-event__capability'),
+    )
+    const memoryCapability = capabilities.find(node => node.textContent?.includes('记忆搜索'))
+    expect(memoryCapability?.textContent).toContain('Tool')
     expect(screen.getByLabelText('Agent 执行情况')).toHaveTextContent('原始需求')
     expect(screen.getByLabelText('Agent 执行情况')).toHaveTextContent('当前没有既有文档')
 
     const memoryResultLink = screen.getByRole('button', { name: '召回 1 条本地资料，打开参考资料' })
+    const scrollIntoView = vi.fn()
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
+    HTMLElement.prototype.scrollIntoView = scrollIntoView
     fireEvent.click(memoryResultLink)
     expect(screen.getByRole('tab', { name: '参考资料 (1)' })).toHaveAttribute('aria-selected', 'true')
+    const referenceGroup = screen.getByLabelText('AIGC进度总结参考资料组')
+    await waitFor(() => expect(referenceGroup).toHaveFocus())
+    expect(referenceGroup.querySelector('.creation-reference-group__query')).toHaveTextContent(
+      '当前步骤：AIGC进度总结 用@记忆搜索 Tool 工具获取本周AIGC共建项目的进展，以及AIGC共建项目周报里关于推理性能优化相关的进展，并以列表形式展示，最多10行文字 整体创作背景：请使用@GPU成本优化周报创作法完成本周周报',
+    )
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' })
+    HTMLElement.prototype.scrollIntoView = originalScrollIntoView
     expect(screen.getByText('既有架构决策')).toBeInTheDocument()
+    const openedReferences: Array<Record<string, unknown>> = []
+    const handleReferenceOpen = (event: Event) => {
+      openedReferences.push((event as CustomEvent<Record<string, unknown>>).detail)
+    }
+    window.addEventListener('view-rag-reference', handleReferenceOpen)
+    fireEvent.click(within(referenceGroup).getByRole('button', { name: '资料来源' }))
+    expect(openedReferences).toContainEqual(expect.objectContaining({
+      type: 'bake_knowledge',
+      artifactId: 2285,
+    }))
+    window.removeEventListener('view-rag-reference', handleReferenceOpen)
 
     const dataResultLink = screen.getByRole('button', { name: '召回 2 个来源，打开参考数据' })
     fireEvent.click(dataResultLink)
@@ -600,6 +686,8 @@ describe('创作 Agent 多轮 Loop', () => {
 
     await waitFor(() => expect(agentPayloads).toHaveLength(2))
     expect(agentPayloads[0].selected_skills[0]).toMatchObject({
+      workflowRole: 'primary',
+      strictStructure: true,
       titleDesignStyle: installedStyleSkill.common_titles,
       writingDesign: installedStyleSkill.text_style,
       imageGeneration: installedStyleSkill.diagram_style,
@@ -609,6 +697,8 @@ describe('创作 Agent 多轮 Loop', () => {
         voiceStyle: installedStyleSkill.field_examples.writing_guidelines,
       },
     })
+    expect(agentPayloads[0].selected_skills[0].skillInstructions).toContain('## 执行工作流')
+    expect(agentPayloads[0].selected_skills[0]).not.toHaveProperty('exampleDocument')
     expect(agentPayloads[1].current_document).toContain('动态调用能力')
     expect(agentPayloads[1].root_request).toBe('设计创作功能的 Agent 架构方案')
     expect(agentPayloads[1].conversation.map((item: any) => item.role)).toEqual([
@@ -632,13 +722,19 @@ describe('创作 Agent 多轮 Loop', () => {
     const assistantMessages = screen.getAllByLabelText('Agent 消息')
     const executionTraces = screen.getAllByLabelText('Agent 执行情况')
     expect(executionTraces).toHaveLength(2)
+    fireEvent.click(within(executionTraces[1]).getByRole('button', { name: '展开全部' }))
     expect(executionTraces[0]).toHaveTextContent('当前没有既有文档')
     expect(executionTraces[0]).not.toHaveTextContent('目标章节仅作为改动线索')
     expect(executionTraces[1]).toHaveTextContent('目标章节仅作为改动线索')
     expect(executionTraces[1]).not.toHaveTextContent('当前没有既有文档')
     expect(executionTraces[1]).toHaveTextContent('创作 Agent')
     expect(executionTraces[1]).not.toHaveTextContent('创作主 Agent')
-    expect(executionTraces[1]).toHaveTextContent('数据检索 Tool · 已完成')
+    const round2Capabilities = Array.from(
+      executionTraces[1].querySelectorAll('.creation-agent-event__capability'),
+    )
+    expect(round2Capabilities.some(node => (
+      node.textContent?.includes('数据检索') && node.textContent?.includes('Tool')
+    ))).toBe(true)
     expect(executionTraces[1]).toHaveTextContent('没有找到匹配的数据来源')
     expect(executionTraces[1]).toHaveTextContent('已根据反馈保留当前处理计划')
     expect(executionTraces[1]).not.toHaveTextContent('Harness 根据 data_search')
@@ -651,14 +747,15 @@ describe('创作 Agent 多轮 Loop', () => {
     expect(executionTraces[1]).not.toHaveTextContent('quality_gate_passed')
     expect(executionTraces[1]).toHaveTextContent('追加能力')
     expect(executionTraces[1]).toHaveTextContent('无，继续现有计划')
-    expect(within(executionTraces[1]).getAllByText('创作 Agent')).toHaveLength(3)
+    // 能力信息只在展开细节里出现：主 Agent 对应 3 个动作分组。
+    expect(round2Capabilities.filter(node => node.textContent?.startsWith('创作 Agent'))).toHaveLength(3)
     const mainAgentStarted = within(executionTraces[1]).getByText('创作 Agent 已接管目标')
     const mainAgentIntent = within(executionTraces[1]).getByText('理解为围绕“质量门禁”联动修订完整文档')
     const mainAgentNode = mainAgentStarted.closest('.creation-agent-event')
     expect(mainAgentNode).toBe(mainAgentIntent.closest('.creation-agent-event'))
     expect(mainAgentNode?.querySelectorAll('.creation-agent-event__icon')).toHaveLength(1)
     expect(mainAgentNode?.querySelectorAll('.creation-agent-event__update')).toHaveLength(2)
-    expect(within(executionTraces[1]).getAllByText('质量审校 Agent')).toHaveLength(1)
+    expect(round2Capabilities.filter(node => node.textContent?.startsWith('质量审校 Agent'))).toHaveLength(1)
     expect(userMessages[1].compareDocumentPosition(executionTraces[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(executionTraces[1].compareDocumentPosition(assistantMessages[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
 
@@ -716,7 +813,7 @@ describe('创作 Agent 多轮 Loop', () => {
     expect(savedHistories[1].agent_trace.every((item: any) => !item.goal?.objective)).toBe(true)
   })
 
-  it('首版生成中的 Agent 内部润色以本轮改动展示局部高亮', async () => {
+  it('首版生成中的 Agent 内部润色仍属于首次创作，不展示本轮改动', async () => {
     const initialDocument = '# GPU 利用率治理方案\n\n## 背景\n\n初始内容。\n\n## 方案\n\n初始表述。'
     const polishedDocument = '# GPU 利用率治理方案\n\n## 背景\n\n首版内容更自然。\n\n## 方案\n\n完善首版表述。'
     const polishPatch = {
@@ -793,10 +890,16 @@ describe('创作 Agent 多轮 Loop', () => {
     const polishedText = await screen.findByText('首版内容更自然。')
     await waitFor(() => expect(savedHistories).toHaveLength(1))
 
-    expect(polishedText).toHaveClass('creation-latest-change')
-    expect(screen.getByLabelText('本轮改动')).toHaveTextContent('修改 · 背景')
-    expect(screen.getByText(/本轮改动 2 处/)).toBeInTheDocument()
+    expect(polishedText).not.toHaveClass('creation-latest-change')
+    expect(screen.queryByLabelText('本轮改动')).not.toBeInTheDocument()
+    expect(screen.queryByText(/本轮改动 2 处/)).not.toBeInTheDocument()
     expect(screen.getByLabelText('Agent 消息')).toHaveTextContent('首版文档已生成')
+    const fullscreenButton = screen.getByRole('button', { name: '全屏查看文档' })
+    fireEvent.click(fullscreenButton)
+    expect(screen.getByLabelText('生成内容')).toHaveClass('creation-panel-fullscreen')
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.getByLabelText('生成内容')).not.toHaveClass('creation-panel-fullscreen')
+    await waitFor(() => expect(fullscreenButton).toHaveFocus())
     expect(savedHistories[0].edit_operation).toBe('create_document')
     expect(savedHistories[0].document_patch).toEqual(polishPatch)
     expect(savedHistories[0].agent_trace).toEqual(expect.arrayContaining([
@@ -935,6 +1038,9 @@ describe('创作 Agent 多轮 Loop', () => {
     fireEvent.change(input, { target: { value: '请使用 GPU 成本周报技能创作本周周报' } })
     fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
 
+    // 参考数据链接在展开细节里：先点开数据检索动作行。
+    const dataRow = await screen.findByRole('button', { name: /召回 1 个来源/ })
+    fireEvent.click(dataRow)
     const dataResultLink = await screen.findByRole('button', { name: '召回 1 个来源，打开参考数据' })
     fireEvent.click(dataResultLink)
     expect(await screen.findByText('该来源尚未采集到数据快照。')).toBeInTheDocument()
@@ -942,12 +1048,16 @@ describe('创作 Agent 多轮 Loop', () => {
 
     releaseScrape()
 
-    expect(await screen.findByText('后台浏览器已完成即时采集。')).toBeInTheDocument()
-    expect(screen.getByRole('rowheader', { name: '总卡数（X40 折算）' })).toBeInTheDocument()
-    expect(screen.getByText('1803.59 卡')).toBeInTheDocument()
+    const refreshedSummaries = await screen.findAllByText('后台浏览器已完成即时采集。')
+    expect(refreshedSummaries).toHaveLength(2)
+    expect(screen.getByLabelText('数据检索参考数据组')).toBeInTheDocument()
+    const scrapeGroup = screen.getByLabelText('网页即时采集参考数据组')
+    expect(scrapeGroup).toHaveTextContent('网页爬取')
+    expect(within(scrapeGroup).getByRole('rowheader', { name: '总卡数（X40 折算）' })).toBeInTheDocument()
+    expect(within(scrapeGroup).getByText('1803.59 卡')).toBeInTheDocument()
     expect(screen.queryByText('当前可用')).not.toBeInTheDocument()
     expect(screen.queryByText('可用于创作')).not.toBeInTheDocument()
-    expect(screen.queryByText('该来源尚未采集到数据快照。')).not.toBeInTheDocument()
+    expect(within(scrapeGroup).queryByText('该来源尚未采集到数据快照。')).not.toBeInTheDocument()
     await waitFor(() => expect(savedHistories).toHaveLength(1))
     expect(sourceRequestCount).toBe(2)
     const storedScrape = savedHistories[0].agent_trace.find(
@@ -1527,5 +1637,289 @@ describe('创作 Agent 多轮 Loop', () => {
     await screen.findByLabelText('本轮改动')
     expect(screen.getByText('等待审校。')).toHaveClass('creation-latest-change')
     expect(screen.getByLabelText('本轮改动')).toHaveTextContent('参考示例公司员工周年礼物方案')
+  })
+
+  it('深度思考中展示呼吸灯，完成后折叠为“深度思考 · Ns”', async () => {
+    let releaseStream = () => {}
+    const encoder = new TextEncoder()
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.pathname === '/api/creation/agent/run') {
+        const thinkingStarted = {
+          ...event('thinking.started', 2, '深度思考中：理解本轮要求', undefined, { stage: 'intent' }),
+          status: 'running',
+        }
+        const thinkingCompleted = {
+          ...event('thinking.completed', 5, '深度思考完成：理解本轮要求', undefined, {
+            stage: 'intent',
+            reasoning: '判断为新场景，直接创建文档',
+          }),
+          timestamp: 1_720_000_003_002,
+          status: 'completed',
+        }
+        const firstEvents = [
+          event('run.started', 1, '创作 Agent 已接管目标'),
+          thinkingStarted,
+          event(
+            'intent.interpreted',
+            3,
+            '理解为新建完整文档',
+            undefined,
+            { operation: 'create_document', reasoning_summary: '判断为新场景' },
+          ),
+        ]
+        const finalEvents = [
+          thinkingCompleted,
+          { ...event('run.completed', 6, '本轮创作完成'), status: 'completed' },
+        ]
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(
+              firstEvents.map(item => `data: ${JSON.stringify(item)}\n\n`).join(''),
+            ))
+            releaseStream = () => {
+              controller.enqueue(encoder.encode(
+                finalEvents.map(item => `data: ${JSON.stringify(item)}\n\n`).join(''),
+              ))
+              controller.close()
+            }
+          },
+        }), { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+    const input = screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/)
+    fireEvent.change(input, { target: { value: '生成一份方案' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
+
+    // 进行中：呼吸灯与“深度思考中”提示。
+    const runningTitle = await screen.findByText('深度思考中：理解本轮要求')
+    const thinkingNode = runningTitle.closest('.creation-trace-thinking')
+    expect(thinkingNode).toHaveClass('is-running')
+    expect(thinkingNode?.querySelector('.creation-trace-thinking__dot')).toBeTruthy()
+
+    releaseStream()
+
+    // 完成后：标题为“深度思考”，时长与阶段标签置灰，reasoning 一行可见。
+    const finishedMeta = await screen.findByText('3s · 理解本轮要求')
+    const finishedNode = finishedMeta.closest('.creation-trace-thinking')
+    expect(finishedNode).toHaveTextContent('深度思考')
+    expect(finishedNode).not.toHaveClass('is-running')
+    expect(finishedNode).toHaveTextContent('判断为新场景，直接创建文档')
+    // 步骤计数不包含思考块本身（思考块内的动作仍计入步骤）。
+    expect(screen.getByRole('button', { name: /执行过程/ })).toHaveTextContent('3 个步骤')
+  })
+
+  it('已完成的动作默认只展示一行概述，点击后才展开细节', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.pathname === '/api/creation/agent/run') {
+        return sse([
+          event('run.started', 1, '创作 Agent 已接管目标'),
+          event(
+            'intent.interpreted',
+            2,
+            '理解为新建完整文档',
+            undefined,
+            { operation: 'create_document' },
+          ),
+          event(
+            'tool.started',
+            3,
+            '记忆搜索开始执行',
+            { kind: 'tool', id: 'memory_search', name: '记忆搜索 Tool' },
+          ),
+          event(
+            'tool.completed',
+            4,
+            '记忆搜索完成，召回 3 条本地资料',
+            { kind: 'tool', id: 'memory_search', name: '记忆搜索 Tool' },
+            { result_count: 3 },
+          ),
+          { ...event('run.completed', 5, '本轮创作完成'), status: 'completed' },
+        ])
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+    const input = screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/)
+    fireEvent.change(input, { target: { value: '生成一份方案' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
+
+    // 折叠行：能力名 + 最新摘要一行可见。
+    const trace = await screen.findByLabelText('Agent 执行情况')
+    await screen.findByText(/召回 3 条本地资料/)
+    const collapsedRow = Array.from(
+      trace.querySelectorAll<HTMLElement>('.creation-agent-event__row'),
+    ).find(row => row.textContent?.includes('记忆搜索完成'))
+    expect(collapsedRow).toBeTruthy()
+    expect(collapsedRow).toHaveAttribute('aria-expanded', 'false')
+    // 细节（dl）默认不可见。
+    expect(trace.querySelector('dl')).toBeNull()
+    expect(screen.queryByText('结果')).not.toBeInTheDocument()
+
+    // 点击展开后细节可见，再次点击收起。
+    fireEvent.click(collapsedRow as HTMLElement)
+    expect(trace.querySelector('dl')).toBeTruthy()
+    expect(screen.getByText('结果')).toBeInTheDocument()
+    expect(screen.getByText('3 条')).toBeInTheDocument()
+    fireEvent.click(collapsedRow as HTMLElement)
+    expect(trace.querySelector('dl')).toBeNull()
+  })
+
+  it('无思考事件的历史轨迹按原有动作行渲染', async () => {
+    useAppStore.getState().setCreationDraft({
+      sessionId: 'session-agent-test',
+      conversation: [{
+        id: 'message-legacy-trace',
+        role: 'user',
+        content: '生成一份周报',
+        createdAt: 1_720_000_000_000,
+        runId: 'run-1',
+      }],
+      agentEvents: [
+        event('run.started', 1, '创作 Agent 已接管目标'),
+        event(
+          'intent.interpreted',
+          2,
+          '理解为新建完整文档',
+          undefined,
+          { operation: 'create_document', root_request: '生成一份周报' },
+        ),
+        event(
+          'tool.completed',
+          3,
+          '记忆搜索完成，召回 2 条本地资料',
+          { kind: 'tool', id: 'memory_search', name: '记忆搜索 Tool' },
+          { result_count: 2 },
+        ),
+        { ...event('run.completed', 4, '本轮创作完成'), status: 'completed' },
+      ] as any,
+    })
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+
+    const trace = await screen.findByLabelText('Agent 执行情况')
+    // 无思考卡片，全部为动作行。
+    expect(trace.querySelector('.creation-trace-thinking')).toBeNull()
+    expect(screen.queryByText(/深度思考/)).not.toBeInTheDocument()
+    expect(trace.querySelectorAll('.creation-agent-event')).toHaveLength(3)
+    // 标题主次拆分后逗号不再保留，主标题与灰色次级结果分开断言。
+    expect(trace).toHaveTextContent('记忆搜索完成')
+    expect(trace).toHaveTextContent('召回 2 条本地资料')
+    // 头部步骤数等于动作分组数。
+    expect(screen.getByRole('button', { name: /执行过程/ })).toHaveTextContent('3 个步骤')
+  })
+
+  it('phase 事件把执行过程分成顶层阶段与下层动作', async () => {
+    const savedHistories: any[] = []
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history' && (!init?.method || init.method === 'GET')) {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.pathname === '/api/creation/history' && init?.method === 'POST') {
+        savedHistories.push(JSON.parse(String(init.body || '{}')))
+        return Response.json({ id: 68 })
+      }
+      if (url.pathname === '/api/creation/agent/run') {
+        return sse([
+          event('run.started', 1, '创作 Agent 已接管目标'),
+          event('phase.started', 2, '开始阶段：检索本地记忆资料', undefined, {
+            phase_id: 'step:memory_search',
+            phase_title: '检索本地记忆资料',
+            phase_kind: 'plan_step',
+          }),
+          event(
+            'tool.completed',
+            3,
+            '检索「本周进度」相关资料，召回 2 条本地资料',
+            { kind: 'tool', id: 'memory_search', name: '记忆搜索 Tool' },
+            { result_count: 2 },
+          ),
+          event('phase.completed', 4, '阶段完成：检索本地记忆资料', undefined, {
+            phase_id: 'step:memory_search',
+            phase_title: '检索本地记忆资料',
+            phase_kind: 'plan_step',
+          }),
+          event('phase.started', 5, '开始阶段：生成文档内容', undefined, {
+            phase_id: 'step:document_writer_agent',
+            phase_title: '生成文档内容',
+            phase_kind: 'plan_step',
+          }),
+          event(
+            'document.replaced',
+            6,
+            '文档撰写 Agent 已提交完整文档版本',
+            { kind: 'agent', id: 'document_writer_agent', name: '文档撰写 Agent' },
+            { content: '# 方案', operation: 'create_document' },
+          ),
+          event('phase.completed', 7, '阶段完成：生成文档内容', undefined, {
+            phase_id: 'step:document_writer_agent',
+            phase_title: '生成文档内容',
+            phase_kind: 'plan_step',
+          }),
+          { ...event('run.completed', 8, '本轮创作完成'), status: 'completed' },
+        ])
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+    const input = screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/)
+    fireEvent.change(input, { target: { value: '生成一份方案' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
+
+    // 顶层阶段行：序号 + 标题，完成阶段用绿色小圆点标记。
+    const firstPhaseTitle = await screen.findByText('1. 检索本地记忆资料')
+    const firstPhase = firstPhaseTitle.closest('.creation-trace-phase')
+    expect(firstPhase).toHaveClass('is-completed')
+    expect(firstPhase?.querySelector('.creation-trace-phase__dot.is-done')).toBeTruthy()
+    await screen.findByText('2. 生成文档内容')
+
+    // 完成的阶段默认折叠，点击后展开下层动作与竖线容器。
+    const firstPhaseHeader = firstPhase?.querySelector('.creation-trace-phase__header')
+    expect(firstPhaseHeader).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText(/召回 2 条本地资料/)).not.toBeInTheDocument()
+    fireEvent.click(firstPhaseHeader as HTMLElement)
+    await screen.findByText(/召回 2 条本地资料/)
+    expect(firstPhase?.querySelector('.creation-trace-phase__body')).toBeTruthy()
+
+    // 头部同时统计阶段数与步骤数（阶段外的生命周期行也计入步骤）。
+    expect(screen.getByRole('button', { name: /执行过程/ }))
+      .toHaveTextContent('2 个阶段 · 4 个步骤')
+
+    // 持久化保留阶段信息，历史记录重新打开时仍能分出三层结构。
+    await waitFor(() => expect(savedHistories.length).toBeGreaterThan(0))
+    const storedPhase = savedHistories[savedHistories.length - 1].agent_trace
+      .find((item: any) => (
+        item.type === 'phase.completed'
+        && item.data?.phase_id === 'step:document_writer_agent'
+      ))
+    expect(storedPhase.data).toEqual({
+      phase_id: 'step:document_writer_agent',
+      phase_title: '生成文档内容',
+      phase_kind: 'plan_step',
+    })
   })
 })

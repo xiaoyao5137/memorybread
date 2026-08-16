@@ -4,6 +4,7 @@ import {
   ArrowDownToLine,
   ArrowRight,
   ArrowUpFromLine,
+  BookOpen,
   BookOpenText,
   Boxes,
   Braces,
@@ -14,6 +15,7 @@ import {
   Copy,
   Database,
   Download,
+  ExternalLink,
   Eye,
   FileArchive,
   FileCode2,
@@ -32,7 +34,9 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import {
-  importCodexSkillPackage,
+  agentSkillZipBytes,
+  importAgentSkillPackage,
+  importAgentSkillZip,
   listLocalCreationSkills,
   saveLocalCreationSkill,
   skillFileText,
@@ -48,7 +52,10 @@ import {
   listIntegrationMemoryOptions,
   listIntegrationSkillRuns,
   listIntegrationSkills,
+  openDownloadedFile,
   pickLocalDirectory,
+  revealDownloadedFile,
+  saveDownloadedBytes,
   selectedFilesToIntegrationInput,
   startIntegrationSkillRun,
   type IntegrationDirection,
@@ -60,8 +67,10 @@ import {
   type IntegrationRunMode,
 } from '../utils/integrationSkills'
 import { toUserFacingError } from '../utils/userFacingError'
+import { openExternalUrl } from '../utils/appMetadata'
 import { useAppStore } from '../store/useAppStore'
 import MemoryBackupSection from './MemoryBackupSection'
+import TutorialLink, { TUTORIAL_URLS } from './TutorialLink'
 import './IntegrationPanel.css'
 import './IntegrationWorkbench.css'
 
@@ -79,10 +88,23 @@ const SKILL_ICONS: Record<string, LucideIcon> = {
   qdrant: Database,
   milvus: Boxes,
   'chroma-pgvector': Braces,
-  workbody: Boxes,
+  workbuddy: Boxes,
   'qianwen-office': FileArchive,
   codex: Code2,
   'claude-code': Code2,
+}
+
+/** 这几款通过 Skill 包导出集成，不需要在本工作台执行。 */
+const SKILL_EXPORT_ONLY_IDS = new Set(['workbuddy', 'qianwen-office', 'codex', 'claude-code'])
+
+/** 集成教程用户手册地址。 */
+const SKILL_MANUAL_URLS: Record<string, string> = {
+  obsidian: 'https://my.feishu.cn/wiki/MV06wgJruizAOMkoM1DcCJLFnHg',
+  'obsidian-export': 'https://my.feishu.cn/wiki/MV06wgJruizAOMkoM1DcCJLFnHg',
+  workbuddy: 'https://my.feishu.cn/wiki/IPXKwXyamiuCuSkdq3Ecoj9lnjc',
+  'claude-code': 'https://my.feishu.cn/wiki/FTY4w5FY0iDMfck6hDVcuxLVnve',
+  codex: 'https://my.feishu.cn/wiki/MRVGwtCJxikku4k7fQLcEyJanMe',
+  'qianwen-office': 'https://my.feishu.cn/wiki/HMTqwXgniiRDW4ktYGycGBTbnwe',
 }
 
 const TABS: Array<{ id: IntegrationTab; label: string; description: string; icon: LucideIcon }> = [
@@ -125,6 +147,8 @@ const IntegrationPanel: React.FC = () => {
   const [runPending, setRunPending] = useState(false)
   const [workbenchError, setWorkbenchError] = useState('')
   const [notice, setNotice] = useState('')
+  const [downloadToast, setDownloadToast] = useState<{ id: number; title: string; path: string | null } | null>(null)
+  const downloadToastTimerRef = useRef<number | undefined>(undefined)
   const dataInputRef = useRef<HTMLInputElement>(null)
   const workbenchRef = useRef<HTMLElement>(null)
 
@@ -134,6 +158,7 @@ const IntegrationPanel: React.FC = () => {
   const [uploadingDirection, setUploadingDirection] = useState<IntegrationDirection | null>(null)
   const [customSkillDetail, setCustomSkillDetail] = useState<LocalCreationSkill | null>(null)
   const skillPackageInputRef = useRef<HTMLInputElement>(null)
+  const skillZipInputRef = useRef<HTMLInputElement>(null)
   const pendingDirectionRef = useRef<IntegrationDirection>('input')
 
   const loadCatalog = useCallback(async () => {
@@ -177,6 +202,18 @@ const IntegrationPanel: React.FC = () => {
     window.localStorage.setItem('memorybread.obsidian-export.subfolder', vaultSubfolder)
   }, [vaultSubfolder])
 
+  useEffect(() => () => window.clearTimeout(downloadToastTimerRef.current), [])
+
+  const showDownloadToast = useCallback((title: string, path: string | null) => {
+    window.clearTimeout(downloadToastTimerRef.current)
+    setDownloadToast({ id: Date.now(), title, path })
+    downloadToastTimerRef.current = window.setTimeout(() => setDownloadToast(null), 8000)
+  }, [])
+
+  const notifyDownloadSaved = useCallback((title: string, savedPath: string | null | undefined) => {
+    if (savedPath) showDownloadToast(title, savedPath)
+  }, [showDownloadToast])
+
   const selectedSkill = useMemo(
     () => skills.find(skill => skill.id === selectedSkillId) || null,
     [selectedSkillId, skills],
@@ -200,7 +237,7 @@ const IntegrationPanel: React.FC = () => {
 
   const openWorkbench = useCallback(async (skill: IntegrationSkillCatalogItem, view: WorkbenchView) => {
     setSelectedSkillId(skill.id)
-    setWorkbenchView(view)
+    setWorkbenchView(SKILL_EXPORT_ONLY_IDS.has(skill.id) ? 'files' : view)
     setSkillDetail(null)
     setViewingFilePath('')
     setInputFiles([])
@@ -306,6 +343,11 @@ const IntegrationPanel: React.FC = () => {
     skillPackageInputRef.current?.click()
   }
 
+  const openSkillZipPicker = (direction: IntegrationDirection) => {
+    pendingDirectionRef.current = direction
+    skillZipInputRef.current?.click()
+  }
+
   const handleSkillPackageSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files ? Array.from(event.target.files) : []
     event.target.value = ''
@@ -315,7 +357,7 @@ const IntegrationPanel: React.FC = () => {
     setNotice('')
     setCustomSkillsError('')
     try {
-      const imported = await importCodexSkillPackage(files)
+      const imported = await importAgentSkillPackage(files)
       const saved = await saveLocalCreationSkill(apiBaseUrl, {
         ...imported,
         categoryId: INTEGRATION_SKILL_CATEGORY[direction],
@@ -329,19 +371,38 @@ const IntegrationPanel: React.FC = () => {
     }
   }
 
-  const downloadCustomSkill = (skill: LocalCreationSkill) => {
-    const payload = JSON.stringify({
-      schemaVersion: 'memorybread.custom-skill-package.v1',
-      title: skill.title,
-      summary: skill.summary,
-      files: skill.packageFiles || [],
-    }, null, 2)
-    const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }))
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = `${skill.title}.skill.json`
-    anchor.click()
-    window.setTimeout(() => URL.revokeObjectURL(url), 0)
+  const handleSkillZipSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const archive = event.target.files?.[0]
+    event.target.value = ''
+    if (!archive) return
+    const direction = pendingDirectionRef.current
+    setUploadingDirection(direction)
+    setNotice('')
+    setCustomSkillsError('')
+    try {
+      const imported = await importAgentSkillZip(archive)
+      const saved = await saveLocalCreationSkill(apiBaseUrl, {
+        ...imported,
+        categoryId: INTEGRATION_SKILL_CATEGORY[direction],
+      })
+      setCustomSkills(current => [saved, ...current.filter(skill => skill.id !== saved.id)])
+      setNotice(`${saved.title} 已从 ZIP 技能包导入`)
+    } catch (error) {
+      setCustomSkillsError(toUserFacingError(error, '上传 ZIP Skill 失败'))
+    } finally {
+      setUploadingDirection(null)
+    }
+  }
+
+  const downloadCustomSkill = async (skill: LocalCreationSkill) => {
+    setCustomSkillsError('')
+    try {
+      const bytes = new Uint8Array(agentSkillZipBytes(skill.title, skill.packageFiles || []))
+      const savedPath = await saveDownloadedBytes(`${skill.title}.zip`, bytes)
+      notifyDownloadSaved(`${skill.title} Skill ZIP 已保存`, savedPath)
+    } catch (error) {
+      setCustomSkillsError(toUserFacingError(error, '下载 Skill ZIP 失败'))
+    }
   }
 
   return (
@@ -400,6 +461,14 @@ const IntegrationPanel: React.FC = () => {
         {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
       />
       <input
+        ref={skillZipInputRef}
+        className="integration-skill-input"
+        type="file"
+        accept=".zip,application/zip"
+        aria-label="选择 Agent Skills ZIP 技能包"
+        onChange={handleSkillZipSelected}
+      />
+      <input
         key={`${selectedSkill?.id || 'none'}-${selectedSkill?.inputKind || 'none'}`}
         ref={dataInputRef}
         className="integration-skill-input"
@@ -421,7 +490,10 @@ const IntegrationPanel: React.FC = () => {
           aria-labelledby="integration-tab-backup"
         >
           <div className="integration-section-heading">
-            <div><span>Keep memory portable</span><h2>备份与恢复</h2></div>
+            <div>
+              <span>Keep memory portable</span>
+              <div className="tutorial-title-row"><h2>备份与恢复</h2><TutorialLink url={TUTORIAL_URLS.backup} /></div>
+            </div>
           </div>
           <MemoryBackupSection />
         </section>
@@ -439,7 +511,7 @@ const IntegrationPanel: React.FC = () => {
             </div>
             <button className="integration-upload-button" type="button" onClick={() => openSkillPackagePicker(activeTab)} disabled={uploadingDirection !== null}>
               {uploadingDirection === activeTab ? <Loader2 className="spin" size={17} /> : <PackagePlus size={17} />}
-              {uploadingDirection === activeTab ? '正在保存…' : '上传自定义 Skill'}
+              {uploadingDirection === activeTab ? '正在保存…' : '上传 Skill 文件夹'}
             </button>
           </div>
 
@@ -460,12 +532,18 @@ const IntegrationPanel: React.FC = () => {
                   key={skill.id}
                   skill={skill}
                   selected={selectedSkillId === skill.id}
-                  latestRun={runs.find(run => run.skillId === skill.id)}
                   onRun={() => void openWorkbench(skill, 'run')}
                   onFiles={() => void openWorkbench(skill, 'files')}
-                  onDownload={() => void downloadIntegrationSkillBundle(apiBaseUrl, skill.id).catch(error => {
-                    setCatalogError(toUserFacingError(error, '下载 Skill 包失败'))
-                  })}
+                  onDownload={() => void downloadIntegrationSkillBundle(apiBaseUrl, skill.id)
+                    .then(savedPath => notifyDownloadSaved(`${skill.title} Skill 包已保存`, savedPath))
+                    .catch(error => {
+                      setCatalogError(toUserFacingError(error, '下载 Skill 包失败'))
+                    })}
+                  onOpenManual={() => {
+                    const manualUrl = SKILL_MANUAL_URLS[skill.id]
+                    if (!manualUrl) return
+                    void openExternalUrl(manualUrl).catch(error => setCatalogError(toUserFacingError(error, '打开用户手册失败')))
+                  }}
                 />
               ))}
             </div>
@@ -480,7 +558,9 @@ const IntegrationPanel: React.FC = () => {
                   <p>{selectedSkill.executor} · v{selectedSkill.version} · {selectedSkill.fileCount} 个可查看文件</p>
                 </div>
                 <div className="integration-workbench__tabs" role="tablist" aria-label="Skill 工作台视图">
-                  <button type="button" role="tab" aria-selected={workbenchView === 'run'} className={workbenchView === 'run' ? 'is-active' : ''} onClick={() => setWorkbenchView('run')}><Play size={14} />执行</button>
+                  {!SKILL_EXPORT_ONLY_IDS.has(selectedSkill.id) && (
+                    <button type="button" role="tab" aria-selected={workbenchView === 'run'} className={workbenchView === 'run' ? 'is-active' : ''} onClick={() => setWorkbenchView('run')}><Play size={14} />执行</button>
+                  )}
                   <button type="button" role="tab" aria-selected={workbenchView === 'files'} className={workbenchView === 'files' ? 'is-active' : ''} onClick={() => setWorkbenchView('files')}><FileCode2 size={14} />文件与源码</button>
                   <button type="button" onClick={() => { setSelectedSkillId(null); setSkillDetail(null) }} aria-label="关闭 Skill 工作台"><X size={16} /></button>
                 </div>
@@ -489,7 +569,7 @@ const IntegrationPanel: React.FC = () => {
               {workbenchError && <div className="integration-error" role="alert"><AlertCircle size={15} />{workbenchError}</div>}
               {detailLoading ? (
                 <div className="integration-workbench__loading"><Loader2 className="spin" size={18} /> 正在加载 Skill 描述、源码和执行历史…</div>
-              ) : workbenchView === 'files' ? (
+              ) : workbenchView === 'files' || SKILL_EXPORT_ONLY_IDS.has(selectedSkill.id) ? (
                 <SkillFilesView
                   apiBaseUrl={apiBaseUrl}
                   skill={skillDetail}
@@ -497,6 +577,7 @@ const IntegrationPanel: React.FC = () => {
                   selectedFile={selectedFile}
                   onSelect={setViewingFilePath}
                   onError={setWorkbenchError}
+                  onDownloaded={notifyDownloadSaved}
                 />
               ) : (
                 <div className="integration-workbench__grid">
@@ -531,6 +612,12 @@ const IntegrationPanel: React.FC = () => {
                         selectedIds={selectedMemoryIds}
                         onSelectedIdsChange={setSelectedMemoryIds}
                       />
+                    ) : selectedSkill.executor === 'workbuddy_skill_export' ? (
+                      <div className="integration-install-note">
+                        <PackageCheck size={23} />
+                        <strong>生成 WorkBuddy 可上传的 Skill ZIP</strong>
+                        <p>预检会说明文件与隐私边界；正式生成不会自动上传，请在 WorkBuddy 中检查后主动安装。</p>
+                      </div>
                     ) : (
                       <div className="integration-install-note">
                         <PackageCheck size={23} />
@@ -553,7 +640,9 @@ const IntegrationPanel: React.FC = () => {
                             ? '安装 Skill'
                             : selectedSkill.executor === 'vault_export'
                               ? '导出到 Vault'
-                              : '生成上下文包'}
+                              : selectedSkill.executor === 'workbuddy_skill_export'
+                                ? '生成 Skill 包'
+                                : '生成上下文包'}
                       </button>
                     </div>
 
@@ -572,6 +661,7 @@ const IntegrationPanel: React.FC = () => {
                   <RunInspector
                     run={activeRun}
                     onCopyError={setWorkbenchError}
+                    onDownloaded={notifyDownloadSaved}
                     onOpenMemory={(memoryId) => {
                       useAppStore.setState({
                         windowMode: 'knowledge',
@@ -590,7 +680,10 @@ const IntegrationPanel: React.FC = () => {
           <section className="integration-custom-section" aria-label={`自定义${activeTab === 'input' ? '输入' : '输出'} Skill`}>
             <div className="integration-custom-section__header">
               <div><h3>自定义 Skill 包</h3></div>
-              <button type="button" onClick={() => openSkillPackagePicker(activeTab)} disabled={customSkillsLoading || uploadingDirection !== null}><PackagePlus size={14} />上传</button>
+              <div>
+                <button type="button" onClick={() => openSkillPackagePicker(activeTab)} disabled={customSkillsLoading || uploadingDirection !== null}><PackagePlus size={14} />文件夹</button>
+                <button type="button" onClick={() => openSkillZipPicker(activeTab)} disabled={customSkillsLoading || uploadingDirection !== null}><Upload size={14} />ZIP</button>
+              </div>
             </div>
             {customSkillsLoading && visibleCustomSkills.length === 0 ? (
               <div className="integration-custom-empty"><Loader2 className="spin" size={16} /> 正在读取…</div>
@@ -605,7 +698,7 @@ const IntegrationPanel: React.FC = () => {
                     <em>{skill.packageFiles?.length || 0} 个文件</em>
                     <div className="integration-custom-list__actions">
                       <button type="button" onClick={() => setCustomSkillDetail(skill)}><Eye size={13} />查看</button>
-                      <button type="button" onClick={() => downloadCustomSkill(skill)}><Download size={13} />下载</button>
+                      <button type="button" onClick={() => void downloadCustomSkill(skill)}><Download size={13} />下载</button>
                     </div>
                   </article>
                 ))}
@@ -616,7 +709,16 @@ const IntegrationPanel: React.FC = () => {
       )}
 
       {customSkillDetail && (
-        <CustomSkillDialog skill={customSkillDetail} onClose={() => setCustomSkillDetail(null)} onDownload={() => downloadCustomSkill(customSkillDetail)} />
+        <CustomSkillDialog skill={customSkillDetail} onClose={() => setCustomSkillDetail(null)} onDownload={() => void downloadCustomSkill(customSkillDetail)} />
+      )}
+
+      {downloadToast && (
+        <DownloadToastView
+          key={downloadToast.id}
+          toast={downloadToast}
+          onDismiss={() => setDownloadToast(null)}
+          onActionError={message => showDownloadToast(message, null)}
+        />
       )}
     </div>
   )
@@ -878,30 +980,28 @@ export const MemoryExportPicker: React.FC<{
 const ExecutableSkillCard: React.FC<{
   skill: IntegrationSkillCatalogItem
   selected: boolean
-  latestRun?: IntegrationSkillRun
   onRun: () => void
   onFiles: () => void
   onDownload: () => void
-}> = ({ skill, selected, latestRun, onRun, onFiles, onDownload }) => {
+  onOpenManual: () => void
+}> = ({ skill, selected, onRun, onFiles, onDownload, onOpenManual }) => {
   const Icon = SKILL_ICONS[skill.id] || PackageCheck
+  const exportOnly = SKILL_EXPORT_ONLY_IDS.has(skill.id)
+  const manualUrl = SKILL_MANUAL_URLS[skill.id]
   return (
     <article className={`integration-skill-card${selected ? ' is-selected' : ''}`}>
       <div className="integration-skill-card__topline">
         <span className="integration-skill-card__icon"><Icon size={21} /></span>
-        <span className="integration-skill-card__badge">{skill.badge}</span>
+        {exportOnly && <span className="integration-skill-card__badge integration-skill-card__badge--skill">Skill</span>}
       </div>
       <span className="integration-skill-card__eyebrow">{skill.eyebrow}</span>
       <h3>{skill.title}</h3>
       <p>{skill.description}</p>
-      <div className="integration-skill-card__runtime">
-        <span><TerminalSquare size={13} />{skill.executor}</span>
-        <span><FileCode2 size={13} />{skill.fileCount} 个文件</span>
-        {latestRun && <span className={`is-${latestRun.status}`}><RunStatusDot status={latestRun.status} />{RUN_STATUS_COPY[latestRun.status]}</span>}
-      </div>
       <div className="integration-skill-card__footer"><span>{skill.capability}</span></div>
       <div className="integration-skill-card__actions">
-        <button className="is-primary" type="button" onClick={onRun}><Play size={14} />执行</button>
+        {!exportOnly && <button className="is-primary" type="button" onClick={onRun}><Play size={14} />执行</button>}
         <button type="button" onClick={onFiles}><Eye size={14} />文件</button>
+        {manualUrl && <button type="button" onClick={onOpenManual} aria-label={`打开 ${skill.title} 集成教程`}><BookOpen size={14} />教程</button>}
         <button type="button" onClick={onDownload} aria-label={`下载 ${skill.title} Skill 包`}><Download size={14} /></button>
       </div>
     </article>
@@ -915,7 +1015,8 @@ const SkillFilesView: React.FC<{
   selectedFile: IntegrationSkillDetail['files'][number] | null
   onSelect: (path: string) => void
   onError: (message: string) => void
-}> = ({ apiBaseUrl, skill, selectedPath, selectedFile, onSelect, onError }) => {
+  onDownloaded: (title: string, savedPath: string | null) => void
+}> = ({ apiBaseUrl, skill, selectedPath, selectedFile, onSelect, onError, onDownloaded }) => {
   if (!skill) return <div className="integration-workbench__loading">没有可查看的 Skill 文件。</div>
   return (
     <div className="integration-files-view">
@@ -926,12 +1027,12 @@ const SkillFilesView: React.FC<{
             <FileCode2 size={14} /><span>{file.path}<small>{formatBytes(file.sizeBytes)}</small></span><ChevronRight size={13} />
           </button>
         ))}
-        <button className="integration-files-view__download-all" type="button" onClick={() => void downloadIntegrationSkillBundle(apiBaseUrl, skill.id).catch(error => onError(toUserFacingError(error, '下载 Skill 包失败')))}><Download size={14} />下载完整 Skill 包</button>
+        <button className="integration-files-view__download-all" type="button" onClick={() => void downloadIntegrationSkillBundle(apiBaseUrl, skill.id).then(savedPath => onDownloaded(`${skill.title} Skill 包已保存`, savedPath)).catch(error => onError(toUserFacingError(error, '下载 Skill 包失败')))}><Download size={14} />下载完整 Skill 包</button>
       </aside>
       <section>
         <header>
           <div><strong>{selectedFile?.path || '选择文件'}</strong><small>{selectedFile?.mediaType}</small></div>
-          {selectedFile && <button type="button" onClick={() => void downloadIntegrationSkillFile(apiBaseUrl, skill.id, selectedFile.path).catch(error => onError(toUserFacingError(error, '下载文件失败')))}><Download size={14} />下载文件</button>}
+          {selectedFile && <button type="button" onClick={() => void downloadIntegrationSkillFile(apiBaseUrl, skill.id, selectedFile.path).then(savedPath => onDownloaded(`${selectedFile.path} 已保存`, savedPath)).catch(error => onError(toUserFacingError(error, '下载文件失败')))}><Download size={14} />下载文件</button>}
         </header>
         <pre><code>{selectedFile?.content || '从左侧选择 SKILL.md、integration.json 或真实执行源码。'}</code></pre>
       </section>
@@ -942,8 +1043,9 @@ const SkillFilesView: React.FC<{
 const RunInspector: React.FC<{
   run: IntegrationSkillRun | null
   onCopyError: (message: string) => void
+  onDownloaded: (title: string, savedPath: string | null) => void
   onOpenMemory: (memoryId: string | number) => void
-}> = ({ run, onCopyError, onOpenMemory }) => {
+}> = ({ run, onCopyError, onDownloaded, onOpenMemory }) => {
   if (!run) {
     return (
       <div className="integration-run-inspector integration-run-inspector--empty">
@@ -988,6 +1090,7 @@ const RunInspector: React.FC<{
           )}
           {run.result.kind === 'install_preview' && <p>目标：{run.result.target}。{run.result.existingInstallation ? '检测到旧版本，正式安装会先备份。' : '目标目录可以直接安装。'}</p>}
           {run.result.kind === 'install' && <p>已安装到 {run.result.target}，共 {run.result.fileCount} 个文件。调用方式：<code>{run.result.invocation}</code></p>}
+          {run.result.kind === 'workbuddy_skill_preview' && <p>将在本机生成包含 {run.result.fileCount} 个文件的 Skill ZIP；随后从 {run.result.target} 主动上传。</p>}
           {!!run.result.records?.length && (
             <div className="integration-result-records" aria-label={run.result.kind === 'import' ? '导入记忆明细' : '记忆来源明细'}>
               {run.result.records.map(record => (
@@ -1005,8 +1108,10 @@ const RunInspector: React.FC<{
           {artifact && (
             <div className="integration-artifact">
               <FileArchive size={21} /><div><strong>{artifact.fileName}</strong><small>{run.result.matchCount || 0} 条本机上下文</small></div>
-              <button type="button" onClick={() => void copyIntegrationArtifact(artifact).catch(error => onCopyError(toUserFacingError(error, '复制上下文包失败')))}><Copy size={14} />复制</button>
-              <button type="button" onClick={() => downloadIntegrationArtifact(artifact)}><Download size={14} />下载</button>
+              {artifact.mediaType.startsWith('text/') && (
+                <button type="button" onClick={() => void copyIntegrationArtifact(artifact).catch(error => onCopyError(toUserFacingError(error, '复制上下文包失败')))}><Copy size={14} />复制</button>
+              )}
+              <button type="button" onClick={() => void downloadIntegrationArtifact(artifact).then(savedPath => onDownloaded(`${artifact.fileName} 已保存`, savedPath)).catch(error => onCopyError(toUserFacingError(error, '下载上下文包失败')))}><Download size={14} />下载</button>
             </div>
           )}
         </div>
@@ -1046,6 +1151,29 @@ const RunRail: React.FC<{ status: string }> = ({ status }) => {
 const RunStatusDot: React.FC<{ status: string }> = ({ status }) => <i className={`integration-status-dot is-${status}`} aria-hidden />
 const Metric: React.FC<{ label: string; value?: number }> = ({ label, value }) => <div><strong>{value || 0}</strong><small>{label}</small></div>
 
+const DownloadToastView: React.FC<{
+  toast: { title: string; path: string | null }
+  onDismiss: () => void
+  onActionError: (message: string) => void
+}> = ({ toast, onDismiss, onActionError }) => (
+  <div className="integration-download-toast" role="status" aria-live="polite">
+    <CheckCircle2 size={17} aria-hidden />
+    <div className="integration-download-toast__copy">
+      <strong>{toast.title}</strong>
+      {toast.path && <small>{toast.path}</small>}
+    </div>
+    <div className="integration-download-toast__actions">
+      {toast.path && (
+        <>
+          <button type="button" onClick={() => void openDownloadedFile(toast.path as string).catch(error => onActionError(toUserFacingError(error, '无法打开下载的文件')))}><ExternalLink size={13} />打开文件</button>
+          <button type="button" onClick={() => void revealDownloadedFile(toast.path as string).catch(error => onActionError(toUserFacingError(error, '无法打开所在文件夹')))}><FolderOpen size={13} />打开文件夹</button>
+        </>
+      )}
+      <button type="button" aria-label="关闭下载提示" onClick={onDismiss}><X size={14} /></button>
+    </div>
+  </div>
+)
+
 const CustomSkillDialog: React.FC<{ skill: LocalCreationSkill; onClose: () => void; onDownload: () => void }> = ({ skill, onClose, onDownload }) => {
   const [selectedPath, setSelectedPath] = useState(skill.packageFiles?.[0]?.path || '')
   const file = skill.packageFiles?.find(item => item.path === selectedPath)
@@ -1057,7 +1185,7 @@ const CustomSkillDialog: React.FC<{ skill: LocalCreationSkill; onClose: () => vo
           <aside>{(skill.packageFiles || []).map(item => <button key={item.path} type="button" className={selectedPath === item.path ? 'is-active' : ''} onClick={() => setSelectedPath(item.path)}><FileCode2 size={13} />{item.path}</button>)}</aside>
           <pre><code>{file ? skillFileText(file) || '二进制文件不可预览' : '没有包文件'}</code></pre>
         </div>
-        <footer><button type="button" onClick={onDownload}><Download size={14} />下载包</button><button type="button" onClick={onClose}>关闭</button></footer>
+        <footer><button type="button" onClick={onDownload}><Download size={14} />下载标准 ZIP</button><button type="button" onClick={onClose}>关闭</button></footer>
       </section>
     </div>
   )

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ModelManager from '../components/ModelManager'
 import { useAppStore } from '../store/useAppStore'
@@ -53,6 +53,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
 })
@@ -75,5 +76,20 @@ describe('模型管理', () => {
     fireEvent.click(screen.getByRole('button', { name: '体验' }))
 
     expect(screen.getByText('体验 MBEM v1.0')).toBeInTheDocument()
+  })
+
+  it('Model API 短暂未就绪时自动重试并恢复模型列表', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockRejectedValueOnce(new TypeError('Load failed'))
+
+    render(<ModelManager />)
+    await act(async () => {
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+
+    expect(screen.getAllByText('MBEM v1.0').length).toBeGreaterThan(0)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 })

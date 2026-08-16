@@ -14,14 +14,16 @@ use super::{
     handlers::{
         action::execute_action,
         bake::{
-            create_bake_document, delete_bake_capture, delete_bake_document, delete_bake_knowledge,
-            delete_bake_memory, delete_bake_sop, get_bake_capture, get_bake_capture_screenshot,
-            get_bake_document, get_bake_knowledge, get_bake_memory_preview, get_bake_overview,
-            get_bake_queue_status, get_bake_sop, get_bake_style_config, ignore_bake_memory,
-            initialize_bake_memories, list_bake_captures, list_bake_documents, list_bake_knowledge,
-            list_bake_memories, list_bake_sops, promote_bake_memory_to_document,
-            promote_bake_memory_to_sop, run_bake_pipeline, toggle_bake_document_status,
-            update_bake_document, update_bake_style_config,
+            create_bake_document, create_bake_knowledge, create_bake_sop, delete_bake_capture,
+            delete_bake_document, delete_bake_knowledge, delete_bake_memory, delete_bake_sop,
+            get_bake_capture, get_bake_capture_screenshot, get_bake_document, get_bake_knowledge,
+            get_bake_memory_preview, get_bake_overview, get_bake_queue_status, get_bake_sop,
+            get_bake_style_config, ignore_bake_memory, initialize_bake_memories,
+            list_bake_captures, list_bake_documents, list_bake_knowledge, list_bake_memories,
+            list_bake_sops, promote_bake_memory_to_document, promote_bake_memory_to_sop,
+            run_bake_pipeline, toggle_bake_document_status, update_bake_document,
+            update_bake_knowledge, update_bake_sop, update_bake_style_config,
+            update_memory_favorite,
         },
         breadcrumbs::{
             award_breadcrumb, equip_breadcrumb, list_breadcrumb_rules, list_breadcrumbs,
@@ -33,7 +35,8 @@ use super::{
             delete_config_check, install_config_check, list_config_checks, run_config_check,
         },
         creation::{
-            generate_document, list_history, preview_references, run_creation_agent, save_history,
+            generate_document, get_history, list_history, preview_references, run_creation_agent,
+            save_history,
         },
         creation_skill::{
             analyze_creation_skill, create_creation_skill_analysis_job, delete_creation_skill,
@@ -41,9 +44,10 @@ use super::{
             save_creation_skill, update_creation_skill,
         },
         data::{
-            delete_data_source, extract_data_sources, get_browser_preview_image,
-            get_creation_evidence_image, get_data_source, list_data_sources, refresh_data_source,
-            register_discovered_source, search_data, validate_creation_evidence,
+            create_data_source, delete_data_source, extract_data_sources,
+            get_browser_preview_image, get_creation_evidence_image, get_data_source,
+            list_data_sources, refresh_data_source, register_discovered_source, search_data,
+            update_data_source, validate_creation_evidence,
         },
         debug::{
             clear_extraction_queue, debug_log_content, debug_log_files, system_stats, vector_status,
@@ -153,7 +157,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/creation/references", post(preview_references))
         .route("/api/creation/history", post(save_history))
         .route("/api/creation/history", get(list_history))
-        .route("/api/data/sources", get(list_data_sources))
+        .route("/api/creation/history/:id", get(get_history))
+        .route(
+            "/api/data/sources",
+            get(list_data_sources).post(create_data_source),
+        )
         .route("/api/data/sources/extract", post(extract_data_sources))
         .route(
             "/api/data/sources/discovered",
@@ -161,7 +169,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/api/data/sources/:id",
-            get(get_data_source).delete(delete_data_source),
+            get(get_data_source)
+                .put(update_data_source)
+                .delete(delete_data_source),
         )
         .route("/api/data/sources/:id/refresh", post(refresh_data_source))
         .route("/api/tools/data-search", post(search_data))
@@ -300,13 +310,19 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/bake/queue-status", get(get_bake_queue_status))
         .route("/api/bake/run", post(run_bake_pipeline))
         .route(
+            "/api/memory-favorites/:resource_kind/:id",
+            put(update_memory_favorite),
+        )
+        .route(
             "/api/bake/style-config",
             get(get_bake_style_config).put(update_bake_style_config),
         )
-        .route("/api/bake/sops", get(list_bake_sops))
+        .route("/api/bake/sops", get(list_bake_sops).post(create_bake_sop))
         .route(
             "/api/bake/sops/:id",
-            get(get_bake_sop).delete(delete_bake_sop),
+            get(get_bake_sop)
+                .put(update_bake_sop)
+                .delete(delete_bake_sop),
         )
         .route(
             "/api/bake/documents",
@@ -325,10 +341,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/bake/articles", get(list_bake_memories))
         .route("/api/bake/memories", get(list_bake_memories))
         .route("/api/bake/memories/:id", delete(delete_bake_memory))
-        .route("/api/bake/knowledge", get(list_bake_knowledge))
+        .route(
+            "/api/bake/knowledge",
+            get(list_bake_knowledge).post(create_bake_knowledge),
+        )
         .route(
             "/api/bake/knowledge/:id",
-            get(get_bake_knowledge).delete(delete_bake_knowledge),
+            get(get_bake_knowledge)
+                .put(update_bake_knowledge)
+                .delete(delete_bake_knowledge),
         )
         .route("/api/bake/captures", get(list_bake_captures))
         .route(

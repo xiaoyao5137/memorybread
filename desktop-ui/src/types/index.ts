@@ -438,6 +438,7 @@ export interface DataSnapshot {
 
 export interface DataSource {
   id: number
+  is_favorite?: boolean
   title: string
   source_kind: 'report_url' | 'work_memory'
   source_url?: string | null
@@ -514,9 +515,11 @@ export interface TimelineItem {
 
 export interface BakeKnowledgeItem {
   id: string
+  isFavorite?: boolean
   captureId: string
   sourceCaptureIds: string[]
   sourceTimelineId?: string
+  sourceUrl?: string
   summary: string
   overview?: string
   details?: string
@@ -583,6 +586,7 @@ export interface ReplacementRule {
 
 export interface ArticleTemplate {
   id: string
+  isFavorite?: boolean
   title: string
   docType: string
   status: 'draft' | 'auto_generated' | 'pending_review' | 'enabled' | 'disabled'
@@ -626,6 +630,7 @@ export interface LinkedKnowledgeSummary {
 
 export interface SopCandidate {
   id: string
+  isFavorite?: boolean
   sourceCaptureId: string
   sourceTimelineId?: string
   sourceTitle?: string
@@ -642,6 +647,10 @@ export interface SopCandidate {
   updatedAt?: string
   updatedAtMs?: number
 }
+
+export type MemoryFavoriteFilter = 'all' | 'favorite' | 'not_favorite'
+
+export type MemoryFavoriteKind = 'knowledge' | 'operation' | 'data' | 'document'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 监控模块
@@ -904,6 +913,8 @@ export interface ScheduledTask {
   template_id:      string | null
   is_builtin:       boolean
   can_delete:       boolean
+  /** 执行智能体：consult 咨询智能体（默认）/ creation 创作智能体 */
+  executor_kind:    'consult' | 'creation'
   notification_channel_ids: number[]
   run_count:        number
   last_run_at:      number | null
@@ -924,6 +935,8 @@ export interface TaskExecution {
   result_text:     string | null
   error_message:   string | null
   latency_ms:      number | null
+  /** 创作智能体执行时关联的创作记录 id，供跳转查看执行过程 */
+  creation_history_id: number | null
   notification_deliveries: Array<{
     channel_id: number
     channel_name: string

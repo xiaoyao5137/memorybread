@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
-import { AtSign, Bot, Check, ChevronDown, ChevronRight, CloudOff, CloudUpload, Copy, ExternalLink, Eye, FileCode2, FileText, Image, Library, Loader2, MessageSquarePlus, PackageCheck, PackagePlus, Paperclip, Pencil, Plus, Search, Send, Sparkles, Square, Store, Trash2, Upload, Wrench, X } from 'lucide-react'
+import { AtSign, Bot, Check, ChevronDown, ChevronRight, CloudOff, CloudUpload, Copy, ExternalLink, Eye, FileCode2, FileText, Image, Library, Loader2, Maximize2, MessageSquarePlus, Minimize2, PackageCheck, PackagePlus, Paperclip, Pencil, Plus, Search, Send, Sparkles, Square, Store, Trash2, Upload, Wrench, X } from 'lucide-react'
 import { serviceEnvironmentHeaders, useAppStore } from '../store/useAppStore'
 import type { CreationAgentEvent, CreationChatMessage, CreationDataReferenceItem, CreationReferenceItem, CreationReferencePreview } from '../store/useAppStore'
 import { fetchWithLocalhostFallback } from '../hooks/useApi'
@@ -18,9 +18,12 @@ import {
   CREATION_SKILL_AGENT_OPTIONS,
   CREATION_SKILL_TOOL_OPTIONS,
   creationSkillCategoryOptions,
+  codexSkillPackageFiles,
   deleteLocalCreationSkill,
   fetchCreationSkillCategories,
-  importCodexSkillPackage,
+  fetchCreationSkillMarketDetail,
+  importAgentSkillPackage,
+  importAgentSkillZip,
   listLocalCreationSkills,
   marketCreationSkillToLocalInput,
   matchCreationSkills,
@@ -28,6 +31,7 @@ import {
   resolveCreationSkillDependencies,
   saveLocalCreationSkill,
   searchCreationSkillMarket,
+  skillFileText,
   type CreationSkillMarketItem,
   type CreationSkillSource,
   type LocalCreationSkill,
@@ -43,6 +47,7 @@ import CreationSkillDetail, {
 } from './CreationSkillDetail'
 import CreationToolsPanel from './CreationToolsPanel'
 import { HistoryPagination, HistorySearch } from './HistoryBrowserControls'
+import TutorialLink, { TUTORIAL_URLS } from './TutorialLink'
 import {
   creationToolResultLimits,
   enabledCreationToolIds,
@@ -63,6 +68,15 @@ interface CreationPanelProps {
 type ReferenceItem = CreationReferenceItem
 type ReferencePreview = CreationReferencePreview
 type BottomTab = 'reference' | 'data' | 'config'
+type FullscreenPanel = 'document' | 'reference' | 'data' | null
+type ReferenceGroup<T> = {
+  id: string
+  title: string
+  toolName: string
+  query: string
+  items: T[]
+  legacy?: boolean
+}
 interface CreationHistoryItem {
   id: number
   prompt: string
@@ -83,6 +97,8 @@ interface CreationHistoryItem {
   model?: string | null
   latencyMs?: number | null
   evidence: CreationEvidenceItem[]
+  /** 记录来源：creation 手动创作（默认）/ scheduled_task 定时任务执行 */
+  sourceKind: 'creation' | 'scheduled_task'
 }
 interface CreationEvidenceItem {
   id: string
@@ -101,6 +117,8 @@ interface BrowserPreviewItem {
   status?: string
   browser?: string | null
   interaction_mode?: string | null
+  focus_policy?: string | null
+  focus_takeover_count?: number
 }
 type MarkdownBlock =
   | { type: 'markdown'; content: string; startLine: number; endLine: number }
@@ -203,6 +221,12 @@ const groupAgentEventsByRun = (events: CreationAgentEvent[]) => {
   return groups
 }
 
+const isLegacyMainAgentControlStart = (event: CreationAgentEvent) => (
+  event.type === 'agent.started'
+  && event.actor?.id === 'creation_main_agent'
+  && /^(?:创作主? Agent|创作 Agent) 开始执行$/.test(String(event.summary || '').trim())
+)
+
 const collapseAgentLifecycleEvents = (events: CreationAgentEvent[]) => {
   const startTypeForTerminal: Record<string, string> = {
     'agent.completed': 'agent.started',
@@ -214,6 +238,10 @@ const collapseAgentLifecycleEvents = (events: CreationAgentEvent[]) => {
   const visible: CreationAgentEvent[] = []
 
   events.forEach((event) => {
+    // 旧版本曾把 route / plan 内部控制阶段记录为普通 Agent 启动步骤。
+    // 这些事件没有独立动作含义；新后端已不再生成，历史轨迹在此兼容清理。
+    if (isLegacyMainAgentControlStart(event)) return
+
     const startType = startTypeForTerminal[event.type]
     if (startType) {
       let startIndex = -1
@@ -260,6 +288,220 @@ const groupConsecutiveAgentEvents = (events: CreationAgentEvent[]) => {
   })
 
   return groups
+}
+
+type AgentEventGroup = { key: string; events: CreationAgentEvent[] }
+
+type TraceThinkingSegment = {
+  kind: 'thinking'
+  key: string
+  stage: string
+  status: 'running' | 'completed'
+  reasoning: string
+  durationMs: number | null
+  startedAt: number | null
+  innerEvents: CreationAgentEvent[]
+}
+
+type TraceStepSegment = {
+  kind: 'step'
+  group: AgentEventGroup
+}
+
+type TracePhaseSegment = {
+  kind: 'phase'
+  key: string
+  phaseId: string
+  title: string
+  phaseKind: string
+  status: 'running' | 'completed'
+  startedAt: number | null
+  durationMs: number | null
+  segments: TraceSegment[]
+}
+
+type TraceSegment = TraceThinkingSegment | TraceStepSegment | TracePhaseSegment
+
+/** 行标题里属于次级结果的开头标记，拆分后用灰色弱化展示 */
+const HEADLINE_SUB_MARKERS = ['，召回', '，获得', '，并把结果写回']
+
+const splitHeadline = (text: string): { main: string; sub: string | null } => {
+  let splitIndex = -1
+  HEADLINE_SUB_MARKERS.forEach((marker) => {
+    const index = text.indexOf(marker)
+    if (index >= 0 && (splitIndex === -1 || index < splitIndex)) splitIndex = index
+  })
+  if (splitIndex < 0) return { main: text, sub: null }
+  return { main: text.slice(0, splitIndex), sub: text.slice(splitIndex + 1) }
+}
+
+/**
+ * 解析思考事件的阶段：优先 data.stage；早期持久化记录未保存 data 时，
+ * 从“深度思考（中/完成）：阶段标签”的 summary 反推，保证历史记录仍能展示阶段。
+ */
+const thinkingStageOfEvent = (event: CreationAgentEvent): string => {
+  const raw = String(event.data?.stage || '').trim()
+  if (raw) return raw
+  const label = String(event.summary || '').split('：').slice(1).join('：').trim()
+  if (!label) return ''
+  const found = Object.entries(CREATION_THINKING_STAGE_LABELS)
+    .find(([, value]) => value === label)
+  return found ? found[0] : ''
+}
+
+/**
+ * 把轨迹切成“深度思考块 + 动作块”：thinking.started 到
+ * thinking.completed 之间的事件归入思考块；没有思考事件的历史轨迹
+ * 全部落到动作块，保持向后兼容。
+ */
+const segmentCoreEvents = (collapsed: CreationAgentEvent[]): TraceSegment[] => {
+  const segments: TraceSegment[] = []
+  let openThinking: TraceThinkingSegment | null = null
+  let stepBuffer: CreationAgentEvent[] = []
+
+  const flushSteps = () => {
+    if (!stepBuffer.length) return
+    groupConsecutiveAgentEvents(stepBuffer).forEach((group) => {
+      segments.push({ kind: 'step', group })
+    })
+    stepBuffer = []
+  }
+
+  const closeOpenThinking = () => {
+    if (!openThinking) return
+    segments.push(openThinking)
+    openThinking = null
+  }
+
+  collapsed.forEach((event) => {
+    if (event.type === 'thinking.started') {
+      flushSteps()
+      closeOpenThinking()
+      openThinking = {
+        kind: 'thinking',
+        key: event.event_id || `thinking-${event.run_id}-${event.sequence}`,
+        stage: thinkingStageOfEvent(event),
+        status: 'running',
+        reasoning: '',
+        durationMs: null,
+        startedAt: Number.isFinite(event.timestamp) ? event.timestamp : null,
+        innerEvents: [],
+      }
+      return
+    }
+    if (event.type === 'thinking.completed') {
+      const stage = thinkingStageOfEvent(event)
+      const reasoning = String(event.data?.reasoning || '').trim()
+      const matchesOpen = openThinking
+        && (!openThinking.stage || !stage || openThinking.stage === stage)
+      if (matchesOpen && openThinking) {
+        openThinking.status = 'completed'
+        openThinking.reasoning = reasoning
+        openThinking.durationMs = (
+          openThinking.startedAt != null && Number.isFinite(event.timestamp)
+            ? Math.max(0, event.timestamp - openThinking.startedAt)
+            : null
+        )
+        segments.push(openThinking)
+        openThinking = null
+        return
+      }
+      // 恢复场景可能只有 completed 没有 started，补一个独立已完成思考块。
+      closeOpenThinking()
+      flushSteps()
+      segments.push({
+        kind: 'thinking',
+        key: event.event_id || `thinking-${event.run_id}-${event.sequence}`,
+        stage,
+        status: 'completed',
+        reasoning,
+        durationMs: null,
+        startedAt: null,
+        innerEvents: [],
+      })
+      return
+    }
+    if (openThinking) {
+      openThinking.innerEvents.push(event)
+      return
+    }
+    stepBuffer.push(event)
+  })
+
+  closeOpenThinking()
+  flushSteps()
+  return segments
+}
+
+/**
+ * 执行过程三层结构的最外层：phase.started/completed 之间的事件归入阶段块，
+ * 阶段内部复用思考/动作分段。没有 phase 事件的旧记录保持平铺，向后兼容。
+ */
+const segmentAgentTrace = (events: CreationAgentEvent[]): TraceSegment[] => {
+  const collapsed = collapseAgentLifecycleEvents(events)
+  if (!collapsed.some(event => event.type === 'phase.started')) {
+    return segmentCoreEvents(collapsed)
+  }
+
+  const segments: TraceSegment[] = []
+  let openPhase: TracePhaseSegment | null = null
+  let phaseBuffer: CreationAgentEvent[] = []
+  let outerBuffer: CreationAgentEvent[] = []
+
+  const flushOuter = () => {
+    if (!outerBuffer.length) return
+    segmentCoreEvents(outerBuffer).forEach(segment => segments.push(segment))
+    outerBuffer = []
+  }
+
+  const closeOpenPhase = (push: boolean) => {
+    if (!openPhase) return
+    openPhase.segments = segmentCoreEvents(phaseBuffer)
+    phaseBuffer = []
+    if (push) segments.push(openPhase)
+    openPhase = null
+  }
+
+  collapsed.forEach((event) => {
+    if (event.type === 'phase.started') {
+      flushOuter()
+      closeOpenPhase(true)
+      openPhase = {
+        kind: 'phase',
+        key: event.event_id || `phase-${event.run_id}-${event.sequence}`,
+        phaseId: String(event.data?.phase_id || ''),
+        title: String(event.data?.phase_title || event.summary || '执行阶段').trim(),
+        phaseKind: String(event.data?.phase_kind || 'plan_step'),
+        status: 'running',
+        startedAt: Number.isFinite(event.timestamp) ? event.timestamp : null,
+        durationMs: null,
+        segments: [],
+      }
+      return
+    }
+    if (event.type === 'phase.completed') {
+      const phaseId = String(event.data?.phase_id || '')
+      if (openPhase && (!phaseId || !openPhase.phaseId || phaseId === openPhase.phaseId)) {
+        openPhase.status = 'completed'
+        openPhase.durationMs = (
+          openPhase.startedAt != null && Number.isFinite(event.timestamp)
+            ? Math.max(0, event.timestamp - openPhase.startedAt)
+            : null
+        )
+        closeOpenPhase(true)
+      }
+      return
+    }
+    if (openPhase) {
+      phaseBuffer.push(event)
+      return
+    }
+    outerBuffer.push(event)
+  })
+
+  flushOuter()
+  closeOpenPhase(true)
+  return segments
 }
 
 const buildCreationTimeline = (
@@ -351,6 +593,105 @@ const formatInferenceLatency = (latencyMs?: number | null) => {
   if (latencyMs == null) return '未记录'
   if (latencyMs < 1000) return `${latencyMs} ms`
   return `${(latencyMs / 1000).toFixed(latencyMs < 10_000 ? 1 : 0)} 秒`
+}
+
+const normalizeReferenceItems = (value: unknown): CreationReferenceItem[] => {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item): CreationReferenceItem[] => {
+    if (!item || typeof item !== 'object') return []
+    const source = item as Record<string, unknown>
+    const id = Number(source.id)
+    if (!Number.isFinite(id) || id <= 0) return []
+    return [{
+      id,
+      title: String(source.title || '本地参考资料'),
+      doc_type: String(source.doc_type || ''),
+      final_weight: Number(source.final_weight || 0),
+      relevance_score: Number(source.relevance_score || 0),
+      quality_score: Number(source.quality_score || 0),
+      completeness_score: Number(source.completeness_score || 0),
+      usage_score: Number(source.usage_score || 0),
+      format_score: Number(source.format_score || 0),
+      freshness_score: Number(source.freshness_score || 0),
+      usage_count: Number(source.usage_count || 0),
+      reason: String(source.reason || ''),
+      summary: String(source.summary || ''),
+      source_url: source.source_url ? String(source.source_url) : undefined,
+      source_type: source.source_type != null ? String(source.source_type) : undefined,
+      source_id: source.source_id != null ? Number(source.source_id) : undefined,
+      skill_step_title: source.skill_step_title ? String(source.skill_step_title) : undefined,
+    }]
+  })
+}
+
+const mergeReferenceItems = (
+  ...referenceGroups: CreationReferenceItem[][]
+): CreationReferenceItem[] => {
+  const referencesByIdentity = new Map<string, CreationReferenceItem>()
+  referenceGroups.forEach(references => {
+    references.forEach(reference => {
+      const identity = `${reference.source_type || 'document'}:${reference.source_id ?? reference.id}`
+      referencesByIdentity.set(identity, reference)
+    })
+  })
+  return [...referencesByIdentity.values()]
+}
+
+const referenceGroupId = (event: CreationAgentEvent) => `reference-group-${event.event_id || `${event.run_id}-${event.sequence}`}`
+const dataGroupId = (event: CreationAgentEvent) => `data-group-${event.event_id || `${event.run_id}-${event.sequence}`}`
+
+const referenceGroupsFromEvents = (
+  events: CreationAgentEvent[],
+  fallback: CreationReferenceItem[],
+): ReferenceGroup<CreationReferenceItem>[] => {
+  const groups = events.flatMap((event): ReferenceGroup<CreationReferenceItem>[] => {
+    if (event.type !== 'tool.completed' || event.actor?.id !== 'memory_search') return []
+    const items = normalizeReferenceItems(event.environment_patch?.references)
+    if (!items.length) return []
+    return [{
+      id: referenceGroupId(event),
+      title: String(event.data?.skill_step_title || '本地资料检索'),
+      toolName: displayCreationToolNames(event.actor.name || '记忆搜索 Tool'),
+      query: String(event.data?.query || ''),
+      items,
+    }]
+  })
+  if (groups.length || !fallback.length) return groups
+  return [{
+    id: 'reference-group-history-summary',
+    title: '历史参考资料',
+    toolName: '历史汇总',
+    query: '',
+    items: fallback,
+    legacy: true,
+  }]
+}
+
+const dataGroupsFromEvents = (
+  events: CreationAgentEvent[],
+  fallback: CreationDataReferenceItem[],
+): ReferenceGroup<CreationDataReferenceItem>[] => {
+  const groups = events.flatMap((event): ReferenceGroup<CreationDataReferenceItem>[] => {
+    if (!isDataReferenceEvent(event)) return []
+    const items = normalizeDataReferences(event.environment_patch?.data_sources)
+    if (!items.length) return []
+    return [{
+      id: dataGroupId(event),
+      title: String(event.data?.skill_step_title || (event.actor?.id === 'webpage_scrape' ? '网页即时采集' : '数据检索')),
+      toolName: displayCreationToolNames(event.actor.name || '数据检索 Tool'),
+      query: String(event.data?.query || ''),
+      items,
+    }]
+  })
+  if (groups.length || !fallback.length) return groups
+  return [{
+    id: 'data-group-history-summary',
+    title: '历史参考数据',
+    toolName: '历史汇总',
+    query: '',
+    items: fallback,
+    legacy: true,
+  }]
 }
 
 const normalizeDataReferences = (value: unknown): CreationDataReferenceItem[] => {
@@ -497,6 +838,7 @@ const mapCreationHistory = (histories: any[]): CreationHistoryItem[] => historie
     model: h.model || null,
     latencyMs: normalizeLatencyMs(h.latency_ms),
     evidence: parseHistoryJson<CreationEvidenceItem[]>(h.evidence_json, []),
+    sourceKind: h.source_kind === 'scheduled_task' ? 'scheduled_task' : 'creation',
   }
 })
 
@@ -686,14 +1028,9 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const draft = useAppStore((s) => s.creationDraft)
   const setCreationDraft = useAppStore((s) => s.setCreationDraft)
   const setWindowMode = useAppStore((s) => s.setWindowMode)
-  const setBakeTab = useAppStore((s) => s.setBakeTab)
-  const setSelectedTemplateId = useAppStore((s) => s.setSelectedTemplateId)
-  const setBakeTemplateFocusId = useAppStore((s) => s.setBakeTemplateFocusId)
-  const setBakeTemplateOffset = useAppStore((s) => s.setBakeTemplateOffset)
-  const setBakeTemplateQuery = useAppStore((s) => s.setBakeTemplateQuery)
-  const setBakeTemplateLimit = useAppStore((s) => s.setBakeTemplateLimit)
-  const pushBakeNavigationTarget = useAppStore((s) => s.pushBakeNavigationTarget)
   const creationModelConfigs = useAppStore((s) => s.creationModelConfigs)
+  const creationHistoryOpenTarget = useAppStore((s) => s.creationHistoryOpenTarget)
+  const setCreationHistoryOpenTarget = useAppStore((s) => s.setCreationHistoryOpenTarget)
   const setCreationModelConfig = useAppStore((s) => s.setCreationModelConfig)
   const userDisplayName = currentUser ? getUserDisplayName(currentUser) : '用户'
 
@@ -754,6 +1091,9 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [topTab, setTopTab] = useState<'creation' | 'history' | 'skills' | 'tools'>('creation')
   const [activeBottomTab, setActiveBottomTab] = useState<BottomTab | null>(null)
+  const [highlightedReferenceGroup, setHighlightedReferenceGroup] = useState<string | null>(null)
+  const [bottomNavigationRevision, setBottomNavigationRevision] = useState(0)
+  const [fullscreenPanel, setFullscreenPanel] = useState<FullscreenPanel>(null)
   const toggleBottomTab = (tab: BottomTab) =>
 
     setActiveBottomTab(prev => prev === tab ? null : tab)
@@ -792,7 +1132,9 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const [skillPendingDelete, setSkillPendingDelete] = useState<LocalCreationSkill | null>(null)
   const [deletingSkillId, setDeletingSkillId] = useState<number | null>(null)
   const [uploadingSkillPackage, setUploadingSkillPackage] = useState(false)
+  const [skillUploadMenuOpen, setSkillUploadMenuOpen] = useState(false)
   const [currentDocumentSkills, setCurrentDocumentSkills] = useState<LocalCreationSkill[]>([])
+  const [dismissedAutomaticSkillIds, setDismissedAutomaticSkillIds] = useState<Set<number>>(() => new Set())
   const [skillPickerOpen, setSkillPickerOpen] = useState(false)
   const [skillQuery, setSkillQuery] = useState('')
   const [activeSkillPickerIndex, setActiveSkillPickerIndex] = useState(0)
@@ -804,14 +1146,23 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const [workspaceSplit, setWorkspaceSplit] = useState(60)
   const contentRef = useRef<HTMLDivElement>(null)
   const bottomPanelRef = useRef<HTMLDivElement>(null)
+  const referencePanelRef = useRef<HTMLDivElement>(null)
+  const dataPanelRef = useRef<HTMLDivElement>(null)
+  const pendingBottomNavigationRef = useRef<{
+    tab: Extract<BottomTab, 'reference' | 'data'>
+    groupId?: string
+  } | null>(null)
   const chatTimelineRef = useRef<HTMLDivElement>(null)
   const workspaceRef = useRef<HTMLElement>(null)
   const workspaceResizeCleanupRef = useRef<(() => void) | null>(null)
+  const fullscreenTriggerRef = useRef<HTMLButtonElement | null>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const legacyDataRecoveryRef = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const skillPackageInputRef = useRef<HTMLInputElement>(null)
+  const skillZipInputRef = useRef<HTMLInputElement>(null)
+  const skillUploadMenuRef = useRef<HTMLDivElement>(null)
   const promptInputRef = useRef<HTMLTextAreaElement>(null)
   const promptSkillShellRef = useRef<HTMLDivElement>(null)
   const promptImeGuard = useImeCompositionGuard<HTMLTextAreaElement>()
@@ -827,6 +1178,24 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   )
   const memorySearchEnabled = enabledToolIds.includes('memory_search')
   const internetSearchEnabled = enabledToolIds.includes('internet_search')
+
+  useEffect(() => {
+    if (!skillUploadMenuOpen) return
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!skillUploadMenuRef.current?.contains(event.target as Node)) {
+        setSkillUploadMenuOpen(false)
+      }
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setSkillUploadMenuOpen(false)
+    }
+    document.addEventListener('mousedown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [skillUploadMenuOpen])
 
   const updateCreationTools = (
     updater: (current: typeof creationTools) => typeof creationTools,
@@ -976,26 +1345,104 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     return () => controller.abort()
   }, [loadCreationHistory])
 
-  const openBottomTab = (tab: Extract<BottomTab, 'reference' | 'data'>) => {
-    setActiveBottomTab(tab)
-    window.requestAnimationFrame(() => {
-      bottomPanelRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' })
-      bottomPanelRef.current
-        ?.querySelector<HTMLButtonElement>(`[data-bottom-tab="${tab}"]`)
-        ?.focus()
-    })
+  const openFullscreenPanel = (
+    panel: Exclude<FullscreenPanel, null>,
+    trigger: HTMLButtonElement,
+  ) => {
+    fullscreenTriggerRef.current = trigger
+    if (panel !== 'document') setActiveBottomTab(panel)
+    setFullscreenPanel(panel)
   }
 
-  const handleOpenReferenceSource = (item: Pick<ReferenceItem, 'id'>) => {
-    const templateId = String(item.id)
-    pushBakeNavigationTarget({ windowMode: 'creation' })
-    setBakeTemplateQuery('')
-    setBakeTemplateOffset(0)
-    setBakeTemplateLimit(100)
-    setBakeTemplateFocusId(templateId)
-    setBakeTab('templates')
-    setSelectedTemplateId(templateId)
-    setWindowMode('bake')
+  const closeFullscreenPanel = useCallback(() => {
+    setFullscreenPanel(null)
+    window.requestAnimationFrame(() => fullscreenTriggerRef.current?.focus())
+  }, [])
+
+  useEffect(() => {
+    if (!fullscreenPanel) return undefined
+    const previousOverflow = document.body.style.overflow
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeFullscreenPanel()
+    }
+    document.body.style.overflow = 'hidden'
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [closeFullscreenPanel, fullscreenPanel])
+
+  const openBottomTab = (
+    tab: Extract<BottomTab, 'reference' | 'data'>,
+    groupId?: string,
+  ) => {
+    pendingBottomNavigationRef.current = { tab, groupId }
+    setActiveBottomTab(tab)
+    setHighlightedReferenceGroup(groupId || null)
+    setBottomNavigationRevision(revision => revision + 1)
+  }
+
+  useEffect(() => {
+    const pending = pendingBottomNavigationRef.current
+    if (!pending || activeBottomTab !== pending.tab) return undefined
+
+    let innerFrame = 0
+    const outerFrame = window.requestAnimationFrame(() => {
+      innerFrame = window.requestAnimationFrame(() => {
+        const panel = pending.tab === 'reference' ? referencePanelRef.current : dataPanelRef.current
+        const target = pending.groupId ? document.getElementById(pending.groupId) : null
+        if (!panel || (pending.groupId && !target)) return
+
+        pendingBottomNavigationRef.current = null
+        bottomPanelRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+        panel.scrollTop = 0
+        target?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+        if (target) {
+          target.focus({ preventScroll: true })
+          window.setTimeout(() => {
+            setHighlightedReferenceGroup(current => current === pending.groupId ? null : current)
+          }, 1800)
+        } else {
+          bottomPanelRef.current
+            ?.querySelector<HTMLButtonElement>(`[data-bottom-tab="${pending.tab}"]`)
+            ?.focus({ preventScroll: true })
+        }
+      })
+    })
+
+    return () => {
+      window.cancelAnimationFrame(outerFrame)
+      if (innerFrame) window.cancelAnimationFrame(innerFrame)
+    }
+  }, [activeBottomTab, agentEvents, bottomNavigationRevision, dataReferences])
+
+  const handleOpenReferenceSource = (item: ReferenceItem) => {
+    const sourceType = String(item.source_type || 'document')
+    const sourceId = Number(item.source_id ?? item.id)
+    if (!Number.isFinite(sourceId) || sourceId <= 0) {
+      if (item.source_url) window.open(item.source_url, '_blank', 'noopener,noreferrer')
+      return
+    }
+    const internalType = sourceType === 'knowledge'
+      ? 'bake_knowledge'
+      : sourceType === 'pending_document'
+        ? 'capture'
+        : sourceType
+    if (!['document', 'bake_knowledge', 'operation', 'action', 'capture'].includes(internalType)) {
+      if (item.source_url) window.open(item.source_url, '_blank', 'noopener,noreferrer')
+      return
+    }
+    window.dispatchEvent(new CustomEvent('view-rag-reference', {
+      detail: {
+        type: internalType,
+        artifactId: ['bake_knowledge', 'operation', 'action'].includes(internalType)
+          ? sourceId
+          : undefined,
+        documentId: internalType === 'document' ? sourceId : undefined,
+        captureId: internalType === 'capture' ? sourceId : undefined,
+      },
+    }))
   }
 
   useEffect(() => {
@@ -1134,9 +1581,39 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       docType: item.docType || docType,
     })
     if (contentRef.current) {
-      setTimeout(() => contentRef.current?.scrollTo({ top: 0, behavior: 'smooth' }), 100)
+      setTimeout(() => contentRef.current?.scrollTo?.({ top: 0, behavior: 'smooth' }), 100)
     }
   }
+
+  // 任务页点击「查看执行过程」后，拉取单条创作记录并恢复会话与执行流水。
+  // 注意：清空目标会重新触发本 effect，不能用 cleanup 取消进行中的请求，
+  // 改用 ref 防止同一个目标被重复消费（含 StrictMode 双调用）。
+  const consumedHistoryTargetRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (creationHistoryOpenTarget == null) {
+      // 目标被清空后重置消费标记，允许之后再次跳转同一条记录。
+      consumedHistoryTargetRef.current = null
+      return
+    }
+    if (consumedHistoryTargetRef.current === creationHistoryOpenTarget) return
+    consumedHistoryTargetRef.current = creationHistoryOpenTarget
+    const targetId = creationHistoryOpenTarget
+    setCreationHistoryOpenTarget(null)
+    fetch(`${apiBaseUrl}/api/creation/history/${targetId}`)
+      .then(async res => {
+        if (!res.ok) throw new Error('创作记录不存在')
+        return res.json()
+      })
+      .then(raw => {
+        const [item] = mapCreationHistory([raw])
+        if (!item) return
+        handleRestoreHistory(item)
+        setTopTab('creation')
+      })
+      .catch(() => {
+        // 记录已被删除或接口不可用时保持当前页面不变。
+      })
+  }, [apiBaseUrl, creationHistoryOpenTarget, setCreationHistoryOpenTarget])
 
   const loadLocalSkills = useCallback(async () => {
     setSkillsLoading(true)
@@ -1218,13 +1695,32 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     setUploadingSkillPackage(true)
     setSkillsError('')
     try {
-      const input = await importCodexSkillPackage(files)
+      const input = await importAgentSkillPackage(files)
       const saved = await saveLocalCreationSkill(apiBaseUrl, input)
       handleSkillSaved(saved)
       setSkillLibraryView('mine')
       showLocalSkillDetail(saved)
     } catch (err) {
-      setSkillsError(toLocalApiError(err, '上传技能包失败'))
+      setSkillsError(toLocalApiError(err, '上传 Skill 源文件失败'))
+    } finally {
+      setUploadingSkillPackage(false)
+    }
+  }
+
+  const handleSkillZipSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const archive = event.target.files?.[0]
+    event.target.value = ''
+    if (!archive) return
+    setUploadingSkillPackage(true)
+    setSkillsError('')
+    try {
+      const input = await importAgentSkillZip(archive)
+      const saved = await saveLocalCreationSkill(apiBaseUrl, input)
+      handleSkillSaved(saved)
+      setSkillLibraryView('mine')
+      showLocalSkillDetail(saved)
+    } catch (err) {
+      setSkillsError(toLocalApiError(err, '上传 Skill 源文件 ZIP 失败'))
     } finally {
       setUploadingSkillPackage(false)
     }
@@ -1282,7 +1778,10 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     const existing = localSkills.find(skill => skill.cloudSkillId === marketSkill.id)
     const installing = !existing?.installed
     try {
-      const marketInput = marketCreationSkillToLocalInput(marketSkill)
+      const completeMarketSkill = marketSkill.packageFiles.length > 0
+        ? marketSkill
+        : await fetchCreationSkillMarketDetail(adminApiBaseUrl, marketSkill.id)
+      const marketInput = marketCreationSkillToLocalInput(completeMarketSkill)
       let input = marketInput
       if (existing) {
         const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...existingInput } = existing
@@ -1316,13 +1815,22 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     setSkillDetailFocusFiles(focusFiles)
   }
 
-  const showMarketSkillDetail = (skill: CreationSkillMarketItem, focusFiles = false) => {
+  const showMarketSkillDetail = async (skill: CreationSkillMarketItem, focusFiles = false) => {
     const installed = localSkills.some(item =>
       item.cloudSkillId === skill.id && item.installed,
     )
     setSkillDetailMarketItem(skill)
     setSkillDetail(marketSkillDetail(skill, installed))
     setSkillDetailFocusFiles(focusFiles)
+    if (skill.packageFiles.length > 0) return
+    try {
+      const detail = await fetchCreationSkillMarketDetail(adminApiBaseUrl, skill.id)
+      setSkillDetailMarketItem(detail)
+      setSkillDetail(current => current?.id === skill.id ? marketSkillDetail(detail, installed) : current)
+      setMarketSkills(current => current.map(item => item.id === detail.id ? detail : item))
+    } catch (err) {
+      setMarketError(toUserFacingError(err, 'Skill 源文件加载失败'))
+    }
   }
 
   const closeSkillDetail = useCallback(() => {
@@ -1384,10 +1892,33 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     () => creationSkillCategoryOptions(marketCategories),
     [marketCategories],
   )
-  const matchedSkills = useMemo(
+  const rawMatchedSkills = useMemo(
     () => matchCreationSkills(prompt, installedSkills),
     [installedSkills, prompt],
   )
+  const matchedSkills = useMemo(
+    () => rawMatchedSkills.filter(match => (
+      match.reason === 'mentioned' || !dismissedAutomaticSkillIds.has(match.skill.id)
+    )),
+    [dismissedAutomaticSkillIds, rawMatchedSkills],
+  )
+
+  useEffect(() => {
+    const activeAutomaticIds = new Set(
+      rawMatchedSkills
+        .filter(match => match.reason === 'automatic')
+        .map(match => match.skill.id),
+    )
+    setDismissedAutomaticSkillIds(current => {
+      const next = new Set([...current].filter(id => activeAutomaticIds.has(id)))
+      if (next.size === current.size && [...next].every(id => current.has(id))) return current
+      return next
+    })
+  }, [rawMatchedSkills])
+
+  const dismissAutomaticSkill = (skillId: number) => {
+    setDismissedAutomaticSkillIds(current => new Set(current).add(skillId))
+  }
   const skillPickerItems = useMemo(() => {
     const query = skillQuery.trim().toLowerCase()
     return installedSkills
@@ -1691,27 +2222,39 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     return finalContent
   }
 
-  const selectedSkillPayload = () => resolveCreationSkillDependencies(
-    matchedSkills.map(({ skill }) => skill),
-    localSkills,
-  ).map(skill => ({
-    id: skill.clientSkillKey || String(skill.id),
-    title: skill.title,
-    summary: skill.summary,
-    skillDescription: skill.skillDescription,
-    executionSteps: skill.executionSteps,
-    titleDesignStyle: skill.commonTitles,
-    writingDesign: skill.textStyle,
-    imageGeneration: skill.diagramStyle,
-    voiceStyle: skill.writingGuidelines,
-    fieldExamples: {
-      titleDesignStyle: skill.fieldExamples.commonTitles,
-      writingDesign: skill.fieldExamples.textStyle,
-      imageGeneration: skill.fieldExamples.diagramStyle,
-      voiceStyle: skill.fieldExamples.writingGuidelines,
-    },
-    exampleDocument: skill.exampleDocument,
-  }))
+  const selectedSkillPayload = () => {
+    const primarySkillIds = new Set(matchedSkills.map(({ skill }) => skill.id))
+    return resolveCreationSkillDependencies(
+      matchedSkills.map(({ skill }) => skill),
+      localSkills,
+    ).map(skill => {
+      const skillMarkdown = codexSkillPackageFiles(skill)
+        .find(file => file.path === 'SKILL.md')
+      return {
+        id: skill.clientSkillKey || String(skill.id),
+        title: skill.title,
+        summary: skill.summary,
+        // 依赖 Skill 只向引用它的步骤提供能力与规则，不能展开自己的整套工作流。
+        workflowRole: primarySkillIds.has(skill.id) ? 'primary' : 'support',
+        skillDescription: skill.skillDescription,
+        executionSteps: skill.executionSteps,
+        skillInstructions: skillMarkdown ? skillFileText(skillMarkdown) || '' : '',
+        strictStructure: true,
+        titleDesignStyle: skill.commonTitles,
+        writingDesign: skill.textStyle,
+        imageGeneration: skill.diagramStyle,
+        voiceStyle: skill.writingGuidelines,
+        fieldExamples: {
+          titleDesignStyle: skill.fieldExamples.commonTitles,
+          writingDesign: skill.fieldExamples.textStyle,
+          imageGeneration: skill.fieldExamples.diagramStyle,
+          voiceStyle: skill.fieldExamples.writingGuidelines,
+        },
+        // 完整示例只供 Skill 编辑与预览，运行时不发送，避免示例章节污染成稿。
+        exampleDocumentAvailable: Boolean(skill.exampleDocument.trim()),
+      }
+    })
+  }
 
   const buildAgentPayload = (
     message: string,
@@ -1768,6 +2311,24 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
         data: { request_id: event.data?.request_id },
       }
     }
+    if (event.type === 'thinking.started' || event.type === 'thinking.completed') {
+      // 深度思考的阶段与推理摘要是历史记录里展示思考内容的依据，必须保留
+      return {
+        ...base,
+        data: { stage: event.data?.stage, reasoning: event.data?.reasoning },
+      }
+    }
+    if (event.type === 'phase.started' || event.type === 'phase.completed') {
+      // 阶段信息是历史记录里三层执行结构的依据，必须保留
+      return {
+        ...base,
+        data: {
+          phase_id: event.data?.phase_id,
+          phase_title: event.data?.phase_title,
+          phase_kind: event.data?.phase_kind,
+        },
+      }
+    }
     if (event.type === 'run.paused') {
       return {
         ...base,
@@ -1818,6 +2379,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
             status: item.status,
             browser: item.browser,
             interaction_mode: item.interaction_mode,
+            focus_policy: item.focus_policy,
+            focus_takeover_count: Number(item.focus_takeover_count || 0),
           }))
         : []
       return { ...base, data: { previews } }
@@ -1826,14 +2389,31 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       const dataSources = isDataReferenceEvent(event)
         ? normalizeDataReferences(event.environment_patch?.data_sources)
         : []
+      // memory_search 额外保留查询与召回明细，便于事后追溯"某条知识为何没进成稿"
+      const isMemorySearch = event.actor?.id === 'memory_search'
+      const memoryReferences = isMemorySearch
+        ? normalizeReferenceItems(event.environment_patch?.references)
+        : []
       return {
         ...base,
-        environment_patch: dataSources.length > 0 ? { data_sources: dataSources } : {},
+        environment_patch: {
+          ...(dataSources.length > 0 ? { data_sources: dataSources } : {}),
+          ...(memoryReferences.length > 0 ? { references: memoryReferences } : {}),
+        },
         data: {
           result_count: event.data?.result_count,
           refresh_required_count: event.data?.refresh_required_count,
           diagram_type: event.data?.diagram_type,
           error_code: event.data?.error_code,
+          ...(isMemorySearch ? {
+            result_limit: event.data?.result_limit,
+            source_counts: event.data?.source_counts,
+            reference_ids: event.data?.reference_ids,
+            query: event.data?.query,
+            keywords: event.data?.keywords,
+            skill_step_id: event.data?.skill_step_id,
+            skill_step_title: event.data?.skill_step_title,
+          } : {}),
         },
       }
     }
@@ -1982,6 +2562,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     if (event.type === 'tool.completed' && event.actor?.id === 'memory_search') {
       const items = event.environment_patch?.references
       if (Array.isArray(items)) {
+        const batchReferences = normalizeReferenceItems(items)
+        const currentReferences = useAppStore.getState().creationDraft.referencePreview?.references || []
         setReferencePreview({
           requirement: {
             topic: messageWithAttachments(activeUserMessageRef.current),
@@ -1990,22 +2572,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
             style: '',
             keywords: [],
           },
-          references: items.map((item: any) => ({
-            id: Number(item.id),
-            title: String(item.title || '本地参考资料'),
-            doc_type: String(item.doc_type || ''),
-            final_weight: Number(item.final_weight || 0),
-            relevance_score: Number(item.relevance_score || 0),
-            quality_score: Number(item.quality_score || 0),
-            completeness_score: Number(item.completeness_score || 0),
-            usage_score: Number(item.usage_score || 0),
-            format_score: Number(item.format_score || 0),
-            freshness_score: Number(item.freshness_score || 0),
-            usage_count: Number(item.usage_count || 0),
-            reason: String(item.reason || ''),
-            summary: String(item.summary || ''),
-            source_url: item.source_url ? String(item.source_url) : undefined,
-          })),
+          references: mergeReferenceItems(currentReferences, batchReferences),
         })
       }
     }
@@ -2449,6 +3016,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     setAttachmentError(null)
     setCurrentDocumentSource(null)
     setCurrentDocumentSkills([])
+    setDismissedAutomaticSkillIds(new Set())
     setPendingConfirmation(null)
     setSkillPickerOpen(false)
     setSkillQuery('')
@@ -2495,16 +3063,17 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const latestRunIsInitialCreation = (
     intentOperationForRun(latestRunEvents, latestAgentRunId) === 'create_document'
   )
-  const canDisplayLatestMutation = latestRunCompleted
-    || (!isGenerating && !latestRunHasLifecycle)
-  // 首版创作 run 内的润色 patch 也展示局部改动；仅排除首版的整篇 document.replaced。
+  const canDisplayLatestMutation = !latestRunIsInitialCreation && (
+    latestRunCompleted || (!isGenerating && !latestRunHasLifecycle)
+  )
+  // 首次用户指令对应的整个 create_document run 都属于首版创作；其中的
+  // 润色和局部 patch 只是内部生成过程，只有后续用户修订才展示“本轮改动”。
   const latestDocumentMutation = canDisplayLatestMutation
     ? [...agentEvents]
       .reverse()
       .find(item => (
         ['document.patch.applied', 'document.replaced'].includes(item.type)
         && (!latestAgentRunId || item.run_id === latestAgentRunId)
-        && !(latestRunIsInitialCreation && item.type === 'document.replaced')
       ))
     : undefined
   const latestDocumentPatch = latestDocumentMutation?.type === 'document.patch.applied'
@@ -2523,11 +3092,17 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     .find(message => message.role === 'user')
     ?.content
   const creationTimeline = buildCreationTimeline(conversation, agentEvents)
+  const referenceGroups = referenceGroupsFromEvents(
+    agentEvents,
+    referencePreview?.references || [],
+  )
+  const dataReferenceGroups = dataGroupsFromEvents(agentEvents, dataReferences)
 
   const handleReferenceClick = (refId: string) => {
     const normalizedId = Number(refId)
     if (!Number.isFinite(normalizedId) || normalizedId <= 0) return
-    handleOpenReferenceSource({ id: normalizedId })
+    const reference = referencePreview?.references.find(item => item.id === normalizedId)
+    if (reference) handleOpenReferenceSource(reference)
   }
 
   const headingId = (node: any) =>
@@ -2612,29 +3187,31 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       {/* 顶部 Tab 栏 */}
       <div className="creation-top-tabs" style={{ display: 'flex', borderBottom: '1px solid #e1e5ea', background: '#fff', padding: '0 22px', flexShrink: 0 }}>
         {(['creation', 'history', 'skills', 'tools'] as const).map((tab) => (
-          <button
-            key={tab}
-            onClick={() => setTopTab(tab)}
-            style={{
-              padding: '12px 16px',
-              border: 'none',
-              borderBottom: topTab === tab ? '2px solid #a45d22' : '2px solid transparent',
-              background: 'none',
-              color: topTab === tab ? '#a45d22' : '#667085',
-              fontWeight: topTab === tab ? 650 : 400,
-              fontSize: 14,
-              cursor: 'pointer',
-              marginBottom: -1,
-            }}
-          >
-            {tab === 'creation'
-              ? '创作'
-              : tab === 'history'
-                ? `创作记录${historyTotal ? ` (${historyTotal})` : ''}`
-                : tab === 'skills'
-                  ? `技能${localSkills.length ? ` (${localSkills.length})` : ''}`
-                  : `工具 (${enabledToolIds.length})`}
-          </button>
+          <React.Fragment key={tab}>
+            <button
+              onClick={() => setTopTab(tab)}
+              style={{
+                padding: '12px 16px',
+                border: 'none',
+                borderBottom: topTab === tab ? '2px solid #a45d22' : '2px solid transparent',
+                background: 'none',
+                color: topTab === tab ? '#a45d22' : '#667085',
+                fontWeight: topTab === tab ? 650 : 400,
+                fontSize: 14,
+                cursor: 'pointer',
+                marginBottom: -1,
+              }}
+            >
+              {tab === 'creation'
+                ? '创作'
+                : tab === 'history'
+                  ? `创作记录${historyTotal ? ` (${historyTotal})` : ''}`
+                  : tab === 'skills'
+                    ? `技能${localSkills.length ? ` (${localSkills.length})` : ''}`
+                    : `工具 (${enabledToolIds.length})`}
+            </button>
+            {tab === 'creation' && <TutorialLink url={TUTORIAL_URLS.creation} />}
+          </React.Fragment>
         ))}
       </div>
 
@@ -2667,6 +3244,12 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                     >
                       <span className="creation-history__title">{item.prompt}</span>
                       <span className="creation-history__meta">
+                        {item.sourceKind === 'scheduled_task' && (
+                          <span style={{
+                            fontSize: 11, padding: '0 6px', borderRadius: 4, marginRight: 6,
+                            background: 'rgba(88,86,214,0.1)', color: '#5856D6',
+                          }}>定时任务</span>
+                        )}
                         完整会话 · {item.timestamp} · 模型：{getModelDisplayName(item.model)} · 推理耗时：{formatInferenceLatency(item.latencyMs)}
                       </span>
                       <span className="creation-history__preview">{item.preview}</span>
@@ -2729,20 +3312,52 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                     className="creation-skill-package-input"
                     type="file"
                     multiple
+                    aria-label="选择 Skill 源文件夹"
                     onChange={handleSkillPackageSelected}
                     {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
                   />
-                  <button
-                    type="button"
-                    onClick={() => skillPackageInputRef.current?.click()}
-                    disabled={uploadingSkillPackage}
-                    title="选择一个包含根目录 SKILL.md 的 Codex 技能文件夹"
-                  >
-                    {uploadingSkillPackage
-                      ? <Loader2 className="spin" size={14} />
-                      : <Upload size={14} />}
-                    {uploadingSkillPackage ? '正在上传…' : '上传技能包'}
-                  </button>
+                  <input
+                    ref={skillZipInputRef}
+                    className="creation-skill-package-input"
+                    type="file"
+                    accept=".zip,application/zip"
+                    aria-label="选择 Skill 源文件 ZIP"
+                    onChange={handleSkillZipSelected}
+                  />
+                  <div className="creation-skill-upload" ref={skillUploadMenuRef}>
+                    <button
+                      type="button"
+                      onClick={() => setSkillUploadMenuOpen(open => !open)}
+                      disabled={uploadingSkillPackage}
+                      aria-haspopup="menu"
+                      aria-expanded={skillUploadMenuOpen}
+                      title="上传包含根目录 SKILL.md 的文件夹或 ZIP"
+                    >
+                      {uploadingSkillPackage
+                        ? <Loader2 className="spin" size={14} />
+                        : <Upload size={14} />}
+                      {uploadingSkillPackage ? '正在上传…' : '上传'}
+                      {!uploadingSkillPackage && <ChevronDown size={13} />}
+                    </button>
+                    {skillUploadMenuOpen && (
+                      <div className="creation-skill-upload__menu" role="menu" aria-label="上传 Skill 源文件">
+                        <button type="button" role="menuitem" onClick={() => {
+                          setSkillUploadMenuOpen(false)
+                          skillPackageInputRef.current?.click()
+                        }}>
+                          <Library size={14} />
+                          <span><strong>选择文件夹</strong><small>包含根目录 SKILL.md</small></span>
+                        </button>
+                        <button type="button" role="menuitem" onClick={() => {
+                          setSkillUploadMenuOpen(false)
+                          skillZipInputRef.current?.click()
+                        }}>
+                          <PackagePlus size={14} />
+                          <span><strong>选择 ZIP 文件</strong><small>Codex / Claude Code 兼容</small></span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </>
               )}
               <button
@@ -2788,7 +3403,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
               {skillsLoading && localSkills.length === 0 ? (
                 <div className="history-browser__state"><Loader2 className="spin" size={17} /> 正在加载技能…</div>
               ) : localSkills.length === 0 ? (
-                <div className="creation-skill-library__empty"><Library size={32} /><strong>还没有技能</strong><span>可以手工新建、上传 Codex 技能包，或去市场安装一份。</span><div className="creation-skill-library__empty-actions"><button type="button" onClick={() => setSkillEditor({})}>新建技能</button><button type="button" onClick={() => setSkillLibraryView('market')}>浏览技能市场</button></div></div>
+                <div className="creation-skill-library__empty"><Library size={32} /><strong>还没有技能</strong><span>可以手工新建、上传 Skill 源文件，或去市场安装一份。</span><div className="creation-skill-library__empty-actions"><button type="button" onClick={() => setSkillEditor({})}>新建技能</button><button type="button" onClick={() => setSkillLibraryView('market')}>浏览技能市场</button></div></div>
               ) : (
                 <div className="creation-skill-library__grid">
                   {localSkills.map(skill => {
@@ -2798,30 +3413,30 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                       ? '来自市场'
                       : imported
                         ? '手工上传'
-                        : skill.sourceKind === 'manual'
-                          ? null
-                          : skill.published
-                            ? '已发布'
-                            : skill.status === 'draft'
-                              ? '草稿'
-                              : '已保存'
+                        : skill.published
+                          ? '已发布'
+                          : skill.status === 'draft'
+                            ? '草稿'
+                            : null
                     return (
                       <article key={skill.id}>
-                        <div className="creation-skill-library__status-row">
-                          {sourceStatus && <div className="creation-skill-library__status">{sourceStatus}</div>}
-                          <span className={skill.installed ? 'is-installed' : ''}>{skill.installed ? '已安装' : '未安装'}</span>
+                        <div className="creation-skill-library__title-row">
+                          <button
+                            type="button"
+                            className="creation-skill-library__title"
+                            onClick={() => showLocalSkillDetail(skill)}
+                          >
+                            {skill.title}
+                          </button>
+                          <div className="creation-skill-library__title-status">
+                            {sourceStatus && <span className="creation-skill-library__status">{sourceStatus}</span>}
+                            <span className={skill.installed ? 'is-installed' : ''}>{skill.installed ? '已安装' : '未安装'}</span>
+                          </div>
                         </div>
-                        <button
-                          type="button"
-                          className="creation-skill-library__title"
-                          onClick={() => showLocalSkillDetail(skill)}
-                        >
-                          {skill.title}
-                        </button>
                         <p>{skill.summary}</p>
                         <div className="creation-skill-library__meta">
                           {imported
-                            ? `${skill.packageFiles?.length || 0} 个文件 · Codex 兼容`
+                            ? `${skill.packageFiles?.length || 0} 个文件 · Codex / Claude Code 兼容`
                             : `${skill.executionSteps.length} 个步骤 · ${skill.commonTitles.length} 个标题规则`}
                         </div>
                         <footer className={fromMarket ? 'is-compact' : ''}>
@@ -2841,7 +3456,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                           <button
                             type="button"
                             onClick={() => showLocalSkillDetail(skill, true)}
-                            title="查看这份技能的源文件"
+                            title="查看并下载 Skill 源文件"
                           >
                             <FileCode2 size={14} /> 源文件
                           </button>
@@ -2923,7 +3538,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                             <button
                               type="button"
                               onClick={() => showMarketSkillDetail(skill, true)}
-                              title="查看这份技能的源文件"
+                              title="查看并下载 Skill 源文件"
                             >
                               <FileCode2 size={14} /> 源文件
                             </button>
@@ -3163,10 +3778,30 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
               <div className="creation-matched-skills" aria-label="本次使用的技能">
                 <span>本次将使用</span>
                 {matchedSkills.map(match => (
-                  <button type="button" key={match.skill.id} onClick={() => showLocalSkillDetail(match.skill)}>
-                    <Sparkles size={13} /> {match.skill.title}
-                    <small>{match.reason === 'mentioned' ? '@ 已选择' : '自动匹配'}</small>
-                  </button>
+                  <span className="creation-matched-skill" key={match.skill.id}>
+                    <button
+                      type="button"
+                      className="creation-matched-skill__detail"
+                      onClick={() => showLocalSkillDetail(match.skill)}
+                      aria-label={`查看技能：${match.skill.title}`}
+                    >
+                      <Sparkles size={13} />
+                      <span>{match.skill.title}</span>
+                      <small>{match.reason === 'mentioned' ? '@ 已选择' : '自动匹配'}</small>
+                    </button>
+                    {match.reason === 'automatic' && (
+                      <button
+                        type="button"
+                        className="creation-matched-skill__dismiss"
+                        onClick={() => dismissAutomaticSkill(match.skill.id)}
+                        disabled={isGenerating}
+                        aria-label={`取消自动匹配：${match.skill.title}`}
+                        title="本次不使用此技能"
+                      >
+                        <X size={12} aria-hidden="true" />
+                      </button>
+                    )}
+                  </span>
                 ))}
               </div>
             )}
@@ -3257,7 +3892,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
             <span className="creation-workspace-divider__handle" aria-hidden="true" />
           </div>
 
-          <section className="creation-document-section" aria-label="生成内容" style={{ flex: 1, minHeight: 0, overflow: 'hidden', padding: 22 }}>
+          <section className={`creation-document-section${fullscreenPanel === 'document' ? ' creation-panel-fullscreen' : ''}`} aria-label="生成内容" style={{ flex: 1, minHeight: 0, overflow: 'hidden', padding: 22 }}>
             <div className="creation-document-card" style={{ height: '100%', border: '1px solid #e1e5ea', borderRadius: 8, background: '#fff', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
               <div className="creation-document-header" style={{ height: 48, padding: '0 16px', borderBottom: '1px solid #e1e5ea', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
                 <span style={{ fontSize: 14, fontWeight: 650 }}>
@@ -3280,6 +3915,18 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                       中止
                     </button>
                   )}
+                  <button
+                    type="button"
+                    onClick={(event) => fullscreenPanel === 'document'
+                      ? closeFullscreenPanel()
+                      : openFullscreenPanel('document', event.currentTarget)}
+                    style={compactButtonStyle}
+                    aria-label={fullscreenPanel === 'document' ? '退出文档全屏' : '全屏查看文档'}
+                    title={fullscreenPanel === 'document' ? '退出全屏（Esc）' : '全屏查看文档'}
+                  >
+                    {fullscreenPanel === 'document' ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+                    {fullscreenPanel === 'document' ? '退出全屏' : '全屏'}
+                  </button>
                   <button onClick={handleCopy} disabled={!generatedContent} style={compactButtonStyle}>
                     <Copy size={15} />
                     {copySuccess ? '已复制' : '复制'}
@@ -3374,20 +4021,63 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                 </button>
               ))}
               {activeBottomTab && (
-                <button
+                <>
+                  {activeBottomTab !== 'config' && (
+                    <button
+                      type="button"
+                      className="creation-bottom-fullscreen-button"
+                      onClick={(event) => openFullscreenPanel(activeBottomTab, event.currentTarget)}
+                      aria-label={`全屏查看${activeBottomTab === 'reference' ? '参考资料' : '参考数据'}`}
+                      title="全屏查看"
+                    >
+                      <Maximize2 size={14} /> 全屏
+                    </button>
+                  )}
+                  <button
                   onClick={() => setActiveBottomTab(null)}
                   style={{ marginLeft: 'auto', padding: '4px 10px', border: '1px solid #e1e5ea', borderRadius: 5, background: '#f3f4f6', color: '#6b7280', fontSize: 12, cursor: 'pointer' }}
                 >
                   收起
-                </button>
+                  </button>
+                </>
               )}
             </div>
             {activeBottomTab === 'reference' && (
-              <div id="creation-bottom-panel-reference" role="tabpanel" aria-label="参考资料" style={{ padding: 16, maxHeight: 280, overflowY: 'auto', background: '#fafbfc', borderTop: '1px solid #e1e5ea' }}>
-                {referencePreview?.references?.length ? (
-                  <div style={{ display: 'grid', gap: 10 }}>
-                    {referencePreview.references.map((ref: any) => (
-                      <ReferenceRow key={ref.id} item={ref} onOpenSource={handleOpenReferenceSource} />
+              <div ref={referencePanelRef} id="creation-bottom-panel-reference" role="tabpanel" aria-label="参考资料" className={fullscreenPanel === 'reference' ? 'creation-panel-fullscreen creation-reference-fullscreen' : ''} style={{ padding: 16, maxHeight: fullscreenPanel === 'reference' ? 'none' : 280, overflowY: 'auto', background: '#fafbfc', borderTop: '1px solid #e1e5ea' }}>
+                {fullscreenPanel === 'reference' && (
+                  <header className="creation-panel-fullscreen__header">
+                    <strong>参考资料</strong>
+                    <button type="button" onClick={closeFullscreenPanel} aria-label="退出参考资料全屏"><Minimize2 size={15} /> 退出全屏</button>
+                  </header>
+                )}
+                {referenceGroups.length ? (
+                  <div className="creation-reference-groups">
+                    {referenceGroups.map(group => (
+                      <section
+                        id={group.id}
+                        key={group.id}
+                        tabIndex={-1}
+                        className={`creation-reference-group${highlightedReferenceGroup === group.id ? ' is-highlighted' : ''}`}
+                        aria-label={`${group.title}参考资料组`}
+                      >
+                        <header className="creation-reference-group__header">
+                          <div>
+                            <strong>{group.title}</strong>
+                            <span>{group.toolName} · {group.items.length} 条</span>
+                          </div>
+                          {group.legacy && <small>历史汇总</small>}
+                        </header>
+                        {group.query && <p className="creation-reference-group__query">{group.query}</p>}
+                        <div className="creation-reference-group__items">
+                          {group.items.map((ref, index) => (
+                            <ReferenceRow
+                              key={`${ref.source_type || 'document'}-${ref.source_id ?? ref.id}-${index}`}
+                              item={ref}
+                              onOpenSource={handleOpenReferenceSource}
+                            />
+                          ))}
+                        </div>
+                      </section>
                     ))}
                   </div>
                 ) : (
@@ -3396,7 +4086,13 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
               </div>
             )}
             {activeBottomTab === 'data' && (
-              <div id="creation-bottom-panel-data" role="tabpanel" aria-label="参考数据" className="creation-data-references">
+              <div ref={dataPanelRef} id="creation-bottom-panel-data" role="tabpanel" aria-label="参考数据" className={`creation-data-references${fullscreenPanel === 'data' ? ' creation-panel-fullscreen' : ''}`}>
+                {fullscreenPanel === 'data' && (
+                  <header className="creation-panel-fullscreen__header">
+                    <strong>参考数据</strong>
+                    <button type="button" onClick={closeFullscreenPanel} aria-label="退出参考数据全屏"><Minimize2 size={15} /> 退出全屏</button>
+                  </header>
+                )}
                 {dataReferencesLoading && (
                   <div className="creation-data-reference-notice" role="status">
                     <Loader2 size={14} className="spin" /> 正在加载参考数据详情…
@@ -3410,15 +4106,35 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                 {dataReferencesError && (
                   <div className="creation-data-reference-error" role="alert">{dataReferencesError}</div>
                 )}
-                {dataReferences.length ? (
-                  <div className="creation-data-reference-list">
-                    {dataReferences.map(item => (
-                      <DataReferenceRow
-                        key={item.source_id}
-                        item={item}
-                        source={dataSourcesById[item.source_id]}
-                        loading={dataReferencesLoading && !dataSourcesById[item.source_id]}
-                      />
+                {dataReferenceGroups.length ? (
+                  <div className="creation-reference-groups creation-data-reference-list">
+                    {dataReferenceGroups.map(group => (
+                      <section
+                        id={group.id}
+                        key={group.id}
+                        tabIndex={-1}
+                        className={`creation-reference-group${highlightedReferenceGroup === group.id ? ' is-highlighted' : ''}`}
+                        aria-label={`${group.title}参考数据组`}
+                      >
+                        <header className="creation-reference-group__header">
+                          <div>
+                            <strong>{group.title}</strong>
+                            <span>{group.toolName} · {group.items.length} 个来源</span>
+                          </div>
+                          {group.legacy && <small>历史汇总</small>}
+                        </header>
+                        {group.query && <p className="creation-reference-group__query">{group.query}</p>}
+                        <div className="creation-reference-group__items">
+                          {group.items.map((item, index) => (
+                            <DataReferenceRow
+                              key={`${item.source_id}-${index}`}
+                              item={item}
+                              source={dataSourcesById[item.source_id]}
+                              loading={dataReferencesLoading && !dataSourcesById[item.source_id]}
+                            />
+                          ))}
+                        </div>
+                      </section>
                     ))}
                   </div>
                 ) : !dataReferencesLoading && (
@@ -3533,14 +4249,25 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   )
 }
 
+const displayCreationToolNames = (value: unknown) =>
+  String(value || '').replace(
+    /(互联网检索|记忆搜索|数据检索|网页爬取|PlantUML 画图|GitHub 检索) Tool/g,
+    '$1',
+  )
+
 const displayAgentName = (event: CreationAgentEvent) => {
   if (event.actor?.id === 'creation_main_agent') return '创作 Agent'
-  return String(event.actor?.name || '创作 Agent').replace(/创作主 Agent/g, '创作 Agent')
+  return displayCreationToolNames(event.actor?.name || '创作 Agent')
+    .replace(/创作主 Agent/g, '创作 Agent')
 }
 
 const displayAgentText = (value: unknown) =>
-  String(value || '')
+  displayCreationToolNames(value)
     .replace(/创作主 Agent/g, '创作 Agent')
+    // 历史记录里“创作 Agent · 标题”类摘要改写为动作描述，与后端新措辞对齐
+    .replace(/创作 Agent · ([^\n，。]+?) 开始执行/g, '正在生成「$1」内容')
+    .replace(/创作 Agent · ([^\n，。]+?) 已完成，并把结果写回创作环境/g, '已生成「$1」内容，并把结果写回创作文档')
+    .replace(/创作 Agent · ([^\n，。]+?) 已完成当前 Skill 步骤/g, '已生成「$1」内容，并把结果写回创作文档')
     .replace(/质检通过，Harness 结束本轮优化循环/g, '质量检查通过')
     .replace(/已达到质检循环上限，Harness 保留剩余问题供用户复核/g, '已达到自动优化上限，剩余问题需要人工复核')
     .replace(/Harness 根据 [^\n，。]+反馈追加[:：][^\n]*/g, '已根据反馈补充后续处理')
@@ -3592,18 +4319,83 @@ const qualityIssueLabels: Record<string, string> = {
 const agentEventCapabilityLabel = (value: unknown) =>
   agentEventCapabilityLabels.get(String(value || '')) || '其他处理步骤'
 
+const CREATION_THINKING_STAGE_LABELS: Record<string, string> = {
+  intent: '理解本轮要求',
+  routing: '决定执行链路',
+  generation: '生成文档内容',
+  planning: '规划下一步',
+}
+
 const AgentExecutionTrace = ({
   events,
   onOpenReferences,
 }: {
   events: CreationAgentEvent[]
-  onOpenReferences: (tab: Extract<BottomTab, 'reference' | 'data'>) => void
+  onOpenReferences: (
+    tab: Extract<BottomTab, 'reference' | 'data'>,
+    groupId?: string,
+  ) => void
 }) => {
   const [expanded, setExpanded] = useState(true)
+  const [openBlocks, setOpenBlocks] = useState<Record<string, boolean>>({})
   if (!events.length) return null
   const latestGoal = [...events].reverse().find(event => event.goal)?.goal
-  const displayEvents = collapseAgentLifecycleEvents(events)
-  const eventGroups = groupConsecutiveAgentEvents(displayEvents)
+  const segments = segmentAgentTrace(events)
+  type RenderThinkingSegment = TraceThinkingSegment & { innerGroups: AgentEventGroup[] }
+  type RenderPhaseSegment = TracePhaseSegment & {
+    innerSegments: Array<TraceStepSegment | RenderThinkingSegment>
+  }
+  type RenderSegment = TraceStepSegment | RenderThinkingSegment | RenderPhaseSegment
+  const toRenderThinking = (segment: TraceThinkingSegment): RenderThinkingSegment => ({
+    ...segment,
+    innerGroups: groupConsecutiveAgentEvents(segment.innerEvents),
+  })
+  const renderSegments: RenderSegment[] = segments.map((segment) => {
+    if (segment.kind === 'step') return segment
+    if (segment.kind === 'thinking') return toRenderThinking(segment)
+    return {
+      ...segment,
+      innerSegments: segment.segments.map((inner) => (
+        inner.kind === 'thinking' ? toRenderThinking(inner) : inner
+      )) as Array<TraceStepSegment | RenderThinkingSegment>,
+    }
+  })
+  const flatGroups: AgentEventGroup[] = []
+  const collectGroups = (list: Array<TraceStepSegment | RenderThinkingSegment>) => {
+    list.forEach((segment) => {
+      if (segment.kind === 'step') flatGroups.push(segment.group)
+      else segment.innerGroups.forEach(group => flatGroups.push(group))
+    })
+  }
+  renderSegments.forEach((segment) => {
+    if (segment.kind === 'phase') collectGroups(segment.innerSegments)
+    else collectGroups([segment])
+  })
+  // 阶段按出现顺序编号，作为顶层执行步骤的序号
+  const phaseIndexes = new Map<string, number>()
+  let phaseCounter = 0
+  renderSegments.forEach((segment) => {
+    if (segment.kind !== 'phase') return
+    phaseCounter += 1
+    phaseIndexes.set(segment.key, phaseCounter)
+  })
+  const resolveGroupStatus = (group: AgentEventGroup, flatIndex: number) => {
+    const latestEvent = group.events[group.events.length - 1]
+    if (latestEvent.status !== 'running') return latestEvent.status
+    const resolved = flatGroups
+      .slice(flatIndex + 1)
+      .some(next => (
+        next.events.some(event => (
+          event.actor?.id === latestEvent.actor?.id
+          && ['completed', 'failed'].includes(event.status)
+        ))
+      ))
+    return resolved ? 'completed' : latestEvent.status
+  }
+  const groupStatusByKey = new Map<string, string>()
+  flatGroups.forEach((group, flatIndex) => {
+    groupStatusByKey.set(group.key, resolveGroupStatus(group, flatIndex))
+  })
   const webpageScrapeTerminalStatus = [...events]
     .reverse()
     .find(event => (
@@ -3612,96 +4404,262 @@ const AgentExecutionTrace = ({
     ))
     ?.status
 
+  const toggleBlock = (key: string) => {
+    setOpenBlocks(previous => ({ ...previous, [key]: !previous[key] }))
+  }
+
+  const collectThinkingKeys = (list: RenderSegment[]): string[] => list.flatMap((segment) => {
+    if (segment.kind === 'thinking') return [segment.key]
+    if (segment.kind === 'phase') {
+      return [
+        segment.key,
+        ...segment.innerSegments
+          .filter((inner): inner is RenderThinkingSegment => inner.kind === 'thinking')
+          .map(inner => inner.key),
+      ]
+    }
+    return []
+  })
+
+  const allBlockKeys = [
+    ...flatGroups.map(group => group.key),
+    ...collectThinkingKeys(renderSegments),
+  ]
+  const openBlockCount = allBlockKeys.filter(key => openBlocks[key]).length
+  const allExpanded = allBlockKeys.length > 0 && openBlockCount === allBlockKeys.length
+  const toggleAllBlocks = () => {
+    const nextOpen = !allExpanded
+    setOpenBlocks(Object.fromEntries(allBlockKeys.map(key => [key, nextOpen])))
+  }
+
+  const renderStepGroup = (group: AgentEventGroup) => {
+    const actorEvent = group.events[0]
+    const latestEvent = group.events[group.events.length - 1]
+    const displayStatus = groupStatusByKey.get(group.key) || latestEvent.status
+    const isActive = displayStatus === 'running'
+    const showDetails = isActive || Boolean(openBlocks[group.key])
+    // 行标题突出动作目的；召回数量等次级结果拆成灰色小字
+    const headline = splitHeadline(displayAgentText(latestEvent.summary))
+    return (
+      <div
+        className={`creation-agent-event is-${displayStatus}${showDetails ? '' : ' is-collapsed'}`}
+        key={group.key}
+      >
+        <div
+          className="creation-agent-event__row"
+          role="button"
+          tabIndex={0}
+          onClick={() => toggleBlock(group.key)}
+          onKeyDown={(keyEvent) => {
+            if (keyEvent.key !== 'Enter' && keyEvent.key !== ' ') return
+            keyEvent.preventDefault()
+            toggleBlock(group.key)
+          }}
+          aria-expanded={showDetails}
+        >
+          <span
+            className={`creation-agent-event__icon is-${actorEvent.actor?.kind || 'agent'}${displayStatus === 'completed' || displayStatus === 'failed' ? ' is-dot' : ''}`}
+            aria-hidden="true"
+          >
+            {displayStatus === 'completed'
+                ? <span className="creation-agent-event__dot is-done" />
+                : displayStatus === 'failed'
+                  ? <span className="creation-agent-event__dot is-failed" />
+                  : actorEvent.actor?.kind === 'tool'
+                    ? <Wrench size={13} />
+                    : actorEvent.actor?.kind === 'skill'
+                      ? <Sparkles size={13} />
+                      : <Bot size={13} />}
+            {displayStatus === 'running' && (
+              <span className="creation-agent-event__activity" />
+            )}
+          </span>
+          <span className="creation-agent-event__headline">
+            {/* 行标题直接表达动作目的；次级结果置灰，具体调用的能力退到展开细节 */}
+            <strong>{headline.main}</strong>
+            {headline.sub && (
+              <span className="creation-agent-event__headline-sub">{headline.sub}</span>
+            )}
+          </span>
+        </div>
+        {showDetails && (
+          <div className="creation-agent-event__updates">
+            <div className="creation-agent-event__capability">
+              {actorEvent.actor?.id === 'creation_main_agent'
+                ? displayAgentName(actorEvent)
+                : `${displayAgentName(actorEvent)} · ${agentActorKindLabel(actorEvent.actor?.kind)}`}
+            </div>
+            {group.events.map((event) => {
+              const details = agentEventDetails(event)
+              return (
+                <div
+                  className="creation-agent-event__update"
+                  key={event.event_id || `${event.run_id}-${event.sequence}`}
+                >
+                  {/* 最新事件的 summary 已提升为行标题，细节里只保留链路与摘要类信息 */}
+                  <AgentEventSummary
+                    event={event}
+                    onOpenReferences={onOpenReferences}
+                    omitHeadlineText={event === latestEvent}
+                  />
+                  {details.length > 0 && (
+                    <dl>
+                      {details.map(detail => (
+                        <React.Fragment key={`${event.event_id}-${detail.label}`}>
+                          <dt>{detail.label}</dt>
+                          <dd>{detail.value}</dd>
+                        </React.Fragment>
+                      ))}
+                    </dl>
+                  )}
+                  <BrowserPreviewStrip
+                    event={event}
+                    terminalStatus={webpageScrapeTerminalStatus}
+                  />
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const renderThinkingSegment = (segment: RenderThinkingSegment) => {
+    const isRunning = segment.status === 'running'
+    const showBody = isRunning || Boolean(openBlocks[segment.key])
+    const stageLabel = CREATION_THINKING_STAGE_LABELS[segment.stage] || ''
+    const durationSeconds = segment.durationMs == null
+      ? null
+      : Math.max(1, Math.round(segment.durationMs / 1000))
+    return (
+      <div
+        className={`creation-trace-thinking${isRunning ? ' is-running' : ''}`}
+        key={segment.key}
+      >
+        <button
+          type="button"
+          className="creation-trace-thinking__header"
+          onClick={() => toggleBlock(segment.key)}
+          aria-expanded={showBody}
+        >
+          <span className="creation-trace-thinking__dot" aria-hidden="true" />
+          <span className="creation-trace-thinking__title">
+            {isRunning ? `深度思考中${stageLabel ? `：${stageLabel}` : ''}` : '深度思考'}
+          </span>
+          {!isRunning && (durationSeconds != null || stageLabel) && (
+            <span className="creation-trace-thinking__meta">
+              {[durationSeconds != null ? `${durationSeconds}s` : null, stageLabel || null]
+                .filter(Boolean)
+                .join(' · ')}
+            </span>
+          )}
+          {!isRunning && segment.reasoning && (
+            <span className="creation-trace-thinking__reasoning">
+              {segment.reasoning}
+            </span>
+          )}
+        </button>
+        {showBody && (
+          <div className="creation-trace-thinking__body">
+            {segment.reasoning && (
+              <p className="creation-trace-thinking__reasoning-full">
+                {segment.reasoning}
+              </p>
+            )}
+            {segment.innerGroups.map(group => renderStepGroup(group))}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const renderInnerSegments = (list: Array<TraceStepSegment | RenderThinkingSegment>) => (
+    list.map((segment) => {
+      if (segment.kind === 'step') return renderStepGroup(segment.group)
+      return renderThinkingSegment(segment)
+    })
+  )
+
+  // 顶层阶段行：序号 + 阶段标题 + 灰色耗时，展开后是思考/动作块，竖线标识层级
+  const renderPhaseSegment = (segment: RenderPhaseSegment) => {
+    const isRunning = segment.status === 'running'
+    const showBody = isRunning || Boolean(openBlocks[segment.key])
+    const durationSeconds = segment.durationMs == null
+      ? null
+      : Math.max(1, Math.round(segment.durationMs / 1000))
+    return (
+      <div
+        className={`creation-trace-phase${isRunning ? ' is-running' : ' is-completed'}`}
+        key={segment.key}
+      >
+        <button
+          type="button"
+          className="creation-trace-phase__header"
+          onClick={() => toggleBlock(segment.key)}
+          aria-expanded={showBody}
+        >
+          <span
+            className={`creation-trace-phase__dot${isRunning ? '' : ' is-done'}`}
+            aria-hidden="true"
+          />
+          <span className="creation-trace-phase__title">
+            {`${phaseIndexes.get(segment.key) || ''}. ${segment.title}`}
+          </span>
+          <span className="creation-trace-phase__meta">
+            {isRunning ? '进行中' : durationSeconds != null ? `${durationSeconds}s` : '已完成'}
+          </span>
+        </button>
+        {showBody && (
+          <div className="creation-trace-phase__body">
+            {renderInnerSegments(segment.innerSegments)}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const renderTraceSegments = (list: RenderSegment[]) => list.map((segment) => {
+    if (segment.kind === 'phase') return renderPhaseSegment(segment)
+    if (segment.kind === 'step') return renderStepGroup(segment.group)
+    return renderThinkingSegment(segment)
+  })
+
+  const phaseCount = renderSegments.filter(segment => segment.kind === 'phase').length
+
   return (
     <section className="creation-agent-trace" aria-label="Agent 执行情况">
-      <button
-        type="button"
-        className="creation-agent-trace__toggle"
-        onClick={() => setExpanded(value => !value)}
-        aria-expanded={expanded}
-      >
-        {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
-        <span>执行过程</span>
-        <small>
-          {latestGoal && `目标修订 ${latestGoal.revision} · `}
-          {displayEvents.length} 个步骤
-        </small>
-      </button>
+      <div className="creation-agent-trace__header">
+        <button
+          type="button"
+          className="creation-agent-trace__toggle"
+          onClick={() => setExpanded(value => !value)}
+          aria-expanded={expanded}
+        >
+          {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+          <span>执行过程</span>
+          <small>
+            {latestGoal && `目标修订 ${latestGoal.revision} · `}
+            {phaseCount > 0
+              ? `${phaseCount} 个阶段 · ${flatGroups.length} 个步骤`
+              : `${flatGroups.length} 个步骤`}
+          </small>
+        </button>
+        {expanded && allBlockKeys.length > 0 && (
+          <button
+            type="button"
+            className="creation-agent-trace__expand-all"
+            onClick={toggleAllBlocks}
+          >
+            {allExpanded ? '收起全部' : '展开全部'}
+          </button>
+        )}
+      </div>
       {expanded && (
         <div className="creation-agent-trace__runs">
           <div className="creation-agent-run">
             <div>
-              {eventGroups.map((group, groupIndex) => {
-                const actorEvent = group.events[0]
-                const latestEvent = group.events[group.events.length - 1]
-                const resolved = latestEvent.status === 'running' && eventGroups
-                  .slice(groupIndex + 1)
-                  .some(next => (
-                    next.events.some(event => (
-                      event.actor?.id === latestEvent.actor?.id
-                      && ['completed', 'failed'].includes(event.status)
-                    ))
-                  ))
-                const displayStatus = resolved ? 'completed' : latestEvent.status
-                return (
-                  <div
-                    className={`creation-agent-event is-${displayStatus}`}
-                    key={group.key}
-                  >
-                    <span
-                      className={`creation-agent-event__icon is-${actorEvent.actor?.kind || 'agent'}`}
-                      aria-hidden="true"
-                    >
-                      {displayStatus === 'completed'
-                          ? <Check size={13} />
-                          : actorEvent.actor?.kind === 'tool'
-                            ? <Wrench size={13} />
-                            : actorEvent.actor?.kind === 'skill'
-                              ? <Sparkles size={13} />
-                              : <Bot size={13} />}
-                      {displayStatus === 'running' && (
-                        <span className="creation-agent-event__activity" />
-                      )}
-                    </span>
-                    <span>
-                      <strong>
-                        {displayAgentName(actorEvent)}
-                        <em>{agentActorKindLabel(actorEvent.actor?.kind)}</em>
-                      </strong>
-                      <div className="creation-agent-event__updates">
-                        {group.events.map((event) => {
-                          const details = agentEventDetails(event)
-                          return (
-                            <div
-                              className="creation-agent-event__update"
-                              key={event.event_id || `${event.run_id}-${event.sequence}`}
-                            >
-                              <AgentEventSummary
-                                event={event}
-                                onOpenReferences={onOpenReferences}
-                              />
-                              {details.length > 0 && (
-                                <dl>
-                                  {details.map(detail => (
-                                    <React.Fragment key={`${event.event_id}-${detail.label}`}>
-                                      <dt>{detail.label}</dt>
-                                      <dd>{detail.value}</dd>
-                                    </React.Fragment>
-                                  ))}
-                                </dl>
-                              )}
-                              <BrowserPreviewStrip
-                                event={event}
-                                terminalStatus={webpageScrapeTerminalStatus}
-                              />
-                            </div>
-                          )
-                        })}
-                      </div>
-                    </span>
-                  </div>
-                )
-              })}
+              {renderTraceSegments(renderSegments)}
             </div>
           </div>
         </div>
@@ -3713,9 +4671,14 @@ const AgentExecutionTrace = ({
 const AgentEventSummary = ({
   event,
   onOpenReferences,
+  omitHeadlineText = false,
 }: {
   event: CreationAgentEvent
-  onOpenReferences: (tab: Extract<BottomTab, 'reference' | 'data'>) => void
+  onOpenReferences: (
+    tab: Extract<BottomTab, 'reference' | 'data'>,
+    groupId?: string,
+  ) => void
+  omitHeadlineText?: boolean
 }) => {
   const text = displayAgentText(event.summary)
   const routingPrefix = '已由模型决定执行链路：'
@@ -3728,7 +4691,7 @@ const AgentEventSummary = ({
     : []
   const tab = event.type === 'tool.completed' && event.actor?.id === 'memory_search'
     ? 'reference'
-    : event.type === 'tool.completed' && event.actor?.id === 'data_search'
+    : event.type === 'tool.completed' && ['data_search', 'webpage_scrape'].includes(event.actor?.id || '')
       ? 'data'
       : null
   const resultCount = Number(event.data?.result_count)
@@ -3744,12 +4707,15 @@ const AgentEventSummary = ({
       </small>
     )
   }
-  if (!tab || !Number.isFinite(resultCount) || resultCount <= 0) return <small>{text}</small>
+  if (!tab || !Number.isFinite(resultCount) || resultCount <= 0) {
+    // 行标题已展示 summary 时，纯文本不再重复；但链路摘要与参考链接仍保留
+    return omitHeadlineText ? null : <small>{text}</small>
+  }
 
   const match = tab === 'reference'
     ? text.match(/召回\s*\d+\s*条(?:本地)?资料/)
     : text.match(/召回\s*\d+\s*个来源/)
-  if (!match || match.index == null) return <small>{text}</small>
+  if (!match || match.index == null) return omitHeadlineText ? null : <small>{text}</small>
 
   const before = text.slice(0, match.index)
   const after = text.slice(match.index + match[0].length)
@@ -3759,7 +4725,11 @@ const AgentEventSummary = ({
       <button
         type="button"
         className="creation-agent-reference-link"
-        onClick={() => onOpenReferences(tab)}
+        onClick={(clickEvent) => {
+          // 避免触发外层动作行的展开/收起切换
+          clickEvent.stopPropagation()
+          onOpenReferences(tab, tab === 'reference' ? referenceGroupId(event) : dataGroupId(event))
+        }}
         aria-label={`${match[0]}，打开${tab === 'reference' ? '参考资料' : '参考数据'}`}
       >
         {match[0]}
@@ -3790,7 +4760,7 @@ const BrowserPreviewStrip = ({
     : terminalStatus || 'running'
 
   return (
-    <div className="creation-browser-previews" aria-label="后台浏览器预览">
+    <div className="creation-browser-previews" aria-label="证据截图预览">
       {previews.map(preview => (
         <BrowserPreviewCard
           key={`${event.event_id}-${preview.id}`}
@@ -3831,7 +4801,7 @@ const BrowserPreviewCard = ({
       ? '采集未完成'
       : status === 'rejected'
         ? '证据未通过'
-        : '后台采集中'
+        : '证据截图中'
 
   return (
     <figure className={`creation-browser-preview is-${status}`}>
@@ -3850,7 +4820,7 @@ const BrowserPreviewCard = ({
         )}
         <img
           src={imageUrl}
-          alt={`${preview.title || '数据页面'}后台浏览器缩略图`}
+          alt={`${preview.title || '数据页面'}网页证据缩略图`}
           onLoad={() => setLoaded(true)}
           onError={() => setLoaded(false)}
           className={loaded ? 'is-loaded' : ''}
@@ -3861,7 +4831,7 @@ const BrowserPreviewCard = ({
         <strong>{preview.title || '实时数据页面'}</strong>
         <span>
           {preview.browser ? `${preview.browser} · ` : ''}
-          {status === 'completed' ? '完整长图 · 点击查看' : '不切换前台窗口'}
+          {status === 'completed' ? '完整长图 · 点击查看' : '每个页面仅临时切换一次'}
         </span>
       </figcaption>
     </figure>

@@ -24,6 +24,7 @@ import { BUILTIN_TEMPLATES, CATEGORY_COLORS, groupTemplatesByCategory } from '..
 import ModelSelect from './ModelSelect'
 import { HistoryPagination, HistorySearch } from './HistoryBrowserControls'
 import { BreadAppIcon, BreadToolIcon } from './icons/BreadIcons'
+import TutorialLink, { TUTORIAL_URLS } from './TutorialLink'
 import type { RagContext, RagHistoryItem } from '../types'
 
 
@@ -554,14 +555,16 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
           { key: 'consult', label: '咨询' },
           { key: 'history', label: `咨询记录${historyTotal ? ` (${historyTotal})` : ''}` },
         ] as const).map(({ key, label }) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => setTopTab(key)}
-            className={`rag-panel__top-tab${topTab === key ? ' rag-panel__top-tab--active' : ''}`}
-          >
-            {label}
-          </button>
+          <React.Fragment key={key}>
+            <button
+              type="button"
+              onClick={() => setTopTab(key)}
+              className={`rag-panel__top-tab${topTab === key ? ' rag-panel__top-tab--active' : ''}`}
+            >
+              {label}
+            </button>
+            {key === 'consult' && <TutorialLink url={TUTORIAL_URLS.consult} />}
+          </React.Fragment>
         ))}
       </div>
 

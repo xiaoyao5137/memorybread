@@ -9,7 +9,12 @@ from types import SimpleNamespace
 import pytest
 
 from creation.agent_loop import CreationAgentLoop
-from creation.service import CreationOptions, CreationService, GithubSearchResult
+from creation.service import (
+    CreationOptions,
+    CreationService,
+    GithubSearchResult,
+    ReferenceDocument,
+)
 from creation.tools import (
     ROUTABLE_AGENT_IDS,
     ROUTABLE_TOOL_IDS,
@@ -266,7 +271,9 @@ async def test_routing_falls_back_when_model_output_is_unparseable():
         event
         async for event in loop._complete_model_step(state, step, "不是合法 JSON")
     ]
-    assert events[-1]["type"] == "agent.completed"
+    # 路由决策公告后由 thinking.completed 收尾，展示层据此关闭思考卡片。
+    assert events[-1]["type"] == "thinking.completed"
+    assert any(item["type"] == "agent.completed" for item in events)
     assert state.environment["routing_decision"]["source"] == "fallback"
     plan_ids = [step_item["id"] for step_item in state.plan]
     assert "internet_search" in plan_ids
@@ -293,6 +300,192 @@ async def test_local_route_failure_degrades_to_fallback_and_run_completes():
         )
     ]
     assert events[-1]["type"] == "run.completed"
+
+
+@pytest.mark.asyncio
+async def test_thinking_events_wrap_intent_routing_and_planning():
+    # 深度思考事件必须成对包裹意图理解、链路决策与 Harness 反馈规划，
+    # 页面据此展示呼吸灯思考状态和可展开的推理摘要。
+    service = FakeCreationService()
+    service.routing_decision = {
+        "tools": ["data_search"],
+        "agents": ["solution_design_agent"],
+        "source": "model",
+        "reasoning": "用户需要看板数据",
+    }
+    events = await collect_events(
+        CreationAgentLoop(service).run(
+            user_message="查看本周经营数据并形成简报",
+            current_document="",
+            conversation=[],
+            selected_skills=[],
+            options=CreationOptions(),
+        )
+    )
+
+    types = [event["type"] for event in events]
+
+    # 意图理解：thinking 对包裹 intent.interpreted，completed 携带推理摘要。
+    intent_index = types.index("intent.interpreted")
+    intent_started = [
+        event
+        for event in events[:intent_index]
+        if event["type"] == "thinking.started"
+        and event["data"]["stage"] == "intent"
+    ]
+    intent_completed = [
+        event
+        for event in events[intent_index + 1:]
+        if event["type"] == "thinking.completed"
+        and event["data"]["stage"] == "intent"
+    ]
+    assert intent_started
+    assert intent_completed
+    assert intent_completed[0]["data"]["reasoning"]
+
+    # 链路决策：routing 思考对成对出现，completed 携带模型决策理由。
+    routing_started = [
+        event
+        for event in events
+        if event["type"] == "thinking.started"
+        and event["data"]["stage"] == "routing"
+    ]
+    routing_completed = [
+        event
+        for event in events
+        if event["type"] == "thinking.completed"
+        and event["data"]["stage"] == "routing"
+    ]
+    assert len(routing_started) == len(routing_completed) == 1
+    assert routing_completed[0]["data"]["reasoning"] == "用户需要看板数据"
+
+    # route / plan 是主 Agent 的内部控制阶段，不应伪装成独立 Agent 启动步骤。
+    main_agent_starts = [
+        event
+        for event in events
+        if event["type"] == "agent.started"
+        and event["actor"]["id"] == "creation_main_agent"
+    ]
+    assert main_agent_starts == []
+    assert not any(event["summary"] == "创作 Agent 开始执行" for event in events)
+    # 真正执行内容的子 Agent 仍保留可观察的 started 生命周期。
+    assert any(
+        event["type"] == "agent.started"
+        and event["actor"]["id"] != "creation_main_agent"
+        for event in events
+    )
+
+    # 内容生成：generation 思考对包裹大模型内容调用，completed 说明写回动作。
+    generation_started = [
+        event
+        for event in events
+        if event["type"] == "thinking.started"
+        and event["data"]["stage"] == "generation"
+    ]
+    generation_completed = [
+        event
+        for event in events
+        if event["type"] == "thinking.completed"
+        and event["data"]["stage"] == "generation"
+    ]
+    assert generation_started
+    assert len(generation_started) == len(generation_completed)
+    assert "写回创作文档" in generation_completed[0]["data"]["reasoning"]
+    # generation started 必须早于文档内容产出事件。
+    document_index = types.index("document.replaced")
+    assert any(
+        event["type"] == "thinking.started"
+        and event["data"]["stage"] == "generation"
+        for event in events[:document_index]
+    )
+
+    # 反馈规划：每个 harness.decision 前后紧邻 planning 思考对。
+    decisions = [
+        index for index, event in enumerate(events)
+        if event["type"] == "harness.decision"
+    ]
+    assert decisions
+    for index in decisions:
+        assert events[index - 1]["type"] == "thinking.started"
+        assert events[index - 1]["data"]["stage"] == "planning"
+        assert events[index + 1]["type"] == "thinking.completed"
+        assert events[index + 1]["data"]["stage"] == "planning"
+        assert events[index + 1]["data"]["reasoning"]
+
+    # 无 Skill 流程：规划阶段先宏观总结接下来的步骤，每个计划步骤再成为顶层阶段。
+    outline_completed = [
+        event
+        for event in events
+        if event["type"] == "thinking.completed"
+        and event["data"]["stage"] == "planning"
+        and "接下来依次执行" in event["data"]["reasoning"]
+    ]
+    assert outline_completed
+    assert "生成文档内容" in outline_completed[0]["data"]["reasoning"]
+    plan_phases = [
+        event
+        for event in events
+        if event["type"] == "phase.started"
+        and event["data"]["phase_kind"] == "plan_step"
+    ]
+    assert plan_phases
+    assert any(
+        event["data"]["phase_title"] == "检索本地记忆资料"
+        for event in plan_phases
+    )
+    assert any(
+        event["data"]["phase_title"] == "生成文档内容" for event in plan_phases
+    )
+
+
+@pytest.mark.asyncio
+async def test_external_route_thinking_pair_survives_pause_and_resume():
+    # 外部模式下 thinking.started 在暂停前发出，thinking.completed 在恢复后
+    # 由路由决策应用阶段补齐，两端事件属于同一 run。
+    loop = CreationAgentLoop(FakeCreationService())
+    first = await collect_events(
+        loop.run(
+            user_message="输出一份架构方案",
+            current_document="",
+            conversation=[],
+            selected_skills=[],
+            options=CreationOptions(enable_rag=False, doc_type="架构设计方案"),
+            model_mode="external",
+        )
+    )
+    first_types = [event["type"] for event in first]
+    assert first_types.count("thinking.started") == 2
+    started_index = first_types.index("model.request")
+    assert "thinking.started" in first_types[:started_index]
+    # 路由思考在暂停前只发出 started，completed 要等恢复后补齐。
+    assert not [
+        event
+        for event in first
+        if event["type"] == "thinking.completed"
+        and event["data"]["stage"] == "routing"
+    ]
+
+    second = await collect_events(
+        loop.run(
+            user_message="",
+            current_document="",
+            conversation=[],
+            selected_skills=[],
+            options=CreationOptions(),
+            resume_state=first[-1]["data"]["continuation"],
+            model_result='{"tools": [], "agents": ["solution_design_agent"], '
+            '"reasoning": "架构方案需要先设计方案"}',
+        )
+    )
+    routing_completed = [
+        event
+        for event in second
+        if event["type"] == "thinking.completed"
+        and event["data"]["stage"] == "routing"
+    ]
+    assert len(routing_completed) == 1
+    assert routing_completed[0]["data"]["reasoning"] == "架构方案需要先设计方案"
+    assert routing_completed[0]["run_id"] == first[0]["run_id"]
 
 
 @pytest.mark.asyncio
@@ -673,6 +866,182 @@ def test_metric_card_date_range_is_bound_to_its_own_value():
     assert claim["statistical_period"] == "2026-08-12至2026-08-12"
 
 
+def test_virtualized_metric_cards_are_parsed_from_structured_regions():
+    payload = {
+        "content_text": "LangBridge模型中心运营看板\n用量统计",
+        "structured_data": {
+            "evidence_regions": [
+                {
+                    "text": (
+                        "独立部署输入Tokens 2026-08-15至2026-08-15 "
+                        "19,762.89亿 亿 input_tokens(求和)"
+                    )
+                },
+                {
+                    "text": (
+                        "公共部署输出tokens 2026-08-15至2026-08-15 "
+                        "65.39亿 亿"
+                    )
+                },
+            ]
+        },
+    }
+
+    claims = CreationService._scrape_claim_candidates(payload)
+
+    assert {
+        (
+            claim.get("label"),
+            claim.get("value"),
+            claim.get("statistical_period"),
+        )
+        for claim in claims
+        if claim.get("claim_type") == "metric"
+    } == {
+        ("独立部署输入Tokens", "19,762.89亿", "2026-08-15至2026-08-15"),
+        ("公共部署输出tokens", "65.39亿", "2026-08-15至2026-08-15"),
+    }
+
+
+def test_structured_metric_cards_precede_table_details_for_prompt_budget():
+    payload = {
+        "content_text": "",
+        "structured_data": {
+            "tables": [
+                [
+                    ["项目", "日期", "卡数"],
+                    *[
+                        [f"项目{index}", "2026-08-14", str(index)]
+                        for index in range(1, 31)
+                    ],
+                ]
+            ],
+            "evidence_regions": [
+                {"text": "总卡数（X40折算） 2026-08-14 1803.59"},
+                {"text": "年化总成本 2026-08-14 12178.4万元"},
+            ],
+        },
+    }
+
+    claims = CreationService._scrape_claim_candidates(payload)
+
+    assert [claim["label"] for claim in claims[:2]] == [
+        "总卡数（X40折算）",
+        "年化总成本",
+    ]
+    assert all(
+        claim.get("evidence_origin") == "structured_region_metric"
+        for claim in claims[:2]
+    )
+
+
+def test_adjacent_summary_cards_without_dates_precede_table_details():
+    payload = {
+        "content_text": (
+            "项目 GPU 用量管理\n"
+            "在用项目数\n102\n"
+            "总卡数（X40折算）\n1803.59\n"
+            "年化总成本（万元）\n12178.4万元\n"
+            "平均 ROI\n39.86x"
+        ),
+        "structured_data": {
+            "tables": [
+                [
+                    ["项目", "日期", "卡数"],
+                    *[
+                        [f"项目{index}", "2026-08-14", str(index)]
+                        for index in range(1, 31)
+                    ],
+                ]
+            ],
+        },
+    }
+
+    claims = CreationService._scrape_claim_candidates(payload)
+
+    assert [(claim["label"], claim["value"]) for claim in claims[:4]] == [
+        ("在用项目数", "102"),
+        ("总卡数（X40折算）", "1803.59"),
+        ("年化总成本（万元）", "12178.4万元"),
+        ("平均 ROI", "39.86x"),
+    ]
+    assert all(
+        claim.get("evidence_origin") == "content_adjacent_metric"
+        for claim in claims[:4]
+    )
+
+
+def test_adjacent_metric_parser_ignores_pagination_symbols():
+    claims = CreationService._scrape_claim_candidates(
+        {
+            "content_text": "‹\n1\n…\n6\n总卡数\n1803.59",
+            "structured_data": {},
+        }
+    )
+
+    assert [(claim["label"], claim["value"]) for claim in claims] == [
+        ("总卡数", "1803.59")
+    ]
+
+
+def test_prompt_data_results_prioritize_each_verified_report_with_bounded_claims():
+    work_memories = [
+        {
+            "source_id": index,
+            "source_kind": "work_memory",
+            "can_use": True,
+            "content_excerpt": "普通工作数据 " + ("说明" * 300),
+        }
+        for index in range(30)
+    ]
+
+    def verified_report(source_id, title, claim_count, validation):
+        return {
+            "source_id": source_id,
+            "title": title,
+            "source_kind": "report_url",
+            "can_use": True,
+            "creation_evidence": {"validation_status": "verified"},
+            "structured_data": {
+                "validation": validation,
+                "verified_claims": [
+                    {
+                        "claim_type": "metric",
+                        "label": f"指标{index}",
+                        "value": str(index),
+                        "statement": f"指标{index} {index}",
+                    }
+                    for index in range(claim_count)
+                ],
+            },
+        }
+
+    results = CreationAgentLoop._prompt_data_results(
+        [
+            *work_memories,
+            verified_report(1584, "GPU报表", 120, "requested_metrics_unmatched"),
+            verified_report(214, "Token报表", 6, "requested_metrics_verified"),
+        ]
+    )
+
+    assert [item["source_id"] for item in results[:2]] == [1584, 214]
+    assert len(results[0]["structured_data"]["verified_claims"]) == 4
+    assert len(results[1]["structured_data"]["verified_claims"]) == 6
+
+
+def test_placeholder_guard_recognizes_bracketed_metric_placeholders():
+    document = (
+        "| 指标 | 数值 |\n"
+        "| --- | --- |\n"
+        "| 独立部署输入Tokens | [待补充具体数值] |"
+    )
+
+    assert CreationAgentLoop._placeholder_count(document) == 1
+    cleaned, audit = CreationAgentLoop._guard_generated_placeholders(document, {})
+    assert "待补充" not in cleaned
+    assert audit == [{"kind": "unsupported_placeholder_removed", "count": 1}]
+
+
 def test_langbridge_preview_source_wins_over_edit_source_for_same_dashboard():
     selected = CreationService._select_canonical_report_sources(
         [
@@ -721,6 +1090,101 @@ def test_refresh_selection_prefers_strong_source_identity_without_business_keywo
     )
 
     assert [item["source_id"] for item in selected] == [1]
+
+
+@pytest.mark.asyncio
+async def test_screenshot_off_retries_silent_block_with_one_foreground_refresh(
+    monkeypatch,
+):
+    requests = []
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+            self.is_success = 200 <= status_code < 300
+
+        def json(self):
+            return self._payload
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, json):
+            requests.append(dict(json))
+            if len(requests) == 1:
+                return FakeResponse(
+                    412,
+                    {
+                        "error": "FOCUS_POLICY_BLOCKED",
+                        "message": "静默取数没有已打开页面",
+                    },
+                )
+            return FakeResponse(
+                200,
+                {
+                    "collector": "browser_attach",
+                    "browser": "chrome",
+                    "interaction_mode": "temporary_foreground_window",
+                    "focus_policy": "allow_once",
+                    "focus_takeover_count": 1,
+                    "collected_at": 1_770_000_000_000,
+                    "title": "经营看板",
+                    "url": "https://bi.example.com/report",
+                    "content_text": "年化总成本\n1200万元",
+                    "structured_data": {
+                        "tables": [
+                            [["指标", "数值"], ["年化总成本", "1200万元"]]
+                        ],
+                        "dom_content_text": "年化总成本\n1200万元",
+                        "extraction": {"primary": "dom"},
+                    },
+                    "evidence": None,
+                },
+            )
+
+    fake_client = FakeAsyncClient()
+    monkeypatch.setattr(
+        "creation.service.httpx.AsyncClient",
+        lambda **_kwargs: fake_client,
+    )
+    service = CreationService(model="test", enable_vector_recall=False)
+
+    outcome = await service.scrape_data_context(
+        [
+            {
+                "source_id": 7,
+                "source_kind": "report_url",
+                "source_url": "https://bi.example.com/report",
+                "title": "经营看板",
+                "refresh_required": True,
+                "refresh_policy": "on_demand",
+                "can_use": False,
+            }
+        ],
+        "获取最新年化总成本",
+        {},
+        run_id="run-1",
+        session_id="session-1",
+        retain_screenshot=False,
+    )
+
+    assert len(requests) == 2
+    assert requests[0]["allow_foreground_refresh"] is False
+    assert requests[0]["focus_policy"] == "never"
+    assert requests[1]["allow_foreground_refresh"] is True
+    assert requests[1]["focus_policy"] == "allow_once"
+    assert requests[1]["capture_evidence"] is False
+    assert requests[1]["retain_screenshot"] is False
+    assert outcome["scrapes"][0]["status"] == "completed"
+    assert outcome["scrapes"][0]["collection_attempt"] == "foreground_fallback"
+    assert outcome["scrapes"][0]["focus_takeover_count"] == 1
+    assert "preview_id" not in outcome["scrapes"][0]
+    assert outcome["refreshed_data"][0]["can_use"] is True
 
 
 def test_evidence_validation_also_supports_document_style_pages():
@@ -1414,6 +1878,90 @@ def test_verified_evidence_card_is_inserted_below_the_claim_block():
     assert updated.index("![证据截图") < updated.index("## 后续动作")
     assert "?crop=10,20,600,280" in updated
     assert "查看原始全图" in updated
+
+
+def test_step_scoped_evidence_cannot_attach_to_an_earlier_section():
+    document = """# GPU成本优化周报
+
+## 本周大模型性能成本优化周会会议纪要
+
+- 2026年8月13日推进 GPU 成本优化专项。
+
+## GPU算力数据
+
+| 项目 | 卡数(X40) |
+| --- | ---: |
+| 快点大模型治理平台 | 119.42 |
+
+## Token数据
+
+本周 Token 成本保持稳定。"""
+    evidence = {
+        "id": "gpu-info-evidence",
+        "source_url": "https://gpu.example.com/info",
+        "page_title": "电商GPU信息平台 - GPU使用情况一览",
+        "captured_at": 1_786_812_464_123,
+        "image_url": "/api/creation/evidence/gpu-info-evidence/image",
+        "validation_status": "verified",
+        "skill_step_title": "GPU算力数据",
+        "target_section": "GPU算力数据",
+        "validation": {
+            "verified_claims": [
+                {
+                    "claim_type": "metric",
+                    "label": "UNKNOWN GPU卡数",
+                    "value": "2",
+                    "statement": "2026-08-13 UNKNOWN 2",
+                }
+            ]
+        },
+    }
+
+    updated, applied = CreationAgentLoop._apply_creation_evidence_cards(
+        document, [evidence]
+    )
+
+    screenshot_index = updated.index("![证据截图")
+    assert len(applied) == 1
+    assert screenshot_index > updated.index("## GPU算力数据")
+    assert screenshot_index < updated.index("## Token数据")
+
+
+def test_unscoped_evidence_ignores_single_character_metric_values():
+    document = "# 周报\n\n2026年8月13日推进 GPU 成本优化专项。"
+    evidence = {
+        "id": "weak-evidence",
+        "image_url": "/api/creation/evidence/weak-evidence/image",
+        "validation_status": "verified",
+        "validation": {
+            "verified_claims": [
+                {"claim_type": "metric", "label": "GPU卡数", "value": "2"}
+            ]
+        },
+    }
+
+    updated, applied = CreationAgentLoop._apply_creation_evidence_cards(
+        document, [evidence]
+    )
+
+    assert updated == document
+    assert applied == []
+
+
+def test_creation_evidence_keeps_its_skill_step_section_scope():
+    evidence = CreationAgentLoop._scope_creation_evidence(
+        {"id": "gpu-evidence", "validation_status": "verified"},
+        {
+            "skill_id": "gpu-weekly",
+            "skill_step_id": "gpu-metrics",
+            "skill_step_title": "GPU算力数据",
+        },
+    )
+
+    assert evidence["skill_id"] == "gpu-weekly"
+    assert evidence["skill_step_id"] == "gpu-metrics"
+    assert evidence["skill_step_title"] == "GPU算力数据"
+    assert evidence["target_section"] == "GPU算力数据"
 
 
 def test_gpu_and_token_evidence_are_accumulated_across_skill_steps():
@@ -2238,7 +2786,7 @@ async def test_harness_replans_during_the_run_from_fresh_data_feedback():
 
 
 @pytest.mark.asyncio
-async def test_webpage_scrape_streams_background_browser_preview_metadata():
+async def test_webpage_scrape_streams_on_demand_screenshot_preview_metadata():
     service = FakeCreationService()
     evidence = {
         "id": "evidence-preview",
@@ -2268,7 +2816,9 @@ async def test_webpage_scrape_streams_background_browser_preview_metadata():
                 "status": "completed",
                 "title": "经营看板",
                 "browser": "chrome",
-                "interaction_mode": "background_browser_window",
+                "interaction_mode": "temporary_foreground_window",
+                "focus_policy": "allow_once",
+                "focus_takeover_count": 1,
                 "evidence": evidence,
             }
         ],
@@ -2287,7 +2837,25 @@ async def test_webpage_scrape_streams_background_browser_preview_metadata():
             user_message="生成本周经营周报，并分析核心指标变化",
             current_document="",
             conversation=[],
-            selected_skills=[],
+            selected_skills=[
+                {
+                    "id": "weekly-report",
+                    "title": "经营周报 Skill",
+                    "summary": "生成经营周报",
+                    "executionSteps": [
+                        {
+                            "id": "refresh-report",
+                            "title": "刷新经营数据",
+                            "objective": "取得本周实时经营指标",
+                            "output": "核验后的经营指标",
+                            "agents": [],
+                            "skills": [],
+                            "tools": ["data_search", "webpage_scrape"],
+                            "retainWebpageScreenshot": True,
+                        }
+                    ],
+                }
+            ],
             options=CreationOptions(enabled_tools=()),
         )
     )
@@ -2304,7 +2872,193 @@ async def test_webpage_scrape_streams_background_browser_preview_metadata():
     assert service.scrape_kwargs["preview_ids"] == {7: preview["id"]}
     assert service.scrape_kwargs["retain_screenshot"] is True
     assert completed["data"]["previews"][0]["image_url"] == evidence["image_url"]
-    assert completed["data"]["previews"][0]["interaction_mode"] == "background_browser_window"
+    assert completed["data"]["previews"][0]["interaction_mode"] == "temporary_foreground_window"
+    assert completed["data"]["previews"][0]["focus_takeover_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_webpage_scrape_defaults_to_silent_structured_collection():
+    service = FakeCreationService()
+    report = {
+        "source_id": 9,
+        "source_kind": "report_url",
+        "source_url": "https://bi.example.com/report",
+        "title": "经营看板",
+        "refresh_required": True,
+        "can_use": False,
+    }
+    structured_evidence = {
+        "validation_status": "verified",
+        "evidence_kind": "structured_page",
+        "validation": {
+            "verified_claims": [
+                {"statement": "本周订单 1200", "label": "订单", "value": "1200"}
+            ]
+        },
+    }
+    service.data_results = [report]
+    service.scrape_outcome = {
+        "scrapes": [
+            {
+                "source_id": 9,
+                "status": "completed",
+                "title": "经营看板",
+                "browser": "chrome",
+                "interaction_mode": "background_tab",
+                "focus_policy": "never",
+                "focus_takeover_count": 0,
+                "evidence": structured_evidence,
+            }
+        ],
+        "refreshed_data": [
+            {
+                **report,
+                "refresh_required": False,
+                "can_use": True,
+                "creation_evidence": structured_evidence,
+            }
+        ],
+    }
+
+    events = await collect_events(
+        CreationAgentLoop(service).run(
+            user_message="生成本周经营周报，并分析核心指标变化",
+            current_document="",
+            conversation=[],
+            selected_skills=[],
+            options=CreationOptions(enabled_tools=()),
+        )
+    )
+
+    assert not any(event["type"].startswith("browser.preview.") for event in events)
+    assert service.scrape_kwargs["retain_screenshot"] is False
+    assert service.scrape_kwargs["preview_ids"] == {}
+    completed = next(
+        event
+        for event in events
+        if event["type"] == "tool.completed"
+        and event["actor"]["id"] == "webpage_scrape"
+    )
+    assert "静默结构化取数" in completed["summary"]
+    assert completed["data"]["sources"][0]["focus_takeover_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_webpage_scrape_reports_foreground_fallback_without_screenshot():
+    service = FakeCreationService()
+    report = {
+        "source_id": 10,
+        "source_kind": "report_url",
+        "source_url": "https://bi.example.com/report",
+        "title": "经营看板",
+        "refresh_required": True,
+        "can_use": False,
+    }
+    structured_evidence = {
+        "validation_status": "verified",
+        "evidence_kind": "structured_page",
+        "validation": {
+            "verified_claims": [
+                {"statement": "年化总成本 1200万元", "label": "年化总成本", "value": "1200万元"}
+            ]
+        },
+    }
+    service.data_results = [report]
+    service.scrape_outcome = {
+        "scrapes": [
+            {
+                "source_id": 10,
+                "status": "completed",
+                "title": "经营看板",
+                "browser": "chrome",
+                "interaction_mode": "temporary_foreground_window",
+                "focus_policy": "allow_once",
+                "focus_takeover_count": 1,
+                "collection_attempt": "foreground_fallback",
+                "evidence": structured_evidence,
+            }
+        ],
+        "refreshed_data": [
+            {
+                **report,
+                "refresh_required": False,
+                "can_use": True,
+                "creation_evidence": structured_evidence,
+            }
+        ],
+    }
+
+    events = await collect_events(
+        CreationAgentLoop(service).run(
+            user_message="生成本周经营周报，并分析最新成本",
+            current_document="",
+            conversation=[],
+            selected_skills=[],
+            options=CreationOptions(enabled_tools=()),
+        )
+    )
+
+    assert not any(event["type"].startswith("browser.preview.") for event in events)
+    completed = next(
+        event
+        for event in events
+        if event["type"] == "tool.completed"
+        and event["actor"]["id"] == "webpage_scrape"
+    )
+    assert "一次性浏览器会话完成即时取数" in completed["summary"]
+    assert "未保留截图" in completed["summary"]
+    assert completed["data"]["sources"][0]["collection_attempt"] == "foreground_fallback"
+
+
+@pytest.mark.asyncio
+async def test_webpage_scrape_reports_focus_gate_instead_of_structure_rejection():
+    service = FakeCreationService()
+    report = {
+        "source_id": 11,
+        "source_kind": "report_url",
+        "source_url": "https://bi.example.com/report",
+        "title": "经营看板",
+        "refresh_required": True,
+        "can_use": False,
+    }
+    service.data_results = [report]
+    service.scrape_outcome = {
+        "scrapes": [
+            {
+                "source_id": 11,
+                "status": "failed",
+                "error_code": "FOCUS_POLICY_BLOCKED",
+                "collection_attempt": "foreground_fallback",
+            }
+        ],
+        "refreshed_data": [
+            {
+                **report,
+                "freshness_class": "unverified",
+                "evidence_status": "failed",
+                "unavailable_reason": "refresh_failed",
+            }
+        ],
+    }
+
+    events = await collect_events(
+        CreationAgentLoop(service).run(
+            user_message="生成本周经营周报，并分析最新成本",
+            current_document="",
+            conversation=[],
+            selected_skills=[],
+            options=CreationOptions(enabled_tools=()),
+        )
+    )
+
+    completed = next(
+        event
+        for event in events
+        if event["type"] == "tool.completed"
+        and event["actor"]["id"] == "webpage_scrape"
+    )
+    assert "焦点硬门禁中止" in completed["summary"]
+    assert "结构校验" not in completed["summary"]
 
 
 def test_primary_skill_workflow_drives_agent_tool_order_and_step_context():
@@ -2380,6 +3134,7 @@ def test_primary_skill_workflow_drives_agent_tool_order_and_step_context():
         "document_writer_agent",
         "quality_review_agent",
         "market-entry-skill:design-entry",
+        "document_unify_polisher",
     ]
     assert "chapter_design_agent" not in [step["id"] for step in skill_plan]
     research_step = next(
@@ -2429,6 +3184,7 @@ def test_skill_step_prompt_consumes_harness_tool_result_without_meta_evidence():
             "tool_id": "memory_search",
             "status": "completed",
             "result_count": 3,
+            "skill_step_id": "collect-meeting",
         }
     ]
     state.environment["references"] = [
@@ -2448,6 +3204,237 @@ def test_skill_step_prompt_consumes_harness_tool_result_without_meta_evidence():
     assert "'tool_id': 'memory_search'" in user
     assert "'status': 'completed'" in user
     assert "本周会议纪要" in user
+
+
+def test_strict_skill_step_prompt_isolates_other_step_artifacts_and_receipts():
+    loop = CreationAgentLoop(FakeCreationService())
+    state = loop._new_state(
+        user_message="请使用@GPU周报 Skill 生成本周周报",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        selected_skills=[
+            {
+                "id": "gpu-weekly",
+                "title": "GPU周报 Skill",
+                "executionSteps": [
+                    {
+                        "id": "meeting",
+                        "title": "本周会议纪要",
+                        "objective": "获取会议纪要。",
+                        "output": "会议纪要列表",
+                        "agents": [],
+                        "skills": [],
+                        "tools": ["memory_search"],
+                    },
+                    {
+                        "id": "aigc",
+                        "title": "AIGC进度总结",
+                        "objective": "获取 AIGC 项目进度。",
+                        "output": "项目进度列表",
+                        "agents": [],
+                        "skills": [],
+                        "tools": ["memory_search"],
+                    },
+                ],
+            }
+        ],
+        options=CreationOptions(enabled_tools=("memory_search",)),
+        model_mode="local",
+        session_id="session-isolated-steps",
+        run_id="run-isolated-steps",
+    )
+    plan = resolve_planned(loop, state)
+    current_step = next(
+        step
+        for step in plan
+        if step["action"] == "skill_step" and step.get("skill_step_id") == "aigc"
+    )
+    state.environment["completed_skill_steps"] = [
+        {
+            "skill_id": "gpu-weekly",
+            "step_id": "meeting",
+            "title": "本周会议纪要",
+            "objective": "获取会议纪要。",
+            "output": "会议纪要列表",
+            "content": "会议纪要独立产物正文：已完成成本优化评审。",
+        }
+    ]
+    state.environment["tool_results"] = [
+        {
+            "tool_id": "memory_search",
+            "status": "completed",
+            "result_count": 2,
+            "skill_step_id": "meeting",
+        },
+        {
+            "tool_id": "memory_search",
+            "status": "completed",
+            "result_count": 5,
+            "skill_step_id": "aigc",
+        },
+    ]
+    state.current_document = (
+        "# GPU周报\n\n## 本周会议纪要\n\n会议纪要独立产物正文：已完成成本优化评审。"
+    )
+
+    _, user = loop._model_prompts(state, current_step)
+
+    # 独立推理：其他步骤的产物正文与已拼接文档不得进入当前步骤环境。
+    assert "会议纪要独立产物正文" not in user
+    assert "现有完整文档" not in user
+    assert "现有文档目录" not in user
+    # 已完成步骤只保留标题，并明示步骤间独立推理。
+    assert "已完成的 Skill 步骤（仅提供标题，步骤间独立推理）" in user
+    assert "本周会议纪要" in user
+    # Tool 回执按步骤过滤：只见当前步骤回执，不见其他步骤回执。
+    assert "'result_count': 5" in user
+    assert "'result_count': 2" not in user
+
+
+def test_single_structured_step_skill_does_not_schedule_document_unify_polisher():
+    loop = CreationAgentLoop(FakeCreationService())
+    state = loop._new_state(
+        user_message="请使用@单步 Skill 生成周报",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        selected_skills=[
+            {
+                "id": "single-step",
+                "title": "单步 Skill",
+                "executionSteps": [
+                    {
+                        "id": "only",
+                        "title": "唯一步骤",
+                        "objective": "形成周报。",
+                        "output": "周报正文",
+                        "agents": [],
+                        "skills": [],
+                        "tools": ["memory_search"],
+                    }
+                ],
+            }
+        ],
+        options=CreationOptions(enabled_tools=("memory_search",)),
+        model_mode="local",
+        session_id="session-single-step-skill",
+        run_id="run-single-step-skill",
+    )
+
+    plan = resolve_planned(loop, state)
+
+    # 只有一个独立推理产物时不需要合并润色，避免多余的大模型调用。
+    assert "document_unify_polisher" not in {step["id"] for step in plan}
+
+
+def test_strict_skill_document_keeps_gpu_and_token_steps_separate():
+    loop = CreationAgentLoop(FakeCreationService())
+    state = SimpleNamespace(
+        environment={
+            "strict_skill_ids": ["gpu-cost-weekly"],
+            "applied_skills": [
+                {"id": "gpu-cost-weekly", "name": "GPU成本优化周报创作法"}
+            ],
+            "completed_skill_steps": [
+                {
+                    "skill_id": "gpu-cost-weekly",
+                    "step_id": "gpu-metrics",
+                    "title": "GPU算力数据",
+                    "objective": "获取 GPU 算力数据并形成独立表格。",
+                    "output": "GPU算力数据表",
+                    "content": (
+                        "| GPU 指标 | 数值 |\n"
+                        "| --- | ---: |\n"
+                        "| 总卡数 | 1803.59 |\n\n"
+                        "算力利用率为 76%。\n\n"
+                        "## 本周结论\n\n这是未声明的总结。\n\n"
+                        "## 风险阻塞\n\n这是未声明的风险分析。"
+                    ),
+                },
+                {
+                    "skill_id": "gpu-cost-weekly",
+                    "step_id": "token-metrics",
+                    "title": "Token用量数据",
+                    "objective": "获取 Token 用量数据并形成独立表格。",
+                    "output": "Token用量数据表",
+                    "content": (
+                        "| Token 指标 | 数值 |\n"
+                        "| --- | ---: |\n"
+                        "| 输入 Token | 12.4 亿 |\n\n"
+                        "输出 Token 成本为 31 万元。\n\n"
+                        "## 重点进展\n\n这是未声明的进展总结。\n\n"
+                        "## 下周计划\n\n这是未声明的计划。"
+                    ),
+                },
+            ],
+        }
+    )
+
+    document = loop._assemble_strict_skill_document(state)
+
+    assert document.startswith("# GPU成本优化周报")
+    assert [
+        line.removeprefix("## ")
+        for line in document.splitlines()
+        if line.startswith("## ")
+    ] == ["GPU算力数据", "Token用量数据"]
+    assert "本周结论" not in document
+    assert "重点进展" not in document
+    assert "风险阻塞" not in document
+    assert "下周计划" not in document
+    assert "未声明" not in document
+    assert document.index("| GPU 指标 | 数值 |") < document.index("## Token用量数据")
+    assert document.index("## Token用量数据") < document.index("| Token 指标 | 数值 |")
+
+
+def test_scoped_skill_writer_prompt_uses_current_step_data_and_forbids_expansion():
+    loop = CreationAgentLoop(FakeCreationService())
+    state = loop._new_state(
+        user_message="请使用@GPU成本优化周报创作法生成周报",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        selected_skills=[
+            {
+                "id": "gpu-cost-weekly",
+                "title": "GPU成本优化周报创作法",
+                "skillInstructions": "# GPU 成本周报\n\n只执行声明的步骤，不增加其它章节。",
+                "executionSteps": [
+                    {
+                        "id": "gpu-metrics",
+                        "title": "GPU算力数据",
+                        "objective": "生成独立 GPU 表格。",
+                        "output": "GPU算力数据表",
+                        "agents": ["document_writer_agent"],
+                        "skills": [],
+                        "tools": [],
+                    }
+                ],
+            }
+        ],
+        options=CreationOptions(),
+        model_mode="local",
+        session_id="session-strict-writer",
+        run_id="run-strict-writer",
+    )
+    state.environment["data_results"] = [{"source_id": 1, "title": "历史 Token 表"}]
+    state.environment["current_data_results"] = [
+        {"source_id": 2, "title": "当前 GPU 表"}
+    ]
+    plan = resolve_planned(loop, state)
+    apply_step = next(step for step in plan if step["action"] == "apply_skill")
+    state.environment.setdefault("applied_skills", []).append(apply_step["skill"])
+    writer_step = next(step for step in plan if step["id"] == "document_writer_agent")
+
+    system, user = loop._model_prompts(state, writer_step)
+
+    assert "execution_steps 是唯一流程和章节白名单" in system
+    assert "不得把不同步骤的数据或表格合并" in system
+    assert "不得自行添加“结论”“重点进展”“风险/阻塞”“下周计划”" in system
+    assert "# GPU 成本周报" in user
+    assert "当前 GPU 表" in user
+    assert "历史 Token 表" not in user
 
 
 def test_skill_step_prompt_uses_scoped_bounded_fact_view_for_large_dashboard_payloads():
@@ -2655,9 +3642,230 @@ def test_selected_skill_without_structured_steps_still_never_adds_hidden_agents(
     assert plan[-1]["skill_step_id"] == "execute-skill"
 
 
+def test_explicit_skill_mention_drops_legacy_automatic_template_expansion():
+    loop = CreationAgentLoop(FakeCreationService())
+    primary_steps = [
+        {
+            "id": "meeting",
+            "title": "本周大模型性能成本优化周会会议纪要",
+            "objective": "获取会议纪要。",
+            "output": "会议纪要列表",
+            "agents": [],
+            "skills": [],
+            "tools": ["memory_search"],
+        },
+        {
+            "id": "aigc",
+            "title": "AIGC进度总结",
+            "objective": "获取 AIGC 进度。",
+            "output": "进度列表",
+            "agents": [],
+            "skills": [],
+            "tools": ["memory_search"],
+        },
+        {
+            "id": "gpu",
+            "title": "GPU算力数据",
+            "objective": "生成 GPU 数据表。",
+            "output": "GPU 数据表",
+            "agents": [],
+            "skills": [],
+            "tools": ["data_search"],
+        },
+        {
+            "id": "token",
+            "title": "Token数据",
+            "objective": "生成 Token 数据表。",
+            "output": "Token 数据表",
+            "agents": [],
+            "skills": [],
+            "tools": ["data_search"],
+        },
+    ]
+    state = loop._new_state(
+        user_message="请使用@GPU成本优化周报模板 创作下本周的周报",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        # 模拟旧客户端错误地把两个自动匹配模板与 @ Skill 一起发给 Agent。
+        selected_skills=[
+            {
+                "id": "gpu-weekly",
+                "title": "GPU成本优化周报模板",
+                "executionSteps": primary_steps,
+            },
+            {
+                "id": "generic-weekly",
+                "title": "通用工作周报模板",
+                "executionSteps": [
+                    {
+                        "id": "risks",
+                        "title": "形成风险与下周计划",
+                        "objective": "补充风险和计划。",
+                        "agents": ["solution_design_agent"],
+                        "skills": [],
+                        "tools": [],
+                    }
+                ],
+            },
+            {
+                "id": "stage-update",
+                "title": "项目阶段汇报模板",
+                "executionSteps": [
+                    {
+                        "id": "stage",
+                        "title": "撰写阶段汇报",
+                        "objective": "撰写完整阶段汇报。",
+                        "agents": ["document_writer_agent"],
+                        "skills": [],
+                        "tools": [],
+                    }
+                ],
+            },
+        ],
+        options=CreationOptions(enabled_tools=("memory_search", "data_search")),
+        model_mode="local",
+        session_id="session-explicit-skill-only",
+        run_id="run-explicit-skill-only",
+    )
+
+    plan = resolve_planned(loop, state)
+
+    assert [step["id"] for step in plan if step["action"] == "apply_skill"] == [
+        "gpu-weekly"
+    ]
+    assert [
+        step.get("skill_step_id")
+        for step in plan
+        if step.get("action") == "skill_step"
+    ] == ["meeting", "aigc", "gpu", "token"]
+    # 四个独立推理步骤后追加一次全文整合润色，共 11 个计划步骤。
+    assert len(plan) == 11
+    assert plan[-1]["id"] == "document_unify_polisher"
+    assert {step["id"] for step in plan}.isdisjoint(
+        {
+            "generic-weekly",
+            "stage-update",
+            "solution_design_agent",
+            "document_writer_agent",
+        }
+    )
+
+
+def test_support_skill_is_loaded_without_expanding_its_workflow():
+    loop = CreationAgentLoop(FakeCreationService())
+    state = loop._new_state(
+        user_message="请使用@主周报 Skill 生成周报",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        selected_skills=[
+            {
+                "id": "primary-weekly",
+                "title": "主周报 Skill",
+                "workflowRole": "primary",
+                "executionSteps": [
+                    {
+                        "id": "facts",
+                        "title": "事实列表",
+                        "objective": "整理事实。",
+                        "agents": [],
+                        "skills": ["evidence-support"],
+                        "tools": [],
+                    }
+                ],
+            },
+            {
+                "id": "evidence-support",
+                "title": "证据辅助 Skill",
+                "workflowRole": "support",
+                "executionSteps": [
+                    {
+                        "id": "forbidden-risk-plan",
+                        "title": "风险与下周计划",
+                        "objective": "生成另一套完整周报。",
+                        "agents": ["document_writer_agent"],
+                        "skills": [],
+                        "tools": [],
+                    }
+                ],
+            },
+        ],
+        options=CreationOptions(),
+        model_mode="local",
+        session_id="session-support-skill",
+        run_id="run-support-skill",
+    )
+
+    plan = resolve_planned(loop, state)
+
+    assert [step["id"] for step in plan if step["action"] == "apply_skill"] == [
+        "primary-weekly",
+        "evidence-support",
+    ]
+    assert [
+        step.get("skill_step_id")
+        for step in plan
+        if step.get("action") == "skill_step"
+    ] == ["facts"]
+    assert "document_writer_agent" not in {step["id"] for step in plan}
+    assert state.environment["strict_skill_ids"] == ["primary-weekly"]
+
+
 @pytest.mark.asyncio
-async def test_skill_workflow_keeps_authored_three_step_order_and_materializes_outputs():
-    service = FakeCreationService()
+async def test_reference_a889436d_four_step_workflow_order_and_output_structure():
+    class ReferenceOutputService(FakeCreationService):
+        async def stream_agent_document(self, **kwargs):
+            system_prompt = str(kwargs.get("system_prompt") or "")
+            if "全文整合润色" in system_prompt:
+                # 全文整合润色只做有边界的统一；测试中以透传组装稿验证
+                # “独立产物组装 -> 最终润色 -> 不被重组覆盖”的链路。
+                prompt = str(kwargs.get("user_prompt") or "")
+                marker = "现有完整文档：\n"
+                if marker in prompt:
+                    yield prompt.split(marker, 1)[1].strip()
+                    return
+            async for chunk in super().stream_agent_document(**kwargs):
+                yield chunk
+
+        async def run_specialist_agent(self, **kwargs):
+            prompt = str(kwargs.get("user_prompt") or "")
+            current_step = ""
+            if "【当前 Skill 执行步骤】" in prompt and "步骤：" in prompt:
+                current_step = prompt.split("步骤：", 1)[1].splitlines()[0].strip()
+            if current_step == "本周大模型性能成本优化周会会议纪要":
+                return "\n".join(
+                    f"- 会议事项 {index}：已核对本周成本优化动作、业务影响、责任边界与验证结果。"
+                    for index in range(1, 6)
+                )
+            if current_step == "AIGC进度总结":
+                return "\n".join(
+                    f"- AIGC 项目 {index}：本周完成阶段性交付、性能验证与应用场景复核，并记录下一里程碑。"
+                    for index in range(1, 11)
+                )
+            if current_step == "GPU算力数据":
+                return (
+                    "| 项目 | 业务线 | 卡数(X40) | 年化收益(万元) | 年化成本(万元) | ROI |\n"
+                    "| --- | --- | ---: | ---: | ---: | ---: |\n"
+                    + "\n".join(
+                        f"| GPU项目{index} | AI基座 | {index * 12:.2f} | {index * 210:.1f} | {index * 80:.1f} | {index * 1.2:.2f}x |"
+                        for index in range(1, 8)
+                    )
+                )
+            if current_step == "Token数据":
+                return (
+                    "| 指标 | 统计周期 | 数值 |\n"
+                    "| --- | --- | ---: |\n"
+                    "| 独立部署输入Tokens | 2026-08-10 至 2026-08-16 | 10919.04亿 |\n"
+                    "| 独立部署输出Tokens | 2026-08-10 至 2026-08-16 | 689.96亿 |\n"
+                    "| 公共部署输入Tokens | 2026-08-10 至 2026-08-16 | 675.90亿 |\n"
+                    "| 公共部署输出Tokens | 2026-08-10 至 2026-08-16 | 46.45亿 |\n"
+                    "| 商业模型输入Tokens | 2026-08-10 至 2026-08-16 | 57.76亿 |\n"
+                    "| 商业模型输出Tokens | 2026-08-10 至 2026-08-16 | 13.58亿 |"
+                )
+            return await super().run_specialist_agent(**kwargs)
+
+    service = ReferenceOutputService()
     service.routing_decision = {
         "tools": ["memory_search", "data_search"],
         "agents": [],
@@ -2743,6 +3951,15 @@ async def test_skill_workflow_keeps_authored_three_step_order_and_materializes_o
                 "skills": [],
                 "tools": ["data_search"],
             },
+            {
+                "id": "token-metrics-table",
+                "title": "Token数据",
+                "objective": "获取 LangBridge 模型中心本周 Token 数据并形成独立表格。",
+                "output": "Token数据表",
+                "agents": [],
+                "skills": [],
+                "tools": ["data_search"],
+            },
         ],
     }
     loop = CreationAgentLoop(service)
@@ -2771,6 +3988,8 @@ async def test_skill_workflow_keeps_authored_three_step_order_and_materializes_o
         ("summarize-progress", "creation_main_agent"),
         ("build-metrics-table", "data_search"),
         ("build-metrics-table", "creation_main_agent"),
+        ("token-metrics-table", "data_search"),
+        ("token-metrics-table", "creation_main_agent"),
     ]
     assert {
         step["id"] for step in plan
@@ -2794,6 +4013,40 @@ async def test_skill_workflow_keeps_authored_three_step_order_and_materializes_o
             options=CreationOptions(enabled_tools=("memory_search", "data_search")),
         )
     )
+    # a889436d 的真实记录为 45 个可见事件（旧记录无思考事件）；引入深度思考
+    # 事件（意图 + 每次内容生成大模型调用各一对）与顶层阶段事件（四个 Skill
+    # 步骤各一对 phase 事件）后同一流程约 71 个。保留少量实现波动空间，
+    # 但不能再回到错误版本的 119 个事件和三套模板长链。
+    assert len(events) <= 90
+    # 顶层阶段：四个 Skill 步骤按顺序形成四个阶段，phase 事件成对包裹；
+    # 最后追加一次独立的全文整合润色阶段。
+    phase_started = [event for event in events if event["type"] == "phase.started"]
+    phase_completed = [
+        event for event in events if event["type"] == "phase.completed"
+    ]
+    assert [event["data"]["phase_title"] for event in phase_started] == [
+        "本周大模型性能成本优化周会会议纪要",
+        "AIGC进度总结",
+        "GPU算力数据",
+        "Token数据",
+        "全文整合润色",
+    ]
+    assert all(
+        event["data"]["phase_kind"] == "skill_step"
+        for event in phase_started[:-1]
+    )
+    assert phase_started[-1]["data"]["phase_kind"] == "plan_step"
+    assert len(phase_started) == len(phase_completed) == 5
+    # 阶段内的工具摘要要表达调用目的，而不只是结果数量。
+    memory_summaries = [
+        event["summary"]
+        for event in events
+        if event["type"] == "tool.completed"
+        and event.get("actor", {}).get("id") == "memory_search"
+    ]
+    assert memory_summaries
+    assert all(summary.startswith("检索「") for summary in memory_summaries)
+    assert all("召回" in summary for summary in memory_summaries)
     completed_steps = [
         event["environment_patch"]["skill_step"]
         for event in events
@@ -2804,15 +4057,18 @@ async def test_skill_workflow_keeps_authored_three_step_order_and_materializes_o
         "collect-inputs",
         "summarize-progress",
         "build-metrics-table",
+        "token-metrics-table",
     ]
-    assert len(service.data_queries) == 1
+    assert len(service.data_queries) == 2
     assert service.data_queries[0].startswith("当前步骤：GPU算力数据")
+    assert service.data_queries[1].startswith("当前步骤：Token数据")
     assert service.reference_queries[1].startswith("当前步骤：AIGC进度总结")
     assert "AIGC 项目进度" in service.reference_queries[1]
     assert service.reference_queries[1].endswith(
         "整体创作背景：请使用@GPU成本优化周报创作法 创作下本周的周报"
     )
     assert "电商GPU信息平台" in service.data_queries[0]
+    assert "LangBridge" in service.data_queries[1]
     assert "创作下本周的周报" not in service.data_queries[0]
 
     data_event = next(
@@ -2892,7 +4148,13 @@ async def test_skill_workflow_keeps_authored_three_step_order_and_materializes_o
         "本周大模型性能成本优化周会会议纪要",
         "AIGC进度总结",
         "GPU算力数据",
+        "Token数据",
     ]
+    assert 1_500 <= len(final_document) <= 3_500
+    assert "## 本周结论" not in final_document
+    assert "## 重点进展" not in final_document
+    assert "## 风险与阻塞" not in final_document
+    assert "## 下周计划" not in final_document
     assert "辅助明细" not in final_document
 
 
@@ -3025,7 +4287,7 @@ def test_installed_skill_keeps_style_but_excludes_fictional_example_facts():
     assert "structurePattern" not in matched[0]
 
 
-def test_skill_step_can_disable_retained_screenshot_without_disabling_data_tool():
+def test_skill_step_defaults_to_silent_collection_without_disabling_data_tool():
     loop = CreationAgentLoop(FakeCreationService())
     skill = {"id": "gpu-weekly", "name": "GPU 周报", "source": "installed"}
     disabled = loop._plan_skill_workflow(
@@ -3058,7 +4320,7 @@ def test_skill_step_can_disable_retained_screenshot_without_disabling_data_tool(
 
     assert disabled[0]["id"] == "data_search"
     assert disabled[0]["skill_step_retain_webpage_screenshot"] is False
-    assert defaulted[0]["skill_step_retain_webpage_screenshot"] is True
+    assert defaulted[0]["skill_step_retain_webpage_screenshot"] is False
 
 
 @pytest.mark.asyncio
@@ -3534,3 +4796,213 @@ def test_revision_patch_tracks_added_modified_and_deleted_ranges():
     ]
     assert all(change["start_line"] <= change["end_line"] for change in visible_changes)
     assert "行业调研" in patch["target_sections"]
+
+
+def _reference_state_item(
+    source_type,
+    source_id,
+    *,
+    content_chars=0,
+    final_weight=0.5,
+    skill_step_id=None,
+):
+    item = {
+        "id": source_id,
+        "source_id": source_id,
+        "source_type": source_type,
+        "title": f"{source_type}-{source_id}",
+        "summary": "参考摘要",
+        "content": "甲" * content_chars,
+        "reason": "与步骤主题相关",
+        "final_weight": final_weight,
+    }
+    if skill_step_id:
+        item["skill_step_id"] = skill_step_id
+        item["skill_step_title"] = f"步骤{skill_step_id}"
+    return item
+
+
+def test_prompt_references_prioritizes_current_step_matches_over_merge_order():
+    # 上一步（会议纪要）先召回占满前位，本步（AIGC进度总结）召回的知识排在合并列表尾部
+    batch_minutes = [
+        _reference_state_item(
+            "document",
+            700 + index,
+            content_chars=1600,
+            final_weight=0.8 - index * 0.01,
+            skill_step_id="collect-minutes",
+        )
+        for index in range(10)
+    ]
+    batch_progress = [
+        _reference_state_item("knowledge", 2275, content_chars=1500, final_weight=0.68, skill_step_id="summarize-progress"),
+        _reference_state_item("knowledge", 2274, content_chars=1200, final_weight=0.66, skill_step_id="summarize-progress"),
+        _reference_state_item("document", 582, content_chars=1000, final_weight=0.60, skill_step_id="summarize-progress"),
+    ]
+    merged = CreationAgentLoop._merge_reference_states([], batch_minutes, limit=30)
+    merged = CreationAgentLoop._merge_reference_states(merged, batch_progress, limit=30)
+    progress_ids = {"knowledge:2275", "knowledge:2274", "document:582"}
+
+    baseline = CreationAgentLoop._prompt_references(merged)
+    baseline_ids = {
+        f"{item.get('source_type') or 'document'}:{item.get('source_id')}"
+        for item in baseline
+    }
+    # 不带步骤上下文时，尾部召回的本步证据会被预算截断（修复前的故障形态）
+    assert not progress_ids <= baseline_ids
+
+    scoped = CreationAgentLoop._prompt_references(
+        merged,
+        step={"skill_step_id": "summarize-progress"},
+    )
+    scoped_ids = [
+        f"{item.get('source_type') or 'document'}:{item.get('source_id')}"
+        for item in scoped
+    ]
+    # 本步命中的参考按 final_weight 降序排到最前且全部进入写作 Prompt
+    assert scoped_ids[:3] == ["knowledge:2275", "knowledge:2274", "document:582"]
+    # 非匹配参考保持原合并顺序，不被错误提升
+    merged_order = [
+        f"{item.get('source_type') or 'document'}:{item.get('source_id')}"
+        for item in merged
+        if f"{item.get('source_type') or 'document'}:{item.get('source_id')}"
+        not in progress_ids
+    ]
+    assert scoped_ids[3:] == [
+        identity for identity in merged_order if identity in set(scoped_ids[3:])
+    ]
+
+
+def test_prompt_references_retries_compaction_when_step_matches_exceed_budget():
+    matched = [
+        _reference_state_item(
+            "knowledge",
+            3000 + index,
+            content_chars=1600,
+            final_weight=0.9 - index * 0.01,
+            skill_step_id="summarize-progress",
+        )
+        for index in range(12)
+    ]
+    fillers = [
+        _reference_state_item(
+            "document",
+            4000 + index,
+            content_chars=1600,
+            final_weight=0.3,
+            skill_step_id="collect-minutes",
+        )
+        for index in range(4)
+    ]
+    merged = CreationAgentLoop._merge_reference_states([], matched + fillers, limit=30)
+
+    result = CreationAgentLoop._prompt_references(
+        merged,
+        step={"skill_step_id": "summarize-progress"},
+    )
+
+    result_ids = [
+        f"{item.get('source_type') or 'document'}:{item.get('source_id')}"
+        for item in result
+    ]
+    matched_ids = [f"knowledge:{3000 + index}" for index in range(12)]
+    # 预算装不下全部匹配项时压缩正文重试，本步证据全部进入 Prompt
+    assert matched_ids == result_ids[:12]
+    for item in result[:12]:
+        assert len(str(item.get("content") or "")) <= 801
+
+
+def test_prompt_references_keeps_source_identity_for_history_trace():
+    merged = CreationAgentLoop._merge_reference_states(
+        [],
+        [
+            _reference_state_item(
+                "knowledge",
+                2275,
+                content_chars=100,
+                final_weight=0.7,
+                skill_step_id="summarize-progress",
+            )
+        ],
+        limit=30,
+    )
+
+    result = CreationAgentLoop._prompt_references(
+        merged,
+        step={"skill_step_id": "summarize-progress"},
+    )
+
+    # references_json 落库依赖 source_type/source_id 追溯记忆域与来源记录
+    assert result[0]["source_type"] == "knowledge"
+    assert result[0]["source_id"] == 2275
+
+
+def _make_reference_document(source_type, source_id, *, final_weight=0.8):
+    return ReferenceDocument(
+        id=source_id,
+        title=f"{source_type}资料{source_id}",
+        doc_type="周报",
+        summary="本周进展摘要",
+        full_content="本周 AIGC 共建项目完成推理性能优化。",
+        sections_json="[]",
+        style_phrases="",
+        prompt_hint="",
+        usage_count=1,
+        review_status="approved",
+        updated_at=1720000000000,
+        source_url=None,
+        relevance_score=0.9,
+        quality_score=0.8,
+        completeness_score=0.8,
+        usage_score=0.5,
+        format_score=0.7,
+        freshness_score=0.9,
+        final_weight=final_weight,
+        reason="与本周进展相关",
+        source_type=source_type,
+        source_id=source_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_memory_search_event_keeps_recall_trace_fields():
+    service = FakeCreationService()
+    service.routing_decision = {"tools": ["memory_search"], "agents": []}
+    recalled = [
+        _make_reference_document("knowledge", 2275),
+        _make_reference_document("document", 582, final_weight=0.6),
+    ]
+    service.retrieve_references = lambda *args, **kwargs: list(recalled)
+
+    events = await collect_events(
+        CreationAgentLoop(service).run(
+            user_message="写一份本周 AIGC 共建项目周报",
+            current_document="",
+            conversation=[],
+            selected_skills=[],
+            options=CreationOptions(),
+        )
+    )
+
+    memory_events = [
+        event
+        for event in events
+        if event["type"] == "tool.completed"
+        and event["actor"]["id"] == "memory_search"
+    ]
+    assert memory_events
+    data = memory_events[0]["data"]
+    # trace 落库必须保留召回 id 列表与查询，才能事后取证"某条知识为何没进成稿"
+    assert data["reference_ids"] == ["knowledge:2275", "document:582"]
+    assert data["result_count"] == 2
+    assert data["query"]
+    assert isinstance(data["keywords"], list)
+    assert "skill_step_id" in data and "skill_step_title" in data
+
+    patch_references = memory_events[0]["environment_patch"]["references"]
+    assert [ref["source_id"] for ref in patch_references] == [2275, 582]
+    assert [ref["source_type"] for ref in patch_references] == [
+        "knowledge",
+        "document",
+    ]
+    assert all("skill_step_title" in ref for ref in patch_references)

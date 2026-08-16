@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 const HISTORY_SELECT: &str = "SELECT id, prompt, generated_content, doc_type, audience,
     reference_count, references_json, model, latency_ms, session_id, conversation_json,
     agent_trace_json, goal_json, root_request, parent_history_id, revision_no,
-    edit_operation, document_patch_json, evidence_json, created_at, updated_at
+    edit_operation, document_patch_json, evidence_json, created_at, updated_at,
+    source_kind, source_ref_id
     FROM creation_history ch";
 
 const LATEST_SESSION_PREDICATE: &str = "(COALESCE(TRIM(ch.session_id), '') = ''
@@ -63,6 +64,11 @@ pub struct CreationHistory {
     pub evidence_json: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// 记录来源：creation 手动创作（默认）/ scheduled_task 定时任务执行。
+    #[serde(default = "default_source_kind")]
+    pub source_kind: String,
+    #[serde(default)]
+    pub source_ref_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -324,6 +330,20 @@ pub fn set_evidence_json(conn: &Connection, history_id: i64, evidence_json: &str
     Ok(())
 }
 
+/// 标记创作记录来源（如定时任务执行），供创作页徽标与任务页跳转。
+pub fn set_source(
+    conn: &Connection,
+    history_id: i64,
+    source_kind: &str,
+    source_ref_id: Option<i64>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE creation_history SET source_kind = ?2, source_ref_id = ?3 WHERE id = ?1",
+        params![history_id, source_kind, source_ref_id],
+    )?;
+    Ok(())
+}
+
 fn map_history_row(row: &rusqlite::Row<'_>) -> Result<CreationHistory> {
     Ok(CreationHistory {
         id: row.get(0)?,
@@ -347,11 +367,19 @@ fn map_history_row(row: &rusqlite::Row<'_>) -> Result<CreationHistory> {
         evidence_json: row.get(18)?,
         created_at: row.get(19)?,
         updated_at: row.get(20)?,
+        source_kind: row
+            .get::<_, Option<String>>(21)?
+            .unwrap_or_else(default_source_kind),
+        source_ref_id: row.get(22)?,
     })
 }
 
 fn default_revision_no() -> i64 {
     1
+}
+
+fn default_source_kind() -> String {
+    "creation".to_string()
 }
 
 fn default_edit_operation() -> String {
@@ -386,7 +414,9 @@ mod tests {
                 document_patch_json TEXT,
                 evidence_json TEXT,
                 created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                source_kind TEXT NOT NULL DEFAULT 'creation',
+                source_ref_id INTEGER
             );",
         )
         .unwrap();
@@ -599,5 +629,40 @@ mod tests {
         assert_eq!(items[0].revision_no, 2);
         assert_eq!(items[0].parent_history_id, None);
         assert!(items[0].generated_content.contains("已补充"));
+    }
+
+    #[test]
+    fn set_source_marks_history_as_scheduled_task() {
+        let conn = connection();
+        let id = insert(
+            &conn,
+            "每日晨报",
+            "# 晨报",
+            None,
+            None,
+            0,
+            None,
+            None,
+            Some(500),
+            Some("session-task-1-9"),
+            None,
+            Some(r#"[{"type":"run.completed"}]"#),
+            None,
+            Some("每日晨报"),
+            None,
+            1,
+            "create_document",
+            None,
+        )
+        .unwrap();
+        set_source(&conn, id, "scheduled_task", Some(7)).unwrap();
+
+        let fetched = get_by_id(&conn, id).unwrap().unwrap();
+        assert_eq!(fetched.source_kind, "scheduled_task");
+        assert_eq!(fetched.source_ref_id, Some(7));
+
+        let (items, total) = list_page(&conn, None, 20, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(items[0].source_kind, "scheduled_task");
     }
 }

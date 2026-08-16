@@ -49,6 +49,7 @@ use objc2_app_kit::{
 use objc2_foundation::NSData;
 
 static QUITTING: AtomicBool = AtomicBool::new(false);
+static BACKEND_SUPERVISOR_STARTED: AtomicBool = AtomicBool::new(false);
 #[cfg(debug_assertions)]
 static FULL_SHUTDOWN_SCHEDULED: AtomicBool = AtomicBool::new(false);
 static LAST_FLOATING_ASSIST_TEMP_CLEANUP_MS: AtomicI64 = AtomicI64::new(0);
@@ -1076,9 +1077,26 @@ fn start_bundled_backends(app: &AppHandle) -> Result<(), String> {
         .children
         .lock()
         .map_err(|_| "内置服务状态锁已损坏".to_string())?;
-    if !children.is_empty() {
-        return Ok(());
+    let mut running_names = Vec::new();
+    let mut alive = Vec::with_capacity(children.len());
+    for mut process in children.drain(..) {
+        match process.child.try_wait() {
+            Ok(None) => {
+                running_names.push(process.name);
+                alive.push(process);
+            }
+            Ok(Some(status)) => {
+                eprintln!("内置服务 {} 已退出（{status}），准备自动恢复", process.name);
+            }
+            Err(error) => {
+                // 无法读取状态不代表进程已经退出。保留句柄，避免重复启动同一服务。
+                eprintln!("读取内置服务 {} 状态失败: {error}", process.name);
+                running_names.push(process.name);
+                alive.push(process);
+            }
+        }
     }
+    *children = alive;
 
     let runtime_home = app
         .path()
@@ -1105,8 +1123,11 @@ fn start_bundled_backends(app: &AppHandle) -> Result<(), String> {
         ("core", &core, &[]),
     ];
 
-    let mut started = Vec::with_capacity(services.len());
+    let mut first_error = None;
     for (name, executable, args) in services {
+        if running_names.contains(&name) {
+            continue;
+        }
         match spawn_bundled_backend(
             name,
             executable,
@@ -1115,18 +1136,37 @@ fn start_bundled_backends(app: &AppHandle) -> Result<(), String> {
             &log_dir,
             &ipc_socket_path,
         ) {
-            Ok(child) => started.push(child),
+            Ok(child) => children.push(child),
             Err(error) => {
-                for process in started.iter_mut().rev() {
-                    let _ = process.child.kill();
-                    let _ = process.child.wait();
+                eprintln!("自动恢复内置服务 {name} 失败: {error}");
+                if first_error.is_none() {
+                    first_error = Some(error);
                 }
-                return Err(error);
             }
         }
     }
-    *children = started;
-    Ok(())
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn schedule_backend_supervisor(app: AppHandle) {
+    if BACKEND_SUPERVISOR_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        while !QUITTING.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_secs(5));
+            if QUITTING.load(Ordering::SeqCst) {
+                break;
+            }
+            if let Err(error) = start_bundled_backends(&app) {
+                eprintln!("内置服务自动恢复未完成: {error}");
+            }
+        }
+    });
 }
 
 fn stop_bundled_backends(app: &AppHandle) {
@@ -1208,27 +1248,48 @@ fn schedule_full_shutdown() {
 fn schedule_full_shutdown() {}
 
 #[cfg(debug_assertions)]
-fn schedule_backend_startup() {
+fn run_backend_start_command() {
     let script = start_script_path();
     if !script.is_file() {
         eprintln!("未找到全组件启动脚本: {}", script.display());
         return;
     }
 
-    if let Err(error) = Command::new("/bin/bash")
+    match Command::new("/bin/bash")
         .arg(script)
         .arg("start-backends")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
+        .status()
     {
-        eprintln!("启动后台服务失败: {error}");
+        Ok(status) if !status.success() => {
+            eprintln!("后台服务检查未完成（{status}）");
+        }
+        Err(error) => {
+            eprintln!("启动后台服务失败: {error}");
+        }
+        Ok(_) => {}
     }
 }
 
-#[cfg(not(debug_assertions))]
-fn schedule_backend_startup() {}
+#[cfg(debug_assertions)]
+fn schedule_backend_supervisor(_app: AppHandle) {
+    if BACKEND_SUPERVISOR_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        while !QUITTING.load(Ordering::SeqCst) {
+            run_backend_start_command();
+            for _ in 0..15 {
+                if QUITTING.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+    });
+}
 
 #[cfg(not(feature = "app-store"))]
 fn autostart_enabled(app: &AppHandle) -> bool {
@@ -1655,6 +1716,65 @@ fn pick_local_directory() -> Option<String> {
 }
 
 #[tauri::command]
+fn pick_download_path(title: String, default_file_name: String) -> Option<String> {
+    rfd::FileDialog::new()
+        .set_title(if title.trim().is_empty() { "选择下载保存位置" } else { title.trim() })
+        .set_file_name(default_file_name.trim())
+        .save_file()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn save_downloaded_file(path: String, content_base64: String) -> Result<String, String> {
+    let target = PathBuf::from(path.trim());
+    if target.as_os_str().is_empty() {
+        return Err("未选择保存位置".to_string());
+    }
+    let bytes = general_purpose::STANDARD
+        .decode(content_base64.as_bytes())
+        .map_err(|error| format!("解析下载内容失败：{error}"))?;
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("创建保存目录失败：{error}"))?;
+        }
+    }
+    fs::write(&target, &bytes).map_err(|error| format!("保存下载文件失败：{error}"))?;
+    Ok(target.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+#[allow(deprecated)]
+fn reveal_downloaded_file(app: AppHandle, path: String) -> Result<(), String> {
+    let downloaded_path =
+        fs::canonicalize(&path).map_err(|error| format!("找不到已下载的文件：{error}"))?;
+    let folder = if downloaded_path.is_dir() {
+        downloaded_path
+    } else {
+        downloaded_path
+            .parent()
+            .map(PathBuf::from)
+            .ok_or_else(|| "无法确定文件所在文件夹".to_string())?
+    };
+    app.shell()
+        .open(folder.to_string_lossy().into_owned(), None)
+        .map_err(|error| format!("无法打开文件所在文件夹：{error}"))
+}
+
+#[tauri::command]
+#[allow(deprecated)]
+fn open_downloaded_file(app: AppHandle, path: String) -> Result<(), String> {
+    let downloaded_path =
+        fs::canonicalize(&path).map_err(|error| format!("找不到已下载的文件：{error}"))?;
+    if !downloaded_path.is_file() {
+        return Err("只能打开已下载的文件".to_string());
+    }
+    app.shell()
+        .open(downloaded_path.to_string_lossy().into_owned(), None)
+        .map_err(|error| format!("无法打开下载的文件：{error}"))
+}
+
+#[tauri::command]
 async fn capture_screen_ocr_for_floating_assist(
     app: AppHandle,
 ) -> Result<FloatingAssistOcrResult, String> {
@@ -1759,6 +1879,10 @@ pub fn run() {
             open_floating_assist_reference,
             open_export_folder,
             pick_local_directory,
+            pick_download_path,
+            save_downloaded_file,
+            reveal_downloaded_file,
+            open_downloaded_file,
             capture_screen_ocr_for_floating_assist,
         ])
         .setup(|app| {
@@ -1769,6 +1893,7 @@ pub fn run() {
             if let Err(error) = start_bundled_backends(app.handle()) {
                 eprintln!("内置服务启动失败: {error}");
             }
+            schedule_backend_supervisor(app.handle().clone());
 
             let main_panel = MenuItem::with_id(app, "main-panel", "主面板", true, None::<&str>)?;
             let capture =
@@ -1920,8 +2045,6 @@ pub fn run() {
 
             // 开发窗口可能由 `tauri dev` 直接启动，也会在 Rust 源码变化后独立重启。
             // 每次 setup 都执行幂等的后端启动检查，避免只剩 UI 时初始化接口报 Load failed。
-            schedule_backend_startup();
-
             Ok(())
         })
         .on_window_event(|window, event| {

@@ -109,6 +109,9 @@ class KnowledgeManager:
             'activity_type': 'TEXT',
             'is_self_generated': 'INTEGER NOT NULL DEFAULT 0',
             'evidence_strength': 'TEXT',
+            'work_item': 'TEXT',
+            'work_status': 'TEXT',
+            'work_progress': 'TEXT',
         }
 
         for name, col_type in expected_columns.items():
@@ -167,8 +170,9 @@ class KnowledgeManager:
                 capture_id, summary, overview, details, entities, category,
                 importance, occurrence_count, observed_at, event_time_start,
                 event_time_end, history_view, content_origin, activity_type,
-                is_self_generated, evidence_strength
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                is_self_generated, evidence_strength, work_item, work_status,
+                work_progress
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             knowledge['capture_id'],
             overview,  # 保持向后兼容
@@ -186,6 +190,9 @@ class KnowledgeManager:
             knowledge.get('activity_type'),
             int(bool(knowledge.get('is_self_generated', False))),
             knowledge.get('evidence_strength'),
+            knowledge.get('work_item'),
+            knowledge.get('work_status'),
+            knowledge.get('work_progress'),
         ))
 
         entry_id = cursor.lastrowid

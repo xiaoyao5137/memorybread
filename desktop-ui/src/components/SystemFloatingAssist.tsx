@@ -30,6 +30,7 @@ import { REMOTE_CREATION_MODEL_ID, canUseRemoteCreationModel, getEffectiveCreati
 import {
   INTERACTION_SETTINGS_CHANGED_EVENT,
   INTERACTION_SETTINGS_KEY,
+  floatingBallActionHint,
   normalizeInteractionSettings,
   readInteractionSettings,
   type FloatingBallAction,
@@ -643,10 +644,6 @@ const SystemFloatingAssist: React.FC = () => {
   }, [clearDoneIdleTimer, doneIdleDelayMs, phase])
 
   useEffect(() => {
-    setReferencesExpanded(false)
-  }, [references])
-
-  useEffect(() => {
     const width = previewOpen
       ? 720
       : hasCanvas
@@ -716,6 +713,7 @@ const SystemFloatingAssist: React.FC = () => {
     setScreenshot(null)
     setScreenshotSrc('')
     setReferences([])
+    setReferencesExpanded(false)
     setOutputTruncated(false)
     setInferenceElapsedMs(null)
     setStreamStatus('')
@@ -766,6 +764,7 @@ const SystemFloatingAssist: React.FC = () => {
     setScreenshot(null)
     setScreenshotSrc('')
     setReferences([])
+    setReferencesExpanded(false)
     setOutputTruncated(false)
     setInferenceElapsedMs(null)
     setStreamStatus('')
@@ -916,6 +915,7 @@ const SystemFloatingAssist: React.FC = () => {
     setCopied(false)
     setAnswer('')
     setReferences([])
+    setReferencesExpanded(false)
     setOutputTruncated(false)
     setInferenceElapsedMs(null)
     setStreamStatus('')
@@ -1052,6 +1052,7 @@ const SystemFloatingAssist: React.FC = () => {
     setAnswer('')
     setError(null)
     setReferences([])
+    setReferencesExpanded(false)
     setOutputTruncated(false)
     setInferenceElapsedMs(null)
     setStreamStatus('')
@@ -1346,6 +1347,7 @@ const SystemFloatingAssist: React.FC = () => {
     || (floatingAnswer.userQuestionUnderstanding ? '' : answer)
   const showAnswer = phase === 'answering'
     || (Boolean(displayedAnswer) && (phase === 'done' || phase === 'idle'))
+  const ballActionHint = floatingBallActionHint(interactionSettings.floatingBall)
 
   return (
     <div
@@ -1364,8 +1366,8 @@ const SystemFloatingAssist: React.FC = () => {
           onPointerMove={moveDrag}
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
-          aria-label="识别当前屏幕并咨询记忆面包"
-          title="识别当前屏幕并咨询记忆面包"
+          aria-label={ballActionHint}
+          title={ballActionHint}
         >
           {autoTaskConfig.enabled && (
             <span className="system-floating-assist__auto-mark" aria-hidden="true">auto</span>

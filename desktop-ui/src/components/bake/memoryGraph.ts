@@ -126,12 +126,19 @@ const dataPresentation = (source: DataSource) => {
   return { title, summary, rowConcepts }
 }
 
+// 网页采集的标题可能混入零宽字符或控制字符，清洗后再作标签，避免截断后只剩「…」
+const cleanLabel = (value?: string) => (value ?? '')
+  .replace(/[\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u2064\uFEFF]/g, '')
+  .replace(/[\u0000-\u001F\u007F]/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim()
+
 const toNodes = (assets: MemoryGraphAssets): MemoryGraphNode[] => {
   const knowledgeNodes = assets.knowledge.map<MemoryGraphNode>(item => ({
     id: `knowledge:${item.id}`,
     assetId: item.id,
     kind: 'knowledge',
-    label: item.summary || `知识 #${item.id}`,
+    label: cleanLabel(item.summary) || `知识 #${item.id}`,
     summary: item.overview || item.details || item.summary || '知识条目',
     concepts: toConcepts([...item.entities, item.category], `${item.summary} ${item.overview ?? ''}`),
     sourceMemoryIds: item.sourceTimelineId ? [item.sourceTimelineId] : [],
@@ -148,7 +155,7 @@ const toNodes = (assets: MemoryGraphAssets): MemoryGraphNode[] => {
     id: `document:${item.id}`,
     assetId: item.id,
     kind: 'document',
-    label: item.title || `文档 #${item.id}`,
+    label: cleanLabel(item.title) || `文档 #${item.id}`,
     summary: item.summary || item.promptHint || item.title || '文档',
     concepts: toConcepts([
       ...item.tags,
@@ -166,7 +173,7 @@ const toNodes = (assets: MemoryGraphAssets): MemoryGraphNode[] => {
     id: `operation:${item.id}`,
     assetId: item.id,
     kind: 'operation',
-    label: item.extractedProblem || item.sourceTitle || item.steps[0] || `操作 #${item.id}`,
+    label: cleanLabel(item.extractedProblem) || cleanLabel(item.sourceTitle) || cleanLabel(item.steps[0]) || `操作 #${item.id}`,
     summary: item.detailedContent || item.steps.slice(0, 2).join('；') || '操作手册',
     concepts: toConcepts(item.triggerKeywords, `${item.extractedProblem ?? ''} ${item.detailedContent ?? ''}`),
     sourceMemoryIds: item.sourceTimelineId ? [item.sourceTimelineId] : [],
@@ -182,7 +189,7 @@ const toNodes = (assets: MemoryGraphAssets): MemoryGraphNode[] => {
       id: `data:${item.id}`,
       assetId: String(item.id),
       kind: 'data',
-      label: presentation.title,
+      label: cleanLabel(presentation.title),
       summary: presentation.summary,
       concepts: toConcepts([...item.tags, ...presentation.rowConcepts], `${presentation.title} ${presentation.summary}`),
       sourceMemoryIds: unique((item.latest_snapshot?.source_timeline_ids ?? []).map(String)),
@@ -601,13 +608,29 @@ export const createMemoryGraphLayout = (
 
   const focusPosition = options.focusNodeId ? positions[options.focusNodeId] : null
   if (focusPosition) {
+    // 只平移焦点节点周围的小范围，避免整体平移后节点被推出画布裁切不可见；
+    // 全局居中交给渲染层的自动适配变换处理。
     const dx = width / 2 - focusPosition.x
     const dy = height / 2 - focusPosition.y
-    Object.values(positions).forEach(position => {
-      position.x += dx
-      position.y += dy
+    const influenceRadius = Math.min(width, height) * 0.42
+    nodes.forEach(node => {
+      const position = positions[node.id]
+      const offsetX = position.x + dx - width / 2
+      const offsetY = position.y + dy - height / 2
+      const distance = Math.sqrt(offsetX * offsetX + offsetY * offsetY)
+      const influence = Math.max(0, 1 - distance / influenceRadius)
+      if (influence <= 0) return
+      position.x += dx * influence
+      position.y += dy * influence
     })
   }
+
+  // 收敛后统一夹取，确保所有节点与标签留在画布可见区内。
+  nodes.forEach(node => {
+    const position = positions[node.id]
+    position.x = Math.min(width - 58, Math.max(58, position.x))
+    position.y = Math.min(height - 56, Math.max(42, position.y))
+  })
 
   return positions
 }

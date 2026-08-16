@@ -19,6 +19,10 @@ vi.mock('../components/RagPanel.v2', () => ({
   default: () => <section data-testid="rag-panel" />,
 }))
 
+vi.mock('../components/CreationPanel', () => ({
+  default: () => <section data-testid="creation-panel" />,
+}))
+
 vi.mock('../components/BakePanel', () => ({
   default: () => <section data-testid="bake-panel" />,
 }))
@@ -357,6 +361,23 @@ describe('App auth entry', () => {
 
     expect(screen.getByTestId('bake-panel')).toBeInTheDocument()
     expect(useAppStore.getState().bakeNavigationStack).toEqual([{ windowMode: 'rag' }])
+  })
+
+  it.each([
+    ['文档', { type: 'document', documentId: '42' }, 'bake-panel'],
+    ['知识', { type: 'bake_knowledge', artifactId: '86' }, 'bake-panel'],
+    ['操作', { type: 'operation', artifactId: '73' }, 'bake-panel'],
+    ['采集', { type: 'capture', captureId: '19' }, 'repository-panel'],
+  ])('从创作记录打开%s引用时把创作页写入返回栈', async (_label, detail, targetPanel) => {
+    useAppStore.getState().setWindowMode('creation')
+    render(<App />)
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('view-rag-reference', { detail }))
+    })
+
+    expect(screen.getByTestId(targetPanel)).toBeInTheDocument()
+    expect(useAppStore.getState().bakeNavigationStack).toEqual([{ windowMode: 'creation' }])
   })
 
   it('无具体目标的引用跳转会清除旧返回栈', async () => {

@@ -3,7 +3,8 @@
 use rusqlite::params;
 
 use super::models::{
-    NewScheduledTask, ScheduledTask, TaskExecution, TaskNotificationDelivery, UpdateScheduledTask,
+    normalize_executor_kind, NewScheduledTask, ScheduledTask, TaskExecution,
+    TaskNotificationDelivery, UpdateScheduledTask,
 };
 use crate::storage::{StorageError, StorageManager};
 
@@ -19,17 +20,19 @@ impl TaskRepo {
         storage.with_conn(|conn| {
             let notification_channel_ids = serde_json::to_string(&task.notification_channel_ids)
                 .unwrap_or_else(|_| "[]".into());
+            let executor_kind = normalize_executor_kind(&task.executor_kind);
             conn.execute(
                 "INSERT INTO scheduled_tasks
                  (name, user_instruction, cron_expression, template_id, notification_channel_ids,
-                  enabled, run_count, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 1, 0, ?6, ?6)",
+                  executor_kind, enabled, run_count, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 0, ?7, ?7)",
                 params![
                     task.name,
                     task.user_instruction,
                     task.cron_expression,
                     task.template_id,
                     notification_channel_ids,
+                    executor_kind,
                     now_ms
                 ],
             )?;
@@ -43,7 +46,7 @@ impl TaskRepo {
             let mut stmt = conn.prepare(
                 "SELECT id, name, user_instruction, cron_expression, enabled, template_id,
                         is_builtin, notification_channel_ids, run_count, last_run_at,
-                        last_run_status, next_run_at, created_at, updated_at
+                        last_run_status, next_run_at, created_at, updated_at, executor_kind
                  FROM scheduled_tasks WHERE enabled = 1 ORDER BY id",
             )?;
             let rows = stmt.query_map([], |row| Self::row_to_task(row))?;
@@ -57,7 +60,7 @@ impl TaskRepo {
             let mut stmt = conn.prepare(
                 "SELECT id, name, user_instruction, cron_expression, enabled, template_id,
                         is_builtin, notification_channel_ids, run_count, last_run_at,
-                        last_run_status, next_run_at, created_at, updated_at
+                        last_run_status, next_run_at, created_at, updated_at, executor_kind
                  FROM scheduled_tasks ORDER BY id",
             )?;
             let rows = stmt.query_map([], |row| Self::row_to_task(row))?;
@@ -71,7 +74,7 @@ impl TaskRepo {
             let mut stmt = conn.prepare(
                 "SELECT id, name, user_instruction, cron_expression, enabled, template_id,
                         is_builtin, notification_channel_ids, run_count, last_run_at,
-                        last_run_status, next_run_at, created_at, updated_at
+                        last_run_status, next_run_at, created_at, updated_at, executor_kind
                  FROM scheduled_tasks WHERE id = ?1",
             )?;
             let mut rows = stmt.query_map(params![id], |row| Self::row_to_task(row))?;
@@ -91,6 +94,10 @@ impl TaskRepo {
                 .notification_channel_ids
                 .as_ref()
                 .map(|ids| serde_json::to_string(ids).unwrap_or_else(|_| "[]".into()));
+            let executor_kind = patch
+                .executor_kind
+                .as_deref()
+                .map(normalize_executor_kind);
             let affected = conn.execute(
                 "UPDATE scheduled_tasks SET
                    name             = COALESCE(?1, name),
@@ -98,8 +105,9 @@ impl TaskRepo {
                    cron_expression  = COALESCE(?3, cron_expression),
                    enabled          = COALESCE(?4, enabled),
                    notification_channel_ids = COALESCE(?5, notification_channel_ids),
-                   updated_at       = ?6
-                 WHERE id = ?7",
+                   updated_at       = ?6,
+                   executor_kind    = COALESCE(?7, executor_kind)
+                 WHERE id = ?8",
                 params![
                     patch.name,
                     patch.user_instruction,
@@ -107,6 +115,7 @@ impl TaskRepo {
                     patch.enabled.map(|b| b as i64),
                     notification_channel_ids,
                     now_ms,
+                    executor_kind,
                     id,
                 ],
             )?;
@@ -186,7 +195,8 @@ impl TaskRepo {
         storage.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, task_id, started_at, completed_at, status,
-                        knowledge_count, token_used, result_text, error_message, latency_ms
+                        knowledge_count, token_used, result_text, error_message, latency_ms,
+                        creation_history_id
                  FROM task_executions WHERE task_id = ?1
                  ORDER BY started_at DESC LIMIT ?2",
             )?;
@@ -202,6 +212,7 @@ impl TaskRepo {
                     result_text: row.get(7)?,
                     error_message: row.get(8)?,
                     latency_ms: row.get(9)?,
+                    creation_history_id: row.get(10)?,
                     notification_deliveries: Vec::new(),
                 })
             })?;
@@ -249,6 +260,124 @@ impl TaskRepo {
             next_run_at: row.get(11)?,
             created_at: row.get(12)?,
             updated_at: row.get(13)?,
+            executor_kind: row.get::<_, Option<String>>(14)?.unwrap_or_else(|| "consult".into()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::StorageManager;
+
+    fn new_task(name: &str, executor_kind: &str) -> NewScheduledTask {
+        NewScheduledTask {
+            name: name.into(),
+            user_instruction: "生成行业周报".into(),
+            cron_expression: "0 9 * * *".into(),
+            template_id: None,
+            notification_channel_ids: Vec::new(),
+            executor_kind: executor_kind.into(),
+        }
+    }
+
+    #[test]
+    fn create_and_read_executor_kind() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        let creation_id = TaskRepo::create(&storage, &new_task("创作任务", "creation"), 1).unwrap();
+        let consult_id = TaskRepo::create(&storage, &new_task("咨询任务", "consult"), 1).unwrap();
+        // 非法取值归一化为默认咨询智能体。
+        let fallback_id = TaskRepo::create(&storage, &new_task("未知任务", "unknown"), 1).unwrap();
+
+        let creation = TaskRepo::get(&storage, creation_id).unwrap().unwrap();
+        let consult = TaskRepo::get(&storage, consult_id).unwrap().unwrap();
+        let fallback = TaskRepo::get(&storage, fallback_id).unwrap().unwrap();
+        assert_eq!(creation.executor_kind, "creation");
+        assert_eq!(consult.executor_kind, "consult");
+        assert_eq!(fallback.executor_kind, "consult");
+
+        let all = TaskRepo::list_all(&storage).unwrap();
+        // 内存库会预置内置日记任务，只校验本次创建的三条。
+        let created = all
+            .iter()
+            .filter(|task| ["创作任务", "咨询任务", "未知任务"].contains(&task.name.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(created.len(), 3);
+        assert!(created
+            .iter()
+            .all(|task| ["creation", "consult"].contains(&task.executor_kind.as_str())));
+    }
+
+    #[test]
+    fn update_executor_kind_without_touching_other_fields() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        let task_id = TaskRepo::create(&storage, &new_task("任务", "consult"), 1).unwrap();
+
+        let updated = TaskRepo::update(
+            &storage,
+            task_id,
+            &UpdateScheduledTask {
+                name: None,
+                user_instruction: None,
+                cron_expression: None,
+                enabled: None,
+                notification_channel_ids: None,
+                executor_kind: Some("creation".into()),
+            },
+            2,
+        )
+        .unwrap();
+        assert!(updated);
+        let task = TaskRepo::get(&storage, task_id).unwrap().unwrap();
+        assert_eq!(task.executor_kind, "creation");
+        assert_eq!(task.name, "任务");
+
+        // patch 不携带 executor_kind 时保持原值。
+        TaskRepo::update(
+            &storage,
+            task_id,
+            &UpdateScheduledTask {
+                name: Some("改名".into()),
+                user_instruction: None,
+                cron_expression: None,
+                enabled: None,
+                notification_channel_ids: None,
+                executor_kind: None,
+            },
+            3,
+        )
+        .unwrap();
+        let task = TaskRepo::get(&storage, task_id).unwrap().unwrap();
+        assert_eq!(task.executor_kind, "creation");
+        assert_eq!(task.name, "改名");
+    }
+
+    #[test]
+    fn list_executions_returns_creation_history_id() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        let task_id = TaskRepo::create(&storage, &new_task("创作任务", "creation"), 1).unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO task_executions
+                     (task_id, started_at, completed_at, status, result_text, creation_history_id)
+                     VALUES (?1, 10, 20, 'success', '文档正文', 88)",
+                    params![task_id],
+                )?;
+                conn.execute(
+                    "INSERT INTO task_executions
+                     (task_id, started_at, completed_at, status, result_text)
+                     VALUES (?1, 5, 8, 'success', '旧结果')",
+                    params![task_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let executions = TaskRepo::list_executions(&storage, task_id, 10).unwrap();
+        assert_eq!(executions.len(), 2);
+        // 按 started_at 倒序，最新一条携带创作记录关联。
+        assert_eq!(executions[0].creation_history_id, Some(88));
+        assert_eq!(executions[1].creation_history_id, None);
     }
 }

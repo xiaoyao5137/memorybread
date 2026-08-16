@@ -199,3 +199,88 @@ describe('创作记录搜索与分页', () => {
     expect(screen.getByText('该历史版本未保存来源编号，以下内容按原始需求从当前本地数据恢复。')).toBeInTheDocument()
   })
 })
+
+describe('定时任务创作记录', () => {
+  const scheduledHistoryRecord = {
+    id: 77,
+    prompt: '生成行业周报',
+    root_request: '生成行业周报',
+    generated_content: '# 任务执行产物\n本周行业动态已汇总。',
+    doc_type: '周报',
+    audience: '管理层',
+    session_id: 'session-task-3-9',
+    source_kind: 'scheduled_task',
+    source_ref_id: 3,
+    reference_count: 0,
+    references_json: '[]',
+    conversation_json: '[]',
+    agent_trace_json: JSON.stringify([{
+      schema_version: 'creation.agent.v1',
+      event_id: 'task-run-completed',
+      session_id: 'session-task-3-9',
+      run_id: 'task-run-1',
+      sequence: 1,
+      timestamp: 1_720_000_000_000,
+      type: 'run.completed',
+      status: 'completed',
+      actor: { kind: 'agent', id: 'orchestrator', name: '创作编排' },
+      summary: '执行完成',
+      environment_patch: {},
+      data: { document: '# 任务执行产物' },
+    }]),
+    created_at: 1_720_000_000_000,
+    updated_at: 1_720_000_100_000,
+  }
+
+  it('创作记录列表为定时任务来源展示徽标', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({
+          items: [{ ...scheduledHistoryRecord, id: 9 }],
+          total: 1,
+          limit: 20,
+          offset: 0,
+        })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: '创作记录 (1)' }))
+
+    expect(await screen.findByText('定时任务')).toBeInTheDocument()
+    expect(screen.getByText('生成行业周报')).toBeInTheDocument()
+  })
+
+  it('任务页跳转目标会拉取单条记录并恢复会话与执行流水', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.pathname === '/api/creation/history/77') {
+        return Response.json(scheduledHistoryRecord)
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    useAppStore.getState().setCreationHistoryOpenTarget(77)
+    const view = render(<CreationPanel />)
+
+    // 恢复后文档内容（编辑器内）与执行流水事件都应展示出来。
+    await waitFor(() => {
+      expect(view.container.textContent).toContain('任务执行产物')
+    }, { timeout: 3000 })
+    await waitFor(() => {
+      expect(view.container.textContent).toContain('执行完成')
+    })
+    expect(vi.mocked(fetch).mock.calls.some(([input]) =>
+      String(input).includes('/api/creation/history/77'))).toBe(true)
+    await waitFor(() => {
+      expect(useAppStore.getState().creationHistoryOpenTarget).toBeNull()
+    })
+  })
+})

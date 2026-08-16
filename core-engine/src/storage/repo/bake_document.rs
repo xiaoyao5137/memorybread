@@ -387,6 +387,9 @@ impl StorageManager {
                 "UPDATE bake_documents SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
                 params![deleted_at, id],
             )?;
+            if affected > 0 {
+                StorageManager::delete_memory_favorite_with_conn(conn, "document", id)?;
+            }
             Ok(affected > 0)
         })
     }

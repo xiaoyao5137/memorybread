@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Calendar, CheckCircle2, Edit2, RefreshCw } from 'lucide-react'
 import { useAppStore } from '../store/useAppStore'
+import TutorialLink, { TUTORIAL_URLS } from './TutorialLink'
 import './DiaryPanel.css'
 
 type PeriodType = 'daily' | 'weekly' | 'monthly'
@@ -182,7 +183,10 @@ const DiaryPanel: React.FC = () => {
   return (
     <div className="diary-panel">
       <header className="diary-card diary-header">
-        <h1 className="diary-title">工作日记</h1>
+        <div className="tutorial-title-row">
+          <h1 className="diary-title">工作日记</h1>
+          <TutorialLink url={TUTORIAL_URLS.diary} />
+        </div>
       </header>
 
       <section className="diary-card diary-toolbar" aria-label="日记筛选">

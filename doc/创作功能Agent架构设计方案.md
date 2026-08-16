@@ -424,8 +424,10 @@ while cursor < plan.length and steps < 64:
 | `run.started` / `run.resumed` | 新建或恢复一轮 Loop |
 | `goal.updated` | 目标建立、修订或完成 |
 | `intent.interpreted` | 用户意图、原始需求、本轮要求和安全的判断摘要 |
+| `thinking.started` / `thinking.completed` | 深度思考事件对，包裹意图理解（intent）、链路决策（routing）、内容生成（generation，文档撰写/润色等大模型内容调用）和反馈规划（planning）四个阶段；completed 携带面向用户的推理摘要，展示层用两者时间戳差计算思考时长，思考中展示呼吸灯。无 Skill 流程在规划阶段还会宏观总结接下来要执行的步骤 |
+| `phase.started` / `phase.completed` | 顶层执行阶段事件对：Skill 流程里同一个 Skill 步骤的 Tool/Agent/Writer 归入同一阶段（phase_kind=skill_step），无 Skill 时每个计划步骤自成一个宏观阶段（phase_kind=plan_step）；展示层据此把执行过程分成“阶段 → 思考/动作 → 明细”三层 |
 | `agent.started` / `agent.completed` | 子 Agent 生命周期 |
-| `tool.started` / `tool.completed` | Tool 生命周期 |
+| `tool.started` / `tool.completed` | Tool 生命周期；检索类 Tool 的 completed 摘要会带上步骤目的（如“检索「AIGC进度总结」相关资料，召回 10 条本地资料”） |
 | `skill.started` / `skill.completed` | Skill 生命周期 |
 | `model.request` | 请求客户端调用品牌模型 |
 | `document.delta` | 本地文档流式增量 |
@@ -435,7 +437,7 @@ while cursor < plan.length and steps < 64:
 | `run.paused` | 等待用户或外部模型 |
 | `run.completed` / `run.failed` | 本轮终态 |
 
-客户端忽略未知事件类型，使后续增加 Agent 或 Tool 时保持向前兼容。
+客户端忽略未知事件类型，使后续增加 Agent 或 Tool 时保持向前兼容。旧历史记录可能不包含 `thinking.*` 事件，展示层必须容忍无思考块的执行轨迹。
 
 ## 10. 本地与品牌模型执行
 

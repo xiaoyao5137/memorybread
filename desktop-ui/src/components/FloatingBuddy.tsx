@@ -9,8 +9,8 @@
  * 5. 账号入口固定在侧栏底部，不使用悬浮卡片
  */
 
-import React from 'react'
-import { ArrowDownToLine, ChevronRight, LogIn } from 'lucide-react'
+import React, { useState } from 'react'
+import { ArrowDownToLine, ChevronLeft, ChevronRight, LogIn } from 'lucide-react'
 import { useAppStore } from '../store/useAppStore'
 import { type WindowMode } from '../types'
 import { getRunModeLabel, getUserDisplayName } from '../utils/accountDisplay'
@@ -120,6 +120,16 @@ const MENU_GROUPS: MenuGroup[] = [
   }
 ]
 
+const SIDEBAR_COLLAPSED_KEY = 'memory-bread_sidebar_collapsed'
+
+const loadSidebarCollapsed = () => {
+  try {
+    return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
 const getAccountInitials = (label: string): string => {
   const normalized = label.trim()
   if (!normalized) return '记'
@@ -141,6 +151,7 @@ const getAccountInitials = (label: string): string => {
 
 const FloatingBuddy: React.FC<FloatingBuddyProps> = ({ className = '', softwareUpdate, onSoftwareUpdateClick }) => {
   const { windowMode, setWindowMode, clearBakeNavigationStack, currentUser, cloudSubscription } = useAppStore()
+  const [collapsed, setCollapsed] = useState(loadSidebarCollapsed)
   const accountLabel = getUserDisplayName(currentUser)
   const runModeLabel = getRunModeLabel(currentUser, cloudSubscription)
   const accountInitials = getAccountInitials(accountLabel)
@@ -149,10 +160,21 @@ const FloatingBuddy: React.FC<FloatingBuddyProps> = ({ className = '', softwareU
     setWindowMode(mode)
   }
 
+  const toggleCollapsed = () => {
+    setCollapsed(value => {
+      const next = !value
+      try {
+        window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(next))
+      } catch { /* localStorage may be unavailable in restricted environments */ }
+      return next
+    })
+  }
+
   return (
     <aside
-      className={`floating-buddy-v2 ${className}`}
+      className={`floating-buddy-v2${collapsed ? ' floating-buddy-v2--collapsed' : ''} ${className}`.trim()}
       data-testid="floating-buddy"
+      data-collapsed={collapsed}
     >
       <div className="buddy-sidebar-header">
         <div className="buddy-sidebar-logo">
@@ -162,6 +184,16 @@ const FloatingBuddy: React.FC<FloatingBuddyProps> = ({ className = '', softwareU
           <h1 className="buddy-sidebar-title">记忆面包</h1>
           <p className="buddy-sidebar-subtitle">品尝新知识</p>
         </div>
+        <button
+          type="button"
+          className="buddy-sidebar-collapse"
+          onClick={toggleCollapsed}
+          aria-label={collapsed ? '展开左侧菜单' : '折叠左侧菜单'}
+          aria-expanded={!collapsed}
+          title={collapsed ? '展开菜单' : '折叠菜单'}
+        >
+          {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+        </button>
       </div>
 
       <nav className="buddy-actions" aria-label="主菜单">
@@ -198,6 +230,8 @@ const FloatingBuddy: React.FC<FloatingBuddyProps> = ({ className = '', softwareU
             data-testid="software-update-entry"
             onClick={onSoftwareUpdateClick}
             type="button"
+            title={softwareUpdate.is_mandatory ? '需要更新软件' : '有可用软件更新'}
+            aria-label={softwareUpdate.is_mandatory ? '需要更新软件' : '有可用软件更新'}
           >
             <span className="buddy-update-entry__icon" aria-hidden="true"><ArrowDownToLine size={17} /></span>
             <span className="buddy-update-entry__copy">
@@ -213,6 +247,7 @@ const FloatingBuddy: React.FC<FloatingBuddyProps> = ({ className = '', softwareU
           type="button"
           aria-current={windowMode === 'account' || windowMode === 'messages' ? 'page' : undefined}
           aria-label={currentUser ? `打开${accountLabel}的用户账户` : '未登录，打开登录'}
+          title={currentUser ? `${accountLabel} · ${runModeLabel}` : '未登录，打开登录'}
           onClick={() => handleNavigate('account')}
         >
           <span className="buddy-account-entry__avatar" data-testid="account-avatar" aria-hidden="true">

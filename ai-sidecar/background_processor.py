@@ -1333,8 +1333,20 @@ class BackgroundProcessor:
                     type(exc).__name__, url[:120],
                 )
 
+    @staticmethod
+    def _ensure_timeline_work_columns(conn: sqlite3.Connection) -> None:
+        """Defensively bridge startup/test databases not yet opened by Core."""
+        existing = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(timelines)").fetchall()
+        }
+        for name in ("work_item", "work_status", "work_progress"):
+            if name not in existing:
+                conn.execute(f"ALTER TABLE timelines ADD COLUMN {name} TEXT")
+
     def _save_knowledge(self, conn: sqlite3.Connection, knowledge: dict) -> int:
         """保存 knowledge 条目，返回新插入的 id"""
+        self._ensure_timeline_work_columns(conn)
         capture_ids_raw = knowledge.get('capture_ids', '[]')
         try:
             capture_ids = json.loads(capture_ids_raw) if capture_ids_raw else []
@@ -1379,10 +1391,13 @@ class BackgroundProcessor:
                 activity_type,
                 is_self_generated,
                 evidence_strength,
+                work_item,
+                work_status,
+                work_progress,
                 created_at_ms,
                 updated_at_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             primary_capture_id,
             summary,
@@ -1409,6 +1424,9 @@ class BackgroundProcessor:
             knowledge.get('activity_type'),
             int(bool(knowledge.get('is_self_generated', False))),
             knowledge.get('evidence_strength'),
+            knowledge.get('work_item'),
+            knowledge.get('work_status'),
+            knowledge.get('work_progress'),
             current_time_ms,
             current_time_ms,
         ))
@@ -1606,6 +1624,76 @@ class BackgroundProcessor:
                 has_document_hint = True
         return identities, has_document_hint
 
+    def _append_key_timestamp_segment(
+        self,
+        conn: sqlite3.Connection,
+        timeline_id: int,
+        added_capture_ids: list[int],
+        group: list[dict],
+        summary: str = '',
+    ) -> Optional[str]:
+        """合并追加 capture 时同步补一段 key_timestamps，返回更新后的 JSON。
+
+        历史上跨批合并只更新 capture_ids 不维护 key_timestamps，导致列表页
+        关联采集数（capture_ids 长度）与详情页片段覆盖的采集数不一致。
+        新增 capture 已被既有片段覆盖或无可用时间戳时返回 None，不改动原值。
+        """
+        if not added_capture_ids:
+            return None
+        row = conn.execute(
+            "SELECT key_timestamps FROM timelines WHERE id = ?",
+            (timeline_id,),
+        ).fetchone()
+        if not row:
+            return None
+        segments: list[dict] = []
+        try:
+            loaded = json.loads(row[0] or '[]')
+            if isinstance(loaded, list):
+                segments = [seg for seg in loaded if isinstance(seg, dict)]
+        except (TypeError, json.JSONDecodeError):
+            segments = []
+        covered: set[int] = set()
+        for seg in segments:
+            raw_ids = seg.get('capture_ids')
+            if isinstance(raw_ids, list):
+                for cid in raw_ids:
+                    try:
+                        covered.add(int(cid))
+                    except (TypeError, ValueError):
+                        pass
+        added = [cid for cid in added_capture_ids if cid not in covered]
+        if not added:
+            return None
+        ts_map: dict[int, int] = {}
+        for capture in group:
+            try:
+                ts_map[int(capture.get('id'))] = int(capture.get('ts'))
+            except (TypeError, ValueError):
+                pass
+        missing = [cid for cid in added if cid not in ts_map]
+        if missing:
+            placeholders = ','.join('?' * len(missing))
+            try:
+                for cid, ts in conn.execute(
+                    f"SELECT id, ts FROM captures WHERE id IN ({placeholders})",
+                    missing,
+                ).fetchall():
+                    if ts is not None:
+                        ts_map[int(cid)] = int(ts)
+            except sqlite3.OperationalError:
+                pass
+        times = [ts_map[cid] for cid in added if cid in ts_map]
+        if not times:
+            return None
+        segments.append({
+            'capture_ids': added,
+            'start_ts': min(times),
+            'end_ts': max(times),
+            'summary': summary or '',
+        })
+        return json.dumps(segments, ensure_ascii=False)
+
     def _merge_group_into_existing_timeline(
         self,
         conn: sqlite3.Connection,
@@ -1613,8 +1701,12 @@ class BackgroundProcessor:
         capture_ids: list[int],
         group: list[dict],
         merged_details: str,
+        work_item: Optional[str] = None,
+        work_status: Optional[str] = None,
+        work_progress: Optional[str] = None,
     ) -> None:
         """语义去重合并：同步 timeline 成员、时间范围和 details。"""
+        self._ensure_timeline_work_columns(conn)
         row = conn.execute(
             """
             SELECT start_time, end_time, time_range_start, time_range_end, observed_at
@@ -1624,6 +1716,10 @@ class BackgroundProcessor:
         ).fetchone()
         existing_ids = self._timeline_member_capture_ids(conn, timeline_id)
         merged_ids = existing_ids + [cid for cid in capture_ids if cid not in existing_ids]
+        added_ids = [cid for cid in capture_ids if cid not in existing_ids]
+        key_timestamps_json = self._append_key_timestamp_segment(
+            conn, timeline_id, added_ids, group
+        )
 
         group_times = []
         for capture in group:
@@ -1649,22 +1745,30 @@ class BackgroundProcessor:
                 occurrence_count = occurrence_count + 1,
                 details = ?,
                 capture_ids = ?,
+                key_timestamps = COALESCE(?, key_timestamps),
                 start_time = COALESCE(?, start_time),
                 end_time = COALESCE(?, end_time),
                 time_range_start = COALESCE(?, time_range_start),
                 time_range_end = COALESCE(?, time_range_end),
                 observed_at = COALESCE(?, observed_at),
+                work_item = COALESCE(NULLIF(?, ''), work_item),
+                work_status = COALESCE(NULLIF(?, ''), work_status),
+                work_progress = COALESCE(NULLIF(?, ''), work_progress),
                 updated_at_ms = ?
             WHERE id = ?
             """,
             (
                 merged_details,
                 json.dumps(merged_ids, ensure_ascii=False),
+                key_timestamps_json,
                 next_start,
                 next_end,
                 next_start,
                 next_end,
                 next_end,
+                work_item,
+                work_status,
+                work_progress,
                 int(time.time() * 1000),
                 timeline_id,
             ),
@@ -1889,18 +1993,30 @@ class BackgroundProcessor:
                 ).fetchone()
                 if not row:
                     return False
-                # 合并 capture_ids JSON
+                # 合并 capture_ids JSON，并同步补 key_timestamps 段，
+                # 避免详情页片段只覆盖初始采集、与列表页关联采集数不一致。
                 existing_ids = json.loads(row[1] or '[]') if row[1] else []
                 merged_ids = existing_ids + [c for c in capture_ids if c not in existing_ids]
+                added_ids = [c for c in capture_ids if c not in existing_ids]
+                key_timestamps_json = self._append_key_timestamp_segment(
+                    conn, timeline_id, added_ids, group
+                )
                 new_end_time = max((c['ts'] for c in group), default=row[2] or 0)
                 conn.execute(
                     """UPDATE timelines SET
                          capture_ids = ?,
+                         key_timestamps = COALESCE(?, key_timestamps),
                          end_time = MAX(COALESCE(end_time, 0), ?),
                          occurrence_count = occurrence_count + 1,
                          updated_at_ms = ?
                        WHERE id = ?""",
-                    (json.dumps(merged_ids), new_end_time, int(time.time() * 1000), timeline_id),
+                    (
+                        json.dumps(merged_ids),
+                        key_timestamps_json,
+                        new_end_time,
+                        int(time.time() * 1000),
+                        timeline_id,
+                    ),
                 )
                 conn.commit()
                 self._mark_captures_processed(conn, capture_ids, timeline_id)
@@ -2122,6 +2238,9 @@ class BackgroundProcessor:
                     capture_ids,
                     group,
                     merged_details,
+                    knowledge.get('work_item'),
+                    knowledge.get('work_status'),
+                    knowledge.get('work_progress'),
                 )
                 self._save_timeline_data_facts(
                     conn,
@@ -2783,6 +2902,7 @@ class BackgroundProcessor:
                     return True
                 # 保存到数据库
                 cursor = conn.cursor()
+                self._ensure_timeline_work_columns(conn)
 
                 # 支持新旧两种格式
                 overview = knowledge.get('overview') or knowledge.get('summary', '')
@@ -2794,9 +2914,10 @@ class BackgroundProcessor:
                     (
                         capture_id, summary, overview, details, entities, category, importance, occurrence_count,
                         observed_at, event_time_start, event_time_end, history_view, content_origin,
-                        activity_type, is_self_generated, evidence_strength, created_at_ms, updated_at_ms
+                        activity_type, is_self_generated, evidence_strength,
+                        work_item, work_status, work_progress, created_at_ms, updated_at_ms
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     capture_data['id'],
                     overview,  # 保持向后兼容
@@ -2814,6 +2935,9 @@ class BackgroundProcessor:
                     knowledge.get('activity_type'),
                     int(bool(knowledge.get('is_self_generated', False))),
                     knowledge.get('evidence_strength'),
+                    knowledge.get('work_item'),
+                    knowledge.get('work_status'),
+                    knowledge.get('work_progress'),
                     current_time_ms,
                     current_time_ms,
                 ))

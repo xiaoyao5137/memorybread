@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "memorybread.integration-skill.v1",
+  "id": "workbuddy",
+  "version": "1.0.0",
+  "direction": "output",
+  "executor": "workbuddy_skill_export",
+  "format": "workbuddy-skill-zip",
+  "target": "WorkBuddy > 专家·技能·连接器 > 技能 > 上传技能",
+  "modes": ["preview", "execute"],
+  "source": "core-engine/src/integration/mod.rs"
+}

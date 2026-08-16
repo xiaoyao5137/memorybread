@@ -112,7 +112,7 @@ Harness 每完成一个 Agent、Tool 或 Skill 步骤就重新读取环境。依
 - FR-012 — 外部品牌模型执行章节设计、初稿和专项润色时，Loop 必须支持 `model.request → run.paused → run.resumed`，恢复后继续原计划。
 - FR-013 — 质量问题无法在预算内清除时，运行必须以当前完整文档结束，并在 `quality_warnings` 中返回剩余问题代码。
 - FR-014 — Skill 编辑器必须把章节设计和五类专项润色 Agent 作为受控可选能力；默认生成的创作工作流必须包含章节设计、初稿和质检步骤，不预置固定润色链。
-- FR-015 — 明确 Skill 的 `execution_steps` 必须作为唯一初始执行契约。Harness 只能调用步骤中声明且已启用的 Tool/Agent，不得追加通用章节设计、Writer、质量审校或专项润色；但步骤声明的 `data_search` 命中实时报表时，允许在同一步追加取得当前快照所必需的 `webpage_scrape`，不得继续隐式追加数据分析 Agent。网页刷新只把本轮 AX/DOM 程序化验证通过的指标写回环境；`retain_webpage_screenshot` 只控制截图附件并缺省为 `true`，不得改变取数和可用性判断。本轮已尝试刷新的报表不得再从同 URL 历史派生数据回退。没有声明子 Agent 的步骤由创作 Agent 自己完成并按顺序组装。
+- FR-015 — 明确 Skill 的 `execution_steps` 必须作为唯一初始执行契约。Harness 只能调用步骤中声明且已启用的 Tool/Agent，不得追加通用章节设计、Writer、质量审校或专项润色；但步骤声明的 `data_search` 命中实时报表时，允许在同一步追加取得当前快照所必需的 `webpage_scrape`，不得继续隐式追加数据分析 Agent。网页刷新只把本轮 DOM/AX 程序化验证通过的指标写回环境；`retain_webpage_screenshot` 只控制“保留证据截图”并缺省为 `false`，不得关闭即时取数。关闭截图时先用 `focus_policy=never` 静默读取；页面未打开或目标指标未通过结构校验时，允许用 `allow_foreground_refresh=true`、`focus_policy=allow_once` 对该来源降级一次专用浏览器会话。该会话只在创建隐藏窗口时短暂切换一次，随即恢复原应用并在隐藏窗口完成页面交互和长 DOM 采集，不生成图片。开启截图时同一一次性会话额外生成证据。用户切走后不得抢回焦点。本轮已尝试刷新的报表不得再从同 URL 历史派生数据回退。没有声明子 Agent 的步骤由创作 Agent 自己完成并按顺序组装。
 - FR-016 — Skill 的 `example_document` 只用于编辑器预览与人工理解风格，不得进入运行时 `applied_skills`、模型事实环境、检索词、章节义务或证据缺口。`field_examples` 可用于复刻句式与排版，但其中的虚构业务主题同样不得形成事实要求。证据缺口只能来自用户原始需求、当前 `execution_steps` 明确写出的目标/产出，或已有证据之间可观察的不一致。
 
 ## 6. 非功能、隐私与兼容要求
@@ -145,7 +145,7 @@ Harness 每完成一个 Agent、Tool 或 Skill 步骤就重新读取环境。依
 - AC-010 — 给定旧版 `creation.agent.v1` 事件与历史记录，当新版页面读取时，必须继续展示文档和执行轨迹；给定未知能力 ID，运行时必须跳过而不是执行，覆盖 FR-012、FR-014。
 - AC-011 — 给定一个只声明三步和 `memory_search`、`data_search` 的明确 Skill，当执行完成时，验证步骤顺序不变，未出现章节设计、Writer、质量审校、数据分析或网页刷新，最终 Markdown 仅有这三个步骤标题，覆盖 FR-015。
 - AC-012 — 给定 `example_document` 含“国产卡切换、潮汐调度、推理引擎优化”，但用户请求与 `execution_steps` 均未包含这些主题，验证运行时 Prompt、检索词、最终文档和证据缺口均不出现三个主题，覆盖 FR-016。
-- AC-013 — 给定声明 `data_search` 的 Skill 步骤，旧数据或未配置时验证默认保留分段长截图；显式设置 `retain_webpage_screenshot=false` 时验证仍执行 AX/DOM 网页读取且指标可用，但不发预览事件、不创建图片资产、不插入证据卡，覆盖 FR-015。
+- AC-013 — 给定声明 `data_search` 的 Skill 步骤，旧数据或未配置截图字段时验证先静默执行 DOM/AX 网页读取；页面未打开或目标指标不足时只降级一次受硬门禁保护的专用浏览器刷新，指标仍可用，但不发预览事件、不创建图片资产、不插入证据卡。显式设置 `retain_webpage_screenshot=true` 时才验证分段长截图和证据卡，覆盖 FR-015。
 
 ## 9. 发布、迁移与回滚
 

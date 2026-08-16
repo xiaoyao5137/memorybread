@@ -3,6 +3,7 @@ import {
   DEFAULT_INTERACTION_SETTINGS,
   INTERACTION_SETTINGS_KEY,
   findShortcutConflict,
+  floatingBallActionHint,
   normalizeInteractionSettings,
   readInteractionSettings,
   shortcutFromKeyboardEvent,
@@ -19,6 +20,18 @@ describe('interaction settings', () => {
       singleClick: 'open_floating_consult',
       doubleClick: 'open_main_panel',
     })
+  })
+
+  it('根据当前单击和双击动作生成悬浮提示', () => {
+    expect(floatingBallActionHint({
+      singleClick: 'open_floating_consult',
+      doubleClick: 'open_main_panel',
+    })).toBe('单击：打开悬浮球咨询框；双击：打开主面板')
+
+    expect(floatingBallActionHint({
+      singleClick: 'none',
+      doubleClick: 'recognize_screen_task',
+    })).toBe('单击：无事件；双击：触发当屏任务识别')
   })
 
   it('损坏或未知配置会安全回退到默认值', () => {

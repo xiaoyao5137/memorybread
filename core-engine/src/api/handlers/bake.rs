@@ -14,15 +14,18 @@ use crate::{
         BakeBucket, BakeCaptureFilter, BakeCapturePayload, BakeDocumentPayload,
         BakeExtractResponse, BakeKnowledgePayload, BakeListFilter, BakeListSort, BakeMemoryFilter,
         BakeMemoryPayload, BakeOverviewPayload, BakePagedResponse, BakeService, BakeSopPayload,
-        BakeStyleConfig, CreateOrUpdateDocumentRequest, InitializeBakeMemoriesResponse,
-        MAX_BAKE_RETRY_FAILURES,
+        BakeStyleConfig, CreateOrUpdateDocumentRequest, CreateOrUpdateKnowledgeRequest,
+        CreateOrUpdateSopRequest, InitializeBakeMemoriesResponse, MAX_BAKE_RETRY_FAILURES,
     },
-    storage::models_bake::BakeQueueStatusRecord,
+    storage::{models_bake::BakeQueueStatusRecord, repo::favorite::is_supported_favorite_kind},
 };
 
 #[derive(serde::Deserialize)]
 pub struct BakePaginationQuery {
     pub q: Option<String>,
+    pub app: Option<String>,
+    pub doc_type: Option<String>,
+    pub favorite: Option<bool>,
     pub bucket: Option<String>,
     pub from: Option<i64>,
     pub to: Option<i64>,
@@ -93,6 +96,18 @@ pub struct BakeQueueStatusResponse {
     pub running_count: i64,
 }
 
+#[derive(serde::Deserialize)]
+pub struct UpdateMemoryFavoriteRequest {
+    pub is_favorite: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct MemoryFavoriteResponse {
+    pub resource_kind: String,
+    pub resource_id: i64,
+    pub is_favorite: bool,
+}
+
 pub async fn get_bake_queue_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<BakeQueueStatusResponse>, ApiError> {
@@ -103,6 +118,36 @@ pub async fn get_bake_queue_status(
         queue,
         capture_enabled: state.is_capture_enabled(),
         running_count: state.storage.count_running_bake_runs().unwrap_or(0),
+    }))
+}
+
+pub async fn update_memory_favorite(
+    State(state): State<Arc<AppState>>,
+    Path((resource_kind, resource_id)): Path<(String, i64)>,
+    Json(body): Json<UpdateMemoryFavoriteRequest>,
+) -> Result<Json<MemoryFavoriteResponse>, ApiError> {
+    if !is_supported_favorite_kind(&resource_kind) {
+        return Err(ApiError::BadRequest(format!(
+            "unsupported favorite resource kind: {resource_kind}"
+        )));
+    }
+    let storage = state.storage.clone();
+    let kind_for_update = resource_kind.clone();
+    let is_favorite = body.is_favorite;
+    let updated = tokio::task::spawn_blocking(move || {
+        storage.set_memory_favorite(&kind_for_update, resource_id, is_favorite)
+    })
+    .await
+    .map_err(|error| ApiError::Internal(error.to_string()))??;
+    if !updated {
+        return Err(ApiError::NotFound(format!(
+            "{resource_kind} {resource_id} not found"
+        )));
+    }
+    Ok(Json(MemoryFavoriteResponse {
+        resource_kind,
+        resource_id,
+        is_favorite,
     }))
 }
 
@@ -140,6 +185,7 @@ pub async fn list_bake_sops(
         bucket,
         from_ts: params.from,
         to_ts: params.to,
+        favorite: params.favorite,
         limit,
         offset,
         sort: BakeListSort::Recent,
@@ -167,6 +213,29 @@ pub async fn delete_bake_sop(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn create_bake_sop(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateOrUpdateSopRequest>,
+) -> Result<Json<BakeSopPayload>, ApiError> {
+    let service = BakeService::new(state.storage.clone(), state.sidecar_url.clone());
+    let sop = tokio::task::spawn_blocking(move || service.create_sop(body))
+        .await
+        .map_err(|err| ApiError::Internal(err.to_string()))??;
+    Ok(Json(sop))
+}
+
+pub async fn update_bake_sop(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<CreateOrUpdateSopRequest>,
+) -> Result<Json<BakeSopPayload>, ApiError> {
+    let service = BakeService::new(state.storage.clone(), state.sidecar_url.clone());
+    let sop = tokio::task::spawn_blocking(move || service.update_sop(id, body))
+        .await
+        .map_err(|err| ApiError::Internal(err.to_string()))??;
+    Ok(Json(sop))
+}
+
 pub async fn get_bake_sop(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
@@ -191,14 +260,17 @@ pub async fn list_bake_documents(
         bucket,
         from_ts: params.from,
         to_ts: params.to,
+        favorite: params.favorite,
         limit,
         offset,
         sort: BakeListSort::Recent,
     };
-    let response: BakePagedResponse<BakeDocumentPayload> =
-        tokio::task::spawn_blocking(move || service.list_documents_paginated(filter))
-            .await
-            .map_err(|err| ApiError::Internal(err.to_string()))??;
+    let doc_type = params.doc_type.filter(|value| !value.trim().is_empty());
+    let response: BakePagedResponse<BakeDocumentPayload> = tokio::task::spawn_blocking(move || {
+        service.list_documents_paginated_with_type(filter, doc_type.as_deref())
+    })
+    .await
+    .map_err(|err| ApiError::Internal(err.to_string()))??;
     Ok(Json(BakeDocumentsResponse {
         items: response.items,
         total: response.total,
@@ -323,6 +395,7 @@ pub async fn list_bake_knowledge(
         bucket,
         from_ts: params.from,
         to_ts: params.to,
+        favorite: params.favorite,
         limit,
         offset,
         sort,
@@ -353,6 +426,29 @@ pub async fn delete_bake_knowledge(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn create_bake_knowledge(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateOrUpdateKnowledgeRequest>,
+) -> Result<Json<BakeKnowledgePayload>, ApiError> {
+    let service = BakeService::new(state.storage.clone(), state.sidecar_url.clone());
+    let knowledge = tokio::task::spawn_blocking(move || service.create_knowledge(body))
+        .await
+        .map_err(|err| ApiError::Internal(err.to_string()))??;
+    Ok(Json(knowledge))
+}
+
+pub async fn update_bake_knowledge(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<CreateOrUpdateKnowledgeRequest>,
+) -> Result<Json<BakeKnowledgePayload>, ApiError> {
+    let service = BakeService::new(state.storage.clone(), state.sidecar_url.clone());
+    let knowledge = tokio::task::spawn_blocking(move || service.update_knowledge(id, body))
+        .await
+        .map_err(|err| ApiError::Internal(err.to_string()))??;
+    Ok(Json(knowledge))
+}
+
 pub async fn get_bake_knowledge(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
@@ -373,6 +469,7 @@ pub async fn list_bake_captures(
     let offset = params.offset.unwrap_or(0);
     let filter = BakeCaptureFilter {
         q: params.q.filter(|value| !value.trim().is_empty()),
+        app_name: params.app.filter(|value| !value.trim().is_empty()),
         from_ts: params.from,
         to_ts: params.to,
         source_capture_id: params.source_capture_id,

@@ -136,7 +136,7 @@ pub async fn trigger_task(
         let _ = client
             .post(format!("{}/tasks/execute", sidecar_url))
             .json(&serde_json::json!({ "task_id": id }))
-            .timeout(std::time::Duration::from_secs(300))
+            .timeout(std::time::Duration::from_secs(1800))
             .send()
             .await;
     });

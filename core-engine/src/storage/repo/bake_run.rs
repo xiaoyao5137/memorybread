@@ -176,14 +176,15 @@ impl StorageManager {
                 "INSERT INTO bake_candidate_audits (
                     run_id, timeline_id, lane, source_capture_count,
                     effective_capture_count, sop_eligible, sop_eligibility_reason,
-                    persist_status, persist_reason, created_at_ms, updated_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+                    sop_evidence_mode, persist_status, persist_reason, created_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
                  ON CONFLICT(run_id, timeline_id) DO UPDATE SET
                     lane = excluded.lane,
                     source_capture_count = excluded.source_capture_count,
                     effective_capture_count = excluded.effective_capture_count,
                     sop_eligible = excluded.sop_eligible,
                     sop_eligibility_reason = excluded.sop_eligibility_reason,
+                    sop_evidence_mode = excluded.sop_evidence_mode,
                     persist_status = excluded.persist_status,
                     persist_reason = excluded.persist_reason,
                     updated_at_ms = excluded.updated_at_ms",
@@ -195,6 +196,7 @@ impl StorageManager {
                     audit.effective_capture_count,
                     audit.sop_eligible,
                     audit.sop_eligibility_reason,
+                    audit.sop_evidence_mode,
                     audit.persist_status,
                     audit.persist_reason,
                     now,
@@ -273,7 +275,7 @@ impl StorageManager {
             conn.query_row(
                 "SELECT id, run_id, timeline_id, lane, source_capture_count,
                         effective_capture_count, sop_eligible, sop_eligibility_reason,
-                        primary_type, classification_reason, sop_model_accepted,
+                        sop_evidence_mode, primary_type, classification_reason, sop_model_accepted,
                         sop_model_reason, sop_payload_valid, persist_status, persist_reason,
                         created_at_ms, updated_at_ms
                  FROM bake_candidate_audits
@@ -1045,15 +1047,16 @@ fn row_to_bake_candidate_audit(
         effective_capture_count: row.get(5)?,
         sop_eligible: row.get::<_, i64>(6)? != 0,
         sop_eligibility_reason: row.get(7)?,
-        primary_type: row.get(8)?,
-        classification_reason: row.get(9)?,
-        sop_model_accepted: row.get::<_, Option<i64>>(10)?.map(|value| value != 0),
-        sop_model_reason: row.get(11)?,
-        sop_payload_valid: row.get::<_, Option<i64>>(12)?.map(|value| value != 0),
-        persist_status: row.get(13)?,
-        persist_reason: row.get(14)?,
-        created_at_ms: row.get(15)?,
-        updated_at_ms: row.get(16)?,
+        sop_evidence_mode: row.get(8)?,
+        primary_type: row.get(9)?,
+        classification_reason: row.get(10)?,
+        sop_model_accepted: row.get::<_, Option<i64>>(11)?.map(|value| value != 0),
+        sop_model_reason: row.get(12)?,
+        sop_payload_valid: row.get::<_, Option<i64>>(13)?.map(|value| value != 0),
+        persist_status: row.get(14)?,
+        persist_reason: row.get(15)?,
+        created_at_ms: row.get(16)?,
+        updated_at_ms: row.get(17)?,
     })
 }
 
@@ -1090,7 +1093,8 @@ mod tests {
             source_capture_count: 3,
             effective_capture_count: 3,
             sop_eligible: true,
-            sop_eligibility_reason: Some("eligible_multi_capture".to_string()),
+            sop_eligibility_reason: Some("eligible_operation_evidence".to_string()),
+            sop_evidence_mode: Some("direct_interaction".to_string()),
             persist_status: "queued".to_string(),
             persist_reason: None,
         })
@@ -1112,6 +1116,10 @@ mod tests {
         assert_eq!(audit.source_capture_count, 3);
         assert_eq!(audit.effective_capture_count, 3);
         assert!(audit.sop_eligible);
+        assert_eq!(
+            audit.sop_evidence_mode.as_deref(),
+            Some("direct_interaction")
+        );
         assert_eq!(audit.primary_type.as_deref(), Some("knowledge"));
         assert_eq!(audit.sop_model_accepted, Some(true));
         assert_eq!(audit.sop_payload_valid, Some(true));

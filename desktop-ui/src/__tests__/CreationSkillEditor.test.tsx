@@ -242,10 +242,10 @@ describe('沉淀技能', () => {
     expect(screen.queryByRole('button', { name: /发布|开放到市场|更新市场版本|下架市场/ })).not.toBeInTheDocument()
     expect(screen.queryByText('发布边界')).not.toBeInTheDocument()
     expect(screen.getByDisplayValue('定义先行')).toBeInTheDocument()
-    const screenshotOption = screen.getByRole('checkbox', { name: '创作时保留网页证据截图到文档上' })
-    expect(screenshotOption).toBeChecked()
-    fireEvent.click(screenshotOption)
+    const screenshotOption = screen.getByRole('checkbox', { name: '保留证据截图' })
     expect(screenshotOption).not.toBeChecked()
+    fireEvent.click(screenshotOption)
+    expect(screenshotOption).toBeChecked()
     expect(screen.queryByText(/默认开启；关闭后仍优先通过 AX\/DOM 精确读取/)).not.toBeInTheDocument()
     fireEvent.change(summaryInput, { target: { value: '把算力数据整理成可复核的分析文档。' } })
     fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
@@ -256,6 +256,7 @@ describe('沉淀技能', () => {
           purpose: '把算力数据整理成可复核的分析文档。',
           problems: ['把算力数据整理成可复核的分析文档。'],
         },
+        execution_steps: [expect.objectContaining({ retain_webpage_screenshot: true })],
       })
       expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({
         summary: '把算力数据整理成可复核的分析文档。',

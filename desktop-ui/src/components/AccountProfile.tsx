@@ -703,6 +703,7 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
       selectedCaptureId: null,
       repositoryMemoryFocusId: null,
       repositoryCaptureQuery: '',
+      repositoryCaptureApp: '',
       repositoryCaptureFrom: selectedWorkDay.date,
       repositoryCaptureTo: selectedWorkDay.date,
       repositoryCaptureSourceCaptureId: null,

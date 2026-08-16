@@ -28,6 +28,7 @@ aes-gcm    = "0.10"
 base64     = "0.22"
 flate2     = "1"
 tempfile   = "3"
+zip        = { version = "2.2", default-features = false, features = ["deflate"] }
 
 # Hash
 sha2       = "0.10"

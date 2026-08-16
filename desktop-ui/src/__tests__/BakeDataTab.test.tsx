@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import BakeDataTab from '../components/bake/BakeDataTab'
 import type { DataSource } from '../types'
@@ -105,12 +105,19 @@ const renderDataTab = (overrides: Partial<React.ComponentProps<typeof BakeDataTa
 }
 
 describe('BakeDataTab', () => {
-  it('以可理解的摘要和表格展示数据含义', () => {
+  it('以完整表格展示数据，并按需打开详情抽屉', () => {
     renderDataTab()
 
-    expect(screen.getAllByText('GPU 利用率对比').length).toBeGreaterThanOrEqual(2)
-    expect(screen.getAllByText(/日均 GPU 利用率：国内 42%，海外 47%/).length).toBeGreaterThanOrEqual(2)
-    const table = screen.getByRole('table')
+    expect(screen.getByRole('table', { name: '数据表格' })).toBeInTheDocument()
+    expect(within(screen.getByRole('table', { name: '数据表格' })).queryByRole('columnheader', { name: '状态' })).not.toBeInTheDocument()
+    expect(within(screen.getByRole('table', { name: '数据表格' })).getByRole('columnheader', { name: '创建时间' })).toBeInTheDocument()
+    expect(screen.getByText('GPU 利用率对比')).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '查看数据：GPU 利用率对比' }))
+    const drawer = screen.getByRole('dialog', { name: 'GPU 利用率对比' })
+    expect(within(drawer).getAllByText('近期数据').length).toBeGreaterThan(0)
+    expect(within(drawer).getByText(/日均 GPU 利用率：国内 42%，海外 47%/)).toBeInTheDocument()
+    const table = within(drawer).getByRole('table')
     expect(within(table).getByRole('columnheader', { name: '对象 / 范围' })).toBeInTheDocument()
     expect(within(table).getByRole('columnheader', { name: '指标' })).toBeInTheDocument()
     expect(within(table).getByText('国内')).toBeInTheDocument()
@@ -118,19 +125,22 @@ describe('BakeDataTab', () => {
     expect(within(table).getByText('42%')).toBeInTheDocument()
     expect(within(table).getByText('47%')).toBeInTheDocument()
     expect(within(table).getByText('GPUTL 可能掩盖实际低效')).toBeInTheDocument()
-    expect(screen.getByText('该数据表共 2 行指标。')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /GPU 利用率/ })).not.toHaveTextContent('行指标')
+    expect(within(drawer).getByText('该数据表共 2 行指标。')).toBeInTheDocument()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
-  it('展示数据 ID，支持跳转来源时间线和删除', () => {
+  it('展示数据 ID，支持跳转来源时间线和删除', async () => {
     const props = renderDataTab()
 
-    expect(screen.getAllByText('数据 #22').length).toBeGreaterThanOrEqual(2)
+    fireEvent.click(screen.getByRole('button', { name: '查看数据：GPU 利用率对比' }))
+    expect(screen.getByText(/数据 #22/)).toBeInTheDocument()
     expect(screen.getByText('快照 ID').parentElement).toHaveTextContent('#220')
     fireEvent.click(screen.getAllByRole('button', { name: '时间线 #71' })[0])
     expect(props.onViewTimeline).toHaveBeenCalledWith(71)
     fireEvent.click(screen.getByRole('button', { name: '删除数据' }))
     expect(props.onDelete).toHaveBeenCalledWith(22)
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 
   it('不显示数据生成说明、重生成入口、页内概况和待采集报表', () => {
@@ -169,9 +179,7 @@ describe('BakeDataTab', () => {
       selectedId: 24,
     })
 
-    // 列表项展示网址
-    expect(screen.getByText('网址：https://bi.example.com/dashboard/gpu')).toBeInTheDocument()
-    // 详情区像文档一样展示可点击的来源网址
+    fireEvent.click(screen.getByRole('button', { name: '查看数据：GPU 利用率对比' }))
     expect(screen.getByText('来源网址')).toBeInTheDocument()
     const link = screen.getByRole('link', { name: 'https://bi.example.com/dashboard/gpu' })
     expect(link).toHaveAttribute('href', 'https://bi.example.com/dashboard/gpu')
@@ -183,5 +191,44 @@ describe('BakeDataTab', () => {
 
     expect(screen.queryByText('来源网址')).not.toBeInTheDocument()
     expect(screen.queryByText(/^网址：/)).not.toBeInTheDocument()
+  })
+
+  it('支持新建数据和编辑现有数据', async () => {
+    const onCreate = vi.fn().mockResolvedValue(true)
+    const onUpdate = vi.fn().mockResolvedValue(true)
+    renderDataTab({ onCreate, onUpdate })
+
+    fireEvent.click(screen.getByRole('button', { name: '新建' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '数据名称 *' }), { target: { value: '本周经营指标' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '第 1 行指标' }), { target: { value: '订单' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '第 1 行数值' }), { target: { value: '1200' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({
+      title: '本周经营指标',
+      rows: [expect.objectContaining({ metric: '订单', value: '1200' })],
+    })))
+
+    fireEvent.click(screen.getByRole('button', { name: '编辑数据：GPU 利用率对比' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '数据名称' }), { target: { value: 'GPU 经营指标' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledWith(22, expect.objectContaining({ title: 'GPU 经营指标' })))
+  })
+
+  it('详情可收藏，列表可切换收藏筛选', async () => {
+    const onFavoriteFilterChange = vi.fn()
+    const onToggleFavorite = vi.fn().mockResolvedValue(true)
+    renderDataTab({
+      favoriteFilter: 'all',
+      onFavoriteFilterChange,
+      onToggleFavorite,
+    })
+
+    fireEvent.change(screen.getByRole('combobox', { name: '收藏状态' }), {
+      target: { value: 'favorite' },
+    })
+    expect(onFavoriteFilterChange).toHaveBeenCalledWith('favorite')
+    fireEvent.click(screen.getByRole('button', { name: '查看数据：GPU 利用率对比' }))
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'GPU 利用率对比' })).getByRole('button', { name: '收藏' }))
+    await waitFor(() => expect(onToggleFavorite).toHaveBeenCalledWith(gpuSource, true))
   })
 })

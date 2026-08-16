@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -13,11 +13,14 @@ use crate::storage::document_identity::{
     canonical_document_identity, canonical_document_source_title, is_generic_document_source_title,
 };
 use crate::storage::models::CaptureRecord;
+use crate::storage::repo::favorite::{
+    FAVORITE_KIND_DOCUMENT, FAVORITE_KIND_KNOWLEDGE, FAVORITE_KIND_OPERATION,
+};
 use crate::storage::{
     now_ms, BakeActionTraceRecord, BakeActivityRecord, BakeDocumentRecord, BakeKnowledgeRecord,
-    BakeMemorySourceRecord, BakeOverviewRecord, BakeRunRecord, NewBakeCandidateAudit,
-    NewBakeDocument, NewBakeKnowledge, NewBakeRun, NewBakeSop, NewTimeline, StorageError,
-    StorageManager, TimelineRecord,
+    BakeMemorySourceRecord, BakeOverviewRecord, BakeRunRecord, BakeSopRecord,
+    NewBakeCandidateAudit, NewBakeDocument, NewBakeKnowledge, NewBakeRun, NewBakeSop, NewTimeline,
+    StorageError, StorageManager, TimelineRecord,
 };
 
 const BAKE_STYLE_CONFIG_KEY: &str = "bake.style.config";
@@ -82,6 +85,7 @@ pub struct BakeListFilter {
     pub bucket: Option<BakeBucket>,
     pub from_ts: Option<i64>,
     pub to_ts: Option<i64>,
+    pub favorite: Option<bool>,
     pub limit: usize,
     pub offset: usize,
     pub sort: BakeListSort,
@@ -97,6 +101,7 @@ pub enum BakeListSort {
 #[derive(Debug, Clone, Default)]
 pub struct BakeCaptureFilter {
     pub q: Option<String>,
+    pub app_name: Option<String>,
     pub from_ts: Option<i64>,
     pub to_ts: Option<i64>,
     pub source_capture_id: Option<i64>,
@@ -135,8 +140,10 @@ pub struct BakeCapturePayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BakeKnowledgePayload {
     pub id: String,
+    pub is_favorite: bool,
     pub capture_id: String,
     pub source_timeline_id: String,
+    pub source_url: Option<String>,
     pub summary: String,
     pub overview: Option<String>,
     pub details: Option<String>,
@@ -183,6 +190,7 @@ pub struct DocumentSectionPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BakeDocumentPayload {
     pub id: String,
+    pub is_favorite: bool,
     pub title: String,
     pub doc_type: String,
     pub status: String,
@@ -255,6 +263,7 @@ pub struct BakeLinkedKnowledgeSummaryPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BakeSopPayload {
     pub id: String,
+    pub is_favorite: bool,
     pub source_capture_id: String,
     pub source_timeline_id: String,
     pub source_title: Option<String>,
@@ -351,13 +360,24 @@ pub struct BakeExtractCandidatePayload {
     /// 处理，由 sidecar 保守降级为单帧。
     #[serde(default)]
     pub source_capture_count: i64,
-    /// 未经页面壳去重、严格按时间排序后实际送入模型的帧数。
+    /// 严格按时间排序后，真正包含用户交互、导航或可观察结果变化的操作证据
+    /// 节点数；不再等同于 action_trace 的原始帧数。
     #[serde(default)]
     pub effective_capture_count: i64,
+    /// Core 选择的证据通道。Sidecar 只在同一次 bundle 推理中消费它，
+    /// 不会再启动一次 SOP 专用推理。
+    #[serde(default)]
+    pub sop_evidence_mode: Option<String>,
     pub timeline_category: String,
     pub summary: String,
     pub overview: Option<String>,
     pub details: Option<String>,
+    #[serde(default)]
+    pub work_item: Option<String>,
+    #[serde(default)]
+    pub work_status: Option<String>,
+    #[serde(default)]
+    pub work_progress: Option<String>,
     pub entities: Vec<String>,
     pub importance: i64,
     pub occurrence_count: Option<i64>,
@@ -431,6 +451,10 @@ pub struct BakeExtractResponse {
     pub usage: Option<Value>,
     pub model: Option<String>,
     pub degraded: Option<bool>,
+    #[serde(default)]
+    pub artifact_shapes: Option<Value>,
+    #[serde(default)]
+    pub compatibility_recovered: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -628,6 +652,9 @@ impl BakeService {
             url_aggregated_text: None,
             url_aggregated_capture_count: 0,
             action_trace: Vec::new(),
+            work_item: None,
+            work_status: None,
+            work_progress: None,
             retry_failure_count: 0,
             retry_error_code: None,
             retry_next_at_ms: 0,
@@ -655,12 +682,18 @@ impl BakeService {
     }
 
     pub fn list_documents(&self) -> Result<Vec<BakeDocumentPayload>, ApiError> {
+        let favorite_ids = self
+            .storage
+            .list_memory_favorite_ids(FAVORITE_KIND_DOCUMENT)?;
         Ok(self
             .storage
             .list_bake_documents()?
             .into_iter()
             .filter(is_current_bake_document)
-            .map(map_document_record)
+            .map(|record| {
+                let is_favorite = favorite_ids.contains(&record.id);
+                map_document_record(record, is_favorite)
+            })
             .collect())
     }
 
@@ -668,6 +701,17 @@ impl BakeService {
         &self,
         filter: BakeListFilter,
     ) -> Result<BakePagedResponse<BakeDocumentPayload>, ApiError> {
+        self.list_documents_paginated_with_type(filter, None)
+    }
+
+    pub fn list_documents_paginated_with_type(
+        &self,
+        filter: BakeListFilter,
+        doc_type: Option<&str>,
+    ) -> Result<BakePagedResponse<BakeDocumentPayload>, ApiError> {
+        let favorite_ids = self
+            .storage
+            .list_memory_favorite_ids(FAVORITE_KIND_DOCUMENT)?;
         let mut items = self
             .storage
             .list_bake_documents()?
@@ -675,13 +719,32 @@ impl BakeService {
             .filter(is_current_bake_document)
             .filter(|record| matches_document_bucket(record, filter.bucket))
             .filter(|record| {
+                filter.favorite.map_or(true, |favorite| {
+                    favorite_ids.contains(&record.id) == favorite
+                })
+            })
+            .filter(|record| {
                 filter
                     .from_ts
                     .map_or(true, |from| record.created_at >= from)
             })
             .filter(|record| filter.to_ts.map_or(true, |to| record.created_at <= to))
-            .map(map_document_record)
+            .map(|record| {
+                let is_favorite = favorite_ids.contains(&record.id);
+                map_document_record(record, is_favorite)
+            })
             .collect::<Vec<_>>();
+
+        if let Some(doc_type) = doc_type.map(str::trim).filter(|value| !value.is_empty()) {
+            let doc_type_lower = doc_type.to_lowercase();
+            items.retain(|item| {
+                item.doc_type
+                    .split(|character| {
+                        matches!(character, '、' | ',' | '，' | '/' | '|' | ';' | '；')
+                    })
+                    .any(|category| category.trim().to_lowercase() == doc_type_lower)
+            });
+        }
 
         if let Some(query) = filter.q.as_deref() {
             let query_lower = query.to_lowercase();
@@ -702,6 +765,12 @@ impl BakeService {
                         .contains(&query_lower)
                     || item
                         .full_content
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&query_lower)
+                    || item
+                        .source_url
                         .as_deref()
                         .unwrap_or_default()
                         .to_lowercase()
@@ -750,7 +819,7 @@ impl BakeService {
             .storage
             .get_bake_document(id)?
             .ok_or_else(|| ApiError::NotFound(format!("document {id} not found after insert")))?;
-        Ok(map_document_record(created))
+        Ok(map_document_record(created, false))
     }
 
     pub fn get_document(&self, id: i64) -> Result<BakeDocumentPayload, ApiError> {
@@ -759,7 +828,10 @@ impl BakeService {
             .get_bake_document(id)?
             .filter(is_current_bake_document)
             .ok_or_else(|| ApiError::NotFound(format!("document {id} not found")))?;
-        Ok(map_document_record(record))
+        let is_favorite = self
+            .storage
+            .is_memory_favorite(FAVORITE_KIND_DOCUMENT, record.id)?;
+        Ok(map_document_record(record, is_favorite))
     }
 
     pub fn adopt_document(&self, id: i64) -> Result<BakeDocumentPayload, ApiError> {
@@ -777,7 +849,10 @@ impl BakeService {
             .storage
             .get_bake_document(id)?
             .ok_or_else(|| ApiError::NotFound(format!("document {id} not found after update")))?;
-        Ok(map_document_record(updated))
+        let is_favorite = self
+            .storage
+            .is_memory_favorite(FAVORITE_KIND_DOCUMENT, updated.id)?;
+        Ok(map_document_record(updated, is_favorite))
     }
 
     pub fn update_document(
@@ -793,7 +868,10 @@ impl BakeService {
             .storage
             .get_bake_document(id)?
             .ok_or_else(|| ApiError::NotFound(format!("document {id} not found after update")))?;
-        Ok(map_document_record(updated))
+        let is_favorite = self
+            .storage
+            .is_memory_favorite(FAVORITE_KIND_DOCUMENT, updated.id)?;
+        Ok(map_document_record(updated, is_favorite))
     }
 
     pub fn toggle_document_status(&self, id: i64) -> Result<BakeDocumentPayload, ApiError> {
@@ -801,7 +879,10 @@ impl BakeService {
             .storage
             .toggle_bake_document_status(id)?
             .ok_or_else(|| ApiError::NotFound(format!("document {id} not found")))?;
-        Ok(map_document_record(document))
+        let is_favorite = self
+            .storage
+            .is_memory_favorite(FAVORITE_KIND_DOCUMENT, document.id)?;
+        Ok(map_document_record(document, is_favorite))
     }
 
     pub fn delete_document(&self, id: i64) -> Result<(), ApiError> {
@@ -811,13 +892,21 @@ impl BakeService {
         Ok(())
     }
     pub fn list_sops(&self) -> Result<Vec<BakeSopPayload>, ApiError> {
+        let favorite_ids = self
+            .storage
+            .list_memory_favorite_ids(FAVORITE_KIND_OPERATION)?;
         Ok(self
             .storage
             .list_timelines_by_category(CATEGORY_BAKE_SOP)?
             .into_iter()
             .filter(is_current_bake_entry)
             .filter(|record| matches_entry_bucket(record, None))
-            .map(|record| map_sop_record_with_linked_summaries(&self.storage, record))
+            .map(|record| {
+                let is_favorite = favorite_ids.contains(&record.id);
+                let mut payload = map_sop_record_with_linked_summaries(&self.storage, record);
+                payload.is_favorite = is_favorite;
+                payload
+            })
             .collect())
     }
 
@@ -825,6 +914,9 @@ impl BakeService {
         &self,
         filter: BakeListFilter,
     ) -> Result<BakePagedResponse<BakeSopPayload>, ApiError> {
+        let favorite_ids = self
+            .storage
+            .list_memory_favorite_ids(FAVORITE_KIND_OPERATION)?;
         let records = self.storage.list_timelines_by_category(CATEGORY_BAKE_SOP)?;
         let filtered_records = if let Some(query) = filter.q.as_deref() {
             let query_lower = query.to_lowercase();
@@ -842,6 +934,9 @@ impl BakeService {
                         .map_or(true, |ids| ids.contains(&record.id))
                         && is_current_bake_entry(record)
                         && matches_entry_bucket(record, filter.bucket)
+                        && filter.favorite.map_or(true, |favorite| {
+                            favorite_ids.contains(&record.id) == favorite
+                        })
                         && filter
                             .from_ts
                             .map_or(true, |from| record.created_at_ms >= from)
@@ -868,6 +963,11 @@ impl BakeService {
                 .filter(is_current_bake_entry)
                 .filter(|record| matches_entry_bucket(record, filter.bucket))
                 .filter(|record| {
+                    filter.favorite.map_or(true, |favorite| {
+                        favorite_ids.contains(&record.id) == favorite
+                    })
+                })
+                .filter(|record| {
                     filter
                         .from_ts
                         .map_or(true, |from| record.created_at_ms >= from)
@@ -880,7 +980,12 @@ impl BakeService {
             .into_iter()
             .skip(filter.offset)
             .take(filter.limit)
-            .map(|record| map_sop_record_with_linked_summaries(&self.storage, record))
+            .map(|record| {
+                let is_favorite = favorite_ids.contains(&record.id);
+                let mut payload = map_sop_record_with_linked_summaries(&self.storage, record);
+                payload.is_favorite = is_favorite;
+                payload
+            })
             .collect();
         Ok(BakePagedResponse {
             items,
@@ -893,12 +998,109 @@ impl BakeService {
     pub fn get_sop(&self, id: i64) -> Result<BakeSopPayload, ApiError> {
         let record = self
             .storage
-            .get_timeline_entry(id)?
+            .get_bake_sop(id)?
             .ok_or_else(|| ApiError::NotFound(format!("sop {id} not found")))?;
-        if record.category != CATEGORY_BAKE_SOP {
+        let mut payload = map_sop_record_with_linked_summaries(
+            &self.storage,
+            bake_sop_record_to_timeline(record),
+        );
+        payload.is_favorite = self
+            .storage
+            .is_memory_favorite(FAVORITE_KIND_OPERATION, id)?;
+        Ok(payload)
+    }
+
+    pub fn create_sop(
+        &self,
+        payload: CreateOrUpdateSopRequest,
+    ) -> Result<BakeSopPayload, ApiError> {
+        validate_sop_request(&payload)?;
+        let title = payload.extracted_problem.trim().to_string();
+        let steps = payload
+            .steps
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        let trigger_keywords = payload
+            .trigger_keywords
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        let details = json!({
+            "source_timeline_id": "",
+            "source_capture_id": "",
+            "source_title": title.clone(),
+            "trigger_keywords": trigger_keywords.clone(),
+            "confidence": "medium",
+            "extracted_problem": title.clone(),
+            "steps": steps.clone(),
+            "linked_knowledge_ids": [],
+            "status": "confirmed",
+            "review_status": "confirmed",
+        });
+        let record = NewBakeSop {
+            timeline_id: 0,
+            title: title.clone(),
+            summary: title,
+            content: Some(details.to_string()),
+            detailed_content: normalize_optional_text(payload.detailed_content),
+            entities: to_json_string(&trigger_keywords)?,
+            importance: 5,
+            source_capture_ids: Some("[]".to_string()),
+        };
+        let id = self.storage.insert_bake_sop(&record)?;
+        self.get_sop(id)
+    }
+
+    pub fn update_sop(
+        &self,
+        id: i64,
+        payload: CreateOrUpdateSopRequest,
+    ) -> Result<BakeSopPayload, ApiError> {
+        validate_sop_request(&payload)?;
+        let existing = self
+            .storage
+            .get_bake_sop(id)?
+            .ok_or_else(|| ApiError::NotFound(format!("sop {id} not found")))?;
+        let title = payload.extracted_problem.trim().to_string();
+        let steps = payload
+            .steps
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        let trigger_keywords = payload
+            .trigger_keywords
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        let mut details = parse_details(existing.content.as_deref())
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        details.insert(
+            "trigger_keywords".to_string(),
+            json!(trigger_keywords.clone()),
+        );
+        details.insert("extracted_problem".to_string(), json!(title.clone()));
+        details.insert("steps".to_string(), json!(steps));
+        details.insert("status".to_string(), json!("confirmed"));
+        details.insert("review_status".to_string(), json!("confirmed"));
+        if !self.storage.update_bake_sop_manual(
+            id,
+            &title,
+            &title,
+            Some(&Value::Object(details).to_string()),
+            normalize_optional_text(payload.detailed_content).as_deref(),
+            &to_json_string(&trigger_keywords)?,
+            existing.importance,
+        )? {
             return Err(ApiError::NotFound(format!("sop {id} not found")));
         }
-        Ok(map_sop_record_with_linked_summaries(&self.storage, record))
+        self.get_sop(id)
     }
 
     pub fn adopt_sop(&self, id: i64) -> Result<BakeSopPayload, ApiError> {
@@ -940,7 +1142,10 @@ impl BakeService {
     }
 
     pub fn delete_sop(&self, id: i64) -> Result<(), ApiError> {
-        self.delete_bake_artifact(id, CATEGORY_BAKE_SOP)
+        if !self.storage.delete_bake_sop(id)? {
+            return Err(ApiError::NotFound(format!("sop {id} not found")));
+        }
+        Ok(())
     }
 
     pub fn list_memories(&self) -> Result<Vec<BakeMemoryPayload>, ApiError> {
@@ -984,21 +1189,59 @@ impl BakeService {
         &self,
         filter: BakeListFilter,
     ) -> Result<BakePagedResponse<BakeKnowledgePayload>, ApiError> {
-        let records = self
+        let favorite_ids = self
             .storage
-            .list_bake_knowledge_paginated(filter.q.as_deref(), 5000, 0)?;
+            .list_memory_favorite_ids(FAVORITE_KIND_KNOWLEDGE)?;
+        let records = self.storage.list_bake_knowledge_paginated(None, 5000, 0)?;
         let mut filtered = records
             .into_iter()
             .filter(is_current_bake_entry)
             .filter(|record| matches_entry_bucket(record, filter.bucket))
+            .filter(|record| {
+                filter.favorite.map_or(true, |favorite| {
+                    favorite_ids.contains(&record.id) == favorite
+                })
+            })
             .filter(|record| {
                 filter
                     .from_ts
                     .map_or(true, |from| record.created_at_ms >= from)
             })
             .filter(|record| filter.to_ts.map_or(true, |to| record.created_at_ms <= to))
-            .map(map_bake_knowledge_record)
-            .collect::<Vec<_>>();
+            .map(|record| {
+                let is_favorite = favorite_ids.contains(&record.id);
+                self.map_knowledge_record_with_capture_url(record)
+                    .map(|mut payload| {
+                        payload.is_favorite = is_favorite;
+                        payload
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(query) = filter.q.as_deref() {
+            let query_lower = query.to_lowercase();
+            filtered.retain(|item| {
+                item.summary.to_lowercase().contains(&query_lower)
+                    || item
+                        .overview
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&query_lower)
+                    || item
+                        .detailed_content
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&query_lower)
+                    || item.category.to_lowercase().contains(&query_lower)
+                    || item
+                        .source_url
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&query_lower)
+            });
+        }
         if filter.sort == BakeListSort::Heat {
             filtered.sort_by(|left, right| {
                 right
@@ -1026,26 +1269,89 @@ impl BakeService {
     pub fn get_knowledge(&self, id: i64) -> Result<BakeKnowledgePayload, ApiError> {
         let record = self
             .storage
-            .get_timeline_entry(id)?
+            .get_bake_knowledge(id)?
             .ok_or_else(|| ApiError::NotFound(format!("knowledge {id} not found")))?;
-        if record.category != CATEGORY_BAKE_KNOWLEDGE {
+        let mut payload =
+            self.map_knowledge_record_with_capture_url(bake_knowledge_record_to_timeline(record))?;
+        payload.is_favorite = self
+            .storage
+            .is_memory_favorite(FAVORITE_KIND_KNOWLEDGE, id)?;
+        Ok(payload)
+    }
+
+    pub fn create_knowledge(
+        &self,
+        payload: CreateOrUpdateKnowledgeRequest,
+    ) -> Result<BakeKnowledgePayload, ApiError> {
+        validate_knowledge_request(&payload)?;
+        let summary = payload.summary.trim().to_string();
+        let overview = normalize_optional_text(payload.overview).unwrap_or_else(|| summary.clone());
+        let details = json!({
+            "source_timeline_id": "",
+            "status": "confirmed",
+            "review_status": "confirmed",
+        });
+        let record = NewBakeKnowledge {
+            timeline_id: 0,
+            title: overview,
+            summary,
+            content: Some(details.to_string()),
+            detailed_content: normalize_optional_text(payload.detailed_content),
+            entities: "[]".to_string(),
+            importance: payload.importance.clamp(1, 10),
+            source_capture_ids: Some("[]".to_string()),
+        };
+        let id = self.storage.insert_bake_knowledge(&record)?;
+        self.get_knowledge(id)
+    }
+
+    pub fn update_knowledge(
+        &self,
+        id: i64,
+        payload: CreateOrUpdateKnowledgeRequest,
+    ) -> Result<BakeKnowledgePayload, ApiError> {
+        validate_knowledge_request(&payload)?;
+        let existing = self
+            .storage
+            .get_bake_knowledge(id)?
+            .ok_or_else(|| ApiError::NotFound(format!("knowledge {id} not found")))?;
+        let summary = payload.summary.trim().to_string();
+        let overview = normalize_optional_text(payload.overview).unwrap_or_else(|| summary.clone());
+        let mut details = parse_details(existing.content.as_deref())
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        details.insert("status".to_string(), json!("confirmed"));
+        details.insert("review_status".to_string(), json!("confirmed"));
+        if !self.storage.update_bake_knowledge_manual(
+            id,
+            &overview,
+            &summary,
+            Some(&Value::Object(details).to_string()),
+            normalize_optional_text(payload.detailed_content).as_deref(),
+            &existing.entities,
+            payload.importance.clamp(1, 10),
+        )? {
             return Err(ApiError::NotFound(format!("knowledge {id} not found")));
         }
-        Ok(map_bake_knowledge_record(record))
+        self.get_knowledge(id)
     }
 
     pub fn adopt_knowledge(&self, id: i64) -> Result<BakeKnowledgePayload, ApiError> {
         let updated = self.update_bake_artifact_status(id, CATEGORY_BAKE_KNOWLEDGE, "confirmed")?;
-        Ok(map_bake_knowledge_record(updated))
+        self.map_knowledge_record_with_capture_url(updated)
     }
 
     pub fn ignore_knowledge(&self, id: i64) -> Result<BakeKnowledgePayload, ApiError> {
         let updated = self.update_bake_artifact_status(id, CATEGORY_BAKE_KNOWLEDGE, "ignored")?;
-        Ok(map_bake_knowledge_record(updated))
+        self.map_knowledge_record_with_capture_url(updated)
     }
 
     pub fn delete_knowledge(&self, id: i64) -> Result<(), ApiError> {
-        self.delete_bake_artifact(id, CATEGORY_BAKE_KNOWLEDGE)
+        if !self.storage.delete_bake_knowledge(id)? {
+            return Err(ApiError::NotFound(format!("knowledge {id} not found")));
+        }
+        Ok(())
     }
 
     pub fn list_capture_records_paginated(
@@ -1058,6 +1364,7 @@ impl BakeService {
         capture_filter.from_ts = filter.from_ts;
         capture_filter.to_ts = filter.to_ts;
         capture_filter.query = filter.q;
+        capture_filter.app_name = filter.app_name;
         capture_filter.capture_id = filter.source_capture_id;
         let total = self.storage.count_captures(&capture_filter)?;
         let records = self.storage.list_captures(&capture_filter)?;
@@ -1163,26 +1470,6 @@ impl BakeService {
         Ok(updated)
     }
 
-    fn delete_bake_artifact(&self, id: i64, expected_category: &str) -> Result<(), ApiError> {
-        let entry = self
-            .storage
-            .get_timeline_entry(id)?
-            .ok_or_else(|| ApiError::NotFound(format!("artifact {id} not found")))?;
-        if entry.category != expected_category {
-            return Err(ApiError::BadRequest(format!(
-                "knowledge {id} is not in category {expected_category}"
-            )));
-        }
-        if extract_status(&entry) == "candidate" {
-            self.update_bake_artifact_status(id, expected_category, "ignored")?;
-            return Ok(());
-        }
-        if !self.storage.delete_knowledge_entry(id)? {
-            return Err(ApiError::NotFound(format!("artifact {id} not found")));
-        }
-        Ok(())
-    }
-
     pub fn promote_memory_to_document(&self, id: i64) -> Result<BakeDocumentPayload, ApiError> {
         let memory = self
             .storage
@@ -1271,7 +1558,7 @@ impl BakeService {
             .ok_or_else(|| {
                 ApiError::NotFound(format!("document {document_id} not found after insert"))
             })?;
-        Ok(map_document_record(created))
+        Ok(map_document_record(created, false))
     }
 
     pub fn promote_memory_to_sop(&self, id: i64) -> Result<BakeSopPayload, ApiError> {
@@ -1315,6 +1602,9 @@ impl BakeService {
             time_range_start: None,
             time_range_end: None,
             key_timestamps: None,
+            work_item: None,
+            work_status: None,
+            work_progress: None,
         };
         let sop_id = self.storage.insert_episodic_memory(&new_entry)?;
         let created = self
@@ -1875,9 +2165,33 @@ impl BakeService {
                     continue;
                 }
             };
+            tracing::info!(
+                "bake bundle contract: timeline_id={} degraded={} artifact_shapes={} compatibility_recovered={}",
+                candidate.timeline.id,
+                extracted.degraded.unwrap_or(false),
+                extracted
+                    .artifact_shapes
+                    .as_ref()
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "{}".to_string()),
+                extracted
+                    .compatibility_recovered
+                    .as_ref()
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "{}".to_string()),
+            );
             let sop_payload_valid = if extracted.sop.accepted {
                 extracted.sop.payload.as_ref().map(|payload| {
-                    serde_json::from_value::<BakeSopArtifactPayload>(payload.clone()).is_ok()
+                    serde_json::from_value::<BakeSopArtifactPayload>(payload.clone())
+                        .ok()
+                        .is_some_and(|parsed| {
+                            validate_bake_sop_evidence(
+                                &parsed,
+                                &candidate,
+                                &source_capture_id_strings(&candidate),
+                            )
+                            .is_ok()
+                        })
                 })
             } else {
                 None
@@ -2129,32 +2443,93 @@ impl BakeService {
         existing_sop_sources: &mut std::collections::HashSet<i64>,
     ) -> Result<CandidatePersistResult, ApiError> {
         let mut result = CandidatePersistResult::default();
+        let mut completed_artifacts = 0_i64;
+        let mut first_error: Option<ApiError> = None;
 
-        result.apply(self.persist_knowledge_artifact(
+        // SOP is both the shortest artifact and the one historically lost when a
+        // preceding long knowledge/document payload was malformed. Persist each
+        // envelope independently; one invalid sibling must not roll back or skip
+        // the others, and must not trigger another model bundle call.
+        match self.persist_sop_artifact(
+            memory_id,
+            candidate,
+            trigger_reason,
+            &extracted.sop,
+            existing_sop_sources,
+        ) {
+            Ok(outcome) => {
+                result.apply(outcome);
+                completed_artifacts += 1;
+            }
+            Err(error) => {
+                let reason = format!("artifact_error:{}", bake_retry_error_code(&error));
+                tracing::warn!(
+                    "bake artifact persist failed independently: timeline_id={} artifact=sop error={}",
+                    candidate.timeline.id,
+                    error,
+                );
+                result.sop_persist_status = Some("failed");
+                result.sop_persist_reason = Some(reason);
+                first_error = Some(error);
+            }
+        }
+
+        match self.persist_knowledge_artifact(
             memory_id,
             candidate,
             trigger_reason,
             &extracted.knowledge,
             existing_knowledge_sources,
-        )?);
-        result.apply(
-            self.persist_document_artifact(
+        ) {
+            Ok(outcome) => {
+                result.apply(outcome);
+                completed_artifacts += 1;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "bake artifact persist failed independently: timeline_id={} artifact=knowledge error={}",
+                    candidate.timeline.id,
+                    error,
+                );
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+
+        match self
+            .persist_document_artifact(
                 memory_id,
                 candidate,
                 &extracted.document,
                 existing_document_sources,
                 existing_document_urls,
             )
-            .await?,
-        );
-        result.apply(self.persist_sop_artifact(
-            memory_id,
-            candidate,
-            trigger_reason,
-            &extracted.sop,
-            existing_sop_sources,
-        )?);
+            .await
+        {
+            Ok(outcome) => {
+                result.apply(outcome);
+                completed_artifacts += 1;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "bake artifact persist failed independently: timeline_id={} artifact=document error={}",
+                    candidate.timeline.id,
+                    error,
+                );
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
 
+        if completed_artifacts == 0 {
+            return Err(first_error
+                .unwrap_or_else(|| ApiError::Internal("bake 资产未产生可持久化结果".to_string())));
+        }
+        if first_error.is_some() {
+            result.discarded_count += 1;
+        }
         Ok(result)
     }
 
@@ -2863,17 +3238,19 @@ impl BakeService {
         existing_sources: &mut std::collections::HashSet<i64>,
     ) -> Result<CandidatePersistResult, ApiError> {
         let source_capture_ids = collect_source_capture_id_strings(&self.storage, candidate)?;
-        // 最终写入守卫：即使旧 sidecar、异常模型响应或其他调用方把单帧候选
-        // 判为 accepted，也绝不允许它落成“操作”。多帧是操作资产的存储不变量。
-        if source_capture_ids.len() < 2 {
+        // 最终写入守卫与请求契约共用同一判定：直接交互通道要求“动作 + 可观察
+        // 结果”，语义工作流通道要求执行面、执行语义和验证/完成语义同时成立。
+        let eligibility = sop_eligibility(candidate);
+        if !eligibility.eligible {
             tracing::info!(
-                "bake sop discard: timeline_id={} reason=insufficient_multi_capture_evidence source_capture_count={}",
+                "bake sop discard: timeline_id={} reason={} effective_capture_count={}",
                 candidate.timeline.id,
-                source_capture_ids.len(),
+                eligibility.reason,
+                eligibility.effective_capture_count,
             );
             return Ok(CandidatePersistResult::sop_outcome(
                 "rejected",
-                "insufficient_multi_capture_evidence",
+                eligibility.reason,
             ));
         }
         let source_fingerprint = artifact_source_fingerprint(candidate);
@@ -2948,6 +3325,14 @@ impl BakeService {
                 message: "bake sop 产物缺少必要 payload".to_string(),
             })?;
         let payload = parse_bake_sop_payload(payload, candidate)?;
+        if let Err(reason) = validate_bake_sop_evidence(&payload, candidate, &source_capture_ids) {
+            tracing::info!(
+                "bake sop discard: timeline_id={} reason={}",
+                candidate.timeline.id,
+                reason,
+            );
+            return Ok(CandidatePersistResult::sop_outcome("rejected", reason));
+        }
         if let Some(memory_id) = memory_id {
             self.update_memory_match_metadata(
                 memory_id,
@@ -3229,6 +3614,27 @@ impl BakeService {
         Ok(map_memory_record(record, capture_url))
     }
 
+    fn map_knowledge_record_with_capture_url(
+        &self,
+        record: TimelineRecord,
+    ) -> Result<BakeKnowledgePayload, ApiError> {
+        let source_url = if record.capture_id > 0 {
+            let capture_id = self
+                .storage
+                .get_timeline_entry(record.capture_id)?
+                .map(|timeline| timeline.capture_id)
+                .unwrap_or(record.capture_id);
+            self.storage
+                .get_capture(capture_id)?
+                .and_then(|capture| normalize_optional_url(capture.url))
+        } else {
+            None
+        };
+        let mut payload = map_bake_knowledge_record(record);
+        payload.source_url = source_url;
+        Ok(payload)
+    }
+
     /// 指纹预筛：候选源文本指纹已命中所有可能产出的产物类型时返回 true。
     ///
     /// knowledge / sop 需已有同指纹产物；document 仅在候选满足自动建档证据
@@ -3340,15 +3746,20 @@ fn map_extract_candidate_payload(
     candidate: &BakeMemorySourceRecord,
 ) -> BakeExtractCandidatePayload {
     let source_capture_count = source_capture_id_strings(candidate).len() as i64;
+    let sop_eligibility = sop_eligibility(candidate);
     BakeExtractCandidatePayload {
         source_timeline_id: candidate.timeline.id,
         source_capture_id: candidate.timeline.capture_id,
         source_capture_count,
-        effective_capture_count: candidate.action_trace.len() as i64,
+        effective_capture_count: sop_eligibility.effective_capture_count,
+        sop_evidence_mode: sop_eligibility.mode.map(|mode| mode.as_str().to_string()),
         timeline_category: candidate.timeline.category.clone(),
         summary: candidate.timeline.summary.clone(),
         overview: candidate.timeline.overview.clone(),
         details: candidate.timeline.details.clone(),
+        work_item: candidate.work_item.clone(),
+        work_status: candidate.work_status.clone(),
+        work_progress: candidate.work_progress.clone(),
         entities: parse_json_vec_string(&candidate.timeline.entities),
         importance: candidate.timeline.importance,
         occurrence_count: candidate.timeline.occurrence_count,
@@ -3394,15 +3805,11 @@ fn new_bake_candidate_audit(
     persist_reason: Option<&str>,
 ) -> NewBakeCandidateAudit {
     let source_capture_count = source_capture_id_strings(candidate).len() as i64;
-    let effective_capture_count = candidate.action_trace.len() as i64;
+    let eligibility = sop_eligibility(candidate);
     let (sop_eligible, sop_eligibility_reason) = if persist_status != "queued" {
         (false, persist_reason.unwrap_or("precheck_skipped"))
-    } else if source_capture_count < 2 {
-        (false, "insufficient_source_capture_count")
-    } else if effective_capture_count < 2 {
-        (false, "insufficient_effective_capture_count")
     } else {
-        (true, "eligible_multi_capture")
+        (eligibility.eligible, eligibility.reason)
     };
     NewBakeCandidateAudit {
         run_id,
@@ -3413,11 +3820,196 @@ fn new_bake_candidate_audit(
             "fresh".to_string()
         },
         source_capture_count,
-        effective_capture_count,
+        effective_capture_count: eligibility.effective_capture_count,
         sop_eligible,
         sop_eligibility_reason: Some(sop_eligibility_reason.to_string()),
+        sop_evidence_mode: eligibility.mode.map(|mode| mode.as_str().to_string()),
         persist_status: persist_status.to_string(),
         persist_reason: persist_reason.map(ToString::to_string),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SopEvidenceMode {
+    DirectInteraction,
+    SemanticWorkflow,
+}
+
+impl SopEvidenceMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectInteraction => "direct_interaction",
+            Self::SemanticWorkflow => "semantic_workflow",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SopEligibility {
+    eligible: bool,
+    reason: &'static str,
+    mode: Option<SopEvidenceMode>,
+    effective_capture_count: i64,
+}
+
+fn sop_eligibility(candidate: &BakeMemorySourceRecord) -> SopEligibility {
+    let source_capture_count = source_capture_id_strings(candidate).len() as i64;
+    if source_capture_count < 2 {
+        return SopEligibility {
+            eligible: false,
+            reason: "insufficient_source_capture_count",
+            mode: None,
+            effective_capture_count: source_capture_count,
+        };
+    }
+
+    let direct_ids = candidate
+        .action_trace
+        .iter()
+        .filter(|record| record.operation_evidence)
+        .map(|record| record.capture_id)
+        .collect::<HashSet<_>>();
+    let has_direct_action = candidate.action_trace.iter().any(|record| {
+        if !record.operation_evidence {
+            return false;
+        }
+        matches!(
+            record.evidence_kind.as_deref(),
+            Some("interaction") | Some("input")
+        ) || matches!(record.event_type.as_str(), "mouse_click" | "key_pause")
+    });
+    let direct_result_markers = [
+        "测试通过",
+        "验证通过",
+        "已完成",
+        "完成校验",
+        "生成成功",
+        "发布成功",
+        "失败",
+        "tests passed",
+        "test passed",
+        "verified",
+        "completed",
+        "failed",
+    ];
+    let has_observable_result = candidate.action_trace.iter().any(|record| {
+        let result_text = [
+            record.visible_text.as_deref(),
+            record.input_text.as_deref(),
+            record.audio_text.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
+        record.operation_evidence
+            && (record
+                .state_delta
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+                || record.evidence_kind.as_deref() == Some("state_change")
+                || direct_result_markers
+                    .iter()
+                    .any(|marker| result_text.contains(marker)))
+    });
+    if direct_ids.len() >= 2 && has_direct_action && has_observable_result {
+        return SopEligibility {
+            eligible: true,
+            reason: "eligible_direct_interaction",
+            mode: Some(SopEvidenceMode::DirectInteraction),
+            effective_capture_count: direct_ids.len() as i64,
+        };
+    }
+
+    let activity_type = candidate
+        .timeline
+        .activity_type
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let category = candidate.timeline.category.to_ascii_lowercase();
+    let execution_surface = activity_type
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .any(|value| matches!(value, "coding" | "ask_ai" | "debugging" | "deployment"))
+        || category.contains("代码")
+        || matches!(category.as_str(), "coding" | "debugging" | "deployment");
+    let work_status = candidate.work_status.as_deref().unwrap_or_default().trim();
+    let semantic_text = [
+        Some(candidate.timeline.summary.as_str()),
+        candidate.timeline.overview.as_deref(),
+        candidate.timeline.details.as_deref(),
+        candidate.work_item.as_deref(),
+        candidate.work_progress.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n")
+    .to_ascii_lowercase();
+    let execution_markers = [
+        "修复",
+        "修改",
+        "实现",
+        "编写",
+        "新增",
+        "删除",
+        "调整",
+        "执行",
+        "运行",
+        "完成",
+        "fixed",
+        "implemented",
+        "patched",
+        "created",
+        "updated",
+        "ran ",
+    ];
+    let verification_markers = [
+        "测试通过",
+        "验证通过",
+        "编译通过",
+        "构建成功",
+        "检查通过",
+        "已上线",
+        "发布成功",
+        "问题解决",
+        "通过",
+        "成功",
+        "tests passed",
+        "test passed",
+        "build succeeded",
+        "verified",
+        "resolved",
+        "completed",
+    ];
+    let has_execution = execution_markers
+        .iter()
+        .any(|marker| semantic_text.contains(marker));
+    let has_verification = verification_markers
+        .iter()
+        .any(|marker| semantic_text.contains(marker));
+    let completed_work = work_status == "completed";
+    let plan_only = matches!(work_status, "pending" | "blocked")
+        || (["计划", "准备", "待处理", "todo", "will "]
+            .iter()
+            .any(|marker| semantic_text.contains(marker))
+            && !has_verification
+            && !completed_work);
+    if execution_surface && has_execution && (has_verification || completed_work) && !plan_only {
+        return SopEligibility {
+            eligible: true,
+            reason: "eligible_semantic_workflow",
+            mode: Some(SopEvidenceMode::SemanticWorkflow),
+            effective_capture_count: source_capture_count,
+        };
+    }
+
+    SopEligibility {
+        eligible: false,
+        reason: "insufficient_sop_evidence",
+        mode: None,
+        effective_capture_count: direct_ids.len() as i64,
     }
 }
 
@@ -3598,6 +4190,79 @@ fn parse_bake_sop_payload(
         payload.summary = candidate.timeline.summary.clone();
     }
     Ok(payload)
+}
+
+fn validate_bake_sop_evidence(
+    payload: &BakeSopArtifactPayload,
+    candidate: &BakeMemorySourceRecord,
+    source_capture_ids: &[String],
+) -> Result<(), &'static str> {
+    if !(3..=8).contains(&payload.steps.len())
+        || payload.steps.iter().any(|step| step.trim().is_empty())
+    {
+        return Err("insufficient_sop_steps");
+    }
+    let eligibility = sop_eligibility(candidate);
+    let evidence_mode = eligibility.mode.ok_or(eligibility.reason)?;
+
+    let source_capture_id_set = source_capture_ids.iter().cloned().collect::<HashSet<_>>();
+    let evidence_timestamps = candidate
+        .action_trace
+        .iter()
+        .filter(|record| {
+            evidence_mode == SopEvidenceMode::SemanticWorkflow || record.operation_evidence
+        })
+        .map(|record| (record.capture_id.to_string(), record.ts))
+        .collect::<HashMap<_, _>>();
+    let mut evidence_by_step = HashMap::<i64, &BakeSopStepEvidencePayload>::new();
+    for evidence in &payload.step_evidence {
+        if evidence.step_index < 1
+            || evidence.step_index > payload.steps.len() as i64
+            || evidence_by_step
+                .insert(evidence.step_index, evidence)
+                .is_some()
+        {
+            return Err("invalid_sop_step_evidence");
+        }
+    }
+    if evidence_by_step.len() != payload.steps.len() {
+        return Err("missing_sop_step_evidence");
+    }
+
+    let mut distinct_evidence = HashSet::new();
+    let mut previous_step_ts: Option<i64> = None;
+    for step_index in 1..=payload.steps.len() as i64 {
+        let evidence = evidence_by_step
+            .get(&step_index)
+            .ok_or("missing_sop_step_evidence")?;
+        if evidence.capture_ids.is_empty() {
+            return Err("missing_sop_step_evidence");
+        }
+        let mut step_ts: Option<i64> = None;
+        for capture_id in &evidence.capture_ids {
+            if !source_capture_id_set.contains(capture_id) {
+                return Err("invalid_sop_step_evidence");
+            }
+            let ts = evidence_timestamps
+                .get(capture_id)
+                .copied()
+                .ok_or(match evidence_mode {
+                    SopEvidenceMode::DirectInteraction => "non_operation_sop_step_evidence",
+                    SopEvidenceMode::SemanticWorkflow => "invalid_sop_step_evidence",
+                })?;
+            distinct_evidence.insert(capture_id.clone());
+            step_ts = Some(step_ts.map_or(ts, |current| current.min(ts)));
+        }
+        let step_ts = step_ts.ok_or("missing_sop_step_evidence")?;
+        if previous_step_ts.is_some_and(|previous| step_ts < previous) {
+            return Err("non_chronological_sop_step_evidence");
+        }
+        previous_step_ts = Some(step_ts);
+    }
+    if distinct_evidence.len() < 2 {
+        return Err("insufficient_distinct_sop_evidence");
+    }
+    Ok(())
 }
 
 fn document_merge_preserves_existing(existing: Option<&str>, merged: &str) -> bool {
@@ -3841,6 +4506,12 @@ fn source_capture_id_strings(source: &BakeMemorySourceRecord) -> Vec<String> {
     if !ids.contains(&primary) {
         ids.insert(0, primary);
     }
+    for record in &source.action_trace {
+        let capture_id = record.capture_id.to_string();
+        if !ids.contains(&capture_id) {
+            ids.push(capture_id);
+        }
+    }
     ids
 }
 
@@ -3979,7 +4650,6 @@ fn build_bake_sop_entry(
         payload.linked_knowledge_ids.clone()
     };
     let source_capture_id_set = source_capture_ids.iter().cloned().collect::<HashSet<_>>();
-    let mut used_timeline_fallback = false;
     let step_evidence = payload
         .steps
         .iter()
@@ -4000,10 +4670,6 @@ fn build_bake_sop_entry(
                 .unwrap_or_default();
             capture_ids.sort();
             capture_ids.dedup();
-            if capture_ids.is_empty() {
-                used_timeline_fallback = true;
-                capture_ids = source_capture_ids.to_vec();
-            }
             json!({
                 "step_index": step_index,
                 "step": step,
@@ -4029,7 +4695,8 @@ fn build_bake_sop_entry(
         "extracted_problem": payload.extracted_problem.clone(),
         "steps": payload.steps,
         "step_evidence": step_evidence,
-        "step_evidence_mode": if used_timeline_fallback { "timeline_scope_fallback" } else { "model_aligned" },
+        "step_evidence_mode": "model_aligned",
+        "sop_evidence_mode": sop_eligibility(source).mode.map(SopEvidenceMode::as_str),
         "linked_knowledge_ids": linked_knowledge_ids,
         "status": review_status,
     });
@@ -4041,11 +4708,35 @@ fn build_bake_sop_entry(
             .unwrap_or_else(|| payload.summary.clone()),
         summary: payload.summary.clone(),
         content: Some(details.to_string()),
-        detailed_content: payload.details.clone(),
+        detailed_content: Some(render_bake_sop_markdown(payload)),
         entities: source.timeline.entities.clone(),
         importance: source.timeline.importance.max(3),
         source_capture_ids: Some(to_json_string(&source_capture_ids)?),
     })
+}
+
+fn render_bake_sop_markdown(payload: &BakeSopArtifactPayload) -> String {
+    let scenario = payload
+        .extracted_problem
+        .as_deref()
+        .or(payload.overview.as_deref())
+        .unwrap_or(payload.summary.as_str())
+        .trim();
+    let route = payload
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| format!("{}. {}", index + 1, step.trim()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let verification = payload
+        .evidence_summary
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| payload.steps.last().map(String::as_str))
+        .unwrap_or("按最后一步确认预期结果")
+        .trim();
+    format!("## 适用场景\n\n{scenario}\n\n## 行动路线\n\n{route}\n\n## 验证方式\n\n{verification}")
 }
 
 fn map_bake_run_record(record: BakeRunRecord) -> BakeRunPayload {
@@ -4118,6 +4809,52 @@ fn map_capture_record(
         linked_timeline_id: linked_timeline.map(|(id, _)| id.to_string()),
         linked_timeline_summary: linked_timeline.map(|(_, summary)| summary.clone()),
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateOrUpdateKnowledgeRequest {
+    pub summary: String,
+    pub overview: Option<String>,
+    pub detailed_content: Option<String>,
+    #[serde(default = "default_manual_importance")]
+    pub importance: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateOrUpdateSopRequest {
+    pub extracted_problem: String,
+    pub detailed_content: Option<String>,
+    #[serde(default)]
+    pub steps: Vec<String>,
+    #[serde(default)]
+    pub trigger_keywords: Vec<String>,
+}
+
+fn default_manual_importance() -> i64 {
+    5
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn validate_knowledge_request(payload: &CreateOrUpdateKnowledgeRequest) -> Result<(), ApiError> {
+    if payload.summary.trim().is_empty() {
+        return Err(ApiError::BadRequest("知识标题不能为空".to_string()));
+    }
+    Ok(())
+}
+
+fn validate_sop_request(payload: &CreateOrUpdateSopRequest) -> Result<(), ApiError> {
+    if payload.extracted_problem.trim().is_empty() {
+        return Err(ApiError::BadRequest("操作名称不能为空".to_string()));
+    }
+    if !payload.steps.iter().any(|step| !step.trim().is_empty()) {
+        return Err(ApiError::BadRequest("至少需要一个操作步骤".to_string()));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4242,7 +4979,7 @@ fn bake_document_record_to_new(record: BakeDocumentRecord) -> NewBakeDocument {
     }
 }
 
-fn map_document_record(record: BakeDocumentRecord) -> BakeDocumentPayload {
+fn map_document_record(record: BakeDocumentRecord, is_favorite: bool) -> BakeDocumentPayload {
     use chrono::{DateTime, Local, Utc};
     let created_at = DateTime::<Utc>::from_timestamp(record.created_at / 1000, 0)
         .map(|dt| {
@@ -4261,6 +4998,7 @@ fn map_document_record(record: BakeDocumentRecord) -> BakeDocumentPayload {
 
     BakeDocumentPayload {
         id: record.id.to_string(),
+        is_favorite,
         title: record.title,
         doc_type: record.doc_type,
         status: record.status,
@@ -4407,6 +5145,82 @@ fn map_memory_record(record: TimelineRecord, capture_url: Option<String>) -> Bak
     }
 }
 
+fn bake_knowledge_record_to_timeline(record: BakeKnowledgeRecord) -> TimelineRecord {
+    TimelineRecord {
+        id: record.id,
+        capture_id: record.timeline_id,
+        summary: record.summary,
+        overview: Some(record.title),
+        details: record.content,
+        detailed_content: record.detailed_content,
+        entities: record.entities,
+        category: CATEGORY_BAKE_KNOWLEDGE.to_string(),
+        importance: record.importance,
+        occurrence_count: Some(record.occurrence_count),
+        observed_at: None,
+        event_time_start: None,
+        event_time_end: None,
+        history_view: false,
+        content_origin: None,
+        activity_type: None,
+        is_self_generated: false,
+        evidence_strength: None,
+        user_verified: record.user_verified,
+        user_edited: record.user_edited,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        created_at_ms: record.created_at_ms,
+        updated_at_ms: record.updated_at_ms,
+        capture_ids: record.source_capture_ids,
+        start_time: None,
+        end_time: None,
+        duration_minutes: None,
+        frag_app_name: None,
+        frag_win_title: None,
+        time_range_start: None,
+        time_range_end: None,
+        key_timestamps: None,
+    }
+}
+
+fn bake_sop_record_to_timeline(record: BakeSopRecord) -> TimelineRecord {
+    TimelineRecord {
+        id: record.id,
+        capture_id: record.timeline_id,
+        summary: record.summary,
+        overview: Some(record.title),
+        details: record.content,
+        detailed_content: record.detailed_content,
+        entities: record.entities,
+        category: CATEGORY_BAKE_SOP.to_string(),
+        importance: record.importance,
+        occurrence_count: None,
+        observed_at: None,
+        event_time_start: None,
+        event_time_end: None,
+        history_view: false,
+        content_origin: None,
+        activity_type: None,
+        is_self_generated: false,
+        evidence_strength: None,
+        user_verified: record.user_verified,
+        user_edited: record.user_edited,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        created_at_ms: record.created_at_ms,
+        updated_at_ms: record.updated_at_ms,
+        capture_ids: record.source_capture_ids,
+        start_time: None,
+        end_time: None,
+        duration_minutes: None,
+        frag_app_name: None,
+        frag_win_title: None,
+        time_range_start: None,
+        time_range_end: None,
+        key_timestamps: None,
+    }
+}
+
 fn map_bake_knowledge_record(record: TimelineRecord) -> BakeKnowledgePayload {
     let details = parse_details(record.details.as_deref());
     let status = extract_status_from_details(&details, record.user_verified);
@@ -4417,6 +5231,7 @@ fn map_bake_knowledge_record(record: TimelineRecord) -> BakeKnowledgePayload {
         .unwrap_or_else(|| status.clone());
     BakeKnowledgePayload {
         id: record.id.to_string(),
+        is_favorite: false,
         capture_id: record.capture_id.to_string(),
         source_timeline_id: details
             .get("source_timeline_id")
@@ -4428,6 +5243,7 @@ fn map_bake_knowledge_record(record: TimelineRecord) -> BakeKnowledgePayload {
                     .or_else(|| value.as_str().map(ToString::to_string))
             })
             .unwrap_or_else(|| record.id.to_string()),
+        source_url: None,
         summary: record.summary,
         overview: record.overview,
         details: record.details,
@@ -4465,6 +5281,7 @@ fn map_sop_record_with_linked_summaries(
 
     BakeSopPayload {
         id: record.id.to_string(),
+        is_favorite: false,
         source_capture_id: details
             .get("source_capture_id")
             .and_then(Value::as_str)
@@ -6036,6 +6853,90 @@ mod tests {
         BakeService::new(storage, "http://127.0.0.1:7071")
     }
 
+    fn test_document_request(
+        title: &str,
+        doc_type: &str,
+        source_url: Option<&str>,
+    ) -> CreateOrUpdateDocumentRequest {
+        CreateOrUpdateDocumentRequest {
+            title: title.to_string(),
+            doc_type: doc_type.to_string(),
+            status: "enabled".to_string(),
+            tags: Vec::new(),
+            applicable_tasks: Vec::new(),
+            source_memory_ids: Vec::new(),
+            source_capture_ids: Vec::new(),
+            source_episode_ids: Vec::new(),
+            linked_knowledge_ids: Vec::new(),
+            sections: Vec::new(),
+            style_phrases: Vec::new(),
+            replacement_rules: Vec::new(),
+            summary: Some(format!("{title}摘要")),
+            full_content: Some(format!("{title}内容")),
+            structured_content: None,
+            prompt_hint: None,
+            diagram_code: None,
+            image_assets: Vec::new(),
+            source_app_name: None,
+            source_win_title: None,
+            source_url: source_url.map(ToString::to_string),
+            content_hash: None,
+            language: None,
+            usage_count: None,
+            match_score: None,
+            match_level: None,
+            creation_mode: Some("manual".to_string()),
+            review_status: Some("confirmed".to_string()),
+            evidence_summary: None,
+            generation_version: None,
+            deleted_at: None,
+        }
+    }
+
+    #[test]
+    fn test_document_list_filters_multi_type_and_source_url() {
+        let service = make_service();
+        service
+            .create_document(test_document_request(
+                "项目复盘",
+                "weekly_report,project_plan",
+                Some("https://docs.example.com/projects/alpha"),
+            ))
+            .unwrap();
+        service
+            .create_document(test_document_request(
+                "普通说明",
+                "general_document",
+                Some("https://docs.example.com/guides/start"),
+            ))
+            .unwrap();
+
+        let by_type = service
+            .list_documents_paginated_with_type(
+                BakeListFilter {
+                    limit: 20,
+                    ..BakeListFilter::default()
+                },
+                Some("project_plan"),
+            )
+            .unwrap();
+        assert_eq!(by_type.total, 1);
+        assert_eq!(by_type.items[0].title, "项目复盘");
+
+        let by_url = service
+            .list_documents_paginated(BakeListFilter {
+                q: Some("projects/alpha".to_string()),
+                limit: 20,
+                ..BakeListFilter::default()
+            })
+            .unwrap();
+        assert_eq!(by_url.total, 1);
+        assert_eq!(
+            by_url.items[0].source_url.as_deref(),
+            Some("https://docs.example.com/projects/alpha")
+        );
+    }
+
     fn seed_capture(service: &BakeService, ts: i64, app_name: &str, title: &str) -> i64 {
         service
             .storage
@@ -6058,6 +6959,25 @@ mod tests {
                 pii_scrubbed: false,
             })
             .expect("插入 capture 失败")
+    }
+
+    #[test]
+    fn test_list_capture_records_filters_by_app_name() {
+        let service = make_service();
+        seed_capture(&service, 1_710_000_000_000, "Safari", "项目文档");
+        seed_capture(&service, 1_710_000_001_000, "Code", "代码编辑器");
+
+        let response = service
+            .list_capture_records_paginated(BakeCaptureFilter {
+                app_name: Some("Safari".to_string()),
+                limit: 20,
+                ..BakeCaptureFilter::default()
+            })
+            .expect("按应用筛选采集记录失败");
+
+        assert_eq!(response.total, 1);
+        assert_eq!(response.items.len(), 1);
+        assert_eq!(response.items[0].app_name.as_deref(), Some("Safari"));
     }
 
     fn seed_knowledge(
@@ -6095,8 +7015,63 @@ mod tests {
                 time_range_start: None,
                 time_range_end: None,
                 key_timestamps: None,
+                work_item: None,
+                work_status: None,
+                work_progress: None,
             })
             .expect("插入 knowledge 失败")
+    }
+
+    #[test]
+    fn test_knowledge_list_searches_and_returns_source_url() {
+        let service = make_service();
+        let capture_id = seed_capture(
+            &service,
+            1_710_000_000_000,
+            "Safari",
+            "MemoryBread API 文档",
+        );
+        service
+            .storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE captures SET url = ?1 WHERE id = ?2",
+                    rusqlite::params!["https://kb.example.com/memorybread/api", capture_id],
+                )
+                .map_err(StorageError::Sqlite)?;
+                Ok(())
+            })
+            .unwrap();
+        let timeline_id = seed_knowledge(&service, "knowledge", capture_id, 7, 1);
+        service
+            .storage
+            .insert_bake_knowledge(&NewBakeKnowledge {
+                timeline_id,
+                title: "接口约定".to_string(),
+                summary: "本地接口约定".to_string(),
+                content: Some(
+                    json!({"status": "confirmed", "review_status": "confirmed"}).to_string(),
+                ),
+                detailed_content: Some("说明本地接口的调用方式".to_string()),
+                entities: "[]".to_string(),
+                importance: 7,
+                source_capture_ids: Some(format!("[{capture_id}]")),
+            })
+            .unwrap();
+
+        let response = service
+            .list_knowledge_paginated(BakeListFilter {
+                q: Some("kb.example.com/memorybread".to_string()),
+                limit: 20,
+                ..BakeListFilter::default()
+            })
+            .unwrap();
+
+        assert_eq!(response.total, 1);
+        assert_eq!(
+            response.items[0].source_url.as_deref(),
+            Some("https://kb.example.com/memorybread/api")
+        );
     }
 
     fn link_captures_to_timeline(service: &BakeService, timeline_id: i64, capture_ids: &[i64]) {
@@ -6136,10 +7111,37 @@ mod tests {
             url_aggregated_text: None,
             url_aggregated_capture_count: 0,
             action_trace: Vec::new(),
+            work_item: None,
+            work_status: None,
+            work_progress: None,
             retry_failure_count: 0,
             retry_error_code: None,
             retry_next_at_ms: 0,
         }
+    }
+
+    fn operation_trace(capture_ids: &[i64]) -> Vec<BakeActionTraceRecord> {
+        capture_ids
+            .iter()
+            .enumerate()
+            .map(|(index, capture_id)| BakeActionTraceRecord {
+                capture_id: *capture_id,
+                ts: 1_710_000_000_000 + index as i64 * 1_000,
+                event_type: "manual".to_string(),
+                app_name: Some("Code".to_string()),
+                win_title: Some(format!("操作步骤 {}", index + 1)),
+                url: None,
+                webpage_title: None,
+                visible_text: Some(format!("操作证据 {}", index + 1)),
+                input_text: None,
+                audio_text: None,
+                ax_focused_role: Some("AXButton".to_string()),
+                ax_focused_id: Some(format!("step-{}", index + 1)),
+                state_delta: (index > 0).then(|| format!("visible→操作证据 {}", index + 1)),
+                evidence_kind: Some("interaction".to_string()),
+                operation_evidence: true,
+            })
+            .collect()
     }
 
     #[test]
@@ -6167,6 +7169,11 @@ mod tests {
                 visible_text: Some("检查配置".to_string()),
                 input_text: None,
                 audio_text: None,
+                ax_focused_role: Some("AXTextArea".to_string()),
+                ax_focused_id: Some("editor".to_string()),
+                state_delta: None,
+                evidence_kind: Some("interaction".to_string()),
+                operation_evidence: true,
             },
             BakeActionTraceRecord {
                 capture_id: primary + 1,
@@ -6179,6 +7186,11 @@ mod tests {
                 visible_text: Some("验证通过".to_string()),
                 input_text: Some("cargo test".to_string()),
                 audio_text: None,
+                ax_focused_role: Some("AXTextField".to_string()),
+                ax_focused_id: Some("terminal".to_string()),
+                state_delta: Some("window:Code→Terminal; visible→验证通过".to_string()),
+                evidence_kind: Some("input".to_string()),
+                operation_evidence: true,
             },
         ];
 
@@ -6193,6 +7205,82 @@ mod tests {
         );
         assert_eq!(payload.start_time, Some(1_710_000_000_000));
         assert!(payload.key_timestamps.is_some());
+    }
+
+    #[test]
+    fn test_sop_audit_accepts_two_direct_nodes_when_action_has_observable_result() {
+        let service = make_service();
+        let first = seed_capture(&service, 1_710_000_000_000, "Code", "步骤一");
+        let second = seed_capture(&service, 1_710_000_001_000, "Code", "步骤二");
+        let third = seed_capture(&service, 1_710_000_002_000, "Code", "滚动上下文");
+        let timeline_id = seed_knowledge(&service, "coding", first, 4, 1);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.timeline.capture_ids = Some(format!("[{first},{second},{third}]"));
+        candidate.action_trace = operation_trace(&[first, second, third]);
+        candidate.action_trace[2].operation_evidence = false;
+        candidate.action_trace[2].evidence_kind = Some("context".to_string());
+
+        let audit = new_bake_candidate_audit(1, &candidate, "queued", None);
+
+        assert_eq!(audit.effective_capture_count, 2);
+        assert!(audit.sop_eligible);
+        assert_eq!(
+            audit.sop_eligibility_reason.as_deref(),
+            Some("eligible_direct_interaction")
+        );
+        assert_eq!(
+            audit.sop_evidence_mode.as_deref(),
+            Some("direct_interaction")
+        );
+    }
+
+    #[test]
+    fn test_sop_eligibility_rejects_navigation_only_trace() {
+        let service = make_service();
+        let first = seed_capture(&service, 1_710_000_000_000, "Chrome", "文档一");
+        let second = seed_capture(&service, 1_710_000_001_000, "Chrome", "文档二");
+        let timeline_id = seed_knowledge(&service, "文档", first, 4, 1);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.timeline.capture_ids = Some(format!("[{first},{second}]"));
+        candidate.action_trace = operation_trace(&[first, second]);
+        for record in &mut candidate.action_trace {
+            record.event_type = "browser_navigation".to_string();
+            record.evidence_kind = Some("navigation".to_string());
+        }
+
+        let eligibility = sop_eligibility(&candidate);
+
+        assert!(!eligibility.eligible);
+        assert_eq!(eligibility.reason, "insufficient_sop_evidence");
+        assert!(eligibility.mode.is_none());
+    }
+
+    #[test]
+    fn test_sop_eligibility_uses_semantic_workflow_for_execution_and_verification() {
+        let service = make_service();
+        let first = seed_capture(&service, 1_710_000_000_000, "Code", "修复实现");
+        let second = seed_capture(&service, 1_710_000_001_000, "Terminal", "测试通过");
+        let timeline_id = seed_knowledge(&service, "代码", first, 4, 1);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.timeline.capture_ids = Some(format!("[{first},{second}]"));
+        candidate.timeline.activity_type = Some("coding".to_string());
+        candidate.timeline.summary = "修复时间线提炼并完成验证".to_string();
+        candidate.timeline.details = Some("修改证据门禁，运行测试后全部通过".to_string());
+        candidate.work_item = Some("MemoryBread-操作提炼".to_string());
+        candidate.work_status = Some("completed".to_string());
+        candidate.work_progress = Some("已完成实现，测试通过".to_string());
+        candidate.action_trace = operation_trace(&[first, second]);
+        for record in &mut candidate.action_trace {
+            record.operation_evidence = false;
+            record.evidence_kind = Some("context".to_string());
+        }
+
+        let eligibility = sop_eligibility(&candidate);
+
+        assert!(eligibility.eligible);
+        assert_eq!(eligibility.reason, "eligible_semantic_workflow");
+        assert_eq!(eligibility.mode, Some(SopEvidenceMode::SemanticWorkflow));
+        assert_eq!(eligibility.effective_capture_count, 2);
     }
 
     #[test]
@@ -6255,6 +7343,111 @@ mod tests {
     }
 
     #[test]
+    fn test_persist_sop_rejects_missing_step_evidence_without_timeline_fallback() {
+        let service = make_service();
+        let first = seed_capture(&service, 1_710_000_000_000, "Code", "检查配置");
+        let second = seed_capture(&service, 1_710_000_001_000, "Code", "执行修复");
+        let third = seed_capture(&service, 1_710_000_002_000, "Code", "验证结果");
+        let timeline_id = seed_knowledge(&service, "coding", first, 4, 1);
+        link_captures_to_timeline(&service, timeline_id, &[first, second, third]);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.timeline.capture_ids = Some(format!("[{first},{second},{third}]"));
+        candidate.action_trace = operation_trace(&[first, second, third]);
+        let extraction = BakeArtifactExtraction {
+            accepted: true,
+            reason: None,
+            payload: Some(json!({
+                "summary": "缺少逐步证据的 SOP",
+                "steps": ["检查配置", "执行修复", "验证结果"],
+                "step_evidence": [
+                    {"step_index": 1, "capture_ids": [first.to_string()]},
+                    {"step_index": 3, "capture_ids": [third.to_string()]}
+                ]
+            })),
+        };
+        let mut existing_sources = std::collections::HashSet::new();
+
+        let result = service
+            .persist_sop_artifact(None, &candidate, "test", &extraction, &mut existing_sources)
+            .expect("缺少逐步证据应作为可解释拒绝处理");
+
+        assert_eq!(result.sop_created_count, 0);
+        assert_eq!(result.sop_persist_status, Some("rejected"));
+        assert_eq!(
+            result.sop_persist_reason.as_deref(),
+            Some("missing_sop_step_evidence")
+        );
+        assert_eq!(service.storage.count_bake_sops().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_bundle_persistence_keeps_valid_sop_when_knowledge_payload_is_invalid() {
+        let service = make_service();
+        let first = seed_capture(&service, 1_710_000_000_000, "Code", "检查配置");
+        let second = seed_capture(&service, 1_710_000_001_000, "Code", "执行修复");
+        let third = seed_capture(&service, 1_710_000_002_000, "Terminal", "验证通过");
+        let timeline_id = seed_knowledge(&service, "代码", first, 4, 1);
+        link_captures_to_timeline(&service, timeline_id, &[first, second, third]);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.timeline.capture_ids = Some(format!("[{first},{second},{third}]"));
+        candidate.action_trace = operation_trace(&[first, second, third]);
+        let extracted = BakeExtractResponse {
+            knowledge: BakeArtifactExtraction {
+                accepted: true,
+                reason: None,
+                payload: Some(json!(["malformed-knowledge-payload"])),
+            },
+            document: BakeArtifactExtraction {
+                accepted: false,
+                reason: Some("not_a_document".to_string()),
+                payload: None,
+            },
+            sop: BakeArtifactExtraction {
+                accepted: true,
+                reason: None,
+                payload: Some(json!({
+                    "summary": "检查配置、修复并验证",
+                    "steps": ["检查配置", "执行修复", "运行测试验证结果"],
+                    "step_evidence": [
+                        {"step_index": 1, "capture_ids": [first.to_string()]},
+                        {"step_index": 2, "capture_ids": [second.to_string()]},
+                        {"step_index": 3, "capture_ids": [third.to_string()]}
+                    ]
+                })),
+            },
+            primary_type: Some("sop".to_string()),
+            classification_reason: None,
+            usage: None,
+            model: None,
+            degraded: Some(true),
+            artifact_shapes: None,
+            compatibility_recovered: None,
+        };
+        let mut knowledge_sources = std::collections::HashSet::new();
+        let mut document_sources = std::collections::HashSet::new();
+        let mut document_urls = std::collections::HashSet::new();
+        let mut sop_sources = std::collections::HashSet::new();
+
+        let result = service
+            .persist_extracted_candidate(
+                None,
+                &candidate,
+                "test",
+                extracted,
+                &mut knowledge_sources,
+                &mut document_sources,
+                &mut document_urls,
+                &mut sop_sources,
+            )
+            .await
+            .expect("知识 payload 失败不应阻止有效 SOP 持久化");
+
+        assert_eq!(result.sop_created_count, 1);
+        assert_eq!(service.storage.count_bake_sops().unwrap(), 1);
+        assert_eq!(service.storage.count_bake_knowledge().unwrap(), 0);
+    }
+
+    #[test]
     fn test_initialize_memories_is_idempotent() {
         let service = make_service();
         let capture_id = seed_capture(&service, 1_710_000_000_000, "Chrome", "方案页");
@@ -6301,6 +7494,7 @@ mod tests {
                 bucket: None,
                 from_ts: None,
                 to_ts: None,
+                favorite: None,
                 limit: 1,
                 offset: 0,
                 sort: BakeListSort::Heat,
@@ -6317,6 +7511,7 @@ mod tests {
                 bucket: None,
                 from_ts: None,
                 to_ts: None,
+                favorite: None,
                 limit: 10,
                 offset: 0,
                 sort: BakeListSort::Recent,
@@ -6579,14 +7774,22 @@ mod tests {
         let second_timeline = seed_knowledge(&service, "meeting", second_capture, 4, 1);
         let first_followup = seed_capture(&service, 1_710_000_001_000, "Code", "第一次验证");
         let second_followup = seed_capture(&service, 1_710_000_011_000, "Code", "第二次验证");
-        link_captures_to_timeline(&service, first_timeline, &[first_capture, first_followup]);
+        let first_result = seed_capture(&service, 1_710_000_002_000, "Code", "第一次完成");
+        let second_result = seed_capture(&service, 1_710_000_012_000, "Code", "第二次完成");
+        link_captures_to_timeline(
+            &service,
+            first_timeline,
+            &[first_capture, first_followup, first_result],
+        );
         link_captures_to_timeline(
             &service,
             second_timeline,
-            &[second_capture, second_followup],
+            &[second_capture, second_followup, second_result],
         );
-        let first = make_candidate(&service, first_timeline);
-        let second = make_candidate(&service, second_timeline);
+        let mut first = make_candidate(&service, first_timeline);
+        first.action_trace = operation_trace(&[first_capture, first_followup, first_result]);
+        let mut second = make_candidate(&service, second_timeline);
+        second.action_trace = operation_trace(&[second_capture, second_followup, second_result]);
 
         let knowledge_extraction = BakeArtifactExtraction {
             accepted: true,
@@ -6606,7 +7809,12 @@ mod tests {
                 "summary": "可复用 SOP",
                 "overview": "相同来源只保留一条 SOP",
                 "details": "SOP 详情",
-                "steps": ["识别来源", "复用已有产物"],
+                "steps": ["识别来源", "复用已有产物", "验证复用结果"],
+                "step_evidence": [
+                    {"step_index": 1, "capture_ids": [first_capture.to_string()]},
+                    {"step_index": 2, "capture_ids": [first_followup.to_string()]},
+                    {"step_index": 3, "capture_ids": [first_result.to_string()]}
+                ],
                 "linked_knowledge_ids": []
             })),
         };
@@ -6652,15 +7860,19 @@ mod tests {
             sop_content
                 .get("step_evidence_mode")
                 .and_then(Value::as_str),
-            Some("timeline_scope_fallback")
+            Some("model_aligned")
         );
         assert_eq!(
             sop_content
                 .get("step_evidence")
                 .and_then(Value::as_array)
                 .map(Vec::len),
-            Some(2)
+            Some(3)
         );
+        assert!(sop
+            .detailed_content
+            .as_deref()
+            .is_some_and(|content| content.contains("## 行动路线")));
         assert_eq!(duplicate_knowledge.discarded_count, 1);
         assert_eq!(duplicate_sop.discarded_count, 1);
         assert!(service
@@ -6681,6 +7893,7 @@ mod tests {
             bucket: None,
             from_ts: None,
             to_ts: None,
+            favorite: None,
             limit: 10,
             offset: 0,
             sort: BakeListSort::Recent,

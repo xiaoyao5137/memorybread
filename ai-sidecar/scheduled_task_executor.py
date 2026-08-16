@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -206,6 +207,32 @@ DIARY_LANGUAGE_LABELS = {
     "en": "英文",
 }
 
+# 创作 Agent / 工具的 @ 提及标签，与 desktop-ui CREATION_SKILL_*_OPTIONS 保持一致，
+# 用于解析任务指令中的提及，避免把工具/Agent 名误判为技能标题。
+CREATION_MENTION_AGENT_LABELS = [
+    "行业调研 Agent",
+    "数据分析 Agent",
+    "方案设计 Agent",
+    "章节设计 Agent",
+    "文档撰写 Agent",
+    "去 AI 味 Agent",
+    "细节润色 Agent",
+    "表格润色 Agent",
+    "字体润色 Agent",
+    "图片润色 Agent",
+    "质量审校 Agent",
+]
+CREATION_MENTION_TOOL_LABELS = [
+    "记忆搜索",
+    "互联网检索",
+    "数据检索",
+    "网页爬取",
+    "GitHub 检索",
+    "PlantUML 画图",
+]
+MENTION_TOKEN_PATTERN = re.compile(r"@([A-Za-z0-9_\u4e00-\u9fa5-]{2,40})")
+MENTION_NAME_CHAR_PATTERN = re.compile(r"[A-Za-z0-9_\u4e00-\u9fa5-]")
+
 
 class NotificationDeliveryRejected(Exception):
     """消息渠道返回了 HTTP 成功，但业务状态明确拒绝投递。"""
@@ -272,43 +299,70 @@ class TaskExecutor:
         exec_id = self._create_execution(conn, task_id, started_at)
 
         try:
+            creation_history_id = None
             if diary_period:
                 diary_result = self._execute_diary_task(conn, task, diary_period)
                 knowledge_count = diary_result["source_count"]
                 token_estimate = diary_result["token_estimate"]
                 result_text = diary_result["result_text"]
             else:
-                # 3. 查询 knowledge 上下文
-                knowledge_list = self._query_knowledge(conn, task['user_instruction'])
-                knowledge_count = len(knowledge_list)
-                is_weekly_report = self._is_weekly_report_instruction(task['user_instruction'])
-                kpi_mode = is_weekly_report and self._is_kpi_mode_instruction(task['user_instruction'])
+                result_text = None
+                knowledge_count = 0
+                token_estimate = 0
+                fallback_note = None
+                if (task.get("executor_kind") or "consult") == "creation":
+                    try:
+                        creation_result = self._execute_creation_task(task, exec_id)
+                        result_text = creation_result["result_text"]
+                        creation_history_id = creation_result.get("creation_history_id")
+                    except Exception as creation_error:
+                        # 创作智能体连接失败或执行失败时，回退现有 knowledge+LLM 咨询路径。
+                        logger.warning(
+                            "任务 %s 创作智能体执行失败，回退咨询智能体: %s",
+                            task_id,
+                            creation_error,
+                        )
+                        fallback_note = (
+                            f"[创作智能体执行失败（{creation_error}），已回退咨询智能体生成结果]"
+                        )
 
-                # 4. 构建上下文（根据 token 预算决定压缩策略）
-                context_text, token_estimate = self._build_context(
-                    knowledge_list,
-                    user_instruction=task['user_instruction'],
-                )
+                if result_text is None:
+                    # 3. 查询 knowledge 上下文
+                    knowledge_list = self._query_knowledge(conn, task['user_instruction'])
+                    knowledge_count = len(knowledge_list)
+                    is_weekly_report = self._is_weekly_report_instruction(task['user_instruction'])
+                    kpi_mode = is_weekly_report and self._is_kpi_mode_instruction(task['user_instruction'])
 
-                # 5. 调用 LLM 生成报告
-                result_text = self._llm_generate(
-                    user_instruction=task['user_instruction'],
-                    context=context_text,
-                    task_id=task_id,
-                    is_weekly_report=is_weekly_report,
-                    kpi_mode=kpi_mode,
-                )
+                    # 4. 构建上下文（根据 token 预算决定压缩策略）
+                    context_text, token_estimate = self._build_context(
+                        knowledge_list,
+                        user_instruction=task['user_instruction'],
+                    )
+
+                    # 5. 调用 LLM 生成报告
+                    result_text = self._llm_generate(
+                        user_instruction=task['user_instruction'],
+                        context=context_text,
+                        task_id=task_id,
+                        is_weekly_report=is_weekly_report,
+                        kpi_mode=kpi_mode,
+                    )
+                    if fallback_note:
+                        result_text = f"{fallback_note}\n\n{result_text}"
 
             # 6. 更新执行记录为成功
             completed_at = int(time.time() * 1000)
-            self._update_execution(conn, exec_id, {
+            success_fields = {
                 "status": "success",
                 "completed_at": completed_at,
                 "result_text": result_text,
                 "knowledge_count": knowledge_count,
                 "token_used": token_estimate,
                 "latency_ms": completed_at - started_at,
-            })
+            }
+            if creation_history_id is not None:
+                success_fields["creation_history_id"] = creation_history_id
+            self._update_execution(conn, exec_id, success_fields)
 
             # 7. 更新任务统计
             self._update_task_stats(conn, task_id, "success", completed_at)
@@ -1868,6 +1922,247 @@ class TaskExecutor:
 
 
     # ─────────────────────────────────────────────────────────────────────────
+    # 创作智能体执行路径
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _core_engine_url() -> str:
+        return os.getenv("CORE_ENGINE_URL", "http://127.0.0.1:7070").rstrip("/")
+
+    def _execute_creation_task(self, task: dict, exec_id: int) -> dict:
+        """
+        复用创作 Agent 链路执行任务指令。
+        抛出任何异常都表示创作路径不可用，调用方回退咨询智能体路径。
+        """
+        core_url = self._core_engine_url()
+        instruction = str(task.get("user_instruction") or "")
+        session_id = "session-task-{}-{}".format(task["id"], exec_id)
+        started = time.time()
+
+        installed_skills = self._fetch_installed_creation_skills(core_url)
+        selected_skills = self._build_task_selected_skills(instruction, installed_skills)
+        payload = {
+            "user_prompt": instruction,
+            "root_request": instruction,
+            "session_id": session_id,
+            "current_document": "",
+            "conversation": [],
+            "selected_skills": selected_skills,
+            "model_mode": "local",
+            "confirmed": True,
+        }
+        events, document = self._run_creation_agent_stream(core_url, payload)
+        if not document.strip():
+            raise RuntimeError("创作智能体未返回文档")
+        latency_ms = int((time.time() - started) * 1000)
+        history_id = self._save_task_creation_history(
+            core_url, task, session_id, instruction, document, events, latency_ms
+        )
+        return {"result_text": document, "creation_history_id": history_id}
+
+    @staticmethod
+    def _fetch_installed_creation_skills(core_url: str) -> list:
+        import httpx
+
+        try:
+            response = httpx.get(
+                f"{core_url}/api/creation/skills?installed=true", timeout=30
+            )
+            response.raise_for_status()
+            skills = response.json()
+        except Exception as exc:
+            raise RuntimeError(f"拉取已安装创作技能失败: {exc}") from exc
+        return skills if isinstance(skills, list) else []
+
+    def _build_task_selected_skills(self, instruction: str, installed_skills: list) -> list:
+        titles = [
+            str(skill.get("title")).strip()
+            for skill in installed_skills
+            if isinstance(skill, dict) and str(skill.get("title") or "").strip()
+        ]
+        mentioned_titles = self._parse_task_mentioned_skills(instruction, titles)
+        skills_by_title = {}
+        for skill in installed_skills:
+            if not isinstance(skill, dict):
+                continue
+            title = str(skill.get("title") or "").strip()
+            if title and title not in skills_by_title:
+                skills_by_title[title] = skill
+        selected = []
+        for title in mentioned_titles:
+            skill = skills_by_title.get(title)
+            if not skill:
+                # 未安装的同名提及不携带技能体，仅保留在指令文本里。
+                continue
+            selected.append(
+                {
+                    "id": skill.get("client_skill_key") or str(skill.get("id") or title),
+                    "title": title,
+                    "summary": skill.get("summary") or "",
+                    "workflowRole": "primary",
+                    "skillDescription": skill.get("skill_description"),
+                    "executionSteps": skill.get("execution_steps") or [],
+                    "skillInstructions": self._skill_markdown_text(skill),
+                    "strictStructure": True,
+                }
+            )
+        return selected
+
+    @staticmethod
+    def _skill_markdown_text(skill: dict) -> str:
+        for package_file in skill.get("package_files") or []:
+            if not isinstance(package_file, dict):
+                continue
+            if package_file.get("path") != "SKILL.md":
+                continue
+            content_base64 = package_file.get("content_base64") or ""
+            try:
+                return base64.b64decode(content_base64).decode("utf-8")
+            except Exception:
+                return ""
+        return ""
+
+    def _parse_task_mentioned_skills(self, text: str, installed_titles: list) -> list:
+        """
+        解析任务指令中被 @ 的技能，与桌面端
+        CreationSkillEditor.parseMentionedResources 的边界规则保持一致：
+        最长名称优先消费，提及后紧跟提及字符则不算命中。
+        """
+        remaining = text or ""
+
+        def find_mention_index(source: str, token: str) -> int:
+            position = source.find(token)
+            while position >= 0:
+                end = position + len(token)
+                next_char = source[end] if end < len(source) else ""
+                if not next_char or not MENTION_NAME_CHAR_PATTERN.match(next_char):
+                    return position
+                position = source.find(token, position + 1)
+            return -1
+
+        def consume(token: str) -> bool:
+            nonlocal remaining
+            if find_mention_index(remaining, token) < 0:
+                return False
+            remaining = remaining.replace(token, " ")
+            return True
+
+        # 先消费 Agent / 工具提及，避免它们的名称被后续兼容正则误判为技能。
+        for label in sorted(
+            CREATION_MENTION_AGENT_LABELS + CREATION_MENTION_TOOL_LABELS,
+            key=len,
+            reverse=True,
+        ):
+            consume(f"@{label}")
+
+        skills: list = []
+        for title in sorted(dict.fromkeys(installed_titles), key=len, reverse=True):
+            if consume(f"@{title}") and title not in skills:
+                skills.append(title)
+
+        for match in MENTION_TOKEN_PATTERN.finditer(remaining):
+            name = match.group(1)
+            if name not in skills:
+                skills.append(name)
+        return skills
+
+    def _run_creation_agent_stream(self, core_url: str, payload: dict):
+        """流式消费创作 Agent SSE，直到 run.completed / run.failed。"""
+        import httpx
+
+        events: list = []
+        document = ""
+        completed = False
+        timeout = httpx.Timeout(1800.0, connect=30.0)
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                with client.stream(
+                    "POST", f"{core_url}/api/creation/agent/run", json=payload
+                ) as response:
+                    if response.status_code != 200:
+                        body = response.read()[:2000].decode("utf-8", "replace")
+                        raise RuntimeError(
+                            f"创作智能体接口返回 {response.status_code}: {body}"
+                        )
+                    for raw_line in response.iter_lines():
+                        line = raw_line.strip()
+                        if not line.startswith("data:"):
+                            continue
+                        data_text = line[len("data:"):].strip()
+                        if not data_text:
+                            continue
+                        try:
+                            event = json.loads(data_text)
+                        except json.JSONDecodeError as exc:
+                            # 解析失败时把完整原文落日志，便于诊断。
+                            logger.error(
+                                "创作智能体 SSE 事件解析失败: %s 原文=%r", exc, data_text
+                            )
+                            continue
+                        if not isinstance(event, dict):
+                            continue
+                        events.append(event)
+                        event_type = event.get("type")
+                        if event_type == "document.delta":
+                            document += str((event.get("data") or {}).get("content") or "")
+                        elif event_type == "run.completed":
+                            completed_document = str(
+                                (event.get("data") or {}).get("document") or ""
+                            )
+                            if completed_document.strip():
+                                document = completed_document
+                            completed = True
+                            break
+                        elif event_type == "run.failed":
+                            raise RuntimeError(
+                                str(event.get("summary") or "创作智能体执行失败")
+                            )
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"连接创作智能体失败: {exc}") from exc
+
+        if not completed:
+            raise RuntimeError("创作智能体事件流结束但未收到执行完成事件")
+        return events, document
+
+    @staticmethod
+    def _save_task_creation_history(
+        core_url: str,
+        task: dict,
+        session_id: str,
+        instruction: str,
+        document: str,
+        events: list,
+        latency_ms: int,
+    ) -> Optional[int]:
+        import httpx
+
+        payload = {
+            "prompt": instruction,
+            "generated_content": document,
+            "reference_count": 0,
+            "references": [],
+            "session_id": session_id,
+            "conversation": [{"role": "user", "content": instruction}],
+            "agent_trace": events,
+            "root_request": instruction,
+            "latency_ms": latency_ms,
+            "source_kind": "scheduled_task",
+            "source_ref_id": task["id"],
+        }
+        try:
+            response = httpx.post(
+                f"{core_url}/api/creation/history", json=payload, timeout=30
+            )
+            response.raise_for_status()
+            saved = response.json()
+        except Exception as exc:
+            logger.warning("任务 %s 创作记录写入失败: %s", task["id"], exc)
+            return None
+        if isinstance(saved, dict) and isinstance(saved.get("id"), int):
+            return saved["id"]
+        return None
+
+    # ─────────────────────────────────────────────────────────────────────────
     # 数据库操作
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -1876,17 +2171,25 @@ class TaskExecutor:
         try:
             cursor.execute(
                 """SELECT id, name, user_instruction, cron_expression, template_id,
-                          notification_channel_ids
+                          notification_channel_ids, executor_kind
                    FROM scheduled_tasks WHERE id = ?""",
                 (task_id,),
             )
         except sqlite3.OperationalError:
-            # 兼容仍在使用旧测试夹具或尚未迁移的本地数据库。
-            cursor.execute(
-                """SELECT id, name, user_instruction, cron_expression, template_id
-                   FROM scheduled_tasks WHERE id = ?""",
-                (task_id,),
-            )
+            try:
+                cursor.execute(
+                    """SELECT id, name, user_instruction, cron_expression, template_id,
+                              notification_channel_ids
+                       FROM scheduled_tasks WHERE id = ?""",
+                    (task_id,),
+                )
+            except sqlite3.OperationalError:
+                # 兼容仍在使用旧测试夹具或尚未迁移的本地数据库。
+                cursor.execute(
+                    """SELECT id, name, user_instruction, cron_expression, template_id
+                       FROM scheduled_tasks WHERE id = ?""",
+                    (task_id,),
+                )
         row = cursor.fetchone()
         if not row:
             return None
@@ -1902,6 +2205,9 @@ class TaskExecutor:
                     ]
             except (TypeError, ValueError, json.JSONDecodeError):
                 channel_ids = []
+        executor_kind = "consult"
+        if len(row) > 6 and row[6]:
+            executor_kind = str(row[6])
         return {
             "id": row[0],
             "name": row[1],
@@ -1909,6 +2215,7 @@ class TaskExecutor:
             "cron_expression": row[3],
             "template_id": row[4],
             "notification_channel_ids": channel_ids,
+            "executor_kind": executor_kind,
         }
 
     def _deliver_task_result(
@@ -2076,6 +2383,7 @@ class TaskExecutor:
         return type(exc).__name__
 
     def _create_execution(self, conn: sqlite3.Connection, task_id: int, started_at: int) -> int:
+        self._ensure_task_executions_creation_history_column(conn)
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO task_executions (task_id, started_at, status) VALUES (?, ?, 'running')",
@@ -2083,6 +2391,22 @@ class TaskExecutor:
         )
         conn.commit()
         return cursor.lastrowid
+
+    @staticmethod
+    def _ensure_task_executions_creation_history_column(conn: sqlite3.Connection) -> None:
+        # 列存在性防御：旧本地库可能尚未应用 086 迁移。
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(task_executions)")}
+        except sqlite3.Error:
+            return
+        if "creation_history_id" not in columns:
+            try:
+                conn.execute(
+                    "ALTER TABLE task_executions ADD COLUMN creation_history_id INTEGER"
+                )
+                conn.commit()
+            except sqlite3.Error:
+                pass
 
     def _update_execution(self, conn: sqlite3.Connection, exec_id: int, data: dict):
         fields = ", ".join(f"{k} = ?" for k in data if k != "exec_id")

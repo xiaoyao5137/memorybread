@@ -17,6 +17,7 @@ import type {
   DebugLogFile,
   DataExtractionSummary,
   DataSource,
+  MemoryFavoriteKind,
   MemoryPackageExportResult,
   MemoryPackageImportReport,
   TimelineItem,
@@ -882,9 +883,13 @@ export interface DataSourceListResponse {
 export function useFetchDataSources() {
   const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
 
-  return useCallback(async (params: { q?: string; limit?: number; offset?: number } = {}): Promise<DataSourceListResponse> => {
+  return useCallback(async (params: { q?: string; source_kind?: DataSource['source_kind']; from?: number; to?: number; favorite?: boolean; limit?: number; offset?: number } = {}): Promise<DataSourceListResponse> => {
     const url = new URL(`${apiBaseUrl}/api/data/sources`)
     if (params.q) url.searchParams.set('q', params.q)
+    if (params.source_kind) url.searchParams.set('source_kind', params.source_kind)
+    if (params.from != null) url.searchParams.set('from', String(params.from))
+    if (params.to != null) url.searchParams.set('to', String(params.to))
+    if (params.favorite != null) url.searchParams.set('favorite', String(params.favorite))
     if (params.limit != null) url.searchParams.set('limit', String(params.limit))
     if (params.offset != null) url.searchParams.set('offset', String(params.offset))
     const resp = await fetchWithLocalhostFallback(url.toString())
@@ -899,6 +904,45 @@ export function useFetchDataSource() {
   return useCallback(async (sourceId: number): Promise<DataSource> => {
     const resp = await fetchWithLocalhostFallback(`${apiBaseUrl}/api/data/sources/${sourceId}`)
     if (!resp.ok) throw new Error(await parseApiErrorMessage(resp, `data source fetch failed: ${resp.status}`))
+    return resp.json()
+  }, [apiBaseUrl])
+}
+
+export interface DataSourceWriteInput {
+  title: string
+  summary: string
+  rows: Array<{
+    dimension: string
+    metric: string
+    value: string
+    note: string
+  }>
+}
+
+export function useCreateDataSource() {
+  const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
+
+  return useCallback(async (input: DataSourceWriteInput): Promise<DataSource> => {
+    const resp = await fetchWithLocalhostFallback(`${apiBaseUrl}/api/data/sources`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    if (!resp.ok) throw new Error(await parseApiErrorMessage(resp, `data source create failed: ${resp.status}`))
+    return resp.json()
+  }, [apiBaseUrl])
+}
+
+export function useUpdateDataSource() {
+  const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
+
+  return useCallback(async (sourceId: number, input: DataSourceWriteInput): Promise<DataSource> => {
+    const resp = await fetchWithLocalhostFallback(`${apiBaseUrl}/api/data/sources/${sourceId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    if (!resp.ok) throw new Error(await parseApiErrorMessage(resp, `data source update failed: ${resp.status}`))
     return resp.json()
   }, [apiBaseUrl])
 }
@@ -932,7 +976,9 @@ export function useRefreshDataSource() {
       source_id: number
       collector: string
       browser?: 'chrome' | 'chrome_canary' | 'edge' | 'brave' | 'chromium' | 'vivaldi' | 'safari' | null
-      interaction_mode?: 'background_tab' | 'background_browser_window' | 'temporary_foreground_tab' | 'none'
+      interaction_mode?: 'background_tab' | 'background_browser_window' | 'temporary_foreground_tab' | 'temporary_foreground_window' | 'none'
+      focus_policy?: 'never' | 'allow_once'
+      focus_takeover_count?: number
       collected_at: number
       title: string
       url: string
@@ -966,15 +1012,47 @@ export function useFetchBakeOverview() {
 
 export interface BakeListQueryParams {
   q?: string
+  doc_type?: string
   bucket?: BakeBucket
   sort?: 'recent' | 'heat'
   from?: number
   to?: number
+  favorite?: boolean
   limit?: number
   offset?: number
 }
 
+export interface MemoryFavoriteResponse {
+  resource_kind: MemoryFavoriteKind
+  resource_id: number
+  is_favorite: boolean
+}
+
+export function useUpdateMemoryFavorite() {
+  const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
+
+  return useCallback(async (
+    resourceKind: MemoryFavoriteKind,
+    resourceId: string | number,
+    isFavorite: boolean,
+  ): Promise<MemoryFavoriteResponse> => {
+    const resp = await fetchWithLocalhostFallback(
+      `${apiBaseUrl}/api/memory-favorites/${resourceKind}/${encodeURIComponent(String(resourceId))}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_favorite: isFavorite }),
+      },
+    )
+    if (!resp.ok) {
+      throw new Error(await parseApiErrorMessage(resp, `favorite update failed: ${resp.status}`))
+    }
+    return resp.json()
+  }, [apiBaseUrl])
+}
+
 export interface BakeCaptureListQueryParams extends BakeListQueryParams {
+  app?: string
   source_capture_id?: number
 }
 
@@ -1033,6 +1111,7 @@ export function useFetchBakeKnowledge() {
     if (params.sort) url.searchParams.set('sort', params.sort)
     if (params.from != null) url.searchParams.set('from', String(params.from))
     if (params.to != null) url.searchParams.set('to', String(params.to))
+    if (params.favorite != null) url.searchParams.set('favorite', String(params.favorite))
     if (params.limit != null) url.searchParams.set('limit', String(params.limit))
     if (params.offset != null) url.searchParams.set('offset', String(params.offset))
 
@@ -1067,12 +1146,51 @@ export function useDeleteBakeKnowledge() {
   }, [apiBaseUrl])
 }
 
+export function useCreateBakeKnowledge() {
+  const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
+
+  return useCallback(async (knowledge: Pick<BakeKnowledgeItem, 'summary' | 'overview' | 'detailedContent' | 'importance'>): Promise<BakeKnowledgeItem> => {
+    const resp = await fetch(`${apiBaseUrl}/api/bake/knowledge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        summary: knowledge.summary,
+        overview: knowledge.overview ?? null,
+        detailed_content: knowledge.detailedContent ?? null,
+        importance: knowledge.importance,
+      }),
+    })
+    if (!resp.ok) throw new Error(`create bake knowledge failed: ${resp.status}`)
+    return mapBakeKnowledge(await resp.json())
+  }, [apiBaseUrl])
+}
+
+export function useUpdateBakeKnowledge() {
+  const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
+
+  return useCallback(async (knowledge: BakeKnowledgeItem): Promise<BakeKnowledgeItem> => {
+    const resp = await fetch(`${apiBaseUrl}/api/bake/knowledge/${encodeURIComponent(knowledge.id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        summary: knowledge.summary,
+        overview: knowledge.overview ?? null,
+        detailed_content: knowledge.detailedContent ?? null,
+        importance: knowledge.importance,
+      }),
+    })
+    if (!resp.ok) throw new Error(`update bake knowledge failed: ${resp.status}`)
+    return mapBakeKnowledge(await resp.json())
+  }, [apiBaseUrl])
+}
+
 export function useFetchBakeCaptures() {
   const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
 
   return useCallback(async (params: BakeCaptureListQueryParams = {}): Promise<PaginatedBakeResponse<BakeCaptureItem>> => {
     const url = new URL(`${apiBaseUrl}/api/bake/captures`)
     if (params.q) url.searchParams.set('q', params.q)
+    if (params.app) url.searchParams.set('app', params.app)
     if (params.from != null) url.searchParams.set('from', String(params.from))
     if (params.to != null) url.searchParams.set('to', String(params.to))
     if (params.source_capture_id != null) url.searchParams.set('source_capture_id', String(params.source_capture_id))
@@ -1167,9 +1285,11 @@ export function useFetchBakeTemplates() {
   return useCallback(async (params: BakeListQueryParams = {}): Promise<PaginatedBakeResponse<ArticleTemplate>> => {
     const url = new URL(`${apiBaseUrl}/api/bake/documents`)
     if (params.q) url.searchParams.set('q', params.q)
+    if (params.doc_type) url.searchParams.set('doc_type', params.doc_type)
     if (params.bucket) url.searchParams.set('bucket', params.bucket)
     if (params.from != null) url.searchParams.set('from', String(params.from))
     if (params.to != null) url.searchParams.set('to', String(params.to))
+    if (params.favorite != null) url.searchParams.set('favorite', String(params.favorite))
     if (params.limit != null) url.searchParams.set('limit', String(params.limit))
     if (params.offset != null) url.searchParams.set('offset', String(params.offset))
 
@@ -1251,6 +1371,7 @@ export function useFetchBakeSops() {
     if (params.bucket) url.searchParams.set('bucket', params.bucket)
     if (params.from != null) url.searchParams.set('from', String(params.from))
     if (params.to != null) url.searchParams.set('to', String(params.to))
+    if (params.favorite != null) url.searchParams.set('favorite', String(params.favorite))
     if (params.limit != null) url.searchParams.set('limit', String(params.limit))
     if (params.offset != null) url.searchParams.set('offset', String(params.offset))
 
@@ -1282,6 +1403,44 @@ export function useDeleteBakeSop() {
   return useCallback(async (id: string): Promise<void> => {
     const resp = await fetch(`${apiBaseUrl}/api/bake/sops/${encodeURIComponent(id)}`, { method: 'DELETE' })
     if (!resp.ok) throw new Error(`delete bake sop failed: ${resp.status}`)
+  }, [apiBaseUrl])
+}
+
+export function useCreateBakeSop() {
+  const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
+
+  return useCallback(async (sop: Pick<SopCandidate, 'extractedProblem' | 'detailedContent' | 'steps' | 'triggerKeywords'>): Promise<SopCandidate> => {
+    const resp = await fetch(`${apiBaseUrl}/api/bake/sops`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        extracted_problem: sop.extractedProblem ?? '',
+        detailed_content: sop.detailedContent ?? null,
+        steps: sop.steps,
+        trigger_keywords: sop.triggerKeywords,
+      }),
+    })
+    if (!resp.ok) throw new Error(`create bake sop failed: ${resp.status}`)
+    return mapBakeSop(await resp.json())
+  }, [apiBaseUrl])
+}
+
+export function useUpdateBakeSop() {
+  const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
+
+  return useCallback(async (sop: SopCandidate): Promise<SopCandidate> => {
+    const resp = await fetch(`${apiBaseUrl}/api/bake/sops/${encodeURIComponent(sop.id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        extracted_problem: sop.extractedProblem ?? '',
+        detailed_content: sop.detailedContent ?? null,
+        steps: sop.steps,
+        trigger_keywords: sop.triggerKeywords,
+      }),
+    })
+    if (!resp.ok) throw new Error(`update bake sop failed: ${resp.status}`)
+    return mapBakeSop(await resp.json())
   }, [apiBaseUrl])
 }
 
@@ -1419,9 +1578,11 @@ function mapBakeKnowledge(item: any): BakeKnowledgeItem {
 
   return {
     id: String(item.id),
+    isFavorite: Boolean(item.is_favorite),
     captureId,
     sourceCaptureIds,
     sourceTimelineId: item.source_timeline_id != null ? String(item.source_timeline_id) : String(item.id),
+    sourceUrl: item.source_url ?? undefined,
     summary: item.summary,
     overview: item.overview,
     details: item.details,
@@ -1496,6 +1657,7 @@ function mapBakeTemplate(item: any): ArticleTemplate {
   const createdAtMs = toTimestampMs(item.created_at_ms ?? item.created_at ?? item.updated_at)
   return {
     id: String(item.id),
+    isFavorite: Boolean(item.is_favorite),
     title: item.title,
     docType: item.doc_type,
     status: item.status,
@@ -1556,6 +1718,7 @@ function mapBakeSop(item: any): SopCandidate {
   const createdAtMs = toTimestampMs(item.created_at_ms ?? item.created_at ?? item.updated_at)
   return {
     id: String(item.id),
+    isFavorite: Boolean(item.is_favorite),
     sourceCaptureId: item.source_capture_id ?? '',
     sourceTimelineId: item.source_timeline_id != null ? String(item.source_timeline_id) : String(item.id),
     sourceTitle: item.source_title,

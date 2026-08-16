@@ -6,22 +6,125 @@
   width: clamp(220px, 19vw, 244px);
   min-width: 220px;
   height: 100%;
+  min-height: 0;
   padding: 22px 12px 0;
   display: flex;
   flex-direction: column;
   gap: 20px;
+  overflow: hidden;
   background: rgba(255, 255, 255, 0.95);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border-right: 1px solid rgba(0, 0, 0, 0.08);
   box-shadow: 4px 0 16px rgba(15, 23, 42, 0.06);
+  transition: width .2s ease, min-width .2s ease, padding .2s ease;
+}
+
+.buddy-sidebar-collapse {
+  width: 26px;
+  height: 26px;
+  margin-left: auto;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(95, 70, 51, .52);
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  cursor: pointer;
+  transition: color .18s ease, background-color .18s ease, border-color .18s ease;
+}
+
+.buddy-sidebar-collapse:hover {
+  border-color: rgba(124, 78, 37, .08);
+  background: rgba(124, 78, 37, .055);
+  color: #755034;
+}
+
+.buddy-sidebar-collapse:focus-visible {
+  outline: 2px solid rgba(164, 93, 34, .35);
+  outline-offset: 2px;
+}
+
+.floating-buddy-v2--collapsed {
+  width: 76px;
+  min-width: 76px;
+  padding-inline: 10px;
+  gap: 14px;
+}
+
+.floating-buddy-v2--collapsed .buddy-sidebar-header {
+  padding-inline: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.floating-buddy-v2--collapsed .buddy-sidebar-collapse {
+  margin-left: 0;
+}
+
+.floating-buddy-v2--collapsed .buddy-sidebar-logo {
+  width: 42px;
+  height: 42px;
+}
+
+.floating-buddy-v2--collapsed .buddy-sidebar-title-group,
+.floating-buddy-v2--collapsed .buddy-menu-group__label,
+.floating-buddy-v2--collapsed .buddy-action-btn__label,
+.floating-buddy-v2--collapsed .buddy-update-entry__copy,
+.floating-buddy-v2--collapsed .buddy-update-entry__action,
+.floating-buddy-v2--collapsed .buddy-account-entry__identity,
+.floating-buddy-v2--collapsed .buddy-account-entry__chevron {
+  display: none;
+}
+
+.floating-buddy-v2--collapsed .buddy-actions {
+  align-items: center;
+}
+
+.floating-buddy-v2--collapsed .buddy-menu-group {
+  width: 100%;
+  margin-bottom: 4px;
+  align-items: center;
+}
+
+.floating-buddy-v2--collapsed .buddy-action-btn,
+.floating-buddy-v2--collapsed .buddy-update-entry,
+.floating-buddy-v2--collapsed .buddy-account-entry {
+  width: 48px;
+  min-height: 44px;
+  padding: 8px;
+  justify-content: center;
+  gap: 0;
+}
+
+.floating-buddy-v2--collapsed .buddy-sidebar-footer {
+  margin-inline: -10px;
+  align-items: center;
+}
+
+.floating-buddy-v2--collapsed .buddy-account-entry {
+  height: 50px;
+  min-height: 50px;
+}
+
+.floating-buddy-v2--collapsed .buddy-update-entry__icon {
+  width: 30px;
+  height: 30px;
+}
+
+.floating-buddy-v2--collapsed .buddy-account-entry__avatar {
+  width: 34px;
+  height: 34px;
 }
 
 .buddy-sidebar-header {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
   padding: 6px;
+  overflow: hidden;
 }
 
 .buddy-sidebar-logo {
@@ -66,23 +169,38 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
+  min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
+  scrollbar-width: none;
+  overscroll-behavior: contain;
   flex: 1;
+}
+
+.buddy-actions::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .buddy-sidebar-footer {
   flex: 0 0 auto;
+  min-width: 0;
   margin: 0 -12px;
   padding: 9px 10px 11px;
+  overflow: hidden;
   border-top: 1px solid rgba(78, 48, 27, 0.1);
   background: rgba(255, 255, 255, 0.58);
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
   gap: 5px;
 }
 
 .buddy-update-entry {
   width: 100%;
+  min-width: 0;
   min-height: 44px;
   padding: 6px 9px;
   border: 1px solid rgba(166, 106, 50, .2);
@@ -138,7 +256,10 @@
 
 .buddy-account-entry {
   width: 100%;
+  min-width: 0;
+  height: 58px;
   min-height: 58px;
+  max-height: 58px;
   padding: 8px 9px;
   border: 0;
   border-radius: 12px;
@@ -189,7 +310,9 @@
   font-size: 14px;
   font-weight: 700;
   line-height: 1.25;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .buddy-account-entry__chevron {
@@ -239,6 +362,7 @@
 
 .buddy-action-btn {
   width: 100%;
+  min-width: 0;
   min-height: 44px;
   padding: 9px 10px;
   border-radius: 12px;
@@ -302,10 +426,13 @@
 }
 
 .buddy-action-btn__label {
+  min-width: 0;
+  overflow: hidden;
+  color: inherit;
   font-size: 14px;
   line-height: 1.3;
-  white-space: normal;
-  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (prefers-color-scheme: dark) {

@@ -132,27 +132,27 @@ describe('创作技能工作流 @ 提及', () => {
     const { container } = renderEditor()
 
     await waitFor(() => {
-      expect((screen.getByLabelText('执行步骤 1 执行动作') as HTMLTextAreaElement).value).toContain('@记忆搜索 Tool')
+      expect((screen.getByLabelText('执行步骤 1 执行动作') as HTMLTextAreaElement).value).toContain('@记忆搜索')
     })
     expect(Array.from(container.querySelectorAll('.mention-highlight-field__mention')).map(node => node.textContent)).toEqual(
-      expect.arrayContaining(['@方案设计 Agent', '@PlantUML 画图 Tool', '@记忆搜索 Tool']),
+      expect.arrayContaining(['@方案设计 Agent', '@PlantUML 画图', '@记忆搜索']),
     )
     const objective = screen.getByLabelText('执行步骤 1 执行动作') as HTMLTextAreaElement
     fireEvent.change(objective, { target: { value: `${objective.value}@` } })
 
     const options = pickerOptionLabels()
-    expect(options.some(label => label.includes('@记忆搜索 Tool'))).toBe(true)
+    expect(options.some(label => label.includes('@记忆搜索'))).toBe(true)
     expect(options.some(label => label.includes('Tool · 已提及'))).toBe(true)
 
     // 重复选择已提及的官方 Tool 不产生重复文本
     const mentionedOption = Array.from(
       screen.getByRole('listbox', { name: '执行步骤 1 选择能力' }).querySelectorAll('[role="option"]'),
-    ).find(node => (node.textContent || '').includes('@记忆搜索 Tool')) as HTMLButtonElement
+    ).find(node => (node.textContent || '').includes('@记忆搜索')) as HTMLButtonElement
     fireEvent.click(mentionedOption)
     const after = (screen.getByLabelText('执行步骤 1 执行动作') as HTMLTextAreaElement).value
-    expect(after.match(/@记忆搜索 Tool/g)?.length).toBe(1)
-    expect(after).not.toContain('@记忆搜索 Tool@')
-    expect(after).not.toContain('@记忆搜索 Tool @记忆搜索 Tool')
+    expect(after.match(/@记忆搜索/g)?.length).toBe(1)
+    expect(after).not.toContain('@记忆搜索@')
+    expect(after).not.toContain('@记忆搜索 @记忆搜索')
   })
 
   it('选择器不能提及技能自身名称', async () => {
@@ -187,7 +187,7 @@ describe('创作技能工作流 @ 提及', () => {
     renderEditor()
 
     await waitFor(() => {
-      expect((screen.getByLabelText('执行步骤 1 执行动作') as HTMLTextAreaElement).value).toContain('@记忆搜索 Tool')
+      expect((screen.getByLabelText('执行步骤 1 执行动作') as HTMLTextAreaElement).value).toContain('@记忆搜索')
     })
     const objective = screen.getByLabelText('执行步骤 1 执行动作') as HTMLTextAreaElement
     fireEvent.change(objective, { target: { value: `${objective.value}@行业调研` } })
@@ -214,7 +214,7 @@ describe('创作技能工作流 @ 提及', () => {
     renderEditor()
 
     await waitFor(() => {
-      expect((screen.getByLabelText('执行步骤 1 执行动作') as HTMLTextAreaElement).value).toContain('@记忆搜索 Tool')
+      expect((screen.getByLabelText('执行步骤 1 执行动作') as HTMLTextAreaElement).value).toContain('@记忆搜索')
     })
     const objective = screen.getByLabelText('执行步骤 1 执行动作') as HTMLTextAreaElement
     const queryValue = `${objective.value}@记忆`

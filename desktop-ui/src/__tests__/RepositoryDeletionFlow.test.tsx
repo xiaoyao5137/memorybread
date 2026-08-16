@@ -55,6 +55,7 @@ describe('采集与时间线删除', () => {
     render(<RepositoryPanel />)
 
     expect((await screen.findAllByText('待删除时间线')).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: '查看时间线：待删除时间线' }))
     fireEvent.click(screen.getByRole('button', { name: '删除时间线' }))
     expect(screen.getByRole('alertdialog', { name: '删除时间线？' })).toBeInTheDocument()
     expect(fetchMock).not.toHaveBeenCalledWith(
@@ -70,7 +71,7 @@ describe('采集与时间线删除', () => {
       )
     })
     expect(await screen.findByText('已删除时间线')).toBeInTheDocument()
-    expect(screen.getByText('当前筛选条件下没有可浏览的时间线。')).toBeInTheDocument()
+    expect(screen.getByText('还没有时间线')).toBeInTheDocument()
   })
 
   it('确认后删除采集记录并清除详情', async () => {
@@ -111,6 +112,7 @@ describe('采集与时间线删除', () => {
 
     expect((await screen.findAllByText('待删除采集记录')).length).toBeGreaterThan(0)
     expect(screen.queryByText('尚未归入时间线')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '查看采集记录 #11 详情' }))
     const deleteButton = screen.getByRole('button', { name: '删除' })
     expect(deleteButton).toHaveClass('bake-btn--compact')
     fireEvent.click(deleteButton)
@@ -128,6 +130,7 @@ describe('采集与时间线删除', () => {
       )
     })
     expect(await screen.findByText('已删除采集记录')).toBeInTheDocument()
-    expect(screen.getByText('暂无采集记录详情')).toBeInTheDocument()
+    expect(screen.getByText('暂无采集记录')).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: '待删除采集记录' })).not.toBeInTheDocument()
   })
 })

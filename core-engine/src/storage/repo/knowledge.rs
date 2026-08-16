@@ -280,6 +280,9 @@ impl StorageManager {
                         time_range_start: None,
                         time_range_end: None,
                         key_timestamps: None,
+                        work_item: entry.work_item.clone(),
+                        work_status: entry.work_status.clone(),
+                        work_progress: entry.work_progress.clone(),
                     };
                     let source_id = insert_episodic_memory_inner(conn, &source)?;
                     let now = current_ts_ms();
@@ -728,7 +731,7 @@ impl StorageManager {
     ) -> Result<Vec<BakeKnowledgeRecord>, StorageError> {
         self.with_conn(|conn| {
             let mut sql = String::from(
-                "SELECT b.id, b.timeline_id, b.title, b.summary, b.content, b.detailed_content, b.entities, b.importance,
+                "SELECT b.id, COALESCE(b.timeline_id, 0), b.title, b.summary, b.content, b.detailed_content, b.entities, b.importance,
                         b.user_verified, b.user_edited, b.created_at, b.updated_at, b.created_at_ms, b.updated_at_ms,
                         b.source_capture_ids,
                         COALESCE((
@@ -1030,7 +1033,8 @@ impl StorageManager {
                         c.ts, c.app_name, c.win_title, c.ax_text, c.ocr_text, c.input_text, c.audio_text,
                         c.url, c.webpage_title,
                         COALESCE(r.failure_count, 0), r.last_error_code,
-                        COALESCE(r.next_retry_at_ms, 0)
+                        COALESCE(r.next_retry_at_ms, 0),
+                        k.work_item, k.work_status, k.work_progress
                  FROM timelines k
                  INNER JOIN captures c ON c.id = k.capture_id
                  LEFT JOIN bake_retry_state r ON r.timeline_id = k.id
@@ -1061,6 +1065,9 @@ impl StorageManager {
                     url_aggregated_text: None,
                     url_aggregated_capture_count: 0,
                     action_trace: Vec::new(),
+                    work_item: row.get(44)?,
+                    work_status: row.get(45)?,
+                    work_progress: row.get(46)?,
                     retry_failure_count: row.get(41)?,
                     retry_error_code: row.get(42)?,
                     retry_next_at_ms: row.get(43)?,
@@ -1387,6 +1394,9 @@ const ACTION_TRACE_MAX_CAPTURES: usize = 40;
 const ACTION_TRACE_VISIBLE_TEXT_CHARS: usize = 1_000;
 const ACTION_TRACE_INPUT_TEXT_CHARS: usize = 400;
 const ACTION_TRACE_AUDIO_TEXT_CHARS: usize = 400;
+const ACTION_TRACE_FOCUSED_ROLE_CHARS: usize = 100;
+const ACTION_TRACE_FOCUSED_ID_CHARS: usize = 240;
+const ACTION_TRACE_STATE_DELTA_CHARS: usize = 320;
 
 /// 构建操作提炼专用的严格时间序轨迹。
 ///
@@ -1406,7 +1416,8 @@ fn load_member_action_trace(
         .join(",");
     let sql = format!(
         "SELECT id, ts, event_type, app_name, win_title, url, webpage_title,
-                ax_text, ocr_text, input_text, audio_text
+                ax_text, ocr_text, input_text, audio_text,
+                ax_focused_role, ax_focused_id
          FROM captures
          WHERE id IN ({placeholders})
          ORDER BY ts ASC, id ASC
@@ -1434,10 +1445,164 @@ fn load_member_action_trace(
             visible_text: truncate_optional_text(visible_text, ACTION_TRACE_VISIBLE_TEXT_CHARS),
             input_text: truncate_optional_text(row.get(9)?, ACTION_TRACE_INPUT_TEXT_CHARS),
             audio_text: truncate_optional_text(row.get(10)?, ACTION_TRACE_AUDIO_TEXT_CHARS),
+            ax_focused_role: truncate_optional_text(row.get(11)?, ACTION_TRACE_FOCUSED_ROLE_CHARS),
+            ax_focused_id: truncate_optional_text(row.get(12)?, ACTION_TRACE_FOCUSED_ID_CHARS),
+            state_delta: None,
+            evidence_kind: None,
+            operation_evidence: false,
         })
     })?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(StorageError::Sqlite)
+    let records = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::Sqlite)?;
+    Ok(annotate_and_compact_action_trace(records))
+}
+
+fn annotate_and_compact_action_trace(
+    records: Vec<BakeActionTraceRecord>,
+) -> Vec<BakeActionTraceRecord> {
+    let mut annotated = Vec::with_capacity(records.len());
+    let mut previous: Option<BakeActionTraceRecord> = None;
+
+    for mut record in records {
+        let state_delta = previous
+            .as_ref()
+            .and_then(|item| build_action_state_delta(item, &record));
+        let state_changed = state_delta.is_some();
+        let has_input = record
+            .input_text
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+        let has_focus = record.ax_focused_role.is_some() || record.ax_focused_id.is_some();
+        let (evidence_kind, operation_evidence) = match record.event_type.as_str() {
+            "mouse_click" => ("interaction", true),
+            "browser_navigation" | "app_switch" => ("navigation", true),
+            "key_pause" if has_input || has_focus || state_changed => ("input", true),
+            "manual" if has_input || has_focus || state_changed => ("interaction", true),
+            "auto" if state_changed => ("state_change", true),
+            _ => ("context", false),
+        };
+        record.state_delta = state_delta;
+        record.evidence_kind = Some(evidence_kind.to_string());
+        record.operation_evidence = operation_evidence;
+        previous = Some(record.clone());
+
+        // 连续滚动只保留最后一帧；连续无变化的 auto/context 也只保留最后一帧。
+        // 它们仍能给模型提供上下文，但不会膨胀有效操作证据数。
+        let replace_previous_context =
+            annotated
+                .last()
+                .is_some_and(|last: &BakeActionTraceRecord| {
+                    !last.operation_evidence
+                        && !record.operation_evidence
+                        && ((last.event_type == "scroll" && record.event_type == "scroll")
+                            || (last.evidence_kind.as_deref() == Some("context")
+                                && record.evidence_kind.as_deref() == Some("context")
+                                && record.state_delta.is_none()))
+                });
+        if replace_previous_context {
+            annotated.pop();
+        }
+        annotated.push(record);
+    }
+
+    annotated
+}
+
+fn build_action_state_delta(
+    previous: &BakeActionTraceRecord,
+    current: &BakeActionTraceRecord,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    push_action_context_delta(&mut parts, "app", &previous.app_name, &current.app_name);
+    push_action_context_delta(
+        &mut parts,
+        "window",
+        &previous.win_title,
+        &current.win_title,
+    );
+    push_action_context_delta(&mut parts, "url", &previous.url, &current.url);
+
+    if materially_different_text(
+        previous.visible_text.as_deref(),
+        current.visible_text.as_deref(),
+    ) {
+        if let Some(current_text) = current.visible_text.as_deref() {
+            let text = current_text
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !text.is_empty() {
+                parts.push(format!("visible→{text}"));
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(
+            parts
+                .join("; ")
+                .chars()
+                .take(ACTION_TRACE_STATE_DELTA_CHARS)
+                .collect(),
+        )
+    }
+}
+
+fn push_action_context_delta(
+    parts: &mut Vec<String>,
+    label: &str,
+    previous: &Option<String>,
+    current: &Option<String>,
+) {
+    let previous = previous.as_deref().unwrap_or_default().trim();
+    let current = current.as_deref().unwrap_or_default().trim();
+    if previous != current && (!previous.is_empty() || !current.is_empty()) {
+        parts.push(format!("{label}:{previous}→{current}"));
+    }
+}
+
+fn materially_different_text(previous: Option<&str>, current: Option<&str>) -> bool {
+    let normalize = |value: Option<&str>| {
+        value
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    let previous = normalize(previous);
+    let current = normalize(current);
+    if previous == current {
+        return false;
+    }
+    if previous.is_empty() || current.is_empty() {
+        return previous.chars().count().max(current.chars().count()) >= 8;
+    }
+
+    let previous_chars = previous.chars().collect::<Vec<_>>();
+    let current_chars = current.chars().collect::<Vec<_>>();
+    let common_prefix = previous_chars
+        .iter()
+        .zip(current_chars.iter())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let previous_tail = &previous_chars[common_prefix..];
+    let current_tail = &current_chars[common_prefix..];
+    let common_suffix = previous_tail
+        .iter()
+        .rev()
+        .zip(current_tail.iter().rev())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let changed_chars = previous_tail
+        .len()
+        .saturating_sub(common_suffix)
+        .max(current_tail.len().saturating_sub(common_suffix));
+    let longest = previous_chars.len().max(current_chars.len());
+    changed_chars >= 12 || changed_chars.saturating_mul(10) >= longest
 }
 
 fn combine_distinct_capture_text(ax_text: Option<&str>, ocr_text: Option<&str>) -> Option<String> {
@@ -2166,10 +2331,11 @@ fn insert_episodic_memory_inner(
             evidence_strength, user_verified, user_edited,
             created_at, updated_at, created_at_ms, updated_at_ms,
             capture_ids, start_time, end_time, duration_minutes, frag_app_name,
-            frag_win_title, time_range_start, time_range_end, key_timestamps
+            frag_win_title, time_range_start, time_range_end, key_timestamps,
+            work_item, work_status, work_progress
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0, 0,
                    datetime(?17 / 1000, 'unixepoch'), datetime(?17 / 1000, 'unixepoch'), ?17, ?17,
-                   ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+                   ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
         params![
             entry.capture_id,
             entry.summary,
@@ -2197,6 +2363,9 @@ fn insert_episodic_memory_inner(
             entry.time_range_start,
             entry.time_range_end,
             entry.key_timestamps,
+            entry.work_item,
+            entry.work_status,
+            entry.work_progress,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -2259,7 +2428,7 @@ impl StorageManager {
                     timeline_id, title, summary, content, detailed_content, entities, importance,
                     user_verified, user_edited,
                     created_at, updated_at, created_at_ms, updated_at_ms, source_capture_ids
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0,
+                 ) VALUES (NULLIF(?1, 0), ?2, ?3, ?4, ?5, ?6, ?7, 1, 0,
                            datetime(?8 / 1000, 'unixepoch'), datetime(?8 / 1000, 'unixepoch'), ?8, ?8, COALESCE(?9, '[]'))",
                 params![
                     knowledge.timeline_id,
@@ -2287,7 +2456,7 @@ impl StorageManager {
     pub fn get_bake_knowledge(&self, id: i64) -> Result<Option<BakeKnowledgeRecord>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT b.id, b.timeline_id, b.title, b.summary, b.content, b.detailed_content, b.entities, b.importance,
+                "SELECT b.id, COALESCE(b.timeline_id, 0), b.title, b.summary, b.content, b.detailed_content, b.entities, b.importance,
                         b.user_verified, b.user_edited, b.created_at, b.updated_at, b.created_at_ms, b.updated_at_ms,
                         b.source_capture_ids,
                         COALESCE((
@@ -2317,7 +2486,7 @@ impl StorageManager {
     ) -> Result<Option<BakeKnowledgeRecord>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT b.id, b.timeline_id, b.title, b.summary, b.content, b.detailed_content, b.entities, b.importance,
+                "SELECT b.id, COALESCE(b.timeline_id, 0), b.title, b.summary, b.content, b.detailed_content, b.entities, b.importance,
                         b.user_verified, b.user_edited, b.created_at, b.updated_at, b.created_at_ms, b.updated_at_ms,
                         b.source_capture_ids,
                         COALESCE((
@@ -2398,6 +2567,39 @@ impl StorageManager {
         })
     }
 
+    pub fn update_bake_knowledge_manual(
+        &self,
+        id: i64,
+        title: &str,
+        summary: &str,
+        content: Option<&str>,
+        detailed_content: Option<&str>,
+        entities: &str,
+        importance: i64,
+    ) -> Result<bool, StorageError> {
+        self.with_conn(|conn| {
+            let now = current_ts_ms();
+            let affected = conn.execute(
+                "UPDATE bake_knowledge
+                 SET title = ?1, summary = ?2, content = ?3, detailed_content = ?4,
+                     entities = ?5, importance = ?6, user_verified = 1, user_edited = 1,
+                     updated_at = datetime(?8 / 1000, 'unixepoch'), updated_at_ms = ?8
+                 WHERE id = ?7",
+                params![
+                    title,
+                    summary,
+                    content,
+                    detailed_content,
+                    entities,
+                    importance,
+                    id,
+                    now,
+                ],
+            )?;
+            Ok(affected > 0)
+        })
+    }
+
     pub fn delete_bake_knowledge(&self, id: i64) -> Result<bool, StorageError> {
         self.with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
@@ -2412,6 +2614,9 @@ impl StorageManager {
                 params![id],
             )?;
             let affected = tx.execute("DELETE FROM bake_knowledge WHERE id = ?1", params![id])?;
+            if affected > 0 {
+                StorageManager::delete_memory_favorite_with_conn(&tx, "knowledge", id)?;
+            }
             tx.commit()?;
             Ok(affected > 0)
         })
@@ -2453,7 +2658,7 @@ impl StorageManager {
                     timeline_id, title, summary, content, detailed_content, entities, importance,
                     user_verified, user_edited,
                     created_at, updated_at, created_at_ms, updated_at_ms, source_capture_ids
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0,
+                 ) VALUES (NULLIF(?1, 0), ?2, ?3, ?4, ?5, ?6, ?7, 1, 0,
                            datetime(?8 / 1000, 'unixepoch'), datetime(?8 / 1000, 'unixepoch'), ?8, ?8, COALESCE(?9, '[]'))",
                 params![
                     sop.timeline_id,
@@ -2478,7 +2683,7 @@ impl StorageManager {
     ) -> Result<Vec<BakeSopRecord>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, timeline_id, title, summary, content, detailed_content, entities, importance,
+                "SELECT id, COALESCE(timeline_id, 0) AS timeline_id, title, summary, content, detailed_content, entities, importance,
                         user_verified, user_edited, created_at, updated_at, created_at_ms, updated_at_ms, source_capture_ids
                  FROM bake_sops ORDER BY updated_at_ms DESC LIMIT ? OFFSET ?"
             )?;
@@ -2645,7 +2850,7 @@ impl StorageManager {
     pub fn get_bake_sop(&self, id: i64) -> Result<Option<BakeSopRecord>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, timeline_id, title, summary, content, detailed_content, entities, importance,
+                "SELECT id, COALESCE(timeline_id, 0) AS timeline_id, title, summary, content, detailed_content, entities, importance,
                         user_verified, user_edited, created_at, updated_at, created_at_ms, updated_at_ms, source_capture_ids
                  FROM bake_sops WHERE id = ?1"
             )?;
@@ -2675,6 +2880,39 @@ impl StorageManager {
                      updated_at = datetime(?6 / 1000, 'unixepoch'), updated_at_ms = ?6
                  WHERE id = ?5",
                 params![title, summary, content, entities, id, now],
+            )?;
+            Ok(affected > 0)
+        })
+    }
+
+    pub fn update_bake_sop_manual(
+        &self,
+        id: i64,
+        title: &str,
+        summary: &str,
+        content: Option<&str>,
+        detailed_content: Option<&str>,
+        entities: &str,
+        importance: i64,
+    ) -> Result<bool, StorageError> {
+        self.with_conn(|conn| {
+            let now = current_ts_ms();
+            let affected = conn.execute(
+                "UPDATE bake_sops
+                 SET title = ?1, summary = ?2, content = ?3, detailed_content = ?4,
+                     entities = ?5, importance = ?6, user_verified = 1, user_edited = 1,
+                     updated_at = datetime(?8 / 1000, 'unixepoch'), updated_at_ms = ?8
+                 WHERE id = ?7",
+                params![
+                    title,
+                    summary,
+                    content,
+                    detailed_content,
+                    entities,
+                    importance,
+                    id,
+                    now,
+                ],
             )?;
             Ok(affected > 0)
         })
@@ -2713,6 +2951,9 @@ impl StorageManager {
                 params![id],
             )?;
             let affected = tx.execute("DELETE FROM bake_sops WHERE id = ?1", params![id])?;
+            if affected > 0 {
+                StorageManager::delete_memory_favorite_with_conn(&tx, "operation", id)?;
+            }
             tx.commit()?;
             Ok(affected > 0)
         })
@@ -2824,6 +3065,9 @@ mod tests {
             time_range_start: None,
             time_range_end: None,
             key_timestamps: None,
+            work_item: None,
+            work_status: None,
+            work_progress: None,
         }
     }
 
@@ -2835,6 +3079,29 @@ mod tests {
         let entries = mgr.list_timelines_by_category("bake_sop").unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].summary, "客服问题处理");
+    }
+
+    #[test]
+    fn timeline_work_context_reaches_bake_candidate() {
+        let mgr = StorageManager::open_in_memory().unwrap();
+        let mut entry = sample_entry(&mgr, "代码");
+        entry.work_item = Some("MemoryBread-操作提炼".to_string());
+        entry.work_status = Some("completed".to_string());
+        entry.work_progress = Some("已完成门禁改造，测试通过".to_string());
+        let timeline_id = mgr.insert_timeline_entry(&entry).unwrap();
+
+        let candidates = mgr.list_bake_memory_fresh_candidates(0, 10, 3).unwrap();
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.timeline.id == timeline_id)
+            .expect("新 timeline 应进入 bake 候选");
+
+        assert_eq!(candidate.work_item.as_deref(), Some("MemoryBread-操作提炼"));
+        assert_eq!(candidate.work_status.as_deref(), Some("completed"));
+        assert_eq!(
+            candidate.work_progress.as_deref(),
+            Some("已完成门禁改造，测试通过")
+        );
     }
 
     #[test]
@@ -3018,7 +3285,9 @@ mod tests {
         mgr.with_conn(|conn| {
             conn.execute(
                 "UPDATE captures
-                 SET ts = ?2, app_name = ?3, win_title = ?4, ax_text = ?5
+                 SET ts = ?2, app_name = ?3, win_title = ?4, ax_text = ?5,
+                     event_type = 'mouse_click', ax_focused_role = 'AXButton',
+                     ax_focused_id = 'save-config'
                  WHERE id = ?1",
                 params![
                     first,
@@ -3030,7 +3299,9 @@ mod tests {
             )?;
             conn.execute(
                 "UPDATE captures
-                 SET ts = ?2, app_name = ?3, win_title = ?4, ax_text = ?5, input_text = ?6
+                 SET ts = ?2, app_name = ?3, win_title = ?4, ax_text = ?5, input_text = ?6,
+                     event_type = 'key_pause', ax_focused_role = 'AXTextField',
+                     ax_focused_id = 'terminal-input'
                  WHERE id = ?1",
                 params![
                     second,
@@ -3043,7 +3314,8 @@ mod tests {
             )?;
             conn.execute(
                 "UPDATE captures
-                 SET ts = ?2, app_name = ?3, win_title = ?4, ax_text = ?5
+                 SET ts = ?2, app_name = ?3, win_title = ?4, ax_text = ?5,
+                     event_type = 'auto'
                  WHERE id = ?1",
                 params![
                     third,
@@ -3102,6 +3374,52 @@ mod tests {
             candidate.action_trace[2].visible_text.as_deref(),
             Some("相同界面壳：修改后")
         );
+        assert_eq!(
+            candidate.action_trace[0].ax_focused_id.as_deref(),
+            Some("save-config")
+        );
+        assert_eq!(
+            candidate.action_trace[1].evidence_kind.as_deref(),
+            Some("input")
+        );
+        assert!(candidate
+            .action_trace
+            .iter()
+            .all(|item| item.operation_evidence));
+        assert!(candidate.action_trace[2]
+            .state_delta
+            .as_deref()
+            .is_some_and(|delta| delta.contains("修改后")));
+    }
+
+    #[test]
+    fn action_trace_compacts_consecutive_scroll_context_without_counting_it_as_operation() {
+        let records = (1..=3)
+            .map(|index| BakeActionTraceRecord {
+                capture_id: index,
+                ts: 1_700_000_000_000 + index * 1_000,
+                event_type: "scroll".to_string(),
+                app_name: Some("Chrome".to_string()),
+                win_title: Some("说明页".to_string()),
+                url: Some("https://example.com/guide".to_string()),
+                webpage_title: Some("说明页".to_string()),
+                visible_text: Some(format!("滚动后的静态正文 {index}")),
+                input_text: None,
+                audio_text: None,
+                ax_focused_role: None,
+                ax_focused_id: None,
+                state_delta: None,
+                evidence_kind: None,
+                operation_evidence: false,
+            })
+            .collect();
+
+        let compacted = annotate_and_compact_action_trace(records);
+
+        assert_eq!(compacted.len(), 1);
+        assert_eq!(compacted[0].capture_id, 3);
+        assert_eq!(compacted[0].evidence_kind.as_deref(), Some("context"));
+        assert!(!compacted[0].operation_evidence);
     }
 
     #[test]

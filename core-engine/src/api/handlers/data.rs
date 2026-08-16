@@ -4,7 +4,7 @@ use std::{
     io::BufWriter,
     path::PathBuf,
     process::{Command, Output, Stdio},
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::Duration,
 };
@@ -35,6 +35,9 @@ const MAX_SCRAPED_CHARS: usize = 80_000;
 const BROWSER_DATA_READY_POLL_ATTEMPTS: usize = 120;
 const BROWSER_INTERACTION_READY_POLL_ATTEMPTS: usize = 80;
 const BROWSER_SCROLL_READY_POLL_ATTEMPTS: usize = 30;
+
+#[cfg(target_os = "macos")]
+static BROWSER_SCRAPE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrowserScriptKind {
@@ -98,6 +101,10 @@ const BROWSER_ADAPTERS: &[BrowserAdapter] = &[
 #[derive(Debug, Deserialize)]
 pub struct DataListQuery {
     pub q: Option<String>,
+    pub source_kind: Option<String>,
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+    pub favorite: Option<bool>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
 }
@@ -110,6 +117,22 @@ pub struct DataListResponse {
     pub pending_total: i64,
     pub limit: usize,
     pub offset: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DataMetricInput {
+    pub dimension: Option<String>,
+    pub metric: String,
+    pub value: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateOrUpdateDataRequest {
+    pub title: String,
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub rows: Vec<DataMetricInput>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,9 +182,16 @@ pub struct RefreshDataSourceRequest {
     pub browser_preference: String,
     #[serde(default)]
     pub capture_evidence: bool,
-    /// 是否额外保留网页截图；缺省开启。关闭时仍使用专用浏览器窗口和 AX/DOM。
-    #[serde(default = "default_true")]
+    /// 是否额外保留网页截图；缺省关闭。关闭不影响 DOM/AX 即时取数。
+    #[serde(default)]
     pub retain_screenshot: bool,
+    /// 静默读取无法取得有效指标时，是否允许用一次专用浏览器会话完成
+    /// 页面加载与筛选交互。该字段不表示需要截图。
+    #[serde(default)]
+    pub allow_foreground_refresh: bool,
+    /// 前台焦点策略。默认 never；截图或前台刷新必须显式传 allow_once。
+    #[serde(default = "default_focus_policy")]
+    pub focus_policy: String,
     #[serde(default)]
     pub run_id: Option<String>,
     #[serde(default)]
@@ -189,6 +219,8 @@ pub struct WebpageScrapeResponse {
     pub collector: String,
     pub browser: Option<String>,
     pub interaction_mode: String,
+    pub focus_policy: String,
+    pub focus_takeover_count: usize,
     pub collected_at: i64,
     pub title: String,
     pub url: String,
@@ -223,6 +255,25 @@ struct BrowserWindowSession {
     apple_script_id: String,
     preview_token: String,
     launched_browser: bool,
+    capture_x: i32,
+    capture_y: i32,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct BrowserForegroundLease {
+    adapter: BrowserAdapter,
+    previous_front_app: String,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for BrowserForegroundLease {
+    fn drop(&mut self) {
+        let _ = run_browser_script(&build_background_browser_restore_focus_script(
+            self.adapter,
+            &self.previous_front_app,
+        ));
+    }
 }
 
 #[derive(Debug)]
@@ -238,6 +289,7 @@ struct ScrapeResult {
     collector: &'static str,
     browser: Option<&'static str>,
     interaction_mode: &'static str,
+    focus_takeover_count: usize,
     title: String,
     url: String,
     content_text: String,
@@ -279,9 +331,21 @@ pub async fn list_data_sources(
     let limit = params.limit.unwrap_or(20).clamp(1, 100);
     let offset = params.offset.unwrap_or(0);
     let query = params.q.filter(|value| !value.trim().is_empty());
+    let source_kind = params.source_kind.filter(|value| !value.trim().is_empty());
+    let from_ts = params.from;
+    let to_ts = params.to;
+    let favorite = params.favorite;
     let storage = state.storage.clone();
     let (items, total, pending_items, pending_total) = tokio::task::spawn_blocking(move || {
-        let (items, total) = storage.list_data_sources(query.as_deref(), limit, offset)?;
+        let (items, total) = storage.list_data_sources_filtered(
+            query.as_deref(),
+            source_kind.as_deref(),
+            from_ts,
+            to_ts,
+            favorite,
+            limit,
+            offset,
+        )?;
         let (pending_items, pending_total) =
             storage.list_pending_data_sources(query.as_deref(), 100)?;
         Ok::<_, StorageError>((items, total, pending_items, pending_total))
@@ -307,6 +371,115 @@ pub async fn get_data_source(
         .await
         .map_err(|error| ApiError::Internal(error.to_string()))??
         .ok_or_else(|| ApiError::NotFound("数据源不存在".to_string()))?;
+    Ok(Json(source))
+}
+
+fn manual_data_payload(
+    body: CreateOrUpdateDataRequest,
+) -> Result<(String, String, Value), ApiError> {
+    let title = body.title.trim().to_string();
+    if title.is_empty() {
+        return Err(ApiError::BadRequest("数据名称不能为空".to_string()));
+    }
+    let rows = body
+        .rows
+        .into_iter()
+        .filter_map(|row| {
+            let metric = row.metric.trim().to_string();
+            let value = row.value.trim().to_string();
+            if metric.is_empty() || value.is_empty() {
+                return None;
+            }
+            Some(json!({
+                "dimension": row.dimension.unwrap_or_default().trim(),
+                "metric": metric,
+                "value": value,
+                "note": row.note.unwrap_or_default().trim(),
+            }))
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return Err(ApiError::BadRequest(
+            "至少需要一行完整的指标和数值".to_string(),
+        ));
+    }
+    let summary = body
+        .summary
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            rows.iter()
+                .take(4)
+                .map(|row| {
+                    format!(
+                        "{} {}",
+                        row.get("metric")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                        row.get("value").and_then(Value::as_str).unwrap_or_default(),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("，")
+        });
+    let content_text = std::iter::once(summary.clone())
+        .chain(rows.iter().map(|row| {
+            format!(
+                "{} {} {} {}",
+                row.get("dimension")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                row.get("metric")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                row.get("value").and_then(Value::as_str).unwrap_or_default(),
+                row.get("note").and_then(Value::as_str).unwrap_or_default(),
+            )
+        }))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let structured = json!({
+        "extraction_version": "data-memory.v15",
+        "content_render_version": "manual.v1",
+        "semantic_origin": "manual",
+        "semantic_subject": title.clone(),
+        "semantic_identity": format!("manual:{}", title),
+        "manual_entry": true,
+        "title": title.clone(),
+        "summary": summary,
+        "metric_rows": rows,
+        "metric_statements": [],
+    });
+    Ok((title, content_text, structured))
+}
+
+pub async fn create_data_source(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateOrUpdateDataRequest>,
+) -> Result<Json<DataSourceRecord>, ApiError> {
+    let (title, content_text, structured) = manual_data_payload(body)?;
+    let storage = state.storage.clone();
+    let source = tokio::task::spawn_blocking(move || {
+        storage.create_manual_data_source(&title, &content_text, &structured)
+    })
+    .await
+    .map_err(|error| ApiError::Internal(error.to_string()))??;
+    Ok(Json(source))
+}
+
+pub async fn update_data_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<CreateOrUpdateDataRequest>,
+) -> Result<Json<DataSourceRecord>, ApiError> {
+    let (title, content_text, structured) = manual_data_payload(body)?;
+    let storage = state.storage.clone();
+    let source = tokio::task::spawn_blocking(move || {
+        storage.update_data_source_content(id, &title, &content_text, &structured)
+    })
+    .await
+    .map_err(|error| ApiError::Internal(error.to_string()))??
+    .ok_or_else(|| ApiError::NotFound("数据不存在或没有可编辑内容".to_string()))?;
     Ok(Json(source))
 }
 
@@ -464,12 +637,23 @@ pub async fn refresh_data_source(
             "浏览器偏好无效或当前不受支持",
         ));
     }
-    let evidence_capture = if body.capture_evidence {
+    let capture_visual_evidence = body.capture_evidence && body.retain_screenshot;
+    let use_foreground_browser = capture_visual_evidence || body.allow_foreground_refresh;
+    let focus_policy = validate_focus_policy(&body.focus_policy, use_foreground_browser)?;
+    let evidence_capture = if capture_visual_evidence {
         Some(prepare_evidence_capture(
             body.run_id.as_deref(),
             body.session_id.as_deref(),
             body.preview_id.as_deref(),
         )?)
+    } else {
+        None
+    };
+    let foreground_preview_token = if use_foreground_browser {
+        Some(match evidence_capture.as_ref() {
+            Some(capture) => capture.id.clone(),
+            None => normalize_preview_id(body.preview_id.as_deref())?,
+        })
     } else {
         None
     };
@@ -508,7 +692,7 @@ pub async fn refresh_data_source(
     })?;
     validate_scrape_url(&url)?;
 
-    let preview_token = evidence_capture.as_ref().map(|capture| capture.id.clone());
+    let preview_token = foreground_preview_token;
     let evidence_path = evidence_capture
         .as_ref()
         .filter(|_| body.retain_screenshot)
@@ -648,6 +832,8 @@ pub async fn refresh_data_source(
         collector: result.collector.to_string(),
         browser: result.browser.map(ToString::to_string),
         interaction_mode: result.interaction_mode.to_string(),
+        focus_policy,
+        focus_takeover_count: result.focus_takeover_count,
         collected_at,
         title: result.title,
         url: result.url,
@@ -812,6 +998,12 @@ fn scrape_with_browser(
 
     #[cfg(target_os = "macos")]
     {
+        // Apple Events 对同一浏览器的窗口、标签和滚动状态不是事务性的。
+        // 串行化浏览器取数，避免并发任务误关对方的专用窗口或交叉滚动。
+        let _browser_scrape_guard = BROWSER_SCRAPE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| internal_scrape_error())?;
         let (adapter, launched_browser) =
             resolve_browser_adapter(browser_candidates(browser_preference, source_app_name))?;
         let javascript = browser_extraction_javascript();
@@ -823,8 +1015,29 @@ fn scrape_with_browser(
         );
         let evidence_path_string = evidence_path.map(|path| path.to_string_lossy().into_owned());
         let (output, accessibility_text) = if let Some(preview_token) = preview_token {
+            // Chromium/Safari 创建窗口时可能会隐式置前。先记住用户当前前台
+            // App，再把整个打开、交互、截图过程收敛为一次连续焦点租约。
+            let mut foreground_lease = Some(begin_browser_foreground_lease(adapter)?);
             let session =
                 start_background_browser_window(adapter, url, preview_token, launched_browser)?;
+            if evidence_path.is_some() {
+                if let Err(error) = prepare_background_browser_window_for_capture(
+                    adapter,
+                    &session,
+                    &foreground_lease
+                        .as_ref()
+                        .expect("foreground lease exists before preparation")
+                        .previous_front_app,
+                ) {
+                    cleanup_background_browser_window(adapter, &session);
+                    drop(foreground_lease);
+                    return Err(error);
+                }
+            } else {
+                // 无截图模式只允许浏览器在创建专用隐藏窗口时发生一次系统级
+                // 切换，随后立即归还焦点；加载、交互和长页遍历全部在隐藏窗口完成。
+                drop(foreground_lease.take());
+            }
             let capture_result = (|| {
                 // 页面刚进入专用窗口后先生成一次运行中预览；最终 DOM 稳定后会原子覆盖。
                 if let Some(evidence_path) = evidence_path {
@@ -838,18 +1051,23 @@ fn scrape_with_browser(
                     &interaction_javascript,
                     &readiness_javascript,
                     &javascript,
+                    evidence_path.is_some(),
                 );
                 let mut output = run_browser_script(&script)?;
-                if output.status.success() {
-                    let payload: Value = serde_json::from_slice(&output.stdout)
-                        .map_err(|_| internal_scrape_error())?;
-                    let page_text = payload.get("text").and_then(Value::as_str).unwrap_or("");
-                    ensure_expected_period_visible(
-                        page_text,
-                        payload.get("structured_data"),
-                        expected_period_start.unwrap_or_default(),
-                        expected_period_end.unwrap_or_default(),
+                if output.status.success() && evidence_path.is_none() {
+                    let segment_payloads = collect_background_browser_structured_segments(
+                        adapter,
+                        &session,
+                        &javascript,
+                        &readiness_javascript,
                     )?;
+                    let primary_payload: Value = serde_json::from_slice(&output.stdout)
+                        .map_err(|_| internal_scrape_error())?;
+                    output.stdout = serde_json::to_vec(&merge_browser_payloads(
+                        primary_payload,
+                        &segment_payloads,
+                    ))
+                    .map_err(|_| internal_scrape_error())?;
                 }
                 let accessibility_text = if output.status.success() {
                     let payload: Value = serde_json::from_slice(&output.stdout).unwrap_or_default();
@@ -872,8 +1090,6 @@ fn scrape_with_browser(
                 };
                 if output.status.success() {
                     if let Some(evidence_path) = evidence_path {
-                        prepare_background_browser_window_for_capture(adapter, &session)?;
-                        thread::sleep(Duration::from_millis(500));
                         let segment_payloads = capture_background_browser_long_screenshot(
                             adapter,
                             &session,
@@ -889,11 +1105,20 @@ fn scrape_with_browser(
                             ))
                             .map_err(|_| internal_scrape_error())?;
                         }
+                        let payload: Value = serde_json::from_slice(&output.stdout)
+                            .map_err(|_| internal_scrape_error())?;
+                        ensure_expected_period_visible(
+                            payload.get("text").and_then(Value::as_str).unwrap_or(""),
+                            payload.get("structured_data"),
+                            expected_period_start.unwrap_or_default(),
+                            expected_period_end.unwrap_or_default(),
+                        )?;
                     }
                 }
                 Ok::<_, DataToolError>((output, accessibility_text))
             })();
             cleanup_background_browser_window(adapter, &session);
+            drop(foreground_lease);
             capture_result?
         } else {
             let script = match adapter.script_kind {
@@ -916,6 +1141,28 @@ fn scrape_with_browser(
         };
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+            if stderr.contains("focus_policy_blocked") {
+                tracing::warn!(
+                    stage = if preview_token.is_some() {
+                        "foreground_browser_extract"
+                    } else {
+                        "silent_browser_extract"
+                    },
+                    browser = adapter.id,
+                    error = %stderr.trim(),
+                    "浏览器取数被焦点硬门禁中止"
+                );
+                let message = if preview_token.is_some() {
+                    "用户已在即时取数期间切换到其他应用，本次任务已中止且不会抢回焦点"
+                } else {
+                    "静默取数没有可用的已打开页面；调用方可在焦点硬门禁下允许一次专用浏览器刷新，且无需保留截图"
+                };
+                return Err(DataToolError::new(
+                    StatusCode::PRECONDITION_FAILED,
+                    "FOCUS_POLICY_BLOCKED",
+                    message,
+                ));
+            }
             if browser_scripting_is_disabled(&stderr) {
                 return Err(DataToolError::new(
                     StatusCode::PRECONDITION_FAILED,
@@ -962,10 +1209,20 @@ fn scrape_with_browser(
                     .to_string();
                 screenshot
             });
+        let aggregated_dom = payload
+            .get("structured_data")
+            .and_then(Value::as_object)
+            .and_then(|structured| structured.get("scroll_capture"))
+            .and_then(Value::as_object)
+            .and_then(|scroll_capture| scroll_capture.get("aggregated"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let ax_content_text = accessibility_text
             .as_deref()
             .map(|value| clip_text(value, MAX_SCRAPED_CHARS))
-            .filter(|value| accessibility_text_covers_dom(value, dom_content_text));
+            .filter(|value| {
+                !aggregated_dom && accessibility_text_covers_dom(value, dom_content_text)
+            });
         let content_text = ax_content_text.as_deref().unwrap_or(dom_content_text);
         let mut structured_data = payload
             .get("structured_data")
@@ -1005,10 +1262,11 @@ fn scrape_with_browser(
             collector: "browser_attach",
             browser: Some(adapter.id),
             interaction_mode: if preview_token.is_some() {
-                "background_browser_window"
+                "temporary_foreground_window"
             } else {
                 "background_tab"
             },
+            focus_takeover_count: usize::from(preview_token.is_some()),
             title: clip_text(title, 240),
             url: redact_url_credentials(final_url).unwrap_or_else(|| url.to_string()),
             content_text: clip_text(content_text, MAX_SCRAPED_CHARS),
@@ -1236,9 +1494,9 @@ fn start_background_browser_window(
     preview_token: &str,
     launched_browser: bool,
 ) -> Result<BrowserWindowSession, DataToolError> {
-    let preview_token = Uuid::parse_str(preview_token)
-        .map_err(|_| internal_scrape_error())?
-        .to_string();
+    let preview_uuid = Uuid::parse_str(preview_token).map_err(|_| internal_scrape_error())?;
+    let preview_token = preview_uuid.to_string();
+    let (capture_x, capture_y) = background_browser_window_origin(&preview_uuid);
     let output = match run_browser_script(&build_background_browser_start_script(
         adapter,
         url,
@@ -1271,7 +1529,19 @@ fn start_background_browser_window(
         apple_script_id,
         preview_token,
         launched_browser,
+        capture_x,
+        capture_y,
     })
+}
+
+fn background_browser_window_origin(preview_id: &Uuid) -> (i32, i32) {
+    let bytes = preview_id.as_bytes();
+    // 在屏幕可见区内为每个取证会话分配稳定的小幅偏移，
+    // 使 xcap 可以在上次异常中断留下孤儿窗口时仍唯一定位当前窗口。
+    (
+        40 + i32::from(bytes[0] % 16) * 12,
+        40 + i32::from(bytes[1] % 16) * 10,
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -1313,41 +1583,7 @@ fn capture_background_browser_image(
     session: &BrowserWindowSession,
     require_rendered_content: bool,
 ) -> Result<image::RgbaImage, DataToolError> {
-    let previous_front_app = require_rendered_content
-        .then(|| {
-            run_browser_script(&format!(
-                r#"
-                tell application "System Events"
-                    set previous_front_app to name of first application process whose frontmost is true
-                    set frontmost of first application process whose name is "{process_name}" to true
-                    delay 0.25
-                    return previous_front_app
-                end tell
-                "#,
-                process_name = adapter.process_name,
-            ))
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-            .filter(|value| !value.is_empty())
-        })
-        .flatten();
-
-    let result =
-        capture_background_browser_image_while_visible(adapter, session, require_rendered_content);
-    if let Some(previous_front_app) = previous_front_app {
-        let _ = run_browser_script(&format!(
-            r#"
-            tell application "System Events"
-                try
-                    set frontmost of first application process whose name is "{previous_front_app}" to true
-                end try
-            end tell
-            "#,
-            previous_front_app = escape_applescript_string(&previous_front_app),
-        ));
-    }
-    result
+    capture_background_browser_image_while_visible(adapter, session, require_rendered_content)
 }
 
 #[cfg(target_os = "macos")]
@@ -1391,8 +1627,8 @@ fn capture_background_browser_image_while_visible(
                 .zip(window.width().ok())
                 .zip(window.height().ok())
                 .map(|(((x, y), width), height)| {
-                    (x - 80).abs() <= 4
-                        && (y - 80).abs() <= 40
+                    (x - session.capture_x).abs() <= 4
+                        && (y - session.capture_y).abs() <= 8
                         && width.abs_diff(1200) <= 8
                         && height.abs_diff(740) <= 40
                 })
@@ -1507,6 +1743,10 @@ struct BrowserScrollState {
     scroll_left: u32,
     #[serde(default)]
     scroll_top: u32,
+}
+
+fn browser_scroll_geometry_javascript() -> &'static str {
+    "(function(){var visible=function(node){var style=window.getComputedStyle(node);var rect=node.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&rect.width>200&&rect.height>120;};var candidates=Array.prototype.slice.call(document.querySelectorAll('body *'),0,8000).filter(function(node){if(!visible(node))return false;var style=window.getComputedStyle(node);return ((node.scrollHeight>node.clientHeight+40)&&/(auto|scroll)/.test(style.overflowY))||((node.scrollWidth>node.clientWidth+40)&&/(auto|scroll)/.test(style.overflowX));});candidates.sort(function(a,b){var ar=a.getBoundingClientRect(),br=b.getBoundingClientRect();var as=(a.scrollHeight-a.clientHeight+a.scrollWidth-a.clientWidth)*ar.width*ar.height;var bs=(b.scrollHeight-b.clientHeight+b.scrollWidth-b.clientWidth)*br.width*br.height;return bs-as;});var root=candidates[0]||null;Array.prototype.slice.call(document.querySelectorAll('[data-memorybread-scroll-root]')).forEach(function(node){node.removeAttribute('data-memorybread-scroll-root');});if(root){root.setAttribute('data-memorybread-scroll-root','true');var rect=root.getBoundingClientRect();return JSON.stringify({scrollMode:'element',outerWidth:Math.max(1,window.outerWidth||0),outerHeight:Math.max(1,window.outerHeight||0),innerWidth:Math.max(1,root.clientWidth||0),innerHeight:Math.max(1,root.clientHeight||0),viewportHeight:Math.max(1,window.innerHeight||0),scrollWidth:Math.max(root.scrollWidth||0,root.clientWidth||0),scrollHeight:Math.max(root.scrollHeight||0,root.clientHeight||0),targetX:rect.left,targetY:rect.top,targetWidth:rect.width,targetHeight:rect.height});}return JSON.stringify({scrollMode:'window',outerWidth:Math.max(1,window.outerWidth||0),outerHeight:Math.max(1,window.outerHeight||0),innerWidth:Math.max(1,window.innerWidth||0),innerHeight:Math.max(1,window.innerHeight||0),viewportHeight:Math.max(1,window.innerHeight||0),scrollWidth:Math.max(document.documentElement?document.documentElement.scrollWidth:0,document.body?document.body.scrollWidth:0,window.innerWidth||0),scrollHeight:Math.max(document.documentElement?document.documentElement.scrollHeight:0,document.body?document.body.scrollHeight:0,window.innerHeight||0),targetX:0,targetY:0,targetWidth:window.innerWidth||0,targetHeight:window.innerHeight||0});})()"
 }
 
 fn browser_scroll_positions(geometry: &BrowserPageGeometry) -> Vec<u32> {
@@ -1737,6 +1977,7 @@ fn wait_for_background_browser_segment(
     adapter: BrowserAdapter,
     session: &BrowserWindowSession,
     readiness_javascript: &str,
+    require_foreground: bool,
 ) -> Result<(), DataToolError> {
     // 虚拟化报表通常在 scroll 事件后的下一批动画帧才挂载新图表。
     // 先留出一小段绘制时间，避免正文总长度未变时立即误判“稳定”。
@@ -1744,15 +1985,24 @@ fn wait_for_background_browser_segment(
     let mut last_length = 0_i64;
     let mut stable_reads = 0_usize;
     for _ in 0..BROWSER_SCROLL_READY_POLL_ATTEMPTS {
-        let output = run_browser_script(&build_background_browser_evaluate_script(
-            adapter,
-            &session.apple_script_id,
-            readiness_javascript,
-        ))?;
+        let script = if require_foreground {
+            build_background_browser_evaluate_script(
+                adapter,
+                &session.apple_script_id,
+                readiness_javascript,
+            )
+        } else {
+            build_background_browser_silent_evaluate_script(
+                adapter,
+                &session.apple_script_id,
+                readiness_javascript,
+            )
+        };
+        let output = run_browser_script(&script)?;
         if !output.status.success() {
-            return Err(DataToolError::new(
-                StatusCode::BAD_GATEWAY,
-                "SCREENSHOT_FAILED",
+            return Err(background_browser_script_error(
+                &output,
+                "SCRAPE_FAILED",
                 "网页滚动后的动态数据状态无法读取",
             ));
         }
@@ -1781,43 +2031,148 @@ fn wait_for_background_browser_segment(
 }
 
 #[cfg(target_os = "macos")]
-fn activate_background_browser_segment_for_render(
+fn background_browser_script_error(
+    output: &Output,
+    fallback_code: &'static str,
+    fallback_message: &'static str,
+) -> DataToolError {
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    if stderr.contains("focus_policy_blocked") {
+        return DataToolError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "FOCUS_POLICY_BLOCKED",
+            "用户已在即时取数期间切换到其他应用，本次任务已中止且不会抢回焦点",
+        );
+    }
+    DataToolError::new(StatusCode::BAD_GATEWAY, fallback_code, fallback_message)
+}
+
+#[cfg(target_os = "macos")]
+fn collect_background_browser_structured_segments(
     adapter: BrowserAdapter,
     session: &BrowserWindowSession,
-) -> Result<(), DataToolError> {
-    // Chromium 会降低完全遮挡窗口的合成与虚拟列表更新频率。滚动后只短暂
-    // 激活专用预览窗口，让当前视口触发真实的异步查询和绘制，再恢复用户
-    // 原先所在应用。这里不依赖页面名称、指标名称或 DOM 业务类名。
-    let output = run_browser_script(&format!(
-        r#"
-        tell application "System Events"
-            set previous_front_app to name of first application process whose frontmost is true
-        end tell
-        tell application "{app_name}"
-            set index of first window whose id is {window_id} to 1
-        end tell
-        tell application "System Events"
-            set frontmost of first application process whose name is "{process_name}" to true
-        end tell
-        delay 0.8
-        tell application "System Events"
-            try
-                set frontmost of first application process whose name is previous_front_app to true
-            end try
-        end tell
-        "#,
-        app_name = adapter.app_name,
-        process_name = adapter.process_name,
-        window_id = applescript_window_id_literal(&session.apple_script_id),
+    extraction_javascript: &str,
+    readiness_javascript: &str,
+) -> Result<Vec<Value>, DataToolError> {
+    let geometry_output = run_browser_script(&build_background_browser_silent_evaluate_script(
+        adapter,
+        &session.apple_script_id,
+        browser_scroll_geometry_javascript(),
     ))?;
-    if output.status.success() {
-        return Ok(());
+    if !geometry_output.status.success() {
+        return Err(background_browser_script_error(
+            &geometry_output,
+            "SCRAPE_FAILED",
+            "无法读取网页结构化滚动范围",
+        ));
     }
-    Err(DataToolError::new(
-        StatusCode::BAD_GATEWAY,
-        "SCREENSHOT_FAILED",
-        "网页滚动后无法触发当前视口绘制",
-    ))
+    let geometry: BrowserPageGeometry =
+        serde_json::from_slice(&geometry_output.stdout).map_err(|_| internal_scrape_error())?;
+    let mut payloads = Vec::new();
+    if geometry.scroll_mode == "element" {
+        let x_positions = browser_axis_positions(geometry.scroll_width, geometry.inner_width, 4);
+        let y_limit = (20 / x_positions.len().max(1)).max(1);
+        let y_positions =
+            browser_axis_positions(geometry.scroll_height, geometry.inner_height, y_limit);
+        for y_position in &y_positions {
+            for x_position in &x_positions {
+                let scroll_script = format!(
+                    "(function(){{var root=document.querySelector('[data-memorybread-scroll-root]');if(!root)return JSON.stringify({{ok:false}});root.scrollTo({{left:{x_position},top:{y_position},behavior:'auto'}});root.dispatchEvent(new Event('scroll',{{bubbles:true}}));window.dispatchEvent(new Event('scroll'));void root.offsetHeight;return JSON.stringify({{ok:true,scrollLeft:Math.round(root.scrollLeft||0),scrollTop:Math.round(root.scrollTop||0)}});}})()"
+                );
+                let scroll_output =
+                    run_browser_script(&build_background_browser_silent_evaluate_script(
+                        adapter,
+                        &session.apple_script_id,
+                        &scroll_script,
+                    ))?;
+                if !scroll_output.status.success() {
+                    return Err(background_browser_script_error(
+                        &scroll_output,
+                        "SCRAPE_FAILED",
+                        "看板内部区域滚动失败",
+                    ));
+                }
+                let scroll_state: BrowserScrollState =
+                    serde_json::from_slice(&scroll_output.stdout)
+                        .map_err(|_| internal_scrape_error())?;
+                if !scroll_state.ok
+                    || !browser_scroll_reached(scroll_state.scroll_left, *x_position)
+                    || !browser_scroll_reached(scroll_state.scroll_top, *y_position)
+                {
+                    return Err(DataToolError::new(
+                        StatusCode::BAD_GATEWAY,
+                        "SCRAPE_SCROLL_STALLED",
+                        "看板内部区域没有滚动到预期位置",
+                    ));
+                }
+                wait_for_background_browser_segment(adapter, session, readiness_javascript, false)?;
+                let payload_output =
+                    run_browser_script(&build_background_browser_silent_evaluate_script(
+                        adapter,
+                        &session.apple_script_id,
+                        extraction_javascript,
+                    ))?;
+                if !payload_output.status.success() {
+                    return Err(background_browser_script_error(
+                        &payload_output,
+                        "SCRAPE_FAILED",
+                        "看板滚动后的结构化数据无法读取",
+                    ));
+                }
+                let mut value: Value = serde_json::from_slice(&payload_output.stdout)
+                    .map_err(|_| internal_scrape_error())?;
+                merge_accessibility_segment_into_payload(adapter, session, &mut value);
+                payloads.push(value);
+            }
+        }
+        let _ = run_browser_script(&build_background_browser_silent_evaluate_script(
+            adapter,
+            &session.apple_script_id,
+            "(function(){var root=document.querySelector('[data-memorybread-scroll-root]');if(root){root.scrollTo({left:0,top:0,behavior:'auto'});root.dispatchEvent(new Event('scroll',{bubbles:true}));}return JSON.stringify({ok:true});})()",
+        ));
+        return Ok(payloads);
+    }
+
+    for position in browser_scroll_positions(&geometry) {
+        let scroll_script = format!(
+            "window.scrollTo(0,{position});JSON.stringify({{scrollY:Math.round(window.scrollY||0)}})"
+        );
+        let scroll_output = run_browser_script(&build_background_browser_silent_evaluate_script(
+            adapter,
+            &session.apple_script_id,
+            &scroll_script,
+        ))?;
+        if !scroll_output.status.success() {
+            return Err(background_browser_script_error(
+                &scroll_output,
+                "SCRAPE_FAILED",
+                "网页分段滚动失败",
+            ));
+        }
+        wait_for_background_browser_segment(adapter, session, readiness_javascript, false)?;
+        let payload_output = run_browser_script(&build_background_browser_silent_evaluate_script(
+            adapter,
+            &session.apple_script_id,
+            extraction_javascript,
+        ))?;
+        if !payload_output.status.success() {
+            return Err(background_browser_script_error(
+                &payload_output,
+                "SCRAPE_FAILED",
+                "网页滚动后的结构化数据无法读取",
+            ));
+        }
+        let mut value: Value =
+            serde_json::from_slice(&payload_output.stdout).map_err(|_| internal_scrape_error())?;
+        merge_accessibility_segment_into_payload(adapter, session, &mut value);
+        payloads.push(value);
+    }
+    let _ = run_browser_script(&build_background_browser_silent_evaluate_script(
+        adapter,
+        &session.apple_script_id,
+        "window.scrollTo(0,0);JSON.stringify({scrollY:0})",
+    ));
+    Ok(payloads)
 }
 
 #[cfg(target_os = "macos")]
@@ -1833,7 +2188,7 @@ fn capture_background_browser_long_screenshot(
     let geometry_output = run_browser_script(&build_background_browser_evaluate_script(
         adapter,
         &session.apple_script_id,
-        "(function(){var visible=function(node){var style=window.getComputedStyle(node);var rect=node.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&rect.width>200&&rect.height>120;};var candidates=Array.prototype.slice.call(document.querySelectorAll('body *'),0,8000).filter(function(node){if(!visible(node))return false;var style=window.getComputedStyle(node);return ((node.scrollHeight>node.clientHeight+40)&&/(auto|scroll)/.test(style.overflowY))||((node.scrollWidth>node.clientWidth+40)&&/(auto|scroll)/.test(style.overflowX));});candidates.sort(function(a,b){var ar=a.getBoundingClientRect(),br=b.getBoundingClientRect();var as=(a.scrollHeight-a.clientHeight+ a.scrollWidth-a.clientWidth)*ar.width*ar.height;var bs=(b.scrollHeight-b.clientHeight+ b.scrollWidth-b.clientWidth)*br.width*br.height;return bs-as;});var root=candidates[0]||null;Array.prototype.slice.call(document.querySelectorAll('[data-memorybread-scroll-root]')).forEach(function(node){node.removeAttribute('data-memorybread-scroll-root');});if(root){root.setAttribute('data-memorybread-scroll-root','true');var rect=root.getBoundingClientRect();return JSON.stringify({scrollMode:'element',outerWidth:Math.max(1,window.outerWidth||0),outerHeight:Math.max(1,window.outerHeight||0),innerWidth:Math.max(1,root.clientWidth||0),innerHeight:Math.max(1,root.clientHeight||0),viewportHeight:Math.max(1,window.innerHeight||0),scrollWidth:Math.max(root.scrollWidth||0,root.clientWidth||0),scrollHeight:Math.max(root.scrollHeight||0,root.clientHeight||0),targetX:rect.left,targetY:rect.top,targetWidth:rect.width,targetHeight:rect.height});}return JSON.stringify({scrollMode:'window',outerWidth:Math.max(1,window.outerWidth||0),outerHeight:Math.max(1,window.outerHeight||0),innerWidth:Math.max(1,window.innerWidth||0),innerHeight:Math.max(1,window.innerHeight||0),viewportHeight:Math.max(1,window.innerHeight||0),scrollWidth:Math.max(document.documentElement?document.documentElement.scrollWidth:0,document.body?document.body.scrollWidth:0,window.innerWidth||0),scrollHeight:Math.max(document.documentElement?document.documentElement.scrollHeight:0,document.body?document.body.scrollHeight:0,window.innerHeight||0),targetX:0,targetY:0,targetWidth:window.innerWidth||0,targetHeight:window.innerHeight||0});})()",
+        browser_scroll_geometry_javascript(),
     ))?;
     if !geometry_output.status.success() {
         return Err(DataToolError::new(
@@ -1860,7 +2215,6 @@ fn capture_background_browser_long_screenshot(
     let mut screenshot_complete = true;
     let mut previous_view: Option<RgbaImage> = None;
     for position in &positions {
-        activate_background_browser_segment_for_render(adapter, session)?;
         let scroll_script = format!(
             "window.scrollTo(0,{position});JSON.stringify({{scrollY:Math.round(window.scrollY||0)}})"
         );
@@ -1876,7 +2230,7 @@ fn capture_background_browser_long_screenshot(
                 "网页分段滚动失败",
             ));
         }
-        wait_for_background_browser_segment(adapter, session, readiness_javascript)?;
+        wait_for_background_browser_segment(adapter, session, readiness_javascript, true)?;
         let payload = run_browser_script(&build_background_browser_evaluate_script(
             adapter,
             &session.apple_script_id,
@@ -1891,9 +2245,7 @@ fn capture_background_browser_long_screenshot(
         if screenshot_complete {
             let mut captured_view = None;
             for _capture_attempt in 0..3 {
-                if force_background_browser_window_repaint(adapter, session).is_err() {
-                    continue;
-                }
+                refresh_background_browser_window_within_lease(adapter, session)?;
                 let Ok(image) = capture_background_browser_image(adapter, session, true) else {
                     continue;
                 };
@@ -1995,7 +2347,6 @@ fn capture_scrollable_element_screenshot(
     for (row_index, y_position) in y_positions.iter().enumerate() {
         let mut row = Vec::new();
         for (column_index, x_position) in x_positions.iter().enumerate() {
-            activate_background_browser_segment_for_render(adapter, session)?;
             let scroll_script = format!(
                 "(function(){{var root=document.querySelector('[data-memorybread-scroll-root]');if(!root)return JSON.stringify({{ok:false}});root.scrollTo({{left:{x_position},top:{y_position},behavior:'auto'}});root.dispatchEvent(new Event('scroll',{{bubbles:true}}));window.dispatchEvent(new Event('scroll'));void root.offsetHeight;return JSON.stringify({{ok:true,scrollLeft:Math.round(root.scrollLeft||0),scrollTop:Math.round(root.scrollTop||0)}});}})()"
             );
@@ -2023,7 +2374,7 @@ fn capture_scrollable_element_screenshot(
                     "看板内部区域没有滚动到预期位置",
                 ));
             }
-            wait_for_background_browser_segment(adapter, session, readiness_javascript)?;
+            wait_for_background_browser_segment(adapter, session, readiness_javascript, true)?;
             let payload = run_browser_script(&build_background_browser_evaluate_script(
                 adapter,
                 &session.apple_script_id,
@@ -2040,9 +2391,7 @@ fn capture_scrollable_element_screenshot(
             }
             let mut captured_view = None;
             for _capture_attempt in 0..3 {
-                if force_background_browser_window_repaint(adapter, session).is_err() {
-                    continue;
-                }
+                refresh_background_browser_window_within_lease(adapter, session)?;
                 let Ok(image) = capture_background_browser_image(adapter, session, true) else {
                     continue;
                 };
@@ -2156,42 +2505,90 @@ fn capture_scrollable_element_screenshot(
 }
 
 #[cfg(target_os = "macos")]
-fn prepare_background_browser_window_for_capture(
+fn begin_browser_foreground_lease(
     adapter: BrowserAdapter,
-    session: &BrowserWindowSession,
-) -> Result<(), DataToolError> {
-    let output = run_browser_script(&build_background_browser_prepare_capture_script(
-        adapter,
-        &session.apple_script_id,
-    ))?;
-    if output.status.success() {
-        return Ok(());
+) -> Result<BrowserForegroundLease, DataToolError> {
+    let output = run_browser_script(&build_current_front_app_script())?;
+    if !output.status.success() {
+        return Err(internal_scrape_error());
     }
-    Err(DataToolError::new(
-        StatusCode::BAD_GATEWAY,
-        "SCREENSHOT_FAILED",
-        "后台页面已读取，但无法准备截图窗口",
-    ))
+    let previous_front_app = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if previous_front_app.is_empty() {
+        return Err(internal_scrape_error());
+    }
+    Ok(BrowserForegroundLease {
+        adapter,
+        previous_front_app,
+    })
 }
 
 #[cfg(target_os = "macos")]
-fn force_background_browser_window_repaint(
+fn prepare_background_browser_window_for_capture(
     adapter: BrowserAdapter,
     session: &BrowserWindowSession,
+    previous_front_app: &str,
 ) -> Result<(), DataToolError> {
     let output = run_browser_script(&build_background_browser_prepare_capture_script(
         adapter,
         &session.apple_script_id,
+        previous_front_app,
     ))?;
-    if output.status.success() {
-        thread::sleep(Duration::from_millis(500));
-        return Ok(());
+    if !output.status.success() {
+        tracing::warn!(
+            browser = adapter.id,
+            error = %String::from_utf8_lossy(&output.stderr).trim(),
+            "一次性前台取数窗口准备失败"
+        );
+        return Err(DataToolError::new(
+            StatusCode::BAD_GATEWAY,
+            "SCRAPE_FAILED",
+            "后台页面已读取，但无法准备一次性前台取数会话",
+        ));
     }
-    Err(DataToolError::new(
-        StatusCode::BAD_GATEWAY,
-        "SCREENSHOT_FAILED",
-        "后台页面滚动后无法刷新截图画面",
-    ))
+    let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if state == "FOCUS_POLICY_BLOCKED" {
+        return Err(DataToolError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "FOCUS_POLICY_BLOCKED",
+            "用户已切换到其他应用，本次即时取数已中止且不会抢回焦点",
+        ));
+    }
+    if state != "OK" {
+        return Err(internal_scrape_error());
+    }
+    thread::sleep(Duration::from_millis(500));
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn refresh_background_browser_window_within_lease(
+    adapter: BrowserAdapter,
+    session: &BrowserWindowSession,
+) -> Result<(), DataToolError> {
+    let output = run_browser_script(&build_background_browser_refresh_script(
+        adapter,
+        &session.apple_script_id,
+    ))?;
+    if !output.status.success() {
+        return Err(DataToolError::new(
+            StatusCode::BAD_GATEWAY,
+            "SCREENSHOT_FAILED",
+            "网页分段截图无法刷新当前画面",
+        ));
+    }
+    let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if state == "FOCUS_POLICY_BLOCKED" {
+        return Err(DataToolError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "FOCUS_POLICY_BLOCKED",
+            "用户已在截图期间切换到其他应用，本次取证已中止且不会抢回焦点",
+        ));
+    }
+    if state != "OK" {
+        return Err(internal_scrape_error());
+    }
+    thread::sleep(Duration::from_millis(500));
+    Ok(())
 }
 
 fn browser_screenshot_has_rendered_content(image: &image::RgbaImage) -> bool {
@@ -2325,7 +2722,7 @@ fn browser_readiness_javascript() -> String {
 fn build_chromium_scrape_script(
     adapter: BrowserAdapter,
     url: &str,
-    interaction_javascript: &str,
+    _interaction_javascript: &str,
     readiness_javascript: &str,
     javascript: &str,
 ) -> String {
@@ -2333,59 +2730,42 @@ fn build_chromium_scrape_script(
         r#"
         tell application "{app_name}"
             if (count of windows) is 0 then error "BROWSER_ATTACH_UNAVAILABLE"
-            set target_window to last window
-            set original_active_index to active tab index of target_window
             set report_tab to missing value
-            try
-                set report_tab to make new tab at end of tabs of target_window with properties {{URL:"about:blank"}}
-                set active tab index of target_window to original_active_index
-                set URL of report_tab to "{url}"
-                repeat 80 times
-                    if loading of report_tab is false then exit repeat
-                    delay 0.25
-                end repeat
-                set interaction_ready to 0
-                repeat {interaction_poll_attempts} times
-                    set interaction_ready to execute report_tab javascript "{interaction_javascript}"
-                    if interaction_ready is greater than or equal to 1 then exit repeat
-                    delay 0.25
-                end repeat
-                delay 1
-                set last_text_length to 0
-                set stable_read_count to 0
-                repeat {readiness_poll_attempts} times
-                    set current_text_length to execute report_tab javascript "{readiness_javascript}"
-                    if current_text_length is greater than or equal to 500 then
-                        if current_text_length is last_text_length then
-                            set stable_read_count to stable_read_count + 1
-                        else
-                            set stable_read_count to 0
-                        end if
-                        if stable_read_count is greater than or equal to 3 then exit repeat
+            repeat with candidate_window in windows
+                repeat with candidate_tab in tabs of candidate_window
+                    if (URL of candidate_tab) is "{url}" then
+                        set report_tab to candidate_tab
+                        exit repeat
                     end if
-                    set last_text_length to current_text_length
-                    delay 0.5
                 end repeat
-                set payload to execute report_tab javascript "{javascript}"
-                try
-                    if active tab of target_window is not report_tab then close report_tab
-                end try
-                return payload
-            on error error_message
-                try
-                    if report_tab is not missing value then
-                        if active tab of target_window is not report_tab then close report_tab
+                if report_tab is not missing value then exit repeat
+            end repeat
+            if report_tab is missing value then error "FOCUS_POLICY_BLOCKED: silent collection requires an already-open matching tab"
+            repeat 80 times
+                if loading of report_tab is false then exit repeat
+                delay 0.25
+            end repeat
+            set last_text_length to 0
+            set stable_read_count to 0
+            repeat {readiness_poll_attempts} times
+                set current_text_length to execute report_tab javascript "{readiness_javascript}"
+                if current_text_length is greater than or equal to 500 then
+                    if current_text_length is last_text_length then
+                        set stable_read_count to stable_read_count + 1
+                    else
+                        set stable_read_count to 0
                     end if
-                end try
-                error error_message
-            end try
+                    if stable_read_count is greater than or equal to 3 then exit repeat
+                end if
+                set last_text_length to current_text_length
+                delay 0.5
+            end repeat
+            return execute report_tab javascript "{javascript}"
         end tell
         "#,
         app_name = adapter.app_name,
         url = escape_applescript_string(url),
-        interaction_javascript = escape_applescript_string(interaction_javascript),
         readiness_javascript = escape_applescript_string(readiness_javascript),
-        interaction_poll_attempts = BROWSER_INTERACTION_READY_POLL_ATTEMPTS,
         readiness_poll_attempts = BROWSER_DATA_READY_POLL_ATTEMPTS,
         javascript = escape_applescript_string(javascript),
     )
@@ -2394,7 +2774,7 @@ fn build_chromium_scrape_script(
 fn build_safari_scrape_script(
     adapter: BrowserAdapter,
     url: &str,
-    interaction_javascript: &str,
+    _interaction_javascript: &str,
     readiness_javascript: &str,
     javascript: &str,
 ) -> String {
@@ -2402,61 +2782,44 @@ fn build_safari_scrape_script(
         r#"
         tell application "{app_name}"
             if (count of windows) is 0 then error "BROWSER_ATTACH_UNAVAILABLE"
-            set target_window to last window
-            set original_tab to current tab of target_window
             set report_tab to missing value
-            try
-                set report_tab to make new tab at end of tabs of target_window with properties {{URL:"about:blank"}}
-                set current tab of target_window to original_tab
-                set URL of report_tab to "{url}"
-                repeat 80 times
-                    try
-                        if (do JavaScript "document.readyState" in report_tab) is "complete" then exit repeat
-                    end try
-                    delay 0.25
-                end repeat
-                set interaction_ready to 0
-                repeat {interaction_poll_attempts} times
-                    set interaction_ready to do JavaScript "{interaction_javascript}" in report_tab
-                    if interaction_ready is greater than or equal to 1 then exit repeat
-                    delay 0.25
-                end repeat
-                delay 1
-                set last_text_length to 0
-                set stable_read_count to 0
-                repeat {readiness_poll_attempts} times
-                    set current_text_length to do JavaScript "{readiness_javascript}" in report_tab
-                    if current_text_length is greater than or equal to 500 then
-                        if current_text_length is last_text_length then
-                            set stable_read_count to stable_read_count + 1
-                        else
-                            set stable_read_count to 0
-                        end if
-                        if stable_read_count is greater than or equal to 3 then exit repeat
+            repeat with candidate_window in windows
+                repeat with candidate_tab in tabs of candidate_window
+                    if (URL of candidate_tab) is "{url}" then
+                        set report_tab to candidate_tab
+                        exit repeat
                     end if
-                    set last_text_length to current_text_length
-                    delay 0.5
                 end repeat
-                set payload to do JavaScript "{javascript}" in report_tab
+                if report_tab is not missing value then exit repeat
+            end repeat
+            if report_tab is missing value then error "FOCUS_POLICY_BLOCKED: silent collection requires an already-open matching tab"
+            repeat 80 times
                 try
-                    if current tab of target_window is not report_tab then close report_tab
+                    if (do JavaScript "document.readyState" in report_tab) is "complete" then exit repeat
                 end try
-                return payload
-            on error error_message
-                try
-                    if report_tab is not missing value then
-                        if current tab of target_window is not report_tab then close report_tab
+                delay 0.25
+            end repeat
+            set last_text_length to 0
+            set stable_read_count to 0
+            repeat {readiness_poll_attempts} times
+                set current_text_length to do JavaScript "{readiness_javascript}" in report_tab
+                if current_text_length is greater than or equal to 500 then
+                    if current_text_length is last_text_length then
+                        set stable_read_count to stable_read_count + 1
+                    else
+                        set stable_read_count to 0
                     end if
-                end try
-                error error_message
-            end try
+                    if stable_read_count is greater than or equal to 3 then exit repeat
+                end if
+                set last_text_length to current_text_length
+                delay 0.5
+            end repeat
+            return do JavaScript "{javascript}" in report_tab
         end tell
         "#,
         app_name = adapter.app_name,
         url = escape_applescript_string(url),
-        interaction_javascript = escape_applescript_string(interaction_javascript),
         readiness_javascript = escape_applescript_string(readiness_javascript),
-        interaction_poll_attempts = BROWSER_INTERACTION_READY_POLL_ATTEMPTS,
         readiness_poll_attempts = BROWSER_DATA_READY_POLL_ATTEMPTS,
         javascript = escape_applescript_string(javascript),
     )
@@ -2468,28 +2831,49 @@ fn build_background_browser_extract_script(
     interaction_javascript: &str,
     readiness_javascript: &str,
     javascript: &str,
+    require_foreground: bool,
 ) -> String {
     let window_id = applescript_window_id_literal(apple_script_id);
+    let focus_guard = if require_foreground {
+        format!(
+            "if not my memoryBreadBrowserLeaseIsActive(\"{}\") then error \"FOCUS_POLICY_BLOCKED: user left the browser foreground lease\"",
+            adapter.process_name
+        )
+    } else {
+        String::new()
+    };
     match adapter.script_kind {
         BrowserScriptKind::Chromium => format!(
             r#"
+            on memoryBreadBrowserLeaseIsActive(process_name)
+                set expected_process_name to process_name as text
+                tell application "System Events"
+                    set current_front_app to name of first application process whose frontmost is true
+                end tell
+                return current_front_app is expected_process_name
+            end memoryBreadBrowserLeaseIsActive
+
             tell application "{app_name}"
                 set target_window to first window whose id is {window_id}
                 set report_tab to active tab of target_window
                 repeat 80 times
+                    {focus_guard}
                     if loading of report_tab is false then exit repeat
                     delay 0.25
                 end repeat
                 set interaction_ready to 0
                 repeat {interaction_poll_attempts} times
+                    {focus_guard}
                     set interaction_ready to execute report_tab javascript "{interaction_javascript}"
                     if interaction_ready is greater than or equal to 1 then exit repeat
                     delay 0.25
                 end repeat
+                {focus_guard}
                 delay 1
                 set last_text_length to 0
                 set stable_read_count to 0
                 repeat {readiness_poll_attempts} times
+                    {focus_guard}
                     set current_text_length to execute report_tab javascript "{readiness_javascript}"
                     if current_text_length is greater than or equal to 500 then
                         if current_text_length is last_text_length then
@@ -2502,10 +2886,12 @@ fn build_background_browser_extract_script(
                     set last_text_length to current_text_length
                     delay 0.5
                 end repeat
+                {focus_guard}
                 return execute report_tab javascript "{javascript}"
             end tell
             "#,
             app_name = adapter.app_name,
+            focus_guard = focus_guard,
             window_id = window_id,
             interaction_javascript = escape_applescript_string(interaction_javascript),
             interaction_poll_attempts = BROWSER_INTERACTION_READY_POLL_ATTEMPTS,
@@ -2515,10 +2901,19 @@ fn build_background_browser_extract_script(
         ),
         BrowserScriptKind::Safari => format!(
             r#"
+            on memoryBreadBrowserLeaseIsActive(process_name)
+                set expected_process_name to process_name as text
+                tell application "System Events"
+                    set current_front_app to name of first application process whose frontmost is true
+                end tell
+                return current_front_app is expected_process_name
+            end memoryBreadBrowserLeaseIsActive
+
             tell application "{app_name}"
                 set target_window to first window whose id is {window_id}
                 set report_tab to current tab of target_window
                 repeat 80 times
+                    {focus_guard}
                     try
                         if (do JavaScript "document.readyState" in report_tab) is "complete" then exit repeat
                     end try
@@ -2526,14 +2921,17 @@ fn build_background_browser_extract_script(
                 end repeat
                 set interaction_ready to 0
                 repeat {interaction_poll_attempts} times
+                    {focus_guard}
                     set interaction_ready to do JavaScript "{interaction_javascript}" in report_tab
                     if interaction_ready is greater than or equal to 1 then exit repeat
                     delay 0.25
                 end repeat
+                {focus_guard}
                 delay 1
                 set last_text_length to 0
                 set stable_read_count to 0
                 repeat {readiness_poll_attempts} times
+                    {focus_guard}
                     set current_text_length to do JavaScript "{readiness_javascript}" in report_tab
                     if current_text_length is greater than or equal to 500 then
                         if current_text_length is last_text_length then
@@ -2546,10 +2944,12 @@ fn build_background_browser_extract_script(
                     set last_text_length to current_text_length
                     delay 0.5
                 end repeat
+                {focus_guard}
                 return do JavaScript "{javascript}" in report_tab
             end tell
             "#,
             app_name = adapter.app_name,
+            focus_guard = focus_guard,
             window_id = window_id,
             interaction_javascript = escape_applescript_string(interaction_javascript),
             interaction_poll_attempts = BROWSER_INTERACTION_READY_POLL_ATTEMPTS,
@@ -2561,6 +2961,48 @@ fn build_background_browser_extract_script(
 }
 
 fn build_background_browser_evaluate_script(
+    adapter: BrowserAdapter,
+    apple_script_id: &str,
+    javascript: &str,
+) -> String {
+    let window_id = applescript_window_id_literal(apple_script_id);
+    match adapter.script_kind {
+        BrowserScriptKind::Chromium => format!(
+            r#"
+            tell application "System Events"
+                set current_front_app to name of first application process whose frontmost is true
+                if current_front_app is not "{process_name}" then error "FOCUS_POLICY_BLOCKED: user left the browser foreground lease"
+            end tell
+            tell application "{app_name}"
+                set target_window to first window whose id is {window_id}
+                return execute active tab of target_window javascript "{javascript}"
+            end tell
+            "#,
+            app_name = adapter.app_name,
+            process_name = adapter.process_name,
+            window_id = window_id,
+            javascript = escape_applescript_string(javascript),
+        ),
+        BrowserScriptKind::Safari => format!(
+            r#"
+            tell application "System Events"
+                set current_front_app to name of first application process whose frontmost is true
+                if current_front_app is not "{process_name}" then error "FOCUS_POLICY_BLOCKED: user left the browser foreground lease"
+            end tell
+            tell application "{app_name}"
+                set target_window to first window whose id is {window_id}
+                return do JavaScript "{javascript}" in current tab of target_window
+            end tell
+            "#,
+            app_name = adapter.app_name,
+            process_name = adapter.process_name,
+            window_id = window_id,
+            javascript = escape_applescript_string(javascript),
+        ),
+    }
+}
+
+fn build_background_browser_silent_evaluate_script(
     adapter: BrowserAdapter,
     apple_script_id: &str,
     javascript: &str,
@@ -2597,50 +3039,55 @@ fn build_background_browser_start_script(
     url: &str,
     preview_token: &str,
 ) -> String {
+    let (window_x, window_y) = Uuid::parse_str(preview_token)
+        .ok()
+        .map(|value| background_browser_window_origin(&value))
+        .unwrap_or((80, 80));
+    let window_right = window_x + 1200;
+    let window_bottom = window_y + 740;
     match adapter.script_kind {
         BrowserScriptKind::Chromium => format!(
             r#"
-            tell application "System Events"
-                set previous_front_app to name of first application process whose frontmost is true
-            end tell
             tell application "{app_name}"
-                set preview_window to make new window with properties {{visible:true, bounds:{{80, 80, 1280, 820}}}}
+                repeat with window_index from (count of windows) to 1 by -1
+                    try
+                        set candidate_window to window window_index
+                        if (given name of candidate_window) starts with "MemoryBread Preview " then close candidate_window
+                    end try
+                end repeat
+                set preview_window to make new window with properties {{visible:false, bounds:{{{window_x}, {window_y}, {window_right}, {window_bottom}}}}}
                 set given name of preview_window to "MemoryBread Preview {preview_token}"
                 set URL of active tab of preview_window to "{url}"
                 set preview_window_id to id of preview_window as text
-            end tell
-            tell application "System Events"
-                try
-                    set frontmost of first application process whose name is previous_front_app to true
-                end try
             end tell
             return preview_window_id
             "#,
             app_name = adapter.app_name,
             preview_token = escape_applescript_string(preview_token),
             url = escape_applescript_string(url),
+            window_x = window_x,
+            window_y = window_y,
+            window_right = window_right,
+            window_bottom = window_bottom,
         ),
         BrowserScriptKind::Safari => format!(
             r#"
-            tell application "System Events"
-                set previous_front_app to name of first application process whose frontmost is true
-            end tell
             tell application "{app_name}"
                 make new document with properties {{URL:"about:blank"}}
                 set preview_window to front window
-                set bounds of preview_window to {{80, 80, 1280, 820}}
+                set visible of preview_window to false
+                set bounds of preview_window to {{{window_x}, {window_y}, {window_right}, {window_bottom}}}
                 set URL of current tab of preview_window to "{url}"
                 set preview_window_id to id of preview_window as text
-            end tell
-            tell application "System Events"
-                try
-                    set frontmost of first application process whose name is previous_front_app to true
-                end try
             end tell
             return preview_window_id
             "#,
             app_name = adapter.app_name,
             url = escape_applescript_string(url),
+            window_x = window_x,
+            window_y = window_y,
+            window_right = window_right,
+            window_bottom = window_bottom,
         ),
     }
 }
@@ -2648,25 +3095,103 @@ fn build_background_browser_start_script(
 fn build_background_browser_prepare_capture_script(
     adapter: BrowserAdapter,
     apple_script_id: &str,
+    previous_front_app: &str,
+) -> String {
+    let window_id = applescript_window_id_literal(apple_script_id);
+    let cleanup_stale_windows = if adapter.script_kind == BrowserScriptKind::Chromium {
+        format!(
+            r#"
+            repeat with window_index from (count of windows) to 1 by -1
+                try
+                    set candidate_window to window window_index
+                    if ((id of candidate_window as text) is not "{window_id}") and ((given name of candidate_window) starts with "MemoryBread Preview ") then
+                        close candidate_window
+                    end if
+                end try
+            end repeat
+            "#,
+            window_id = window_id,
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"
+        tell application "System Events"
+            set current_front_app to name of first application process whose frontmost is true
+            if current_front_app is not "{process_name}" and current_front_app is not "{previous_front_app}" then return "FOCUS_POLICY_BLOCKED"
+            set frontmost of first application process whose name is "{process_name}" to true
+        end tell
+        tell application "{app_name}"
+            set target_window to first window whose id is {window_id}
+            {cleanup_stale_windows}
+            set visible of target_window to true
+            set index of target_window to 1
+        end tell
+        delay 0.35
+        return "OK"
+        "#,
+        app_name = adapter.app_name,
+        process_name = adapter.process_name,
+        previous_front_app = escape_applescript_string(previous_front_app),
+        window_id = window_id,
+        cleanup_stale_windows = cleanup_stale_windows,
+    )
+}
+
+fn build_current_front_app_script() -> String {
+    r#"
+    tell application "System Events"
+        return name of first application process whose frontmost is true
+    end tell
+    "#
+    .to_string()
+}
+
+fn build_background_browser_refresh_script(
+    adapter: BrowserAdapter,
+    apple_script_id: &str,
 ) -> String {
     let window_id = applescript_window_id_literal(apple_script_id);
     format!(
         r#"
         tell application "System Events"
-            set previous_front_app to name of first application process whose frontmost is true
+            set current_front_app to name of first application process whose frontmost is true
+            if current_front_app is not "{process_name}" then return "FOCUS_POLICY_BLOCKED"
+            -- 只在浏览器仍持有本次租约时重申同一前台状态，
+            -- 触发 Chromium 合成器更新；不会从其他 App 抢回焦点。
+            set frontmost of first application process whose name is "{process_name}" to true
         end tell
         tell application "{app_name}"
-            set index of first window whose id is {window_id} to 1
+            set target_window to first window whose id is {window_id}
+            set visible of target_window to true
+            set index of target_window to 1
         end tell
-        delay 0.35
+        return "OK"
+        "#,
+        app_name = adapter.app_name,
+        process_name = adapter.process_name,
+        window_id = window_id,
+    )
+}
+
+fn build_background_browser_restore_focus_script(
+    adapter: BrowserAdapter,
+    previous_front_app: &str,
+) -> String {
+    format!(
+        r#"
         tell application "System Events"
             try
-                set frontmost of first application process whose name is previous_front_app to true
+                set current_front_app to name of first application process whose frontmost is true
+                if current_front_app is "{process_name}" then
+                    set frontmost of first application process whose name is "{previous_front_app}" to true
+                end if
             end try
         end tell
         "#,
-        app_name = adapter.app_name,
-        window_id = window_id,
+        process_name = escape_applescript_string(adapter.process_name),
+        previous_front_app = escape_applescript_string(previous_front_app),
     )
 }
 
@@ -2683,6 +3208,10 @@ fn build_background_browser_cleanup_script(
     };
     format!(
         r#"
+        tell application "System Events"
+            set current_front_app to name of first application process whose frontmost is true
+            if current_front_app is not "{process_name}" then return "FOCUS_POLICY_BLOCKED"
+        end tell
         tell application "{app_name}"
             try
                 close first window whose id is {window_id}
@@ -2691,6 +3220,7 @@ fn build_background_browser_cleanup_script(
         end tell
         "#,
         app_name = adapter.app_name,
+        process_name = adapter.process_name,
         window_id = window_id,
         quit_if_empty = quit_if_empty,
     )
@@ -3030,6 +3560,7 @@ async fn scrape_http(url: &str) -> Result<ScrapeResult, DataToolError> {
         collector: "direct_http",
         browser: None,
         interaction_mode: "none",
+        focus_takeover_count: 0,
         title,
         url: redact_url_credentials(&final_url).unwrap_or_else(|| url.to_string()),
         content_text,
@@ -3341,8 +3872,30 @@ fn default_browser_preference() -> String {
     "auto".to_string()
 }
 
-fn default_true() -> bool {
-    true
+fn default_focus_policy() -> String {
+    "never".to_string()
+}
+
+fn validate_focus_policy(
+    requested_policy: &str,
+    use_foreground_browser: bool,
+) -> Result<String, DataToolError> {
+    let focus_policy = requested_policy.trim().to_lowercase();
+    if !matches!(focus_policy.as_str(), "never" | "allow_once") {
+        return Err(DataToolError::new(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "网页采集焦点策略无效",
+        ));
+    }
+    if use_foreground_browser && focus_policy != "allow_once" {
+        return Err(DataToolError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "FOCUS_POLICY_BLOCKED",
+            "专用浏览器刷新或截图需要明确允许一次前台会话；静默模式不会抢占焦点",
+        ));
+    }
+    Ok(focus_policy)
 }
 
 #[cfg(test)]
@@ -3419,7 +3972,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_scripts_keep_the_temporary_tab_in_the_background() {
+    fn silent_browser_scripts_only_attach_existing_matching_tabs() {
         let javascript = browser_extraction_javascript();
         let readiness_javascript = browser_readiness_javascript();
         let interaction_javascript = browser_interaction_javascript("", "", "");
@@ -3438,13 +3991,18 @@ mod tests {
             &javascript,
         );
 
-        assert!(chromium.contains("last window"));
-        assert!(chromium.contains("set active tab index of target_window to original_active_index"));
-        assert!(chromium
-            .contains("if active tab of target_window is not report_tab then close report_tab"));
-        assert!(safari.contains("set current tab of target_window to original_tab"));
-        assert!(safari
-            .contains("if current tab of target_window is not report_tab then close report_tab"));
+        for script in [&chromium, &safari] {
+            assert!(script.contains("repeat with candidate_window in windows"));
+            assert!(script.contains("repeat with candidate_tab in tabs of candidate_window"));
+            assert!(script.contains("FOCUS_POLICY_BLOCKED"));
+            assert!(!script.contains("make new tab"));
+            assert!(!script.contains("make new window"));
+            assert!(!script.contains("active tab index"));
+            assert!(!script.contains("current tab of target_window"));
+            assert!(!script.contains("frontmost"));
+            assert!(!script.contains("activate"));
+            assert!(!script.contains("interaction_ready"));
+        }
         assert!(chromium.contains("stable_read_count"));
         assert!(safari.contains("stable_read_count"));
         assert!(chromium.contains("repeat 80 times"));
@@ -3458,7 +4016,7 @@ mod tests {
     }
 
     #[test]
-    fn evidence_scripts_use_a_dedicated_background_window_and_restore_focus() {
+    fn evidence_scripts_keep_the_window_hidden_until_one_foreground_lease() {
         let javascript = browser_extraction_javascript();
         let readiness_javascript = browser_readiness_javascript();
         let interaction_javascript = browser_interaction_javascript("", "", "");
@@ -3479,6 +4037,7 @@ mod tests {
             &interaction_javascript,
             &readiness_javascript,
             &javascript,
+            true,
         );
         let safari_extract = build_background_browser_extract_script(
             *BROWSER_ADAPTERS.last().unwrap(),
@@ -3486,13 +4045,37 @@ mod tests {
             &interaction_javascript,
             &readiness_javascript,
             &javascript,
+            true,
         );
-        let chromium_prepare =
-            build_background_browser_prepare_capture_script(BROWSER_ADAPTERS[0], "12345");
+        let chromium_hidden_extract = build_background_browser_extract_script(
+            BROWSER_ADAPTERS[0],
+            "12345",
+            &interaction_javascript,
+            &readiness_javascript,
+            &javascript,
+            false,
+        );
+        let chromium_prepare = build_background_browser_prepare_capture_script(
+            BROWSER_ADAPTERS[0],
+            "12345",
+            "MemoryBread",
+        );
         let safari_prepare = build_background_browser_prepare_capture_script(
             *BROWSER_ADAPTERS.last().unwrap(),
             "54321",
+            "MemoryBread",
         );
+        let chromium_refresh =
+            build_background_browser_refresh_script(BROWSER_ADAPTERS[0], "12345");
+        let safari_refresh =
+            build_background_browser_refresh_script(*BROWSER_ADAPTERS.last().unwrap(), "54321");
+        let chromium_restore =
+            build_background_browser_restore_focus_script(BROWSER_ADAPTERS[0], "MemoryBread");
+        let safari_restore = build_background_browser_restore_focus_script(
+            *BROWSER_ADAPTERS.last().unwrap(),
+            "MemoryBread",
+        );
+        let current_front_app = build_current_front_app_script();
         let chromium_cleanup =
             build_background_browser_cleanup_script(BROWSER_ADAPTERS[0], "12345", false);
         let safari_cleanup = build_background_browser_cleanup_script(
@@ -3509,26 +4092,49 @@ mod tests {
         );
 
         for script in [&chromium_start, &safari_start] {
-            assert!(script.contains("previous_front_app"));
-            assert!(script.contains("frontmost of first application process"));
+            assert!(!script.contains("previous_front_app"));
+            assert!(!script.contains("frontmost of first application process"));
             assert!(!script.contains("original_front_window"));
             assert!(!script.contains("activate"));
         }
-        assert!(chromium_start.contains("visible:true"));
+        assert!(chromium_start.contains("visible:false"));
         assert!(chromium_start.contains("MemoryBread Preview"));
-        assert!(!safari_start.contains("set visible of preview_window to false"));
+        assert!(safari_start.contains("set visible of preview_window to false"));
         for script in [&chromium_extract, &safari_extract] {
             assert!(script.contains("first window whose id is"));
             assert!(script.contains("stable_read_count"));
+            assert!(script.contains("memoryBreadBrowserLeaseIsActive"));
+            assert!(script.contains("FOCUS_POLICY_BLOCKED"));
             assert!(!script.contains("front window"));
             assert!(!script.contains("screencapture"));
             assert!(!script.contains("activate"));
         }
+        assert!(!chromium_hidden_extract.contains("FOCUS_POLICY_BLOCKED"));
+        assert!(!chromium_hidden_extract.contains("frontmost of first application process"));
         for script in [&chromium_prepare, &safari_prepare] {
-            assert!(script.contains("previous_front_app"));
-            assert!(script.contains("set index of first window whose id is"));
+            assert!(script.contains("set index of target_window to 1"));
             assert!(script.contains("frontmost of first application process"));
+            assert!(script.contains("current_front_app"));
+            assert!(script.contains("FOCUS_POLICY_BLOCKED"));
+            assert!(script.contains("MemoryBread"));
+            assert!(!script.contains("previous_front_app"));
             assert!(!script.contains("activate"));
+        }
+        for script in [&chromium_refresh, &safari_refresh] {
+            assert!(script.contains("current_front_app"));
+            assert!(script.contains("FOCUS_POLICY_BLOCKED"));
+            assert!(script.contains("set index of target_window to 1"));
+            assert!(script.contains("set frontmost"));
+            assert!(!script.contains("activate"));
+        }
+        assert!(current_front_app.contains("first application process whose frontmost is true"));
+        for script in [&chromium_restore, &safari_restore] {
+            assert!(script.contains("if current_front_app is"));
+            assert!(script.contains("MemoryBread"));
+        }
+        for script in [&chromium_cleanup, &safari_cleanup] {
+            assert!(script.contains("current_front_app"));
+            assert!(script.contains("FOCUS_POLICY_BLOCKED"));
         }
         assert!(chromium_cleanup.contains("close first window whose id is 12345"));
         assert!(safari_cleanup.contains("close first window whose id is 54321"));
@@ -3545,8 +4151,11 @@ mod tests {
                 &safari_start,
                 &chromium_extract,
                 &safari_extract,
+                &chromium_hidden_extract,
                 &chromium_prepare,
                 &safari_prepare,
+                &chromium_restore,
+                &safari_restore,
                 &chromium_cleanup,
                 &safari_cleanup,
                 &chromium_orphan_cleanup,
@@ -3819,21 +4428,37 @@ mod tests {
     }
 
     #[test]
-    fn refresh_request_defaults_to_retaining_screenshot() {
+    fn refresh_request_defaults_to_silent_focus_safe_collection() {
         let legacy: RefreshDataSourceRequest = serde_json::from_value(json!({})).unwrap();
-        assert!(legacy.retain_screenshot);
-        let disabled: RefreshDataSourceRequest = serde_json::from_value(json!({
-            "capture_evidence": true,
-            "retain_screenshot": false,
+        assert!(!legacy.retain_screenshot);
+        assert!(!legacy.allow_foreground_refresh);
+        assert_eq!(legacy.focus_policy, "never");
+        let enabled: RefreshDataSourceRequest = serde_json::from_value(json!({
+            "allow_foreground_refresh": true,
+            "focus_policy": "allow_once",
         }))
         .unwrap();
-        assert!(!disabled.retain_screenshot);
+        assert!(!enabled.retain_screenshot);
+        assert!(enabled.allow_foreground_refresh);
+        assert_eq!(enabled.focus_policy, "allow_once");
+    }
+
+    #[test]
+    fn focus_policy_never_blocks_foreground_refresh_but_allows_structured_collection() {
+        assert_eq!(validate_focus_policy("never", false).unwrap(), "never");
+        let blocked = validate_focus_policy("never", true).unwrap_err();
+        assert_eq!(blocked.status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(blocked.code, "FOCUS_POLICY_BLOCKED");
+        assert_eq!(
+            validate_focus_policy("allow_once", true).unwrap(),
+            "allow_once"
+        );
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "需要本机 Chrome、Apple Events JavaScript 与录屏权限"]
-    fn background_browser_window_keeps_front_app_and_user_tab_unchanged() {
+    fn on_demand_browser_window_restores_front_app_and_user_tab() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
@@ -3884,7 +4509,8 @@ mod tests {
         .unwrap();
         server.join().unwrap();
 
-        assert_eq!(result.interaction_mode, "background_browser_window");
+        assert_eq!(result.interaction_mode, "temporary_foreground_window");
+        assert_eq!(result.focus_takeover_count, 1);
         assert_eq!(result.title, "MemoryBread 后台预览自测");
         assert!(result.content_text.contains("本周订单 1200"));
         assert!(result.screenshot.is_some());

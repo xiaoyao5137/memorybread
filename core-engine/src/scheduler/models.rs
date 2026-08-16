@@ -12,6 +12,9 @@ pub struct ScheduledTask {
     pub template_id: Option<String>,
     pub is_builtin: bool,
     pub can_delete: bool,
+    /// 执行智能体：consult 咨询智能体（默认）/ creation 创作智能体。
+    #[serde(default = "default_executor_kind")]
+    pub executor_kind: String,
     pub notification_channel_ids: Vec<i64>,
     pub run_count: i64,
     pub last_run_at: Option<i64>,
@@ -29,6 +32,8 @@ pub struct NewScheduledTask {
     pub template_id: Option<String>,
     #[serde(default)]
     pub notification_channel_ids: Vec<i64>,
+    #[serde(default = "default_executor_kind")]
+    pub executor_kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +43,7 @@ pub struct UpdateScheduledTask {
     pub cron_expression: Option<String>,
     pub enabled: Option<bool>,
     pub notification_channel_ids: Option<Vec<i64>>,
+    pub executor_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +78,18 @@ fn default_enabled() -> bool {
     true
 }
 
+pub fn default_executor_kind() -> String {
+    "consult".to_string()
+}
+
+/// 把客户端传入的执行智能体归一化为合法枚举值，非法值回退默认咨询智能体。
+pub fn normalize_executor_kind(value: &str) -> String {
+    match value.trim() {
+        "creation" => "creation".to_string(),
+        _ => default_executor_kind(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskExecution {
     pub id: i64,
@@ -84,6 +102,9 @@ pub struct TaskExecution {
     pub result_text: Option<String>,
     pub error_message: Option<String>,
     pub latency_ms: Option<i64>,
+    /// 创作智能体执行时关联的创作记录 id，供任务页跳转执行过程。
+    #[serde(default)]
+    pub creation_history_id: Option<i64>,
     pub notification_deliveries: Vec<TaskNotificationDelivery>,
 }
 

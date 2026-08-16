@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import BakeKnowledgeTab from '../components/bake/BakeKnowledgeTab'
 import BakeTemplatesTab from '../components/bake/BakeTemplatesTab'
 import BakeSopTab from '../components/bake/BakeSopTab'
+import BakeRichTextEditor from '../components/bake/BakeRichTextEditor'
 import type { ArticleTemplate, BakeKnowledgeItem, SopCandidate } from '../types'
 import {
   DEFAULT_CREATION_SKILL_EXAMPLE_DOCUMENT,
@@ -129,6 +131,48 @@ const relatedSkill: LocalCreationSkill = {
 }
 
 describe('Bake 详情展示优化', () => {
+  it('富文本编辑框保留标题、粗体和列表格式为 Markdown', () => {
+    const onChange = vi.fn()
+    render(<BakeRichTextEditor value="" onChange={onChange} ariaLabel="测试文档内容" />)
+    const editor = screen.getByRole('textbox', { name: '测试文档内容' })
+    editor.innerHTML = '<h2>结论</h2><p><strong>订单</strong>保持增长</p><ul><li>继续观察</li></ul>'
+    fireEvent.input(editor)
+
+    expect(onChange).toHaveBeenLastCalledWith('## 结论\n\n**订单**保持增长\n\n- 继续观察')
+  })
+
+  it('富文本工具栏可切换正文、标题、粗体、斜体和两种列表', async () => {
+    const user = userEvent.setup()
+    const runAction = async (value: string, action: string, expected: string) => {
+      const onChange = vi.fn()
+      const { unmount } = render(
+        <BakeRichTextEditor value={value} onChange={onChange} ariaLabel={`测试${action}`} />,
+      )
+      const editor = screen.getByRole('textbox', { name: `测试${action}` })
+      editor.focus()
+      const block = editor.querySelector('p, h2, li')
+      const text = block
+        ? document.createTreeWalker(block, NodeFilter.SHOW_TEXT).nextNode()
+        : null
+      expect(text).toBeTruthy()
+      const range = document.createRange()
+      range.selectNodeContents(text!)
+      const selection = window.getSelection()!
+      selection.removeAllRanges()
+      selection.addRange(range)
+      await user.click(screen.getByRole('button', { name: action }))
+      expect(onChange).toHaveBeenLastCalledWith(expected)
+      unmount()
+    }
+
+    await runAction('第一项', '加粗', '**第一项**')
+    await runAction('第一项', '斜体', '*第一项*')
+    await runAction('第一项', '标题', '## 第一项')
+    await runAction('## 第一项', '正文', '第一项')
+    await runAction('第一项', '项目列表', '- 第一项')
+    await runAction('- 第一项', '编号列表', '1. 第一项')
+  })
+
   it('超长来源网址使用可换行的受限宽度样式', () => {
     const longSourceUrl = 'https://docs.example.com/d/home/a-very-long-document-identifier-without-natural-breaks?section=another-very-long-section-identifier'
 
@@ -161,10 +205,72 @@ describe('Bake 详情展示优化', () => {
       />,
     )
 
+    fireEvent.click(screen.getByRole('button', { name: '查看文档「周报模板」详情' }))
     expect(screen.getByRole('link', { name: longSourceUrl })).toHaveClass('bake-source-url-link')
   })
 
-  it('模板详情使用更明确的结构/风格说明文案', () => {
+  it('文档列表释放摘要空间，并从行操作和详情打开记忆图谱', () => {
+    const onOpenGraph = vi.fn()
+    const multiCategoryTemplate = {
+      ...template,
+      docType: 'weekly_report,project_plan',
+      sourceUrl: 'https://docs.example.com/projects/weekly',
+    }
+    render(
+      <BakeTemplatesTab
+        templates={[multiCategoryTemplate]}
+        total={1}
+        limit={20}
+        offset={0}
+        query=""
+        from=""
+        to=""
+        draftQuery=""
+        draftFrom=""
+        draftTo=""
+        selectedTemplateId={template.id}
+        onSelectTemplate={noop}
+        onCreateTemplate={noop}
+        onUpdateTemplate={noop}
+        onToggleTemplateStatus={noop}
+        onDeleteTemplate={noop}
+        onViewSourceMemory={noop}
+        onPageChange={noop}
+        onLimitChange={noop}
+        onDraftQueryChange={noop}
+        onDraftFromChange={noop}
+        onDraftToChange={noop}
+        onSearch={noop}
+        onClearFilters={noop}
+        onOpenGraph={onOpenGraph}
+      />,
+    )
+
+    const table = screen.getByRole('table', { name: '文档表格' })
+    expect(within(table).queryByRole('columnheader', { name: '状态' })).not.toBeInTheDocument()
+    expect(within(table).getByText('周报')).toBeInTheDocument()
+    expect(within(table).getByText('项目方案')).toBeInTheDocument()
+    // 关键词独占首行；清空、搜索和新建统一位于筛选区底部右侧，新建按钮保持 type="button"。
+    const clearButton = screen.getByRole('button', { name: '清空' })
+    const searchButton = screen.getByRole('button', { name: '搜索' })
+    const createDocumentButton = screen.getByRole('button', { name: '新建' }) as HTMLButtonElement
+    const primaryActions = createDocumentButton.closest('.bake-list-toolbar__repository-primary-actions')
+    expect(createDocumentButton.type).toBe('button')
+    expect(primaryActions).not.toBeNull()
+    expect(primaryActions).toContainElement(clearButton)
+    expect(primaryActions).toContainElement(searchButton)
+    expect(screen.getByText('关键词').closest('.bake-list-toolbar__repository-row--search')).not.toContainElement(searchButton)
+    fireEvent.click(screen.getByRole('button', { name: /在记忆图谱中查看文档/ }))
+    expect(onOpenGraph).toHaveBeenCalledWith(multiCategoryTemplate)
+
+    fireEvent.click(screen.getByRole('button', { name: /查看文档.*详情/ }))
+    const drawer = screen.getByRole('dialog', { name: '周报模板' })
+    expect(within(drawer).getByRole('link', { name: multiCategoryTemplate.sourceUrl })).toBeInTheDocument()
+    fireEvent.click(within(drawer).getByRole('button', { name: '记忆图谱' }))
+    expect(onOpenGraph).toHaveBeenCalledTimes(2)
+  })
+
+  it('文档详情隐藏模板技术字段，并在标题行进入编辑', () => {
     const onOpenSkill = vi.fn()
     render(
       <BakeTemplatesTab
@@ -197,20 +303,97 @@ describe('Bake 详情展示优化', () => {
       />,
     )
 
-    expect(screen.getByText('结构骨架（决定输出结构）')).toBeInTheDocument()
-    expect(screen.getByText('表达风格（决定措辞）')).toBeInTheDocument()
-    expect(screen.getByText('常用短语：整体看、先结论后展开')).toBeInTheDocument()
-    expect(screen.queryByText('已启用')).not.toBeInTheDocument()
-    expect(screen.queryByText('草稿')).not.toBeInTheDocument()
-    expect(screen.queryByText(/使用 \d+ 次/)).not.toBeInTheDocument()
-    expect(screen.queryByText('high')).not.toBeInTheDocument()
-    expect(screen.queryByText(/匹配分|匹配等级|来源记忆|提炼状态/)).not.toBeInTheDocument()
-    expect(screen.getByText('关联技能')).toBeInTheDocument()
-    expect(screen.getByText(/新增时间.*2026.*8.*11.*00:35:45.*最近更新.*2026.*8.*11.*14:18:36/)).toBeInTheDocument()
-    expect(screen.getByText('跨部门技术沟通会文档')).toBeInTheDocument()
-    expect(screen.getByText('已安装')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: /跨部门技术沟通会文档/ }))
+    expect(screen.getByRole('table', { name: '文档表格' })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '查看文档「周报模板」详情' }))
+    const drawer = screen.getByRole('dialog', { name: '周报模板' })
+    expect(within(drawer).getByText('文档内容')).toBeInTheDocument()
+    expect(screen.getAllByText('周报').length).toBeGreaterThan(0)
+    expect(within(drawer).queryByText('结构骨架（决定输出结构）')).not.toBeInTheDocument()
+    expect(within(drawer).queryByText('表达风格（决定措辞）')).not.toBeInTheDocument()
+    expect(within(drawer).queryByText(/替换规则|风格短语|结构字段/)).not.toBeInTheDocument()
+    expect(within(drawer).getByText('已启用')).toBeInTheDocument()
+    expect(within(drawer).queryByText('草稿')).not.toBeInTheDocument()
+    expect(within(drawer).queryByText(/使用 \d+ 次/)).not.toBeInTheDocument()
+    expect(within(drawer).queryByText('high')).not.toBeInTheDocument()
+    expect(within(drawer).queryByText(/匹配分|匹配等级|来源记忆|提炼状态/)).not.toBeInTheDocument()
+    expect(within(drawer).getByText('关联技能')).toBeInTheDocument()
+    expect(within(drawer).getByText(/创建时间.*2026.*8.*11.*00:35:45.*最近更新.*2026.*8.*11.*14:18:36/)).toBeInTheDocument()
+    expect(within(drawer).getByText('跨部门技术沟通会文档')).toBeInTheDocument()
+    expect(within(drawer).getByText('已安装')).toBeInTheDocument()
+    fireEvent.click(within(drawer).getByRole('button', { name: /跨部门技术沟通会文档/ }))
     expect(onOpenSkill).toHaveBeenCalledWith(relatedSkill)
+
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }))
+    expect(screen.getByRole('textbox', { name: '文档名称' })).toHaveValue('周报模板')
+    expect(screen.getByRole('combobox', { name: '文档分类' })).toHaveTextContent('周报')
+    expect(screen.getByRole('textbox', { name: '文档内容' })).toBeInTheDocument()
+    expect(screen.queryByText('关联技能')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '保存' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '取消' })).toBeInTheDocument()
+  })
+
+  it('新建文档使用弹窗草稿，取消不入库且保存后才创建', async () => {
+    const onCreateTemplate = vi.fn().mockResolvedValue(true)
+    const commonProps = {
+      total: 1,
+      limit: 20,
+      offset: 0,
+      query: '',
+      from: '',
+      to: '',
+      draftQuery: '',
+      draftFrom: '',
+      draftTo: '',
+      onSelectTemplate: noop,
+      onCreateTemplate,
+      onUpdateTemplate: noop,
+      onToggleTemplateStatus: noop,
+      onDeleteTemplate: noop,
+      onViewSourceMemory: noop,
+      onPageChange: noop,
+      onLimitChange: noop,
+      onDraftQueryChange: noop,
+      onDraftFromChange: noop,
+      onDraftToChange: noop,
+      onSearch: noop,
+      onClearFilters: noop,
+    }
+    render(
+      <BakeTemplatesTab
+        {...commonProps}
+        templates={[template]}
+        selectedTemplateId={template.id}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: '新建' })).toBeInTheDocument()
+    expect(screen.queryByText('新建模板')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '新建' }))
+    expect(screen.getByRole('dialog', { name: '新建文档' })).toBeInTheDocument()
+    expect(onCreateTemplate).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.queryByRole('dialog', { name: '新建文档' })).not.toBeInTheDocument()
+    expect(onCreateTemplate).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: '新建' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '新文档名称' }), { target: { value: '供应商尽调报告' } })
+    fireEvent.click(screen.getByRole('combobox', { name: '新文档分类' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '搜索或自定义文档分类' }), { target: { value: '法律尽调' } })
+    fireEvent.keyDown(screen.getByRole('textbox', { name: '搜索或自定义文档分类' }), { key: 'Enter' })
+    expect(screen.getByRole('combobox', { name: '新文档分类' })).toHaveTextContent('法律尽调')
+    const contentEditor = screen.getByRole('textbox', { name: '新文档内容' })
+    contentEditor.innerHTML = '<p>核对主体资质与关键合同。</p>'
+    fireEvent.input(contentEditor)
+    expect(onCreateTemplate).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(onCreateTemplate).toHaveBeenCalledWith({
+      title: '供应商尽调报告',
+      docType: '法律尽调',
+      fullContent: '核对主体资质与关键合同。',
+    }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '新建文档' })).not.toBeInTheDocument())
   })
 
   it('知识列表和详情不展示内部提炼字段', () => {
@@ -241,6 +424,7 @@ describe('Bake 详情展示优化', () => {
       />,
     )
 
+    fireEvent.click(screen.getByRole('button', { name: '查看知识「本地优先知识」详情' }))
     expect(screen.getAllByText('本地优先知识').length).toBeGreaterThan(0)
     expect(screen.queryByText(/bake_knowledge/)).not.toBeInTheDocument()
     expect(screen.queryByText(/重复观察/)).not.toBeInTheDocument()
@@ -248,6 +432,46 @@ describe('Bake 详情展示优化', () => {
     expect(screen.queryByText(/匹配分|匹配等级|提炼状态/)).not.toBeInTheDocument()
     expect(screen.queryByText('实体 / 标签')).not.toBeInTheDocument()
     expect(screen.queryByText('MemoryBread')).not.toBeInTheDocument()
+  })
+
+  it('知识详情支持新建入口和标题行编辑保存', async () => {
+    const onUpdateKnowledge = vi.fn().mockResolvedValue(true)
+    render(
+      <BakeKnowledgeTab
+        items={[knowledge]}
+        total={1}
+        limit={20}
+        offset={0}
+        query=""
+        draftQuery=""
+        from=""
+        to=""
+        draftFrom=""
+        draftTo=""
+        selectedKnowledgeId={knowledge.id}
+        onSelectKnowledge={noop}
+        onPageChange={noop}
+        onLimitChange={noop}
+        onDraftQueryChange={noop}
+        onDraftFromChange={noop}
+        onDraftToChange={noop}
+        onSearch={noop}
+        onClearFilters={noop}
+        onDeleteKnowledge={noop}
+        onOpenCapture={noop}
+        onViewSourceTimeline={noop}
+        onCreateKnowledge={noop}
+        onUpdateKnowledge={onUpdateKnowledge}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: '新建' })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '编辑知识「本地优先知识」' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '知识标题' }), { target: { value: '更新后的知识' } })
+    expect(screen.getByRole('textbox', { name: '知识详细内容' })).toHaveAttribute('contenteditable', 'true')
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(onUpdateKnowledge).toHaveBeenCalledWith(expect.objectContaining({ summary: '更新后的知识' })))
   })
 
   it('SOP详情不展示原始关联ID与工作提示预览', () => {
@@ -275,9 +499,16 @@ describe('Bake 详情展示优化', () => {
         onSearch={noop}
         onClearFilters={noop}
         onCreateSop={noop}
+        onUpdateSop={noop}
       />,
     )
 
+    const operationTable = screen.getByRole('table', { name: '操作表格' })
+    expect(within(operationTable).getByRole('columnheader', { name: '适用场景' })).toBeInTheDocument()
+    expect(within(operationTable).getByRole('columnheader', { name: '操作环节概述' })).toBeInTheDocument()
+    expect(within(operationTable).queryByRole('columnheader', { name: '步骤' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '查看操作：服务无法启动' }))
     expect(screen.queryByText('关联知识')).not.toBeInTheDocument()
     expect(screen.queryByText('已关联 2 条知识（用于补充背景和术语）')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '排查服务健康检查失败' })).not.toBeInTheDocument()
@@ -289,8 +520,136 @@ describe('Bake 详情展示优化', () => {
     expect(screen.queryByText(/来源：/)).not.toBeInTheDocument()
     expect(screen.queryByText('启动失败排查')).not.toBeInTheDocument()
     expect(screen.queryByPlaceholderText(/来源/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '编辑' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '新建' }))
     expect(screen.queryByText(/置信度/)).not.toBeInTheDocument()
+  })
+
+  it('知识详情可收藏，列表可切换收藏筛选', async () => {
+    const onFavoriteFilterChange = vi.fn()
+    const onToggleFavorite = vi.fn().mockResolvedValue(true)
+    render(
+      <BakeKnowledgeTab
+        items={[knowledge]}
+        total={1}
+        limit={20}
+        offset={0}
+        query=""
+        draftQuery=""
+        from=""
+        to=""
+        draftFrom=""
+        draftTo=""
+        selectedKnowledgeId={knowledge.id}
+        onSelectKnowledge={noop}
+        onPageChange={noop}
+        onLimitChange={noop}
+        onDraftQueryChange={noop}
+        onDraftFromChange={noop}
+        onDraftToChange={noop}
+        onSearch={noop}
+        onClearFilters={noop}
+        onDeleteKnowledge={noop}
+        onOpenCapture={noop}
+        onViewSourceTimeline={noop}
+        favoriteFilter="all"
+        onFavoriteFilterChange={onFavoriteFilterChange}
+        onToggleFavorite={onToggleFavorite}
+      />,
+    )
+
+    fireEvent.change(screen.getByRole('combobox', { name: '收藏状态' }), {
+      target: { value: 'favorite' },
+    })
+    expect(onFavoriteFilterChange).toHaveBeenCalledWith('favorite')
+    fireEvent.click(screen.getByRole('button', { name: '查看知识「本地优先知识」详情' }))
+    fireEvent.click(within(screen.getByRole('dialog', { name: '本地优先知识' })).getByRole('button', { name: '收藏' }))
+    await waitFor(() => expect(onToggleFavorite).toHaveBeenCalledWith(knowledge, true))
+  })
+
+  it('操作详情可收藏，列表可切换收藏筛选', async () => {
+    const onFavoriteFilterChange = vi.fn()
+    const onToggleFavorite = vi.fn().mockResolvedValue(true)
+    render(
+      <BakeSopTab
+        candidates={[sop]}
+        total={1}
+        limit={20}
+        offset={0}
+        query=""
+        from=""
+        to=""
+        draftQuery=""
+        draftFrom=""
+        draftTo=""
+        selectedSopId={sop.id}
+        onSelectSop={noop}
+        onDeleteSop={noop}
+        onViewSourceTimeline={noop}
+        onPageChange={noop}
+        onLimitChange={noop}
+        onDraftQueryChange={noop}
+        onDraftFromChange={noop}
+        onDraftToChange={noop}
+        onSearch={noop}
+        onClearFilters={noop}
+        favoriteFilter="all"
+        onFavoriteFilterChange={onFavoriteFilterChange}
+        onToggleFavorite={onToggleFavorite}
+      />,
+    )
+
+    fireEvent.change(screen.getByRole('combobox', { name: '收藏状态' }), {
+      target: { value: 'not_favorite' },
+    })
+    expect(onFavoriteFilterChange).toHaveBeenCalledWith('not_favorite')
+    fireEvent.click(screen.getByRole('button', { name: '查看操作：服务无法启动' }))
+    fireEvent.click(within(screen.getByRole('dialog', { name: '服务无法启动' })).getByRole('button', { name: '收藏' }))
+    await waitFor(() => expect(onToggleFavorite).toHaveBeenCalledWith(sop, true))
+  })
+
+  it('文档详情可收藏，列表可切换收藏筛选', async () => {
+    const onFavoriteFilterChange = vi.fn()
+    const onToggleFavorite = vi.fn().mockResolvedValue(true)
+    render(
+      <BakeTemplatesTab
+        templates={[template]}
+        total={1}
+        limit={20}
+        offset={0}
+        query=""
+        from=""
+        to=""
+        draftQuery=""
+        draftFrom=""
+        draftTo=""
+        selectedTemplateId={template.id}
+        onSelectTemplate={noop}
+        onCreateTemplate={noop}
+        onUpdateTemplate={noop}
+        onToggleTemplateStatus={noop}
+        onDeleteTemplate={noop}
+        onViewSourceMemory={noop}
+        onPageChange={noop}
+        onLimitChange={noop}
+        onDraftQueryChange={noop}
+        onDraftFromChange={noop}
+        onDraftToChange={noop}
+        onSearch={noop}
+        onClearFilters={noop}
+        favoriteFilter="all"
+        onFavoriteFilterChange={onFavoriteFilterChange}
+        onToggleFavorite={onToggleFavorite}
+      />,
+    )
+
+    fireEvent.change(screen.getByRole('combobox', { name: '收藏状态' }), {
+      target: { value: 'favorite' },
+    })
+    expect(onFavoriteFilterChange).toHaveBeenCalledWith('favorite')
+    fireEvent.click(screen.getByRole('button', { name: '查看文档「周报模板」详情' }))
+    fireEvent.click(within(screen.getByRole('dialog', { name: '周报模板' })).getByRole('button', { name: '收藏' }))
+    await waitFor(() => expect(onToggleFavorite).toHaveBeenCalledWith(template, true))
   })
 })

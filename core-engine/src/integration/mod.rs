@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     fs,
+    io::{Cursor, Write},
     path::{Path, PathBuf},
 };
 
@@ -8,6 +9,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 use crate::storage::{
     ImportWriteOutcome, ImportedKnowledgeItem, IntegrationSkillRunRecord, StorageManager,
@@ -185,17 +187,17 @@ pub fn integration_skill_catalog() -> Vec<IntegrationSkillCatalogItem> {
             true,
         ),
         catalog_item(
-            "workbody",
-            "Workbody",
-            "办公协作上下文包",
-            "从本机记忆生成可检查、可复制、可下载的最小 Markdown 上下文包。",
-            "本机检索 · Markdown 交付",
-            "办公",
+            "workbuddy",
+            "WorkBuddy",
+            "腾讯办公智能体",
+            "生成可直接上传到 WorkBuddy 的 memorybread-retrieval Skill，由 WorkBuddy 按需调用本机记忆召回。",
+            "Skill ZIP · 本机即时召回",
+            "腾讯",
             "output",
-            "context_export",
-            "query",
+            "workbuddy_skill_export",
+            "none",
             "",
-            false,
+            true,
         ),
         catalog_item(
             "qianwen-office",
@@ -302,6 +304,52 @@ pub fn integration_skill_bundle(id: &str) -> Option<Value> {
     }))
 }
 
+fn workbuddy_skill_files() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "SKILL.md",
+            include_str!("../../../integrations/workbuddy/memorybread-retrieval/SKILL.md"),
+        ),
+        (
+            "scripts/recall-memory.mjs",
+            include_str!("../../../integrations/codex/memory-retrieval/scripts/recall-memory.mjs"),
+        ),
+    ]
+}
+
+pub fn workbuddy_skill_zip() -> Result<Vec<u8>, IntegrationExecutionError> {
+    let cursor = Cursor::new(Vec::new());
+    let mut archive = ZipWriter::new(cursor);
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .unix_permissions(0o644);
+    for (path, content) in workbuddy_skill_files() {
+        archive
+            .start_file(format!("memorybread-retrieval/{path}"), options)
+            .map_err(|error| {
+                IntegrationExecutionError::failed(
+                    "PACKAGE_WRITE_FAILED",
+                    format!("创建 WorkBuddy Skill ZIP 失败: {error}"),
+                )
+            })?;
+        archive.write_all(content.as_bytes()).map_err(|error| {
+            IntegrationExecutionError::failed(
+                "PACKAGE_WRITE_FAILED",
+                format!("写入 WorkBuddy Skill 文件失败: {error}"),
+            )
+        })?;
+    }
+    archive
+        .finish()
+        .map(|cursor| cursor.into_inner())
+        .map_err(|error| {
+            IntegrationExecutionError::failed(
+                "PACKAGE_WRITE_FAILED",
+                format!("完成 WorkBuddy Skill ZIP 失败: {error}"),
+            )
+        })
+}
+
 pub fn run_input_summary(request: &RunIntegrationSkillRequest) -> Value {
     json!({
         "fileCount": request.files.len(),
@@ -380,7 +428,8 @@ pub fn execute_integration_skill(
         "qdrant" | "milvus" | "chroma-pgvector" => {
             execute_record_import(storage, run_id, skill_id, request)
         }
-        "workbody" | "qianwen-office" => execute_context_export(storage, run_id, skill_id, request),
+        "workbuddy" => execute_workbuddy_skill_export(storage, run_id, request),
+        "qianwen-office" => execute_context_export(storage, run_id, request),
         "obsidian-export" => execute_vault_export(storage, run_id, request),
         "codex" | "claude-code" => execute_agent_install(storage, run_id, skill_id, request),
         _ => Err(IntegrationExecutionError::bad_input("未知的内置集成 Skill")),
@@ -489,10 +538,53 @@ fn finish_import(
     }))
 }
 
+fn execute_workbuddy_skill_export(
+    storage: &StorageManager,
+    run_id: &str,
+    request: &RunIntegrationSkillRequest,
+) -> Result<Value, IntegrationExecutionError> {
+    let files = workbuddy_skill_files();
+    if request.mode == "preview" {
+        storage
+            .append_integration_skill_log(
+                run_id,
+                "info",
+                "已完成 WorkBuddy Skill 预检；正式执行只生成本地 ZIP，不会自动上传",
+            )
+            .map_err(storage_error)?;
+        return Ok(json!({
+            "kind": "workbuddy_skill_preview",
+            "target": "WorkBuddy > 专家·技能·连接器 > 技能 > 上传技能",
+            "fileCount": files.len(),
+            "invocation": "memorybread-retrieval",
+            "privacy": "Skill 仅连接本机 127.0.0.1，由用户在 WorkBuddy 中主动启用后才会召回记忆。",
+        }));
+    }
+
+    let bytes = workbuddy_skill_zip()?;
+    storage
+        .append_integration_skill_log(
+            run_id,
+            "success",
+            "WorkBuddy Skill ZIP 已在本机生成；请检查后再上传到 WorkBuddy",
+        )
+        .map_err(storage_error)?;
+    Ok(json!({
+        "kind": "artifact",
+        "target": "WorkBuddy",
+        "fileCount": files.len(),
+        "invocation": "memorybread-retrieval",
+        "artifact": {
+            "fileName": "memorybread-retrieval.zip",
+            "mediaType": "application/zip",
+            "contentBase64": BASE64_STANDARD.encode(bytes),
+        }
+    }))
+}
+
 fn execute_context_export(
     storage: &StorageManager,
     run_id: &str,
-    skill_id: &str,
     request: &RunIntegrationSkillRequest,
 ) -> Result<Value, IntegrationExecutionError> {
     let query = request
@@ -517,11 +609,7 @@ fn execute_context_export(
             &format!("本机检索完成，共选择 {} 条必要上下文", contexts.len()),
         )
         .map_err(storage_error)?;
-    let target = if skill_id == "workbody" {
-        "Workbody"
-    } else {
-        "千问办公"
-    };
+    let target = "千问办公";
     let mut markdown = format!(
         "# {target} 任务上下文包\n\n> 由记忆面包在本机生成。请在发送到外部工具前检查内容与披露范围。\n\n## 使用线索\n\n{}\n\n## 相关记忆\n",
         query
@@ -563,11 +651,7 @@ fn execute_context_export(
         ));
     }
     markdown.push_str("\n## 使用边界\n\n- 这些内容来自本机历史记录，不代表当前外部事实。\n- 只把当前任务需要的片段复制到外部工具。\n");
-    let file_name = if skill_id == "workbody" {
-        "memorybread-workbody-context.md"
-    } else {
-        "memorybread-qianwen-office-context.md"
-    };
+    let file_name = "memorybread-qianwen-office-context.md";
     Ok(json!({
         "kind": "artifact",
         "matchCount": contexts.len(),
@@ -1661,16 +1745,23 @@ fn source_file_contents(id: &str) -> Vec<(&'static str, &'static str, &'static s
                 include_str!("../../../integrations/builtin/chroma-pgvector/integration.json"),
             ),
         ],
-        "workbody" => vec![
+        "workbuddy" => vec![
             (
                 "SKILL.md",
                 "text/markdown",
-                include_str!("../../../integrations/builtin/workbody/SKILL.md"),
+                include_str!("../../../integrations/workbuddy/memorybread-retrieval/SKILL.md"),
             ),
             (
                 "integration.json",
                 "application/json",
-                include_str!("../../../integrations/builtin/workbody/integration.json"),
+                include_str!("../../../integrations/builtin/workbuddy/integration.json"),
+            ),
+            (
+                "scripts/recall-memory.mjs",
+                "text/javascript",
+                include_str!(
+                    "../../../integrations/codex/memory-retrieval/scripts/recall-memory.mjs"
+                ),
             ),
         ],
         "qianwen-office" => vec![
@@ -1811,7 +1902,7 @@ mod tests {
     }
 
     #[test]
-    fn executes_import_and_context_export_against_local_storage() {
+    fn executes_import_and_workbuddy_skill_export_against_local_storage() {
         let storage = StorageManager::open_in_memory().expect("storage");
         let markdown = "# Imported decision\n\nUnique integration evidence.";
         let import_request = RunIntegrationSkillRequest {
@@ -1850,32 +1941,46 @@ mod tests {
         let export_request = RunIntegrationSkillRequest {
             mode: "execute".to_string(),
             files: Vec::new(),
-            config: json!({"query": "Unique integration", "limit": 3}),
+            config: json!({}),
         };
         storage
             .create_integration_skill_run(
                 "export-run",
-                "workbody",
+                "workbuddy",
                 "execute",
                 &run_input_summary(&export_request),
             )
             .expect("create export run");
         let exported =
-            execute_integration_skill(&storage, "export-run", "workbody", &export_request)
+            execute_integration_skill(&storage, "export-run", "workbuddy", &export_request)
                 .expect("execute export");
-        assert_eq!(exported.get("matchCount").and_then(Value::as_u64), Some(1));
         assert_eq!(
-            exported.pointer("/records/0/id").and_then(Value::as_i64),
-            Some(1)
+            exported
+                .pointer("/artifact/mediaType")
+                .and_then(Value::as_str),
+            Some("application/zip")
         );
         let artifact = exported
             .pointer("/artifact/contentBase64")
             .and_then(Value::as_str)
             .expect("artifact");
         let decoded = BASE64_STANDARD.decode(artifact).expect("decode artifact");
-        assert!(String::from_utf8(decoded)
-            .expect("utf8 artifact")
-            .contains("Imported decision"));
+        let mut archive = zip::ZipArchive::new(Cursor::new(decoded)).expect("open zip");
+        assert!(archive.by_name("memorybread-retrieval/SKILL.md").is_ok());
+        assert!(archive
+            .by_name("memorybread-retrieval/scripts/recall-memory.mjs")
+            .is_ok());
+    }
+
+    #[test]
+    fn catalog_uses_the_official_workbuddy_name() {
+        let catalog = integration_skill_catalog();
+        let workbuddy = catalog
+            .iter()
+            .find(|skill| skill.id == "workbuddy")
+            .expect("workbuddy catalog item");
+        assert_eq!(workbuddy.title, "WorkBuddy");
+        assert_eq!(workbuddy.executor, "workbuddy_skill_export");
     }
 
     fn vault_export_request(

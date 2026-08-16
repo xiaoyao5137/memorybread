@@ -8,7 +8,10 @@ import { toUserFacingError } from '../utils/userFacingError'
 import { useImeCompositionGuard } from '../hooks/useImeCompositionGuard'
 import { useConfirmDialog } from './useConfirmDialog'
 
-const SIDECAR = 'http://localhost:7071'
+const SIDECAR = 'http://127.0.0.1:7071'
+const MODEL_LOAD_RETRY_DELAYS_MS = [0, 1_000, 2_000, 4_000]
+
+const wait = (delayMs: number) => new Promise<void>(resolve => window.setTimeout(resolve, delayMs))
 
 type OllamaSetupDetail = {
   message?: string
@@ -560,15 +563,24 @@ const ModelManager: React.FC = () => {
   const loadModels = async () => {
     setLoading(true)
     setModelLoadError('')
-    try {
-      const r = await fetch(`${SIDECAR}/api/models`)
-      if (!r.ok) throw new Error(`HTTP ${r.status}`)
-      const d = await r.json()
-      if (d.status === 'ok') setModels(normalizeVisibleModels(d.models || []))
-      else throw new Error(d.message || '模型列表读取失败')
-    } catch (error) {
-      setModelLoadError(toUserFacingError(error, 'AI 能力暂时无法读取，请稍后重试'))
-    } finally { setLoading(false) }
+    let lastError: unknown = new Error('模型列表读取失败')
+    for (const delayMs of MODEL_LOAD_RETRY_DELAYS_MS) {
+      if (delayMs > 0) await wait(delayMs)
+      try {
+        const r = await fetch(`${SIDECAR}/api/models`)
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        const d = await r.json()
+        if (d.status !== 'ok') throw new Error(d.message || '模型列表读取失败')
+        setModels(normalizeVisibleModels(d.models || []))
+        setModelLoadError('')
+        setLoading(false)
+        return
+      } catch (error) {
+        lastError = error
+      }
+    }
+    setModelLoadError(toUserFacingError(lastError, 'AI 能力暂时无法读取，请稍后重试'))
+    setLoading(false)
   }
 
   const refreshOllamaSetup = async () => {

@@ -135,7 +135,7 @@ const toForm = (skill: LocalCreationSkill): SkillForm => ({
     agents: [...step.agents],
     skills: [...step.skills],
     tools: [...step.tools],
-    retainWebpageScreenshot: step.retainWebpageScreenshot !== false,
+    retainWebpageScreenshot: step.retainWebpageScreenshot === true,
   }, skill.title)),
   categoryId: skill.categoryId || '',
   commonTitles: skill.commonTitles.join('\n'),
@@ -176,7 +176,7 @@ const analysisToForm = (analysis: CreationSkillAnalysis): SkillForm => ({
     agents: [...step.agents],
     skills: [...step.skills],
     tools: [...step.tools],
-    retainWebpageScreenshot: step.retainWebpageScreenshot !== false,
+    retainWebpageScreenshot: step.retainWebpageScreenshot === true,
   }, analysis.title)),
   categoryId: '',
   commonTitles: analysis.commonTitles.join('\n'),
@@ -580,7 +580,7 @@ export default function CreationSkillEditor({ source, initialSkill, onClose, onS
     const current = stepResources(step)
     const capacityReached = current.agents.length + current.tools.length >= 4
     const items: ResourceOption[] = []
-    // 已提及的 Agent/Tool 仍然展示，避免默认注入的官方能力（如记忆搜索 Tool）从选择器中消失；
+    // 已提及的 Agent/Tool 仍然展示，避免默认注入的官方能力（如记忆搜索）从选择器中消失；
     // 容量上限只拦截新增能力，重复选中已提及项不会产生重复文本。
     CREATION_SKILL_AGENT_OPTIONS
       .filter(option => matches(`${option.label} ${option.id}`))
@@ -725,7 +725,7 @@ export default function CreationSkillEditor({ source, initialSkill, onClose, onS
         agents: [],
         skills: [],
         tools: [],
-        retainWebpageScreenshot: true,
+        retainWebpageScreenshot: false,
       },
     ],
   }))
@@ -1246,7 +1246,7 @@ export default function CreationSkillEditor({ source, initialSkill, onClose, onS
                     <label>
                       <span>执行动作 <small>写明本步做什么与产出；输入 @ 提及要调用的能力</small></span>
                       <div className="creation-skill-mention-anchor">
-                        <MentionHighlightTextarea mentionLabels={mentionHighlightLabels} rows={3} maxLength={500} aria-label={`执行步骤 ${index + 1} 执行动作`} placeholder="例如：用 @行业调研 Agent 和 @互联网检索 Tool 收集行业背景、竞品做法与关键数据，产出调研结论清单。" value={step.objective} onChange={event => handleStepFieldChange(index, 'objective', event.target.value, event.target)} onKeyDown={event => handleStepFieldKeyDown(event, step)} onCompositionStart={mentionImeGuard.onCompositionStart} onCompositionEnd={mentionImeGuard.onCompositionEnd} onBlur={() => { mentionImeGuard.onBlur(); setMention(null) }} />
+                        <MentionHighlightTextarea mentionLabels={mentionHighlightLabels} rows={3} maxLength={500} aria-label={`执行步骤 ${index + 1} 执行动作`} placeholder="例如：用 @行业调研 Agent 和 @互联网检索 收集行业背景、竞品做法与关键数据，产出调研结论清单。" value={step.objective} onChange={event => handleStepFieldChange(index, 'objective', event.target.value, event.target)} onKeyDown={event => handleStepFieldKeyDown(event, step)} onCompositionStart={mentionImeGuard.onCompositionStart} onCompositionEnd={mentionImeGuard.onCompositionEnd} onBlur={() => { mentionImeGuard.onBlur(); setMention(null) }} />
                         {renderMentionPicker(step, index, 'objective')}
                       </div>
                     </label>
@@ -1264,7 +1264,7 @@ export default function CreationSkillEditor({ source, initialSkill, onClose, onS
                             )),
                           }))}
                         />
-                        <span>创作时保留网页证据截图到文档上</span>
+                        <span>保留证据截图</span>
                       </label>
                     )}
                   </article>

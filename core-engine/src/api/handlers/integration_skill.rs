@@ -15,7 +15,7 @@ use crate::{
     integration::{
         execute_integration_skill, integration_skill_bundle, integration_skill_catalog,
         integration_skill_detail, integration_skill_file, list_runs, run_input_summary,
-        validate_run_request, RunIntegrationSkillRequest,
+        validate_run_request, workbuddy_skill_zip, RunIntegrationSkillRequest,
     },
 };
 
@@ -79,6 +79,12 @@ pub async fn download_integration_skill_file(
 pub async fn download_integration_skill_bundle(
     Path(skill_id): Path<String>,
 ) -> Result<Response, ApiError> {
+    if skill_id == "workbuddy" {
+        let bytes = workbuddy_skill_zip().map_err(|error| {
+            ApiError::Internal(format!("生成 WorkBuddy Skill 包失败: {}", error.message))
+        })?;
+        return download_response("application/zip", "memorybread-retrieval.zip", bytes);
+    }
     let bundle = integration_skill_bundle(&skill_id)
         .ok_or_else(|| ApiError::NotFound("集成 Skill 不存在".to_string()))?;
     let bytes = serde_json::to_vec_pretty(&bundle)

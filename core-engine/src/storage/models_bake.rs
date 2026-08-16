@@ -144,6 +144,12 @@ pub struct NewTimeline {
     pub time_range_start: Option<i64>,
     pub time_range_end: Option<i64>,
     pub key_timestamps: Option<String>,
+    #[serde(default)]
+    pub work_item: Option<String>,
+    #[serde(default)]
+    pub work_status: Option<String>,
+    #[serde(default)]
+    pub work_progress: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -278,6 +284,15 @@ pub struct BakeMemorySourceRecord {
     /// 不按页面开头去重，避免丢失操作前后状态。
     #[serde(default)]
     pub action_trace: Vec<BakeActionTraceRecord>,
+    /// Timeline extraction has already paid the model cost for these fields. Keep
+    /// them alongside the source record so bake can reuse them without another
+    /// inference stage.
+    #[serde(default)]
+    pub work_item: Option<String>,
+    #[serde(default)]
+    pub work_status: Option<String>,
+    #[serde(default)]
+    pub work_progress: Option<String>,
     /// 0 表示 fresh lane；大于 0 表示独立于 watermark 的 retry lane。
     #[serde(default)]
     pub retry_failure_count: i64,
@@ -299,6 +314,22 @@ pub struct BakeActionTraceRecord {
     pub visible_text: Option<String>,
     pub input_text: Option<String>,
     pub audio_text: Option<String>,
+    /// 采集时真正获得焦点的辅助功能控件。相比整页可见文字，它更接近用户实际
+    /// 点击或输入的目标；字段缺失时保持兼容，不据此猜测控件。
+    #[serde(default)]
+    pub ax_focused_role: Option<String>,
+    #[serde(default)]
+    pub ax_focused_id: Option<String>,
+    /// 相对上一帧可观察到的状态变化摘要，只用于本地 bake 提炼。
+    #[serde(default)]
+    pub state_delta: Option<String>,
+    /// interaction / input / navigation / state_change / context。
+    #[serde(default)]
+    pub evidence_kind: Option<String>,
+    /// 是否构成 SOP 的独立动作或结果证据节点。effective_capture_count 只统计
+    /// 该字段为 true 的节点，不再等同于 action_trace 的原始帧数。
+    #[serde(default)]
+    pub operation_evidence: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -404,6 +435,7 @@ pub struct BakeCandidateAuditRecord {
     pub effective_capture_count: i64,
     pub sop_eligible: bool,
     pub sop_eligibility_reason: Option<String>,
+    pub sop_evidence_mode: Option<String>,
     pub primary_type: Option<String>,
     pub classification_reason: Option<String>,
     pub sop_model_accepted: Option<bool>,
@@ -424,6 +456,7 @@ pub struct NewBakeCandidateAudit {
     pub effective_capture_count: i64,
     pub sop_eligible: bool,
     pub sop_eligibility_reason: Option<String>,
+    pub sop_evidence_mode: Option<String>,
     pub persist_status: String,
     pub persist_reason: Option<String>,
 }

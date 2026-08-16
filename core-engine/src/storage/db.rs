@@ -336,6 +336,30 @@ static MIGRATIONS: &[(&str, &str)] = &[
         "080_bake_candidate_audits",
         include_str!("migrations/080_bake_candidate_audits.sql"),
     ),
+    (
+        "081_allow_manual_bake_artifacts",
+        include_str!("migrations/081_allow_manual_bake_artifacts.sql"),
+    ),
+    (
+        "082_timeline_work_context",
+        include_str!("migrations/082_timeline_work_context.sql"),
+    ),
+    (
+        "083_requeue_semantic_sop_candidates",
+        include_str!("migrations/083_requeue_semantic_sop_candidates.sql"),
+    ),
+    (
+        "084_requeue_semantic_sop_prompt_rejects",
+        include_str!("migrations/084_requeue_semantic_sop_prompt_rejects.sql"),
+    ),
+    (
+        "085_memory_favorites",
+        include_str!("migrations/085_memory_favorites.sql"),
+    ),
+    (
+        "086_task_creation_link",
+        include_str!("migrations/086_task_creation_link.sql"),
+    ),
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -753,6 +777,13 @@ impl StorageManager {
             )?;
             Self::add_column_if_missing(conn, "creation_history", "document_patch_json", "TEXT")?;
             Self::add_column_if_missing(conn, "creation_history", "evidence_json", "TEXT")?;
+            Self::add_column_if_missing(
+                conn,
+                "creation_history",
+                "source_kind",
+                "TEXT NOT NULL DEFAULT 'creation'",
+            )?;
+            Self::add_column_if_missing(conn, "creation_history", "source_ref_id", "INTEGER")?;
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_creation_history_session
                  ON creation_history(session_id, created_at DESC)",
@@ -769,6 +800,21 @@ impl StorageManager {
         // scheduled_tasks，因此仅在其基础表存在时执行兼容修复。
         if self.table_exists(conn, "scheduled_tasks")? {
             conn.execute_batch(include_str!("migrations/039_create_diaries.sql"))?;
+            Self::add_column_if_missing(
+                conn,
+                "scheduled_tasks",
+                "executor_kind",
+                "TEXT NOT NULL DEFAULT 'consult'",
+            )?;
+        }
+
+        if self.table_exists(conn, "task_executions")? {
+            Self::add_column_if_missing(conn, "task_executions", "creation_history_id", "INTEGER")?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_task_executions_creation_history
+                 ON task_executions(creation_history_id)",
+                [],
+            )?;
         }
 
         Ok(())
@@ -1512,6 +1558,191 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(retry_ids, vec![2]);
+    }
+
+    #[test]
+    fn semantic_sop_requeue_migration_targets_only_recent_audited_workflows() {
+        let conn = Connection::open_in_memory().unwrap();
+        let now = current_ts_ms();
+        conn.execute_batch(
+            "CREATE TABLE timelines (
+                id INTEGER PRIMARY KEY,
+                category TEXT,
+                activity_type TEXT,
+                summary TEXT,
+                overview TEXT,
+                details TEXT,
+                updated_at TEXT,
+                updated_at_ms INTEGER
+             );
+             CREATE TABLE captures (
+                id INTEGER PRIMARY KEY,
+                timeline_id INTEGER
+             );
+             CREATE TABLE bake_sops (
+                id INTEGER PRIMARY KEY,
+                timeline_id INTEGER
+             );
+             CREATE TABLE bake_retry_state (
+                timeline_id INTEGER PRIMARY KEY
+             );
+             CREATE TABLE bake_candidate_audits (
+                id INTEGER PRIMARY KEY,
+                timeline_id INTEGER NOT NULL,
+                source_capture_count INTEGER NOT NULL,
+                sop_eligible INTEGER NOT NULL,
+                sop_eligibility_reason TEXT,
+                sop_model_accepted INTEGER,
+                persist_status TEXT NOT NULL DEFAULT 'queued',
+                created_at_ms INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO timelines VALUES (1, '代码', 'coding', '实现修复', NULL, '运行测试通过', NULL, ?1)",
+            [now - 60_000],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO timelines VALUES (2, '文档', 'reading', '实现说明', NULL, '验证文档内容', NULL, ?1)",
+            [now - 60_000],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO captures VALUES (10, 1);
+             INSERT INTO captures VALUES (11, 1);
+             INSERT INTO captures VALUES (20, 2);
+             INSERT INTO captures VALUES (21, 2);
+             INSERT INTO bake_retry_state VALUES (1);
+             INSERT INTO bake_retry_state VALUES (2);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO bake_candidate_audits
+             (id, timeline_id, source_capture_count, sop_eligible, sop_eligibility_reason, created_at_ms)
+             VALUES (1, 1, 2, 0, 'insufficient_operation_evidence_nodes', ?1)",
+            [now - 30_000],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO bake_candidate_audits
+             (id, timeline_id, source_capture_count, sop_eligible, sop_eligibility_reason, created_at_ms)
+             VALUES (2, 2, 2, 0, 'insufficient_operation_evidence_nodes', ?1)",
+            [now - 30_000],
+        )
+        .unwrap();
+
+        conn.execute_batch(include_str!("migrations/082_timeline_work_context.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!(
+            "migrations/083_requeue_semantic_sop_candidates.sql"
+        ))
+        .unwrap();
+
+        let coding_updated: i64 = conn
+            .query_row(
+                "SELECT updated_at_ms FROM timelines WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let reading_updated: i64 = conn
+            .query_row(
+                "SELECT updated_at_ms FROM timelines WHERE id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(coding_updated > now - 60_000);
+        assert_eq!(reading_updated, now - 60_000);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM bake_retry_state WHERE timeline_id = 1",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM bake_retry_state WHERE timeline_id = 2",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn semantic_sop_prompt_requeue_targets_only_latest_model_rejects() {
+        let conn = Connection::open_in_memory().unwrap();
+        let now = current_ts_ms();
+        conn.execute_batch(
+            "CREATE TABLE timelines (
+                id INTEGER PRIMARY KEY,
+                updated_at TEXT,
+                updated_at_ms INTEGER
+             );
+             CREATE TABLE bake_sops (
+                id INTEGER PRIMARY KEY,
+                timeline_id INTEGER
+             );
+             CREATE TABLE bake_retry_state (
+                timeline_id INTEGER PRIMARY KEY
+             );
+             CREATE TABLE bake_candidate_audits (
+                id INTEGER PRIMARY KEY,
+                timeline_id INTEGER NOT NULL,
+                sop_eligible INTEGER NOT NULL,
+                sop_evidence_mode TEXT,
+                sop_model_accepted INTEGER,
+                persist_status TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO timelines VALUES (1, NULL, ?1), (2, NULL, ?1), (3, NULL, ?1)",
+            [now - 60_000],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO bake_retry_state VALUES (1), (2), (3);
+             INSERT INTO bake_sops VALUES (1, 3);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO bake_candidate_audits VALUES
+             (1, 1, 1, 'semantic_workflow', 0, 'rejected', ?1),
+             (2, 2, 1, 'direct_interaction', 0, 'rejected', ?1),
+             (3, 3, 1, 'semantic_workflow', 0, 'rejected', ?1)",
+            [now - 30_000],
+        )
+        .unwrap();
+
+        conn.execute_batch(include_str!(
+            "migrations/084_requeue_semantic_sop_prompt_rejects.sql"
+        ))
+        .unwrap();
+
+        let updated_ids: Vec<i64> = conn
+            .prepare("SELECT id FROM timelines WHERE updated_at_ms > ?1 ORDER BY id")
+            .unwrap()
+            .query_map([now - 60_000], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(updated_ids, vec![1]);
+        let retry_ids: Vec<i64> = conn
+            .prepare("SELECT timeline_id FROM bake_retry_state ORDER BY timeline_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(retry_ids, vec![2, 3]);
     }
 
     #[test]

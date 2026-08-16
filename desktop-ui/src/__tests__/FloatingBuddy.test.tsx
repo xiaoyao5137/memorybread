@@ -126,6 +126,37 @@ describe('FloatingBuddy', () => {
     expect(screen.queryByTestId('messages-btn')).not.toBeInTheDocument()
   })
 
+  it('支持折叠左侧菜单并持久化选择', () => {
+    const values = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => values.set(key, value)),
+      removeItem: vi.fn((key: string) => values.delete(key)),
+      clear: vi.fn(() => values.clear()),
+    })
+
+    const { unmount } = render(<FloatingBuddy />)
+    const sidebar = screen.getByTestId('floating-buddy')
+    const accountEntry = screen.getByTestId('account-entry')
+    const collapseButton = screen.getByRole('button', { name: '折叠左侧菜单' })
+
+    expect(collapseButton).toHaveAttribute('aria-expanded', 'true')
+    expect(accountEntry.querySelector('.buddy-account-entry__identity')).toBeInTheDocument()
+    fireEvent.click(collapseButton)
+
+    expect(sidebar).toHaveAttribute('data-collapsed', 'true')
+    expect(screen.getByRole('button', { name: '展开左侧菜单' })).toHaveAttribute('aria-expanded', 'false')
+    expect(accountEntry.querySelector('.buddy-account-entry__identity')).toBeInTheDocument()
+    expect(localStorage.setItem).toHaveBeenCalledWith('memory-bread_sidebar_collapsed', 'true')
+    expect(screen.getByTestId('creation-btn')).toHaveAttribute('title', '创作')
+
+    unmount()
+    render(<FloatingBuddy />)
+    expect(screen.getByTestId('floating-buddy')).toHaveAttribute('data-collapsed', 'true')
+    expect(screen.getByRole('button', { name: '展开左侧菜单' })).toBeInTheDocument()
+    vi.unstubAllGlobals()
+  })
+
   it('在左下角显示可直接触发的更新入口', () => {
     const onSoftwareUpdateClick = vi.fn()
     const softwareUpdate: SoftwareUpdateCheck = {

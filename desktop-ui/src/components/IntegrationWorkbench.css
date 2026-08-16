@@ -12,8 +12,6 @@
   font-size: 11px;
 }
 
-.integration-skill-card { min-height: 286px; }
-
 .integration-skill-card__runtime {
   display: flex;
   flex-wrap: wrap;
@@ -41,10 +39,22 @@
 .integration-skill-card__runtime > span.is-failed { color: #a63f35; }
 
 .integration-skill-card__actions {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
   gap: 6px;
   margin-top: 11px;
+}
+
+.integration-skill-card__actions button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* 主操作（执行）存在时拉伸占满剩余宽度；纯导出 Skill 卡片没有主操作时不拉伸任何按钮。 */
+.integration-skill-card__actions button.is-primary {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .integration-skill-card__actions button,

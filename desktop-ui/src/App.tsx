@@ -560,16 +560,16 @@ const App: React.FC = () => {
       const parsedTargetId = parseReferenceId(docKey)
       const targetId = String(documentId ?? artifactId ?? parsedTargetId ?? '')
       const hasTargetId = targetId.trim().length > 0
-      const setRagBackTarget = (enabled: boolean) => {
+      const setReferenceBackTarget = (enabled: boolean) => {
         if (enabled) {
-          pushBakeNavigationTarget({ windowMode: 'rag' })
+          pushBakeNavigationTarget({ windowMode: useAppStore.getState().windowMode })
         } else {
           clearBakeNavigationStack()
         }
       }
 
       if (type === 'document') {
-        setRagBackTarget(hasTargetId)
+        setReferenceBackTarget(hasTargetId)
         setBakeTab('templates')
         setBakeTemplateOffset(0)
         setBakeTemplateLimit(100)
@@ -579,7 +579,7 @@ const App: React.FC = () => {
         return
       }
       if (type === 'bake_knowledge') {
-        setRagBackTarget(hasTargetId)
+        setReferenceBackTarget(hasTargetId)
         setBakeTab('knowledge')
         setBakeKnowledgeOffset(0)
         setBakeKnowledgeLimit(1000)
@@ -589,7 +589,7 @@ const App: React.FC = () => {
         return
       }
       if (type === 'operation' || type === 'action') {
-        setRagBackTarget(hasTargetId)
+        setReferenceBackTarget(hasTargetId)
         setBakeTab('sop')
         setBakeSopOffset(0)
         setBakeSopLimit(1000)
@@ -599,7 +599,7 @@ const App: React.FC = () => {
         return
       }
       if (type === 'knowledge' && knowledgeId) {
-        pushBakeNavigationTarget({ windowMode: 'rag' })
+        pushBakeNavigationTarget({ windowMode: useAppStore.getState().windowMode })
         setWindowMode('knowledge')
         setRepositoryTab('memory')
         setRepositoryMemoryFocusId(String(knowledgeId))
@@ -607,7 +607,7 @@ const App: React.FC = () => {
         return
       }
       if (captureId) {
-        pushBakeNavigationTarget({ windowMode: 'rag' })
+        pushBakeNavigationTarget({ windowMode: useAppStore.getState().windowMode })
         setWindowMode('knowledge')
         setRepositoryTab('capture')
         setRepositoryCaptureSourceCaptureId(String(captureId))

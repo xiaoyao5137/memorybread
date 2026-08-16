@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{sse::Event, IntoResponse, Response, Sse},
     Json,
@@ -883,6 +883,11 @@ pub struct SaveHistoryRequest {
     pub document_patch: Option<serde_json::Value>,
     #[serde(default)]
     pub evidence: Vec<serde_json::Value>,
+    /// 记录来源：creation（缺省）/ scheduled_task。
+    #[serde(default)]
+    pub source_kind: Option<String>,
+    #[serde(default)]
+    pub source_ref_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1075,6 +1080,14 @@ pub async fn save_history(
                 history_id,
                 &evidence_ids,
             )?;
+            if let Some(source_kind) = normalize_history_source_kind(req.source_kind.as_deref()) {
+                crate::storage::repo::creation_history::set_source(
+                    conn,
+                    history_id,
+                    source_kind,
+                    req.source_ref_id,
+                )?;
+            }
             Ok(history_id)
         })
         .map_err(|e| {
@@ -1140,6 +1153,35 @@ pub async fn list_history(
     } else {
         // 保留旧客户端依赖的数组响应；新页面显式传 paged=true 获取分页元数据。
         Ok(Json(histories).into_response())
+    }
+}
+
+/// 归一化创作记录来源，非法值回退默认 creation。
+fn normalize_history_source_kind(value: Option<&str>) -> Option<&'static str> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty())?;
+    match value {
+        "scheduled_task" => Some("scheduled_task"),
+        _ => Some("creation"),
+    }
+}
+
+/// GET /api/creation/history/:id - 获取单条创作记录（供任务页跳转恢复）
+pub async fn get_history(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Response, (StatusCode, String)> {
+    let history = state
+        .storage
+        .with_conn(|conn| {
+            crate::storage::repo::creation_history::get_by_id(conn, id).map_err(Into::into)
+        })
+        .map_err(|e| {
+            error!("查询创作记录失败: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        })?;
+    match history {
+        Some(history) => Ok(Json(history).into_response()),
+        None => Err((StatusCode::NOT_FOUND, "创作记录不存在".to_string())),
     }
 }
 

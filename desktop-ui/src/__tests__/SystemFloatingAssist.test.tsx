@@ -45,7 +45,7 @@ vi.mock('../utils/breadcrumbApi', () => ({
 const mockedInvoke = vi.mocked(invoke)
 const mockedListen = vi.mocked(listen)
 const mockedRunRagQueryStream = vi.mocked(runRagQueryStream)
-const assistButton = () => screen.getByRole('button', { name: '识别当前屏幕并咨询记忆面包' })
+const assistButton = () => screen.getByRole('button', { name: /^单击：/ })
 const AUTO_TASK_SCAN_INITIAL_DELAY_MS = 10_000
 const AUTO_TASK_SCAN_INTERVAL_MS = 120_000
 const taskOcrResult = {
@@ -310,6 +310,9 @@ describe('SystemFloatingAssist', () => {
     render(<SystemFloatingAssist />)
     const button = assistButton()
 
+    expect(button).toHaveAttribute('title', '单击：打开悬浮球咨询框；双击：打开主面板')
+    expect(button).not.toHaveAttribute('title', expect.stringContaining('当屏任务识别'))
+
     fireEvent.click(button)
     act(() => {
       vi.advanceTimersByTime(220)
@@ -353,6 +356,8 @@ describe('SystemFloatingAssist', () => {
     }))
     render(<SystemFloatingAssist />)
     const button = assistButton()
+
+    expect(button).toHaveAttribute('title', '单击：无事件；双击：触发当屏任务识别')
 
     fireEvent.click(button)
     act(() => {
@@ -486,6 +491,60 @@ describe('SystemFloatingAssist', () => {
 
     expect(screen.getByText('这是完整答案')).toBeInTheDocument()
     expect(screen.getByText('推理耗时 1.2 秒')).toBeInTheDocument()
+  })
+
+  it('流式召回后展开的参考资料在推理完成时保持展开', async () => {
+    let finishStream: ((value: any) => void) | null = null
+    const streamedReferences = Array.from({ length: 6 }, (_, index) => ({
+      capture_id: index + 1,
+      doc_key: `document:${index + 1}`,
+      title: `流式资料 ${index + 1}`,
+      text: `参考内容 ${index + 1}`,
+      score: 1 - index / 10,
+      source: 'document',
+      source_type: 'document',
+    }))
+    mockedRunRagQueryStream.mockImplementation((...args: any[]) => {
+      const callbacks = args[7]
+      callbacks.onStatus?.({ stage: 'retrieving', message: '正在召回相关资料', progress: 42 })
+      callbacks.onReferences?.(streamedReferences)
+      callbacks.onStatus?.({ stage: 'answering', message: '正在生成答案', progress: 58 })
+      return new Promise(resolve => {
+        finishStream = resolve
+      }) as any
+    })
+
+    render(<SystemFloatingAssist />)
+    fireEvent.click(assistButton())
+    act(() => {
+      vi.advanceTimersByTime(220)
+    })
+    const textarea = screen.getByPlaceholderText('输入你的指令，直接向记忆面包咨询')
+    fireEvent.change(textarea, { target: { value: '分析这份资料' } })
+    await act(async () => {
+      fireEvent.submit(textarea.closest('form')!)
+      await flushMicrotasks()
+    })
+
+    expect(screen.getByText('流式资料 5')).toBeInTheDocument()
+    expect(screen.queryByText('流式资料 6')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '展开更多（1）' }))
+    expect(screen.getByText('流式资料 6')).toBeInTheDocument()
+
+    await act(async () => {
+      finishStream?.({
+        answer: '这是完整答案',
+        contexts: streamedReferences.map(item => ({ ...item })),
+        model: 'test-model',
+        inference_elapsed_ms: 1234,
+      })
+      await flushMicrotasks()
+    })
+
+    expect(screen.getByText('这是完整答案')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '收起' })).toBeInTheDocument()
+    expect(screen.getByText('流式资料 6')).toBeInTheDocument()
   })
 
   it('阶段状态等待期间持续推进进度，不停在服务端建议值', async () => {

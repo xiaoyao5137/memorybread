@@ -38,6 +38,8 @@ pub struct DataSnapshotRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataSourceRecord {
     pub id: i64,
+    #[serde(default)]
+    pub is_favorite: bool,
     pub title: String,
     pub source_kind: String,
     pub source_url: Option<String>,

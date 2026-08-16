@@ -62,7 +62,7 @@ Agent 计划中的每次 Tool 调用都产生 `creation.agent.v1` 事件：
 - 数据检索：`data_results`，包含时效、`refresh_required` 和 `can_use`
 - 网页刷新：`webpage_scrapes`，正文只留在本轮内部环境，事件仅返回数量和状态
 
-数据型文档没有稳定流水线：初始证据探针可包含 `data_search`；报表 URL 与其他来源统一参加 Top-K，不预留名额。Top-K 内的报表在本轮创作中通过通用浏览器窗口截图重新取证，OCR 与同次 DOM/表格硬校验通过后才可进入数据分析，并把截图证据卡插到使用该数据的段落或表格下方。数据、文档、知识、操作和互联网结果不因模块类型获得额外权重；刷新或校验失败不终止创作，但未验证的报表值不得当作当前事实。详细数据契约见 `shared/data-memory/`，完整设计与验收见《数据记忆与实时报表采集产品技术规范》。
+数据型文档没有稳定流水线：初始证据探针可包含 `data_search`；报表 URL 与其他来源统一参加 Top-K，不预留名额。Top-K 内的报表先通过后台标签静默读取 DOM/AX，`focus_policy=never`；页面未打开或目标指标不足时，在硬门禁下以 `allow_foreground_refresh=true`、`focus_policy=allow_once` 对该来源降级一次专用浏览器刷新。“保留证据截图”只控制是否在同一会话生成通用浏览器长截图，不控制即时取数。程序化校验通过的数据可以进入分析，截图 OCR 仅作补充核验；启用截图时才把证据卡插到实际使用该数据的段落或表格下方。数据、文档、知识、操作和互联网结果不因模块类型获得额外权重；刷新或校验失败不终止创作，但未验证的报表值不得当作当前事实。详细数据契约见 `shared/data-memory/`，完整设计与验收见《数据记忆与实时报表采集产品技术规范》。
 
 初稿质量问题使用同一 Harness 决策事件：匹配的已应用 Skill 通过 `activated_skills[]` 和 `skill.completed` 动态激活；章节细节需要指标支持时可以先追加 `data_search`，再根据 Tool 反馈追加 `data_analysis_agent`；图示问题在 PlantUML 已启用时先追加 `plantuml_diagram`。专项 Agent 不直接绕过 Harness 调用 Tool 或 Skill，避免形成不可审计的嵌套循环。
 

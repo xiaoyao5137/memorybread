@@ -390,12 +390,22 @@
 }
 
 .creation-agent-trace {
-  width: min(92%, 860px);
+  width: 100%;
+  min-width: 0;
   background: #fff;
 }
 
-.creation-agent-trace__toggle {
+.creation-agent-trace__header {
   width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.creation-agent-trace__toggle {
+  flex: 1;
+  min-width: 0;
   min-height: 36px;
   padding: 0 10px;
   border: 0;
@@ -406,6 +416,31 @@
   gap: 7px;
   cursor: pointer;
   text-align: left;
+}
+
+.creation-agent-trace__expand-all {
+  appearance: none;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 4px 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #806c5c;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.4;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.creation-agent-trace__expand-all:hover {
+  color: #a45d22;
+}
+
+.creation-agent-trace__expand-all:focus-visible {
+  outline: 2px solid rgba(164, 93, 34, .32);
+  outline-offset: 2px;
 }
 
 .creation-agent-trace__toggle span {
@@ -420,9 +455,18 @@
 }
 
 .creation-agent-trace__runs {
-  padding: 0 10px 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 0 0 10px 10px;
   display: grid;
   gap: 10px;
+  box-sizing: border-box;
+}
+
+.creation-agent-run,
+.creation-agent-run > div {
+  min-width: 0;
+  width: 100%;
 }
 
 .creation-agent-run > header {
@@ -450,9 +494,48 @@
 .creation-agent-event {
   min-width: 0;
   display: grid;
+  gap: 4px;
+}
+
+.creation-agent-event__row {
+  appearance: none;
+  margin: 0;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  min-width: 0;
+  display: grid;
   grid-template-columns: 24px minmax(0, 1fr);
-  align-items: start;
+  align-items: center;
   gap: 7px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.creation-agent-event__headline {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+/* 行标题的次级结果（召回数量、写回说明等）弱化为灰色小字 */
+.creation-agent-event__headline-sub {
+  color: #a4958a;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.creation-agent-event__chevron {
+  color: #9a8676;
+  display: grid;
+  place-items: center;
+}
+
+.creation-agent-event.is-collapsed .creation-agent-event__headline small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .creation-agent-event__icon {
@@ -549,6 +632,28 @@
   color: #b42318;
 }
 
+/* 已完成/未完成的动作行不再用图标方块，改成小圆点标记结果 */
+.creation-agent-event__icon.is-dot {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.creation-agent-event__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.creation-agent-event__dot.is-done {
+  background: #22a06b;
+}
+
+.creation-agent-event__dot.is-failed {
+  background: #d92d20;
+}
+
 .creation-agent-event > span:last-child {
   min-width: 0;
   display: grid;
@@ -564,6 +669,181 @@
 
 .creation-agent-event__updates {
   gap: 5px;
+  margin-left: 11px;
+  padding: 2px 0 2px 19px;
+  border-left: 1px solid #e8ded2;
+}
+
+/* 展开细节里的能力描述：弱化为一行灰色小字 */
+.creation-agent-event__capability {
+  color: #9a8676;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+/* 深度思考卡片：包裹意图理解、链路决策与反馈规划阶段 */
+.creation-trace-thinking {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.creation-trace-thinking__header {
+  appearance: none;
+  margin: 0;
+  width: 100%;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  display: grid;
+  grid-template-columns: auto auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.creation-trace-thinking.is-running .creation-trace-thinking__header {
+  background: transparent;
+}
+
+.creation-trace-thinking__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #c97935;
+  opacity: .45;
+}
+
+.creation-trace-thinking.is-running .creation-trace-thinking__dot {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .creation-trace-thinking.is-running .creation-trace-thinking__dot {
+    animation: creation-thinking-breathe 1.6s cubic-bezier(.4, 0, .2, 1) infinite;
+  }
+}
+
+@keyframes creation-thinking-breathe {
+  0%, 100% {
+    opacity: .3;
+    transform: scale(.8);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.12);
+  }
+}
+
+.creation-trace-thinking__title {
+  color: #785c45;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.creation-trace-thinking.is-running .creation-trace-thinking__title {
+  color: #a45d22;
+}
+
+/* 时长与阶段标签属于次级信息，统一置灰 */
+.creation-trace-thinking__meta {
+  color: #a4958a;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.creation-trace-thinking__reasoning {
+  min-width: 0;
+  color: #9a8676;
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.creation-trace-thinking__body {
+  margin-left: 4px;
+  padding: 4px 0 2px 15px;
+  border-left: 1px solid #e8ded2;
+  display: grid;
+  gap: 6px;
+}
+
+.creation-trace-thinking__reasoning-full {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  color: #76685e;
+  font-size: 10.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* 顶层执行阶段块：Skill 步骤或宏观计划步骤，作为三层结构的第一层 */
+.creation-trace-phase {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.creation-trace-phase__header {
+  appearance: none;
+  margin: 0;
+  width: 100%;
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  display: grid;
+  grid-template-columns: auto minmax(0, max-content) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.creation-trace-phase__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #c97935;
+}
+
+.creation-trace-phase__dot.is-done {
+  background: #22a06b;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .creation-trace-phase.is-running .creation-trace-phase__dot {
+    animation: creation-thinking-breathe 1.6s cubic-bezier(.4, 0, .2, 1) infinite;
+  }
+}
+
+.creation-trace-phase__title {
+  color: #44372e;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.creation-trace-phase.is-running .creation-trace-phase__title {
+  color: #a45d22;
+}
+
+.creation-trace-phase__meta {
+  color: #a4958a;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+/* 阶段展开区：竖线标识上一层与下一层的从属关系 */
+.creation-trace-phase__body {
+  margin-left: 3px;
+  padding: 2px 0 2px 15px;
+  border-left: 1px solid #e8ded2;
+  display: grid;
+  gap: 6px;
 }
 
 .creation-agent-event__update + .creation-agent-event__update {
@@ -635,6 +915,154 @@
   border-radius: 3px;
   outline: 2px solid rgba(164, 93, 34, .35);
   outline-offset: 2px;
+}
+
+.creation-reference-groups {
+  display: grid;
+  gap: 12px;
+}
+
+.creation-reference-group {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #e5d9ce;
+  border-radius: 10px;
+  background: #fff;
+  transition: border-color .18s ease, box-shadow .18s ease, background-color .18s ease;
+}
+
+.creation-reference-group:focus {
+  outline: none;
+}
+
+.creation-reference-group:focus-visible,
+.creation-reference-group.is-highlighted {
+  border-color: #bd7a43;
+  background: #fffaf3;
+  box-shadow: 0 0 0 3px rgba(164, 93, 34, .14);
+}
+
+.creation-reference-group__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 9px;
+}
+
+.creation-reference-group__header > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.creation-reference-group__header strong {
+  color: #3f2a1f;
+  font-size: 13px;
+}
+
+.creation-reference-group__header span,
+.creation-reference-group__header small {
+  color: #8b7564;
+  font-size: 10px;
+}
+
+.creation-reference-group__header small {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #f3ece5;
+}
+
+.creation-reference-group__query {
+  margin: 0 0 10px;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: #f7f3ef;
+  color: #75675d;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.creation-reference-group__items {
+  display: grid;
+  gap: 9px;
+}
+
+.creation-bottom-fullscreen-button {
+  margin-left: auto;
+  padding: 4px 9px;
+  border: 1px solid #e1d5ca;
+  border-radius: 6px;
+  background: #fffaf5;
+  color: #7b4c28;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.creation-bottom-fullscreen-button + button {
+  margin-left: 8px !important;
+}
+
+.creation-panel-fullscreen {
+  position: fixed !important;
+  inset: 16px !important;
+  z-index: 1200 !important;
+  width: auto !important;
+  height: auto !important;
+  max-height: none !important;
+  padding: 18px !important;
+  border: 1px solid #ded3c8 !important;
+  border-radius: 12px !important;
+  background: #f8f9fb !important;
+  box-shadow: 0 24px 70px rgba(35, 24, 16, .24) !important;
+  overflow: auto !important;
+}
+
+.creation-document-section.creation-panel-fullscreen {
+  display: block;
+}
+
+.creation-document-section.creation-panel-fullscreen .creation-document-card {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.creation-panel-fullscreen__header {
+  position: sticky;
+  top: -18px;
+  z-index: 3;
+  min-height: 48px;
+  margin: -18px -18px 16px;
+  padding: 0 18px;
+  border-bottom: 1px solid #e1d5ca;
+  background: rgba(255, 255, 255, .96);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.creation-panel-fullscreen__header strong {
+  color: #35271d;
+  font-size: 15px;
+}
+
+.creation-panel-fullscreen__header button {
+  padding: 6px 10px;
+  border: 1px solid #dccdbf;
+  border-radius: 7px;
+  background: #fff;
+  color: #704625;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
 }
 
 .creation-data-references {
@@ -1239,7 +1667,7 @@ h6.creation-latest-change {
     display: none;
   }
 
-  .creation-top-tabs > button {
+  .creation-top-tabs > button:not(.tutorial-link) {
     padding-inline: 10px !important;
     white-space: nowrap;
   }

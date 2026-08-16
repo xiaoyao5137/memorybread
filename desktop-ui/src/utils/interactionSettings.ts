@@ -56,6 +56,13 @@ export const FLOATING_BALL_ACTIONS: ReadonlyArray<{
   { id: 'recognize_screen_task', label: '触发当屏任务识别' },
 ]
 
+const floatingBallActionLabels = new Map<FloatingBallAction, string>(
+  FLOATING_BALL_ACTIONS.map(item => [item.id, item.label]),
+)
+
+export const floatingBallActionHint = (settings: InteractionSettings['floatingBall']): string =>
+  `单击：${floatingBallActionLabels.get(settings.singleClick)}；双击：${floatingBallActionLabels.get(settings.doubleClick)}`
+
 const shortcutActionIds = new Set<ShortcutAction>(SHORTCUT_ACTIONS.map(item => item.id))
 const floatingBallActionIds = new Set<FloatingBallAction>(FLOATING_BALL_ACTIONS.map(item => item.id))
 

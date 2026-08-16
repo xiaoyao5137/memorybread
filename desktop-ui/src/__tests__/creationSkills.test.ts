@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   analyzeCreationSkill,
+  agentSkillZipBytes,
   buildCreationSkillInstruction,
   categoryPathFor,
   codexSkillPackageFiles,
@@ -10,6 +11,7 @@ import {
   DEFAULT_CREATION_SKILL_SECTION_HEADINGS,
   fetchCreationSkillCategories,
   importCodexSkillPackage,
+  importAgentSkillZip,
   listLocalCreationSkills,
   marketCreationSkillToLocalInput,
   matchCreationSkills,
@@ -92,7 +94,11 @@ Read the notes, then list owners and due dates.`)
     })
     const markdown = skillFileText(files[0])
 
-    expect(files.map(file => file.path)).toEqual(['SKILL.md'])
+    expect(files.map(file => file.path)).toEqual([
+      'SKILL.md',
+      'references/memorybread-creation.json',
+      'references/example.md',
+    ])
     expect(markdown).toContain('name: local-skill-1')
     expect(markdown).toContain('description:')
     expect(markdown).toContain('帮助架构师把目标、约束和证据组织成可评审的架构设计文档')
@@ -102,8 +108,25 @@ Read the notes, then list owners and due dates.`)
     expect(markdown).toContain('Agent：solution_design_agent')
     expect(markdown).toContain('Tool：plantuml_diagram')
     expect(markdown).not.toContain('## 章节组织骨架')
-    expect(markdown).toContain('## 话术表达风格')
-    expect(markdown).toContain('## 特色亮点：定义先行的概念建立')
+    expect(markdown).toContain('## References')
+    expect(markdown).toContain('references/memorybread-creation.json')
+    expect(skillFileText(files[1])).toContain('"title": "定义先行的概念建立"')
+  })
+
+  it('用 ZIP 导出再导入时保留标准目录', async () => {
+    const files = codexSkillPackageFiles({ ...localSkill, id: 9 })
+    const archive = new File([agentSkillZipBytes(localSkill.title, files)], 'portable-skill.zip', {
+      type: 'application/zip',
+    })
+
+    const imported = await importAgentSkillZip(archive)
+
+    expect(imported.sourceKind).toBe('imported')
+    expect(imported.packageFiles?.map(file => file.path).sort()).toEqual(files.map(file => file.path).sort())
+    expect(skillFileText(imported.packageFiles![0])).toContain('name: local-skill-1')
+    expect(imported.skillDescription).toEqual(localSkill.skillDescription)
+    expect(imported.textStyle).toBe(localSkill.textStyle)
+    expect(imported.exampleDocument).toBe(localSkill.exampleDocument)
   })
 
   it('拒绝目录名与 Skill name 不一致的包', async () => {
@@ -713,13 +736,18 @@ describe('技能本地生成与类目容错', () => {
     expect(matches[0].reason).toBe('automatic')
     expect(instruction).toContain('适用场景与目标：')
     expect(instruction).toContain('互联网 / 企业服务 / 架构师 / 技术架构设计文档')
-    expect(instruction).toContain('完全脱离源文档的 few-shot 示例文档')
-    expect(instruction).toContain('标题设计风格：')
-    expect(instruction).toContain('行文设计思路：')
-    expect(instruction).toContain('图片生成方式：')
-    expect(instruction).toContain('话术表达风格：')
-    expect(instruction).toContain('特色亮点｜定义先行的概念建立')
-    expect(instruction).toContain('复刻指引：对象首次出现时先给通俗解释')
+    expect(instruction).toContain('Agent Skills 目录内容')
+    expect(instruction).not.toContain('[技能文件：references/example.md]')
+    expect(instruction).toContain('references/memorybread-creation.json')
+    expect(instruction).toContain('execution_steps 是唯一的执行流程和一级章节白名单')
+    expect(instruction).toContain('不得跳步、调换步骤或合并不同步骤的数据与表格')
+    expect(instruction).toContain('不得添加 Skill 未声明的结论、重点进展、风险阻塞、后续计划')
+    expect(instruction).toContain('标题设计风格：总体架构设计；关键链路设计')
+    expect(instruction).toContain(`行文设计思路：${installedSkill.textStyle}`)
+    expect(instruction).toContain('"diagram_style"')
+    expect(instruction).toContain('"writing_guidelines"')
+    expect(instruction).toContain('"title": "定义先行的概念建立"')
+    expect(instruction).toContain('"guidance": "对象首次出现时先给通俗解释')
     expect(instruction).not.toContain('章节组织骨架：')
     expect(instruction).not.toContain('章节推进示例：')
     expect(instruction).not.toContain('标题如何传递重点')
@@ -748,6 +776,67 @@ describe('技能本地生成与类目容错', () => {
 
     expect(matches).toHaveLength(1)
     expect(matches[0]).toMatchObject({ reason: 'automatic', skill: { id: 71 } })
+  })
+
+  it('显式 @ 一个 Skill 时不再叠加名称相近的自动匹配模板', () => {
+    const primary: LocalCreationSkill = {
+      ...localSkill,
+      id: 81,
+      title: 'GPU成本优化周报模板',
+      summary: '按四个指定步骤生成 GPU 成本优化周报。',
+      installed: true,
+      createdAt: 1,
+      updatedAt: 3,
+    }
+    const genericWeekly: LocalCreationSkill = {
+      ...localSkill,
+      id: 82,
+      title: '通用工作周报模板',
+      summary: '生成包含进展、风险和下周计划的工作周报。',
+      installed: true,
+      createdAt: 1,
+      updatedAt: 2,
+    }
+    const stageUpdate: LocalCreationSkill = {
+      ...localSkill,
+      id: 83,
+      title: '项目阶段汇报模板',
+      summary: '生成项目阶段进展汇报。',
+      installed: true,
+      createdAt: 1,
+      updatedAt: 1,
+    }
+
+    const matches = matchCreationSkills(
+      '请使用@GPU成本优化周报模板 创作下本周的周报',
+      [primary, genericWeekly, stageUpdate],
+    )
+
+    expect(matches.map(match => match.skill.id)).toEqual([81])
+    expect(matches[0].reason).toBe('mentioned')
+  })
+
+  it('没有 @ 选择时只采用得分最高的一个主 Skill', () => {
+    const first: LocalCreationSkill = {
+      ...localSkill,
+      id: 84,
+      title: '团队工作周报',
+      summary: '整理团队周报。',
+      installed: true,
+      createdAt: 1,
+      updatedAt: 3,
+    }
+    const second: LocalCreationSkill = {
+      ...first,
+      id: 85,
+      title: '通用工作周报',
+      updatedAt: 2,
+    }
+
+    const matches = matchCreationSkills('整理一份团队工作周报', [first, second])
+
+    expect(matches).toHaveLength(1)
+    expect(matches[0].skill.id).toBe(84)
   })
 
   it('把执行步骤引用的已安装 Skill 一并加入本轮调用', () => {
@@ -833,6 +922,11 @@ describe('技能本地生成与类目容错', () => {
     expect(skills[0].commonTitles).toEqual(['结论先行'])
     expect(skills[0].fieldExamples.commonTitles).toContain('项目复盘')
     expect(skills[0].sectionHeadings.commonTitles).toBe('标题设计风格')
+    expect(skills[0].packageFiles?.map(file => file.path)).toEqual([
+      'SKILL.md',
+      'references/memorybread-creation.json',
+      'references/example.md',
+    ])
   })
 
   it('读取旧本地记录时把 Python 字典字符串还原为可读规则', async () => {
@@ -892,7 +986,7 @@ describe('技能本地生成与类目容错', () => {
       'review-delivery',
     ])
     expect(skill.executionSteps[0].tools).toEqual(['memory_search'])
-    expect(skill.executionSteps.every(step => step.retainWebpageScreenshot === true)).toBe(true)
+    expect(skill.executionSteps.every(step => step.retainWebpageScreenshot === false)).toBe(true)
   })
 
   it('读取新版保存结果时保留空示例文档和用户修改的仿写示例', async () => {

@@ -31,39 +31,39 @@ describe('创作工具 Tab', () => {
     expect(screen.queryByText('随 MemoryBread 默认安装并开启，保证创作具备公开信息与本地记忆两类基础上下文。')).not.toBeInTheDocument()
     expect(screen.queryByText('安装后才会进入 Agent 的可用能力列表；关闭时保留安装，但本次创作不会调用。')).not.toBeInTheDocument()
     expect(screen.queryByRole('region', { name: '当前工具调用链' })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '互联网检索 Tool已安装' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: '互联网检索 Tool已开启' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: '记忆搜索 Tool已安装' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: '记忆搜索 Tool已开启' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: '数据检索 Tool已安装' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: '数据检索 Tool已开启' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: '网页爬取 Tool已安装' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: '网页爬取 Tool已开启' })).toBeDisabled()
-    expect(screen.getByRole('spinbutton', { name: '记忆搜索 Tool默认召回条数' })).toHaveValue(10)
-    expect(screen.getByRole('spinbutton', { name: '数据检索 Tool默认召回条数' })).toHaveValue(30)
+    expect(screen.getByRole('button', { name: '互联网检索已安装' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '互联网检索已开启' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '记忆搜索已安装' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '记忆搜索已开启' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '数据检索已安装' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '数据检索已开启' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '网页爬取已安装' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '网页爬取已开启' })).toBeDisabled()
+    expect(screen.getByRole('spinbutton', { name: '记忆搜索默认召回条数' })).toHaveValue(10)
+    expect(screen.getByRole('spinbutton', { name: '数据检索默认召回条数' })).toHaveValue(30)
 
     fireEvent.change(
-      screen.getByRole('spinbutton', { name: '记忆搜索 Tool默认召回条数' }),
+      screen.getByRole('spinbutton', { name: '记忆搜索默认召回条数' }),
       { target: { value: '14' } },
     )
     fireEvent.change(
-      screen.getByRole('spinbutton', { name: '数据检索 Tool默认召回条数' }),
+      screen.getByRole('spinbutton', { name: '数据检索默认召回条数' }),
       { target: { value: '42' } },
     )
 
-    const plantUmlCard = screen.getByText('PlantUML 画图 Tool').closest('article')
+    const plantUmlCard = screen.getByText('PlantUML 画图').closest('article')
     expect(plantUmlCard).not.toBeNull()
     const plantUmlActions = within(plantUmlCard as HTMLElement)
-    expect(plantUmlActions.getByRole('button', { name: '开启PlantUML 画图 Tool' })).toBeDisabled()
+    expect(plantUmlActions.getByRole('button', { name: '开启PlantUML 画图' })).toBeDisabled()
 
-    fireEvent.click(plantUmlActions.getByRole('button', { name: '安装PlantUML 画图 Tool' }))
-    expect(plantUmlActions.getByRole('button', { name: '卸载PlantUML 画图 Tool' })).toBeEnabled()
-    expect(plantUmlActions.getByRole('button', { name: '开启PlantUML 画图 Tool' })).toBeEnabled()
+    fireEvent.click(plantUmlActions.getByRole('button', { name: '安装PlantUML 画图' }))
+    expect(plantUmlActions.getByRole('button', { name: '卸载PlantUML 画图' })).toBeEnabled()
+    expect(plantUmlActions.getByRole('button', { name: '开启PlantUML 画图' })).toBeEnabled()
 
-    fireEvent.click(plantUmlActions.getByRole('button', { name: '开启PlantUML 画图 Tool' }))
-    expect(plantUmlActions.getByRole('button', { name: '关闭PlantUML 画图 Tool' })).toBeEnabled()
-    fireEvent.click(plantUmlActions.getByRole('button', { name: '关闭PlantUML 画图 Tool' }))
-    expect(plantUmlActions.getByRole('button', { name: '开启PlantUML 画图 Tool' })).toBeEnabled()
+    fireEvent.click(plantUmlActions.getByRole('button', { name: '开启PlantUML 画图' }))
+    expect(plantUmlActions.getByRole('button', { name: '关闭PlantUML 画图' })).toBeEnabled()
+    fireEvent.click(plantUmlActions.getByRole('button', { name: '关闭PlantUML 画图' }))
+    expect(plantUmlActions.getByRole('button', { name: '开启PlantUML 画图' })).toBeEnabled()
 
     await waitFor(() => {
       const stored = JSON.parse(window.localStorage.getItem(CREATION_TOOLS_STORAGE_KEY) || '[]')

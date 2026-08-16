@@ -33,6 +33,7 @@ describe('技能安装与使用', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals()
+    vi.restoreAllMocks()
   })
 
   it('安装后可通过 @ 选择，并把完整 Skill 配方注入生成请求', async () => {
@@ -99,15 +100,59 @@ describe('技能安装与使用', () => {
     expect(generationPayload.user_prompt).toContain('S#1 跨部门技术沟通会文档（用户明确选择）')
     expect(generationPayload.user_prompt).toContain(`适用场景与目标：${rawSkill.summary}`)
     expect(generationPayload.user_prompt).toContain('互联网 / 电商零售')
-    expect(generationPayload.user_prompt).toContain(
-      '标题设计风格：子标题优先使用“对象或章节角色＋技术方案动作”的短名词结构',
-    )
-    expect(generationPayload.user_prompt).toContain(
-      '图片生成方式：源记录没有保留图示证据，默认不生成图片',
-    )
+    expect(generationPayload.user_prompt).toContain('Agent Skills 目录内容')
+    expect(generationPayload.user_prompt).toContain('references/memorybread-creation.json')
+    expect(generationPayload.user_prompt).toContain('子标题优先使用“对象或章节角色＋技术方案动作”的短名词结构')
+    expect(generationPayload.user_prompt).toContain('源记录没有保留图示证据，默认不生成图片')
     expect(generationPayload.user_prompt).not.toContain(rawSkill.title_style)
     expect(generationPayload.user_prompt).not.toContain(rawSkill.diagram_style)
-    expect(generationPayload.user_prompt).toContain('完全脱离源文档的 few-shot 示例文档')
+    expect(generationPayload.user_prompt).not.toContain('[技能文件：references/example.md]')
+    expect(generationPayload.user_prompt).toContain('execution_steps 是唯一的执行流程和一级章节白名单')
+  })
+
+  it('可取消自动匹配的技能，且生成请求不再注入该技能', async () => {
+    let generationPayload: any = null
+    const installedSkill = { ...rawSkill, installed: true }
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills' && (!init?.method || init.method === 'GET')) {
+        return Response.json([installedSkill])
+      }
+      if (url.pathname === '/api/creation/history' && (!init?.method || init.method === 'GET')) {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.pathname === '/api/creation/references') {
+        return Response.json({ requirement: {}, references: [] })
+      }
+      if (url.pathname === '/api/creation/generate') {
+        generationPayload = JSON.parse(String(init?.body || '{}'))
+        return new Response('data: {"content":"# 已生成文档"}\n\ndata: {"done":true}\n\n', {
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      }
+      if (url.pathname === '/api/creation/history' && init?.method === 'POST') {
+        return Response.json({ id: 89 })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+
+    const textarea = await screen.findByPlaceholderText(/输入 @ 可选择已安装的技能/)
+    fireEvent.change(textarea, { target: { value: '请生成跨部门技术沟通会文档' } })
+
+    const matched = screen.getByLabelText('本次使用的技能')
+    expect(within(matched).getByText('自动匹配')).toBeInTheDocument()
+    expect(within(matched).getByRole('button', { name: `查看技能：${rawSkill.title}` })).toBeInTheDocument()
+
+    fireEvent.click(within(matched).getByRole('button', { name: `取消自动匹配：${rawSkill.title}` }))
+    expect(screen.queryByLabelText('本次使用的技能')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
+    await waitFor(() => expect(generationPayload).not.toBeNull())
+    expect(generationPayload.user_prompt).not.toContain('已安装并匹配的技能')
+    expect(generationPayload.user_prompt).not.toContain(`S#1 ${rawSkill.title}`)
+    expect(generationPayload.user_prompt).not.toContain(rawSkill.summary)
   })
 
   it('打开 @ 技能选择框后支持键盘选择，并可点击外部关闭', async () => {
@@ -247,7 +292,8 @@ describe('技能安装与使用', () => {
     fireEvent.click(await screen.findByRole('button', { name: '技能 (1)' }))
     fireEvent.click(screen.getByRole('button', { name: '取消发布' }))
 
-    await screen.findByText('已保存')
+    await screen.findByRole('button', { name: '发布' })
+    expect(screen.queryByText('已保存')).not.toBeInTheDocument()
     expect(marketPayload).toMatchObject({ published: false })
   })
 
@@ -297,6 +343,10 @@ describe('技能安装与使用', () => {
       },
       author: { id: 'author-1', nickname: '面包师小麦' },
       is_official: true,
+      package_name: 'architecture-review',
+      package_file_count: 1,
+      package_size_bytes: 140,
+      package_sha256: 'a'.repeat(64),
       published: true,
       published_at: '2026-07-23T08:00:00Z',
       updated_at: '2026-07-23T08:00:00Z',
@@ -351,6 +401,20 @@ describe('技能安装与使用', () => {
           },
         })
       }
+      if (url.pathname === `/v1/creation-skills/${marketSkill.id}`) {
+        const markdown = '---\nname: architecture-review\ndescription: Review architecture decisions and produce an actionable document.\n---\n\n# Workflow\n'
+        return Response.json({
+          data: {
+            ...marketSkill,
+            package_files: [{
+              path: 'SKILL.md',
+              media_type: 'text/markdown',
+              content_base64: btoa(markdown),
+              size_bytes: new TextEncoder().encode(markdown).byteLength,
+            }],
+          },
+        })
+      }
       if (url.pathname === '/api/creation/history') {
         return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
       }
@@ -378,7 +442,7 @@ describe('技能安装与使用', () => {
     fireEvent.click(within(marketCard).getByRole('button', { name: '查看详情' }))
     const detail = await screen.findByRole('dialog', { name: '通用架构评审文档' })
     expect(within(detail).getByText('面包师小麦')).toBeInTheDocument()
-    expect(within(detail).getByTitle('SKILL.md')).toBeInTheDocument()
+    expect(await within(detail).findByTitle('SKILL.md')).toBeInTheDocument()
     fireEvent.click(within(detail).getByRole('button', { name: '下载 SKILL.md' }))
     expect(createObjectUrl).toHaveBeenCalledOnce()
     expect(downloadClick).toHaveBeenCalledOnce()
@@ -417,7 +481,66 @@ describe('技能安装与使用', () => {
     expect(within(editor).getByText(/手工新建从空白开始/)).toBeInTheDocument()
   })
 
-  it('我的技能卡片不显示手工新建来源标签', async () => {
+  it('用一个上传入口同时提供文件夹和 ZIP 选择', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([rawSkill])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /技能/ }))
+    const folderInput = screen.getByLabelText('选择 Skill 源文件夹') as HTMLInputElement
+    const zipInput = screen.getByLabelText('选择 Skill 源文件 ZIP') as HTMLInputElement
+    const folderClick = vi.spyOn(folderInput, 'click')
+    const zipClick = vi.spyOn(zipInput, 'click')
+
+    expect(folderInput).toHaveAttribute('webkitdirectory')
+    expect(zipInput).toHaveAttribute('accept', '.zip,application/zip')
+
+    fireEvent.click(screen.getByRole('button', { name: '上传' }))
+    const folderOption = screen.getByRole('menuitem', { name: /选择文件夹/ })
+    const zipOption = screen.getByRole('menuitem', { name: /选择 ZIP 文件/ })
+    expect(folderOption).toBeInTheDocument()
+    expect(zipOption).toBeInTheDocument()
+    fireEvent.click(folderOption)
+    expect(folderClick).toHaveBeenCalledOnce()
+
+    fireEvent.click(screen.getByRole('button', { name: '上传' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /选择 ZIP 文件/ }))
+    expect(zipClick).toHaveBeenCalledOnce()
+  })
+
+  it('源文件按钮打开独立文件浏览器并提供单文件与完整下载', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([rawSkill])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /技能/ }))
+    const card = screen.getByText(rawSkill.title).closest('article')!
+    fireEvent.click(within(card).getByRole('button', { name: '源文件' }))
+
+    const sourceDialog = await screen.findByRole('dialog', { name: rawSkill.title })
+    expect(within(sourceDialog).getByText('Skill 源文件')).toBeInTheDocument()
+    expect(within(sourceDialog).getByTitle('SKILL.md')).toBeInTheDocument()
+    expect(within(sourceDialog).getByRole('button', { name: '下载文件' })).toBeInTheDocument()
+    expect(within(sourceDialog).getByRole('button', { name: '下载全部源文件 (.zip)' })).toBeInTheDocument()
+    expect(sourceDialog).toHaveTextContent('name:')
+    expect(sourceDialog).not.toHaveTextContent('标题写法')
+  })
+
+  it('我的技能卡片省略无意义的已保存标签，并把安装状态放在标题同行', async () => {
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input))
       if (url.pathname === '/api/creation/skills' && (!init?.method || init.method === 'GET')) {
@@ -434,7 +557,10 @@ describe('技能安装与使用', () => {
     fireEvent.click(await screen.findByRole('button', { name: /技能/ }))
     const card = screen.getByText(rawSkill.title).closest('article')!
     expect(within(card).queryByText('手工新建')).not.toBeInTheDocument()
-    expect(within(card).getByText('未安装')).toBeInTheDocument()
+    expect(within(card).queryByText('已保存')).not.toBeInTheDocument()
+    const titleRow = within(card).getByText(rawSkill.title).closest('.creation-skill-library__title-row')
+    expect(titleRow).not.toBeNull()
+    expect(within(titleRow as HTMLElement).getByText('未安装')).toBeInTheDocument()
   })
 
   it('删除技能前要求二次确认', async () => {

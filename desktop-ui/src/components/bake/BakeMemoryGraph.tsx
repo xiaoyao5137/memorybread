@@ -13,9 +13,12 @@ import {
   type MemoryGraphNodeKind,
   type MemoryGraphPosition,
 } from './memoryGraph'
+import TutorialLink, { TUTORIAL_URLS } from '../TutorialLink'
 
 const VIEWBOX_WIDTH = 1000
 const VIEWBOX_HEIGHT = 620
+const VIEWBOX_MIN_WIDTH = 480
+const VIEWBOX_MIN_HEIGHT = 380
 
 const allKinds: MemoryGraphNodeKind[] = ['knowledge', 'document', 'operation', 'data']
 
@@ -43,6 +46,44 @@ const clampScale = (scale: number) => Math.min(2.8, Math.max(0.45, scale))
 
 export const getMemoryGraphWheelScale = (currentScale: number, deltaY: number) => (
   clampScale(currentScale * Math.exp(-deltaY * 0.003))
+)
+
+// 根据节点包围圈计算“铺满画布”的初始变换，避免窄列中图谱被整体缩小到不可读。
+const computeFitTransform = (
+  positions: Record<string, MemoryGraphPosition>,
+  viewWidth: number,
+  viewHeight: number,
+) => {
+  const points = Object.values(positions)
+  if (points.length === 0) return { x: 0, y: 0, scale: 1 }
+  const padding = 86
+  const minX = Math.min(...points.map(point => point.x))
+  const maxX = Math.max(...points.map(point => point.x))
+  const minY = Math.min(...points.map(point => point.y))
+  const maxY = Math.max(...points.map(point => point.y))
+  const contentWidth = Math.max(120, maxX - minX + padding * 2)
+  const contentHeight = Math.max(120, maxY - minY + padding * 2)
+  // 适配变换单独限幅：上限 1.6 避免少量节点被过度放大，下限 0.45 保留手动缩放空间。
+  const scale = Math.min(1.6, Math.max(0.45, Math.min(viewWidth / contentWidth, viewHeight / contentHeight)))
+  const centerX = (minX + maxX) / 2
+  const centerY = (minY + maxY) / 2
+  return {
+    x: viewWidth / 2 - centerX * scale,
+    y: viewHeight / 2 - centerY * scale,
+    scale,
+  }
+}
+
+// 估算标签宽度（CJK 按字号等宽，ASCII 按 0.62 估），用于重叠检测。
+const estimateLabelWidth = (text: string) => Array.from(text).reduce(
+  (width, char) => width + (/[\u2E80-\u9FFF\uFF00-\uFFEF\u3000-\u303F]/.test(char) ? 10 : 6.2),
+  8,
+)
+
+type LabelRect = { left: number; right: number; top: number; bottom: number }
+
+const rectsOverlap = (a: LabelRect, b: LabelRect) => (
+  a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
 )
 
 const normalizeSearchText = (value: string) => value
@@ -90,9 +131,11 @@ const BakeMemoryGraph: React.FC<{
   const [searchLoading, setSearchLoading] = useState(false)
   const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 })
   const [positions, setPositions] = useState<Record<string, MemoryGraphPosition>>({})
+  const [viewBox, setViewBox] = useState({ width: VIEWBOX_WIDTH, height: VIEWBOX_HEIGHT })
   const svgRef = useRef<SVGSVGElement | null>(null)
   const canvasRef = useRef<HTMLDivElement | null>(null)
   const fullscreenButtonRef = useRef<HTMLButtonElement | null>(null)
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null)
   const searchRequestRef = useRef(0)
   const gestureRef = useRef<{
     kind: 'pan' | 'node'
@@ -164,15 +207,75 @@ const BakeMemoryGraph: React.FC<{
     return counts
   }, { knowledge: 0, document: 0, operation: 0, data: 0 }), [slicedGraph.nodes])
 
-  const layoutSignature = `${slicedGraph.graphVersion}:${visibleNodes.map(node => node.id).join(',')}:${focusNodeId ?? ''}:${fullscreen}:${normalizedSearchQuery}`
+  // 标签互相压盖或与节点形状重叠时，优先保留选中/焦点/邻居节点的标签。
+  const hiddenLabelIds = useMemo(() => {
+    const hidden = new Set<string>()
+    if (visibleNodes.length === 0) return hidden
+    const occupied: LabelRect[] = visibleNodes.reduce<LabelRect[]>((rects, node) => {
+      const position = positions[node.id]
+      if (position) rects.push({ left: position.x - 17, right: position.x + 17, top: position.y - 17, bottom: position.y + 17 })
+      return rects
+    }, [])
+    const priority = (node: MemoryGraphNode) => {
+      if (node.id === selectedNodeId || node.id === focusNodeId) return 0
+      return neighborIds.has(node.id) ? 1 : 2
+    }
+    const ordered = [...visibleNodes].sort((a, b) => (
+      priority(a) - priority(b)
+      || b.heatScore - a.heatScore
+      || a.id.localeCompare(b.id)
+    ))
+    ordered.forEach(node => {
+      const position = positions[node.id]
+      if (!position) return
+      const label = node.label.length > 12 ? `${node.label.slice(0, 12)}…` : node.label
+      const width = estimateLabelWidth(label)
+      const radius = node.id === focusNodeId ? 19 : node.id === selectedNodeId ? 18 : 15
+      const rect: LabelRect = {
+        left: position.x - width / 2,
+        right: position.x + width / 2,
+        top: position.y + radius + 5,
+        bottom: position.y + radius + 25,
+      }
+      if (occupied.some(other => rectsOverlap(rect, other))) {
+        hidden.add(node.id)
+        return
+      }
+      occupied.push(rect)
+    })
+    return hidden
+  }, [visibleNodes, positions, selectedNodeId, focusNodeId, neighborIds])
+
+  const layoutSignature = `${slicedGraph.graphVersion}:${visibleNodes.map(node => node.id).join(',')}:${focusNodeId ?? ''}:${fullscreen}:${normalizedSearchQuery}:${viewBox.width}x${viewBox.height}`
+
+  // viewBox 跟随画布容器宽高比，避免固定 1000x620 在窄列 dock 中被等比压缩到不可读。
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || typeof ResizeObserver === 'undefined') return undefined
+    const observer = new ResizeObserver(entries => {
+      const rect = entries[entries.length - 1]?.contentRect
+      if (!rect || rect.width < 120 || rect.height < 120) return
+      const aspect = rect.width / rect.height
+      setViewBox(current => {
+        const width = Math.round(Math.min(1600, Math.max(VIEWBOX_MIN_WIDTH, rect.width)))
+        const height = Math.round(Math.min(1400, Math.max(VIEWBOX_MIN_HEIGHT, width / aspect)))
+        if (current.width === width && current.height === height) return current
+        return { width, height }
+      })
+    })
+    observer.observe(canvas)
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
-    setPositions(createMemoryGraphLayout(visibleNodes, visibleEdges, {
-      width: VIEWBOX_WIDTH,
-      height: VIEWBOX_HEIGHT,
+    const nextPositions = createMemoryGraphLayout(visibleNodes, visibleEdges, {
+      width: viewBox.width,
+      height: viewBox.height,
       focusNodeId,
-    }))
-    setTransform({ x: 0, y: 0, scale: 1 })
+    })
+    setPositions(nextPositions)
+    // 初始视图自动铺满画布，替代原先恒定的 identity 变换。
+    setTransform(computeFitTransform(nextPositions, viewBox.width, viewBox.height))
   // layoutSignature intentionally captures the stable graph membership and focus.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layoutSignature])
@@ -218,6 +321,18 @@ const BakeMemoryGraph: React.FC<{
   }, [mode, normalizedSearchQuery, onSearchAssets, searchQuery])
 
   useEffect(() => {
+    if (mode !== 'dock') return undefined
+    if (!fullscreen) closeButtonRef.current?.focus()
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || fullscreen) return
+      event.preventDefault()
+      onClose?.()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [fullscreen, mode, onClose])
+
+  useEffect(() => {
     if (!fullscreen) return undefined
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
@@ -231,8 +346,8 @@ const BakeMemoryGraph: React.FC<{
   const handlePointerMove = (event: React.PointerEvent<SVGSVGElement>) => {
     const gesture = gestureRef.current
     if (!gesture || gesture.pointerId !== event.pointerId) return
-    const dx = ((event.clientX - gesture.startClientX) / Math.max(1, svgRef.current?.getBoundingClientRect().width ?? 1)) * VIEWBOX_WIDTH
-    const dy = ((event.clientY - gesture.startClientY) / Math.max(1, svgRef.current?.getBoundingClientRect().height ?? 1)) * VIEWBOX_HEIGHT
+    const dx = ((event.clientX - gesture.startClientX) / Math.max(1, svgRef.current?.getBoundingClientRect().width ?? 1)) * viewBox.width
+    const dy = ((event.clientY - gesture.startClientY) / Math.max(1, svgRef.current?.getBoundingClientRect().height ?? 1)) * viewBox.height
     if (gesture.kind === 'pan') {
       setTransform(current => ({ ...current, x: gesture.startX + dx, y: gesture.startY + dy }))
       return
@@ -271,8 +386,8 @@ const BakeMemoryGraph: React.FC<{
       const rect = svgRef.current.getBoundingClientRect()
       if (rect.width <= 0 || rect.height <= 0) return
       const point = {
-        x: ((event.clientX - rect.left) / rect.width) * VIEWBOX_WIDTH,
-        y: ((event.clientY - rect.top) / rect.height) * VIEWBOX_HEIGHT,
+        x: ((event.clientX - rect.left) / rect.width) * viewBox.width,
+        y: ((event.clientY - rect.top) / rect.height) * viewBox.height,
       }
       setTransform(current => {
         const nextScale = getMemoryGraphWheelScale(current.scale, event.deltaY)
@@ -287,7 +402,7 @@ const BakeMemoryGraph: React.FC<{
     }
     canvas.addEventListener('wheel', handleNativeWheel, { passive: false })
     return () => canvas.removeEventListener('wheel', handleNativeWheel)
-  }, [fullscreen])
+  }, [fullscreen, viewBox.height, viewBox.width])
 
   const toggleKind = (kind: MemoryGraphNodeKind) => {
     setEnabledKinds(current => {
@@ -299,12 +414,13 @@ const BakeMemoryGraph: React.FC<{
   }
 
   const resetView = () => {
-    setPositions(createMemoryGraphLayout(visibleNodes, visibleEdges, {
-      width: VIEWBOX_WIDTH,
-      height: VIEWBOX_HEIGHT,
+    const nextPositions = createMemoryGraphLayout(visibleNodes, visibleEdges, {
+      width: viewBox.width,
+      height: viewBox.height,
       focusNodeId: selectedNodeId ?? focusNodeId,
-    }))
-    setTransform({ x: 0, y: 0, scale: 1 })
+    })
+    setPositions(nextPositions)
+    setTransform(computeFitTransform(nextPositions, viewBox.width, viewBox.height))
   }
 
   const graphClassName = [
@@ -313,17 +429,19 @@ const BakeMemoryGraph: React.FC<{
     fullscreen ? 'bake-memory-graph--fullscreen' : '',
   ].filter(Boolean).join(' ')
 
-  return (
+  const graphContent = (
     <section
       className={graphClassName}
       aria-label="记忆图谱"
-      role={fullscreen ? 'dialog' : 'region'}
-      aria-modal={fullscreen || undefined}
+      role={fullscreen || mode === 'dock' ? 'dialog' : 'region'}
+      aria-modal={fullscreen || mode === 'dock' || undefined}
     >
       <header className="bake-memory-graph__header">
         <div className="bake-memory-graph__heading">
-          <span className="bake-memory-graph__eyebrow"><Network size={14} /> 语义记忆网络</span>
-          <h2>记忆图谱</h2>
+          <div className="tutorial-title-row">
+            <span className="bake-memory-graph__eyebrow"><Network size={14} /> 记忆图谱</span>
+            <TutorialLink url={TUTORIAL_URLS.memoryGraph} />
+          </div>
         </div>
         <div className="bake-memory-graph__actions">
           <button type="button" className="bake-graph-tool" onClick={resetView} aria-label="适配图谱画布" title="适配画布">
@@ -340,7 +458,7 @@ const BakeMemoryGraph: React.FC<{
             {fullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
           </button>
           {mode === 'dock' && onClose && !fullscreen && (
-            <button type="button" className="bake-graph-tool" onClick={onClose} aria-label="关闭记忆图谱" title="关闭">
+            <button ref={closeButtonRef} type="button" className="bake-graph-tool" onClick={onClose} aria-label="关闭记忆图谱" title="关闭">
               <X size={16} />
             </button>
           )}
@@ -417,7 +535,7 @@ const BakeMemoryGraph: React.FC<{
           <svg
             ref={svgRef}
             className="bake-memory-graph__svg"
-            viewBox={`0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}`}
+            viewBox={`0 0 ${viewBox.width} ${viewBox.height}`}
             preserveAspectRatio="xMidYMid meet"
             onPointerDown={(event) => {
               if (event.target !== event.currentTarget && (event.target as Element).closest('[data-graph-node], [data-graph-edge]')) return
@@ -448,7 +566,7 @@ const BakeMemoryGraph: React.FC<{
                 <path d="M0,0 L0,6 L7,3 z" className="bake-memory-graph__arrow" />
               </marker>
             </defs>
-            <rect width={VIEWBOX_WIDTH} height={VIEWBOX_HEIGHT} fill="url(#bake-graph-grid)" />
+            <rect width={viewBox.width} height={viewBox.height} fill="url(#bake-graph-grid)" />
             <g data-graph-viewport transform={`translate(${transform.x} ${transform.y}) scale(${transform.scale})`}>
               {visibleEdges.map(edge => {
                 const source = positions[edge.source]
@@ -531,9 +649,11 @@ const BakeMemoryGraph: React.FC<{
                       {nodeShape(node, radius)}
                     </g>
                     <text className="bake-memory-graph__node-glyph" textAnchor="middle" dominantBaseline="central">{meta.shortLabel}</text>
-                    <text className="bake-memory-graph__node-label" textAnchor="middle" y={radius + 17}>
-                      {node.label.length > 12 ? `${node.label.slice(0, 12)}…` : node.label}
-                    </text>
+                    {!hiddenLabelIds.has(node.id) && (
+                      <text className="bake-memory-graph__node-label" textAnchor="middle" y={radius + 17}>
+                        {node.label.length > 12 ? `${node.label.slice(0, 12)}…` : node.label}
+                      </text>
+                    )}
                   </g>
                 )
               })}
@@ -577,6 +697,19 @@ const BakeMemoryGraph: React.FC<{
         {slicedGraph.hiddenNodeCount > 0 && <span className="bake-memory-graph__hidden">另有 {slicedGraph.hiddenNodeCount} 项未展开</span>}
       </footer>
     </section>
+  )
+
+  if (mode !== 'dock') return graphContent
+
+  return (
+    <div
+      className="bake-memory-graph-drawer-overlay"
+      onMouseDown={(event) => {
+        if (!fullscreen && event.target === event.currentTarget) onClose?.()
+      }}
+    >
+      {graphContent}
+    </div>
   )
 }
 
