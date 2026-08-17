@@ -1022,7 +1022,8 @@ fn bundled_helper_path(name: &str) -> Result<PathBuf, String> {
         directory
             .parent()
             .ok_or_else(|| "无法定位 App Contents 目录".to_string())?
-            .join("Helpers")
+            .join("Resources")
+            .join("binaries")
             .join("memory-bread-ai.app")
             .join("Contents")
             .join("MacOS")
