@@ -166,7 +166,23 @@ class ModelManager:
             json.dump(self.config, f, indent=2, ensure_ascii=False)
 
     def _parse_macos_major_version(self) -> Optional[int]:
+        # 优先使用 platform.mac_ver()，但在 PyInstaller 环境下可能返回 10.16
         version = (platform.mac_ver()[0] or "").strip()
+
+        # 如果 platform.mac_ver() 返回空或无效值，使用 sw_vers 命令
+        if not version or version.startswith('10.16'):
+            try:
+                result = subprocess.run(
+                    ['sw_vers', '-productVersion'],
+                    capture_output=True,
+                    text=True,
+                    timeout=2
+                )
+                if result.returncode == 0:
+                    version = result.stdout.strip()
+            except Exception:
+                pass
+
         if not version:
             return None
         try:
@@ -261,7 +277,27 @@ class ModelManager:
         system = platform.system()
         is_macos = system == 'Darwin'
         arch = platform.machine().lower()
-        macos_version = (platform.mac_ver()[0] or '').strip() if is_macos else ''
+
+        # 使用统一的版本检测逻辑（支持 PyInstaller 环境）
+        macos_version = ''
+        if is_macos:
+            version_from_platform = (platform.mac_ver()[0] or '').strip()
+            if version_from_platform and not version_from_platform.startswith('10.16'):
+                macos_version = version_from_platform
+            else:
+                # PyInstaller 环境下 platform.mac_ver() 可能返回 10.16，使用 sw_vers
+                try:
+                    result = subprocess.run(
+                        ['sw_vers', '-productVersion'],
+                        capture_output=True,
+                        text=True,
+                        timeout=2
+                    )
+                    if result.returncode == 0:
+                        macos_version = result.stdout.strip()
+                except Exception:
+                    pass
+
         major = self._parse_macos_major_version() if is_macos else None
         version_compatible = True if not is_macos else (major is not None and major >= MIN_MACOS_MAJOR_FOR_OLLAMA)
 
