@@ -129,6 +129,26 @@ def init_knowledge_fts() -> bool:
         return False
 
 
+def check_critical_requirements_silent() -> dict:
+    """
+    静默检查核心要求（用于自动升级监控），不输出任何日志。
+
+    Returns:
+        dict with keys:
+          - 'critical_passed': bool  Ollama+LLM 核心检查是否通过
+          - 'embedding_ok': bool     向量模型是否可用
+    """
+    critical_passed = check_ollama_installed() and check_ollama_running() and check_model_available()
+    embedding_ok = check_embedding_model() if critical_passed else False
+
+    return {
+        'critical_passed': critical_passed,
+        'embedding_ok': embedding_ok,
+        'all_passed': critical_passed and embedding_ok,
+        'message': 'ok' if critical_passed else 'core checks failed',
+    }
+
+
 def run_startup_checks() -> dict:
     """
     运行启动前置检查。
