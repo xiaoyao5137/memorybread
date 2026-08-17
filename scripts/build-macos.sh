@@ -207,8 +207,10 @@ prepare_python_helper() {
 
   # Explicitly include third-party runtime dependencies that use lazy imports
   # (PyInstaller's static analysis can't detect imports inside functions)
+  # Use --collect-all to ensure all submodules and data files are included
   for module in requests urllib3 certifi charset_normalizer idna; do
-    hidden_args+=(--hidden-import "$module")
+    hidden_args+=(--collect-all "$module")
+    hidden_args+=(--copy-metadata "$module")
   done
 
   if [ "${MEMORY_BREAD_REUSE_PYINSTALLER:-0}" = "1" ] \
@@ -271,7 +273,8 @@ prepare_python_helper() {
   fi
 
   rm -rf "$STAGING_DIR/memory-bread-ai.app"
-  cp -R "$frozen_app" "$STAGING_DIR/memory-bread-ai.app"
+  # 使用 ditto 保留符号链接（PyInstaller 使用符号链接优化库布局）
+  ditto "$frozen_app" "$STAGING_DIR/memory-bread-ai.app"
 }
 
 prepare_core_helper() {
@@ -425,10 +428,37 @@ if [ "$MODE" = "dmg" ]; then
       --target "$TARGET" \
       "${TAURI_CONFIG_ARGS[@]}"
   )
+
+  # Tauri 打包会将 resources 中的符号链接解析为实际文件
+  # 需要从原始 PyInstaller 输出恢复符号链接，否则 PyInstaller 运行时会失败
+  APP_PATH="$(locate_app_bundle)"
+  [ -d "$APP_PATH" ] || fail "未找到生成的 .app"
+
+  echo "[macOS build] 恢复 PyInstaller helper 的符号链接..."
+  AI_BUNDLE_PATH="$APP_PATH/Contents/Resources/binaries/memory-bread-ai.app"
+  AI_STAGING_PATH="$STAGING_DIR/memory-bread-ai.app"
+
+  if [ -d "$AI_BUNDLE_PATH" ] && [ -d "$AI_STAGING_PATH" ]; then
+    # 删除 Tauri 复制的版本（符号链接已被解析）
+    rm -rf "$AI_BUNDLE_PATH"
+    # 使用 ditto 重新复制，保留符号链接
+    ditto "$AI_STAGING_PATH" "$AI_BUNDLE_PATH"
+    echo "[macOS build] 符号链接已恢复：$(find "$AI_BUNDLE_PATH" -type l | wc -l | xargs) 个"
+  else
+    echo "[macOS build] 警告：未找到 AI helper，跳过符号链接恢复"
+  fi
+
   APP_PATH="$(locate_app_bundle)"
   DMG_PATH="$(locate_dmg)"
   [ -d "$APP_PATH" ] || fail "未找到生成的 .app"
   [ -f "$DMG_PATH" ] || fail "未找到生成的 .dmg"
+
+  # 由于符号链接已恢复，需要重新创建 DMG（Tauri 创建的 DMG 不包含符号链接）
+  echo "[macOS build] 重新创建 DMG（包含符号链接）..."
+  rm "$DMG_PATH"
+  hdiutil create -volname "记忆面包" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
+  echo "[macOS build] DMG 已重新创建"
+
   apply_dmg_file_icon "$DMG_PATH"
   "$SCRIPT_DIR/verify-macos-bundle.sh" "$APP_PATH" dmg "$DMG_PATH"
   echo "[macOS build] App: $APP_PATH"
@@ -457,6 +487,20 @@ echo "[macOS build] 构建 Mac App Store App Bundle..."
     --features app-store \
     --config src-tauri/tauri.appstore.conf.json
 )
+
+# 恢复 PyInstaller 符号链接（同 DMG 构建）
+APP_PATH="$(locate_app_bundle)"
+[ -d "$APP_PATH" ] || fail "未找到生成的 App Store .app"
+
+echo "[macOS build] 恢复 PyInstaller helper 的符号链接..."
+AI_BUNDLE_PATH="$APP_PATH/Contents/Resources/binaries/memory-bread-ai.app"
+AI_STAGING_PATH="$STAGING_DIR/memory-bread-ai.app"
+
+if [ -d "$AI_BUNDLE_PATH" ] && [ -d "$AI_STAGING_PATH" ]; then
+  rm -rf "$AI_BUNDLE_PATH"
+  ditto "$AI_STAGING_PATH" "$AI_BUNDLE_PATH"
+  echo "[macOS build] 符号链接已恢复：$(find "$AI_BUNDLE_PATH" -type l | wc -l | xargs) 个"
+fi
 
 APP_PATH="$(locate_app_bundle)"
 [ -d "$APP_PATH" ] || fail "未找到生成的 App Store .app"
