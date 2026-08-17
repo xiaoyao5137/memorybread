@@ -1018,19 +1018,38 @@ fn bundled_helper_path(name: &str) -> Result<PathBuf, String> {
     let directory = executable
         .parent()
         .ok_or_else(|| "无法定位 App 内置服务目录".to_string())?;
+    let contents_dir = directory
+        .parent()
+        .ok_or_else(|| "无法定位 App Contents 目录".to_string())?;
+
     let helper = if name == "memory-bread-ai" {
-        directory
-            .parent()
-            .ok_or_else(|| "无法定位 App Contents 目录".to_string())?
-            .join("Resources")
-            .join("binaries")
-            .join("memory-bread-ai.app")
-            .join("Contents")
-            .join("MacOS")
-            .join(name)
+        // 尝试多个可能的路径位置
+        let candidates = vec![
+            // Tauri 2.x 默认的 Helpers 目录
+            contents_dir
+                .join("Helpers")
+                .join("memory-bread-ai.app")
+                .join("Contents")
+                .join("MacOS")
+                .join(name),
+            // 旧版或自定义的 Resources/binaries 目录
+            contents_dir
+                .join("Resources")
+                .join("binaries")
+                .join("memory-bread-ai.app")
+                .join("Contents")
+                .join("MacOS")
+                .join(name),
+        ];
+
+        candidates
+            .into_iter()
+            .find(|path| path.is_file())
+            .ok_or_else(|| format!("未找到 {name}，尝试了 Contents/Helpers 和 Contents/Resources/binaries"))?
     } else {
         directory.join(name)
     };
+
     if !helper.is_file() {
         return Err(format!("App 缺少内置服务: {}", helper.display()));
     }
