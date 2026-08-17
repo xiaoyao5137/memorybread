@@ -163,7 +163,14 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
             setConnecting(false)
             setConnectionError(error instanceof Error ? error.message : '本地初始化服务版本较旧')
           } else {
-            setConnecting(true)
+            // 前几次重试时显示连接状态，避免用户误以为卡住
+            // 超过 20 次重试（1 分钟）后认为确实无法连接
+            if (attempts > 20) {
+              setConnecting(false)
+              setConnectionError('本地初始化服务连接超时，请检查应用是否正常运行')
+            } else {
+              setConnecting(true)
+            }
           }
           timer = setTimeout(refresh, SIDECAR_RETRY_MS)
         } else {
