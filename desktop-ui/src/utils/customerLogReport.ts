@@ -56,7 +56,7 @@ export const scrubDiagnosticLog = (content: string): string => content
   .replace(/[A-Z]:\\Users\\[^\\\s]+/gi, '[USER_HOME]')
   .replace(/\/Users\/[^/\s]+/g, '[USER_HOME]')
   .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, '[REDACTED_EMAIL]')
-  .replace(/(?<!\d)1[3-9]\d{9}(?!\d)/g, '[REDACTED_PHONE]')
+  .replace(/\b1[3-9]\d{9}\b/g, '[REDACTED_PHONE]')
 
 const readApiError = async (response: Response, fallback: string): Promise<Error> => {
   const payload = await response.json().catch(() => null)

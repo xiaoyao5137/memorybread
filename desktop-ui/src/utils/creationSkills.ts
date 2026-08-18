@@ -1041,7 +1041,7 @@ function compactCreationSkillPlaceholders(value: unknown) {
   return String(value || '')
     .replace(/(?:目标对象[\s·—_:：/\\-]*){2,}/gu, '目标对象')
     .replace(/(?:相关角色[\s·—_:：/\\-]*){2,}/gu, '相关角色')
-    .replace(/(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])/gu, '')
+    .replace(/([\u4e00-\u9fff])\s+([\u4e00-\u9fff])/gu, '$1$2')
     .replace(/\s{2,}/g, ' ')
     .replace(/^[\s：:·—_\/\\-]+|[\s：:·—_\/\\-]+$/g, '')
 }

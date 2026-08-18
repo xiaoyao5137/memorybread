@@ -215,7 +215,15 @@ const App: React.FC = () => {
 
     const registerTrayEvents = async () => {
       try {
-        const floatingAssistEnabled = localStorage.getItem(FLOATING_ASSIST_ENABLED_KEY) === 'true'
+        // 首次安装默认启用悬浮球，让用户可以立即体验核心功能
+        const storedValue = localStorage.getItem(FLOATING_ASSIST_ENABLED_KEY)
+        const floatingAssistEnabled = storedValue === null ? true : storedValue === 'true'
+
+        // 如果是首次启动（localStorage 中没有值），保存默认值
+        if (storedValue === null) {
+          localStorage.setItem(FLOATING_ASSIST_ENABLED_KEY, 'true')
+        }
+
         const autoTaskConfig = readFloatingAssistAutoTaskConfig()
         const autoTaskDetectionEnabled = floatingAssistEnabled && autoTaskConfig.enabled
         await invoke('set_floating_assist_menu_state', { enabled: floatingAssistEnabled })

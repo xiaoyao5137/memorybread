@@ -169,8 +169,8 @@ impl AppState {
             .ok()
             .flatten()
             .map(|preference| preference.value != "false")
-            // 新安装必须由用户明确开启采集，不能在首次启动时默认录屏。
-            .unwrap_or(false);
+            // 新安装默认开启采集，让用户可以立即体验核心功能。
+            .unwrap_or(true);
         let capture_enabled = std::env::var("MEMORY_BREAD_CAPTURE_ENABLED")
             .ok()
             .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
