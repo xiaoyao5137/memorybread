@@ -36,7 +36,7 @@ def test_setup_status_guides_clean_mac_without_homebrew_to_official_download(mon
     assert detail["ollama_installed"] is False
     assert detail["ollama_running"] is False
     assert detail["can_auto_install"] is False
-    assert detail["minimum_macos_major"] == 14
+    assert detail["minimum_macos_major"] == MIN_MACOS_MAJOR_FOR_OLLAMA
     assert detail["official_download_url"] == OLLAMA_MACOS_DOWNLOAD_URL
 
     result = manager.install_ollama_auto()
@@ -47,17 +47,26 @@ def test_setup_status_guides_clean_mac_without_homebrew_to_official_download(mon
 
 def test_setup_status_rejects_macos_older_than_current_ollama_requirement(monkeypatch, tmp_path):
     manager = _manager(tmp_path)
-    _mock_macos(monkeypatch, "13.7.6")
+    # DMG 内嵌 Ollama 支持 macOS 12+，低于该版本才应被拒绝。
+    _mock_macos(monkeypatch, "11.7.10")
+    # 版本探测优先走真实 sw_vers，必须一并 mock 才能模拟旧系统。
+    def _fake_sw_vers(*args, **kwargs):
+        if args and args[0][:2] == ["sw_vers", "-productVersion"]:
+            raise FileNotFoundError("sw_vers mocked away")
+        raise FileNotFoundError("unexpected subprocess in test")
+
+    monkeypatch.setattr(model_manager_module.subprocess, "run", _fake_sw_vers)
+    monkeypatch.setattr(manager, "_parse_macos_major_version", lambda: 11)
     monkeypatch.setattr(manager, "_resolve_ollama_command", lambda: None)
     monkeypatch.setattr(manager, "_is_ollama_running", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(model_manager_module.shutil, "which", lambda name: "/opt/homebrew/bin/brew" if name == "brew" else None)
 
     detail = manager.get_ollama_setup_status()
 
-    assert MIN_MACOS_MAJOR_FOR_OLLAMA == 14
+    assert MIN_MACOS_MAJOR_FOR_OLLAMA == 12
     assert detail["version_compatible"] is False
     assert detail["can_auto_install"] is False
-    assert "14+" in detail["message"]
+    assert "12+" in detail["message"]
 
 
 def test_running_ollama_api_is_ready_even_when_cli_is_not_on_path(monkeypatch, tmp_path):
