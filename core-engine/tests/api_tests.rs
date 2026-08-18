@@ -25,7 +25,10 @@ use memory_bread_core::storage::models::{EventType, NewCapture};
 use memory_bread_core::{
     api::{state::DebugLogSpec, AppState},
     services::bake_service::BakeService,
-    storage::{NewBakeSop, NewTimeline, StorageManager},
+    storage::{
+        models_bake::{NewBakeArtifactAudit, NewBakeRun},
+        NewBakeSop, NewTimeline, StorageManager,
+    },
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -160,6 +163,58 @@ async fn set_favorite(
     let (status, body) = oneshot(router, request).await;
     let json = serde_json::from_str(&body).unwrap_or_else(|_| serde_json::json!({ "body": body }));
     (status, json)
+}
+
+#[tokio::test]
+async fn bake_artifact_audits_api_returns_branch_decisions_without_candidate_content() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("test.db");
+    let sm = StorageManager::open(&db).unwrap();
+    let run_id = sm
+        .insert_bake_run(&NewBakeRun {
+            trigger_reason: "test".to_string(),
+            status: "running".to_string(),
+            started_at: 1_710_000_000_000,
+        })
+        .unwrap();
+    sm.upsert_bake_artifact_audit(&NewBakeArtifactAudit {
+        run_id,
+        timeline_id: 5439,
+        artifact_kind: "document".to_string(),
+        deterministic_eligible: Some(true),
+        deterministic_reason: Some("document_url".to_string()),
+        model_accepted: false,
+        model_reason: Some("not_a_document".to_string()),
+        payload_present: false,
+        payload_valid: None,
+        artifact_shape: Some("null".to_string()),
+        compatibility_recovered: false,
+    })
+    .unwrap();
+    sm.finalize_bake_artifact_audit(
+        run_id,
+        5439,
+        "document",
+        "false_negative",
+        Some("not_a_document"),
+        None,
+    )
+    .unwrap();
+    let router = memory_bread_core::api::create_router(AppState::new(sm));
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/api/bake/timelines/5439/artifact-audits?limit=10")
+        .body(Body::empty())
+        .unwrap();
+
+    let (status, body) = oneshot(router, request).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["timeline_id"], 5439);
+    assert_eq!(json["items"][0]["artifact_kind"], "document");
+    assert_eq!(json["items"][0]["persist_status"], "false_negative");
+    assert_eq!(json["items"][0]["deterministic_eligible"], true);
+    assert!(!body.contains("candidate_content"));
 }
 
 fn seed_capture(sm: &StorageManager) -> i64 {
@@ -535,6 +590,78 @@ async fn test_bake_queue_status_prevents_empty_run_creation() {
     assert_eq!(run_json["status"], "skipped");
     assert_eq!(run_json["reason"], "no actionable bake candidates");
     assert!(sm.get_latest_bake_run().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_bake_run_skipped_after_consecutive_no_progress_runs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sm = StorageManager::open(&tmp.path().join("no-progress.db")).unwrap();
+    // 队列里确实有可烘候选（actionable>0），但最近连续 run 都零进展。
+    seed_artifact_ready_timeline(&sm, "no_progress 退避候选", "队列口径有内容但 run 持续空转");
+    for i in 0..3i64 {
+        let run_id = sm
+            .insert_bake_run(&NewBakeRun {
+                trigger_reason: "knowledge_background".to_string(),
+                status: "running".to_string(),
+                started_at: 1_710_000_000_000 + i,
+            })
+            .unwrap();
+        sm.complete_bake_run(
+            run_id,
+            "no_op",
+            1_710_000_001_000 + i,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            Some(10),
+        )
+        .unwrap();
+    }
+    let state = make_bake_state(sm.clone(), "http://127.0.0.1:9".to_string());
+    let router = memory_bread_core::api::create_router(state);
+
+    let (status, json, body) = run_bake(router, &sm, "knowledge_background").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(json["status"], "skipped");
+    assert_eq!(json["reason"], "no_progress_backoff");
+    assert!(json["retry_after_ms"].as_i64().unwrap() >= 15_000);
+    assert!(json["queue"]["actionable_count"].as_i64().unwrap() > 0);
+    assert!(json["queue"]["recent_no_progress_count"].as_i64().unwrap() >= 3);
+    // 守卫必须拦在创建 run 行之前：最新 run 仍是预置的第 3 条。
+    assert_eq!(sm.get_latest_bake_run().unwrap().unwrap().id, 3);
+}
+
+#[tokio::test]
+async fn test_bake_run_records_trigger_actionable_count() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("trigger-actionable.db");
+    let sm = StorageManager::open(&db).unwrap();
+    seed_artifact_ready_timeline(
+        &sm,
+        "记录触发口径的候选",
+        "触发时刻读到的 actionable 应落库",
+    );
+    let sidecar_url = spawn_bake_sidecar(vec![make_bake_response(
+        bake_rejected("not_a_knowledge"),
+        bake_template_artifact("触发口径模板", Some("candidate")),
+        bake_rejected("not_a_sop"),
+    )])
+    .await;
+    let router = memory_bread_core::api::create_router(make_bake_state(sm.clone(), sidecar_url));
+
+    let (status, run_json, run_body) = run_bake(router, &sm, "knowledge_background").await;
+    assert_eq!(status, StatusCode::OK, "body: {run_body}");
+    let run_id = run_json["id"].as_i64().expect("run id required");
+    // 触发时队列里只有 1 条 fresh 候选，落库口径必须与 queue-status 一致。
+    assert_eq!(
+        sm.get_bake_run_trigger_actionable_count(run_id).unwrap(),
+        Some(1)
+    );
 }
 
 #[tokio::test]

@@ -21,6 +21,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::ipc::IpcClient;
 use crate::storage::{
+    extraction_budget::TIMELINE_EXTRACTION_CAPTURE_TEXT_BUDGET_CHARS,
     models::{EventType, NewCapture, NewCaptureAttempt, NewVectorIndex},
     StorageManager,
 };
@@ -938,6 +939,8 @@ impl CaptureEngine {
                 || merged.app_bundle_id.is_some());
         let is_periodic_event = matches!(event, CaptureEvent::Periodic);
         let has_ax_text = has_meaningful_ax_text(&merged);
+        let ax_text_exceeds_timeline_budget = ax_text_exceeds_timeline_budget(&merged);
+        let needs_ocr_backfill = should_capture_screenshot_for_ocr(&merged);
         let has_input_text = has_meaningful_input_text(&event);
 
         debug!(
@@ -946,7 +949,8 @@ impl CaptureEngine {
             cache_hit,
             app = ?merged.app_name,
             win_title = ?merged.win_title,
-            ax_text_len = merged.extracted_text.as_ref().map(|t| t.len()),
+            ax_text_len = merged.extracted_text.as_ref().map(|t| t.chars().count()),
+            ax_text_exceeds_timeline_budget,
             "AX 与上下文合并完成"
         );
 
@@ -1050,12 +1054,14 @@ impl CaptureEngine {
             }
         }
 
-        // AX 正文优先：只有 AX 正文为空时才截图，并把截图交给后台 OCR。
+        // AX 正文正常时优先直接保存；若正文为空，或长度超过后续时间线单条材料预算，
+        // 则截取用户当前可见的应用画面并交给 OCR。超长 AX 往往是整篇文档树，直接
+        // 保存会在提炼时稳定只留下文档开头，无法代表用户实际看到的核心段落。
         let mut screenshot_path = None;
         let mut screenshot_source: Option<String> = None;
         let mut screenshot_dhash = None;
         let mut duplicate_capture_id = None;
-        if !has_ax_text && self.config.enable_screenshot {
+        if needs_ocr_backfill && self.config.enable_screenshot {
             let screenshot_result = match visual_probe.take() {
                 Some(probe) => save_visual_probe_async(
                     probe,
@@ -1189,8 +1195,20 @@ impl CaptureEngine {
             debug!(
                 event = ?event.to_event_type(),
                 has_ax_text,
+                ax_text_exceeds_timeline_budget,
                 screenshot_enabled = self.config.enable_screenshot,
-                "跳过截图：AX 正文已满足或截图已关闭"
+                "跳过截图：AX 正文可完整进入时间线或截图已关闭"
+            );
+        }
+
+        let use_ocr_as_primary_text = ax_text_exceeds_timeline_budget && screenshot_path.is_some();
+        if use_ocr_as_primary_text {
+            info!(
+                event = ?event.to_event_type(),
+                app = ?merged.app_name,
+                win_title = ?merged.win_title,
+                timeline_capture_budget_chars = TIMELINE_EXTRACTION_CAPTURE_TEXT_BUDGET_CHARS,
+                "AX 正文超过时间线材料预算，OCR 成功后将以应用截图文本替换 AX"
             );
         }
 
@@ -1225,10 +1243,15 @@ impl CaptureEngine {
             return Ok(None);
         }
 
+        let mut capture_text = merged.clone();
+        if use_ocr_as_primary_text && ocr_text_for_insert.is_some() {
+            capture_text.extracted_text = None;
+        }
+
         // 5. 写入数据库
         let id = match self.save_capture(
             ts,
-            &merged,
+            &capture_text,
             &event,
             screenshot_path.clone(),
             screenshot_source.clone(),
@@ -1251,7 +1274,7 @@ impl CaptureEngine {
         };
         self.update_cached_context(&merged);
         let mut ocr_backfill_enqueued = false;
-        if !has_ax_text {
+        if needs_ocr_backfill {
             if ocr_text_for_insert.is_none() {
                 if let Some(screenshot_rel_path) = screenshot_path.clone() {
                     ocr_backfill_enqueued = self.enqueue_ocr_backfill(
@@ -1259,6 +1282,7 @@ impl CaptureEngine {
                         screenshot_rel_path,
                         merged.app_name.clone(),
                         merged.win_title.clone(),
+                        use_ocr_as_primary_text,
                     );
                 }
             }
@@ -1280,8 +1304,10 @@ impl CaptureEngine {
             event = ?event.to_event_type(),
             app = ?merged.app_name,
             win_title = ?merged.win_title,
-            ax_text_len = merged.extracted_text.as_ref().map(|t| t.len()),
-            ocr_text_len = ocr_text_for_insert.as_ref().map(|t| t.len()),
+            ax_text_len = merged.extracted_text.as_ref().map(|t| t.chars().count()),
+            ocr_text_len = ocr_text_for_insert.as_ref().map(|t| t.chars().count()),
+            ax_text_exceeds_timeline_budget,
+            use_ocr_as_primary_text,
             screenshot = screenshot_path.is_some(),
             ocr_backfill_enqueued,
             "采集完成"
@@ -1602,6 +1628,7 @@ impl CaptureEngine {
         screenshot_rel_path: String,
         app_name: Option<String>,
         win_title: Option<String>,
+        replace_ax_text: bool,
     ) -> bool {
         let submitted_at_ms = current_ts_ms();
         let Some(ipc_client) = self.ipc_client.clone() else {
@@ -1664,9 +1691,12 @@ impl CaptureEngine {
                 Ok(Some((text, confidence))) => {
                     let completed_at_ms = current_ts_ms();
                     let (filtered_text, pii_scrubbed) = filter_ocr_text_for_update(&storage, text);
-                    if let Err(error) =
+                    let update_result = if replace_ax_text {
+                        storage.replace_ax_text_with_ocr(capture_id, &filtered_text, confidence)
+                    } else {
                         storage.update_ocr_text(capture_id, &filtered_text, confidence)
-                    {
+                    };
+                    if let Err(error) = update_result {
                         warn!(capture_id, %error, "OCR 后台补写失败：数据库更新失败");
                         ocr_metrics().record_completed(
                             OcrBackfillOutcome::Failed,
@@ -1687,6 +1717,7 @@ impl CaptureEngine {
                         capture_id,
                         text_len = filtered_text.chars().count(),
                         pii_scrubbed,
+                        replace_ax_text,
                         "OCR 后台补写完成"
                     );
                 }
@@ -1756,6 +1787,17 @@ fn has_meaningful_ax_text(info: &AXInfo) -> bool {
         .as_deref()
         .map(|text| !text.trim().is_empty())
         .unwrap_or(false)
+}
+
+fn ax_text_exceeds_timeline_budget(info: &AXInfo) -> bool {
+    info.extracted_text
+        .as_deref()
+        .map(|text| text.chars().count() > TIMELINE_EXTRACTION_CAPTURE_TEXT_BUDGET_CHARS)
+        .unwrap_or(false)
+}
+
+fn should_capture_screenshot_for_ocr(info: &AXInfo) -> bool {
+    !has_meaningful_ax_text(info) || ax_text_exceeds_timeline_budget(info)
 }
 
 fn has_meaningful_input_text(event: &CaptureEvent) -> bool {
@@ -2318,6 +2360,49 @@ mod tests {
         assert!(rec.ax_text.is_none());
         assert!(rec.screenshot_path.is_some());
         assert!(rec.ocr_text.is_none(), "OCR 应后台补写，不阻塞变化采集");
+    }
+
+    #[test]
+    fn test_ax_text_timeline_budget_boundary_and_ocr_fallback_decision() {
+        let at_budget = AXInfo {
+            extracted_text: Some("文".repeat(TIMELINE_EXTRACTION_CAPTURE_TEXT_BUDGET_CHARS)),
+            ..Default::default()
+        };
+        assert!(!ax_text_exceeds_timeline_budget(&at_budget));
+        assert!(!should_capture_screenshot_for_ocr(&at_budget));
+
+        let over_budget = AXInfo {
+            extracted_text: Some("文".repeat(TIMELINE_EXTRACTION_CAPTURE_TEXT_BUDGET_CHARS + 1)),
+            ..Default::default()
+        };
+        assert!(ax_text_exceeds_timeline_budget(&over_budget));
+        assert!(should_capture_screenshot_for_ocr(&over_budget));
+        assert!(should_capture_screenshot_for_ocr(&AXInfo::default()));
+    }
+
+    #[tokio::test]
+    async fn test_oversized_ax_text_keeps_ax_when_screenshot_is_disabled() {
+        let engine = make_engine();
+        let oversized_text = "长文档".repeat(TIMELINE_EXTRACTION_CAPTURE_TEXT_BUDGET_CHARS / 3 + 1);
+
+        let id = engine
+            .process_event_with_ax_info(
+                CaptureEvent::Periodic,
+                Some(AXInfo {
+                    app_name: Some("Pages".into()),
+                    win_title: Some("项目汇报".into()),
+                    extracted_text: Some(oversized_text.clone()),
+                    ..Default::default()
+                }),
+                false,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let record = engine.storage.get_capture(id).unwrap().unwrap();
+        assert_eq!(record.ax_text.as_deref(), Some(oversized_text.as_str()));
+        assert!(record.screenshot_path.is_none());
     }
 
     #[tokio::test]

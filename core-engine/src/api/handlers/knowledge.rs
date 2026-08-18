@@ -274,7 +274,7 @@ pub async fn list_knowledge(
                          FROM timelines WHERE category = ?1
                            AND summary NOT LIKE ?2
                            AND COALESCE(is_self_generated, 0) = 0
-                         ORDER BY updated_at_ms DESC LIMIT ?3 OFFSET ?4"
+                         ORDER BY created_at_ms DESC, id DESC LIMIT ?3 OFFSET ?4"
                     ).map_err(|e| crate::storage::StorageError::Sqlite(e))?;
 
                     let entries = stmt.query_map(rusqlite::params![category, format!("{}%", FALLBACK_NOISE_OVERVIEW_PREFIX), params.limit, params.offset], |row: &rusqlite::Row| {
@@ -371,7 +371,8 @@ pub async fn list_knowledge(
             }
             if let Some(f) = params.from { sql.push_str(" AND created_at_ms >= ?"); bind.push(Box::new(f)); }
             if let Some(t) = params.to   { sql.push_str(" AND created_at_ms <= ?"); bind.push(Box::new(t)); }
-            sql.push_str(" ORDER BY updated_at_ms DESC LIMIT ? OFFSET ?");
+            // 时间线表格统一按创建时间逆序展示
+            sql.push_str(" ORDER BY created_at_ms DESC, id DESC LIMIT ? OFFSET ?");
             bind.push(Box::new(params.limit));
             bind.push(Box::new(params.offset));
 

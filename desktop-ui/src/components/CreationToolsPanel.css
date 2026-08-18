@@ -223,3 +223,112 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ===== macOS 暗色模式适配（仅覆盖，不改动上方亮色规则）===== */
+@media (prefers-color-scheme: dark) {
+  .creation-tools-page {
+    color: #F3F4F6;
+  }
+
+  .creation-tools-page > header h2 {
+    color: #F3F4F6;
+  }
+
+  .creation-tools-section h3 {
+    color: #F3F4F6;
+  }
+
+  .creation-tool-card {
+    border-color: rgba(255, 255, 255, .09);
+    background: #1C1C1E;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .28);
+  }
+
+  .creation-tool-card__status {
+    background: rgba(47, 179, 168, .16);
+    color: #2FB3A8;
+  }
+
+  .creation-tool-card__status.is-official {
+    border-color: rgba(255, 177, 122, .3);
+    background: rgba(255, 159, 67, .14);
+    color: #FFC48D;
+  }
+
+  .creation-tool-card__status-row > span:last-child {
+    color: #8E8E93;
+  }
+
+  .creation-tool-card__status-row > span:last-child.is-installed {
+    color: #E8A25C;
+  }
+
+  .creation-tool-card__status-row > span:last-child.is-enabled {
+    color: #2FB3A8;
+  }
+
+  .creation-tool-card h4 {
+    color: #F3F4F6;
+  }
+
+  .creation-tool-card p {
+    color: #9CA3AF;
+  }
+
+  .creation-tool-card__meta {
+    color: #8E8E93;
+  }
+
+  .creation-tool-card__setting {
+    border-color: rgba(255, 255, 255, .09);
+    background: #232326;
+    color: #9CA3AF;
+  }
+
+  .creation-tool-card__setting > span {
+    color: #9CA3AF;
+  }
+
+  .creation-tool-card__setting input {
+    border-color: rgba(255, 255, 255, .14);
+    background: #2C2C2E;
+    color: #F3F4F6;
+  }
+
+  .creation-tool-card__setting input:focus-visible {
+    outline-color: rgba(47, 179, 168, .3);
+    border-color: #2FB3A8;
+  }
+
+  .creation-tool-card footer {
+    border-top-color: rgba(255, 255, 255, .08);
+  }
+
+  .creation-tool-card footer button {
+    border-color: rgba(255, 255, 255, .14);
+    background: #232326;
+    color: #F3F4F6;
+  }
+
+  .creation-tool-card footer button:hover:not(:disabled) {
+    border-color: rgba(255, 177, 122, .3);
+    background: rgba(255, 159, 67, .10);
+    color: #FFC48D;
+  }
+
+  .creation-tool-card footer button.is-installed {
+    border-color: rgba(255, 177, 122, .3);
+    background: rgba(255, 159, 67, .14);
+    color: #FFC48D;
+  }
+
+  .creation-tool-card footer button.is-enabled {
+    border-color: rgba(47, 179, 168, .3);
+    background: rgba(47, 179, 168, .16);
+    color: #2FB3A8;
+  }
+
+  .creation-tool-card footer button:focus-visible {
+    outline-color: rgba(47, 179, 168, .3);
+  }
+}

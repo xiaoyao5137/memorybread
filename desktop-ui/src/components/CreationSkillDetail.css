@@ -399,3 +399,166 @@
   .creation-skill-detail__file-preview { min-height: 240px; max-height: 380px; }
   .creation-skill-detail__footer { padding-inline: 16px; }
 }
+
+/* ===== macOS 暗色模式适配（仅覆盖，不改动上方亮色规则）===== */
+@media (prefers-color-scheme: dark) {
+  .creation-skill-detail {
+    border-color: rgba(255, 255, 255, .14);
+    background: #1C1C1E;
+    box-shadow: 0 18px 40px rgba(0, 0, 0, .5);
+  }
+
+  .creation-skill-source {
+    border-color: rgba(255, 255, 255, .14);
+    background: #1C1C1E;
+    box-shadow: 0 18px 40px rgba(0, 0, 0, .5);
+  }
+
+  .creation-skill-source__header {
+    border-bottom-color: rgba(255, 255, 255, .08);
+  }
+
+  .creation-skill-source__header span { color: #E8A25C; }
+  .creation-skill-source__header h2 { color: #F3F4F6; }
+  .creation-skill-source__header p { color: #9CA3AF; }
+  .creation-skill-source__header > button {
+    border-color: rgba(255, 255, 255, .14);
+    background: #2C2C2E;
+    color: #9CA3AF;
+  }
+
+  .creation-skill-source__browser > aside {
+    border-right-color: rgba(255, 255, 255, .08);
+    background: #1C1C1E;
+  }
+
+  .creation-skill-source__browser > aside > header strong { color: #F3F4F6; }
+  .creation-skill-source__browser > aside > header small { color: #8E8E93; }
+  .creation-skill-source__browser > aside > button { color: #9CA3AF; }
+  .creation-skill-source__browser > aside > button:hover { background: rgba(255, 255, 255, .06); }
+  .creation-skill-source__browser > aside > button.is-active {
+    border-color: rgba(255, 177, 122, .3);
+    background: rgba(255, 159, 67, .14);
+    color: #FFC48D;
+  }
+  .creation-skill-source__browser > aside > button > span small { color: #8E8E93; }
+  .creation-skill-source__browser > aside > button.creation-skill-source__download-all {
+    border-color: rgba(255, 177, 122, .3);
+    color: #FFC48D;
+  }
+
+  .creation-skill-source__header button:focus-visible,
+  .creation-skill-source__browser button:focus-visible { outline-color: rgba(255, 179, 136, .3); }
+
+  .creation-skill-detail__header {
+    border-bottom-color: rgba(255, 255, 255, .08);
+    background: linear-gradient(135deg, rgba(255, 159, 67, .10) 0%, #1C1C1E 54%);
+  }
+
+  .creation-skill-detail__header > div > span { color: #E8A25C; }
+  .creation-skill-detail__header h2 { color: #F3F4F6; }
+  .creation-skill-detail__header p { color: #9CA3AF; }
+  .creation-skill-detail__header > button { border-color: rgba(255, 255, 255, .14); background: #2C2C2E; color: #9CA3AF; }
+
+  .creation-skill-detail__meta span { color: #9CA3AF; }
+  .creation-skill-detail__meta svg { color: #E8A25C; }
+
+  .creation-skill-detail__section,
+  .creation-skill-detail__document,
+  .creation-skill-detail__files,
+  .creation-skill-detail__capability {
+    border-color: rgba(255, 255, 255, .09);
+    background: #232326;
+  }
+
+  .creation-skill-detail__capability { background: linear-gradient(180deg, rgba(255, 159, 67, .10) 0%, #232326 38%); }
+  .creation-skill-detail__capability > div:first-child > span { color: #E8A25C; }
+  .creation-skill-detail__capability > div:first-child h3 { color: #F3F4F6; }
+  .creation-skill-detail__capability > div:first-child p { color: #9CA3AF; }
+  .creation-skill-detail__capability dl > div { border-color: rgba(255, 255, 255, .09); background: #2C2C2E; }
+  .creation-skill-detail__capability dt { color: #E8A25C; }
+  .creation-skill-detail__capability dd { color: #9CA3AF; }
+  .creation-skill-detail__workflow { border-top-color: rgba(255, 255, 255, .08); }
+  .creation-skill-detail__workflow article > span { background: rgba(255, 159, 67, .14); color: #E8A25C; }
+  .creation-skill-detail__workflow article > div { border-bottom-color: rgba(255, 255, 255, .08); }
+  .creation-skill-detail__workflow h4 { color: #F3F4F6; }
+  .creation-skill-detail__workflow p { color: #9CA3AF; }
+  .creation-skill-detail__workflow small { color: #8E8E93; }
+  .creation-skill-detail__resources > span { border-color: rgba(47, 179, 168, .3); background: rgba(47, 179, 168, .16); color: #2FB3A8; }
+  .creation-skill-detail__resources > span i { background: rgba(47, 179, 168, .16); color: #2FB3A8; }
+
+  .creation-skill-detail__files-heading {
+    border-bottom-color: rgba(255, 255, 255, .08);
+    background: rgba(255, 159, 67, .10);
+  }
+
+  .creation-skill-detail__files-heading > div > span { color: #E8A25C; }
+  .creation-skill-detail__files-heading h3 { color: #F3F4F6; }
+  .creation-skill-detail__files-heading p { color: #8E8E93; }
+  .creation-skill-detail__files-heading > button {
+    border-color: rgba(255, 177, 122, .3);
+    background: #2C2C2E;
+    color: #FFC48D;
+  }
+
+  .creation-skill-detail__file-browser nav {
+    border-right-color: rgba(255, 255, 255, .08);
+    background: #1C1C1E;
+  }
+
+  .creation-skill-detail__file-browser nav button { color: #9CA3AF; }
+  .creation-skill-detail__file-browser nav button:hover { background: rgba(255, 255, 255, .06); }
+  .creation-skill-detail__file-browser nav button.is-active {
+    border-color: rgba(255, 177, 122, .3);
+    background: #2C2C2E;
+    color: #FFC48D;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .28);
+  }
+
+  .creation-skill-detail__file-browser nav button small { color: #8E8E93; }
+
+  .creation-skill-detail__section > span { color: #E8A25C; }
+  .creation-skill-detail__section h3,
+  .creation-skill-detail__document h3 { color: #F3F4F6; }
+  .creation-skill-detail__section > p { color: #9CA3AF; }
+  .creation-skill-detail__section > ul,
+  .creation-skill-detail__section > ol { color: #9CA3AF; }
+  .creation-skill-detail__section--distinctive { border-color: rgba(47, 179, 168, .3); background: linear-gradient(180deg, rgba(47, 179, 168, .10) 0%, #232326 42%); }
+  .creation-skill-detail__section--distinctive > span { color: #2FB3A8; }
+  .creation-skill-detail__guidance { border-left-color: rgba(47, 179, 168, .42); background: rgba(47, 179, 168, .16); }
+  .creation-skill-detail__guidance strong { color: #2FB3A8; }
+  .creation-skill-detail__guidance p { color: #9CA3AF; }
+
+  .creation-skill-detail__examples { border-color: rgba(255, 177, 122, .28); background: rgba(255, 159, 67, .12); }
+  .creation-skill-detail__examples strong { color: #FFC48D; }
+  .creation-skill-detail__examples ul { color: #9CA3AF; }
+
+  .creation-skill-detail__document { background: #232326; }
+  .creation-skill-detail__document > div svg { color: #E8A25C; }
+  .creation-skill-detail__document > p { color: #9CA3AF; }
+  .creation-skill-detail__markdown {
+    border-color: rgba(255, 255, 255, .09);
+    background: #1C1C1E;
+    color: #E5E7EB;
+  }
+
+  .creation-skill-detail__footer {
+    border-top-color: rgba(255, 255, 255, .08);
+    background: #1C1C1E;
+  }
+
+  .creation-skill-detail__footer button {
+    border-color: rgba(255, 255, 255, .14);
+    background: #2C2C2E;
+    color: #F3F4F6;
+  }
+
+  .creation-skill-detail__footer button.is-primary { border-color: #C77E3A; background: #C77E3A; color: #fff; }
+  .creation-skill-detail__footer button:focus-visible,
+  .creation-skill-detail__header > button:focus-visible,
+  .creation-skill-detail__files button:focus-visible { outline-color: rgba(255, 179, 136, .3); }
+
+  /* 移动端：与亮色中 #e4e7ec 分割线对应的暗色覆盖 */
+  .creation-skill-source__browser > aside { border-bottom-color: rgba(255, 255, 255, .08); }
+  .creation-skill-detail__file-browser nav { border-bottom-color: rgba(255, 255, 255, .08); }
+}

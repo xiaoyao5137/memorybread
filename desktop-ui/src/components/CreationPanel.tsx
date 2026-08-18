@@ -29,12 +29,14 @@ import {
   matchCreationSkills,
   publishCreationSkill,
   resolveCreationSkillDependencies,
+  resolveExecutionSkills,
   saveLocalCreationSkill,
   searchCreationSkillMarket,
   skillFileText,
   type CreationSkillMarketItem,
   type CreationSkillSource,
   type LocalCreationSkill,
+  type MatchedCreationSkill,
 } from '../utils/creationSkills'
 import { OFFLINE_CREATION_SKILL_CATEGORIES } from '../data/creationSkillCategories'
 import ModelSelect from './ModelSelect'
@@ -1134,7 +1136,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const [uploadingSkillPackage, setUploadingSkillPackage] = useState(false)
   const [skillUploadMenuOpen, setSkillUploadMenuOpen] = useState(false)
   const [currentDocumentSkills, setCurrentDocumentSkills] = useState<LocalCreationSkill[]>([])
-  const [dismissedAutomaticSkillIds, setDismissedAutomaticSkillIds] = useState<Set<number>>(() => new Set())
+  const turnMatchedSkillsRef = useRef<MatchedCreationSkill[] | null>(null)
   const [skillPickerOpen, setSkillPickerOpen] = useState(false)
   const [skillQuery, setSkillQuery] = useState('')
   const [activeSkillPickerIndex, setActiveSkillPickerIndex] = useState(0)
@@ -1892,33 +1894,15 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     () => creationSkillCategoryOptions(marketCategories),
     [marketCategories],
   )
-  const rawMatchedSkills = useMemo(
+  // 自动推荐技能已下线：输入过程中不再做任何召回计算，只有用户显式 @ 提及
+  // 的 Skill 会进入创作指令。
+  const matchedSkills = useMemo(
     () => matchCreationSkills(prompt, installedSkills),
     [installedSkills, prompt],
   )
-  const matchedSkills = useMemo(
-    () => rawMatchedSkills.filter(match => (
-      match.reason === 'mentioned' || !dismissedAutomaticSkillIds.has(match.skill.id)
-    )),
-    [dismissedAutomaticSkillIds, rawMatchedSkills],
-  )
-
-  useEffect(() => {
-    const activeAutomaticIds = new Set(
-      rawMatchedSkills
-        .filter(match => match.reason === 'automatic')
-        .map(match => match.skill.id),
-    )
-    setDismissedAutomaticSkillIds(current => {
-      const next = new Set([...current].filter(id => activeAutomaticIds.has(id)))
-      if (next.size === current.size && [...next].every(id => current.has(id))) return current
-      return next
-    })
-  }, [rawMatchedSkills])
-
-  const dismissAutomaticSkill = (skillId: number) => {
-    setDismissedAutomaticSkillIds(current => new Set(current).add(skillId))
-  }
+  // 提交后的执行时解析结果只在当轮生效：Loop 运行中 selected_skills 与技能
+  // 指令都以它为准；未解析时退回输入时的显式 @ 选择。
+  const effectiveMatchedSkills = () => turnMatchedSkillsRef.current ?? matchedSkills
   const skillPickerItems = useMemo(() => {
     const query = skillQuery.trim().toLowerCase()
     return installedSkills
@@ -1959,7 +1943,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   }
   const promptWithAttachments = () => {
     const basePrompt = messageWithAttachments()
-    return `${basePrompt}${buildCreationSkillInstruction(matchedSkills)}`
+    return `${basePrompt}${buildCreationSkillInstruction(effectiveMatchedSkills())}`
   }
 
   const handlePromptChange = (value: string, caret: number | null) => {
@@ -2223,9 +2207,10 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   }
 
   const selectedSkillPayload = () => {
-    const primarySkillIds = new Set(matchedSkills.map(({ skill }) => skill.id))
+    const turnSkills = effectiveMatchedSkills()
+    const primarySkillIds = new Set(turnSkills.map(({ skill }) => skill.id))
     return resolveCreationSkillDependencies(
-      matchedSkills.map(({ skill }) => skill),
+      turnSkills.map(({ skill }) => skill),
       localSkills,
     ).map(skill => {
       const skillMarkdown = codexSkillPackageFiles(skill)
@@ -2904,6 +2889,17 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     startTimer()
     const startedAt = Date.now()
 
+    // 执行时自动解析技能：显式 @ 优先；否则由 sidecar 模型路由依据 Skill 自描述
+    // 决策，模型不可用或降级时退回词级证据 + 意图门控的确定性匹配，避免明明
+    // 命中的技能在执行前被静默丢掉。
+    const skillResolution = await resolveExecutionSkills({
+      apiBaseUrl,
+      prompt: messageWithAttachments(message),
+      skills: installedSkills,
+      signal: controller.signal,
+    })
+    turnMatchedSkillsRef.current = skillResolution.matches
+
     try {
       let payload = buildAgentPayload(message, chat, {
         session_id: activeSessionId,
@@ -3016,7 +3012,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     setAttachmentError(null)
     setCurrentDocumentSource(null)
     setCurrentDocumentSkills([])
-    setDismissedAutomaticSkillIds(new Set())
+    turnMatchedSkillsRef.current = null
     setPendingConfirmation(null)
     setSkillPickerOpen(false)
     setSkillQuery('')
@@ -3114,11 +3110,11 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     h3: ({ node, children, ...props }: any) => <h3 id={headingId(node)} style={{ fontSize: 16, lineHeight: 1.45, margin: '18px 0 9px' }} {...props}>{children}</h3>,
     p: ({ node, ...props }: any) => <p style={{ margin: '9px 0', lineHeight: 1.75 }} {...props} />,
     li: ({ node, ...props }: any) => <li style={{ margin: '6px 0', lineHeight: 1.65 }} {...props} />,
-    code: ({ node, ...props }: any) => <code style={{ background: '#f2f4f7', padding: '2px 5px', borderRadius: 4 }} {...props} />,
+    code: ({ node, ...props }: any) => <code style={{ background: 'var(--mb-bg-inset)', padding: '2px 5px', borderRadius: 4 }} {...props} />,
     strong: ({ node, ...props }: any) => (
       <strong
         style={{
-          color: '#9a4f1c',
+          color: 'var(--mb-brand-strong)',
           fontWeight: 750,
           textDecoration: 'underline',
           textDecorationColor: '#e4b48e',
@@ -3182,10 +3178,10 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   }
 
   return (
-    <div className={`creation-panel ${className}`.trim()} style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: '#f6f7f9', color: '#172033' }}>
+    <div className={`creation-panel ${className}`.trim()} style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--mb-bg-page)', color: 'var(--mb-text-primary)' }}>
 
       {/* 顶部 Tab 栏 */}
-      <div className="creation-top-tabs" style={{ display: 'flex', borderBottom: '1px solid #e1e5ea', background: '#fff', padding: '0 22px', flexShrink: 0 }}>
+      <div className="creation-top-tabs" style={{ display: 'flex', borderBottom: '1px solid var(--mb-border-strong)', background: 'var(--mb-bg-card)', padding: '0 22px', flexShrink: 0 }}>
         {(['creation', 'history', 'skills', 'tools'] as const).map((tab) => (
           <React.Fragment key={tab}>
             <button
@@ -3787,20 +3783,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                     >
                       <Sparkles size={13} />
                       <span>{match.skill.title}</span>
-                      <small>{match.reason === 'mentioned' ? '@ 已选择' : '自动匹配'}</small>
+                      <small>@ 已选择</small>
                     </button>
-                    {match.reason === 'automatic' && (
-                      <button
-                        type="button"
-                        className="creation-matched-skill__dismiss"
-                        onClick={() => dismissAutomaticSkill(match.skill.id)}
-                        disabled={isGenerating}
-                        aria-label={`取消自动匹配：${match.skill.title}`}
-                        title="本次不使用此技能"
-                      >
-                        <X size={12} aria-hidden="true" />
-                      </button>
-                    )}
                   </span>
                 ))}
               </div>
@@ -3811,7 +3795,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                   <span key={item.id} style={attachmentPillStyle}>
                     <Paperclip size={13} />
                     <span style={{ maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</span>
-                    <small style={{ color: '#667085' }}>{formatAttachmentSize(item.size)}</small>
+                    <small style={{ color: 'var(--mb-text-secondary)' }}>{formatAttachmentSize(item.size)}</small>
                     <button
                       type="button"
                       onClick={() => setAttachments(prev => prev.filter(existing => existing.id !== item.id))}
@@ -3849,7 +3833,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                   title="选择创作生成模型"
                 />
                 {activeCreationModelId === REMOTE_CREATION_MODEL_ID && cloudBalance && (
-                  <span style={{ color: '#667085', fontSize: 12 }}>
+                  <span style={{ color: 'var(--mb-text-secondary)', fontSize: 12 }}>
                     Credit {cloudBalance.available}
                   </span>
                 )}
@@ -3893,8 +3877,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
           </div>
 
           <section className={`creation-document-section${fullscreenPanel === 'document' ? ' creation-panel-fullscreen' : ''}`} aria-label="生成内容" style={{ flex: 1, minHeight: 0, overflow: 'hidden', padding: 22 }}>
-            <div className="creation-document-card" style={{ height: '100%', border: '1px solid #e1e5ea', borderRadius: 8, background: '#fff', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-              <div className="creation-document-header" style={{ height: 48, padding: '0 16px', borderBottom: '1px solid #e1e5ea', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
+            <div className="creation-document-card" style={{ height: '100%', border: '1px solid var(--mb-border-strong)', borderRadius: 8, background: 'var(--mb-bg-card)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+              <div className="creation-document-header" style={{ height: 48, padding: '0 16px', borderBottom: '1px solid var(--mb-border-strong)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
                 <span style={{ fontSize: 14, fontWeight: 650 }}>
                   创作文档
                   {latestDocumentPatch && (
@@ -3974,7 +3958,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                     changes={latestPatchChanges}
                   />
                 ) : isGenerating ? (
-                  <div style={{ height: '100%', display: 'grid', placeItems: 'center', color: '#667085', fontSize: 14, gap: 12 }}>
+                  <div style={{ height: '100%', display: 'grid', placeItems: 'center', color: 'var(--mb-text-secondary)', fontSize: 14, gap: 12 }}>
                     <Loader2 size={28} className="spin" color="#a45d22" />
                     <div style={{ textAlign: 'center', lineHeight: 1.6 }}>
                       <div style={{ fontWeight: 600, color: '#a45d22', marginBottom: 4 }}>模型正在深度推理中</div>
@@ -3982,7 +3966,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                     </div>
                   </div>
                 ) : (
-                  <div style={{ height: '100%', display: 'grid', placeItems: 'center', color: '#98a2b3', fontSize: 14 }}>
+                  <div style={{ height: '100%', display: 'grid', placeItems: 'center', color: 'var(--mb-text-tertiary)', fontSize: 14 }}>
                     输入创作需求后，可以先预览参考资料，也可以直接开始生成。
                   </div>
                 )}
@@ -3991,7 +3975,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
           </section>
 
           {/* 底部互斥 Tab */}
-          <div ref={bottomPanelRef} className="creation-bottom-panel" style={{ background: '#fff', borderTop: '1px solid #e1e5ea', flexShrink: 0 }}>
+          <div ref={bottomPanelRef} className="creation-bottom-panel" style={{ background: 'var(--mb-bg-card)', borderTop: '1px solid var(--mb-border-strong)', flexShrink: 0 }}>
             <div className="creation-bottom-tabs" role="tablist" aria-label="创作参考与参数" style={{ display: 'flex', alignItems: 'center', padding: '0 16px' }}>
               {([
                 { key: 'reference', label: '参考资料', badge: referencePreview?.references?.length || 0 },
@@ -4035,7 +4019,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                   )}
                   <button
                   onClick={() => setActiveBottomTab(null)}
-                  style={{ marginLeft: 'auto', padding: '4px 10px', border: '1px solid #e1e5ea', borderRadius: 5, background: '#f3f4f6', color: '#6b7280', fontSize: 12, cursor: 'pointer' }}
+                  style={{ marginLeft: 'auto', padding: '4px 10px', border: '1px solid var(--mb-border-strong)', borderRadius: 5, background: 'var(--mb-bg-inset)', color: 'var(--mb-text-secondary)', fontSize: 12, cursor: 'pointer' }}
                 >
                   收起
                   </button>
@@ -4043,7 +4027,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
               )}
             </div>
             {activeBottomTab === 'reference' && (
-              <div ref={referencePanelRef} id="creation-bottom-panel-reference" role="tabpanel" aria-label="参考资料" className={fullscreenPanel === 'reference' ? 'creation-panel-fullscreen creation-reference-fullscreen' : ''} style={{ padding: 16, maxHeight: fullscreenPanel === 'reference' ? 'none' : 280, overflowY: 'auto', background: '#fafbfc', borderTop: '1px solid #e1e5ea' }}>
+              <div ref={referencePanelRef} id="creation-bottom-panel-reference" role="tabpanel" aria-label="参考资料" className={fullscreenPanel === 'reference' ? 'creation-panel-fullscreen creation-reference-fullscreen' : ''} style={{ padding: 16, maxHeight: fullscreenPanel === 'reference' ? 'none' : 280, overflowY: 'auto', background: 'var(--mb-bg-elevated)', borderTop: '1px solid var(--mb-border-strong)' }}>
                 {fullscreenPanel === 'reference' && (
                   <header className="creation-panel-fullscreen__header">
                     <strong>参考资料</strong>
@@ -4081,7 +4065,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                     ))}
                   </div>
                 ) : (
-                  <div style={{ color: '#667085', fontSize: 13 }}>暂无资料，请先点击「预览参考」。</div>
+                  <div style={{ color: 'var(--mb-text-secondary)', fontSize: 13 }}>暂无资料，请先点击「预览参考」。</div>
                 )}
               </div>
             )}
@@ -4143,7 +4127,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
               </div>
             )}
             {activeBottomTab === 'config' && (
-              <div id="creation-bottom-panel-config" role="tabpanel" aria-label="创作参数" style={{ padding: 16, maxHeight: 280, overflowY: 'auto', background: '#fafbfc', borderTop: '1px solid #e1e5ea', display: 'grid', gap: 12 }}>
+              <div id="creation-bottom-panel-config" role="tabpanel" aria-label="创作参数" style={{ padding: 16, maxHeight: 280, overflowY: 'auto', background: 'var(--mb-bg-elevated)', borderTop: '1px solid var(--mb-border-strong)', display: 'grid', gap: 12 }}>
                 <label style={{ display: 'grid', gap: 7, fontSize: 13 }}>
                   文档类型
                   <input value={docType} onChange={(e) => setDocType(e.target.value)} placeholder="建设方案" style={inputStyle} />
@@ -4154,8 +4138,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                 </label>
                 <Toggle label="继承历史格式" checked={inheritFormat} onChange={setInheritFormat} />
                 <Toggle label="图片生成建议" checked={enableImageGeneration} onChange={setEnableImageGeneration} icon={<Image size={16} />} />
-                <div style={{ height: 1, background: '#e1e5ea', margin: '4px 0' }} />
-                <div style={{ fontSize: 12, color: '#475467', display: 'flex', justifyContent: 'space-between' }}>
+                <div style={{ height: 1, background: 'var(--mb-border-strong)', margin: '4px 0' }} />
+                <div style={{ fontSize: 12, color: 'var(--mb-text-secondary)', display: 'flex', justifyContent: 'space-between' }}>
                   <span>权重配置</span>
                   <span style={{ color: totalWeight === 100 ? '#a45d22' : '#b54708' }}>{totalWeight}%</span>
                 </div>
@@ -5050,9 +5034,9 @@ const MarkdownContent = ({
                     <th
                       key={cellIndex}
                       style={{
-                        border: '1px solid #ddc5b2',
-                        background: '#f7eadf',
-                        color: '#6b3517',
+                        border: '1px solid var(--mb-brand-border)',
+                        background: 'var(--mb-brand-soft)',
+                        color: 'var(--mb-brand-text)',
                         fontWeight: 700,
                         padding: '10px 12px',
                         textAlign: block.alignments[cellIndex] || 'left',
@@ -5071,11 +5055,11 @@ const MarkdownContent = ({
                       <td
                         key={cellIndex}
                         style={{
-                          border: '1px solid #d0d5dd',
+                          border: '1px solid var(--mb-border-strong)',
                           padding: '10px 12px',
                           textAlign: block.alignments[cellIndex] || 'left',
                           verticalAlign: 'top',
-                          background: rowIndex % 2 === 0 ? '#fff' : '#fdf9f5',
+                          background: rowIndex % 2 === 0 ? 'var(--mb-bg-card)' : 'var(--mb-bg-warm)',
                         }}
                       >
                         <ReactMarkdown components={inlineComponents}>{row[cellIndex] || ''}</ReactMarkdown>
@@ -5093,14 +5077,14 @@ const MarkdownContent = ({
 }
 
 const Toggle = ({ label, checked, onChange, icon }: { label: string; checked: boolean; onChange: (value: boolean) => void; icon?: React.ReactNode }) => (
-  <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, fontSize: 14, color: '#344054' }}>
+  <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, fontSize: 14, color: 'var(--mb-text-primary)' }}>
     <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>{icon}{label}</span>
     <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
   </label>
 )
 
 const WeightSlider = ({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) => (
-  <label style={{ display: 'grid', gap: 6, marginBottom: 11, fontSize: 12, color: '#667085' }}>
+  <label style={{ display: 'grid', gap: 6, marginBottom: 11, fontSize: 12, color: 'var(--mb-text-secondary)' }}>
     <span style={{ display: 'flex', justifyContent: 'space-between' }}>
       <span>{label}</span>
       <span>{value}%</span>
@@ -5111,11 +5095,11 @@ const WeightSlider = ({ label, value, onChange }: { label: string; value: number
 
 const ProgressStrip = ({ label, percent }: { label: string; percent: number }) => (
   <div style={{ marginTop: 12, display: 'grid', gap: 6, maxWidth: 360 }}>
-    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#475467' }}>
+    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--mb-text-secondary)' }}>
       <span>{label}</span>
       <span>{percent}%</span>
     </div>
-    <div style={{ height: 6, borderRadius: 999, background: '#e4e7ec', overflow: 'hidden' }}>
+    <div style={{ height: 6, borderRadius: 999, background: 'var(--mb-border-strong)', overflow: 'hidden' }}>
       <div style={{ width: `${percent}%`, height: '100%', borderRadius: 999, background: '#a45d22', transition: 'width 0.25s ease' }} />
     </div>
   </div>
@@ -5241,13 +5225,13 @@ const DataReferenceRow = ({
 }
 
 const ReferenceRow = ({ item, onOpenSource }: { item: ReferenceItem; onOpenSource: (item: ReferenceItem) => void }) => (
-  <div style={{ border: '1px solid #e1e5ea', borderRadius: 8, padding: 12 }}>
+  <div style={{ border: '1px solid var(--mb-border-strong)', borderRadius: 8, padding: 12 }}>
     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
       <div style={{ fontSize: 14, fontWeight: 650, lineHeight: 1.35 }}>{item.title}</div>
     </div>
-    <div style={{ marginTop: 6, fontSize: 12, color: '#667085' }}>{item.doc_type || '未分类'} · 打开/引用 {item.usage_count}</div>
-    <div style={{ marginTop: 8, fontSize: 12, color: '#475467', lineHeight: 1.55 }}>{item.reason}</div>
-    <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, fontSize: 11, color: '#667085' }}>
+    <div style={{ marginTop: 6, fontSize: 12, color: 'var(--mb-text-secondary)' }}>{item.doc_type || '未分类'} · 打开/引用 {item.usage_count}</div>
+    <div style={{ marginTop: 8, fontSize: 12, color: 'var(--mb-text-secondary)', lineHeight: 1.55 }}>{item.reason}</div>
+    <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, fontSize: 11, color: 'var(--mb-text-secondary)' }}>
       <span>相关 {Math.round(item.relevance_score * 100)}</span>
       <span>完整 {Math.round(item.completeness_score * 100)}</span>
       <span>格式 {Math.round(item.format_score * 100)}</span>
@@ -5258,9 +5242,9 @@ const ReferenceRow = ({ item, onOpenSource }: { item: ReferenceItem; onOpenSourc
       style={{
         marginTop: 10,
         padding: '6px 10px',
-        border: '1px solid #d0d5dd',
+        border: '1px solid var(--mb-border-strong)',
         borderRadius: 6,
-        background: '#fff',
+        background: 'var(--mb-bg-card)',
         color: '#a45d22',
         fontSize: 12,
         fontWeight: 600,
@@ -5279,12 +5263,12 @@ const ReferenceRow = ({ item, onOpenSource }: { item: ReferenceItem; onOpenSourc
 const inputStyle: React.CSSProperties = {
   width: '100%',
   padding: '10px 12px',
-  border: '1px solid #d0d5dd',
+  border: '1px solid var(--mb-border-strong)',
   borderRadius: 8,
   fontSize: 13,
   fontFamily: 'inherit',
   outline: 'none',
-  background: '#fff',
+  background: 'var(--mb-bg-card)',
 }
 
 const primaryButtonStyle: React.CSSProperties = {
@@ -5304,9 +5288,9 @@ const primaryButtonStyle: React.CSSProperties = {
 
 const secondaryButtonStyle: React.CSSProperties = {
   ...primaryButtonStyle,
-  background: '#fff',
-  color: '#344054',
-  border: '1px solid #d0d5dd',
+  background: 'var(--mb-bg-card)',
+  color: 'var(--mb-text-primary)',
+  border: '1px solid var(--mb-border-strong)',
 }
 
 const dangerButtonStyle: React.CSSProperties = {
@@ -5332,10 +5316,10 @@ const compactDangerButtonStyle: React.CSSProperties = {
 const attachmentPillStyle: React.CSSProperties = {
   minHeight: 30,
   padding: '0 8px',
-  border: '1px solid #d0d5dd',
+  border: '1px solid var(--mb-border-strong)',
   borderRadius: 999,
-  background: '#fff',
-  color: '#344054',
+  background: 'var(--mb-bg-card)',
+  color: 'var(--mb-text-primary)',
   display: 'inline-flex',
   alignItems: 'center',
   gap: 6,
@@ -5347,8 +5331,8 @@ const attachmentRemoveStyle: React.CSSProperties = {
   height: 20,
   border: 0,
   borderRadius: 999,
-  background: '#f2f4f7',
-  color: '#475467',
+  background: 'var(--mb-bg-inset)',
+  color: 'var(--mb-text-secondary)',
   display: 'inline-flex',
   alignItems: 'center',
   justifyContent: 'center',

@@ -82,6 +82,7 @@ const EMPTY_OVERVIEW: MonitorOverview = {
     capture_enabled: true,
     pending_extraction_count: 0,
     oldest_pending_extraction_at_ms: null,
+    extraction_stalled: false,
     pending_bake_count: 0,
     oldest_pending_bake_at_ms: null,
     bake_retry_pending_count: 0,
@@ -300,10 +301,10 @@ function fmtRatePerMin(value: number): string {
 
 const OCR_STATUS_META: Record<string, { label: string; color: string }> = {
   success: { label: '成功', color: '#34C759' },
-  empty: { label: '空文本', color: '#8E8E93' },
+  empty: { label: '空文本', color: 'var(--mb-text-tertiary)' },
   failed: { label: '失败', color: '#FF3B30' },
   timeout: { label: '超时', color: '#FF9500' },
-  skipped_offline: { label: '离线跳过', color: '#6E6E73' },
+  skipped_offline: { label: '离线跳过', color: 'var(--mb-text-secondary)' },
   skipped_backpressure: { label: '队列限流', color: '#FF9500' },
 }
 
@@ -454,7 +455,7 @@ export const SparkLine: React.FC<{
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'stretch', gap: 6 }}>
-        <div style={{ width: 34, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', fontSize: 9, color: '#AEAEB2', textAlign: 'right', paddingTop: 2, paddingBottom: 22 }}>
+        <div style={{ width: 34, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', fontSize: 9, color: 'var(--mb-text-faint)', textAlign: 'right', paddingTop: 2, paddingBottom: 22 }}>
           <span>{axisValueFormatter(max)}</span>
           <span>{axisValueFormatter((max + min) / 2)}</span>
           <span>{axisValueFormatter(min)}</span>
@@ -464,8 +465,8 @@ export const SparkLine: React.FC<{
           border: '1px solid rgba(99,99,102,0.10)',
           borderRadius: 10,
           padding: '8px 8px 4px',
-          background: 'linear-gradient(180deg, rgba(255,255,255,0.98), rgba(249,250,252,0.92)), repeating-linear-gradient(0deg, transparent 0 23px, rgba(142,142,147,0.11) 24px), repeating-linear-gradient(90deg, transparent 0 39px, rgba(142,142,147,0.09) 40px)',
-          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.85)',
+          background: 'linear-gradient(180deg, var(--mb-bg-card), var(--mb-bg-elevated)), repeating-linear-gradient(0deg, transparent 0 23px, rgba(142,142,147,0.11) 24px), repeating-linear-gradient(90deg, transparent 0 39px, rgba(142,142,147,0.09) 40px)',
+          boxShadow: 'var(--mb-highlight-inset)',
         }}>
           <svg
             width="100%"
@@ -512,14 +513,14 @@ export const SparkLine: React.FC<{
               <circle key={`${point.ts}-${seriesIndex}`} cx={point.x} cy={point.y} r={3} fill={seriesPoints[seriesIndex].color} />
             ))}
           </svg>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: 10, color: '#AEAEB2' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: 10, color: 'var(--mb-text-faint)' }}>
             <span>{axisFormatter(domainStart)}</span>
             <span>{axisFormatter(domainStart + domainRange / 2)}</span>
             <span>{axisFormatter(domainEnd)}</span>
           </div>
         </div>
       </div>
-      <div style={{ fontSize: 11, color: '#6E6E73', marginTop: 6, minHeight: 16 }}>
+      <div style={{ fontSize: 11, color: 'var(--mb-text-secondary)', marginTop: 6, minHeight: 16 }}>
         {normalizedSeries.length === 1
           ? (() => {
               const singleData = normalizedSeries[0].data
@@ -554,7 +555,7 @@ const BarChart: React.FC<{
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'stretch', gap: 6, height }}>
-        <div style={{ width: 34, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', fontSize: 9, color: '#AEAEB2', textAlign: 'right', paddingTop: 2, paddingBottom: 18 }}>
+        <div style={{ width: 34, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', fontSize: 9, color: 'var(--mb-text-faint)', textAlign: 'right', paddingTop: 2, paddingBottom: 18 }}>
           <span>{valueFormatter(max)}</span>
           <span>{valueFormatter(mid)}</span>
           <span>{valueFormatter(0)}</span>
@@ -579,14 +580,14 @@ const BarChart: React.FC<{
                 onFocus={() => setHoverIndex(i)}
                 onBlur={() => setHoverIndex(null)}
               />
-              <span style={{ fontSize: 9, color: '#AEAEB2', textAlign: 'center', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', width: '100%' }}>
+              <span style={{ fontSize: 9, color: 'var(--mb-text-faint)', textAlign: 'center', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', width: '100%' }}>
                 {d.label}
               </span>
             </div>
           ))}
         </div>
       </div>
-      <div style={{ fontSize: 11, color: '#6E6E73', marginTop: 6, minHeight: 16 }}>
+      <div style={{ fontSize: 11, color: 'var(--mb-text-secondary)', marginTop: 6, minHeight: 16 }}>
         {hoverItem ? `${hoverItem.label || '当前'} · ${valueFormatter(hoverItem.value)}` : '悬停柱子可查看具体值'}
       </div>
     </div>
@@ -652,7 +653,7 @@ const TrendHeader: React.FC<{
 }> = ({ title, rangeLabel, bucketLabel }) => (
   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
     <span style={{ ...sectionTitle, marginBottom: 0 }}>{title}（{rangeLabel}）</span>
-    <span style={{ fontSize: 11, color: '#AEAEB2' }}>采样粒度 {bucketLabel}</span>
+    <span style={{ fontSize: 11, color: 'var(--mb-text-faint)' }}>采样粒度 {bucketLabel}</span>
   </div>
 )
 
@@ -663,7 +664,7 @@ const ChartLegend: React.FC<{
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
       {items.map((item, index) => (
-        <span key={`${index}-${item.color}-${item.label}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: '#6E6E73' }}>
+        <span key={`${index}-${item.color}-${item.label}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--mb-text-secondary)' }}>
           <span style={{ width: 8, height: 8, borderRadius: '50%', background: item.color, display: 'inline-block' }} />
           {item.label}
         </span>
@@ -695,9 +696,9 @@ type ExtractorStatus = 'running' | 'waiting' | 'idle' | 'stalled' | 'paused'
 const EXTRACTOR_STATUS_META: Record<ExtractorStatus, { label: string; color: string; dot: string }> = {
   running: { label: '运行中', color: '#34C759', dot: '#34C759' },
   waiting: { label: '等待片段成熟', color: '#FF9500', dot: '#FF9500' },
-  idle:    { label: '空闲', color: '#8E8E93', dot: '#8E8E93' },
+  idle:    { label: '空闲', color: 'var(--mb-text-tertiary)', dot: '#8E8E93' },
   stalled: { label: '提炼器无响应', color: '#FF3B30', dot: '#FF3B30' },
-  paused:  { label: '已暂停', color: '#8E8E93', dot: '#8E8E93' },
+  paused:  { label: '已暂停', color: 'var(--mb-text-tertiary)', dot: '#8E8E93' },
 }
 
 function fmtRelativeTs(ms: number | null | undefined): string {
@@ -737,14 +738,15 @@ const ExtractionQueueCard: React.FC<{
   extractingCount: number
   lastExtractionAtMs: number | null | undefined
   oldestPendingAtMs: number | null | undefined
-}> = ({ pending, status, extractingCount, lastExtractionAtMs, oldestPendingAtMs }) => {
+  stalled: boolean
+}> = ({ pending, status, extractingCount, lastExtractionAtMs, oldestPendingAtMs, stalled }) => {
   const meta = EXTRACTOR_STATUS_META[status] ?? EXTRACTOR_STATUS_META.idle
   const oldestAge = oldestQueueAge(oldestPendingAtMs)
   const baseColor = status === 'paused'
     ? '#8E8E93'
     : oldestAge >= 86_400_000
     ? '#FF3B30'
-    : pending > 0 ? '#FF9500' : '#8E8E93'
+    : stalled || pending > 0 ? '#FF9500' : '#8E8E93'
 
   let sub: string
   if (status === 'running') {
@@ -755,6 +757,10 @@ const ExtractionQueueCard: React.FC<{
     sub = '等待片段积累足够（≥3 条且静默 ≥10 分钟）后批量提炼'
   } else if (status === 'stalled') {
     sub = '后台提炼未启动，请检查本机服务'
+  } else if (stalled) {
+    sub = pending > 0
+      ? `提炼停摆：最老已等待 ${fmtDurationMs(oldestAge)}，请检查本机服务`
+      : '提炼停摆，请检查本机服务'
   } else if (status === 'paused') {
     sub = pending > 0
       ? `自动提炼已暂停 · 保留 ${pending} 条待恢复处理`
@@ -1033,7 +1039,7 @@ const OcrBackfillCard: React.FC<{
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', alignItems: 'flex-start', marginBottom: 10 }}>
         <div>
           <div style={{ ...sectionTitle, marginBottom: 3 }}>后台文字识别</div>
-          <div style={{ fontSize: 11, color: '#6E6E73' }}>{rangeLabel} · 仅在无法读取正文时使用截图识别，并在后台逐条补全文本</div>
+          <div style={{ fontSize: 11, color: 'var(--mb-text-secondary)' }}>{rangeLabel} · 仅在无法读取正文时使用截图识别，并在后台逐条补全文本</div>
         </div>
         <div style={{
           fontSize: 11, color: statusColor, background: `${statusColor}14`,
@@ -1045,24 +1051,24 @@ const OcrBackfillCard: React.FC<{
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(108px, 1fr))', gap: 8, marginBottom: 10 }}>
         <div style={{ background: 'rgba(0,122,255,0.08)', borderRadius: 8, padding: '8px 10px' }}>
-          <div style={{ fontSize: 11, color: '#6E6E73' }}>吞吐</div>
+          <div style={{ fontSize: 11, color: 'var(--mb-text-secondary)' }}>吞吐</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: '#007AFF', marginTop: 2 }}>{fmtRatePerMin(metrics.period_throughput_per_min)}</div>
-          <div style={{ fontSize: 10, color: '#8E8E93', marginTop: 2 }}>完成 {fmt(metrics.period_completed)}</div>
+          <div style={{ fontSize: 10, color: 'var(--mb-text-tertiary)', marginTop: 2 }}>完成 {fmt(metrics.period_completed)}</div>
         </div>
         <div style={{ background: 'rgba(52,199,89,0.08)', borderRadius: 8, padding: '8px 10px' }}>
-          <div style={{ fontSize: 11, color: '#6E6E73' }}>成功率</div>
+          <div style={{ fontSize: 11, color: 'var(--mb-text-secondary)' }}>成功率</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: '#34C759', marginTop: 2 }}>{metrics.period_success_rate.toFixed(0)}%</div>
-          <div style={{ fontSize: 10, color: '#8E8E93', marginTop: 2 }}>成功 {fmt(metrics.period_succeeded)}</div>
+          <div style={{ fontSize: 10, color: 'var(--mb-text-tertiary)', marginTop: 2 }}>成功 {fmt(metrics.period_succeeded)}</div>
         </div>
         <div style={{ background: 'rgba(255,149,0,0.08)', borderRadius: 8, padding: '8px 10px' }}>
-          <div style={{ fontSize: 11, color: '#6E6E73' }}>队列</div>
+          <div style={{ fontSize: 11, color: 'var(--mb-text-secondary)' }}>队列</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: '#FF9500', marginTop: 2 }}>{fmt(metrics.queued_count)}</div>
-          <div style={{ fontSize: 10, color: '#8E8E93', marginTop: 2 }}>执行中 {fmt(metrics.in_progress_count)}</div>
+          <div style={{ fontSize: 10, color: 'var(--mb-text-tertiary)', marginTop: 2 }}>执行中 {fmt(metrics.in_progress_count)}</div>
         </div>
         <div style={{ background: 'rgba(94,92,230,0.08)', borderRadius: 8, padding: '8px 10px' }}>
-          <div style={{ fontSize: 11, color: '#6E6E73' }}>平均耗时</div>
+          <div style={{ fontSize: 11, color: 'var(--mb-text-secondary)' }}>平均耗时</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: '#5E5CE6', marginTop: 2 }}>{fmtMs(metrics.avg_latency_ms)}</div>
-          <div style={{ fontSize: 10, color: '#8E8E93', marginTop: 2 }}>上次 {fmtRelativeTs(metrics.last_completed_at_ms)}</div>
+          <div style={{ fontSize: 10, color: 'var(--mb-text-tertiary)', marginTop: 2 }}>上次 {fmtRelativeTs(metrics.last_completed_at_ms)}</div>
         </div>
       </div>
 
@@ -1070,8 +1076,8 @@ const OcrBackfillCard: React.FC<{
         {[
           { label: '失败', value: metrics.period_failed, color: '#FF3B30' },
           { label: '超时', value: metrics.period_timed_out, color: '#FF9500' },
-          { label: '空文本', value: metrics.period_empty, color: '#8E8E93' },
-          { label: '离线跳过', value: metrics.period_skipped_offline, color: '#6E6E73' },
+          { label: '空文本', value: metrics.period_empty, color: 'var(--mb-text-tertiary)' },
+          { label: '离线跳过', value: metrics.period_skipped_offline, color: 'var(--mb-text-secondary)' },
           { label: '队列限流', value: metrics.period_skipped_backpressure, color: '#FF9500' },
           { label: '累计完成', value: metrics.completed_total, color: '#007AFF' },
         ].map((item) => (
@@ -1084,15 +1090,15 @@ const OcrBackfillCard: React.FC<{
 
       {metrics.recent.length > 0 && (
         <div>
-          <div style={{ fontSize: 11, color: '#6E6E73', marginBottom: 5 }}>最近文字识别</div>
+          <div style={{ fontSize: 11, color: 'var(--mb-text-secondary)', marginBottom: 5 }}>最近文字识别</div>
           {metrics.recent.map((item, index) => {
-            const meta = OCR_STATUS_META[item.status] ?? { label: item.status, color: '#6E6E73' }
+            const meta = OCR_STATUS_META[item.status] ?? { label: item.status, color: 'var(--mb-text-secondary)' }
             return (
               <div key={`${item.ts}-${index}`} style={{
                 display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center',
                 padding: '5px 0', borderTop: index === 0 ? '1px solid rgba(0,0,0,0.05)' : 'none',
               }}>
-                <span style={{ fontSize: 11, color: '#8E8E93' }}>{fmtTs(item.ts)}</span>
+                <span style={{ fontSize: 11, color: 'var(--mb-text-tertiary)' }}>{fmtTs(item.ts)}</span>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, color: meta.color }}>
                   <span style={{ width: 6, height: 6, borderRadius: '50%', background: meta.color }} />
                   {meta.label} · {fmtMs(item.latency_ms)}
@@ -1114,7 +1120,7 @@ const RuntimeBreakdownCard: React.FC<{
     <div style={cardStyle}>
       <div style={sectionTitle}>模型运行时拆分</div>
       {visible.length === 0 ? (
-        <div style={{ color: '#AEAEB2', fontSize: 12, textAlign: 'center', padding: '12px 0' }}>暂无拆分数据</div>
+        <div style={{ color: 'var(--mb-text-faint)', fontSize: 12, textAlign: 'center', padding: '12px 0' }}>暂无拆分数据</div>
       ) : (
         <div style={{ display: 'grid', gap: 8 }}>
           {visible.map((item, index) => {
@@ -1128,14 +1134,14 @@ const RuntimeBreakdownCard: React.FC<{
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center' }}>
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: '#1D1D1F' }}>{item.label}</div>
-                    <div style={{ fontSize: 11, color: '#6E6E73', marginTop: 3 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--mb-text-primary)' }}>{item.label}</div>
+                    <div style={{ fontSize: 11, color: 'var(--mb-text-secondary)', marginTop: 3 }}>
                       {formatCoverageText(item.coverage_note, item.coverage_status)}
                     </div>
                   </div>
                   <div style={{ textAlign: 'right', flexShrink: 0 }}>
                     <div style={{ fontSize: 15, fontWeight: 700, color }}>{item.mem_process_mb.toLocaleString()} MB</div>
-                    <div style={{ fontSize: 11, color: '#6E6E73', marginTop: 3 }}>
+                    <div style={{ fontSize: 11, color: 'var(--mb-text-secondary)', marginTop: 3 }}>
                       CPU {item.cpu_percent.toFixed(1)}% · {item.process_count} 个进程
                     </div>
                   </div>
@@ -1221,6 +1227,7 @@ const OverviewContent: React.FC<{
     oldest_pending_extraction_at_ms: liveData?.oldest_pending_extraction_at_ms
       ?? data?.knowledge_flow?.oldest_pending_extraction_at_ms
       ?? null,
+    extraction_stalled: data?.knowledge_flow?.extraction_stalled ?? false,
     pending_bake_count: liveData?.pending_bake_count
       ?? data?.knowledge_flow?.pending_bake_count
       ?? 0,
@@ -1372,6 +1379,7 @@ const OverviewContent: React.FC<{
           extractingCount={knowledge_flow.extracting.length}
           lastExtractionAtMs={knowledge_flow.last_extraction_at_ms}
           oldestPendingAtMs={knowledge_flow.oldest_pending_extraction_at_ms}
+          stalled={knowledge_flow.extraction_stalled}
         />
         <BakeQueueCard
           pending={knowledge_flow.pending_bake_count}
@@ -1426,10 +1434,10 @@ const OverviewContent: React.FC<{
               }}
             />
             {tokenTrendSeries.filter((item) => item.data.length > 0).every((item) => item.data.length === 1) && (
-              <div style={{ color: '#AEAEB2', fontSize: 11, marginTop: 6 }}>当前时间范围内仅 1 个统计点。</div>
+              <div style={{ color: 'var(--mb-text-faint)', fontSize: 11, marginTop: 6 }}>当前时间范围内仅 1 个统计点。</div>
             )}
           </>
-        ) : <div style={{ color: '#AEAEB2', fontSize: 12, textAlign: 'center', padding: '12px 0' }}>暂无趋势数据</div>}
+        ) : <div style={{ color: 'var(--mb-text-faint)', fontSize: 12, textAlign: 'center', padding: '12px 0' }}>暂无趋势数据</div>}
       </div>
 
       <BakeTokenDistributionCard
@@ -1461,13 +1469,13 @@ const OverviewContent: React.FC<{
               detailFormatter={(point) => `${fmtTs(point.ts)} · ${point.value} 条知识`}
             />
             {knowledge_flow.by_time.length === 1 && (
-              <div style={{ color: '#AEAEB2', fontSize: 11, marginTop: 6 }}>当前时间范围内仅 1 个统计点。</div>
+              <div style={{ color: 'var(--mb-text-faint)', fontSize: 11, marginTop: 6 }}>当前时间范围内仅 1 个统计点。</div>
             )}
-            <div style={{ color: '#8E8E93', fontSize: 11, marginTop: 6 }}>
+            <div style={{ color: 'var(--mb-text-tertiary)', fontSize: 11, marginTop: 6 }}>
               当前库存：时间线 {fmt(knowledge_flow.pending_extraction_count)} 条 · 烘焙 {fmt(knowledge_flow.pending_bake_count)} 条
             </div>
           </>
-        ) : <div style={{ color: '#AEAEB2', fontSize: 12, textAlign: 'center', padding: '12px 0' }}>暂无知识趋势数据</div>}
+        ) : <div style={{ color: 'var(--mb-text-faint)', fontSize: 12, textAlign: 'center', padding: '12px 0' }}>暂无知识趋势数据</div>}
       </div>
 
       <OcrBackfillCard metrics={ocr_backfill} rangeLabel={rangeLabel} />
@@ -1476,7 +1484,7 @@ const OverviewContent: React.FC<{
         <div style={{ ...cardStyle, flex: 1 }}>
           <div style={sectionTitle}>模型用量</div>
           {token_usage.by_model.length === 0
-            ? <div style={{ color: '#AEAEB2', fontSize: 12 }}>暂无数据</div>
+            ? <div style={{ color: 'var(--mb-text-faint)', fontSize: 12 }}>暂无数据</div>
             : token_usage.by_model.map((m, i) => {
               const color = getStableSeriesColor(`token-${m.model}`, i)
               const pct = token_usage.total_period > 0 ? (m.total / token_usage.total_period * 100).toFixed(0) : '0'
@@ -1484,19 +1492,19 @@ const OverviewContent: React.FC<{
                 <div key={i} style={{ marginBottom: 8 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 3 }}>
                     <span style={{ color, fontWeight: 500 }}>{formatLlmModelName(m.model)}</span>
-                    <span style={{ color: '#6E6E73' }}>{fmt(m.total)} · {m.calls}次 ({pct}%)</span>
+                    <span style={{ color: 'var(--mb-text-secondary)' }}>{fmt(m.total)} · {m.calls}次 ({pct}%)</span>
                   </div>
-                  <div style={{ color: '#8E8E93', fontSize: 10, marginBottom: 4 }}>
+                  <div style={{ color: 'var(--mb-text-tertiary)', fontSize: 10, marginBottom: 4 }}>
                     Prompt {fmt(m.prompt)} · Completion {fmt(m.completion)}
                   </div>
-                  <div style={{ height: 4, borderRadius: 2, background: '#E5E5EA' }}>
+                  <div style={{ height: 4, borderRadius: 2, background: 'var(--mb-border-strong)' }}>
                     <div style={{ height: '100%', borderRadius: 2, background: color, width: `${pct}%` }} />
                   </div>
                 </div>
               )
             })}
           {token_usage.by_model.some((m) => m.model === 'unavailable') && (
-            <div style={{ color: '#AEAEB2', fontSize: 10, lineHeight: 1.4 }}>
+            <div style={{ color: 'var(--mb-text-faint)', fontSize: 10, lineHeight: 1.4 }}>
               “模型不可用/未记录”表示调用失败或记录时未拿到具体模型名。
             </div>
           )}
@@ -1504,7 +1512,7 @@ const OverviewContent: React.FC<{
         <div style={{ ...cardStyle, flex: 1 }}>
           <div style={sectionTitle}>按来源分布</div>
           {token_usage.by_caller.length === 0
-            ? <div style={{ color: '#AEAEB2', fontSize: 12 }}>暂无数据</div>
+            ? <div style={{ color: 'var(--mb-text-faint)', fontSize: 12 }}>暂无数据</div>
             : token_usage.by_caller.map((c, i) => {
               const color = CALLER_COLORS[c.caller] || '#6E6E73'
               const pct = token_usage.total_period > 0 ? (c.total / token_usage.total_period * 100).toFixed(0) : '0'
@@ -1512,9 +1520,9 @@ const OverviewContent: React.FC<{
                 <div key={i} style={{ marginBottom: 8 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 3 }}>
                     <span style={{ color, fontWeight: 500 }}>{CALLER_LABELS[c.caller] || c.caller}</span>
-                    <span style={{ color: '#6E6E73' }}>{fmt(c.total)} · {c.calls}次</span>
+                    <span style={{ color: 'var(--mb-text-secondary)' }}>{fmt(c.total)} · {c.calls}次</span>
                   </div>
-                  <div style={{ height: 4, borderRadius: 2, background: '#E5E5EA' }}>
+                  <div style={{ height: 4, borderRadius: 2, background: 'var(--mb-border-strong)' }}>
                     <div style={{ height: '100%', borderRadius: 2, background: color, width: `${pct}%` }} />
                   </div>
                 </div>
@@ -1529,7 +1537,7 @@ const OverviewContent: React.FC<{
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, justifyContent: 'flex-end' }}>
             <span style={{ fontSize: 11, color: '#5E5CE6' }}>向量化率 {(capture_flow.vectorization_rate * 100).toFixed(0)}%</span>
             <span style={{ fontSize: 11, color: '#AF52DE' }}>知识化率 {(capture_flow.knowledge_generation_rate * 100).toFixed(0)}%</span>
-            <span style={{ fontSize: 11, color: '#6E6E73' }}>知识挂载率 {(capture_flow.knowledge_rate * 100).toFixed(0)}%</span>
+            <span style={{ fontSize: 11, color: 'var(--mb-text-secondary)' }}>知识挂载率 {(capture_flow.knowledge_rate * 100).toFixed(0)}%</span>
           </div>
         </div>
         {capture_flow.by_hour.length > 0
@@ -1538,10 +1546,10 @@ const OverviewContent: React.FC<{
               value: capture_flow.by_hour.find(b => b.hour === h)?.count || 0,
               color: '#34C759',
             }))} height={70} valueFormatter={(value) => `${value} 条`} />
-          : <div style={{ color: '#AEAEB2', fontSize: 12, textAlign: 'center', padding: '12px 0' }}>今日暂无采集数据</div>}
+          : <div style={{ color: 'var(--mb-text-faint)', fontSize: 12, textAlign: 'center', padding: '12px 0' }}>今日暂无采集数据</div>}
         {capture_flow.by_app.length > 0 && (
           <div style={{ marginTop: 10 }}>
-            <div style={{ fontSize: 11, color: '#6E6E73', marginBottom: 6 }}>应用分布（Top 8）</div>
+            <div style={{ fontSize: 11, color: 'var(--mb-text-secondary)', marginBottom: 6 }}>应用分布（Top 8）</div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
               {capture_flow.by_app.map((a, i) => (
                 <div key={i} style={{ fontSize: 11, padding: '2px 8px', borderRadius: 10,
@@ -1552,15 +1560,15 @@ const OverviewContent: React.FC<{
         )}
         {capture_flow.recent.length > 0 && (
           <div style={{ marginTop: 10 }}>
-            <div style={{ fontSize: 11, color: '#6E6E73', marginBottom: 6 }}>最近采集记录</div>
+            <div style={{ fontSize: 11, color: 'var(--mb-text-secondary)', marginBottom: 6 }}>最近采集记录</div>
             {capture_flow.recent.map((c, i) => (
               <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0',
                 borderBottom: i < capture_flow.recent.length - 1 ? '1px solid rgba(0,0,0,0.05)' : 'none' }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 12, color: '#333' }}>{c.app_name || '上下文缺失'}</div>
-                  <div style={{ fontSize: 11, color: '#AEAEB2', marginTop: 2 }}>{fmtTs(c.ts)}</div>
+                  <div style={{ fontSize: 12, color: 'var(--mb-text-primary)' }}>{c.app_name || '上下文缺失'}</div>
+                  <div style={{ fontSize: 11, color: 'var(--mb-text-faint)', marginTop: 2 }}>{fmtTs(c.ts)}</div>
                 </div>
-                <div style={{ fontSize: 11, color: '#6E6E73', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                <div style={{ fontSize: 11, color: 'var(--mb-text-secondary)', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {c.win_title || '无窗口标题'}
                 </div>
               </div>
@@ -1572,16 +1580,16 @@ const OverviewContent: React.FC<{
       <div style={cardStyle}>
         <div style={sectionTitle}>最近问答记录</div>
         {rag_sessions.recent.length === 0
-          ? <div style={{ color: '#AEAEB2', fontSize: 12 }}>暂无问答记录</div>
+          ? <div style={{ color: 'var(--mb-text-faint)', fontSize: 12 }}>暂无问答记录</div>
           : rag_sessions.recent.map((s, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 0',
               borderBottom: i < rag_sessions.recent.length - 1 ? '1px solid rgba(0,0,0,0.05)' : 'none' }}>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12, color: '#333', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.query}</div>
-                <div style={{ fontSize: 11, color: '#AEAEB2', marginTop: 2 }}>{fmtTs(s.ts)}</div>
+                <div style={{ fontSize: 12, color: 'var(--mb-text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.query}</div>
+                <div style={{ fontSize: 11, color: 'var(--mb-text-faint)', marginTop: 2 }}>{fmtTs(s.ts)}</div>
               </div>
               <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-                {s.latency_ms && <span style={{ fontSize: 11, color: '#6E6E73' }}>{fmtMs(s.latency_ms)}</span>}
+                {s.latency_ms && <span style={{ fontSize: 11, color: 'var(--mb-text-secondary)' }}>{fmtMs(s.latency_ms)}</span>}
                 <span style={{ fontSize: 11, padding: '1px 6px', borderRadius: 4,
                   background: 'rgba(0,122,255,0.08)', color: '#007AFF' }}>{s.context_count} 条</span>
               </div>
@@ -1596,12 +1604,12 @@ const OverviewContent: React.FC<{
             {captureHealth.outcome_counts.length > 0 ? captureHealth.outcome_counts.map(item => (
               <span key={`${item.outcome}-${item.reason}`} style={{
                 fontSize: 11,
-                color: item.outcome === 'failed' ? '#C62828' : item.outcome === 'degraded' ? '#9A6700' : '#3A3A3C',
-                background: item.outcome === 'failed' ? '#FFF1F0' : '#F2F2F7',
+                color: item.outcome === 'failed' ? 'var(--mb-danger)' : item.outcome === 'degraded' ? 'var(--mb-warning-text)' : 'var(--mb-text-secondary)',
+                background: item.outcome === 'failed' ? 'var(--mb-danger-soft)' : item.outcome === 'degraded' ? 'var(--mb-warning-soft)' : 'var(--mb-bg-inset)',
                 borderRadius: 999,
                 padding: '4px 8px',
               }}>{item.reason} · {item.count}</span>
-            )) : <span style={{ color: '#8E8E93', fontSize: 12 }}>暂无采集尝试记录</span>}
+            )) : <span style={{ color: 'var(--mb-text-tertiary)', fontSize: 12 }}>暂无采集尝试记录</span>}
           </div>
           {captureHealth.recent.slice(0, 8).map((item, index) => (
             <div key={`${item.observed_at}-${index}`} style={{
@@ -1612,7 +1620,7 @@ const OverviewContent: React.FC<{
               fontSize: 12,
               borderTop: index === 0 ? 'none' : '1px solid rgba(0,0,0,0.05)',
             }}>
-              <span style={{ color: '#8E8E93' }}>{fmtTs(item.observed_at)}</span>
+              <span style={{ color: 'var(--mb-text-tertiary)' }}>{fmtTs(item.observed_at)}</span>
               <span style={{ color: item.outcome === 'failed' ? '#C62828' : '#3A3A3C' }}>{item.outcome}</span>
               <span style={{ color: '#636366', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {item.is_private ? '隐私活动（内容未记录）' : [item.app_name, item.win_title].filter(Boolean).join(' · ') || item.reason}
@@ -1656,10 +1664,10 @@ const OverviewContent: React.FC<{
               background: '#34C759', animation: 'pulse 1.4s ease-in-out infinite',
             }} />
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12, color: '#333', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <div style={{ fontSize: 12, color: 'var(--mb-text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {c.win_title || c.app_name || '采集内容'}
               </div>
-              <div style={{ fontSize: 11, color: '#AEAEB2', marginTop: 2 }}>{fmtTs(c.ts)}</div>
+              <div style={{ fontSize: 11, color: 'var(--mb-text-faint)', marginTop: 2 }}>{fmtTs(c.ts)}</div>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2, flexShrink: 0 }}>
               <span style={{ fontSize: 11, padding: '1px 6px', borderRadius: 4, background: 'rgba(52,199,89,0.12)', color: '#34C759', fontWeight: 600 }}>
@@ -1674,16 +1682,16 @@ const OverviewContent: React.FC<{
           </div>
         ))}
         {knowledge_flow.recent.length === 0 && knowledge_flow.extracting.length === 0
-          ? <div style={{ color: '#AEAEB2', fontSize: 12 }}>暂无知识记录</div>
+          ? <div style={{ color: 'var(--mb-text-faint)', fontSize: 12 }}>暂无知识记录</div>
           : knowledge_flow.recent.map((item, i) => (
             <div key={item.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 0',
               borderBottom: i < knowledge_flow.recent.length - 1 ? '1px solid rgba(0,0,0,0.05)' : 'none' }}>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12, color: '#333', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.summary || '无摘要'}</div>
-                <div style={{ fontSize: 11, color: '#AEAEB2', marginTop: 2 }}>{fmtTs(item.ts)}</div>
+                <div style={{ fontSize: 12, color: 'var(--mb-text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.summary || '无摘要'}</div>
+                <div style={{ fontSize: 11, color: 'var(--mb-text-faint)', marginTop: 2 }}>{fmtTs(item.ts)}</div>
               </div>
               <div style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'center' }}>
-                {!!item.app_name && <span style={{ fontSize: 11, color: '#6E6E73', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.app_name}</span>}
+                {!!item.app_name && <span style={{ fontSize: 11, color: 'var(--mb-text-secondary)', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.app_name}</span>}
                 <span style={{ fontSize: 11, padding: '1px 6px', borderRadius: 4, background: 'rgba(191,90,242,0.10)', color: '#BF5AF2' }}>{item.category}</span>
               </div>
             </div>
@@ -1693,20 +1701,20 @@ const OverviewContent: React.FC<{
       <div style={{ ...cardStyle, marginBottom: 0 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
           <span style={sectionTitle as any}>定时任务执行记录</span>
-          <span style={{ fontSize: 11, color: '#6E6E73' }}>成功 {task_executions.success} / 失败 {task_executions.failed}</span>
+          <span style={{ fontSize: 11, color: 'var(--mb-text-secondary)' }}>成功 {task_executions.success} / 失败 {task_executions.failed}</span>
         </div>
         {task_executions.recent.length === 0
-          ? <div style={{ color: '#AEAEB2', fontSize: 12 }}>暂无执行记录</div>
+          ? <div style={{ color: 'var(--mb-text-faint)', fontSize: 12 }}>暂无执行记录</div>
           : task_executions.recent.map((e, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 0',
               borderBottom: i < task_executions.recent.length - 1 ? '1px solid rgba(0,0,0,0.05)' : 'none' }}>
               <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
                 background: STATUS_COLOR[e.status] || '#AEAEB2' }} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12, color: '#333', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.task_name}</div>
-                <div style={{ fontSize: 11, color: '#AEAEB2', marginTop: 2 }}>{fmtTs(e.started_at)}</div>
+                <div style={{ fontSize: 12, color: 'var(--mb-text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.task_name}</div>
+                <div style={{ fontSize: 11, color: 'var(--mb-text-faint)', marginTop: 2 }}>{fmtTs(e.started_at)}</div>
               </div>
-              <div style={{ display: 'flex', gap: 6, flexShrink: 0, fontSize: 11, color: '#6E6E73' }}>
+              <div style={{ display: 'flex', gap: 6, flexShrink: 0, fontSize: 11, color: 'var(--mb-text-secondary)' }}>
                 {e.latency_ms && <span>{fmtMs(e.latency_ms)}</span>}
                 {e.knowledge_count && <span>{e.knowledge_count} 条知识</span>}
               </div>
@@ -1746,7 +1754,7 @@ const ServiceHealthBanner: React.FC<{ health: MonitorOverview['service_health'] 
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
         <span style={{ width: 8, height: 8, borderRadius: '50%', background: meta.color, flexShrink: 0 }} />
         <span style={{ fontSize: 13, fontWeight: 700, color: meta.color }}>{meta.title}</span>
-        <span style={{ fontSize: 11, color: '#6E6E73' }}>{formatServiceMode(health.mode)}</span>
+        <span style={{ fontSize: 11, color: 'var(--mb-text-secondary)' }}>{formatServiceMode(health.mode)}</span>
       </div>
       <div style={{ fontSize: 12, color: '#3A3A3C', lineHeight: 1.6 }}>
         {issues.slice(0, 3).map((issue, idx) => (
@@ -1903,7 +1911,7 @@ const toTrendLine = (
 })
 
 const SystemContent: React.FC<{ data: SystemResources | null; range: SystemRange }> = ({ data, range }) => {
-  if (!data) return <div style={{ color: '#AEAEB2', fontSize: 12, textAlign: 'center', padding: '24px 0' }}>暂无数据</div>
+  if (!data) return <div style={{ color: 'var(--mb-text-faint)', fontSize: 12, textAlign: 'center', padding: '24px 0' }}>暂无数据</div>
   const { latest, disk_trend, model_events, trends } = data
   const runtimeBreakdown = data.model_runtime_breakdown ?? []
   const knowledgeEvents = data.knowledge_events ?? []
@@ -1956,9 +1964,9 @@ const SystemContent: React.FC<{ data: SystemResources | null; range: SystemRange
               valueFormatter={formatter}
               axisFormatter={(ts) => fmtSystemAxisTs(ts, range)}
             />
-            {series.length === 1 && <div style={{ color: '#AEAEB2', fontSize: 11, marginTop: 6 }}>当前范围仅 1 个采样点。</div>}
+            {series.length === 1 && <div style={{ color: 'var(--mb-text-faint)', fontSize: 11, marginTop: 6 }}>当前范围仅 1 个采样点。</div>}
           </>
-        : <div style={{ color: '#AEAEB2', fontSize: 12, textAlign: 'center', padding: '12px 0' }}>{emptyText}</div>}
+        : <div style={{ color: 'var(--mb-text-faint)', fontSize: 12, textAlign: 'center', padding: '12px 0' }}>{emptyText}</div>}
     </div>
   )
 
@@ -1978,7 +1986,7 @@ const SystemContent: React.FC<{ data: SystemResources | null; range: SystemRange
       return (
         <div style={cardStyle}>
           <div style={sectionTitle}>{getTrendTitle(title, getSystemBucketLabel(range))}</div>
-          <div style={{ color: '#AEAEB2', fontSize: 12, textAlign: 'center', padding: '12px 0' }}>{emptyText}</div>
+          <div style={{ color: 'var(--mb-text-faint)', fontSize: 12, textAlign: 'center', padding: '12px 0' }}>{emptyText}</div>
         </div>
       )
     }
@@ -1988,7 +1996,7 @@ const SystemContent: React.FC<{ data: SystemResources | null; range: SystemRange
         <div style={sectionTitle}>{getTrendTitle(title, getSystemBucketLabel(range))}</div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
           {available.map((line, index) => (
-            <span key={`${index}-${line.label}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: '#6E6E73' }}>
+            <span key={`${index}-${line.label}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--mb-text-secondary)' }}>
               <span style={{ width: 8, height: 8, borderRadius: '50%', background: line.color, display: 'inline-block' }} />
               {line.label}
             </span>
@@ -2014,7 +2022,7 @@ const SystemContent: React.FC<{ data: SystemResources | null; range: SystemRange
           }}
         />
         {available.every((line) => line.data.length === 1) && (
-          <div style={{ color: '#AEAEB2', fontSize: 11, marginTop: 6 }}>当前范围仅 1 个采样点。</div>
+          <div style={{ color: 'var(--mb-text-faint)', fontSize: 11, marginTop: 6 }}>当前范围仅 1 个采样点。</div>
         )}
       </div>
     )
@@ -2066,7 +2074,7 @@ const SystemContent: React.FC<{ data: SystemResources | null; range: SystemRange
           marginBottom: 10,
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <div style={{ fontSize: 11, color: '#6E6E73', marginBottom: 2 }}>当前模型</div>
+            <div style={{ fontSize: 11, color: 'var(--mb-text-secondary)', marginBottom: 2 }}>当前模型</div>
             {selectedModelName && (
               <button
                 onClick={() => setSelectedModelName(null)}
@@ -2074,15 +2082,15 @@ const SystemContent: React.FC<{ data: SystemResources | null; range: SystemRange
                   fontSize: 11,
                   padding: '2px 8px',
                   borderRadius: 999,
-                  border: '1px solid rgba(0,0,0,0.08)',
-                  background: 'white',
-                  color: '#6E6E73',
+                  border: '1px solid var(--mb-border-strong)',
+                  background: 'var(--mb-bg-input)',
+                  color: 'var(--mb-text-secondary)',
                   cursor: 'pointer',
                 }}
               >清除高亮</button>
             )}
           </div>
-          {renderProcessTags(currentModelNames, model_events, selectedModelName, setSelectedModelName) || <div style={{ fontSize: 11, color: '#AEAEB2' }}>暂无模型名称</div>}
+          {renderProcessTags(currentModelNames, model_events, selectedModelName, setSelectedModelName) || <div style={{ fontSize: 11, color: 'var(--mb-text-faint)' }}>暂无模型名称</div>}
         </div>
       )}
 
@@ -2096,13 +2104,13 @@ const SystemContent: React.FC<{ data: SystemResources | null; range: SystemRange
           <>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
               {gpuTrend.length > 0 && (
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: '#6E6E73' }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--mb-text-secondary)' }}>
                   <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#34C759', display: 'inline-block' }} />
                   系统
                 </span>
               )}
               {modelGpuTrend.length > 0 && (
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: '#6E6E73' }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--mb-text-secondary)' }}>
                   <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#FF2D55', display: 'inline-block' }} />
                   模型
                 </span>
@@ -2116,15 +2124,15 @@ const SystemContent: React.FC<{ data: SystemResources | null; range: SystemRange
               height={50}
               axisFormatter={(ts) => fmtSystemAxisTs(ts, range)}
             />
-            <div style={{ marginTop: 8, fontSize: 11, color: '#6E6E73' }}>
+            <div style={{ marginTop: 8, fontSize: 11, color: 'var(--mb-text-secondary)' }}>
               GPU 总体：{system?.gpu_total_label || system?.gpu_name || '未检测'}
             </div>
             {gpuTrend.length <= 1 && modelGpuTrend.length <= 1 && (
-              <div style={{ color: '#AEAEB2', fontSize: 11, marginTop: 6 }}>当前范围仅 1 个 GPU 采样点。</div>
+              <div style={{ color: 'var(--mb-text-faint)', fontSize: 11, marginTop: 6 }}>当前范围仅 1 个 GPU 采样点。</div>
             )}
           </>
         ) : (
-          <div style={{ color: '#AEAEB2', fontSize: 12, textAlign: 'center', padding: '12px 0' }}>
+          <div style={{ color: 'var(--mb-text-faint)', fontSize: 12, textAlign: 'center', padding: '12px 0' }}>
             {system?.gpu_name ? `已检测到 ${system.gpu_name}，但当前范围内暂无 GPU 利用率采样。` : '当前设备未返回 GPU 利用率数据'}
           </div>
         )}
@@ -2140,7 +2148,7 @@ const SystemContent: React.FC<{ data: SystemResources | null; range: SystemRange
               </span>
             ))}
           </div>
-          <div style={{ fontSize: 11, color: '#AEAEB2' }}>结合系统 / 整套软件 / 模型趋势，可观察知识提炼触发时段与资源波动关系。</div>
+          <div style={{ fontSize: 11, color: 'var(--mb-text-faint)' }}>结合系统 / 整套软件 / 模型趋势，可观察知识提炼触发时段与资源波动关系。</div>
         </div>
       )}
 
@@ -2171,7 +2179,7 @@ const SystemContent: React.FC<{ data: SystemResources | null; range: SystemRange
               </div>
             </div>
           </>
-        ) : <div style={{ color: '#AEAEB2', fontSize: 12, textAlign: 'center', padding: '12px 0' }}>暂无数据</div>}
+        ) : <div style={{ color: 'var(--mb-text-faint)', fontSize: 12, textAlign: 'center', padding: '12px 0' }}>暂无数据</div>}
       </div>
 
       <div style={{ ...cardStyle, marginBottom: 0 }}>
@@ -2184,20 +2192,20 @@ const SystemContent: React.FC<{ data: SystemResources | null; range: SystemRange
                 <button
                   onClick={() => setEventPage((page) => Math.max(1, page - 1))}
                   disabled={eventPage === 1}
-                  style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, border: '1px solid rgba(0,0,0,0.1)', background: eventPage === 1 ? '#F2F2F7' : 'white', color: '#6E6E73', cursor: eventPage === 1 ? 'default' : 'pointer' }}
+                  style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, border: '1px solid var(--mb-border-strong)', background: eventPage === 1 ? 'var(--mb-bg-inset)' : 'var(--mb-bg-input)', color: 'var(--mb-text-secondary)', cursor: eventPage === 1 ? 'default' : 'pointer' }}
                 >上一页</button>
-                <span style={{ fontSize: 11, color: '#6E6E73' }}>{eventPage} / {totalEventPages}</span>
+                <span style={{ fontSize: 11, color: 'var(--mb-text-secondary)' }}>{eventPage} / {totalEventPages}</span>
                 <button
                   onClick={() => setEventPage((page) => Math.min(totalEventPages, page + 1))}
                   disabled={eventPage === totalEventPages}
-                  style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, border: '1px solid rgba(0,0,0,0.1)', background: eventPage === totalEventPages ? '#F2F2F7' : 'white', color: '#6E6E73', cursor: eventPage === totalEventPages ? 'default' : 'pointer' }}
+                  style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, border: '1px solid var(--mb-border-strong)', background: eventPage === totalEventPages ? 'var(--mb-bg-inset)' : 'var(--mb-bg-input)', color: 'var(--mb-text-secondary)', cursor: eventPage === totalEventPages ? 'default' : 'pointer' }}
                 >下一页</button>
               </div>
             )}
           </div>
         </div>
         {filteredModelEvents.length === 0
-          ? <div style={{ color: '#AEAEB2', fontSize: 12 }}>暂无事件</div>
+          ? <div style={{ color: 'var(--mb-text-faint)', fontSize: 12 }}>暂无事件</div>
           : pagedModelEvents.map((e, i) => {
             const active = selectedModelName === e.model_name || selectedModelName === normalizeModelName(e.model_name)
             const meta = getModelTypeMeta(e.model_type)
@@ -2214,10 +2222,10 @@ const SystemContent: React.FC<{ data: SystemResources | null; range: SystemRange
                   {EVENT_LABEL[e.event_type] || e.event_type}
                 </span>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <span style={{ fontSize: 12, color: '#333' }}>{normalizeModelName(e.model_name) || e.model_name}</span>
+                  <span style={{ fontSize: 12, color: 'var(--mb-text-primary)' }}>{normalizeModelName(e.model_name) || e.model_name}</span>
                   <span style={{ fontSize: 11, color: meta.color, marginLeft: 6 }}>{meta.label}</span>
                 </div>
-                <div style={{ flexShrink: 0, fontSize: 11, color: '#6E6E73', textAlign: 'right' }}>
+                <div style={{ flexShrink: 0, fontSize: 11, color: 'var(--mb-text-secondary)', textAlign: 'right' }}>
                   {e.duration_ms && <span>{fmtMs(e.duration_ms)} · </span>}
                   {e.memory_mb && <span>{e.memory_mb} MB · </span>}
                   <span>{fmtTs(e.ts)}</span>
@@ -2282,8 +2290,8 @@ const OverviewRangeControl: React.FC<{
           const active = isSameOverviewRange(value, range)
           return (
             <button key={label} onClick={() => onChange(range)} style={{
-              background: active ? '#007AFF' : 'white',
-              color: active ? 'white' : '#6E6E73',
+              background: active ? '#007AFF' : 'var(--mb-bg-input)',
+              color: active ? 'white' : 'var(--mb-text-secondary)',
             }}>{label}</button>
           )
         })}
@@ -2466,7 +2474,7 @@ const MonitorPanel: React.FC = () => {
   if ((loadingOverview && !data && tab === 'overview' && !overviewError)
     || (loadingSystem && !sysData && tab === 'system' && !systemError)) return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center',
-      height: '100%', color: '#AEAEB2', fontSize: 13 }}>加载中...</div>
+      height: '100%', color: 'var(--mb-text-faint)', fontSize: 13 }}>加载中...</div>
   )
 
   return (
@@ -2478,8 +2486,8 @@ const MonitorPanel: React.FC = () => {
           {(['overview', 'system', 'dag'] as const).map(t => (
             <button key={t} onClick={() => setTab(t)} style={{
               fontSize: 12, padding: '4px 10px', borderRadius: 7, border: 'none', cursor: 'pointer',
-              background: tab === t ? '#007AFF' : 'white',
-              color: tab === t ? 'white' : '#6E6E73',
+              background: tab === t ? '#007AFF' : 'var(--mb-bg-input)',
+              color: tab === t ? 'white' : 'var(--mb-text-secondary)',
               fontWeight: tab === t ? 600 : 400,
             }}>{t === 'overview' ? '总览' : t === 'system' ? '系统资源' : '提炼流程'}</button>
           ))}
@@ -2494,15 +2502,15 @@ const MonitorPanel: React.FC = () => {
           ] as const).map(({ value, label }) => (
             <button key={value} onClick={() => setSysRange(value)} style={{
               fontSize: 11, padding: '3px 8px', borderRadius: 6, border: 'none', cursor: 'pointer',
-              background: sysRange === value ? '#007AFF' : 'white',
-              color: sysRange === value ? 'white' : '#6E6E73',
+              background: sysRange === value ? '#007AFF' : 'var(--mb-bg-input)',
+              color: sysRange === value ? 'white' : 'var(--mb-text-secondary)',
             }}>{label}</button>
           ))}
           <button onClick={tab === 'overview'
             ? () => { load(); loadCaptureHealth() }
             : tab === 'system' ? loadSys : () => {}} style={{
-            fontSize: 11, padding: '3px 8px', borderRadius: 6, border: '1px solid rgba(0,0,0,0.1)',
-            background: 'white', color: '#6E6E73', cursor: 'pointer',
+            fontSize: 11, padding: '3px 8px', borderRadius: 6, border: '1px solid var(--mb-border-strong)',
+            background: 'var(--mb-bg-input)', color: 'var(--mb-text-secondary)', cursor: 'pointer',
             visibility: tab === 'dag' ? 'hidden' : 'visible',
           }}>刷新</button>
         </div>
@@ -2524,7 +2532,7 @@ const MonitorPanel: React.FC = () => {
         />
       )}
       {tab === 'overview' && !data && !overviewError && !loadingOverview && (
-        <div style={{ color: '#AEAEB2', fontSize: 12, textAlign: 'center', padding: '24px 0' }}>暂无运行数据</div>
+        <div style={{ color: 'var(--mb-text-faint)', fontSize: 12, textAlign: 'center', padding: '24px 0' }}>暂无运行数据</div>
       )}
       {tab === 'system' && <SystemContent data={sysData} range={sysRange} />}
       {tab === 'dag' && <PipelineDagPanel base={base} isVisible={isVisible} />}
@@ -2534,7 +2542,7 @@ const MonitorPanel: React.FC = () => {
 }
 
 const cardStyle: React.CSSProperties = {
-  background: 'linear-gradient(180deg, #FFFFFF 0%, #FBFBFD 100%)',
+  background: 'linear-gradient(180deg, var(--mb-bg-card) 0%, var(--mb-bg-elevated) 100%)',
   borderRadius: 12,
   padding: '13px 14px',
   border: '1px solid rgba(60,60,67,0.10)',
@@ -2543,7 +2551,7 @@ const cardStyle: React.CSSProperties = {
 }
 
 const sectionTitle: React.CSSProperties = {
-  fontSize: 12, fontWeight: 700, color: '#1D1D1F', marginBottom: 10, display: 'block',
+  fontSize: 12, fontWeight: 700, color: 'var(--mb-text-primary)', marginBottom: 10, display: 'block',
 }
 
 export default MonitorPanel

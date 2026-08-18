@@ -67,6 +67,33 @@ def test_priority_order_p0_beats_p2(small_queue):
     assert small_queue.stats()["background_retry_after_ms"] > 0
 
 
+def test_p1_waits_for_running_p2_without_preemption(small_queue):
+    """P1 只在等待队列中优先，不能抢占已运行的 P2，避免重复计算降低吞吐。"""
+    order: list[str] = []
+    p2_started = threading.Event()
+
+    def background():
+        p2_started.set()
+        deadline = time.monotonic() + 0.15
+        while time.monotonic() < deadline:
+            raise_if_preempted()
+            time.sleep(0.005)
+        order.append("P2")
+        return "P2"
+
+    p2_future = small_queue.submit(Priority.P2, background)
+    assert p2_started.wait(timeout=0.5)
+    p1_future = small_queue.submit(
+        Priority.P1,
+        _delayed_factory(order, "P1", 0.01),
+    )
+
+    assert p2_future.result(timeout=1) == "P2"
+    assert p1_future.result(timeout=1) == "P1"
+    assert order == ["P2", "P1"]
+    assert small_queue.stats()["totals"]["P2"]["preempted"] == 0
+
+
 def test_is_idle_tracks_queued_and_running_tasks(small_queue):
     assert small_queue.is_idle() is True
 

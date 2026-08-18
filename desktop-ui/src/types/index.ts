@@ -721,6 +721,7 @@ export interface MonitorOverview {
     capture_enabled: boolean
     pending_extraction_count: number
     oldest_pending_extraction_at_ms: number | null
+    extraction_stalled: boolean
     pending_bake_count: number
     oldest_pending_bake_at_ms: number | null
     bake_retry_pending_count: number

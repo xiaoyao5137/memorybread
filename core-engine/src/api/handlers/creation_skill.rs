@@ -78,6 +78,27 @@ pub struct CreationSkillAnalysisJobCreateResponse {
     pub status: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct MatchCreationSkillsRequest {
+    pub prompt: String,
+    #[serde(default)]
+    pub skills: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct MatchCreationSkillsPayload<'a> {
+    prompt: &'a str,
+    skills: &'a [serde_json::Value],
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MatchCreationSkillsResponse {
+    pub skill_ids: Vec<i64>,
+    pub source: String,
+    #[serde(default)]
+    pub reasoning: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct CreationSkillAnalysisJobStatusResponse {
     pub id: String,
@@ -168,6 +189,70 @@ pub async fn analyze_creation_skill(
     Ok(Json(
         call_creation_skill_analyzer(&state.creation_sidecar_url, &request).await?,
     ))
+}
+
+pub async fn match_creation_skills(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<MatchCreationSkillsRequest>,
+) -> Result<Json<MatchCreationSkillsResponse>, ApiError> {
+    let prompt = request.prompt.trim();
+    if prompt.is_empty() || prompt.chars().count() > 2000 {
+        return Err(ApiError::BadRequest(
+            "技能召回输入需要在 1 到 2000 个字符之间".into(),
+        ));
+    }
+    let requested_ids: HashSet<i64> = request
+        .skills
+        .iter()
+        .filter_map(|skill| skill.get("id")?.as_i64())
+        .collect();
+    let mut response =
+        call_creation_skill_matcher(&state.creation_sidecar_url, prompt, &request.skills).await?;
+    // 与 sidecar 的白名单校验同构：返回的 Skill 必须来自本次请求的候选集。
+    response.skill_ids.retain(|id| requested_ids.contains(id));
+    response.skill_ids.truncate(1);
+    Ok(Json(response))
+}
+
+async fn call_creation_skill_matcher(
+    creation_sidecar_url: &str,
+    prompt: &str,
+    skills: &[serde_json::Value],
+) -> Result<MatchCreationSkillsResponse, ApiError> {
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/creation/skills/match",
+            creation_sidecar_url.trim_end_matches('/')
+        ))
+        .timeout(std::time::Duration::from_secs(30))
+        .json(&MatchCreationSkillsPayload { prompt, skills })
+        .send()
+        .await
+        .map_err(|error| ApiError::Upstream {
+            status: StatusCode::BAD_GATEWAY,
+            code: "CREATION_SKILL_MATCHER_UNAVAILABLE",
+            message: format!("技能召回路由服务不可用: {error}"),
+        })?;
+    if !response.status().is_success() {
+        let message = response.text().await.unwrap_or_default();
+        return Err(ApiError::Upstream {
+            status: StatusCode::BAD_GATEWAY,
+            code: "CREATION_SKILL_MATCH_FAILED",
+            message: if message.is_empty() {
+                "技能召回路由失败".to_string()
+            } else {
+                message
+            },
+        });
+    }
+    response
+        .json::<MatchCreationSkillsResponse>()
+        .await
+        .map_err(|error| ApiError::Upstream {
+            status: StatusCode::BAD_GATEWAY,
+            code: "INVALID_CREATION_SKILL_MATCH",
+            message: format!("技能召回路由结果格式错误: {error}"),
+        })
 }
 
 pub async fn create_creation_skill_analysis_job(

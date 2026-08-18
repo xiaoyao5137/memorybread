@@ -68,7 +68,7 @@ impl StorageManager {
                 // FTS5 预筛：bake_documents_fts 候选可用时收窄扫描，否则回退 LIKE 全扫
                 append_document_fts_prefilter(conn, &mut sql, &mut bind_values, q);
             }
-            sql.push_str(" ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?");
+            sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?");
             bind_values.push(Box::new(limit as i64));
             bind_values.push(Box::new(offset as i64));
 
@@ -113,7 +113,7 @@ impl StorageManager {
             let sql = format!(
                 "SELECT {} FROM bake_documents
                  WHERE deleted_at IS NULL
-                 ORDER BY updated_at DESC, id DESC",
+                 ORDER BY created_at DESC, id DESC",
                 SELECT_COLUMNS
             );
             let mut stmt = conn.prepare(&sql)?;
@@ -690,6 +690,44 @@ mod tests {
         other.prompt_hint = Some("无关提示".to_string());
         other.source_url = Some("https://docs.example.com/unrelated".to_string());
         mgr.insert_bake_document(&other).unwrap()
+    }
+
+    #[test]
+    fn test_list_bake_documents_orders_by_created_at_not_updated_at() {
+        let mgr = make_mgr();
+        let older_id = mgr.insert_bake_document(&sample_document()).unwrap();
+        let mut newer = sample_document();
+        newer.title = "较新创建的文档".to_string();
+        newer.source_url = Some("https://docs.example.com/newer".to_string());
+        let newer_id = mgr.insert_bake_document(&newer).unwrap();
+
+        mgr.with_conn(|conn| {
+            conn.execute(
+                "UPDATE bake_documents SET created_at = ?1, updated_at = ?2 WHERE id = ?3",
+                params![1_000_i64, 3_000_i64, older_id],
+            )?;
+            conn.execute(
+                "UPDATE bake_documents SET created_at = ?1, updated_at = ?2 WHERE id = ?3",
+                params![2_000_i64, 2_000_i64, newer_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let paginated = mgr.list_bake_documents_paginated(None, 10, 0).unwrap();
+        assert_eq!(
+            paginated
+                .iter()
+                .map(|document| document.id)
+                .collect::<Vec<_>>(),
+            vec![newer_id, older_id]
+        );
+
+        let all = mgr.list_bake_documents().unwrap();
+        assert_eq!(
+            all.iter().map(|document| document.id).collect::<Vec<_>>(),
+            vec![newer_id, older_id]
+        );
     }
 
     #[test]

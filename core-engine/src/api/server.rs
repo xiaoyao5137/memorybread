@@ -14,9 +14,10 @@ use super::{
     handlers::{
         action::execute_action,
         bake::{
-            create_bake_document, create_bake_knowledge, create_bake_sop, delete_bake_capture,
-            delete_bake_document, delete_bake_knowledge, delete_bake_memory, delete_bake_sop,
-            get_bake_capture, get_bake_capture_screenshot, get_bake_document, get_bake_knowledge,
+            create_bake_document, create_bake_knowledge, create_bake_sop, create_manual_capture,
+            delete_bake_capture, delete_bake_document, delete_bake_knowledge, delete_bake_memory,
+            delete_bake_sop, get_bake_artifact_audits, get_bake_capture,
+            get_bake_capture_screenshot, get_bake_document, get_bake_knowledge,
             get_bake_memory_preview, get_bake_overview, get_bake_queue_status, get_bake_sop,
             get_bake_style_config, ignore_bake_memory, initialize_bake_memories,
             list_bake_captures, list_bake_documents, list_bake_knowledge, list_bake_memories,
@@ -41,7 +42,7 @@ use super::{
         creation_skill::{
             analyze_creation_skill, create_creation_skill_analysis_job, delete_creation_skill,
             get_creation_skill, get_creation_skill_analysis_job, list_creation_skills,
-            save_creation_skill, update_creation_skill,
+            match_creation_skills, save_creation_skill, update_creation_skill,
         },
         data::{
             create_data_source, delete_data_source, extract_data_sources,
@@ -188,6 +189,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             post(validate_creation_evidence),
         )
         .route("/api/creation/skills/analyze", post(analyze_creation_skill))
+        .route("/api/creation/skills/match", post(match_creation_skills))
         .route(
             "/api/creation/skills/analyze/jobs",
             post(create_creation_skill_analysis_job),
@@ -308,6 +310,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // 烤面包
         .route("/api/bake/overview", get(get_bake_overview))
         .route("/api/bake/queue-status", get(get_bake_queue_status))
+        .route(
+            "/api/bake/timelines/:id/artifact-audits",
+            get(get_bake_artifact_audits),
+        )
         .route("/api/bake/run", post(run_bake_pipeline))
         .route(
             "/api/memory-favorites/:resource_kind/:id",
@@ -351,7 +357,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
                 .put(update_bake_knowledge)
                 .delete(delete_bake_knowledge),
         )
-        .route("/api/bake/captures", get(list_bake_captures))
+        .route(
+            "/api/bake/captures",
+            get(list_bake_captures).post(create_manual_capture),
+        )
         .route(
             "/api/bake/captures/:id",
             get(get_bake_capture).delete(delete_bake_capture),

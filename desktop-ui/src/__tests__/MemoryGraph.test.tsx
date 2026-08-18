@@ -119,6 +119,55 @@ describe('memoryGraph', () => {
     expect(buildMemoryGraph(assets()).graphVersion).toBe(graph.graphVersion)
   })
 
+  it('从中文标题和摘要提取概念并生成语义边', () => {
+    const graph = buildMemoryGraph(assets({
+      knowledge: [knowledge({
+        summary: '年度预算评审结论',
+        overview: '明确费用科目和预算周期',
+        entities: [],
+        category: '',
+        sourceTimelineId: 'timeline-budget',
+        sourceCaptureIds: ['capture-budget'],
+      })],
+      documents: [document({
+        title: '年度预算执行方案',
+        summary: '跟踪各部门预算执行情况',
+        tags: [],
+        sections: [],
+        docType: '',
+        sourceMemoryIds: ['timeline-document'],
+        sourceCaptureIds: ['capture-document'],
+      })],
+      operations: [],
+      data: [],
+    }))
+
+    expect(graph.nodes.find(node => node.id === 'knowledge:k1')?.concepts).toContain('预算')
+    expect(graph.nodes.find(node => node.id === 'document:d1')?.concepts).toContain('预算')
+    expect(graph.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: 'document:d1',
+        target: 'knowledge:k1',
+        relationType: 'semantic',
+        evidence: expect.stringContaining('预算'),
+      }),
+    ]))
+  })
+
+  it('过滤旧数据中 timeline id 与未来 knowledge id 的命名空间碰撞', () => {
+    const graph = buildMemoryGraph(assets({
+      knowledge: [knowledge({ id: '2688', sourceTimelineId: '5689' })],
+      documents: [document({
+        sourceMemoryIds: ['2688'],
+        linkedKnowledgeIds: ['2688'],
+      })],
+      operations: [],
+      data: [],
+    }))
+
+    expect(graph.edges.some(edge => edge.relationType === 'references')).toBe(false)
+  })
+
   it('显式引用优先于同一节点对的语义关系', () => {
     const graph = buildMemoryGraph(assets({
       documents: [document({ linkedKnowledgeIds: ['k1'] })],
@@ -163,6 +212,68 @@ describe('memoryGraph', () => {
     expect(unrelatedGraph.edges).toHaveLength(0)
   })
 
+  it('旧响应中的 timeline/capture 同号不会生成知识共同来源假边', () => {
+    const graph = buildMemoryGraph(assets({
+      knowledge: [
+        knowledge({
+          id: '224',
+          captureId: '538',
+          sourceTimelineId: '538',
+          sourceCaptureIds: ['5543'],
+          summary: '调试 Desktop UI',
+          overview: '排查本地界面问题',
+          entities: ['Desktop'],
+        }),
+        knowledge({
+          id: '2683',
+          captureId: '5543',
+          sourceTimelineId: '5543',
+          sourceCaptureIds: [],
+          summary: '万擎定价文档',
+          overview: '查看平台 SKU 定价',
+          entities: ['万擎'],
+        }),
+      ],
+      documents: [],
+      operations: [],
+      data: [],
+    }))
+
+    expect(graph.edges.some(edge => edge.relationType === 'shared_source')).toBe(false)
+  })
+
+  it('知识确实共享真实 capture 时仍生成共同来源边', () => {
+    const graph = buildMemoryGraph(assets({
+      knowledge: [
+        knowledge({
+          id: 'first',
+          captureId: '42',
+          sourceTimelineId: '100',
+          sourceCaptureIds: ['42'],
+          summary: '第一条独立知识',
+          overview: '主题甲',
+          entities: ['主题甲'],
+        }),
+        knowledge({
+          id: 'second',
+          captureId: '42',
+          sourceTimelineId: '200',
+          sourceCaptureIds: ['42'],
+          summary: '第二条独立知识',
+          overview: '主题乙',
+          entities: ['主题乙'],
+        }),
+      ],
+      documents: [],
+      operations: [],
+      data: [],
+    }))
+
+    expect(graph.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ relationType: 'shared_source', generationSource: 'shared_source' }),
+    ]))
+  })
+
   it('聚焦切片始终保留当前节点并生成稳定布局', () => {
     const graph = buildMemoryGraph(assets())
     const slice = sliceMemoryGraph(graph, { focusNodeId: 'knowledge:k1', maxNodes: 2 })
@@ -188,23 +299,25 @@ describe('memoryGraph', () => {
     expect(slice.nodes.map(node => node.id)).toEqual(['knowledge:hot'])
   })
 
-  it('日期范围以今日节点为起点，并保留一跳关联的历史节点', () => {
+  it('日期范围只保留范围内创建的节点及节点之间的关联', () => {
     const todayStart = 1_000
     const graph = buildMemoryGraph(assets({
-      knowledge: [knowledge({ createdAtMs: todayStart + 10 })],
+      knowledge: [
+        knowledge({ createdAtMs: todayStart + 10 }),
+        knowledge({ id: 'today-related', createdAtMs: todayStart + 20 }),
+      ],
       documents: [document({
         id: 'historical-related',
         title: '历史关联文档',
         createdAtMs: todayStart - 100,
         linkedKnowledgeIds: ['k1'],
+      }), document({
+        id: 'today-related',
+        title: '今日关联文档',
+        createdAtMs: todayStart + 30,
+        linkedKnowledgeIds: ['today-related'],
       })],
-      operations: [operation({
-        id: 'historical-unrelated',
-        extractedProblem: '历史无关操作',
-        triggerKeywords: ['完全不同'],
-        steps: ['处理其他事项'],
-        createdAtMs: todayStart - 100,
-      })],
+      operations: [],
       data: [],
     }))
 
@@ -215,37 +328,52 @@ describe('memoryGraph', () => {
 
     expect(scoped.nodes.map(node => node.id)).toEqual(expect.arrayContaining([
       'knowledge:k1',
-      'document:historical-related',
+      'knowledge:today-related',
+      'document:today-related',
     ]))
-    expect(scoped.nodes.map(node => node.id)).not.toContain('operation:historical-unrelated')
+    expect(scoped.nodes.map(node => node.id)).not.toContain('document:historical-related')
     expect(scoped.edges).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        source: 'document:historical-related',
-        target: 'knowledge:k1',
+        source: 'document:today-related',
+        target: 'knowledge:today-related',
         relationType: 'references',
       }),
+    ]))
+    expect(scoped.edges).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'document:historical-related' }),
     ]))
   })
 })
 
 describe('BakeMemoryGraph', () => {
-  it('支持节点打开和全屏退出', () => {
+  it('支持节点打开、展示创建时间和全屏退出', () => {
     const onOpenNode = vi.fn()
-    render(<BakeMemoryGraph assets={assets()} focusNodeId="knowledge:k1" onOpenNode={onOpenNode} />)
+    const createdAtMs = new Date(2026, 7, 1, 10, 30).getTime()
+    render(<BakeMemoryGraph
+      assets={assets({ knowledge: [knowledge({ createdAtMs })] })}
+      focusNodeId="knowledge:k1"
+      onOpenNode={onOpenNode}
+    />)
 
-    expect(screen.getByRole('region', { name: '记忆图谱' })).toBeInTheDocument()
-    expect(screen.getByText('记忆图谱')).toBeInTheDocument()
-    expect(screen.queryByRole('heading', { name: '记忆图谱' })).not.toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '今日记忆' })).toBeInTheDocument()
+    expect(screen.getByText('今日记忆')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '今日记忆' })).not.toBeInTheDocument()
     expect(screen.queryByText('语义记忆网络')).not.toBeInTheDocument()
     expect(screen.queryByText('按来源、引用与提炼语义连接知识、文档、操作和数据')).not.toBeInTheDocument()
-    const knowledgeNode = screen.getByRole('button', { name: /知识：GPU 利用率口径/ })
-    fireEvent.doubleClick(knowledgeNode)
+    const createdTime = screen.getByText(/创建于 2026\/08\/01 10:30/)
+    expect(createdTime).toHaveAttribute('dateTime', new Date(createdAtMs).toISOString())
+
+    fireEvent.click(screen.getByRole('button', { name: '打开内容' }))
     expect(onOpenNode).toHaveBeenCalledWith(expect.objectContaining({ id: 'knowledge:k1' }))
 
+    const knowledgeNode = screen.getByRole('button', { name: /知识：GPU 利用率口径/ })
+    fireEvent.doubleClick(knowledgeNode)
+    expect(onOpenNode).toHaveBeenCalledTimes(2)
+
     fireEvent.click(screen.getByRole('button', { name: '全屏查看图谱' }))
-    expect(screen.getByRole('dialog', { name: '记忆图谱' })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: '今日记忆' })).toBeInTheDocument()
     fireEvent.keyDown(window, { key: 'Escape' })
-    expect(screen.queryByRole('dialog', { name: '记忆图谱' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: '今日记忆' })).not.toBeInTheDocument()
   })
 
   it('dock 模式使用详情抽屉形式，并支持 Escape 和遮罩关闭', () => {
@@ -316,7 +444,7 @@ describe('BakeMemoryGraph', () => {
     expect(await screen.findByRole('button', { name: /知识：历史预算规则/ })).toHaveClass('bake-memory-graph__node--search-match')
   })
 
-  it('总览默认展示今日节点及其历史关联节点', () => {
+  it('总览默认只展示今日创建的节点', () => {
     render(<BakeMemoryGraph
       assets={assets({
         knowledge: [knowledge({ createdAtMs: 1_100 })],
@@ -339,9 +467,9 @@ describe('BakeMemoryGraph', () => {
       defaultScopeLabel="今日"
     />)
 
-    expect(screen.getByText('今日展示 2/2')).toBeInTheDocument()
+    expect(screen.getByText('今日展示 1/1')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /知识：GPU 利用率口径/ })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /文档：历史关联文档/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /文档：历史关联文档/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /操作：历史无关操作/ })).not.toBeInTheDocument()
   })
 

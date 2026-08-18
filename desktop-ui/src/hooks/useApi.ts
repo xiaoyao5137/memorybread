@@ -1073,8 +1073,11 @@ export function useFetchBakeMemories() {
     const resp = await fetch(buildUrl('/api/knowledge').toString())
     if (!resp.ok) throw new Error(`timelines fetch failed: ${resp.status}`)
     const data = await resp.json()
+    const rawEntries = Array.isArray(data?.entries)
+      ? data.entries
+      : Array.isArray(data?.items) ? data.items : []
     return {
-      items: (data.entries ?? []).map(mapKnowledgeEntryToTimeline),
+      items: rawEntries.map(mapKnowledgeEntryToTimeline),
       total: data.total ?? 0,
       limit: data.limit ?? params.limit ?? 20,
       offset: data.offset ?? params.offset ?? 0,
@@ -1225,6 +1228,30 @@ export function useDeleteBakeCapture() {
   return useCallback(async (id: string): Promise<void> => {
     const resp = await fetch(`${apiBaseUrl}/api/bake/captures/${encodeURIComponent(id)}`, { method: 'DELETE' })
     if (!resp.ok) throw new Error(`delete capture failed: ${resp.status}`)
+  }, [apiBaseUrl])
+}
+
+export function useCreateBakeCapture() {
+  const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
+
+  return useCallback(async (params: {
+    title: string
+    appName?: string
+    text?: string
+    screenshotBase64?: string
+  }): Promise<BakeCaptureItem> => {
+    const resp = await fetch(`${apiBaseUrl}/api/bake/captures`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: params.title,
+        app_name: params.appName || null,
+        text: params.text || null,
+        screenshot_base64: params.screenshotBase64 || null,
+      }),
+    })
+    if (!resp.ok) throw new Error(`create capture failed: ${resp.status}`)
+    return mapBakeCapture(await resp.json())
   }, [apiBaseUrl])
 }
 
@@ -1566,22 +1593,27 @@ function mapBakeMemory(item: any): TimelineItem {
 
 function mapBakeKnowledge(item: any): BakeKnowledgeItem {
   const details = parseMaybeJsonObject(item.details)
-  const sourceCaptureIds = Array.isArray(item.source_capture_ids)
-    ? item.source_capture_ids.map(String)
+  const sourceTimelineId = normalizeSourceId(item.source_timeline_id)
+  const explicitSourceCaptureIds = Array.isArray(item.source_capture_ids)
+    ? item.source_capture_ids.map(normalizeSourceId).filter(Boolean)
     : Array.isArray(details?.source_capture_ids)
-      ? details.source_capture_ids.map(String)
+      ? details.source_capture_ids.map(normalizeSourceId).filter(Boolean)
       : []
-  const captureId = String(item.capture_id)
-  if (captureId && !sourceCaptureIds.includes(captureId)) {
-    sourceCaptureIds.unshift(captureId)
-  }
+  const legacyCaptureId = normalizeSourceId(item.capture_id)
+  const captureId = explicitSourceCaptureIds[0]
+    ?? (legacyCaptureId && legacyCaptureId !== sourceTimelineId ? legacyCaptureId : '')
+  const sourceCaptureIds = explicitSourceCaptureIds.length > 0
+    ? Array.from(new Set(explicitSourceCaptureIds))
+    : captureId
+      ? [captureId]
+      : []
 
   return {
     id: String(item.id),
     isFavorite: Boolean(item.is_favorite),
     captureId,
     sourceCaptureIds,
-    sourceTimelineId: item.source_timeline_id != null ? String(item.source_timeline_id) : String(item.id),
+    sourceTimelineId: sourceTimelineId || undefined,
     sourceUrl: item.source_url ?? undefined,
     summary: item.summary,
     overview: item.overview,
@@ -1601,6 +1633,14 @@ function mapBakeKnowledge(item: any): BakeKnowledgeItem {
     updatedAt: item.updated_at ?? '',
     updatedAtMs: item.updated_at_ms ?? 0,
   }
+}
+
+function normalizeSourceId(value: unknown): string {
+  if (value == null) return ''
+  const normalized = String(value).trim()
+  return normalized && normalized !== '0' && normalized !== 'undefined' && normalized !== 'null'
+    ? normalized
+    : ''
 }
 
 function parseMaybeJsonObject(raw: unknown): Record<string, any> | null {
@@ -1655,6 +1695,11 @@ function toTimestampMs(value: unknown): number {
 
 function mapBakeTemplate(item: any): ArticleTemplate {
   const createdAtMs = toTimestampMs(item.created_at_ms ?? item.created_at ?? item.updated_at)
+  // 后端可能以数字数组返回关联 ID，统一归一为字符串，
+  // 否则跳转来源时间线时 focus id 与时间线 id 类型不一致，抽屉无法自动展开
+  const toIdList = (value: unknown): string[] => (
+    Array.isArray(value) ? value.map(normalizeSourceId).filter(Boolean) : []
+  )
   return {
     id: String(item.id),
     isFavorite: Boolean(item.is_favorite),
@@ -1663,10 +1708,10 @@ function mapBakeTemplate(item: any): ArticleTemplate {
     status: item.status,
     tags: item.tags ?? [],
     applicableTasks: item.applicable_tasks ?? [],
-    sourceMemoryIds: item.source_memory_ids ?? [],
-    sourceCaptureIds: item.source_capture_ids ?? [],
-    sourceEpisodeIds: item.source_episode_ids ?? [],
-    linkedKnowledgeIds: item.linked_knowledge_ids ?? [],
+    sourceMemoryIds: toIdList(item.source_memory_ids),
+    sourceCaptureIds: toIdList(item.source_capture_ids),
+    sourceEpisodeIds: toIdList(item.source_episode_ids),
+    linkedKnowledgeIds: toIdList(item.linked_knowledge_ids),
     sections: item.sections ?? [],
     stylePhrases: item.style_phrases ?? [],
     replacementRules: item.replacement_rules ?? [],

@@ -213,8 +213,8 @@ const TaskCard: React.FC<{
 
   return (
     <div style={{
-      background: 'white', borderRadius: 12, padding: '14px 16px',
-      border: '1px solid rgba(0,0,0,0.08)', marginBottom: 10,
+      background: 'var(--mb-bg-card)', borderRadius: 12, padding: '14px 16px',
+      border: '1px solid var(--mb-border)', marginBottom: 10,
       opacity: task.enabled ? 1 : 0.5,
     }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
@@ -237,7 +237,7 @@ const TaskCard: React.FC<{
 
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-            <span style={{ fontWeight: 600, fontSize: 14, color: '#000' }}>{task.name}</span>
+            <span style={{ fontWeight: 600, fontSize: 14, color: 'var(--mb-text-primary)' }}>{task.name}</span>
             <span style={{
               fontSize: 11, padding: '1px 6px', borderRadius: 4,
               background: 'rgba(0,122,255,0.08)', color: '#007AFF',
@@ -245,7 +245,7 @@ const TaskCard: React.FC<{
             {task.is_builtin && (
               <span style={{
                 fontSize: 11, padding: '1px 6px', borderRadius: 4,
-                background: 'rgba(181,122,43,0.1)', color: '#8A5A1F',
+                background: 'rgba(181,122,43,0.1)', color: 'var(--mb-brand-text)',
               }}>内置日记</span>
             )}
             <span style={{
@@ -257,11 +257,11 @@ const TaskCard: React.FC<{
               <span style={{ width: 6, height: 6, borderRadius: '50%', background: statusColor, flexShrink: 0 }} />
             )}
           </div>
-          <p style={{ fontSize: 12, color: '#6E6E73', margin: 0, lineHeight: 1.4,
+          <p style={{ fontSize: 12, color: 'var(--mb-text-secondary)', margin: 0, lineHeight: 1.4,
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {task.user_instruction}
           </p>
-          <div style={{ display: 'flex', gap: 12, marginTop: 6, fontSize: 11, color: '#AEAEB2' }}>
+          <div style={{ display: 'flex', gap: 12, marginTop: 6, fontSize: 11, color: 'var(--mb-text-faint)' }}>
             <span>执行 {task.run_count} 次</span>
             {task.last_run_at && <span>上次 {formatTs(task.last_run_at)}</span>}
             {task.next_run_at && <span>下次 {formatTs(task.next_run_at)}</span>}
@@ -744,21 +744,21 @@ const ScheduledTasksPanel: React.FC = () => {
 
   // ── 渲染 ──────────────────────────────────────────────────────────────────
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: '#F5F5F7' }}>
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: 'var(--mb-bg-page)' }}>
       {/* Header */}
-      <div style={{ padding: '16px 16px 0', background: '#F5F5F7' }}>
+      <div style={{ padding: '16px 16px 0', background: 'var(--mb-bg-page)' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-          <span className="tutorial-title-row" style={{ fontSize: 16, fontWeight: 600, color: '#000' }}>
+          <span className="tutorial-title-row" style={{ fontSize: 16, fontWeight: 600, color: 'var(--mb-text-primary)' }}>
             定时任务<TutorialLink url={TUTORIAL_URLS.tasks} />
           </span>
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={() => setView('channels')} style={{
-              fontSize: 12, padding: '5px 10px', borderRadius: 8, border: '1px solid rgba(0,0,0,0.1)',
-              background: 'white', color: '#8A5A1F', cursor: 'pointer',
+              fontSize: 12, padding: '5px 10px', borderRadius: 8, border: '1px solid var(--mb-border-strong)',
+              background: 'var(--mb-bg-input)', color: 'var(--mb-brand-text)', cursor: 'pointer',
             }}>消息渠道</button>
             <button onClick={() => setView('templates')} style={{
-              fontSize: 12, padding: '5px 10px', borderRadius: 8, border: '1px solid rgba(0,0,0,0.1)',
-              background: 'white', color: '#007AFF', cursor: 'pointer',
+              fontSize: 12, padding: '5px 10px', borderRadius: 8, border: '1px solid var(--mb-border-strong)',
+              background: 'var(--mb-bg-input)', color: '#007AFF', cursor: 'pointer',
             }}>模板库</button>
             <button onClick={() => {
               setSelectedTask(null)
@@ -791,8 +791,8 @@ const ScheduledTasksPanel: React.FC = () => {
         {view === 'list' && (
           <div style={{ display: 'flex', flexDirection: 'column' }}>
             <div style={{
-              background: 'white', borderRadius: 12, padding: 16,
-              border: '1px solid rgba(0,0,0,0.08)', marginBottom: 12, order: 3,
+              background: 'var(--mb-bg-card)', borderRadius: 12, padding: 16,
+              border: '1px solid var(--mb-border)', marginBottom: 12, order: 3,
             }}>
               <div style={{
                 display: 'flex',
@@ -818,21 +818,21 @@ const ScheduledTasksPanel: React.FC = () => {
                 </button>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                    <span style={{ fontWeight: 600, fontSize: 14, color: '#000' }}>自动识别任务</span>
+                    <span style={{ fontWeight: 600, fontSize: 14, color: 'var(--mb-text-primary)' }}>自动识别任务</span>
                     <span style={{
                       fontSize: 11, padding: '1px 6px', borderRadius: 4,
                       background: autoTaskConfig.enabled ? 'rgba(52,199,89,0.1)' : 'rgba(142,142,147,0.12)',
                       color: autoTaskConfig.enabled ? '#248A3D' : '#6E6E73',
                     }}>{autoTaskConfig.enabled ? '运行中' : '已关闭'}</span>
                   </div>
-                  <div style={{ fontSize: 11, color: '#8E8E93' }}>按应用和触发词发现可执行任务</div>
+                  <div style={{ fontSize: 11, color: 'var(--mb-text-tertiary)' }}>按应用和触发词发现可执行任务</div>
                 </div>
                 <button
                   type="button"
                   aria-expanded={autoTaskExpanded}
                   onClick={() => setAutoTaskExpanded(value => !value)}
                   style={{
-                    border: 'none', background: 'transparent', color: '#8A5A1F',
+                    border: 'none', background: 'transparent', color: 'var(--mb-brand-text)',
                     cursor: 'pointer', fontSize: 12, padding: '4px 0 4px 8px',
                   }}
                 >
@@ -906,7 +906,7 @@ const ScheduledTasksPanel: React.FC = () => {
                   {autoTaskDraft.triggerWords.map(word => (
                     <span key={word} style={{
                       display: 'inline-flex', alignItems: 'center', gap: 6,
-                      fontSize: 12, color: '#3A2A1A', background: 'rgba(181,122,43,0.12)',
+                      fontSize: 12, color: 'var(--mb-brand-text)', background: 'rgba(181,122,43,0.12)',
                       border: '1px solid rgba(181,122,43,0.18)', borderRadius: 999,
                       padding: '4px 8px',
                     }}>
@@ -914,7 +914,7 @@ const ScheduledTasksPanel: React.FC = () => {
                       <button
                         type="button"
                         onClick={() => handleRemoveTriggerWord(word)}
-                        style={{ border: 'none', background: 'transparent', color: '#8A5A1F', cursor: 'pointer', padding: 0 }}
+                        style={{ border: 'none', background: 'transparent', color: 'var(--mb-brand-text)', cursor: 'pointer', padding: 0 }}
                         title="删除触发词"
                       >
                         ×
@@ -953,9 +953,9 @@ const ScheduledTasksPanel: React.FC = () => {
               )}
             </div>
 
-            {loading && <div style={{ textAlign: 'center', color: '#AEAEB2', padding: 20 }}>加载中...</div>}
+            {loading && <div style={{ textAlign: 'center', color: 'var(--mb-text-faint)', padding: 20 }}>加载中...</div>}
             {!loading && tasks.length === 0 && (
-              <div style={{ textAlign: 'center', color: '#AEAEB2', padding: 40 }}>
+              <div style={{ textAlign: 'center', color: 'var(--mb-text-faint)', padding: 40 }}>
                 <div style={{ fontSize: 32, marginBottom: 8 }}>⏰</div>
                 <div style={{ fontSize: 14 }}>还没有定时任务</div>
                 <div style={{ fontSize: 12, marginTop: 4 }}>点击「模板库」快速创建</div>
@@ -973,11 +973,11 @@ const ScheduledTasksPanel: React.FC = () => {
 
         {/* 创建 / 编辑表单 */}
         {(view === 'create' || view === 'edit') && (
-          <div style={{ background: 'white', borderRadius: 12, padding: 16, border: '1px solid rgba(0,0,0,0.08)' }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: '#2E2115', marginBottom: 14 }}>
+          <div style={{ background: 'var(--mb-bg-card)', borderRadius: 12, padding: 16, border: '1px solid var(--mb-border)' }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--mb-bg-warm-text)', marginBottom: 14 }}>
               {view === 'edit' ? '编辑任务' : '创建任务'}
               {selectedTask?.is_builtin && (
-                <span style={{ fontSize: 11, color: '#8A5A1F', fontWeight: 400, marginLeft: 8 }}>
+                <span style={{ fontSize: 11, color: 'var(--mb-brand-text)', fontWeight: 400, marginLeft: 8 }}>
                   内置日记任务可编辑，但不能删除
                 </span>
               )}
@@ -1008,7 +1008,7 @@ const ScheduledTasksPanel: React.FC = () => {
                 {instructionMentionQuery !== null && filteredInstructionMentionOptions.length > 0 && (
                   <div style={{
                     position: 'absolute', left: 0, right: 0, top: '100%', marginTop: 4,
-                    background: 'white', border: '1px solid rgba(0,0,0,0.12)', borderRadius: 8,
+                    background: 'var(--mb-bg-elevated)', border: '1px solid var(--mb-border-strong)', borderRadius: 8,
                     boxShadow: '0 6px 18px rgba(0,0,0,0.12)', maxHeight: 200, overflow: 'auto', zIndex: 20,
                   }}>
                     {filteredInstructionMentionOptions.map((option, optionIndex) => (
@@ -1026,7 +1026,7 @@ const ScheduledTasksPanel: React.FC = () => {
                         }}
                       >
                         <span style={{ color: '#007AFF', fontWeight: 500 }}>@{option.label}</span>
-                        <span style={{ color: '#AEAEB2', fontSize: 11 }}>{option.description}</span>
+                        <span style={{ color: 'var(--mb-text-faint)', fontSize: 11 }}>{option.description}</span>
                       </button>
                     ))}
                   </div>
@@ -1080,13 +1080,13 @@ const ScheduledTasksPanel: React.FC = () => {
                 <div style={{ marginBottom: 10 }}>
                   <select value={schedule.dayOfMonth}
                     onChange={e => setSchedule(s => ({ ...s, dayOfMonth: Number(e.target.value) }))}
-                    style={{ ...inputStyle, width: 'auto', background: 'white' }}>
+                    style={{ ...inputStyle, width: 'auto' }}>
                     {Array.from({ length: 31 }, (_, index) => index + 1).map(day => (
                       <option key={day} value={day}>每月 {day} 日</option>
                     ))}
                   </select>
                   {schedule.dayOfMonth > 28 && (
-                    <div style={{ fontSize: 11, color: '#AEAEB2', marginTop: 4 }}>
+                    <div style={{ fontSize: 11, color: 'var(--mb-text-faint)', marginTop: 4 }}>
                       没有这一天的月份（如 2 月）将不会执行
                     </div>
                   )}
@@ -1097,19 +1097,19 @@ const ScheduledTasksPanel: React.FC = () => {
                   <input value={schedule.customExpression}
                     onChange={e => setSchedule(s => ({ ...s, customExpression: e.target.value }))}
                     placeholder="0 20 * * *" style={inputStyle} />
-                  <div style={{ fontSize: 11, color: '#AEAEB2', marginTop: 4 }}>
+                  <div style={{ fontSize: 11, color: 'var(--mb-text-faint)', marginTop: 4 }}>
                     Cron 表达式（分 时 日 月 周），例如「0 20 * * *」表示每天 20:00
                   </div>
                 </>
               ) : (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontSize: 12, color: '#6E6E73' }}>执行时间</span>
+                  <span style={{ fontSize: 12, color: 'var(--mb-text-secondary)' }}>执行时间</span>
                   <input type="time" value={schedule.time}
                     onChange={e => setSchedule(s => ({ ...s, time: e.target.value }))}
                     style={{ ...inputStyle, width: 'auto' }} />
                 </div>
               )}
-              <div style={{ fontSize: 11, color: '#8E8E93', marginTop: 6 }}>
+              <div style={{ fontSize: 11, color: 'var(--mb-text-tertiary)', marginTop: 6 }}>
                 当前设置：{(() => {
                   const cron = buildCronFromSchedule(schedule)
                   return cron ? describeCron(cron) : '请完善频率设置'
@@ -1121,11 +1121,11 @@ const ScheduledTasksPanel: React.FC = () => {
               <div style={{ display: 'grid', gap: 8 }}>
                 <div style={{
                   display: 'flex', alignItems: 'center', gap: 9, padding: '8px 10px',
-                  border: '1px solid rgba(181,122,43,0.16)', borderRadius: 8, background: '#FFFCF7',
+                  border: '1px solid rgba(181,122,43,0.16)', borderRadius: 8, background: 'var(--mb-bg-warm)',
                 }}>
                   <input type="checkbox" checked disabled />
-                  <span style={{ fontSize: 12, color: '#2E2115', flex: 1 }}>站内消息</span>
-                  <span style={{ fontSize: 11, color: '#8E8E93' }}>默认渠道</span>
+                  <span style={{ fontSize: 12, color: 'var(--mb-bg-warm-text)', flex: 1 }}>站内消息</span>
+                  <span style={{ fontSize: 11, color: 'var(--mb-text-tertiary)' }}>默认渠道</span>
                 </div>
                 {channels.map(channel => (
                   <label key={channel.id} style={{
@@ -1140,8 +1140,8 @@ const ScheduledTasksPanel: React.FC = () => {
                       disabled={!channel.enabled}
                       onChange={() => toggleFormChannel(channel.id)}
                     />
-                    <span style={{ fontSize: 12, color: '#2E2115', flex: 1 }}>{channel.name}</span>
-                    <span style={{ fontSize: 11, color: '#8E8E93' }}>
+                    <span style={{ fontSize: 12, color: 'var(--mb-bg-warm-text)', flex: 1 }}>{channel.name}</span>
+                    <span style={{ fontSize: 11, color: 'var(--mb-text-tertiary)' }}>
                       {channelTypeLabel(channel.channel_type)}{channel.enabled ? '' : ' · 已停用'}
                     </span>
                   </label>
@@ -1159,11 +1159,11 @@ const ScheduledTasksPanel: React.FC = () => {
         {view === 'channels' && (
           <div style={{ display: 'grid', gap: 12 }}>
             <div style={{
-              background: 'linear-gradient(135deg, #FFF9EF 0%, #FFFDF9 100%)',
+              background: 'linear-gradient(135deg, var(--mb-bg-warm-deep) 0%, var(--mb-bg-warm) 100%)',
               border: '1px solid rgba(181,122,43,0.2)', borderRadius: 12, padding: 16,
             }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: '#2E2115' }}>任务结果消息渠道</div>
-              <p style={{ fontSize: 12, color: '#705D49', lineHeight: 1.6, margin: '6px 0 14px' }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--mb-bg-warm-text)' }}>任务结果消息渠道</div>
+              <p style={{ fontSize: 12, color: 'var(--mb-brand-text)', lineHeight: 1.6, margin: '6px 0 14px' }}>
                 Webhook 地址只保存在这台电脑上，不会同步到云端。支持飞书、钉钉、企业微信和通用 Webhook。
               </p>
               <div style={{ display: 'grid', gridTemplateColumns: 'minmax(120px, .7fr) minmax(120px, .55fr)', gap: 10, marginBottom: 10 }}>
@@ -1179,7 +1179,7 @@ const ScheduledTasksPanel: React.FC = () => {
                     ...value,
                     channel_type: event.target.value as NotificationChannel['channel_type'],
                   }))}
-                  style={{ ...inputStyle, background: 'white' }}
+                  style={{ ...inputStyle }}
                 >
                   <option value="feishu">飞书</option>
                   <option value="dingtalk">钉钉</option>
@@ -1203,13 +1203,13 @@ const ScheduledTasksPanel: React.FC = () => {
             </div>
 
             {channels.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: 28, color: '#8E8E93', fontSize: 12 }}>
+              <div style={{ textAlign: 'center', padding: 28, color: 'var(--mb-text-tertiary)', fontSize: 12 }}>
                 暂无消息渠道。添加后可在创建或编辑任务时选择。
               </div>
             ) : channels.map(channel => (
               <div key={channel.id} style={{
-                display: 'flex', alignItems: 'center', gap: 12, background: 'white',
-                border: '1px solid rgba(0,0,0,0.08)', borderRadius: 10, padding: '12px 14px',
+                display: 'flex', alignItems: 'center', gap: 12, background: 'var(--mb-bg-card)',
+                border: '1px solid var(--mb-border)', borderRadius: 10, padding: '12px 14px',
                 opacity: channel.enabled ? 1 : 0.62,
               }}>
                 <button
@@ -1229,8 +1229,8 @@ const ScheduledTasksPanel: React.FC = () => {
                   }} />
                 </button>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: '#2E2115' }}>{channel.name}</div>
-                  <div style={{ fontSize: 11, color: '#8E8E93', marginTop: 3 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--mb-bg-warm-text)' }}>{channel.name}</div>
+                  <div style={{ fontSize: 11, color: 'var(--mb-text-tertiary)', marginTop: 3 }}>
                     {channelTypeLabel(channel.channel_type)} · {webhookHost(channel.webhook_url)}
                   </div>
                 </div>
@@ -1251,14 +1251,14 @@ const ScheduledTasksPanel: React.FC = () => {
                   marginBottom: 8, paddingLeft: 2 }}>{category}</div>
                 {tpls.map(tpl => (
                   <div key={tpl.id} onClick={() => handleUseTemplate(tpl)} style={{
-                    background: 'white', borderRadius: 10, padding: '10px 14px',
-                    border: '1px solid rgba(0,0,0,0.08)', marginBottom: 8, cursor: 'pointer',
+                    background: 'var(--mb-bg-card)', borderRadius: 10, padding: '10px 14px',
+                    border: '1px solid var(--mb-border)', marginBottom: 8, cursor: 'pointer',
                   }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <span style={{ fontSize: 13, fontWeight: 500 }}>{tpl.name}</span>
                       <span style={{ fontSize: 11, color: '#007AFF' }}>{describeCron(tpl.cron)}</span>
                     </div>
-                    <p style={{ fontSize: 11, color: '#6E6E73', margin: '4px 0 0',
+                    <p style={{ fontSize: 11, color: 'var(--mb-text-secondary)', margin: '4px 0 0',
                       overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {tpl.user_instruction}
                     </p>
@@ -1274,20 +1274,20 @@ const ScheduledTasksPanel: React.FC = () => {
           <div>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>{selectedTask.name} — 执行历史</div>
             {executions.length === 0 && (
-              <div style={{ textAlign: 'center', padding: 32, color: '#8E8E93', fontSize: 12 }}>
+              <div style={{ textAlign: 'center', padding: 32, color: 'var(--mb-text-tertiary)', fontSize: 12 }}>
                 还没有执行记录
               </div>
             )}
             {executions.map(exec => (
               <div key={exec.id} style={{
-                background: 'white', borderRadius: 10, padding: 14,
-                border: '1px solid rgba(0,0,0,0.08)', marginBottom: 10,
+                background: 'var(--mb-bg-card)', borderRadius: 10, padding: 14,
+                border: '1px solid var(--mb-border)', marginBottom: 10,
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
                   <span style={{ fontSize: 12, color: exec.status === 'success' ? '#34C759' : '#FF3B30', fontWeight: 500 }}>
                     {exec.status === 'success' ? '成功' : exec.status === 'failed' ? '失败' : '执行中'}
                   </span>
-                  <span style={{ fontSize: 11, color: '#AEAEB2', display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 11, color: 'var(--mb-text-faint)', display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                     <span>
                       {formatTs(exec.started_at)}
                       {exec.latency_ms && ` · ${(exec.latency_ms / 1000).toFixed(1)}s`}
@@ -1307,7 +1307,7 @@ const ScheduledTasksPanel: React.FC = () => {
                   </span>
                 </div>
                 {exec.result_text && (
-                  <pre style={{ fontSize: 12, color: '#333', margin: 0, whiteSpace: 'pre-wrap',
+                  <pre style={{ fontSize: 12, color: 'var(--mb-text-primary)', margin: 0, whiteSpace: 'pre-wrap',
                     maxHeight: 300, overflow: 'auto', lineHeight: 1.6 }}>
                     {exec.result_text}
                   </pre>
@@ -1318,13 +1318,13 @@ const ScheduledTasksPanel: React.FC = () => {
                 {(exec.notification_deliveries?.length || 0) > 0 && (
                   <div style={{
                     display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10,
-                    borderTop: '1px solid rgba(0,0,0,0.06)', paddingTop: 9,
+                    borderTop: '1px solid var(--mb-divider)', paddingTop: 9,
                   }}>
                     {exec.notification_deliveries.map(delivery => (
                       <span key={delivery.channel_id} title={delivery.error_message || undefined} style={{
                         fontSize: 11, borderRadius: 999, padding: '3px 7px',
-                        color: delivery.status === 'success' ? '#248A3D'
-                          : delivery.status === 'failed' ? '#D70015' : '#8A5A1F',
+                        color: delivery.status === 'success' ? 'var(--mb-status-success-text)'
+                          : delivery.status === 'failed' ? 'var(--mb-status-failed-text)' : 'var(--mb-status-pending-text)',
                         background: delivery.status === 'success' ? 'rgba(52,199,89,.1)'
                           : delivery.status === 'failed' ? 'rgba(255,59,48,.08)' : 'rgba(181,122,43,.1)',
                       }}>
@@ -1355,12 +1355,13 @@ const ScheduledTasksPanel: React.FC = () => {
 }
 
 const labelStyle: React.CSSProperties = {
-  display: 'block', fontSize: 12, fontWeight: 500, color: '#6E6E73', marginBottom: 6,
+  display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--mb-text-secondary)', marginBottom: 6,
 }
 
 const inputStyle: React.CSSProperties = {
   width: '100%', padding: '8px 10px', borderRadius: 8, fontSize: 13,
-  border: '1px solid rgba(0,0,0,0.15)', outline: 'none', boxSizing: 'border-box',
+  border: '1px solid var(--mb-border-strong)', outline: 'none', boxSizing: 'border-box',
+  background: 'var(--mb-bg-input)', color: 'var(--mb-text-primary)', colorScheme: 'light dark',
   fontFamily: 'inherit',
 }
 
@@ -1389,9 +1390,9 @@ const smallDangerButtonStyle: React.CSSProperties = {
 function scheduleChipStyle(active: boolean): React.CSSProperties {
   return {
     fontSize: 12, padding: '5px 12px', borderRadius: 999, cursor: 'pointer',
-    border: active ? '1px solid #007AFF' : '1px solid rgba(0,0,0,0.12)',
-    background: active ? 'rgba(0,122,255,0.1)' : 'white',
-    color: active ? '#007AFF' : '#6E6E73',
+    border: active ? '1px solid #007AFF' : '1px solid var(--mb-border-strong)',
+    background: active ? 'rgba(0,122,255,0.1)' : 'var(--mb-bg-input)',
+    color: active ? '#007AFF' : 'var(--mb-text-secondary)',
   }
 }
 

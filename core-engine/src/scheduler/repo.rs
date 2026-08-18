@@ -94,10 +94,7 @@ impl TaskRepo {
                 .notification_channel_ids
                 .as_ref()
                 .map(|ids| serde_json::to_string(ids).unwrap_or_else(|_| "[]".into()));
-            let executor_kind = patch
-                .executor_kind
-                .as_deref()
-                .map(normalize_executor_kind);
+            let executor_kind = patch.executor_kind.as_deref().map(normalize_executor_kind);
             let affected = conn.execute(
                 "UPDATE scheduled_tasks SET
                    name             = COALESCE(?1, name),
@@ -260,7 +257,9 @@ impl TaskRepo {
             next_run_at: row.get(11)?,
             created_at: row.get(12)?,
             updated_at: row.get(13)?,
-            executor_kind: row.get::<_, Option<String>>(14)?.unwrap_or_else(|| "consult".into()),
+            executor_kind: row
+                .get::<_, Option<String>>(14)?
+                .unwrap_or_else(|| "consult".into()),
         })
     }
 }

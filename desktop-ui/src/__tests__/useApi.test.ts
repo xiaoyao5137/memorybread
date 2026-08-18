@@ -446,6 +446,8 @@ describe('useFetchBakeKnowledge', () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
       id: 9,
       capture_id: 12,
+      source_capture_ids: ['12'],
+      source_timeline_id: 101,
       summary: '已提炼知识',
       overview: '概述',
       details: '{"source_capture_ids":["12"]}',
@@ -467,8 +469,66 @@ describe('useFetchBakeKnowledge', () => {
       id: '9',
       captureId: '12',
       sourceCaptureIds: ['12'],
+      sourceTimelineId: '101',
       summary: '已提炼知识',
     })
+  })
+
+  it('以多值来源字段为权威，不混入旧服务伪造的 timeline capture_id', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
+      id: 2683,
+      capture_id: 5543,
+      source_timeline_id: 5543,
+      source_capture_ids: ['40449', '41395'],
+      summary: '万擎定价文档',
+      entities: [],
+      category: 'bake_knowledge',
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { result } = renderHook(() => useFetchBakeKnowledgeDetail())
+    const data = await result.current('2683')
+
+    expect(data.captureId).toBe('40449')
+    expect(data.sourceCaptureIds).toEqual(['40449', '41395'])
+    expect(data.sourceCaptureIds).not.toContain('5543')
+  })
+
+  it('旧响应仅在单值 capture 与 timeline 不同且无来源数组时回退', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        id: 1,
+        capture_id: 42,
+        source_timeline_id: 7,
+        summary: '旧版真实单采集',
+        entities: [],
+        category: 'bake_knowledge',
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        id: 2,
+        capture_id: 5543,
+        source_timeline_id: 5543,
+        summary: '旧版伪采集',
+        entities: [],
+        category: 'bake_knowledge',
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        id: 3,
+        summary: '缺失来源',
+        entities: [],
+        category: 'bake_knowledge',
+      }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { result } = renderHook(() => useFetchBakeKnowledgeDetail())
+    const legacyReal = await result.current('1')
+    const legacyCollision = await result.current('2')
+    const missing = await result.current('3')
+
+    expect(legacyReal).toMatchObject({ captureId: '42', sourceCaptureIds: ['42'] })
+    expect(legacyCollision).toMatchObject({ captureId: '', sourceCaptureIds: [] })
+    expect(missing).toMatchObject({ captureId: '', sourceCaptureIds: [] })
+    expect(missing.sourceTimelineId).toBeUndefined()
   })
 })
 

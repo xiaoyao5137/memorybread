@@ -203,3 +203,104 @@
 @media (prefers-reduced-motion: reduce) {
   .about-panel .is-spinning { animation: none; }
 }
+
+/* macOS 暗色模式适配 */
+@media (prefers-color-scheme: dark) {
+  .about-panel {
+    color: #F3F4F6;
+    background:
+      linear-gradient(90deg, rgba(255, 159, 67, .05) 1px, transparent 1px),
+      #111315;
+  }
+
+  .about-panel__header {
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+    background: rgba(28, 28, 30, 0.92);
+  }
+
+  .about-panel__header span {
+    color: #E8A25C;
+  }
+
+  .about-panel__header > button {
+    color: #9CA3AF;
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  .about-panel__identity {
+    border-color: rgba(255, 255, 255, 0.09);
+    background:
+      radial-gradient(circle at 92% 8%, rgba(255, 159, 67, 0.14), transparent 32%),
+      #1C1C1E;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  }
+
+  .about-panel__identity p {
+    color: #9CA3AF;
+  }
+
+  .about-panel__identity code,
+  .about-panel__version-card dd {
+    color: #E8A25C;
+  }
+
+  .about-panel__version-card {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #1C1C1E;
+  }
+
+  .about-panel__version-heading p {
+    color: #9CA3AF;
+  }
+
+  .about-panel__version-heading button,
+  .about-panel__update button {
+    border-color: rgba(255, 177, 122, 0.3);
+    color: #FFC48D;
+    background: rgba(255, 159, 67, 0.14);
+  }
+
+  .about-panel__version-card dl {
+    border-top-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .about-panel__version-card dl > div {
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .about-panel__version-card dt {
+    color: #9CA3AF;
+  }
+
+  .about-panel__status {
+    color: #6EE7A0;
+    background: rgba(52, 199, 89, 0.14);
+  }
+
+  .about-panel__status--error {
+    color: #FF6961;
+    background: rgba(255, 69, 58, 0.16);
+  }
+
+  .about-panel__update {
+    border-color: rgba(255, 177, 122, 0.3);
+    background: rgba(255, 159, 67, 0.14);
+  }
+
+  .about-panel__update small {
+    color: #9CA3AF;
+  }
+
+  .about-panel__update p {
+    color: #F3F4F6;
+  }
+
+  .about-panel__update button {
+    color: #fffaf5;
+    background: #a94c25;
+  }
+
+  .about-panel button:focus-visible {
+    outline-color: rgba(10, 132, 255, 0.24);
+  }
+}

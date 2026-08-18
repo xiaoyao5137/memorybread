@@ -17,13 +17,15 @@ use crate::storage::{
 
 const REPORT_FRESH_SECONDS: i64 = 15 * 60;
 const DATA_TEXT_MAX_CHARS: usize = 80_000;
-const DATA_MEMORY_VERSION: &str = "data-memory.v15";
+const DATA_MEMORY_VERSION: &str = "data-memory.v16";
 const DATA_CONTENT_RENDER_VERSION: &str = "fact-specific.v1";
 const CURRENT_TIMELINE_DATA_FACT_VERSION: &str = "timeline-data-fact.v3";
 const DATA_PERIOD_GRANULARITY: &str = "week";
 const WEEK_MILLIS: i64 = 7 * 24 * 60 * 60 * 1000;
 const EPOCH_FIRST_MONDAY_MILLIS: i64 = 4 * 24 * 60 * 60 * 1000;
 const DATA_HISTORY_LIMIT: usize = 16;
+const TIMELINE_DATASET_MAX_ROWS: usize = 50;
+const TIMELINE_DATASET_MAX_PARTS: usize = 3;
 
 #[derive(Debug, Clone)]
 struct DataPeriodTag {
@@ -60,6 +62,18 @@ fn attach_period_tag(value: &mut Value, period: &DataPeriodTag) {
             }),
         );
     }
+}
+
+#[derive(Debug)]
+struct TimelineCandidate {
+    timeline_id: i64,
+    timeline_updated_at_ms: i64,
+    fact_updated_at_ms: i64,
+    fact_accepted_count: i64,
+    fact_contract_version: String,
+    capture_count: i64,
+    max_capture_id: i64,
+    captures: Vec<CaptureCandidate>,
 }
 
 #[derive(Debug)]
@@ -185,7 +199,7 @@ impl StorageManager {
                         last_error_code, status, created_at, updated_at
                  FROM data_sources
                  WHERE deleted_at IS NULL
-                 ORDER BY last_seen_at DESC, id DESC",
+                 ORDER BY created_at DESC, id DESC",
             )?;
             let rows = stmt.query_map([], map_data_source_row)?;
             for row in rows {
@@ -230,21 +244,11 @@ impl StorageManager {
             if let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) {
                 candidates.retain(|source| data_source_matches_query(source, query));
             }
-            // 数据页展示的是最新快照的采集时间，因此默认顺序也必须使用同一字段。
-            // last_seen_at 只表示来源近期再次被识别，不能把未更新的旧快照推到前面。
+            // 数据表格统一按创建时间逆序展示，与页面创建时间列保持一致。
             candidates.sort_by(|left, right| {
-                let left_collected_at = left
-                    .latest_snapshot
-                    .as_ref()
-                    .map(|snapshot| snapshot.collected_at)
-                    .unwrap_or(i64::MIN);
-                let right_collected_at = right
-                    .latest_snapshot
-                    .as_ref()
-                    .map(|snapshot| snapshot.collected_at)
-                    .unwrap_or(i64::MIN);
-                right_collected_at
-                    .cmp(&left_collected_at)
+                right
+                    .created_at
+                    .cmp(&left.created_at)
                     .then_with(|| right.id.cmp(&left.id))
             });
             let total = candidates.len() as i64;
@@ -271,7 +275,7 @@ impl StorageManager {
                        SELECT 1 FROM data_snapshots snapshot
                        WHERE snapshot.source_id = data_sources.id
                    )
-                 ORDER BY last_seen_at DESC, id DESC",
+                 ORDER BY created_at DESC, id DESC",
             )?;
             let rows = stmt.query_map([], map_data_source_row)?;
             let mut pending = rows.collect::<Result<Vec<_>, _>>()?;
@@ -645,124 +649,24 @@ impl StorageManager {
         &self,
         limit: usize,
     ) -> Result<DataExtractionSummary, StorageError> {
-        self.with_conn(|conn| {
-            let regeneration = regenerate_legacy_data_memories(conn, limit.clamp(1, 5000))?;
-            let (candidates, newest_capture_id, backfill_before_capture_id) =
-                load_capture_candidates(conn, limit.clamp(1, 5000))?;
-            let mut summary = DataExtractionSummary {
-                scanned_count: candidates.len(),
-                historical_regenerated_count: regeneration.regenerated_count,
-                historical_merged_count: regeneration.merged_count,
-                historical_rejected_count: regeneration.rejected_count,
-                ..DataExtractionSummary::default()
-            };
-            let mut handled_work_timelines = HashSet::new();
-            for candidate in candidates {
-                let mut candidate_created = false;
-                let active_url = candidate
-                    .url
-                    .as_deref()
-                    .and_then(canonical_data_url)
-                    .filter(|url| {
-                        looks_like_data_url(url, candidate_title(&candidate), &candidate.text)
-                    });
-                if let Some(url) = active_url {
-                    let created = upsert_report_source(conn, &candidate, &url, "active_url")?;
-                    summary.source_created_count += usize::from(created);
-                    summary.source_updated_count += usize::from(!created);
-                    candidate_created = true;
-                }
+        let db_path = self.db_path();
+        if db_path.is_empty() || db_path == ":memory:" {
+            return self.with_conn(|conn| extract_data_candidates_with_conn(conn, limit));
+        }
 
-                for embedded in extract_http_urls(&candidate.text).into_iter().take(12) {
-                    let Some(url) = canonical_data_url(&embedded) else {
-                        continue;
-                    };
-                    if candidate
-                        .url
-                        .as_deref()
-                        .and_then(canonical_data_url)
-                        .as_deref()
-                        == Some(url.as_str())
-                        || !looks_like_data_url(&url, candidate_title(&candidate), &candidate.text)
-                    {
-                        continue;
-                    }
-                    let created = upsert_report_source(conn, &candidate, &url, "embedded_url")?;
-                    summary.source_created_count += usize::from(created);
-                    summary.source_updated_count += usize::from(!created);
-                    candidate_created = true;
-                }
-
-                if let Some(timeline_id) = candidate.timeline_id {
-                    if !handled_work_timelines.contains(&timeline_id) {
-                        handled_work_timelines.insert(timeline_id);
-                        let context = load_timeline_data_context(conn, &candidate, timeline_id)?;
-                        let mut semantic_context = [
-                            candidate.timeline_summary.as_deref(),
-                            candidate.timeline_overview.as_deref(),
-                            candidate.timeline_details.as_deref(),
-                            candidate.webpage_title.as_deref(),
-                            candidate.win_title.as_deref(),
-                        ]
-                        .into_iter()
-                        .flatten()
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                        if let Some(timeline_topic) = candidate
-                            .timeline_overview
-                            .as_deref()
-                            .or(candidate.timeline_summary.as_deref())
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                        {
-                            semantic_context
-                                .push_str(&format!("\ntimeline_topic:{timeline_topic}"));
-                        }
-                        if let Some(window_title) = candidate
-                            .webpage_title
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                            .or_else(|| {
-                                candidate
-                                    .win_title
-                                    .as_deref()
-                                    .map(str::trim)
-                                    .filter(|value| !value.is_empty())
-                            })
-                        {
-                            semantic_context.push_str(&format!("\nwindow_title:{window_title}"));
-                        }
-                        if let Some(app_name) = candidate.app_name.as_deref() {
-                            semantic_context.push_str(&format!("\napplication:{app_name}"));
-                        }
-                        let views =
-                            semantic_views_for_timeline_context(&context, &semantic_context);
-                        if !views.is_empty() {
-                            for view in views {
-                                let (created, snapshot_created) = upsert_work_memory_view(
-                                    conn,
-                                    &candidate,
-                                    timeline_id,
-                                    &context,
-                                    &view,
-                                )?;
-                                summary.source_created_count += usize::from(created);
-                                summary.source_updated_count += usize::from(!created);
-                                summary.snapshot_created_count += usize::from(snapshot_created);
-                            }
-                            candidate_created = true;
-                        }
-                    }
-                }
-
-                if !candidate_created {
-                    summary.skipped_count += 1;
-                }
-            }
-            save_data_extraction_cursor(conn, newest_capture_id, backfill_before_capture_id)?;
-            Ok(summary)
-        })
+        // 数据物化属于后台维护任务，不能占用 StorageManager 唯一的交互连接。
+        // 独立 WAL 连接允许采集/记忆列表继续读取；busy_timeout 只处理短写竞争，
+        // 不会把交互 API 排在一个超慢维护查询后面。
+        let conn = Connection::open(&db_path)?;
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA foreign_keys = ON;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA temp_store = MEMORY;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA mmap_size = 268435456;",
+        )?;
+        extract_data_candidates_with_conn(&conn, limit)
     }
 
     pub fn regenerate_historical_data_memories(
@@ -968,6 +872,7 @@ fn regenerate_legacy_data_memories(
          LEFT JOIN latest_snapshot snapshot
            ON snapshot.source_id = source.id AND snapshot.snapshot_rank = 1
          WHERE source.deleted_at IS NULL
+           AND source.canonical_key NOT LIKE 'memory:timeline-dataset:%'
            AND (
                COALESCE(json_extract(snapshot.structured_data, '$.extraction_version'), '') <> ?1
                OR (
@@ -1083,25 +988,21 @@ fn regenerate_legacy_data_memories_inner(
         let semantic_context = semantic_context_for_source(&source, None, previous_subject);
         if source.source_kind == "work_memory" {
             let linked_model_views = linked_current_model_fact_views(conn, &snapshot)?;
-            let (views, has_current_contract) = if let Some(model_views) = linked_model_views {
-                (
-                    model_views
-                        .into_iter()
-                        .filter(|view| semantic_view_matches_legacy_snapshot(&snapshot, view))
-                        .collect(),
-                    true,
-                )
-            } else {
-                (
-                    semantic_views_for_content(
-                        &snapshot.content_text,
-                        &snapshot.structured_data,
-                        snapshot.observed_at,
-                        &semantic_context,
-                    ),
-                    false,
-                )
-            };
+            // 当前契约的 Timeline Facts 统一由 Timeline DataSet 管道物化。
+            // 历史再生不得再按单事实 identity 创建 memory:semantic source，
+            // 否则会在聚合完成后重新制造一事实一数据项。
+            if linked_model_views.is_some() {
+                continue;
+            }
+            let (views, has_current_contract) = (
+                semantic_views_for_content(
+                    &snapshot.content_text,
+                    &snapshot.structured_data,
+                    snapshot.observed_at,
+                    &semantic_context,
+                ),
+                false,
+            );
             let views = if views.iter().any(|view| {
                 view.statements.iter().any(|statement| {
                     statement.get("fact_contract").and_then(Value::as_str)
@@ -1756,90 +1657,255 @@ fn map_data_snapshot_row(row: &Row<'_>) -> rusqlite::Result<DataSnapshotRecord> 
     })
 }
 
-fn load_capture_candidates(
+fn extract_data_candidates_with_conn(
     conn: &Connection,
     limit: usize,
-) -> Result<(Vec<CaptureCandidate>, i64, Option<i64>), StorageError> {
-    let global_max_id = conn.query_row("SELECT COALESCE(MAX(id), 0) FROM captures", [], |row| {
-        row.get::<_, i64>(0)
-    })?;
-    let cursor = conn
-        .query_row(
-            "SELECT newest_capture_id, backfill_before_capture_id
-             FROM data_extraction_state WHERE singleton_id = 1",
-            [],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
-        )
-        .optional()?;
-
-    if cursor.is_none() {
-        let candidates = query_capture_candidates(conn, "c.id >= ?1", 0, limit, "DESC")?;
-        let backfill_before = if candidates.len() < limit {
-            None
-        } else {
-            candidates.iter().map(|item| item.id).min()
-        };
-        return Ok((candidates, global_max_id, backfill_before));
-    }
-
-    let (current_newest, current_backfill_before) = cursor.unwrap_or_default();
-    let new_budget = ((limit * 3) / 4).max(1);
-    let mut candidates =
-        query_capture_candidates(conn, "c.id > ?1", current_newest, new_budget, "ASC")?;
-    let next_newest = if candidates.len() < new_budget {
-        global_max_id
-    } else {
-        candidates
-            .iter()
-            .map(|item| item.id)
-            .max()
-            .unwrap_or(current_newest)
+) -> Result<DataExtractionSummary, StorageError> {
+    let limit = limit.clamp(1, 5000);
+    let regeneration = regenerate_legacy_data_memories(conn, limit)?;
+    let timelines = load_timeline_candidates(conn, limit)?;
+    let mut summary = DataExtractionSummary {
+        scanned_count: timelines.len(),
+        historical_regenerated_count: regeneration.regenerated_count,
+        historical_merged_count: regeneration.merged_count,
+        historical_rejected_count: regeneration.rejected_count,
+        ..DataExtractionSummary::default()
     };
+    for timeline in timelines {
+        let timeline_id = timeline.timeline_id;
+        let mut timeline_created = false;
+        for candidate in &timeline.captures {
+            let active_url = candidate
+                .url
+                .as_deref()
+                .and_then(canonical_data_url)
+                .filter(|url| {
+                    looks_like_data_url(url, candidate_title(candidate), &candidate.text)
+                });
+            if let Some(url) = active_url {
+                let created = upsert_report_source(conn, candidate, &url, "active_url")?;
+                summary.source_created_count += usize::from(created);
+                summary.source_updated_count += usize::from(!created);
+                timeline_created = true;
+            }
 
-    let remaining = limit.saturating_sub(candidates.len());
-    let mut next_backfill_before = current_backfill_before;
-    if remaining > 0 {
-        if let Some(before_id) = current_backfill_before.filter(|value| *value > 0) {
-            let mut backfill =
-                query_capture_candidates(conn, "c.id < ?1", before_id, remaining, "DESC")?;
-            next_backfill_before = if backfill.len() < remaining {
-                None
-            } else {
-                backfill.iter().map(|item| item.id).min()
-            };
-            candidates.append(&mut backfill);
+            for embedded in extract_http_urls(&candidate.text).into_iter().take(12) {
+                let Some(url) = canonical_data_url(&embedded) else {
+                    continue;
+                };
+                if candidate
+                    .url
+                    .as_deref()
+                    .and_then(canonical_data_url)
+                    .as_deref()
+                    == Some(url.as_str())
+                    || !looks_like_data_url(&url, candidate_title(candidate), &candidate.text)
+                {
+                    continue;
+                }
+                let created = upsert_report_source(conn, candidate, &url, "embedded_url")?;
+                summary.source_created_count += usize::from(created);
+                summary.source_updated_count += usize::from(!created);
+                timeline_created = true;
+            }
         }
+
+        if let Some(candidate) = timeline.captures.first() {
+            let context = load_timeline_data_context(conn, candidate, timeline_id)?;
+            let mut semantic_context = [
+                candidate.timeline_summary.as_deref(),
+                candidate.timeline_overview.as_deref(),
+                candidate.timeline_details.as_deref(),
+                candidate.webpage_title.as_deref(),
+                candidate.win_title.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n");
+            if let Some(timeline_topic) = candidate
+                .timeline_overview
+                .as_deref()
+                .or(candidate.timeline_summary.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                semantic_context.push_str(&format!("\ntimeline_topic:{timeline_topic}"));
+            }
+            if let Some(window_title) = candidate
+                .webpage_title
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    candidate
+                        .win_title
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                })
+            {
+                semantic_context.push_str(&format!("\nwindow_title:{window_title}"));
+            }
+            if let Some(app_name) = candidate.app_name.as_deref() {
+                semantic_context.push_str(&format!("\napplication:{app_name}"));
+            }
+            let views = semantic_views_for_timeline_context(&context, &semantic_context);
+            let context_title = timeline_dataset_title(candidate);
+            let datasets = aggregate_timeline_data_views(views, &context_title);
+            let mut dataset_source_ids = Vec::new();
+            for (part_index, view) in datasets.iter().enumerate() {
+                let (source_id, created, snapshot_created) = upsert_work_memory_view(
+                    conn,
+                    candidate,
+                    timeline_id,
+                    part_index,
+                    &context,
+                    view,
+                )?;
+                dataset_source_ids.push(source_id);
+                summary.source_created_count += usize::from(created);
+                summary.source_updated_count += usize::from(!created);
+                summary.snapshot_created_count += usize::from(snapshot_created);
+                timeline_created = true;
+            }
+            if !dataset_source_ids.is_empty() {
+                cleanup_legacy_timeline_data_sources(conn, timeline_id, &dataset_source_ids)?;
+            }
+        }
+
+        if !timeline_created {
+            summary.skipped_count += 1;
+        }
+        save_timeline_materialization_state(conn, &timeline)?;
     }
-    Ok((candidates, next_newest, next_backfill_before))
+    cleanup_fully_covered_legacy_data_sources(conn)?;
+    Ok(summary)
 }
 
-fn query_capture_candidates(
+fn load_timeline_candidates(
     conn: &Connection,
-    cursor_predicate: &str,
-    cursor_value: i64,
     limit: usize,
-    direction: &str,
+) -> Result<Vec<TimelineCandidate>, StorageError> {
+    let mut stmt = conn.prepare(
+        "WITH capture_stats AS (
+             SELECT timeline_id,
+                    COUNT(*) AS capture_count,
+                    MAX(id) AS max_capture_id
+             FROM captures
+             WHERE timeline_id IS NOT NULL AND is_sensitive = 0
+             GROUP BY timeline_id
+         ), legacy_capture AS (
+             SELECT t.id AS timeline_id,
+                    CASE WHEN c.id IS NULL THEN 0 ELSE 1 END AS capture_count,
+                    COALESCE(c.id, 0) AS max_capture_id
+             FROM timelines t
+             LEFT JOIN captures c
+               ON c.id = t.capture_id
+              AND c.is_sensitive = 0
+              AND NOT EXISTS (
+                  SELECT 1 FROM captures linked WHERE linked.timeline_id = t.id
+              )
+         )
+         SELECT t.id,
+                COALESCE(t.updated_at_ms, t.created_at_ms, 0) AS timeline_updated_at_ms,
+                COALESCE(fact_run.updated_at, 0) AS fact_updated_at_ms,
+                COALESCE(fact_run.accepted_count, 0) AS fact_accepted_count,
+                COALESCE(fact_run.contract_version, '') AS fact_contract_version,
+                COALESCE(capture_stats.capture_count, legacy_capture.capture_count, 0) AS capture_count,
+                COALESCE(capture_stats.max_capture_id, legacy_capture.max_capture_id, 0) AS max_capture_id
+         FROM timelines t
+         LEFT JOIN capture_stats ON capture_stats.timeline_id = t.id
+         LEFT JOIN legacy_capture ON legacy_capture.timeline_id = t.id
+         LEFT JOIN timeline_data_fact_runs fact_run ON fact_run.timeline_id = t.id
+         LEFT JOIN data_timeline_materialization_state state ON state.timeline_id = t.id
+         WHERE COALESCE(capture_stats.capture_count, legacy_capture.capture_count, 0) > 0
+           AND (
+               state.timeline_id IS NULL
+               OR state.timeline_updated_at_ms <> COALESCE(t.updated_at_ms, t.created_at_ms, 0)
+               OR state.fact_updated_at_ms <> COALESCE(fact_run.updated_at, 0)
+               OR state.fact_accepted_count <> COALESCE(fact_run.accepted_count, 0)
+               OR state.fact_contract_version <> COALESCE(fact_run.contract_version, '')
+               OR state.capture_count <> COALESCE(capture_stats.capture_count, legacy_capture.capture_count, 0)
+               OR state.max_capture_id <> COALESCE(capture_stats.max_capture_id, legacy_capture.max_capture_id, 0)
+           )
+         ORDER BY MAX(
+                    COALESCE(t.updated_at_ms, t.created_at_ms, 0),
+                    COALESCE(fact_run.updated_at, 0)
+                  ) DESC,
+                  t.id DESC
+         LIMIT ?1",
+    )?;
+    let timeline_rows = stmt
+        .query_map([limit as i64], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    let mut candidates = Vec::with_capacity(timeline_rows.len());
+    for (
+        timeline_id,
+        timeline_updated_at_ms,
+        fact_updated_at_ms,
+        fact_accepted_count,
+        fact_contract_version,
+        capture_count,
+        max_capture_id,
+    ) in timeline_rows
+    {
+        let captures = load_timeline_captures(conn, timeline_id)?;
+        if !captures.is_empty() {
+            candidates.push(TimelineCandidate {
+                timeline_id,
+                timeline_updated_at_ms,
+                fact_updated_at_ms,
+                fact_accepted_count,
+                fact_contract_version,
+                capture_count,
+                max_capture_id,
+                captures,
+            });
+        }
+    }
+    Ok(candidates)
+}
+
+fn load_timeline_captures(
+    conn: &Connection,
+    timeline_id: i64,
 ) -> Result<Vec<CaptureCandidate>, StorageError> {
-    debug_assert!(matches!(direction, "ASC" | "DESC"));
-    let sql = format!(
+    let mut stmt = conn.prepare(
         "SELECT c.id, c.ts, c.app_name, c.win_title, c.webpage_title, c.url,
                 COALESCE(c.ax_text, ''), COALESCE(c.ocr_text, ''),
                 COALESCE(c.input_text, ''), COALESCE(c.audio_text, ''),
-                c.timeline_id, t.summary, t.overview, t.details, t.updated_at_ms
-         FROM captures c
-         LEFT JOIN timelines t ON t.id = c.timeline_id
-         WHERE c.is_sensitive = 0
-           AND ({cursor_predicate})
-           AND (COALESCE(c.url, '') <> ''
-                OR c.timeline_id IS NOT NULL
-                OR COALESCE(c.ax_text, '') <> ''
-                OR COALESCE(c.ocr_text, '') <> ''
-                OR COALESCE(c.input_text, '') <> ''
-                OR COALESCE(c.audio_text, '') <> '')
-         ORDER BY c.id {direction} LIMIT ?2"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![cursor_value, limit as i64], |row| {
+                t.id, t.summary, t.overview, t.details, t.updated_at_ms
+         FROM timelines t
+         JOIN captures c ON c.timeline_id = t.id
+         WHERE t.id = ?1 AND c.is_sensitive = 0
+         UNION ALL
+         SELECT c.id, c.ts, c.app_name, c.win_title, c.webpage_title, c.url,
+                COALESCE(c.ax_text, ''), COALESCE(c.ocr_text, ''),
+                COALESCE(c.input_text, ''), COALESCE(c.audio_text, ''),
+                t.id, t.summary, t.overview, t.details, t.updated_at_ms
+         FROM timelines t
+         JOIN captures c ON c.id = t.capture_id
+         WHERE t.id = ?1
+           AND c.is_sensitive = 0
+           AND NOT EXISTS (
+               SELECT 1 FROM captures linked WHERE linked.timeline_id = t.id
+           )
+         ORDER BY 2 DESC, 1 DESC",
+    )?;
+    let rows = stmt.query_map([timeline_id], |row| {
         let text = [
             row.get::<_, String>(6)?,
             row.get::<_, String>(7)?,
@@ -1858,7 +1924,7 @@ fn query_capture_candidates(
             webpage_title: row.get(4)?,
             url: row.get(5)?,
             text,
-            timeline_id: row.get(10)?,
+            timeline_id: Some(row.get(10)?),
             timeline_summary: row.get(11)?,
             timeline_overview: row.get(12)?,
             timeline_details: row.get(13)?,
@@ -1868,22 +1934,32 @@ fn query_capture_candidates(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-fn save_data_extraction_cursor(
+fn save_timeline_materialization_state(
     conn: &Connection,
-    newest_capture_id: i64,
-    backfill_before_capture_id: Option<i64>,
+    timeline: &TimelineCandidate,
 ) -> Result<(), StorageError> {
     conn.execute(
-        "INSERT INTO data_extraction_state (
-            singleton_id, newest_capture_id, backfill_before_capture_id, updated_at
-         ) VALUES (1, ?1, ?2, ?3)
-         ON CONFLICT(singleton_id) DO UPDATE SET
-            newest_capture_id = excluded.newest_capture_id,
-            backfill_before_capture_id = excluded.backfill_before_capture_id,
-            updated_at = excluded.updated_at",
+        "INSERT INTO data_timeline_materialization_state (
+            timeline_id, timeline_updated_at_ms, fact_updated_at_ms,
+            fact_accepted_count, fact_contract_version, capture_count,
+            max_capture_id, materialized_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(timeline_id) DO UPDATE SET
+            timeline_updated_at_ms = excluded.timeline_updated_at_ms,
+            fact_updated_at_ms = excluded.fact_updated_at_ms,
+            fact_accepted_count = excluded.fact_accepted_count,
+            fact_contract_version = excluded.fact_contract_version,
+            capture_count = excluded.capture_count,
+            max_capture_id = excluded.max_capture_id,
+            materialized_at = excluded.materialized_at",
         params![
-            newest_capture_id,
-            backfill_before_capture_id,
+            timeline.timeline_id,
+            timeline.timeline_updated_at_ms,
+            timeline.fact_updated_at_ms,
+            timeline.fact_accepted_count,
+            timeline.fact_contract_version,
+            timeline.capture_count,
+            timeline.max_capture_id,
             current_ts_ms()
         ],
     )?;
@@ -1948,9 +2024,10 @@ fn upsert_work_memory_view(
     conn: &Connection,
     candidate: &CaptureCandidate,
     timeline_id: i64,
+    part_index: usize,
     context: &TimelineDataContext,
     view: &SemanticDataView,
-) -> Result<(bool, bool), StorageError> {
+) -> Result<(i64, bool, bool), StorageError> {
     let scope = semantic_source_scope(
         candidate
             .webpage_title
@@ -1961,8 +2038,8 @@ fn upsert_work_memory_view(
         candidate.app_name.as_deref(),
         &format!("timeline:{timeline_id}"),
     );
-    let identity_hash = hash_text(&format!("{scope}|{}", view.identity));
-    let key = format!("memory:semantic:{DATA_MEMORY_VERSION}:{identity_hash}");
+    let identity_hash = hash_text(&format!("timeline:{timeline_id}:dataset:{part_index}"));
+    let key = format!("memory:timeline-dataset:{DATA_MEMORY_VERSION}:{identity_hash}");
     let existed = source_exists(conn, &key)?;
     let source_title = clip_text(&view.title, 240);
     let source_url = candidate
@@ -2101,7 +2178,7 @@ fn upsert_work_memory_view(
             now
         ],
     )?;
-    Ok((!existed, snapshot_changed))
+    Ok((source_id, !existed, snapshot_changed))
 }
 
 fn load_timeline_data_context(
@@ -2335,6 +2412,547 @@ fn semantic_views_for_timeline_context(
         // 聚焦补提炼负责恢复遗漏，零事实也不得再让 Rust 猜出另一套宽泛语义。
     }
     semantic_views_from_statements(&context.metric_statements, semantic_context)
+}
+
+fn generic_dataset_title(value: &str) -> bool {
+    let normalized = normalize_identity_text(value);
+    matches!(
+        normalized.as_str(),
+        "chatgpt"
+            | "kim"
+            | "chrome"
+            | "googlechrome"
+            | "safari"
+            | "记忆面包"
+            | "questwindow"
+            | "langbridge"
+            | "terminal"
+            | "终端"
+            | "iterm"
+            | "iterm2"
+            | "visualstudiocode"
+            | "vscode"
+    ) || normalized.ends_with("window")
+}
+
+fn process_like_dataset_title(value: &str) -> bool {
+    let value = value.trim();
+    value.chars().count() > 70
+        || [
+            "用户执行",
+            "用户完成",
+            "用户参与",
+            "用户查看",
+            "用户鲜嘉麒",
+            "随后",
+            "首先",
+            "尝试",
+            "准备使用",
+        ]
+        .iter()
+        .any(|marker| value.contains(marker))
+}
+
+fn timeline_dataset_title(candidate: &CaptureCandidate) -> String {
+    let context_title = candidate
+        .timeline_overview
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            candidate
+                .timeline_summary
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        });
+    let window_title = candidate
+        .webpage_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| candidate.win_title.as_deref().map(str::trim).filter(|value| !value.is_empty()));
+    let raw = window_title
+        .filter(|value| !generic_dataset_title(value))
+        .or(context_title.filter(|value| !process_like_dataset_title(value)))
+        .or(window_title.filter(|value| !generic_dataset_title(value)))
+        .unwrap_or("工作数据");
+    clip_text(raw, 120)
+}
+
+fn meaningful_dataset_context_title(value: &str) -> bool {
+    let value = value.trim();
+    let lower = value.to_lowercase();
+    !value.is_empty()
+        && value != "工作数据"
+        && !generic_dataset_title(value)
+        && !process_like_dataset_title(value)
+        && [
+            "数据",
+            "报表",
+            "报告",
+            "盘点",
+            "统计",
+            "指标",
+            "成本",
+            "利用率",
+            "安装量",
+            "资源",
+            "效率",
+            "收入",
+            "gmv",
+            "qps",
+            "gpu",
+            "cpu",
+        ]
+        .iter()
+        .any(|marker| lower.contains(&marker.to_lowercase()))
+}
+
+fn clean_dataset_fact_title(value: &str) -> String {
+    let mut title = value.trim().to_string();
+    for suffix in ["数值", "统计值", "数据值"] {
+        if title.ends_with(suffix) && title.chars().count() > suffix.chars().count() {
+            title = title
+                .strip_suffix(suffix)
+                .unwrap_or(title.as_str())
+                .trim()
+                .to_string();
+            break;
+        }
+    }
+    title
+}
+
+fn clean_dataset_subject(value: &str) -> String {
+    let mut subject = value.trim().to_string();
+    for marker in [
+        "仅管理员可见",
+        "仅管理品可见",
+        "个人贡献",
+        "个人责献",
+        "负责人",
+    ] {
+        if let Some((prefix, _)) = subject.split_once(marker) {
+            subject = prefix.trim().to_string();
+        }
+    }
+    subject
+}
+
+fn meaningful_dataset_subject(subject: &str, rows: &[SemanticMetricRow]) -> bool {
+    let subject = clean_dataset_subject(subject);
+    !subject.is_empty()
+        && !generic_dataset_title(&subject)
+        && !rows.iter().any(|row| {
+            normalize_identity_text(&subject) == normalize_identity_text(&row.value)
+                || normalize_identity_text(&subject) == normalize_identity_text(&row.metric)
+        })
+}
+
+fn dataset_semantic_title(
+    context_title: &str,
+    view_titles: &[String],
+    subjects: &[String],
+    metrics: &[String],
+) -> String {
+    if meaningful_dataset_context_title(context_title) {
+        return clip_text(context_title, 120);
+    }
+    let mut titles = view_titles
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty() && !generic_dataset_title(value))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    titles.sort();
+    titles.dedup();
+    if titles.len() == 1 {
+        return clip_text(&titles[0], 120);
+    }
+    if titles.len() == 2 {
+        return clip_text(&format!("{}与{}", titles[0], titles[1]), 120);
+    }
+    let clean_subjects = subjects
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty() && !generic_dataset_title(value))
+        .collect::<Vec<_>>();
+    if clean_subjects.len() == 1 {
+        let metric_text = metrics
+            .iter()
+            .take(3)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("、");
+        if !metric_text.is_empty() {
+            return clip_text(&format!("{}的{}", clean_subjects[0], metric_text), 120);
+        }
+    }
+    if !titles.is_empty() {
+        let title_text = titles.iter().take(2).cloned().collect::<Vec<_>>().join("、");
+        return clip_text(&format!("{title_text}等{}项数据", titles.len()), 120);
+    }
+    if !metrics.is_empty() {
+        return clip_text(
+            &format!(
+                "{}等{}项指标数据",
+                metrics.iter().take(2).cloned().collect::<Vec<_>>().join("、"),
+                metrics.len()
+            ),
+            120,
+        );
+    }
+    "工作数据概况".to_string()
+}
+
+fn dataset_semantic_summary(
+    title: &str,
+    rows: &[SemanticMetricRow],
+    subjects: &[String],
+    metrics: &[String],
+) -> String {
+    let subject_text = subjects
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty() && !generic_dataset_title(value))
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("、");
+    let metric_text = metrics
+        .iter()
+        .take(5)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("、");
+    let key_values = rows
+        .iter()
+        .take(3)
+        .map(|row| {
+            let object = row.dimension.trim();
+            if object.is_empty()
+                || normalize_identity_text(object) == normalize_identity_text(&row.metric)
+            {
+                format!("{}为{}", row.metric.trim(), row.value.trim())
+            } else {
+                format!("{}的{}为{}", object, row.metric.trim(), row.value.trim())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("；");
+    let mut summary = format!("这批数据汇总“{title}”");
+    if !subject_text.is_empty() {
+        summary.push_str(&format!("，涉及{subject_text}"));
+    }
+    if !metric_text.is_empty() {
+        if metrics.len() <= 5 {
+            summary.push_str(&format!("，包含{metric_text}，共{}行指标", rows.len()));
+        } else {
+            summary.push_str(&format!(
+                "，包含{metric_text}等{}类指标，共{}行",
+                metrics.len(),
+                rows.len()
+            ));
+        }
+    } else {
+        summary.push_str(&format!("，共{}行指标", rows.len()));
+    }
+    if !key_values.is_empty() {
+        summary.push_str(&format!("。关键数据包括：{key_values}"));
+    }
+    summary.push('。');
+    clip_text(&summary, 500)
+}
+
+fn aggregate_timeline_data_views(
+    views: Vec<SemanticDataView>,
+    dataset_title: &str,
+) -> Vec<SemanticDataView> {
+    let mut rows = Vec::new();
+    let mut statements = Vec::new();
+    let mut subjects = Vec::new();
+    let mut view_titles = Vec::new();
+    let mut latest_observed_at = None;
+    for view in views {
+        let view_title = clean_dataset_fact_title(&view.title);
+        if !view_title.is_empty()
+            && !view_titles.iter().any(|existing: &String| existing == &view_title)
+        {
+            view_titles.push(view_title);
+        }
+        let subject = clean_dataset_subject(&view.subject);
+        let subject_is_meaningful = meaningful_dataset_subject(&subject, &view.rows);
+        let view_subject = if subject_is_meaningful {
+            subject.clone()
+        } else {
+            String::new()
+        };
+        let enriched_rows = view
+            .rows
+            .into_iter()
+            .map(|mut row| {
+                if !view_subject.is_empty()
+                    && !normalize_identity_text(&row.dimension)
+                        .contains(&normalize_identity_text(&view_subject))
+                {
+                    row.dimension = if row.dimension.trim().is_empty() {
+                        view_subject.clone()
+                    } else {
+                        format!("{} · {}", view_subject, row.dimension.trim())
+                    };
+                }
+                row
+            })
+            .collect::<Vec<_>>();
+        if subject_is_meaningful
+            && !subjects.iter().any(|existing: &String| existing == &subject)
+        {
+            subjects.push(subject);
+        }
+        merge_semantic_rows(&mut rows, enriched_rows);
+        for statement in view.statements {
+            if !statements.iter().any(|existing| existing == &statement) {
+                statements.push(statement);
+            }
+        }
+        latest_observed_at = latest_observed_at.max(view.latest_observed_at);
+    }
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    rows.sort_by(|left, right| {
+        normalize_identity_text(&left.dimension)
+            .cmp(&normalize_identity_text(&right.dimension))
+            .then_with(|| {
+                normalize_identity_text(&left.metric)
+                    .cmp(&normalize_identity_text(&right.metric))
+            })
+    });
+    rows.truncate(TIMELINE_DATASET_MAX_ROWS * TIMELINE_DATASET_MAX_PARTS);
+    let mut metrics = rows
+        .iter()
+        .map(|row| row.metric.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    metrics.sort();
+    metrics.dedup();
+    let semantic_title = dataset_semantic_title(dataset_title, &view_titles, &subjects, &metrics);
+    let part_count = ((rows.len() + TIMELINE_DATASET_MAX_ROWS - 1)
+        / TIMELINE_DATASET_MAX_ROWS)
+        .min(TIMELINE_DATASET_MAX_PARTS);
+    let mut datasets = Vec::with_capacity(part_count);
+    for part_index in 0..part_count {
+        let start = part_index * TIMELINE_DATASET_MAX_ROWS;
+        let end = if part_index + 1 == part_count {
+            rows.len()
+        } else {
+            ((part_index + 1) * TIMELINE_DATASET_MAX_ROWS).min(rows.len())
+        };
+        let part_rows = rows[start..end].to_vec();
+        let title = if part_count == 1 {
+            semantic_title.clone()
+        } else {
+            format!("{semantic_title} · 第 {} 组", part_index + 1)
+        };
+        let subject = if subjects.len() == 1 {
+            subjects[0].clone()
+        } else {
+            dataset_title.to_string()
+        };
+        datasets.push(SemanticDataView {
+            identity: format!("timeline-dataset:part-{part_index}"),
+            summary: dataset_semantic_summary(&title, &part_rows, &subjects, &metrics),
+            title,
+            subject,
+            rows: part_rows,
+            statements: statements.clone(),
+            latest_observed_at,
+        });
+    }
+    datasets
+}
+
+fn cleanup_legacy_timeline_data_sources(
+    conn: &Connection,
+    timeline_id: i64,
+    dataset_source_ids: &[i64],
+) -> Result<(), StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT source.id,
+                EXISTS(
+                    SELECT 1 FROM memory_favorites favorite
+                    WHERE favorite.resource_kind = 'data'
+                      AND favorite.resource_id = source.id
+                ) AS is_favorite
+         FROM data_sources source
+         JOIN data_source_links link ON link.source_id = source.id
+         WHERE link.timeline_id = ?1
+           AND link.link_kind = 'work_memory'
+           AND source.source_kind = 'work_memory'
+           AND source.deleted_at IS NULL
+           AND source.canonical_key LIKE 'memory:semantic:%'
+           AND NOT EXISTS (
+               SELECT 1 FROM data_source_links other
+               WHERE other.source_id = source.id
+                 AND other.timeline_id IS NOT NULL
+                 AND other.timeline_id <> ?1
+           )",
+    )?;
+    let legacy = stmt
+        .query_map([timeline_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    let now = current_ts_ms();
+    for (source_id, is_favorite) in legacy {
+        if dataset_source_ids.contains(&source_id)
+            || !legacy_source_rows_fully_covered(conn, source_id)?
+        {
+            continue;
+        }
+        if is_favorite {
+            for dataset_source_id in dataset_source_ids {
+                conn.execute(
+                    "INSERT OR IGNORE INTO memory_favorites (
+                        resource_kind, resource_id, created_at, updated_at
+                     ) VALUES ('data', ?1, ?2, ?2)",
+                    params![dataset_source_id, now],
+                )?;
+            }
+            conn.execute(
+                "DELETE FROM memory_favorites
+                 WHERE resource_kind = 'data' AND resource_id = ?1",
+                [source_id],
+            )?;
+        }
+        conn.execute(
+            "UPDATE data_sources
+             SET status = 'disabled', deleted_at = ?2, updated_at = ?2
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![source_id, now],
+        )?;
+    }
+    Ok(())
+}
+
+fn legacy_source_rows_fully_covered(
+    conn: &Connection,
+    source_id: i64,
+) -> Result<bool, StorageError> {
+    let (row_count, unmatched_count): (i64, i64) = conn.query_row(
+        "WITH old_rows AS (
+             SELECT DISTINCT
+                    LOWER(TRIM(json_extract(metric_row.value, '$.metric'))) AS metric,
+                    LOWER(TRIM(json_extract(metric_row.value, '$.value'))) AS value
+             FROM data_snapshots snapshot,
+                  json_each(snapshot.structured_data, '$.metric_rows') metric_row
+             WHERE snapshot.source_id = ?1
+               AND snapshot.id = (
+                   SELECT latest.id FROM data_snapshots latest
+                   WHERE latest.source_id = ?1
+                   ORDER BY latest.collected_at DESC, latest.id DESC LIMIT 1
+               )
+               AND TRIM(COALESCE(json_extract(metric_row.value, '$.metric'), '')) <> ''
+               AND TRIM(COALESCE(json_extract(metric_row.value, '$.value'), '')) <> ''
+         )
+         SELECT COUNT(*),
+                SUM(CASE WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM data_source_links legacy_link
+                    JOIN data_source_links dataset_link
+                      ON dataset_link.timeline_id = legacy_link.timeline_id
+                     AND dataset_link.link_kind = 'work_memory'
+                    JOIN data_sources dataset ON dataset.id = dataset_link.source_id
+                    JOIN data_snapshots dataset_snapshot ON dataset_snapshot.source_id = dataset.id
+                    JOIN json_each(dataset_snapshot.structured_data, '$.metric_rows') dataset_row
+                    WHERE legacy_link.source_id = ?1
+                      AND dataset.deleted_at IS NULL
+                      AND dataset.canonical_key LIKE 'memory:timeline-dataset:data-memory.v16:%'
+                      AND LOWER(TRIM(json_extract(dataset_row.value, '$.metric'))) = old_rows.metric
+                      AND LOWER(TRIM(json_extract(dataset_row.value, '$.value'))) = old_rows.value
+                ) THEN 1 ELSE 0 END)
+         FROM old_rows",
+        [source_id],
+        |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+    )?;
+    Ok(row_count > 0 && unmatched_count == 0)
+}
+
+fn cleanup_fully_covered_legacy_data_sources(conn: &Connection) -> Result<(), StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT source.id,
+                EXISTS(
+                    SELECT 1 FROM memory_favorites favorite
+                    WHERE favorite.resource_kind = 'data'
+                      AND favorite.resource_id = source.id
+                ) AS is_favorite
+         FROM data_sources source
+         WHERE source.source_kind = 'work_memory'
+           AND source.deleted_at IS NULL
+           AND source.canonical_key LIKE 'memory:semantic:%'
+           AND EXISTS (
+               SELECT 1 FROM data_source_links link
+               WHERE link.source_id = source.id AND link.timeline_id IS NOT NULL
+           )
+           AND NOT EXISTS (
+               SELECT 1
+               FROM data_source_links legacy_link
+               WHERE legacy_link.source_id = source.id
+                 AND legacy_link.timeline_id IS NOT NULL
+                 AND NOT EXISTS (
+                     SELECT 1
+                     FROM data_source_links dataset_link
+                     JOIN data_sources dataset ON dataset.id = dataset_link.source_id
+                     WHERE dataset_link.timeline_id = legacy_link.timeline_id
+                       AND dataset_link.link_kind = 'work_memory'
+                       AND dataset.deleted_at IS NULL
+                       AND dataset.canonical_key LIKE 'memory:timeline-dataset:data-memory.v16:%'
+                 )
+           )",
+    )?;
+    let covered = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    let now = current_ts_ms();
+    for (source_id, is_favorite) in covered {
+        if !legacy_source_rows_fully_covered(conn, source_id)? {
+            continue;
+        }
+        if is_favorite {
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_favorites (
+                    resource_kind, resource_id, created_at, updated_at
+                 )
+                 SELECT 'data', dataset.id, ?2, ?2
+                 FROM data_source_links legacy_link
+                 JOIN data_source_links dataset_link
+                   ON dataset_link.timeline_id = legacy_link.timeline_id
+                  AND dataset_link.link_kind = 'work_memory'
+                 JOIN data_sources dataset ON dataset.id = dataset_link.source_id
+                 WHERE legacy_link.source_id = ?1
+                   AND dataset.deleted_at IS NULL
+                   AND dataset.canonical_key LIKE 'memory:timeline-dataset:data-memory.v16:%'",
+                params![source_id, now],
+            )?;
+            conn.execute(
+                "DELETE FROM memory_favorites
+                 WHERE resource_kind = 'data' AND resource_id = ?1",
+                [source_id],
+            )?;
+        }
+        conn.execute(
+            "UPDATE data_sources
+             SET status = 'disabled', deleted_at = ?2, updated_at = ?2
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![source_id, now],
+        )?;
+    }
+    Ok(())
 }
 
 fn semantic_views_from_model_facts(
@@ -6652,11 +7270,17 @@ fn latest_snapshot(
         snapshot.source_capture_ids.dedup();
         snapshot.source_timeline_ids.sort_unstable();
         snapshot.source_timeline_ids.dedup();
-        if snapshot
+        let is_timeline_dataset = snapshot
             .structured_data
-            .get("manual_entry")
-            .and_then(Value::as_bool)
-            != Some(true)
+            .get("semantic_identity")
+            .and_then(Value::as_str)
+            .is_some_and(|identity| identity.starts_with("timeline-dataset:"));
+        if !is_timeline_dataset
+            && snapshot
+                .structured_data
+                .get("manual_entry")
+                .and_then(Value::as_bool)
+                != Some(true)
         {
             let semantic_context = semantic_context_for_source(
                 source,
@@ -7505,6 +8129,230 @@ mod tests {
     }
 
     #[test]
+    fn aggregates_timeline_views_into_one_multirow_dataset() {
+        let views = vec![
+            SemanticDataView {
+                title: "A利用率".to_string(),
+                subject: "模型A".to_string(),
+                identity: "a:gpu".to_string(),
+                summary: "模型A利用率42%".to_string(),
+                rows: vec![SemanticMetricRow {
+                    dimension: "本周".to_string(),
+                    metric: "GPU利用率".to_string(),
+                    value: "42%".to_string(),
+                    note: String::new(),
+                    statement: "模型A本周GPU利用率42%".to_string(),
+                    observed_at: Some(2),
+                }],
+                statements: vec![json!({"statement":"模型A本周GPU利用率42%"})],
+                latest_observed_at: Some(2),
+            },
+            SemanticDataView {
+                title: "B利用率".to_string(),
+                subject: "模型B".to_string(),
+                identity: "b:gpu".to_string(),
+                summary: "模型B利用率51%".to_string(),
+                rows: vec![SemanticMetricRow {
+                    dimension: "本周".to_string(),
+                    metric: "GPU利用率".to_string(),
+                    value: "51%".to_string(),
+                    note: String::new(),
+                    statement: "模型B本周GPU利用率51%".to_string(),
+                    observed_at: Some(2),
+                }],
+                statements: vec![json!({"statement":"模型B本周GPU利用率51%"})],
+                latest_observed_at: Some(2),
+            },
+        ];
+
+        let datasets = aggregate_timeline_data_views(views, "算力资源盘点");
+
+        assert_eq!(datasets.len(), 1);
+        assert_eq!(datasets[0].title, "算力资源盘点");
+        assert_eq!(datasets[0].rows.len(), 2);
+        assert!(datasets[0].rows.iter().any(|row| row.dimension == "模型A · 本周"));
+        assert!(datasets[0].rows.iter().any(|row| row.dimension == "模型B · 本周"));
+    }
+
+    #[test]
+    fn derives_dataset_name_and_summary_from_fact_semantics_for_generic_window() {
+        let views = vec![
+            SemanticDataView {
+                title: "Python 版本信息".to_string(),
+                subject: "/opt/homebrew/bin/python3.9".to_string(),
+                identity: "python-version".to_string(),
+                summary: String::new(),
+                rows: vec![SemanticMetricRow {
+                    dimension: String::new(),
+                    metric: "版本号".to_string(),
+                    value: "Python 3.9.25".to_string(),
+                    note: String::new(),
+                    statement: "Python 版本为 3.9.25".to_string(),
+                    observed_at: Some(2),
+                }],
+                statements: Vec::new(),
+                latest_observed_at: Some(2),
+            },
+            SemanticDataView {
+                title: "今日活跃一级数据项数量".to_string(),
+                subject: "聚合数据集".to_string(),
+                identity: "active-datasets".to_string(),
+                summary: String::new(),
+                rows: vec![SemanticMetricRow {
+                    dimension: String::new(),
+                    metric: "今日活跃一级数据项数量".to_string(),
+                    value: "1164".to_string(),
+                    note: String::new(),
+                    statement: "今日活跃一级数据项为1164".to_string(),
+                    observed_at: Some(2),
+                }],
+                statements: Vec::new(),
+                latest_observed_at: Some(2),
+            },
+        ];
+
+        let datasets = aggregate_timeline_data_views(views, "Quest Window");
+
+        assert_eq!(datasets.len(), 1);
+        assert_eq!(datasets[0].title, "Python 版本信息与今日活跃一级数据项数量");
+        assert!(!datasets[0].title.contains("Quest Window"));
+        assert!(datasets[0].summary.starts_with("这批数据汇总"));
+        assert!(datasets[0].summary.contains("版本号"));
+        assert!(datasets[0].summary.contains("今日活跃一级数据项数量"));
+        assert!(datasets[0].summary.contains("共2行指标"));
+        assert!(datasets[0].summary.contains("Python 3.9.25"));
+    }
+
+    #[test]
+    fn uses_single_fact_title_instead_of_process_like_timeline_text() {
+        let views = vec![SemanticDataView {
+            title: "finops-gpu-resource 技能安装量".to_string(),
+            subject: "finops-gpu-resource".to_string(),
+            identity: "skill-installs".to_string(),
+            summary: String::new(),
+            rows: vec![SemanticMetricRow {
+                dimension: String::new(),
+                metric: "安装量".to_string(),
+                value: "16".to_string(),
+                note: String::new(),
+                statement: "当前安装量为16".to_string(),
+                observed_at: Some(2),
+            }],
+            statements: Vec::new(),
+            latest_observed_at: Some(2),
+        }];
+
+        let datasets = aggregate_timeline_data_views(
+            views,
+            "用户在 MyFlicker 平台执行技能安装任务，随后等待安装反馈。",
+        );
+
+        assert_eq!(datasets[0].title, "finops-gpu-resource 技能安装量");
+        assert_eq!(
+            datasets[0].summary,
+            "这批数据汇总“finops-gpu-resource 技能安装量”，涉及finops-gpu-resource，包含安装量，共1行指标。关键数据包括：finops-gpu-resource的安装量为16。"
+        );
+    }
+
+    #[test]
+    fn ignores_value_like_subject_and_plain_product_window() {
+        let single = aggregate_timeline_data_views(
+            vec![SemanticDataView {
+                title: "MyFlicker 技能安装量".to_string(),
+                subject: "23.7k".to_string(),
+                identity: "installs".to_string(),
+                summary: String::new(),
+                rows: vec![SemanticMetricRow {
+                    dimension: String::new(),
+                    metric: "安装量".to_string(),
+                    value: "23.7k".to_string(),
+                    note: String::new(),
+                    statement: "MyFlicker 技能安装量为23.7k".to_string(),
+                    observed_at: Some(2),
+                }],
+                statements: Vec::new(),
+                latest_observed_at: Some(2),
+            }],
+            "MyFlicker",
+        );
+        assert_eq!(single[0].title, "MyFlicker 技能安装量");
+        assert!(single[0].summary.contains("这批数据汇总“MyFlicker 技能安装量”"));
+        assert!(!single[0].summary.contains("涉及23.7k"));
+
+        let mixed = dataset_semantic_title(
+            "MyFlicker",
+            &[
+                "KAT-Coder-Pro-V2模型月成本".to_string(),
+                "审批流程耗时".to_string(),
+                "技能自动搜索安装量".to_string(),
+            ],
+            &[],
+            &["月成本".to_string(), "耗时".to_string(), "安装量".to_string()],
+        );
+        assert_eq!(mixed, "KAT-Coder-Pro-V2模型月成本、审批流程耗时等3项数据");
+    }
+
+    #[test]
+    fn splits_large_timeline_dataset_at_fifty_rows() {
+        let rows = (0..51)
+            .map(|index| SemanticMetricRow {
+                dimension: format!("对象{index}"),
+                metric: "利用率".to_string(),
+                value: format!("{index}%"),
+                note: String::new(),
+                statement: format!("对象{index}利用率为{index}%"),
+                observed_at: Some(index),
+            })
+            .collect::<Vec<_>>();
+        let views = vec![SemanticDataView {
+            title: "资源盘点".to_string(),
+            subject: String::new(),
+            identity: "resources".to_string(),
+            summary: String::new(),
+            rows,
+            statements: Vec::new(),
+            latest_observed_at: Some(50),
+        }];
+
+        let datasets = aggregate_timeline_data_views(views, "资源盘点");
+
+        assert_eq!(datasets.len(), 2);
+        assert_eq!(datasets[0].rows.len(), 50);
+        assert_eq!(datasets[1].rows.len(), 1);
+        assert_eq!(datasets[0].title, "资源盘点 · 第 1 组");
+        assert_eq!(datasets[1].title, "资源盘点 · 第 2 组");
+    }
+
+    #[test]
+    fn caps_timeline_dataset_at_three_fifty_row_parts() {
+        let rows = (0..151)
+            .map(|index| SemanticMetricRow {
+                dimension: format!("对象{index}"),
+                metric: "利用率".to_string(),
+                value: format!("{index}%"),
+                note: String::new(),
+                statement: format!("对象{index}利用率为{index}%"),
+                observed_at: Some(index),
+            })
+            .collect::<Vec<_>>();
+        let datasets = aggregate_timeline_data_views(
+            vec![SemanticDataView {
+                title: "资源盘点".to_string(),
+                subject: String::new(),
+                identity: "resources".to_string(),
+                summary: String::new(),
+                rows,
+                statements: Vec::new(),
+                latest_observed_at: Some(150),
+            }],
+            "资源盘点",
+        );
+
+        assert_eq!(datasets.len(), 3);
+        assert!(datasets.iter().all(|dataset| dataset.rows.len() == 50));
+    }
+
+    #[test]
     fn replaces_document_subject_with_reusable_business_scope_in_place() {
         let storage = StorageManager::open_in_memory().unwrap();
         storage
@@ -8000,18 +8848,31 @@ mod tests {
         let extraction = storage.extract_data_candidates(100).unwrap();
         let (sources, total) = storage.list_data_sources(None, 20, 0).unwrap();
 
-        assert_eq!(total, 1);
-        assert_eq!(sources.len(), 1);
-        assert_eq!(extraction.source_created_count, 1);
-        assert_eq!(extraction.source_updated_count, 1);
-        let snapshot = sources[0].latest_snapshot.as_ref().unwrap();
-        assert_eq!(snapshot.structured_data["title"], "GPU 利用率对比");
-        assert_eq!(sources[0].source_window_title.as_deref(), Some("GPU 周报"));
-        assert!(snapshot.structured_data["summary"]
-            .as_str()
-            .unwrap()
-            .contains("国内 55%"));
-        assert_eq!(snapshot.source_timeline_ids, vec![11, 12]);
+        assert_eq!(total, 2);
+        assert_eq!(sources.len(), 2);
+        assert_eq!(extraction.source_created_count, 2);
+        assert_eq!(extraction.source_updated_count, 0);
+        assert!(sources.iter().all(|source| {
+            source.source_window_title.as_deref() == Some("GPU 周报")
+                && source
+                    .latest_snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.source_timeline_ids.len() == 1)
+        }));
+        assert!(sources.iter().any(|source| {
+            source
+                .latest_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| {
+                    snapshot.structured_data["summary"]
+                        .as_str()
+                        .is_some_and(|summary| {
+                            summary.contains("国内")
+                                && summary.contains("GPU 利用率")
+                                && summary.contains("55%")
+                        })
+                })
+        }));
     }
 
     #[test]
@@ -8130,6 +8991,61 @@ mod tests {
     }
 
     #[test]
+    fn historical_regeneration_never_rewrites_timeline_datasets() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    r#"
+                    INSERT INTO data_sources (
+                        id, canonical_key, title, source_kind, access_mode, refresh_policy,
+                        realtime_level, tags, first_seen_at, last_seen_at, status,
+                        created_at, updated_at
+                    ) VALUES (
+                        91, 'memory:timeline-dataset:data-memory.v16:test',
+                        '清晰的数据集名称', 'work_memory', 'memory_only', 'never',
+                        'observed', '["work_memory"]', 1, 1, 'active', 1, 1
+                    );
+                    INSERT INTO data_snapshots (
+                        source_id, collected_at, observed_at, collector, content_text,
+                        structured_data, content_hash, freshness_ttl_seconds, provenance,
+                        source_capture_ids, source_timeline_ids, status, created_at
+                    ) VALUES (
+                        91, 1, 1, 'memory_extract', '清晰摘要',
+                        '{"extraction_version":"old","semantic_origin":"model_structured_fact","semantic_identity":"timeline-dataset:part-0","title":"清晰的数据集名称","summary":"清晰摘要","metric_rows":[{"dimension":"对象A","metric":"安装量","value":"16","note":""},{"dimension":"对象B","metric":"成本","value":"20元","note":""}]}',
+                        'stable-hash', 0, '{}', '[]', '[500]', 'success', 1
+                    );
+                    "#,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let summary = storage.regenerate_historical_data_memories(100).unwrap();
+        let (title, snapshot_summary): (String, String) = storage
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT source.title, json_extract(snapshot.structured_data, '$.summary')
+                     FROM data_sources source
+                     JOIN data_snapshots snapshot ON snapshot.source_id = source.id
+                     WHERE source.id = 91",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+
+        assert_eq!(summary.historical_regenerated_count, 0);
+        assert_eq!(title, "清晰的数据集名称");
+        assert_eq!(snapshot_summary, "清晰摘要");
+        let presented = storage.get_data_source(91).unwrap().unwrap();
+        let presented_structured = &presented.latest_snapshot.unwrap().structured_data;
+        assert_eq!(presented_structured["summary"], "清晰摘要");
+        assert_eq!(presented_structured["metric_rows"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
     fn regenerates_stale_model_content_in_place() {
         let storage = StorageManager::open_in_memory().unwrap();
         let observed_at = 1_700_000_000_000_i64;
@@ -8235,18 +9151,10 @@ mod tests {
         let source = storage.get_data_source(1).unwrap().unwrap();
         let snapshot = source.latest_snapshot.unwrap();
 
-        assert_eq!(summary.historical_regenerated_count, 1);
+        assert_eq!(summary.historical_regenerated_count, 0);
         assert_eq!(source.id, 1);
-        assert!(snapshot.content_text.contains("72.3%"));
-        assert_ne!(snapshot.content_text, shared_statement);
-        assert_eq!(
-            snapshot.structured_data["content_render_version"],
-            DATA_CONTENT_RENDER_VERSION
-        );
-        assert!(snapshot.structured_data["summary"]
-            .as_str()
-            .unwrap()
-            .contains("72.3%"));
+        assert_eq!(snapshot.content_text, shared_statement);
+        assert!(snapshot.structured_data.get("content_render_version").is_none());
 
         let second = storage.regenerate_historical_data_memories(100).unwrap();
         assert_eq!(second.historical_regenerated_count, 0);
@@ -8349,18 +9257,20 @@ mod tests {
             })
             .unwrap();
 
-        let summary = storage.regenerate_historical_data_memories(100).unwrap();
+        let summary = storage.extract_data_candidates(100).unwrap();
         let (sources, total) = storage.list_data_sources(None, 20, 0).unwrap();
+        let dataset = sources
+            .iter()
+            .find(|source| source.id > 2)
+            .unwrap();
 
-        assert_eq!(summary.historical_regenerated_count, 2);
-        assert_eq!(summary.historical_merged_count, 1);
+        assert_eq!(summary.source_created_count, 1);
         assert_eq!(total, 1);
-        assert_eq!(sources[0].id, 1);
         assert_eq!(
-            sources[0].title,
+            dataset.title,
             "MemoryBread 官网首页视觉与文案优化任务耗时"
         );
-        let structured = &sources[0].latest_snapshot.as_ref().unwrap().structured_data;
+        let structured = &dataset.latest_snapshot.as_ref().unwrap().structured_data;
         assert_eq!(structured["semantic_origin"], "model_structured_fact");
         assert_eq!(structured["metric_rows"][0]["value"], "16分31秒");
     }
@@ -8487,41 +9397,26 @@ mod tests {
             })
             .unwrap();
 
-        let summary = storage.regenerate_historical_data_memories(100).unwrap();
-        storage
-            .with_conn(|conn| {
-                for source_id in [1_i64, 2_i64] {
-                    let snapshot = raw_latest_snapshot(conn, source_id)?.unwrap();
-                    assert!(
-                        semantic_view_from_existing_v3(&snapshot.structured_data).is_some(),
-                        "source {source_id} is not self-contained: {}",
-                        snapshot.structured_data
-                    );
-                }
-                Ok(())
-            })
+        let summary = storage.extract_data_candidates(100).unwrap();
+        let (sources, _) = storage.list_data_sources(None, 20, 0).unwrap();
+        let dataset = sources
+            .iter()
+            .find(|source| source.id > 3)
             .unwrap();
-        let (mut sources, total) = storage.list_data_sources(None, 20, 0).unwrap();
-        sources.sort_by_key(|source| source.id);
+        let structured = &dataset.latest_snapshot.as_ref().unwrap().structured_data;
 
-        assert_eq!(summary.historical_regenerated_count, 2);
-        assert_eq!(summary.historical_merged_count, 0);
-        assert_eq!(total, 3);
-        assert_eq!(sources[0].id, 1);
-        assert_eq!(sources[0].title, "MemoryBread 官网首屏静音背景视频生成时长");
-        assert_eq!(sources[1].id, 2);
-        assert_eq!(sources[1].title, "MemoryBread 官网首屏静音背景视频画幅比例");
-        assert!(sources[..2].iter().all(|source| {
-            source.latest_snapshot.as_ref().is_some_and(|snapshot| {
-                snapshot.structured_data["semantic_origin"] == "model_structured_fact"
-            })
-        }));
-        assert_eq!(sources[2].id, 3);
-        assert_eq!(sources[2].title, "SUCCEED 系统接收请求后处理耗时");
+        assert_eq!(summary.source_created_count, 1);
         assert_eq!(
-            sources[2].latest_snapshot.as_ref().unwrap().structured_data["semantic_origin"],
-            "legacy_parser"
+            dataset.title,
+            "MemoryBread 官网首屏静音背景视频生成时长与MemoryBread 官网首屏静音背景视频画幅比例"
         );
+        assert_eq!(structured["metric_rows"].as_array().unwrap().len(), 2);
+        assert!(structured["metric_rows"].as_array().unwrap().iter().any(|row| {
+            row["metric"] == "生成时长" && row["value"] == "15秒"
+        }));
+        assert!(structured["metric_rows"].as_array().unwrap().iter().any(|row| {
+            row["metric"] == "画幅比例" && row["value"] == "16:9"
+        }));
     }
 
     #[test]
@@ -9268,6 +10163,57 @@ mod tests {
     }
 
     #[test]
+    fn timeline_candidate_query_uses_grouped_capture_index_and_keeps_legacy_capture() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage
+            .with_conn(|conn| {
+                for id in 1_i64..=200 {
+                    conn.execute(
+                        "INSERT INTO captures (
+                            id, ts, app_name, win_title, event_type, ax_text, timeline_id,
+                            is_sensitive, pii_scrubbed
+                         ) VALUES (?1, ?2, 'Browser', 'Dashboard', 'manual', '指标 1', ?1, 0, 0)",
+                        params![id, 1700000000000_i64 + id],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO timelines (
+                            id, capture_id, summary, entities, category, importance,
+                            created_at_ms, updated_at_ms
+                         ) VALUES (?1, ?1, '数据记录', '[]', '数据', 4, ?2, ?2)",
+                        params![id, 1700000000000_i64 + id],
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO captures (
+                        id, ts, app_name, win_title, event_type, ax_text,
+                        is_sensitive, pii_scrubbed
+                     ) VALUES (1000, 1700000001000, 'Legacy', 'Legacy window', 'manual',
+                               '旧记录指标 2', 0, 0)",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO timelines (
+                        id, capture_id, summary, entities, category, importance,
+                        created_at_ms, updated_at_ms
+                     ) VALUES (1000, 1000, '旧数据记录', '[]', '数据', 4,
+                               1700000001000, 1700000001000)",
+                    [],
+                )?;
+
+                let candidates = load_timeline_candidates(conn, 500)?;
+                assert_eq!(candidates.len(), 201);
+                let legacy = candidates
+                    .iter()
+                    .find(|candidate| candidate.timeline_id == 1000)
+                    .expect("legacy capture_id timeline must remain visible");
+                assert_eq!(legacy.captures.len(), 1);
+                assert_eq!(legacy.captures[0].id, 1000);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn extraction_is_idempotent_and_searches_snapshot_content() {
         let storage = StorageManager::open_in_memory().unwrap();
         storage
@@ -9349,22 +10295,30 @@ mod tests {
     }
 
     #[test]
-    fn extraction_cursor_backfills_history_without_starving_new_captures() {
+    fn extraction_processes_timeline_batches_without_starving_updates() {
         let storage = StorageManager::open_in_memory().unwrap();
         storage
             .with_conn(|conn| {
                 for id in 1_i64..=5 {
+                    let observed_at = 1700000000000_i64 + id;
                     conn.execute(
                         "INSERT INTO captures (
                             id, ts, app_name, win_title, event_type, url,
-                            webpage_title, is_sensitive, pii_scrubbed
+                            webpage_title, timeline_id, is_sensitive, pii_scrubbed
                          ) VALUES (?1, ?2, 'Google Chrome', '经营看板', 'manual', ?3,
-                                   '经营看板', 0, 0)",
+                                   '经营看板', ?1, 0, 0)",
                         params![
                             id,
-                            1700000000000_i64 + id,
+                            observed_at,
                             format!("https://bi.example.com/dashboard/{id}")
                         ],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO timelines (
+                            id, capture_id, summary, entities, category, importance,
+                            created_at_ms, updated_at_ms
+                         ) VALUES (?1, ?1, '经营看板数据', '[]', '数据', 4, ?2, ?2)",
+                        params![id, observed_at],
                     )?;
                 }
                 Ok(())
@@ -9391,9 +10345,17 @@ mod tests {
                 conn.execute(
                     "INSERT INTO captures (
                         id, ts, app_name, win_title, event_type, url,
-                        webpage_title, is_sensitive, pii_scrubbed
+                        webpage_title, timeline_id, is_sensitive, pii_scrubbed
                      ) VALUES (6, 1700000000006, 'Google Chrome', '经营看板', 'manual',
-                               'https://bi.example.com/dashboard/6', '经营看板', 0, 0)",
+                               'https://bi.example.com/dashboard/6', '经营看板', 6, 0, 0)",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO timelines (
+                        id, capture_id, summary, entities, category, importance,
+                        created_at_ms, updated_at_ms
+                     ) VALUES (6, 6, '经营看板数据', '[]', '数据', 4,
+                               1700000000006, 1700000000006)",
                     [],
                 )?;
                 Ok(())
@@ -9406,6 +10368,81 @@ mod tests {
         let (_, pending_total) = storage.list_pending_data_sources(None, 20).unwrap();
         assert_eq!(total, 0);
         assert_eq!(pending_total, 6);
+    }
+
+    #[test]
+    fn timeline_fact_update_requeues_materialization_without_new_capture() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO captures (
+                        id, ts, app_name, win_title, event_type, ax_text, timeline_id,
+                        is_sensitive, pii_scrubbed
+                     ) VALUES (
+                        41, 1700000000000, 'Feishu', '经营复盘', 'manual',
+                        '本周订单量 1200 单', 7, 0, 0
+                     )",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO timelines (
+                        id, capture_id, summary, entities, category, importance,
+                        created_at_ms, updated_at_ms
+                     ) VALUES (
+                        7, 41, '经营复盘', '[]', '数据', 4,
+                        1700000000000, 1700000000000
+                     )",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO timeline_data_fact_runs (
+                        timeline_id, contract_version, accepted_count, rejected_count,
+                        created_at, updated_at
+                     ) VALUES (7, 'timeline-data-fact.v3', 0, 0,
+                               1700000000000, 1700000000000)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let first = storage.extract_data_candidates(100).unwrap();
+        assert_eq!(first.snapshot_created_count, 0);
+        let idle = storage.extract_data_candidates(100).unwrap();
+        assert_eq!(idle.scanned_count, 0);
+
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO timeline_data_facts (
+                        timeline_id, fact_key, title, subject, action, target_context,
+                        dimension, metric, value, unit, statement, evidence_quote,
+                        confidence, observed_at, source_capture_ids, created_at, updated_at
+                     ) VALUES (
+                        7, 'orders', '经营复盘订单量', '经营复盘', '统计', '订单量',
+                        '本周', '订单量', '1200', '单', '本周经营复盘订单量为1200单。',
+                        '本周订单量 1200 单', 'high', 1700000000000, '[41]',
+                        1700000001000, 1700000001000
+                     )",
+                    [],
+                )?;
+                conn.execute(
+                    "UPDATE timeline_data_fact_runs
+                     SET accepted_count = 1, updated_at = 1700000001000
+                     WHERE timeline_id = 7",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let requeued = storage.extract_data_candidates(100).unwrap();
+        assert_eq!(requeued.scanned_count, 1);
+        assert_eq!(requeued.snapshot_created_count, 1);
+        let (sources, total) = storage.list_data_sources(Some("订单量"), 20, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(sources[0].source_kind, "work_memory");
     }
 
     fn seed_discovery_capture(storage: &StorageManager, id: i64, is_sensitive: i64) {

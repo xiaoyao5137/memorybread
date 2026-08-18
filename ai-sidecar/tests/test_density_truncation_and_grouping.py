@@ -13,6 +13,7 @@ import pytest
 from background_processor import BackgroundProcessor
 from knowledge.extractor_v2 import (
     MERGE_TOTAL_MAX_CHARS,
+    TIMELINE_CAPTURE_TEXT_MAX_CHARS,
     KnowledgeExtractorV2,
     _density_aware_truncate,
     _sanitize_capture_text,
@@ -127,18 +128,27 @@ class TestNoiseStripping:
 
 class TestDensityAwareTruncate:
     def test_dense_text_gets_full_quota(self):
-        long_report = REPORT_BODY * 5
-        assert len(long_report) > 2000
-        result = _density_aware_truncate(long_report, 2000)
-        assert len(result) == 2000
+        long_report = REPORT_BODY * 40
+        assert len(long_report) > TIMELINE_CAPTURE_TEXT_MAX_CHARS
+        result = _density_aware_truncate(
+            long_report,
+            TIMELINE_CAPTURE_TEXT_MAX_CHARS,
+        )
+        assert len(result) == TIMELINE_CAPTURE_TEXT_MAX_CHARS
 
     def test_noise_text_compressed(self):
         noise = (IM_SIDEBAR_NOISE + "\n" + "短\n行\n堆\n积") * 8
-        result = _density_aware_truncate(noise, 2000)
-        assert len(result) <= 1000
+        result = _density_aware_truncate(
+            noise,
+            TIMELINE_CAPTURE_TEXT_MAX_CHARS,
+        )
+        assert len(result) <= TIMELINE_CAPTURE_TEXT_MAX_CHARS // 2
 
     def test_small_text_untouched(self):
-        result = _density_aware_truncate(REPORT_BODY, 2000)
+        result = _density_aware_truncate(
+            REPORT_BODY,
+            TIMELINE_CAPTURE_TEXT_MAX_CHARS,
+        )
         assert "召回率87%" in result
 
 
@@ -199,8 +209,16 @@ class TestBuildMergedBlocks:
         merged = _build_merged(captures)
         assert "92.6%" in merged
 
+    def test_single_dense_block_uses_16k_context_derived_budget(self):
+        body = (REPORT_BODY + "补充分析与结论。") * 40
+        captures = [_make_capture(2, 1753849509000, "Kim", body)]
+        merged = _build_merged(captures)
+        assert len(body) > TIMELINE_CAPTURE_TEXT_MAX_CHARS
+        assert len(merged) > 3_000
+        assert len(merged) <= TIMELINE_CAPTURE_TEXT_MAX_CHARS + 200
+
     def test_over_budget_many_dense_blocks_keep_metrics(self):
-        """10 个密集块总长超 6000：重复块去重 + 指标窗口截断，尾部指标不丢。
+        """10 个密集块总长超 18K：重复块去重 + 指标窗口截断，尾部指标不丢。
 
         对应 timeline 2008 成员全量回填场景：旧逻辑压缩到 250 后
         仍超限，尾部硬切把汇报块整体切掉。

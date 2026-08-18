@@ -44,6 +44,7 @@
         "data_search",
         "webpage_scrape",
         "plantuml_diagram",
+        "mermaid_diagram",
         "github_search"
       ]
     },
@@ -165,6 +166,7 @@
               "data_search",
               "data_analysis_agent",
               "plantuml_diagram",
+              "mermaid_diagram",
               "skill:voice_style",
               "skill:structure",
               "skill:table_style",
@@ -263,6 +265,7 @@
                       "data_search",
                       "data_analysis_agent",
                       "plantuml_diagram",
+                      "mermaid_diagram",
                       "document_writer_agent",
                       "detail_polish_agent",
                       "table_polish_agent",

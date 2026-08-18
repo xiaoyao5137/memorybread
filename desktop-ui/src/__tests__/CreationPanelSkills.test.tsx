@@ -110,7 +110,7 @@ describe('技能安装与使用', () => {
     expect(generationPayload.user_prompt).toContain('execution_steps 是唯一的执行流程和一级章节白名单')
   })
 
-  it('可取消自动匹配的技能，且生成请求不再注入该技能', async () => {
+  it('输入内容不再自动推荐技能，未 @ 时生成请求不注入技能', async () => {
     let generationPayload: any = null
     const installedSkill = { ...rawSkill, installed: true }
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -139,13 +139,9 @@ describe('技能安装与使用', () => {
     render(<CreationPanel />)
 
     const textarea = await screen.findByPlaceholderText(/输入 @ 可选择已安装的技能/)
+    // 输入内容与技能标题高度重合，但没有显式 @，不应出现任何自动推荐。
     fireEvent.change(textarea, { target: { value: '请生成跨部门技术沟通会文档' } })
 
-    const matched = screen.getByLabelText('本次使用的技能')
-    expect(within(matched).getByText('自动匹配')).toBeInTheDocument()
-    expect(within(matched).getByRole('button', { name: `查看技能：${rawSkill.title}` })).toBeInTheDocument()
-
-    fireEvent.click(within(matched).getByRole('button', { name: `取消自动匹配：${rawSkill.title}` }))
     expect(screen.queryByLabelText('本次使用的技能')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '开始创作' }))

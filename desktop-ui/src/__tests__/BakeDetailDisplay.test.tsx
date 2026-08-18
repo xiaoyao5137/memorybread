@@ -250,13 +250,15 @@ describe('Bake 详情展示优化', () => {
     expect(within(table).queryByRole('columnheader', { name: '状态' })).not.toBeInTheDocument()
     expect(within(table).getByText('周报')).toBeInTheDocument()
     expect(within(table).getByText('项目方案')).toBeInTheDocument()
-    // 关键词独占首行；清空、搜索和新建统一位于筛选区底部右侧，新建按钮保持 type="button"。
+    // 关键词独占首行；筛选内容与按钮区由整行分隔线隔开，清空、搜索和新建统一位于底部右侧。
     const clearButton = screen.getByRole('button', { name: '清空' })
     const searchButton = screen.getByRole('button', { name: '搜索' })
     const createDocumentButton = screen.getByRole('button', { name: '新建' }) as HTMLButtonElement
     const primaryActions = createDocumentButton.closest('.bake-list-toolbar__repository-primary-actions')
+    const separatedActionRow = primaryActions?.closest('.bake-list-toolbar__repository-actions--secondary')
     expect(createDocumentButton.type).toBe('button')
     expect(primaryActions).not.toBeNull()
+    expect(separatedActionRow).not.toBeNull()
     expect(primaryActions).toContainElement(clearButton)
     expect(primaryActions).toContainElement(searchButton)
     expect(screen.getByText('关键词').closest('.bake-list-toolbar__repository-row--search')).not.toContainElement(searchButton)
@@ -419,7 +421,6 @@ describe('Bake 详情展示优化', () => {
         onSearch={noop}
         onClearFilters={noop}
         onDeleteKnowledge={noop}
-        onOpenCapture={noop}
         onViewSourceTimeline={noop}
       />,
     )
@@ -458,7 +459,6 @@ describe('Bake 详情展示优化', () => {
         onSearch={noop}
         onClearFilters={noop}
         onDeleteKnowledge={noop}
-        onOpenCapture={noop}
         onViewSourceTimeline={noop}
         onCreateKnowledge={noop}
         onUpdateKnowledge={onUpdateKnowledge}
@@ -551,7 +551,6 @@ describe('Bake 详情展示优化', () => {
         onSearch={noop}
         onClearFilters={noop}
         onDeleteKnowledge={noop}
-        onOpenCapture={noop}
         onViewSourceTimeline={noop}
         favoriteFilter="all"
         onFavoriteFilterChange={onFavoriteFilterChange}

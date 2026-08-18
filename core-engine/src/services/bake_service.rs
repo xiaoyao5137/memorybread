@@ -18,7 +18,7 @@ use crate::storage::repo::favorite::{
 };
 use crate::storage::{
     now_ms, BakeActionTraceRecord, BakeActivityRecord, BakeDocumentRecord, BakeKnowledgeRecord,
-    BakeMemorySourceRecord, BakeOverviewRecord, BakeRunRecord, BakeSopRecord,
+    BakeMemorySourceRecord, BakeOverviewRecord, BakeRunRecord, BakeSopRecord, NewBakeArtifactAudit,
     NewBakeCandidateAudit, NewBakeDocument, NewBakeKnowledge, NewBakeRun, NewBakeSop, NewTimeline,
     StorageError, StorageManager, TimelineRecord,
 };
@@ -142,6 +142,7 @@ pub struct BakeKnowledgePayload {
     pub id: String,
     pub is_favorite: bool,
     pub capture_id: String,
+    pub source_capture_ids: Vec<String>,
     pub source_timeline_id: String,
     pub source_url: Option<String>,
     pub summary: String,
@@ -1924,6 +1925,28 @@ impl BakeService {
                             existing_doc.id,
                             candidate.capture_url,
                         );
+                    } else {
+                        // refresh 无变化却仍被 queue-status 计入 metadata_refresh 时，
+                        // 说明两边口径漂移；打出缺失 capture 差集供定位。
+                        let expected = collect_source_capture_id_strings(&self.storage, &candidate)
+                            .unwrap_or_default();
+                        let covered: std::collections::HashSet<String> =
+                            parse_json_vec_string(&existing_doc.source_capture_ids)
+                                .into_iter()
+                                .collect();
+                        let missing: Vec<String> = expected
+                            .iter()
+                            .filter(|id| !covered.contains(id.as_str()))
+                            .cloned()
+                            .collect();
+                        if !missing.is_empty() {
+                            tracing::warn!(
+                                "bake document source metadata refresh no-op but captures uncovered: timeline_id={} doc_id={} missing_capture_ids={:?}",
+                                candidate.timeline.id,
+                                existing_doc.id,
+                                missing,
+                            );
+                        }
                     }
                 }
                 if candidate_ts <= max_processed_ts {
@@ -2196,6 +2219,7 @@ impl BakeService {
             } else {
                 None
             };
+            self.record_artifact_extraction_audits(run_id, &candidate, &extracted)?;
             self.storage.update_bake_candidate_audit_model(
                 run_id,
                 candidate.timeline.id,
@@ -2207,6 +2231,7 @@ impl BakeService {
             )?;
             let candidate_result = match self
                 .persist_extracted_candidate(
+                    Some(run_id),
                     None,
                     &candidate,
                     trigger_reason,
@@ -2431,8 +2456,190 @@ impl BakeService {
         }
     }
 
+    fn document_already_persisted(
+        &self,
+        candidate: &BakeMemorySourceRecord,
+    ) -> Result<bool, ApiError> {
+        if self
+            .storage
+            .find_bake_artifact_by_source_timeline("document", candidate.timeline.id)?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        if let Some(url) = candidate.capture_url.as_deref() {
+            if self.storage.find_document_by_source_url(url)?.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn persisted_artifact_id(
+        &self,
+        artifact_kind: &str,
+        timeline_id: i64,
+    ) -> Result<Option<i64>, ApiError> {
+        if artifact_kind == "document" {
+            return Ok(self
+                .storage
+                .find_bake_document_by_source_memory_id(timeline_id)?
+                .map(|document| document.id));
+        }
+        Ok(self
+            .storage
+            .find_bake_artifact_by_source_timeline(artifact_kind, timeline_id)?)
+    }
+
+    fn record_artifact_extraction_audits(
+        &self,
+        run_id: i64,
+        candidate: &BakeMemorySourceRecord,
+        extracted: &BakeExtractResponse,
+    ) -> Result<(), ApiError> {
+        let document_evidence = document_evidence(candidate);
+        let sop_eligibility = sop_eligibility(candidate);
+        let shapes = extracted
+            .artifact_shapes
+            .as_ref()
+            .and_then(Value::as_object);
+        let recovered = extracted
+            .compatibility_recovered
+            .as_ref()
+            .and_then(Value::as_object);
+        for (artifact_kind, extraction, deterministic_eligible, deterministic_reason) in [
+            ("knowledge", &extracted.knowledge, None, None),
+            (
+                "document",
+                &extracted.document,
+                Some(document_evidence.allows_auto_create),
+                Some(format!("{:?}", document_evidence.kind).to_lowercase()),
+            ),
+            (
+                "sop",
+                &extracted.sop,
+                Some(sop_eligibility.eligible),
+                Some(sop_eligibility.reason.to_string()),
+            ),
+        ] {
+            let payload_valid = extraction
+                .payload
+                .as_ref()
+                .map(|payload| match artifact_kind {
+                    "knowledge" => parse_bake_knowledge_payload(payload.clone(), candidate).is_ok(),
+                    "document" => parse_bake_document_payload(payload.clone(), candidate).is_ok(),
+                    "sop" => parse_bake_sop_payload(payload.clone(), candidate)
+                        .ok()
+                        .is_some_and(|parsed| {
+                            validate_bake_sop_evidence(
+                                &parsed,
+                                candidate,
+                                &source_capture_id_strings(candidate),
+                            )
+                            .is_ok()
+                        }),
+                    _ => false,
+                });
+            let sidecar_key = if artifact_kind == "document" {
+                "design"
+            } else {
+                artifact_kind
+            };
+            let artifact_shape = shapes
+                .and_then(|items| items.get(sidecar_key))
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+            let compatibility_recovered = recovered
+                .and_then(|items| items.get(sidecar_key))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            tracing::info!(
+                "bake artifact decision: run_id={} timeline_id={} artifact={} deterministic_eligible={:?} deterministic_reason={:?} model_accepted={} model_reason={:?} payload_present={} payload_valid={:?} artifact_shape={:?} compatibility_recovered={}",
+                run_id,
+                candidate.timeline.id,
+                artifact_kind,
+                deterministic_eligible,
+                deterministic_reason,
+                extraction.accepted,
+                extraction.reason,
+                extraction.payload.is_some(),
+                payload_valid,
+                artifact_shape,
+                compatibility_recovered,
+            );
+            self.storage
+                .upsert_bake_artifact_audit(&NewBakeArtifactAudit {
+                    run_id,
+                    timeline_id: candidate.timeline.id,
+                    artifact_kind: artifact_kind.to_string(),
+                    deterministic_eligible,
+                    deterministic_reason,
+                    model_accepted: extraction.accepted,
+                    model_reason: extraction.reason.clone(),
+                    payload_present: extraction.payload.is_some(),
+                    payload_valid,
+                    artifact_shape,
+                    compatibility_recovered,
+                })?;
+        }
+        Ok(())
+    }
+
+    fn finalize_artifact_audit(
+        &self,
+        run_id: Option<i64>,
+        timeline_id: i64,
+        artifact_kind: &str,
+        extraction: &BakeArtifactExtraction,
+        outcome: &CandidatePersistResult,
+    ) -> Result<(), ApiError> {
+        let Some(run_id) = run_id else {
+            return Ok(());
+        };
+        let created_count = match artifact_kind {
+            "knowledge" => outcome.knowledge_created_count,
+            "document" => outcome.document_created_count,
+            "sop" => outcome.sop_created_count,
+            _ => 0,
+        };
+        let (status, reason) = if !extraction.accepted {
+            (
+                "rejected",
+                extraction.reason.as_deref().or(Some("model_rejected")),
+            )
+        } else if created_count > 0 {
+            ("created", Some("created"))
+        } else {
+            ("reused_or_merged", Some("source_already_persisted"))
+        };
+        let artifact_id = if matches!(status, "created" | "reused_or_merged") {
+            self.persisted_artifact_id(artifact_kind, timeline_id)?
+        } else {
+            None
+        };
+        tracing::info!(
+            "bake artifact persistence: run_id={} timeline_id={} artifact={} status={} reason={:?} artifact_id={:?}",
+            run_id,
+            timeline_id,
+            artifact_kind,
+            status,
+            reason,
+            artifact_id,
+        );
+        self.storage.finalize_bake_artifact_audit(
+            run_id,
+            timeline_id,
+            artifact_kind,
+            status,
+            reason,
+            artifact_id,
+        )?;
+        Ok(())
+    }
+
     async fn persist_extracted_candidate(
         &self,
+        audit_run_id: Option<i64>,
         memory_id: Option<i64>,
         candidate: &BakeMemorySourceRecord,
         trigger_reason: &str,
@@ -2445,6 +2652,24 @@ impl BakeService {
         let mut result = CandidatePersistResult::default();
         let mut completed_artifacts = 0_i64;
         let mut first_error: Option<ApiError> = None;
+        let mut document_persist_error_code: Option<String> = None;
+        let model_document_payload_valid = extracted.document.accepted
+            && extracted.document.payload.as_ref().is_some_and(|payload| {
+                parse_bake_document_payload(payload.clone(), candidate).is_ok()
+            });
+        let deterministic_document_recovery = if audit_run_id.is_some()
+            && candidate.retry_failure_count >= MAX_BAKE_RETRY_FAILURES - 1
+            && document_evidence(candidate).allows_auto_create
+            && !model_document_payload_valid
+            && !self.document_already_persisted(candidate)?
+        {
+            deterministic_document_recovery(candidate)
+        } else {
+            None
+        };
+        let document_extraction = deterministic_document_recovery
+            .as_ref()
+            .unwrap_or(&extracted.document);
 
         // SOP is both the shortest artifact and the one historically lost when a
         // preceding long knowledge/document payload was malformed. Persist each
@@ -2458,7 +2683,14 @@ impl BakeService {
             existing_sop_sources,
         ) {
             Ok(outcome) => {
-                result.apply(outcome);
+                result.apply(outcome.clone());
+                self.finalize_artifact_audit(
+                    audit_run_id,
+                    candidate.timeline.id,
+                    "sop",
+                    &extracted.sop,
+                    &outcome,
+                )?;
                 completed_artifacts += 1;
             }
             Err(error) => {
@@ -2468,6 +2700,16 @@ impl BakeService {
                     candidate.timeline.id,
                     error,
                 );
+                if let Some(run_id) = audit_run_id {
+                    self.storage.finalize_bake_artifact_audit(
+                        run_id,
+                        candidate.timeline.id,
+                        "sop",
+                        "failed",
+                        Some(bake_retry_error_code(&error)),
+                        None,
+                    )?;
+                }
                 result.sop_persist_status = Some("failed");
                 result.sop_persist_reason = Some(reason);
                 first_error = Some(error);
@@ -2482,7 +2724,14 @@ impl BakeService {
             existing_knowledge_sources,
         ) {
             Ok(outcome) => {
-                result.apply(outcome);
+                result.apply(outcome.clone());
+                self.finalize_artifact_audit(
+                    audit_run_id,
+                    candidate.timeline.id,
+                    "knowledge",
+                    &extracted.knowledge,
+                    &outcome,
+                )?;
                 completed_artifacts += 1;
             }
             Err(error) => {
@@ -2491,6 +2740,16 @@ impl BakeService {
                     candidate.timeline.id,
                     error,
                 );
+                if let Some(run_id) = audit_run_id {
+                    self.storage.finalize_bake_artifact_audit(
+                        run_id,
+                        candidate.timeline.id,
+                        "knowledge",
+                        "failed",
+                        Some(bake_retry_error_code(&error)),
+                        None,
+                    )?;
+                }
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
@@ -2501,14 +2760,24 @@ impl BakeService {
             .persist_document_artifact(
                 memory_id,
                 candidate,
-                &extracted.document,
+                document_extraction,
+                deterministic_document_recovery
+                    .as_ref()
+                    .map(|_| "candidate"),
                 existing_document_sources,
                 existing_document_urls,
             )
             .await
         {
             Ok(outcome) => {
-                result.apply(outcome);
+                result.apply(outcome.clone());
+                self.finalize_artifact_audit(
+                    audit_run_id,
+                    candidate.timeline.id,
+                    "document",
+                    document_extraction,
+                    &outcome,
+                )?;
                 completed_artifacts += 1;
             }
             Err(error) => {
@@ -2517,10 +2786,79 @@ impl BakeService {
                     candidate.timeline.id,
                     error,
                 );
+                if let Some(run_id) = audit_run_id {
+                    self.storage.finalize_bake_artifact_audit(
+                        run_id,
+                        candidate.timeline.id,
+                        "document",
+                        "failed",
+                        Some(bake_retry_error_code(&error)),
+                        None,
+                    )?;
+                }
+                document_persist_error_code = Some(bake_retry_error_code(&error).to_string());
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
             }
+        }
+
+        let deterministic_recovery_succeeded = deterministic_document_recovery.is_some()
+            && document_persist_error_code.is_none()
+            && self.document_already_persisted(candidate)?;
+        if let (Some(run_id), true) = (audit_run_id, deterministic_recovery_succeeded) {
+            let artifact_id = self.persisted_artifact_id("document", candidate.timeline.id)?;
+            self.storage.finalize_bake_artifact_audit(
+                run_id,
+                candidate.timeline.id,
+                "document",
+                "recovered_from_source",
+                extracted
+                    .document
+                    .reason
+                    .as_deref()
+                    .or(Some("deterministic_document_source_recovery")),
+                artifact_id,
+            )?;
+            tracing::warn!(
+                "bake document recovered from captured source: timeline_id={} artifact_id={:?} original_model_reason={:?}",
+                candidate.timeline.id,
+                artifact_id,
+                extracted.document.reason,
+            );
+        }
+
+        if audit_run_id.is_some()
+            && !deterministic_recovery_succeeded
+            && document_evidence(candidate).allows_auto_create
+            && (!extracted.document.accepted || document_persist_error_code.is_some())
+            && !self.document_already_persisted(candidate)?
+        {
+            if let Some(run_id) = audit_run_id {
+                self.storage.finalize_bake_artifact_audit(
+                    run_id,
+                    candidate.timeline.id,
+                    "document",
+                    "false_negative",
+                    document_persist_error_code
+                        .as_deref()
+                        .or(extracted.document.reason.as_deref())
+                        .or(Some("deterministic_document_evidence_model_rejected")),
+                    None,
+                )?;
+            }
+            tracing::warn!(
+                "bake document false-negative detected: timeline_id={} evidence={:?} model_reason={:?} persist_error_code={:?}",
+                candidate.timeline.id,
+                document_evidence(candidate).kind,
+                extracted.document.reason,
+                document_persist_error_code,
+            );
+            return Err(ApiError::Upstream {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "BAKE_DOCUMENT_FALSE_NEGATIVE",
+                message: "文档证据充分但模型未生成文档，已安排有界重试".to_string(),
+            });
         }
 
         if completed_artifacts == 0 {
@@ -2820,6 +3158,7 @@ impl BakeService {
         memory_id: Option<i64>,
         candidate: &BakeMemorySourceRecord,
         extraction: &BakeArtifactExtraction,
+        forced_review_status: Option<&str>,
         existing_sources: &mut std::collections::HashSet<i64>,
         existing_urls: &mut std::collections::HashSet<String>,
     ) -> Result<CandidatePersistResult, ApiError> {
@@ -2956,11 +3295,15 @@ impl BakeService {
                 payload.match_level.as_deref(),
             )?;
         }
-        let review_status = resolve_review_status(
-            payload.review_status.as_deref(),
-            payload.match_score,
-            payload.match_level.as_deref(),
-        );
+        let review_status = forced_review_status
+            .map(ToString::to_string)
+            .unwrap_or_else(|| {
+                resolve_review_status(
+                    payload.review_status.as_deref(),
+                    payload.match_score,
+                    payload.match_level.as_deref(),
+                )
+            });
         tracing::info!(
             "bake document accept: timeline_id={} sidecar_review_status={:?} match_score={:?} match_level={:?} resolved_review_status={}",
             candidate.timeline.id,
@@ -2970,8 +3313,18 @@ impl BakeService {
             review_status,
         );
         let source_capture_ids = collect_source_capture_id_strings(&self.storage, candidate)?;
-        let document =
-            build_bake_document(candidate, &payload, &review_status, &source_capture_ids)?;
+        let linked_knowledge_ids = self
+            .storage
+            .find_bake_artifact_by_source_timeline("knowledge", candidate.timeline.id)?
+            .map(|knowledge_id| vec![knowledge_id.to_string()])
+            .unwrap_or_default();
+        let document = build_bake_document(
+            candidate,
+            &payload,
+            &review_status,
+            &source_capture_ids,
+            &linked_knowledge_ids,
+        )?;
         let document_id = match self.storage.insert_bake_document(&document) {
             Ok(document_id) => document_id,
             Err(insert_error) => {
@@ -3186,9 +3539,15 @@ impl BakeService {
         }
 
         let mut linked_knowledge_ids = parse_json_vec_string(&existing_doc.linked_knowledge_ids);
-        if !linked_knowledge_ids.contains(&timeline_id) {
-            linked_knowledge_ids.push(timeline_id);
-            changed = true;
+        if let Some(knowledge_id) = self
+            .storage
+            .find_bake_artifact_by_source_timeline("knowledge", candidate.timeline.id)?
+            .map(|value| value.to_string())
+        {
+            if !linked_knowledge_ids.contains(&knowledge_id) {
+                linked_knowledge_ids.push(knowledge_id);
+                changed = true;
+            }
         }
 
         let mut update = bake_document_record_to_new(existing_doc.clone());
@@ -3619,13 +3978,8 @@ impl BakeService {
         record: TimelineRecord,
     ) -> Result<BakeKnowledgePayload, ApiError> {
         let source_url = if record.capture_id > 0 {
-            let capture_id = self
-                .storage
-                .get_timeline_entry(record.capture_id)?
-                .map(|timeline| timeline.capture_id)
-                .unwrap_or(record.capture_id);
             self.storage
-                .get_capture(capture_id)?
+                .get_capture(record.capture_id)?
                 .and_then(|capture| normalize_optional_url(capture.url))
         } else {
             None
@@ -4079,6 +4433,7 @@ fn is_retryable_bake_candidate_error(error: &ApiError) -> bool {
                     | "BAKE_MODEL_UPSTREAM_ERROR"
                     | "BAKE_SIDECAR_RESPONSE_INVALID"
                     | "BAKE_ARTIFACT_PAYLOAD_INVALID"
+                    | "BAKE_DOCUMENT_FALSE_NEGATIVE"
                     | "BAKE_INTERNAL_ERROR"
                     | "BAKE_UNCLASSIFIED_UPSTREAM_ERROR"
             )
@@ -4556,11 +4911,48 @@ fn build_bake_knowledge_entry(
     })
 }
 
+fn deterministic_document_recovery(
+    candidate: &BakeMemorySourceRecord,
+) -> Option<BakeArtifactExtraction> {
+    if !document_evidence(candidate).allows_auto_create {
+        return None;
+    }
+    let title = document_source_title(candidate)?;
+    let full_content = candidate
+        .url_aggregated_text
+        .as_deref()
+        .or(candidate.capture_ax_text.as_deref())
+        .or(candidate.capture_ocr_text.as_deref())
+        .map(str::trim)
+        .filter(|text| text.chars().count() >= 200)?
+        .to_string();
+    Some(BakeArtifactExtraction {
+        accepted: true,
+        reason: Some("deterministic_document_source_recovery".to_string()),
+        payload: Some(json!({
+            "name": title,
+            "category": "来源文档",
+            "summary": null,
+            "full_content": full_content,
+            "details": null,
+            "status": "candidate",
+            "tags": [],
+            "applicable_tasks": [],
+            "structure_sections": [],
+            "style_phrases": [],
+            "replacement_rules": [],
+            "review_status": "candidate",
+            "evidence_summary": "由已采集的文档标题与可见正文恢复，未生成额外内容"
+        })),
+    })
+}
+
 fn build_bake_document(
     source: &BakeMemorySourceRecord,
     payload: &BakeDocumentArtifactPayload,
     review_status: &str,
     source_capture_ids: &[String],
+    linked_knowledge_ids: &[String],
 ) -> Result<NewBakeDocument, ApiError> {
     let tags = if payload.tags.is_empty() {
         parse_json_vec_string(&source.timeline.entities)
@@ -4603,7 +4995,7 @@ fn build_bake_document(
         source_memory_ids: to_json_string(&source_memory_ids)?,
         source_capture_ids: to_json_string(&source_capture_ids)?,
         source_episode_ids: to_json_string(&source_memory_ids)?,
-        linked_knowledge_ids: to_json_string(&source_memory_ids)?,
+        linked_knowledge_ids: to_json_string(&linked_knowledge_ids)?,
         sections_json: to_json_string(&payload.sections)?,
         style_phrases: to_json_string(&payload.style_phrases)?,
         replacement_rules: to_json_string(&payload.replacement_rules)?,
@@ -5159,12 +5551,42 @@ fn map_memory_record(record: TimelineRecord, capture_url: Option<String>) -> Bak
 }
 
 fn bake_knowledge_record_to_timeline(record: BakeKnowledgeRecord) -> TimelineRecord {
+    let capture_id = record
+        .source_capture_ids
+        .as_deref()
+        .map(parse_json_vec_string_lossy)
+        .unwrap_or_default()
+        .into_iter()
+        .find_map(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(0);
+    let mut details = parse_details(record.content.as_deref())
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    if record.timeline_id > 0
+        && details
+            .get("source_timeline_id")
+            .and_then(|value| {
+                value
+                    .as_i64()
+                    .or_else(|| {
+                        value
+                            .as_str()
+                            .and_then(|value| value.trim().parse::<i64>().ok())
+                    })
+                    .filter(|value| *value > 0)
+            })
+            .is_none()
+    {
+        details.insert("source_timeline_id".to_string(), json!(record.timeline_id));
+    }
     TimelineRecord {
         id: record.id,
-        capture_id: record.timeline_id,
+        capture_id,
         summary: record.summary,
         overview: Some(record.title),
-        details: record.content,
+        details: Some(Value::Object(details).to_string()),
         detailed_content: record.detailed_content,
         entities: record.entities,
         category: CATEGORY_BAKE_KNOWLEDGE.to_string(),
@@ -5246,6 +5668,11 @@ fn map_bake_knowledge_record(record: TimelineRecord) -> BakeKnowledgePayload {
         id: record.id.to_string(),
         is_favorite: false,
         capture_id: record.capture_id.to_string(),
+        source_capture_ids: record
+            .capture_ids
+            .as_deref()
+            .map(parse_json_vec_string_lossy)
+            .unwrap_or_default(),
         source_timeline_id: details
             .get("source_timeline_id")
             .or_else(|| details.get("source_knowledge_id"))
@@ -5255,7 +5682,7 @@ fn map_bake_knowledge_record(record: TimelineRecord) -> BakeKnowledgePayload {
                     .map(|id| id.to_string())
                     .or_else(|| value.as_str().map(ToString::to_string))
             })
-            .unwrap_or_else(|| record.id.to_string()),
+            .unwrap_or_default(),
         source_url: None,
         summary: record.summary,
         overview: record.overview,
@@ -6653,6 +7080,7 @@ mod tests {
                 None,
                 &candidate,
                 &extraction,
+                None,
                 &mut existing_sources,
                 &mut existing_urls,
             )
@@ -6752,8 +7180,10 @@ mod tests {
             &payload,
             "auto_created",
             &[capture_id.to_string()],
+            &[],
         )
         .unwrap();
+        assert_eq!(document.linked_knowledge_ids, "[]");
         document.title = "知识库".to_string();
         document.source_win_title = Some("知识库".to_string());
         let document_id = service.storage.insert_bake_document(&document).unwrap();
@@ -6773,6 +7203,57 @@ mod tests {
             updated.source_win_title.as_deref(),
             Some("商业化大模型例行压测介绍 - 云文档")
         );
+    }
+
+    #[test]
+    fn test_document_source_metadata_links_real_knowledge_id_not_timeline_id() {
+        let service = make_service();
+        let capture_id = seed_capture(
+            &service,
+            1_710_000_000_000,
+            "Google Chrome",
+            "商业体系 AI 能力盘点 - 云文档",
+        );
+        let timeline_id = seed_knowledge(&service, "文档", capture_id, 4, 1);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.capture_url = Some("https://docs.example.com/d/home/ai-inventory".to_string());
+        candidate.capture_ax_text = Some("AI 能力盘点正文".repeat(80));
+
+        let payload = parse_bake_document_payload(
+            json!({
+                "name": "商业体系 AI 能力盘点 - 云文档",
+                "full_content": "AI 能力盘点正文"
+            }),
+            &candidate,
+        )
+        .unwrap();
+        let document = build_bake_document(
+            &candidate,
+            &payload,
+            "auto_created",
+            &[capture_id.to_string()],
+            &[],
+        )
+        .unwrap();
+        let document_id = service.storage.insert_bake_document(&document).unwrap();
+        service
+            .storage
+            .record_bake_artifact_source("knowledge", 777, timeline_id, None)
+            .unwrap();
+        let existing = service
+            .storage
+            .get_bake_document(document_id)
+            .unwrap()
+            .unwrap();
+
+        let (updated, changed) = service
+            .document_with_merged_source_metadata(&candidate, &existing)
+            .unwrap();
+        let linked = parse_json_vec_string(&updated.linked_knowledge_ids);
+
+        assert!(changed);
+        assert_eq!(linked, vec!["777"]);
+        assert!(!linked.contains(&timeline_id.to_string()));
     }
 
     #[test]
@@ -7038,6 +7519,9 @@ mod tests {
     #[test]
     fn test_knowledge_list_searches_and_returns_source_url() {
         let service = make_service();
+        // 先占用一个 capture ID，确保下面的真实 capture ID 与 timeline ID 不同，
+        // 从而能检测 timeline/capture 命名空间是否再次混用。
+        seed_capture(&service, 1_709_999_999_000, "Code", "占位采集");
         let capture_id = seed_capture(
             &service,
             1_710_000_000_000,
@@ -7081,6 +7565,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.total, 1);
+        assert_eq!(response.items[0].capture_id, capture_id.to_string());
+        assert_eq!(
+            response.items[0].source_capture_ids,
+            vec![capture_id.to_string()]
+        );
+        assert_eq!(
+            response.items[0].source_timeline_id,
+            timeline_id.to_string()
+        );
+        assert_ne!(
+            response.items[0].capture_id,
+            response.items[0].source_timeline_id
+        );
         assert_eq!(
             response.items[0].source_url.as_deref(),
             Some("https://kb.example.com/memorybread/api")
@@ -7300,10 +7797,11 @@ mod tests {
         candidate.work_status = Some("completed".to_string());
         candidate.work_progress = Some("执行完成，Lint 检查通过".to_string());
         candidate.action_trace = operation_trace(&[first, second, third]);
-        for (record, event_type) in candidate
-            .action_trace
-            .iter_mut()
-            .zip(["app_switch", "key_pause", "auto"])
+        for (record, event_type) in
+            candidate
+                .action_trace
+                .iter_mut()
+                .zip(["app_switch", "key_pause", "auto"])
         {
             record.event_type = event_type.to_string();
             record.input_text = None;
@@ -7499,6 +7997,7 @@ mod tests {
         let result = service
             .persist_extracted_candidate(
                 None,
+                None,
                 &candidate,
                 "test",
                 extracted,
@@ -7513,6 +8012,369 @@ mod tests {
         assert_eq!(result.sop_created_count, 1);
         assert_eq!(service.storage.count_bake_sops().unwrap(), 1);
         assert_eq!(service.storage.count_bake_knowledge().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_artifact_audit_maps_sidecar_design_contract_to_document_branch() {
+        let service = make_service();
+        let capture_id = seed_capture(
+            &service,
+            1_710_000_000_000,
+            "Google Chrome",
+            "招聘方案 - 云文档",
+        );
+        let timeline_id = seed_knowledge(&service, "文档", capture_id, 3, 1);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.capture_url = Some("https://docs.example.com/d/home/recruiting".to_string());
+        candidate.capture_ax_text = Some("招聘方案正文".repeat(100));
+        let run_id = service
+            .storage
+            .insert_bake_run(&NewBakeRun {
+                trigger_reason: "test".to_string(),
+                status: "running".to_string(),
+                started_at: 1_710_000_000_000,
+            })
+            .unwrap();
+        let extracted = BakeExtractResponse {
+            knowledge: BakeArtifactExtraction {
+                accepted: false,
+                reason: Some("invalid_json".to_string()),
+                payload: None,
+            },
+            document: BakeArtifactExtraction {
+                accepted: true,
+                reason: None,
+                payload: Some(json!({
+                    "name": "招聘方案",
+                    "full_content": "招聘方案正文",
+                    "summary": "招聘方案摘要"
+                })),
+            },
+            sop: BakeArtifactExtraction {
+                accepted: false,
+                reason: Some("missing_real_action".to_string()),
+                payload: None,
+            },
+            primary_type: Some("knowledge".to_string()),
+            classification_reason: None,
+            usage: None,
+            model: None,
+            degraded: Some(true),
+            artifact_shapes: Some(json!({
+                "knowledge": "null",
+                "design": "array_single_recovered",
+                "sop": "object"
+            })),
+            compatibility_recovered: Some(json!({
+                "knowledge": false,
+                "design": true,
+                "sop": false
+            })),
+        };
+
+        service
+            .record_artifact_extraction_audits(run_id, &candidate, &extracted)
+            .unwrap();
+        let audits = service
+            .storage
+            .list_bake_artifact_audits_for_timeline(timeline_id, 10)
+            .unwrap();
+        let document = audits
+            .iter()
+            .find(|audit| audit.artifact_kind == "document")
+            .unwrap();
+        assert_eq!(
+            document.artifact_shape.as_deref(),
+            Some("array_single_recovered")
+        );
+        assert!(document.compatibility_recovered);
+        assert_eq!(document.deterministic_eligible, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_strong_document_evidence_model_rejection_is_retryable_false_negative() {
+        let service = make_service();
+        let capture_id = seed_capture(
+            &service,
+            1_710_000_000_000,
+            "Google Chrome",
+            "招聘方案 - 云文档",
+        );
+        let timeline_id = seed_knowledge(&service, "文档", capture_id, 3, 1);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.capture_url = Some("https://docs.example.com/d/home/recruiting".to_string());
+        candidate.capture_webpage_title = Some("招聘方案 - 云文档".to_string());
+        candidate.capture_ax_text = Some("岗位职责与任职要求".repeat(100));
+        let extracted = BakeExtractResponse {
+            knowledge: BakeArtifactExtraction {
+                accepted: false,
+                reason: Some("not_knowledge".to_string()),
+                payload: None,
+            },
+            document: BakeArtifactExtraction {
+                accepted: false,
+                reason: Some("not_a_document".to_string()),
+                payload: None,
+            },
+            sop: BakeArtifactExtraction {
+                accepted: false,
+                reason: Some("missing_real_action".to_string()),
+                payload: None,
+            },
+            primary_type: Some("knowledge".to_string()),
+            classification_reason: None,
+            usage: None,
+            model: None,
+            degraded: Some(false),
+            artifact_shapes: None,
+            compatibility_recovered: None,
+        };
+        let mut knowledge_sources = std::collections::HashSet::new();
+        let mut document_sources = std::collections::HashSet::new();
+        let mut document_urls = std::collections::HashSet::new();
+        let mut sop_sources = std::collections::HashSet::new();
+
+        let error = service
+            .persist_extracted_candidate(
+                Some(9_999),
+                None,
+                &candidate,
+                "test",
+                extracted,
+                &mut knowledge_sources,
+                &mut document_sources,
+                &mut document_urls,
+                &mut sop_sources,
+            )
+            .await
+            .expect_err("强文档证据不应被模型拒绝后永久跳过");
+
+        assert_eq!(
+            bake_retry_error_code(&error),
+            "BAKE_DOCUMENT_FALSE_NEGATIVE"
+        );
+        assert!(is_retryable_bake_candidate_error(&error));
+    }
+
+    #[tokio::test]
+    async fn test_final_document_retry_recovers_review_candidate_from_captured_source() {
+        let service = make_service();
+        let capture_id = seed_capture(
+            &service,
+            1_710_000_000_000,
+            "Google Chrome",
+            "招聘方案 - 云文档",
+        );
+        let timeline_id = seed_knowledge(&service, "文档", capture_id, 3, 1);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.capture_url = Some("https://docs.example.com/d/home/recruiting".to_string());
+        candidate.capture_webpage_title = Some("招聘方案 - 云文档".to_string());
+        let captured_body = "岗位职责与任职要求".repeat(100);
+        candidate.capture_ax_text = Some(captured_body.clone());
+        candidate.retry_failure_count = MAX_BAKE_RETRY_FAILURES - 1;
+        let extracted = BakeExtractResponse {
+            knowledge: BakeArtifactExtraction {
+                accepted: false,
+                reason: Some("not_knowledge".to_string()),
+                payload: None,
+            },
+            document: BakeArtifactExtraction {
+                accepted: false,
+                reason: Some("not_a_document".to_string()),
+                payload: None,
+            },
+            sop: BakeArtifactExtraction {
+                accepted: false,
+                reason: Some("missing_real_action".to_string()),
+                payload: None,
+            },
+            primary_type: Some("knowledge".to_string()),
+            classification_reason: None,
+            usage: None,
+            model: None,
+            degraded: Some(false),
+            artifact_shapes: Some(json!({"design": "object"})),
+            compatibility_recovered: Some(json!({"design": false})),
+        };
+        let run_id = service
+            .storage
+            .insert_bake_run(&NewBakeRun {
+                trigger_reason: "test".to_string(),
+                status: "running".to_string(),
+                started_at: 1_710_000_000_000,
+            })
+            .unwrap();
+        service
+            .record_artifact_extraction_audits(run_id, &candidate, &extracted)
+            .unwrap();
+        let mut knowledge_sources = std::collections::HashSet::new();
+        let mut document_sources = std::collections::HashSet::new();
+        let mut document_urls = std::collections::HashSet::new();
+        let mut sop_sources = std::collections::HashSet::new();
+
+        let result = service
+            .persist_extracted_candidate(
+                Some(run_id),
+                None,
+                &candidate,
+                "test",
+                extracted,
+                &mut knowledge_sources,
+                &mut document_sources,
+                &mut document_urls,
+                &mut sop_sources,
+            )
+            .await
+            .expect("最后一次强文档证据应从采集正文恢复待审核文档");
+
+        assert_eq!(result.document_created_count, 1);
+        let document = service
+            .storage
+            .find_bake_document_by_source_memory_id(timeline_id)
+            .unwrap()
+            .expect("应创建来源文档");
+        assert_eq!(document.review_status, "candidate");
+        assert_eq!(
+            document.full_content.as_deref(),
+            Some(captured_body.as_str())
+        );
+        assert_eq!(document.summary, None);
+        let audits = service
+            .storage
+            .list_bake_artifact_audits_for_timeline(timeline_id, 10)
+            .unwrap();
+        let document_audit = audits
+            .iter()
+            .find(|audit| audit.artifact_kind == "document")
+            .unwrap();
+        assert_eq!(document_audit.model_accepted, Some(false));
+        assert_eq!(document_audit.persist_status, "recovered_from_source");
+        assert_eq!(document_audit.artifact_id, Some(document.id));
+    }
+
+    #[tokio::test]
+    async fn test_final_document_retry_recovers_when_accepted_payload_is_invalid() {
+        let service = make_service();
+        let capture_id = seed_capture(
+            &service,
+            1_710_000_000_000,
+            "Google Chrome",
+            "招聘方案 - 云文档",
+        );
+        let timeline_id = seed_knowledge(&service, "文档", capture_id, 3, 1);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.capture_url = Some("https://docs.example.com/d/home/invalid-payload".to_string());
+        candidate.capture_webpage_title = Some("招聘方案 - 云文档".to_string());
+        candidate.capture_ax_text = Some("岗位职责与任职要求".repeat(100));
+        candidate.retry_failure_count = MAX_BAKE_RETRY_FAILURES - 1;
+        let extracted = BakeExtractResponse {
+            knowledge: BakeArtifactExtraction {
+                accepted: false,
+                reason: Some("not_knowledge".to_string()),
+                payload: None,
+            },
+            document: BakeArtifactExtraction {
+                accepted: true,
+                reason: None,
+                payload: Some(json!(["malformed-document-payload"])),
+            },
+            sop: BakeArtifactExtraction {
+                accepted: false,
+                reason: Some("missing_real_action".to_string()),
+                payload: None,
+            },
+            primary_type: Some("document".to_string()),
+            classification_reason: None,
+            usage: None,
+            model: None,
+            degraded: Some(true),
+            artifact_shapes: Some(json!({"design": "array_invalid"})),
+            compatibility_recovered: Some(json!({"design": false})),
+        };
+        let mut knowledge_sources = std::collections::HashSet::new();
+        let mut document_sources = std::collections::HashSet::new();
+        let mut document_urls = std::collections::HashSet::new();
+        let mut sop_sources = std::collections::HashSet::new();
+
+        let result = service
+            .persist_extracted_candidate(
+                Some(9_999),
+                None,
+                &candidate,
+                "test",
+                extracted,
+                &mut knowledge_sources,
+                &mut document_sources,
+                &mut document_urls,
+                &mut sop_sources,
+            )
+            .await
+            .expect("最终尝试的无效文档 payload 应从采集正文恢复");
+
+        assert_eq!(result.document_created_count, 1);
+        let document = service
+            .storage
+            .find_bake_document_by_source_memory_id(timeline_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(document.review_status, "candidate");
+    }
+
+    #[tokio::test]
+    async fn test_non_document_model_rejection_does_not_trigger_document_retry() {
+        let service = make_service();
+        let capture_id = seed_capture(&service, 1_710_000_000_000, "Kim", "项目群");
+        let timeline_id = seed_knowledge(&service, "会议", capture_id, 3, 1);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.capture_app_name = Some("Kim".to_string());
+        candidate.capture_win_title = Some("项目群".to_string());
+        candidate.capture_url = None;
+        candidate.capture_ax_text = Some("群聊中提到招聘方案文档".repeat(30));
+        let extracted = BakeExtractResponse {
+            knowledge: BakeArtifactExtraction {
+                accepted: false,
+                reason: Some("not_knowledge".to_string()),
+                payload: None,
+            },
+            document: BakeArtifactExtraction {
+                accepted: false,
+                reason: Some("not_a_document".to_string()),
+                payload: None,
+            },
+            sop: BakeArtifactExtraction {
+                accepted: false,
+                reason: Some("missing_real_action".to_string()),
+                payload: None,
+            },
+            primary_type: Some("knowledge".to_string()),
+            classification_reason: None,
+            usage: None,
+            model: None,
+            degraded: Some(false),
+            artifact_shapes: None,
+            compatibility_recovered: None,
+        };
+        let mut knowledge_sources = std::collections::HashSet::new();
+        let mut document_sources = std::collections::HashSet::new();
+        let mut document_urls = std::collections::HashSet::new();
+        let mut sop_sources = std::collections::HashSet::new();
+
+        let result = service
+            .persist_extracted_candidate(
+                Some(9_999),
+                None,
+                &candidate,
+                "test",
+                extracted,
+                &mut knowledge_sources,
+                &mut document_sources,
+                &mut document_urls,
+                &mut sop_sources,
+            )
+            .await
+            .expect("非文档候选的模型拒绝应正常完成");
+
+        assert_eq!(result.document_created_count, 0);
     }
 
     #[test]

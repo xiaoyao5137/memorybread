@@ -151,10 +151,10 @@ const sanitizeRagAnswer = (content: string) => {
 const compactButtonStyle: React.CSSProperties = {
   height: 32,
   padding: '0 10px',
-  border: '1px solid #d0d5dd',
+  border: '1px solid var(--mb-border-strong)',
   borderRadius: 6,
-  background: '#fff',
-  color: '#344054',
+  background: 'var(--mb-bg-card)',
+  color: 'var(--mb-text-primary)',
   display: 'inline-flex',
   alignItems: 'center',
   gap: 6,
@@ -492,7 +492,7 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
     h3: ({ node, children, ...props }: any) => <h3 style={{ fontSize: 16, lineHeight: 1.45, margin: '18px 0 9px' }} {...props}>{children}</h3>,
     p: ({ node, ...props }: any) => <p style={{ margin: '9px 0', lineHeight: 1.75 }} {...props} />,
     li: ({ node, ...props }: any) => <li style={{ margin: '6px 0', lineHeight: 1.65 }} {...props} />,
-    code: ({ node, ...props }: any) => <code style={{ background: '#f2f4f7', padding: '2px 5px', borderRadius: 4 }} {...props} />,
+    code: ({ node, ...props }: any) => <code style={{ background: 'var(--mb-bg-inset)', padding: '2px 5px', borderRadius: 4 }} {...props} />,
     a: ({ node, href, children, ...props }: any) => (
       <a href={href} target={href?.startsWith('#') ? undefined : '_blank'} rel="noopener noreferrer" style={{ color: '#0f766e', textDecoration: 'underline' }} {...props}>{children}</a>
     ),
@@ -596,11 +596,11 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
         <div style={{
           margin: '12px 16px',
           padding: '12px',
-          background: '#FFF3CD',
-          border: '1px solid #FFE69C',
+          background: 'var(--mb-warning-soft)',
+          border: '1px solid var(--mb-warning-border)',
           borderRadius: 8,
           fontSize: 13,
-          color: '#856404',
+          color: 'var(--mb-warning-text)',
         }}>
           <div style={{ fontWeight: 600, marginBottom: 4 }}>AI 能力尚未就绪</div>
           <div style={{ marginBottom: 8 }}>
@@ -849,7 +849,7 @@ const MarkdownContent = ({ content, components }: { content: string; components:
               <thead>
                 <tr>
                   {block.headers.map((header, cellIndex) => (
-                    <th key={cellIndex} style={{ border: '1px solid #d0d5dd', background: '#f8fafc', color: '#172033', fontWeight: 700, padding: '10px 12px', textAlign: block.alignments[cellIndex] || 'left', verticalAlign: 'top' }}>
+                    <th key={cellIndex} style={{ border: '1px solid var(--mb-border-strong)', background: 'var(--mb-bg-page)', color: 'var(--mb-text-primary)', fontWeight: 700, padding: '10px 12px', textAlign: block.alignments[cellIndex] || 'left', verticalAlign: 'top' }}>
                       <ReactMarkdown components={inlineComponents}>{header}</ReactMarkdown>
                     </th>
                   ))}
@@ -859,7 +859,7 @@ const MarkdownContent = ({ content, components }: { content: string; components:
                 {block.rows.map((row, rowIndex) => (
                   <tr key={rowIndex}>
                     {block.headers.map((_, cellIndex) => (
-                      <td key={cellIndex} style={{ border: '1px solid #d0d5dd', padding: '10px 12px', textAlign: block.alignments[cellIndex] || 'left', verticalAlign: 'top', background: rowIndex % 2 === 0 ? '#fff' : '#fbfcfe' }}>
+                      <td key={cellIndex} style={{ border: '1px solid var(--mb-border-strong)', padding: '10px 12px', textAlign: block.alignments[cellIndex] || 'left', verticalAlign: 'top', background: rowIndex % 2 === 0 ? '#fff' : '#fbfcfe' }}>
                         <ReactMarkdown components={inlineComponents}>{row[cellIndex] || ''}</ReactMarkdown>
                       </td>
                     ))}
@@ -903,11 +903,11 @@ const referenceText = (item: RagContext) => {
 
 const ProgressStrip = ({ label, percent }: { label: string; percent: number }) => (
   <div style={{ margin: '0 16px 12px', display: 'grid', gap: 6 }}>
-    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#475467' }}>
+    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--mb-text-secondary)' }}>
       <span>{label}</span>
       <span>{percent}%</span>
     </div>
-    <div style={{ height: 6, borderRadius: 999, background: '#e4e7ec', overflow: 'hidden' }}>
+    <div style={{ height: 6, borderRadius: 999, background: 'var(--mb-border-strong)', overflow: 'hidden' }}>
       <div style={{ width: `${percent}%`, height: '100%', borderRadius: 999, background: '#0f766e', transition: 'width 0.25s ease' }} />
     </div>
   </div>

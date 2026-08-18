@@ -466,6 +466,42 @@ pub struct NewBakeCandidateAudit {
     pub persist_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BakeArtifactAuditRecord {
+    pub id: i64,
+    pub run_id: i64,
+    pub timeline_id: i64,
+    pub artifact_kind: String,
+    pub deterministic_eligible: Option<bool>,
+    pub deterministic_reason: Option<String>,
+    pub model_accepted: Option<bool>,
+    pub model_reason: Option<String>,
+    pub payload_present: Option<bool>,
+    pub payload_valid: Option<bool>,
+    pub artifact_shape: Option<String>,
+    pub compatibility_recovered: bool,
+    pub persist_status: String,
+    pub persist_reason: Option<String>,
+    pub artifact_id: Option<i64>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewBakeArtifactAudit {
+    pub run_id: i64,
+    pub timeline_id: i64,
+    pub artifact_kind: String,
+    pub deterministic_eligible: Option<bool>,
+    pub deterministic_reason: Option<String>,
+    pub model_accepted: bool,
+    pub model_reason: Option<String>,
+    pub payload_present: bool,
+    pub payload_valid: Option<bool>,
+    pub artifact_shape: Option<String>,
+    pub compatibility_recovered: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BakeSopFunnelSummaryRecord {
     pub audited_count: i64,

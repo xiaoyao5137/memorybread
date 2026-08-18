@@ -264,3 +264,84 @@
 @media (prefers-reduced-motion: reduce) {
   .account-contact__card { transition: none; }
 }
+
+/* ===== macOS 暗色模式适配（仅追加，不改动任何亮色规则） ===== */
+@media (prefers-color-scheme: dark) {
+  .account-contact { border-top-color: rgba(255, 255, 255, 0.08); }
+
+  .account-contact > header h3 { color: #F3F4F6; }
+  .account-contact > header p { color: #9CA3AF; }
+  .account-contact > header > svg { color: #E8A25C; }
+
+  .account-contact__card {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #232326;
+  }
+  .account-contact__card--editing {
+    border-color: rgba(255, 177, 122, 0.45);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  }
+
+  .account-contact__icon {
+    background: rgba(255, 159, 67, 0.16);
+    color: #FFC48D;
+  }
+
+  .account-contact__title-row h4 { color: #F3F4F6; }
+
+  .account-contact__status {
+    background: #2C2C2E;
+    color: #9CA3AF;
+  }
+  .account-contact__status--bound {
+    background: rgba(52, 199, 89, 0.14);
+    color: #6EE7A0;
+  }
+
+  .account-contact__summary p { color: #9CA3AF; }
+
+  .account-contact__open,
+  .account-contact__code-field button,
+  .account-contact__actions button {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+    color: #FFC48D;
+  }
+  .account-contact__open:hover,
+  .account-contact__code-field button:hover:not(:disabled),
+  .account-contact__actions button:hover:not(:disabled) {
+    border-color: rgba(255, 177, 122, 0.45);
+    background: rgba(255, 159, 67, 0.14);
+  }
+
+  .account-contact button:focus-visible,
+  .account-contact input:focus-visible {
+    outline-color: rgba(10, 132, 255, 0.24);
+  }
+
+  .account-contact__form { border-top-color: rgba(255, 255, 255, 0.08); }
+  .account-contact__form label { color: #9CA3AF; }
+  .account-contact__form input {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+    color: #F3F4F6;
+  }
+
+  .account-contact__hint { color: #8E8E93; }
+  .account-contact__hint--expired { color: #E8A25C; }
+  .account-contact__replacement-note {
+    background: #2C2C2E;
+    color: #9CA3AF;
+  }
+
+  .account-contact__error {
+    border-color: rgba(255, 69, 58, 0.3);
+    background: rgba(255, 69, 58, 0.16);
+    color: #FF6961;
+  }
+  .account-contact__success {
+    border-color: rgba(52, 199, 89, 0.3);
+    background: rgba(52, 199, 89, 0.14);
+    color: #6EE7A0;
+  }
+}

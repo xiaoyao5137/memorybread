@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import React from 'react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import RepositoryPanel from '../components/RepositoryPanel'
 import BakePanel from '../components/BakePanel'
+import FloatingBuddy from '../components/FloatingBuddy'
 import { useAppStore } from '../store/useAppStore'
 
 const jsonResponse = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
@@ -26,10 +28,121 @@ const styleConfigResponse = {
   applyToTemplateEditing: true,
 }
 
+const deferred = <T,>() => {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  const promise = new Promise<T>((next) => { resolve = next })
+  return { promise, resolve }
+}
+
+const documentItem = (id: number, title: string) => ({
+  id,
+  title,
+  doc_type: 'general_document',
+  status: 'enabled',
+  tags: [],
+  applicable_tasks: [],
+  source_memory_ids: [],
+  source_capture_ids: [],
+  source_episode_ids: [],
+  linked_knowledge_ids: [],
+  sections: [],
+  style_phrases: [],
+  replacement_rules: [],
+  usage_count: 0,
+  review_status: 'confirmed',
+  created_at: '2026-08-18 10:00:00',
+  created_at_ms: 1,
+  updated_at: '2026-08-18 10:00:00',
+  updated_at_ms: 1,
+})
+
+const sopItem = (id: number, title: string) => ({
+  id,
+  source_capture_id: '',
+  source_timeline_id: String(id),
+  trigger_keywords: ['分页'],
+  confidence: 'medium',
+  extracted_problem: title,
+  detailed_content: `${title}详情`,
+  steps: ['执行下一步'],
+  linked_knowledge_ids: [],
+  linked_knowledge_summaries: [],
+  status: 'confirmed',
+  review_status: 'confirmed',
+  created_at: '2026-08-18 10:00:00',
+  created_at_ms: 1,
+  updated_at: '2026-08-18 10:00:00',
+  updated_at_ms: 1,
+})
+
 describe('显式搜索交互', () => {
   beforeEach(() => {
     useAppStore.getState().reset()
     useAppStore.getState().setApiBaseUrl('http://localhost:7070')
+  })
+
+  it('文档翻页后不会被上一页的迟到响应覆盖', async () => {
+    const firstPage = deferred<Response>()
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/models')) return jsonResponse({ ollama: true, llm: true, embedding: true })
+      if (url.includes('/api/bake/overview')) return jsonResponse(overviewResponse)
+      if (url === 'http://localhost:7070/api/bake/documents?limit=20&offset=0') return firstPage.promise
+      if (url === 'http://localhost:7070/api/bake/documents?limit=20&offset=20') {
+        return jsonResponse({ items: [documentItem(21, '第二页文档')], total: 21, limit: 20, offset: 20 })
+      }
+      if (url.includes('/api/knowledge')) return jsonResponse({ entries: [], total: 0, limit: 1000, offset: 0 })
+      throw new Error(`unexpected url: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useAppStore.setState({ bakeTab: 'templates' })
+
+    render(<BakePanel />)
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('http://localhost:7070/api/bake/documents?limit=20&offset=0')
+    })
+
+    act(() => useAppStore.getState().setBakeTemplateOffset(20))
+    expect(await screen.findByText('第二页文档')).toBeInTheDocument()
+    expect(screen.getByText('第 2/2 页')).toBeInTheDocument()
+
+    firstPage.resolve(jsonResponse({ items: [documentItem(1, '第一页文档')], total: 21, limit: 20, offset: 0 }))
+    await waitFor(() => {
+      expect(screen.queryByText('第一页文档')).not.toBeInTheDocument()
+    })
+    expect(screen.getByText('第二页文档')).toBeInTheDocument()
+  })
+
+  it('操作翻页后不会被上一页的迟到响应覆盖', async () => {
+    const firstPage = deferred<Response>()
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/models')) return jsonResponse({ ollama: true, llm: true, embedding: true })
+      if (url.includes('/api/bake/overview')) return jsonResponse(overviewResponse)
+      if (url === 'http://localhost:7070/api/bake/sops?limit=20&offset=0') return firstPage.promise
+      if (url === 'http://localhost:7070/api/bake/sops?limit=20&offset=20') {
+        return jsonResponse({ items: [sopItem(21, '第二页操作')], total: 21, limit: 20, offset: 20 })
+      }
+      if (url.includes('/api/knowledge')) return jsonResponse({ entries: [], total: 0, limit: 1000, offset: 0 })
+      throw new Error(`unexpected url: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useAppStore.setState({ bakeTab: 'sop' })
+
+    render(<BakePanel />)
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('http://localhost:7070/api/bake/sops?limit=20&offset=0')
+    })
+
+    act(() => useAppStore.getState().setBakeSopOffset(20))
+    expect(await screen.findByText('第二页操作')).toBeInTheDocument()
+    expect(screen.getByText('第 2/2 页')).toBeInTheDocument()
+
+    firstPage.resolve(jsonResponse({ items: [sopItem(1, '第一页操作')], total: 21, limit: 20, offset: 0 }))
+    await waitFor(() => {
+      expect(screen.queryByText('第一页操作')).not.toBeInTheDocument()
+    })
+    expect(screen.getByText('第二页操作')).toBeInTheDocument()
   })
 
   it('BakePanel 知识搜索只有点击搜索后才发起带关键词请求', async () => {
@@ -436,13 +549,88 @@ describe('显式搜索交互', () => {
     expect(within(drawer).getByText('#2')).toBeInTheDocument()
   })
 
-  it('RepositoryPanel 时间线支持按需展开记忆图谱', async () => {
+  it('BakePanel 从图谱打开节点时关闭图谱并进入具体内容详情', async () => {
+    const knowledgeItem = {
+      id: 91,
+      summary: '面试复盘方法',
+      overview: '整理面试结论与后续动作',
+      details: '',
+      category: '工作方法',
+      importance: 7,
+      occurrence_count: 2,
+      status: 'confirmed',
+      review_status: 'confirmed',
+      entities: ['面试'],
+      source_capture_ids: [],
+      created_at: '2026-08-15 10:10',
+      created_at_ms: new Date(2026, 7, 15, 10, 10).getTime(),
+      updated_at: '2026-08-15 10:10',
+      updated_at_ms: new Date(2026, 7, 15, 10, 10).getTime(),
+    }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/models')) return jsonResponse({ ollama: true, llm: true, embedding: true })
+      if (url.includes('/api/bake/overview')) return jsonResponse(overviewResponse)
+      if (url === 'http://localhost:7070/api/bake/knowledge/91') return jsonResponse(knowledgeItem)
+      if (url.includes('/api/bake/knowledge')) {
+        return jsonResponse({ items: [knowledgeItem], total: 1, limit: 100, offset: 0 })
+      }
+      if (url.includes('/api/bake/documents')) return jsonResponse({ items: [], total: 0, limit: 100, offset: 0 })
+      if (url.includes('/api/bake/sops')) return jsonResponse({ items: [], total: 0, limit: 100, offset: 0 })
+      if (url.includes('/api/data/sources')) return jsonResponse({ items: [], total: 0 })
+      throw new Error(`unexpected url: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    useAppStore.setState({ bakeTab: 'knowledge' })
+    render(<BakePanel />)
+
+    expect(await screen.findByRole('table', { name: '知识表格' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '在记忆图谱中查看知识「面试复盘方法」' }))
+
+    expect(await screen.findByRole('dialog', { name: '记忆图谱' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '打开内容' }))
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: '记忆图谱' })).not.toBeInTheDocument()
+    })
+    expect(await screen.findByRole('dialog', { name: '面试复盘方法' })).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledWith('http://localhost:7070/api/bake/knowledge/91')
+  })
+
+  it('RepositoryPanel 时间线操作列可按需打开该时间线的记忆图谱', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
       if (url === 'http://localhost:7070/api/knowledge?limit=20&offset=0') {
-        return jsonResponse({ entries: [], total: 0, limit: 20, offset: 0 })
+        return jsonResponse({
+          entries: [{
+            id: 5034,
+            summary: '面试时间线',
+            overview: '面试时间线详情',
+            capture_id: 1,
+            importance: 5,
+            occurrence_count: 4,
+            created_at: '2026-08-15 10:10',
+            created_at_ms: 1786759850978,
+            capture_ids: [1],
+            key_timestamps: [],
+          }],
+          total: 1,
+          limit: 20,
+          offset: 0,
+        })
       }
-      if (url.includes('/api/bake/knowledge')) return jsonResponse({ items: [], total: 0, limit: 100, offset: 0 })
+      if (url.includes('/api/bake/knowledge')) {
+        return jsonResponse({
+          items: [
+            { id: 91, summary: '面试时间线提炼的知识', source_timeline_id: 5034 },
+            { id: 92, summary: '与本时间线无关的知识', source_timeline_id: 9999 },
+          ],
+          total: 2,
+          limit: 100,
+          offset: 0,
+        })
+      }
       if (url.includes('/api/bake/documents')) return jsonResponse({ items: [], total: 0, limit: 100, offset: 0 })
       if (url.includes('/api/bake/sops')) return jsonResponse({ items: [], total: 0, limit: 100, offset: 0 })
       if (url.includes('/api/data/sources')) return jsonResponse({ items: [], total: 0 })
@@ -453,11 +641,11 @@ describe('显式搜索交互', () => {
     useAppStore.setState({ repositoryTab: 'memory' })
     render(<RepositoryPanel />)
 
-    const graphButton = screen.getByRole('button', { name: '展开记忆图谱' })
-    expect(screen.queryByRole('region', { name: '记忆图谱' })).not.toBeInTheDocument()
-    fireEvent.click(graphButton)
+    expect(await screen.findByRole('table', { name: '时间线表格' })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: '记忆图谱' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '在记忆图谱中查看时间线「面试时间线」' }))
 
-    expect(await screen.findByRole('region', { name: '记忆图谱' })).toBeInTheDocument()
+    expect(await screen.findByRole('dialog', { name: '记忆图谱' })).toBeInTheDocument()
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith('http://localhost:7070/api/bake/knowledge?sort=heat&limit=100&offset=0')
       expect(fetchMock).toHaveBeenCalledWith('http://localhost:7070/api/bake/documents?limit=100&offset=0')
@@ -466,6 +654,11 @@ describe('显式搜索交互', () => {
         String(input) === 'http://localhost:7070/api/data/sources?limit=100&offset=0'
       ))).toBe(true)
     })
+    // 图谱只展示当前时间线提炼出的资产
+    await waitFor(() => {
+      expect(screen.getAllByText('面试时间线提炼的知识').length).toBeGreaterThan(0)
+    })
+    expect(screen.queryAllByText('与本时间线无关的知识')).toHaveLength(0)
   })
 
   it('RepositoryPanel 情节记忆搜索只有点击搜索后才发起带筛选请求', async () => {
@@ -606,6 +799,71 @@ describe('显式搜索交互', () => {
       expect(fetchMock).toHaveBeenCalledWith('http://localhost:7070/api/knowledge?limit=20&offset=0')
     })
     expect(useAppStore.getState().repositoryMemoryFocusId).toBeNull()
+  })
+
+  it('RepositoryPanel 脱离关联跳转链后再次进入采集页不会重开时间线抽屉', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === 'http://localhost:7070/api/knowledge/7') {
+        return jsonResponse({
+          id: 7,
+          summary: '关联跳转时间线',
+          overview: '不应在普通返回后重开',
+          capture_id: 71,
+          importance: 5,
+          occurrence_count: 1,
+          created_at: '2026-04-11 10:00',
+          created_at_ms: 1,
+          capture_ids: [],
+        })
+      }
+      if (url === 'http://localhost:7070/api/knowledge?limit=20&offset=0') {
+        return jsonResponse({
+          entries: [{
+            id: 6,
+            summary: '普通时间线',
+            overview: '普通列表内容',
+            capture_id: 61,
+            importance: 3,
+            occurrence_count: 1,
+            created_at: '2026-04-11 09:00',
+            created_at_ms: 1,
+            capture_ids: [],
+          }],
+          total: 1,
+          limit: 20,
+          offset: 0,
+        })
+      }
+      if (url.includes('/api/bake/documents') || url.includes('/api/bake/knowledge') || url.includes('/api/bake/sops')) {
+        return jsonResponse({ items: [], total: 0, limit: 1000, offset: 0 })
+      }
+      throw new Error(`unexpected url: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    useAppStore.setState({
+      windowMode: 'knowledge',
+      repositoryTab: 'memory',
+      repositoryMemoryFocusId: '7',
+      selectedMemoryId: '7',
+      bakeNavigationStack: [{ windowMode: 'rag' }],
+      captureBackTarget: { windowMode: 'rag' },
+    })
+
+    const firstVisit = render(<><FloatingBuddy /><RepositoryPanel /></>)
+    expect(await screen.findByRole('dialog', { name: '关联跳转时间线' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('settings-btn'))
+    expect(useAppStore.getState().repositoryMemoryFocusId).toBeNull()
+    firstVisit.unmount()
+
+    useAppStore.getState().setWindowMode('knowledge')
+    render(<RepositoryPanel />)
+
+    expect(await screen.findByText('普通时间线')).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([input]) => String(input) === 'http://localhost:7070/api/knowledge/7')).toHaveLength(1)
   })
 
   it('RepositoryPanel 采集记录不显示查看全部，空条件搜索会清掉来源范围', async () => {
@@ -833,11 +1091,82 @@ describe('显式搜索交互', () => {
       expect(fetchMock).toHaveBeenCalledWith('http://localhost:7070/api/bake/captures?source_capture_id=42&limit=20&offset=0')
     })
     expect(useAppStore.getState().repositoryCaptureSourceCaptureId).toBe('42')
-    expect(useAppStore.getState().selectedCaptureId).toBeNull()
-
-    fireEvent.click(await screen.findByRole('button', { name: '查看采集记录 #42 详情' }))
-
+    // 跳转选中的采集记录不会被加载中的空列表误清
     expect(useAppStore.getState().selectedCaptureId).toBe('42')
+
+    // 跳转到采集记录后自动展开目标详情抽屉
     expect(await screen.findByRole('dialog', { name: '目标页面' })).toBeInTheDocument()
+
+    // 手动关闭抽屉后不会被自动重开
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: '目标页面' })).not.toBeInTheDocument()
+  })
+
+  it('文档详情点击来源时间线后自动展开时间线抽屉', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/models')) return jsonResponse({ ollama: true, llm: true, embedding: true })
+      if (url.includes('/api/bake/overview')) return jsonResponse(overviewResponse)
+      if (url === 'http://localhost:7070/api/knowledge/7') {
+        return jsonResponse({
+          id: 7,
+          summary: '来源时间线',
+          overview: '来源时间线详情',
+          capture_id: 71,
+          importance: 5,
+          occurrence_count: 1,
+          created_at: '2026-04-11 10:00',
+          created_at_ms: 1,
+          capture_ids: [],
+        })
+      }
+      if (url === 'http://localhost:7070/api/bake/documents?limit=20&offset=0') {
+        return jsonResponse({
+          items: [{ ...documentItem(1, '周报模板'), source_memory_ids: [7] }],
+          total: 1,
+          limit: 20,
+          offset: 0,
+        })
+      }
+      if (url.includes('/api/bake/documents') || url.includes('/api/bake/knowledge') || url.includes('/api/bake/sops')) {
+        return jsonResponse({ items: [], total: 0, limit: 1000, offset: 0 })
+      }
+      if (url.includes('/api/knowledge')) {
+        return jsonResponse({ entries: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.includes('/captures')) {
+        return jsonResponse({ total: 0, captures: [] })
+      }
+      throw new Error(`unexpected url: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    useAppStore.setState({
+      windowMode: 'bake',
+      bakeTab: 'templates',
+    })
+
+    const PanelHarness = () => {
+      const windowMode = useAppStore((s) => s.windowMode)
+      return (
+        <>
+          {windowMode === 'bake' && <BakePanel />}
+          {windowMode === 'knowledge' && <RepositoryPanel />}
+        </>
+      )
+    }
+
+    // 与 main.tsx 一致包 StrictMode，暴露双重挂载下的时序问题
+    render(
+      <React.StrictMode>
+        <PanelHarness />
+      </React.StrictMode>,
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: '查看文档「周报模板」详情' }))
+    fireEvent.click(await screen.findByRole('button', { name: '来源时间线' }))
+
+    expect(useAppStore.getState().repositoryMemoryFocusId).toBe('7')
+    expect(await screen.findByRole('dialog', { name: '来源时间线' })).toBeInTheDocument()
   })
 })

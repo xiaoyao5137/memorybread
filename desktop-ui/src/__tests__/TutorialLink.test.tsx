@@ -25,6 +25,22 @@ describe('TutorialLink', () => {
     expect(appMetadataMocks.openExternalUrl).toHaveBeenCalledWith(TUTORIAL_URLS.consult)
   })
 
+  it('标题旁按需显示紧凑的返回操作', () => {
+    const onBack = vi.fn()
+    const { rerender } = render(
+      <BakeHeader title="采集" backAction={{ label: '返回上一步', onClick: onBack }} />,
+    )
+
+    const backButton = screen.getByRole('button', { name: '返回上一步' })
+    expect(screen.getByRole('heading', { name: '采集' })).toBeTruthy()
+    expect(backButton.closest('.bake-header__main')).toBeTruthy()
+    fireEvent.click(backButton)
+    expect(onBack).toHaveBeenCalledTimes(1)
+
+    rerender(<BakeHeader title="采集" />)
+    expect(screen.queryByRole('button', { name: '返回上一步' })).toBeNull()
+  })
+
   it('记忆页会按当前子页面切换教程链接', () => {
     const { rerender } = render(<BakeHeader currentTab="knowledge" />)
     fireEvent.click(screen.getByRole('button', { name: '查看教程（在浏览器中打开）' }))

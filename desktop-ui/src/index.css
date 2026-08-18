@@ -2,6 +2,96 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ========================================
+   全局暗色模式语义 token（macOS 外观）
+   亮色为默认值，暗色在 prefers-color-scheme: dark 中覆盖；
+   内联样式与组件 CSS 统一引用这些变量，保证整站随系统外观切换。
+   ======================================== */
+:root {
+  color-scheme: light dark;
+  --mb-bg-page: #F5F5F7;
+  --mb-bg-card: #FFFFFF;
+  --mb-bg-elevated: #FAFBFC;
+  --mb-bg-inset: #F2F4F7;
+  --mb-bg-input: #FFFFFF;
+  --mb-bg-hover: rgba(15, 23, 42, 0.05);
+  --mb-bg-hover-strong: rgba(15, 23, 42, 0.09);
+  --mb-text-primary: #172033;
+  --mb-text-secondary: #667085;
+  --mb-text-tertiary: #98A2B3;
+  --mb-text-faint: #AEAEB2;
+  --mb-bg-warm: #FFFCF7;
+  --mb-bg-warm-deep: #FFF9EF;
+  --mb-bg-warm-text: #2E2115;
+  --mb-border: rgba(15, 23, 42, 0.08);
+  --mb-border-strong: #E1E5EA;
+  --mb-divider: #EEF0F3;
+  --mb-shadow-card: 0 8px 24px rgba(0, 0, 0, 0.04);
+  --mb-shadow-pop: 0 18px 40px rgba(15, 23, 42, 0.14);
+  --mb-accent: #0F766E;
+  --mb-accent-soft: rgba(15, 118, 110, 0.1);
+  --mb-brand: #B46F2A;
+  --mb-brand-strong: #A45D22;
+  --mb-brand-soft: #FFF8EC;
+  --mb-brand-text: #7A4B20;
+  --mb-brand-border: #DEC6A4;
+  --mb-danger: #B42318;
+  --mb-danger-soft: #FEF3F2;
+  --mb-link: #0066CC;
+  --mb-warning-soft: #FFF6ED;
+  --mb-warning-text: #71411F;
+  --mb-warning-border: #ECC9AD;
+  --mb-status-success-text: #248A3D;
+  --mb-status-failed-text: #D70015;
+  --mb-status-pending-text: #8A5A1F;
+  --mb-scrollbar-track: transparent;
+  --mb-scrollbar-thumb: #CBD5E0;
+  --mb-highlight-inset: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --mb-bg-page: #111315;
+    --mb-bg-card: #1C1C1E;
+    --mb-bg-elevated: #232326;
+    --mb-bg-inset: #29292C;
+    --mb-bg-input: #2C2C2E;
+    --mb-bg-hover: rgba(255, 255, 255, 0.06);
+    --mb-bg-hover-strong: rgba(255, 255, 255, 0.11);
+    --mb-text-primary: #F3F4F6;
+    --mb-text-secondary: #9CA3AF;
+    --mb-text-tertiary: #8E8E93;
+    --mb-text-faint: #7C7C81;
+    --mb-bg-warm: rgba(255, 159, 67, 0.08);
+    --mb-bg-warm-deep: rgba(255, 159, 67, 0.12);
+    --mb-bg-warm-text: #FFC48D;
+    --mb-border: rgba(255, 255, 255, 0.09);
+    --mb-border-strong: rgba(255, 255, 255, 0.14);
+    --mb-divider: rgba(255, 255, 255, 0.08);
+    --mb-shadow-card: 0 8px 24px rgba(0, 0, 0, 0.28);
+    --mb-shadow-pop: 0 18px 40px rgba(0, 0, 0, 0.5);
+    --mb-accent: #2FB3A8;
+    --mb-accent-soft: rgba(47, 179, 168, 0.16);
+    --mb-brand: #E8A25C;
+    --mb-brand-strong: #FFB17A;
+    --mb-brand-soft: rgba(255, 159, 67, 0.14);
+    --mb-brand-text: #FFC48D;
+    --mb-brand-border: rgba(255, 177, 122, 0.3);
+    --mb-danger: #FF6961;
+    --mb-danger-soft: rgba(255, 69, 58, 0.16);
+    --mb-link: #0A84FF;
+    --mb-warning-soft: rgba(255, 159, 67, 0.12);
+    --mb-warning-text: #FFC48D;
+    --mb-warning-border: rgba(255, 177, 122, 0.28);
+    --mb-status-success-text: #4CD964;
+    --mb-status-failed-text: #FF6961;
+    --mb-status-pending-text: #E8A25C;
+    --mb-scrollbar-track: transparent;
+    --mb-scrollbar-thumb: #48484A;
+    --mb-highlight-inset: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  }
+}
+
 /* 全局样式 */
 * {
   margin: 0;
@@ -14,8 +104,8 @@ body {
     'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background: #f8f9fa;
-  color: #1a202c;
+  background: var(--mb-bg-page);
+  color: var(--mb-text-primary);
 }
 
 #root {
@@ -1820,16 +1910,22 @@ body {
 }
 
 ::-webkit-scrollbar-track {
-  background: #f1f1f1;
+  background: var(--mb-scrollbar-track);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #cbd5e0;
+  background: var(--mb-scrollbar-thumb);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
   background: #a0aec0;
+}
+
+@media (prefers-color-scheme: dark) {
+  ::-webkit-scrollbar-thumb:hover {
+    background: #636366;
+  }
 }
 
 /* ========================================
@@ -2155,4 +2251,989 @@ body {
   font-size: 12px;
   font-weight: 600;
   margin-left: 8px;
+}
+
+/* ========================================
+   暗色模式（macOS 暗色外观）
+   覆盖本文件内所有亮色写死的区域：
+   错误边界 / 悬浮球旧样式 / RagPanel / 历史浏览器 /
+   创作技能库 / 技能选择器 / 设置旧版 / 接管确认 / 知识库
+   ======================================== */
+@media (prefers-color-scheme: dark) {
+  /* 面板错误边界 */
+  .panel-error-state {
+    background: #111315;
+  }
+
+  .panel-error-state__card {
+    background: #1C1C1E;
+    border-color: rgba(255, 255, 255, 0.09);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  }
+
+  .panel-error-state__card strong {
+    color: #F3F4F6;
+  }
+
+  .panel-error-state__card span {
+    color: #9CA3AF;
+  }
+
+  .panel-error-state__card button {
+    border-color: #2FB3A8;
+    background: #2FB3A8;
+    color: #06211E;
+  }
+
+  .panel-error-state__card button:hover {
+    background: #3AC4B8;
+  }
+
+  /* 悬浮球（旧版样式兼容） */
+  .buddy-settings-btn,
+  .buddy-knowledge-btn {
+    background: rgba(44, 44, 46, 0.9);
+    color: #F3F4F6;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  }
+
+  .buddy-settings-btn:hover,
+  .buddy-knowledge-btn:hover {
+    background: #2C2C2E;
+  }
+
+  /* RagPanel 知识唤醒面板 */
+  .rag-panel {
+    background: #111315;
+  }
+
+  .rag-panel__top-tabs {
+    background: #1C1C1E;
+    border-bottom-color: rgba(255, 255, 255, 0.09);
+  }
+
+  .rag-panel__top-tab {
+    color: #9CA3AF;
+  }
+
+  .rag-panel__top-tab--active {
+    border-bottom-color: #2FB3A8;
+    color: #2FB3A8;
+  }
+
+  .rag-panel__header,
+  .rag-panel__form,
+  .rag-panel__answer,
+  .rag-panel__templates {
+    background: #1C1C1E;
+    border-color: rgba(255, 255, 255, 0.09);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  }
+
+  .rag-panel__title {
+    color: #F3F4F6;
+  }
+
+  .rag-panel__header-subtitle {
+    color: #9CA3AF;
+  }
+
+  .rag-panel__input {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+    color: #F3F4F6;
+  }
+
+  .rag-panel__input::placeholder {
+    color: #8E8E93;
+  }
+
+  .rag-panel__credit-balance {
+    color: #9CA3AF;
+  }
+
+  .rag-panel__attach-btn {
+    border-color: rgba(255, 177, 122, 0.3);
+    background: rgba(255, 159, 67, 0.1);
+    color: #FFC48D;
+  }
+
+  .rag-panel__attachment {
+    border-color: rgba(255, 177, 122, 0.24);
+    background: rgba(255, 159, 67, 0.12);
+    color: #FFC48D;
+  }
+
+  .rag-panel__attachment small {
+    color: #C99B6F;
+  }
+
+  .rag-panel__attachment button {
+    background: rgba(255, 177, 122, 0.16);
+    color: #FFC48D;
+  }
+
+  .rag-panel__attachment-error {
+    color: #FF6961;
+  }
+
+  .rag-panel__error {
+    background: rgba(255, 69, 58, 0.14);
+    color: #FF6961;
+    border-left-color: #FF6961;
+  }
+
+  .rag-panel__document {
+    background: #1C1C1E;
+    border-color: rgba(255, 255, 255, 0.09);
+  }
+
+  .rag-panel__document-header {
+    border-bottom-color: rgba(255, 255, 255, 0.09);
+  }
+
+  .rag-panel__document-title {
+    color: #F3F4F6;
+  }
+
+  .rag-panel__document-title .bread-icon,
+  .rag-panel__bottom-tab .bread-icon,
+  .rag-panel__document-header button .bread-icon {
+    --bread-icon-line: #FFC48D;
+    --bread-icon-accent: #E8A25C;
+    --bread-icon-glass-edge: rgba(255, 177, 122, 0.24);
+  }
+
+  .rag-panel__document-body {
+    color: #E5E7EB;
+  }
+
+  .rag-panel__document-empty {
+    color: #9CA3AF;
+  }
+
+  .rag-panel__bottom-tabs {
+    background: #1C1C1E;
+    border-color: rgba(255, 255, 255, 0.09);
+  }
+
+  .rag-panel__bottom-tab {
+    color: #9CA3AF;
+  }
+
+  .rag-panel__bottom-tab--active {
+    border-top-color: #E8A25C;
+    color: #FFC48D;
+  }
+
+  .rag-panel__bottom-panel {
+    background: #232326;
+    border-color: rgba(255, 255, 255, 0.09);
+  }
+
+  .rag-panel__reference-item {
+    background: #232326;
+    border-color: rgba(255, 255, 255, 0.09);
+  }
+
+  .rag-panel__reference-title {
+    color: #F3F4F6;
+  }
+
+  .rag-panel__reference-meta {
+    color: #9CA3AF;
+  }
+
+  .rag-panel__reference-text {
+    color: #D1D5DB;
+  }
+
+  .rag-panel__history-item {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #1C1C1E;
+  }
+
+  .rag-panel__history-item:hover {
+    border-color: #2FB3A8;
+  }
+
+  .rag-panel__history-shot {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #232326;
+  }
+
+  .rag-panel__history-shot--unavailable {
+    border-color: rgba(255, 177, 122, 0.18);
+    background: rgba(255, 159, 67, 0.08);
+  }
+
+  .rag-panel__history-shot-placeholder {
+    color: #C99B6F;
+  }
+
+  .rag-panel__history-query {
+    color: #F3F4F6;
+  }
+
+  .rag-panel__history-meta,
+  .rag-panel__bottom-empty,
+  .rag-panel__history-empty {
+    color: #9CA3AF;
+  }
+
+  /* 历史浏览器（咨询/创作记录共用） */
+  .history-browser__search {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+    color: #9CA3AF;
+  }
+
+  .history-browser__search:focus-within {
+    border-color: #2FB3A8;
+    box-shadow: 0 0 0 3px rgba(47, 179, 168, 0.16);
+  }
+
+  .history-browser__search input {
+    color: #F3F4F6;
+  }
+
+  .history-browser__search input::placeholder {
+    color: #8E8E93;
+  }
+
+  .history-browser__search button {
+    color: #9CA3AF;
+  }
+
+  .history-browser__search button:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: #F3F4F6;
+  }
+
+  .history-browser__count {
+    color: #9CA3AF;
+  }
+
+  .history-browser__state {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: rgba(28, 28, 30, 0.6);
+    color: #9CA3AF;
+  }
+
+  .history-browser__state--error {
+    border-color: rgba(255, 69, 58, 0.35);
+    background: rgba(255, 69, 58, 0.1);
+    color: #FF6961;
+  }
+
+  .history-browser__state button,
+  .history-browser__pagination button {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+    color: #D1D5DB;
+  }
+
+  .history-browser__state button:hover,
+  .history-browser__pagination button:not(:disabled):hover {
+    border-color: #2FB3A8;
+    color: #2FB3A8;
+  }
+
+  .history-browser__pagination {
+    border-top-color: rgba(255, 255, 255, 0.09);
+    color: #9CA3AF;
+  }
+
+  .creation-history__item {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #1C1C1E;
+  }
+
+  .creation-history__item:hover {
+    border-color: #2FB3A8;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  }
+
+  .creation-history__title {
+    color: #F3F4F6;
+  }
+
+  .creation-history__meta {
+    color: #9CA3AF;
+  }
+
+  .creation-history__preview {
+    color: #D1D5DB;
+  }
+
+  /* 创作技能库 */
+  .creation-skill-library > header h2 {
+    color: #F3F4F6;
+  }
+
+  .creation-skill-library > header button,
+  .creation-skill-library__grid footer button,
+  .creation-skill-library__empty button,
+  .creation-skill-market-pagination button {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+    color: #D1D5DB;
+  }
+
+  .creation-skill-upload > button[aria-expanded="true"] {
+    border-color: rgba(255, 177, 122, 0.4);
+    background: rgba(255, 159, 67, 0.14);
+    color: #FFC48D;
+  }
+
+  .creation-skill-upload__menu {
+    border-color: rgba(255, 177, 122, 0.2);
+    background: #232326;
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+  }
+
+  .creation-skill-library > header .creation-skill-upload__menu button:hover {
+    background: rgba(255, 159, 67, 0.12);
+  }
+
+  .creation-skill-upload__menu button > svg {
+    color: #E8A25C;
+  }
+
+  .creation-skill-upload__menu button strong {
+    color: #F3F4F6;
+  }
+
+  .creation-skill-upload__menu button small {
+    color: #9CA3AF;
+  }
+
+  .creation-skill-library__switcher {
+    border-color: rgba(255, 255, 255, 0.12);
+    background: #232326;
+  }
+
+  .creation-skill-library__switcher button {
+    color: #9CA3AF;
+  }
+
+  .creation-skill-library__switcher button.is-active {
+    border-color: rgba(255, 177, 122, 0.35);
+    background: rgba(255, 159, 67, 0.14);
+    color: #FFC48D;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  }
+
+  .creation-skill-market-search__field {
+    color: #9CA3AF;
+  }
+
+  .creation-skill-market-search__query {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+  }
+
+  .creation-skill-market-search__query svg {
+    color: #E8A25C;
+  }
+
+  .creation-skill-market-search input {
+    color: #F3F4F6;
+  }
+
+  .creation-skill-market-search input::placeholder {
+    color: #8E8E93;
+  }
+
+  .creation-skill-category-combobox {
+    color: #F3F4F6;
+  }
+
+  .creation-skill-category-combobox__control {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+  }
+
+  .creation-skill-category-combobox__control:hover {
+    border-color: rgba(255, 177, 122, 0.35);
+    background: #333336;
+  }
+
+  .creation-skill-category-combobox__control:focus-within {
+    border-color: #E8A25C;
+    box-shadow: 0 0 0 3px rgba(232, 162, 92, 0.18);
+  }
+
+  .creation-skill-category-combobox__control > svg {
+    color: #E8A25C;
+  }
+
+  .creation-skill-category-combobox__control input {
+    color: #F3F4F6;
+  }
+
+  .creation-skill-category-combobox__control input::placeholder {
+    color: #8E8E93;
+  }
+
+  .creation-skill-category-combobox__menu {
+    border-color: rgba(255, 177, 122, 0.2);
+    background: #232326;
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+  }
+
+  .creation-skill-category-combobox__menu button {
+    color: #F3F4F6;
+  }
+
+  .creation-skill-category-combobox__menu button:hover,
+  .creation-skill-category-combobox__menu button.is-active {
+    background: rgba(255, 159, 67, 0.12);
+  }
+
+  .creation-skill-category-combobox__menu small {
+    color: #9CA3AF;
+  }
+
+  .creation-skill-category-combobox__menu button > svg {
+    color: #E8A25C;
+  }
+
+  .creation-skill-category-combobox__empty {
+    color: #9CA3AF;
+  }
+
+  .creation-skill-market-search > button {
+    border-color: #B8722E;
+    background: #B8722E;
+    color: #fff;
+  }
+
+  .creation-skill-library__feedback.is-error {
+    border-color: rgba(255, 69, 58, 0.35);
+    background: rgba(255, 69, 58, 0.12);
+    color: #FF6961;
+  }
+
+  .creation-skill-library__grid > article {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #1C1C1E;
+  }
+
+  .creation-skill-library__status {
+    background: rgba(47, 179, 168, 0.14);
+    color: #2FB3A8;
+  }
+
+  .creation-skill-library__status.is-official {
+    border-color: rgba(255, 177, 122, 0.3);
+    background: rgba(255, 159, 67, 0.14);
+    color: #FFC48D;
+  }
+
+  .creation-skill-library__title-status > span:not(.creation-skill-library__status) {
+    color: #8E8E93;
+  }
+
+  .creation-skill-library__title-status > span.is-installed {
+    color: #E8A25C;
+  }
+
+  .creation-skill-library__title {
+    color: #F3F4F6;
+  }
+
+  .creation-skill-library__title:hover {
+    color: #FFC48D;
+  }
+
+  .creation-skill-library__grid p {
+    color: #9CA3AF;
+  }
+
+  .creation-skill-library__meta {
+    color: #8E8E93;
+  }
+
+  .creation-skill-library__grid footer {
+    border-top-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .creation-skill-library__grid footer button.is-installed {
+    border-color: rgba(255, 177, 122, 0.3);
+    background: rgba(255, 159, 67, 0.12);
+    color: #FFC48D;
+  }
+
+  .creation-skill-library__grid footer button.is-unpublish {
+    border-color: rgba(255, 69, 58, 0.32);
+    background: rgba(255, 69, 58, 0.12);
+    color: #FF6961;
+  }
+
+  .creation-skill-library__empty {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: rgba(28, 28, 30, 0.6);
+    color: #9CA3AF;
+  }
+
+  .creation-skill-library__empty svg {
+    color: #2FB3A8;
+  }
+
+  .creation-skill-library__empty strong {
+    color: #D1D5DB;
+  }
+
+  .creation-skill-market-count,
+  .creation-skill-market-pagination span {
+    color: #9CA3AF;
+  }
+
+  /* 技能删除确认弹窗 */
+  .creation-skill-delete-confirm {
+    border-color: rgba(255, 177, 122, 0.2);
+    background: #232326;
+    box-shadow: 0 26px 72px rgba(0, 0, 0, 0.55);
+  }
+
+  .creation-skill-delete-confirm__icon {
+    background: rgba(255, 69, 58, 0.14);
+    color: #FF6961;
+  }
+
+  .creation-skill-delete-confirm h2 {
+    color: #F3F4F6;
+  }
+
+  .creation-skill-delete-confirm p {
+    color: #9CA3AF;
+  }
+
+  .creation-skill-delete-confirm footer button {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+    color: #D1D5DB;
+  }
+
+  /* 创作页技能选择器与技能胶囊 */
+  .creation-skill-picker {
+    border-color: rgba(255, 177, 122, 0.22);
+    background: #232326;
+    box-shadow: 0 16px 42px rgba(0, 0, 0, 0.5);
+  }
+
+  .creation-skill-picker > header {
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+    background: rgba(35, 35, 38, 0.96);
+    color: #FFC48D;
+  }
+
+  .creation-skill-picker > header small {
+    color: #C99B6F;
+  }
+
+  .creation-skill-picker > button {
+    border-bottom-color: rgba(255, 255, 255, 0.06);
+    color: #D1D5DB;
+  }
+
+  .creation-skill-picker > button:hover,
+  .creation-skill-picker > button:focus-visible,
+  .creation-skill-picker > button[aria-selected="true"] {
+    background: rgba(255, 159, 67, 0.12);
+  }
+
+  .creation-skill-picker > button strong {
+    color: #F3F4F6;
+  }
+
+  .creation-skill-picker > button span {
+    color: #9CA3AF;
+  }
+
+  .creation-skill-picker__empty {
+    color: #C99B6F;
+  }
+
+  .creation-matched-skills > span:not(.creation-matched-skill),
+  .creation-document-skills > span {
+    color: #FFC48D;
+  }
+
+  .creation-matched-skill,
+  .creation-document-skills > button {
+    border-color: rgba(255, 177, 122, 0.3);
+    background: rgba(255, 159, 67, 0.12);
+    color: #FFC48D;
+  }
+
+  .creation-matched-skill__detail small {
+    border-left-color: rgba(255, 177, 122, 0.24);
+    color: #E8A25C;
+  }
+
+  .creation-matched-skill__dismiss {
+    border-left-color: rgba(255, 177, 122, 0.24);
+    color: #E8A25C;
+  }
+
+  .creation-matched-skill__detail:hover,
+  .creation-matched-skill__dismiss:hover {
+    background: rgba(255, 159, 67, 0.2);
+    color: #FFC48D;
+  }
+
+  .creation-document-skills > button small {
+    border-left-color: rgba(255, 177, 122, 0.24);
+    color: #E8A25C;
+  }
+
+  .creation-document-skills {
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 159, 67, 0.05);
+  }
+
+  /* Markdown 渲染与答案区 */
+  .rag-panel__answer-header {
+    color: #D1D5DB;
+  }
+
+  .rag-panel__copy-btn {
+    color: #9CA3AF;
+    background: #2C2C2E;
+    border-color: rgba(255, 255, 255, 0.12);
+  }
+
+  .rag-panel__copy-btn:hover {
+    color: #F3F4F6;
+    border-color: rgba(255, 255, 255, 0.2);
+    background: #333336;
+  }
+
+  .rag-panel__copy-btn--copied {
+    color: #6EE7A0;
+    border-color: rgba(52, 199, 89, 0.4);
+    background: rgba(52, 199, 89, 0.12);
+  }
+
+  .rag-panel__answer-content--markdown,
+  .rag-panel__answer-text {
+    color: #E5E7EB;
+  }
+
+  .rag-panel__answer-content--markdown h1,
+  .rag-panel__answer-content--markdown h2,
+  .rag-panel__answer-content--markdown h3,
+  .rag-panel__answer-content--markdown h4,
+  .rag-panel__answer-content--markdown strong {
+    color: #F3F4F6;
+  }
+
+  .rag-panel__answer-content--markdown h2 {
+    border-bottom-color: rgba(255, 255, 255, 0.1);
+  }
+
+  .rag-panel__answer-content--markdown code {
+    background: #2C2C2E;
+    color: #FFC48D;
+  }
+
+  .rag-panel__answer-content--markdown blockquote {
+    color: #D1D5DB;
+  }
+
+  .rag-panel__answer-content--markdown th,
+  .rag-panel__answer-content--markdown td {
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+
+  .rag-panel__answer-content--markdown th {
+    background: #232326;
+    color: #F3F4F6;
+  }
+
+  .rag-panel__answer-content--markdown tr:nth-child(even) td {
+    background: #232326;
+  }
+
+  /* 上下文引用区 */
+  .rag-panel__contexts {
+    background: #1C1C1E;
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+
+  .rag-panel__contexts-header {
+    color: #D1D5DB;
+  }
+
+  .rag-panel__contexts-title {
+    color: #9CA3AF;
+  }
+
+  .rag-panel__context-item {
+    background: #232326;
+    border-left-color: #0A84FF;
+  }
+
+  .rag-panel__context-item:hover {
+    background: #29292C;
+  }
+
+  .rag-panel__context-source {
+    color: #0A84FF;
+  }
+
+  .rag-panel__context-text {
+    color: #D1D5DB;
+  }
+
+  /* 空状态 */
+  .rag-panel__empty {
+    color: #9CA3AF;
+  }
+
+  .rag-panel__empty p {
+    color: #D1D5DB;
+  }
+
+  .rag-panel__empty-hint {
+    color: #9CA3AF;
+  }
+
+  .rag-panel__empty li {
+    background: #232326;
+    border-left-color: rgba(255, 255, 255, 0.16);
+    color: #D1D5DB;
+  }
+
+  .rag-panel__empty li:hover {
+    background: #29292C;
+    border-left-color: #0A84FF;
+  }
+
+  /* 任务模板区 */
+  .rag-panel__template-chip {
+    background: color-mix(in srgb, var(--chip-color, #4a90e2) 14%, #1C1C1E);
+    border-color: color-mix(in srgb, var(--chip-color, #4a90e2) 34%, transparent);
+    color: color-mix(in srgb, var(--chip-color, #4a90e2) 62%, #F3F4F6);
+  }
+
+  .rag-panel__template-chip:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--chip-color, #4a90e2) 24%, #1C1C1E);
+  }
+
+  .rag-panel__templates-collapsed {
+    border-color: rgba(255, 255, 255, 0.09);
+  }
+
+  .rag-panel__templates-toggle {
+    background: #232326;
+    color: #D1D5DB;
+  }
+
+  .rag-panel__templates-toggle:hover {
+    background: #29292C;
+  }
+
+  /* 设置（旧版） */
+  .settings {
+    background: #1C1C1E;
+  }
+
+  /* 接管确认弹窗 */
+  .action-confirm-dialog {
+    background: #1C1C1E;
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+  }
+
+  .action-confirm__title {
+    color: #F3F4F6;
+  }
+
+  .action-confirm__action {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #232326;
+  }
+
+  .action-confirm__action strong,
+  .action-confirm__details span {
+    color: #9CA3AF;
+  }
+
+  .action-confirm__details {
+    border-color: rgba(255, 255, 255, 0.09);
+  }
+
+  .action-confirm__details strong {
+    color: #F3F4F6;
+  }
+
+  .action-confirm__details small {
+    color: #8E8E93;
+  }
+
+  .action-confirm__warning {
+    border-color: rgba(255, 177, 122, 0.28);
+    background: rgba(255, 159, 67, 0.12);
+    color: #FFC48D;
+  }
+
+  .action-confirm__description {
+    color: #9CA3AF;
+  }
+
+  .action-confirm__btn--cancel {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+    color: #D1D5DB;
+  }
+
+  .action-confirm__btn--confirm {
+    background: #C77E3A;
+    color: #FFF8F0;
+  }
+
+  .action-confirm__button--cancel {
+    background: #2C2C2E;
+    color: #D1D5DB;
+  }
+
+  .action-confirm__button--cancel:hover {
+    background: #3A3A3C;
+  }
+
+  /* 知识库面板 */
+  .knowledge-panel {
+    background: #111315;
+  }
+
+  .knowledge-panel__header {
+    background: linear-gradient(135deg, #2C2C2E 0%, #232326 100%);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  }
+
+  .knowledge-panel__toolbar {
+    background: #1C1C1E;
+    border-bottom-color: rgba(255, 255, 255, 0.09);
+  }
+
+  .filter-btn {
+    border-color: rgba(255, 255, 255, 0.12);
+    background: #2C2C2E;
+    color: #D1D5DB;
+  }
+
+  .filter-btn:hover {
+    border-color: #0A84FF;
+    color: #0A84FF;
+  }
+
+  .filter-btn.active {
+    background: #0A84FF;
+    border-color: #0A84FF;
+    color: #fff;
+  }
+
+  .search-input {
+    border-color: rgba(255, 255, 255, 0.12);
+    background: #2C2C2E;
+    color: #F3F4F6;
+  }
+
+  .search-input:focus {
+    border-color: #0A84FF;
+    box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.16);
+  }
+
+  .search-btn {
+    background: #0A84FF;
+  }
+
+  .search-btn:hover {
+    background: #0071E3;
+  }
+
+  .knowledge-panel__error {
+    background: rgba(255, 69, 58, 0.14);
+    color: #FF6961;
+    border-left-color: #FF6961;
+  }
+
+  .knowledge-panel__loading,
+  .knowledge-panel__empty {
+    color: #9CA3AF;
+  }
+
+  .knowledge-item {
+    background: #1C1C1E;
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+
+  .knowledge-item:hover {
+    border-color: #0A84FF;
+    box-shadow: 0 4px 12px rgba(10, 132, 255, 0.14);
+  }
+
+  .knowledge-item__title {
+    color: #F3F4F6;
+  }
+
+  .knowledge-item__meta {
+    color: #9CA3AF;
+  }
+
+  .knowledge-item__badge {
+    background: #2C2C2E;
+    color: #D1D5DB;
+  }
+
+  .knowledge-item__badge.verified {
+    background: rgba(52, 199, 89, 0.16);
+    color: #6EE7A0;
+  }
+
+  .knowledge-item__summary {
+    color: #D1D5DB;
+  }
+
+  .entity-tag {
+    background: rgba(10, 132, 255, 0.14);
+    color: #6FB7FF;
+  }
+
+  .action-btn {
+    border-color: rgba(255, 255, 255, 0.12);
+    background: #2C2C2E;
+    color: #D1D5DB;
+  }
+
+  .action-btn:hover {
+    border-color: #0A84FF;
+    color: #0A84FF;
+    background: #333336;
+  }
+
+  .action-btn.danger:hover {
+    border-color: #FF6961;
+    color: #FF6961;
+    background: rgba(255, 69, 58, 0.12);
+  }
+
+  .knowledge-panel__empty-text {
+    color: #D1D5DB;
+  }
+
+  .knowledge-item__details {
+    background: #232326;
+    border-left-color: #0A84FF;
+  }
+
+  .details-label {
+    color: #9CA3AF;
+  }
+
+  .details-content {
+    color: #E5E7EB;
+  }
 }

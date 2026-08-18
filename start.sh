@@ -61,6 +61,13 @@ STATE_DIR="$HOME/.memory-bread/state"
 mkdir -p "$STATE_DIR"
 SUPERVISOR_SHUTDOWN_MARKER="$STATE_DIR/supervisor-shutdown-in-progress"
 
+# 启动互斥锁：桌面端 supervisor 每 15 秒巡检一次 start-backends，与终端手动
+# restart 并发时，两份实例会各自 spawn 服务并互相覆盖 pid 文件，先启动的健康
+# 进程会变成无登记的孤儿并占住端口，后启动的随后 bind 失败报错。所有会变更
+# 进程状态的命令必须先拿到这把锁。
+START_LOCK_DIR="$STATE_DIR/start-lock"
+START_LOCK_PID_FILE="$START_LOCK_DIR/pid"
+
 # PID 文件
 SIDECAR_PID_FILE="$LOG_DIR/sidecar.pid"
 MODEL_API_PID_FILE="$LOG_DIR/model_api.pid"
@@ -109,6 +116,43 @@ log_warn() {
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
+}
+
+release_start_lock() {
+    rm -rf "$START_LOCK_DIR" 2>/dev/null || true
+}
+
+acquire_start_lock() {
+    local command="${1:-}"
+    case "$command" in
+        start|start-backends|stop|stop-after-app|restart)
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+
+    local waited=0
+    local max_wait=300
+    while ! mkdir "$START_LOCK_DIR" 2>/dev/null; do
+        # 持锁进程已不存在时回收陈旧锁（崩溃/kill -9 遗留），避免永久死锁。
+        local holder
+        holder=$(tr -d '[:space:]' < "$START_LOCK_PID_FILE" 2>/dev/null || true)
+        if [ -n "$holder" ] && ! ps -p "$holder" > /dev/null 2>&1; then
+            log_warn "回收陈旧的启动锁（原持有者 PID $holder 已退出）"
+            rm -rf "$START_LOCK_DIR" 2>/dev/null || true
+            continue
+        fi
+        if [ "$waited" -ge "$max_wait" ]; then
+            log_error "另一个 start.sh（PID: ${holder:-未知}）正在执行启停操作，已等待 ${max_wait}s，本次退出"
+            exit 1
+        fi
+        [ "$waited" -eq 0 ] && log_info "另一个 start.sh 正在执行启停操作，等待其完成..."
+        sleep 2
+        waited=$((waited + 2))
+    done
+    echo $$ > "$START_LOCK_PID_FILE" 2>/dev/null || true
+    trap 'release_start_lock' EXIT
 }
 
 maybe_delegate_to_workspace_supervisor() {
@@ -560,6 +604,28 @@ ensure_ollama_running() {
     fi
 }
 
+# 端口上已有属于本项目的健康监听进程时，把它收养为受管进程（写入 pid 文件）。
+# 用于回收历史并发启动竞争遗留的健康孤儿：它们服务正常但没有 pid 文件登记，
+# 直接杀掉重启会白白浪费一次冷启动，还会再次触发端口竞争。
+adopt_healthy_listener() {
+    local port=$1
+    local pid_file=$2
+    local label=$3
+    local url=$4
+    local pid
+
+    for pid in $(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | sort -u || true); do
+        [ -n "$pid" ] || continue
+        pid_belongs_to_memorybread "$pid" || continue
+        if is_http_ok "$url"; then
+            echo "$pid" > "$pid_file"
+            log_warn "收养已在监听 ${port} 的健康 ${label} 孤儿进程 (PID: $pid)，跳过重新启动"
+            return 0
+        fi
+    done
+    return 1
+}
+
 cleanup_port() {
     local port=$1
     local label=$2
@@ -711,11 +777,12 @@ wait_for_managed_http() {
     local url=$1
     local label=$2
     local pid_file=$3
-    local retries=${4:-20}
-    local delay=${5:-1}
+    local port=$4
+    local retries=${5:-20}
+    local delay=${6:-1}
 
     for ((i=1; i<=retries; i++)); do
-        if curl -fsS "$url" > /dev/null 2>&1; then
+        if is_managed_http_ok "$url" "$pid_file" "$port"; then
             log_success "${label} 健康检查通过"
             return 0
         fi
@@ -726,13 +793,38 @@ wait_for_managed_http() {
         sleep "$delay"
     done
 
-    log_warn "${label} 健康检查超时，请查看日志"
+    log_warn "${label} 健康检查超时：受管进程未监听预期端口 ${port}"
     return 1
 }
 
 is_http_ok() {
     local url=$1
     curl -fsS "$url" > /dev/null 2>&1
+}
+
+pid_listens_on_port() {
+    local pid=$1
+    local port=$2
+    local listener
+
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    while IFS= read -r listener; do
+        [ "$listener" = "$pid" ] && return 0
+    done < <(lsof -nP -a -p "$pid" -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)
+    return 1
+}
+
+is_managed_http_ok() {
+    local url=$1
+    local pid_file=$2
+    local port=$3
+    local pid
+
+    is_running "$pid_file" || return 1
+    pid=$(tr -d '[:space:]' < "$pid_file")
+    pid_listens_on_port "$pid" "$port" || return 1
+    is_http_ok "$url"
 }
 
 check_core_api_readiness() {
@@ -790,10 +882,10 @@ show_status() {
 
     if is_running "$CREATION_PID_FILE"; then
         local creation_pid=$(cat "$CREATION_PID_FILE")
-        if is_http_ok "http://localhost:${CREATION_PORT}/health"; then
+        if is_managed_http_ok "http://localhost:${CREATION_PORT}/health" "$CREATION_PID_FILE" "$CREATION_PORT"; then
             log_success "Creation Service: 运行中 (PID: ${creation_pid}, Port: ${CREATION_PORT})"
         else
-            log_error "Creation Service: 进程存在但接口未就绪 (PID: ${creation_pid}, Port: ${CREATION_PORT})"
+            log_error "Creation Service: 受管进程未监听预期端口或接口未就绪 (PID: ${creation_pid}, Port: ${CREATION_PORT})"
             failed=1
         fi
     else
@@ -1127,6 +1219,12 @@ start_sidecar() {
 
     cleanup_port "$MODEL_API_PORT" "Model API / RAG API"
 
+    # 日志轮转：启动会把 sidecar.log 截断重写，先把上一会话的日志保留为
+    # sidecar.log.prev，避免凌晨异常现场被覆盖后无日志可查。
+    if [ -f "$SIDECAR_LOG" ]; then
+        mv -f "$SIDECAR_LOG" "${SIDECAR_LOG}.prev"
+    fi
+
     # 启动 Sidecar（后台运行）
     nohup .venv/bin/python main.py > "$SIDECAR_LOG" 2>&1 &
     echo $! > "$SIDECAR_PID_FILE"
@@ -1166,14 +1264,43 @@ start_sidecar() {
 # 启动 Creation Service
 start_creation_service() {
     if is_running "$CREATION_PID_FILE"; then
-        if creation_service_sources_changed; then
-            log_info "检测到 Creation Service 源码晚于当前进程，将加载最新代码"
-            stop_managed_process "$CREATION_PID_FILE" "Creation Service"
+        if is_managed_http_ok "http://127.0.0.1:${CREATION_PORT}/health" "$CREATION_PID_FILE" "$CREATION_PORT"; then
+            if creation_service_sources_changed; then
+                log_info "检测到 Creation Service 源码晚于当前进程，将加载最新代码"
+                stop_managed_process "$CREATION_PID_FILE" "Creation Service"
+            else
+                log_info "Creation Service 已在运行且代码未变化，复用现有进程"
+                return 0
+            fi
         else
-            log_info "Creation Service 已在运行且代码未变化，复用现有进程"
-            wait_for_http "http://127.0.0.1:${CREATION_PORT}/health" "Creation Service" 10 1 || log_warn "现有 Creation Service 进程健康检查失败，建议执行 ./start.sh restart"
-            return 0
+            # 受管进程存活但尚未就绪：冷启动要加载 embedding 与模型注册表，
+            # 旧逻辑会在此直接杀掉重拉；与并发启动叠加时会互相覆盖 pid 文件、
+            # 制造孤儿。先等它完成启动，真的退出了 wait 会提前返回再重拉。
+            log_info "Creation Service 受管进程存活但未就绪，等待冷启动完成..."
+            if wait_for_managed_http \
+                "http://127.0.0.1:${CREATION_PORT}/health" \
+                "Creation Service" \
+                "$CREATION_PID_FILE" \
+                "$CREATION_PORT" \
+                "$CREATION_STARTUP_RETRIES" \
+                1; then
+                if creation_service_sources_changed; then
+                    log_info "检测到 Creation Service 源码晚于当前进程，将加载最新代码"
+                    stop_managed_process "$CREATION_PID_FILE" "Creation Service"
+                else
+                    return 0
+                fi
+            else
+                log_warn "Creation Service 受管进程未监听预期端口，自动清理后重启"
+                stop_managed_process "$CREATION_PID_FILE" "Creation Service"
+            fi
         fi
+    fi
+
+    # 无登记进程但端口已被健康的本项目孤儿占用时直接收养，避免重复冷启动
+    # 后 bind 冲突报错。
+    if adopt_healthy_listener "$CREATION_PORT" "$CREATION_PID_FILE" "Creation Service" "http://127.0.0.1:${CREATION_PORT}/health"; then
+        return 0
     fi
 
     log_info "启动 Creation Service..."
@@ -1206,13 +1333,18 @@ start_creation_service() {
         "http://127.0.0.1:${CREATION_PORT}/health" \
         "Creation Service" \
         "$CREATION_PID_FILE" \
+        "$CREATION_PORT" \
         "$CREATION_STARTUP_RETRIES" \
         1 || {
-        log_error "Creation Service 启动失败，请查看日志: $CREATION_LOG"
-        if ! ps -p "$(cat "$CREATION_PID_FILE" 2>/dev/null)" > /dev/null 2>&1; then
-            rm -f "$CREATION_PID_FILE"
+        # 新进程启动失败时，若端口上已有健康的本项目进程（例如并发启动的
+        # 先到的兄弟进程），收养它继续，而不是把整套服务卡死在失败态。
+        if adopt_healthy_listener "$CREATION_PORT" "$CREATION_PID_FILE" "Creation Service" "http://127.0.0.1:${CREATION_PORT}/health"; then
+            log_warn "Creation Service 新进程启动失败，但已收养现存健康进程，继续后续启动"
+        else
+            log_error "Creation Service 启动失败，请查看日志: $CREATION_LOG"
+            stop_managed_process "$CREATION_PID_FILE" "Creation Service 启动失败进程"
+            exit 1
         fi
-        exit 1
     }
 }
 
@@ -1324,6 +1456,8 @@ main() {
         shift
     fi
 
+    acquire_start_lock "$command"
+
     echo ""
     echo "╔════════════════════════════════════════╗"
     echo "║     记忆面包 启动脚本 v1.0           ║"
@@ -1366,7 +1500,8 @@ main() {
             # 标记覆盖完整重启窗口，不能在旧进程刚退出时就删除。否则它已经
             # 派生的 stop-after-app 会在新进程启动后执行，再次停掉整套服务。
             # EXIT 兜底保证中途构建或启动失败时不会遗留永久抑制清理的标记。
-            trap 'rm -f "$SUPERVISOR_SHUTDOWN_MARKER"' EXIT
+            # 注意：这个 trap 会覆盖启动锁的 EXIT 释放，必须一并释放锁。
+            trap 'rm -f "$SUPERVISOR_SHUTDOWN_MARKER"; release_start_lock' EXIT
             stop_all true
             sleep 2
             check_path_leaks
@@ -1377,7 +1512,7 @@ main() {
             start_core
             start_ui
             rm -f "$SUPERVISOR_SHUTDOWN_MARKER"
-            trap - EXIT
+            trap 'release_start_lock' EXIT
             show_status
             log_info "联调测试前请优先使用 ./start.sh restart，7071 由 model_api_server.py 统一提供 /api/models + /query，避免旧进程状态污染测试结果"
             ;;

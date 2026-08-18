@@ -7,6 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 
 use crate::{
     api::{error::ApiError, state::AppState},
@@ -17,7 +18,12 @@ use crate::{
         BakeStyleConfig, CreateOrUpdateDocumentRequest, CreateOrUpdateKnowledgeRequest,
         CreateOrUpdateSopRequest, InitializeBakeMemoriesResponse, MAX_BAKE_RETRY_FAILURES,
     },
-    storage::{models_bake::BakeQueueStatusRecord, repo::favorite::is_supported_favorite_kind},
+    storage::{
+        db::current_ts_ms,
+        models::{EventType, NewCapture},
+        models_bake::{BakeArtifactAuditRecord, BakeQueueStatusRecord},
+        repo::favorite::is_supported_favorite_kind,
+    },
 };
 
 #[derive(serde::Deserialize)]
@@ -106,6 +112,24 @@ pub struct MemoryFavoriteResponse {
     pub resource_kind: String,
     pub resource_id: i64,
     pub is_favorite: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct BakeArtifactAuditsResponse {
+    pub timeline_id: i64,
+    pub items: Vec<BakeArtifactAuditRecord>,
+}
+
+pub async fn get_bake_artifact_audits(
+    State(state): State<Arc<AppState>>,
+    Path(timeline_id): Path<i64>,
+    Query(params): Query<BakePaginationQuery>,
+) -> Result<Json<BakeArtifactAuditsResponse>, ApiError> {
+    let limit = params.limit.unwrap_or(30).clamp(1, 100);
+    let items = state
+        .storage
+        .list_bake_artifact_audits_for_timeline(timeline_id, limit)?;
+    Ok(Json(BakeArtifactAuditsResponse { timeline_id, items }))
 }
 
 pub async fn get_bake_queue_status(
@@ -520,6 +544,104 @@ pub async fn delete_bake_capture(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// 手动新建采集记录的请求体。
+#[derive(serde::Deserialize)]
+pub struct CreateManualCaptureRequest {
+    /// 窗口/页面标题（必填）
+    pub title: String,
+    /// 应用名称（可选）
+    pub app_name: Option<String>,
+    /// 用户输入的文本信息（可选）
+    pub text: Option<String>,
+    /// 截图的 base64 编码（不含 data: 前缀，可选）
+    pub screenshot_base64: Option<String>,
+}
+
+pub async fn create_manual_capture(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateManualCaptureRequest>,
+) -> Result<Json<BakeCapturePayload>, ApiError> {
+    let title = body.title.trim().to_string();
+    // 手工录入的记录标题与应用名均非必填，未填写时默认「手工录入」
+    let title = if title.is_empty() {
+        "手工录入".to_string()
+    } else {
+        title
+    };
+    let app_name = body
+        .app_name
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "手工录入".to_string());
+
+    let storage = state.storage.clone();
+    let ts = current_ts_ms();
+
+    // 处理截图：解码 base64 并保存到 captures/screenshots/
+    let screenshot_path = if let Some(b64) = body.screenshot_base64.as_deref() {
+        let b64_trimmed = b64.trim();
+        if b64_trimmed.is_empty() {
+            None
+        } else {
+            let screenshot_dir = capture_assets_dir().join("screenshots");
+            std::fs::create_dir_all(&screenshot_dir)
+                .map_err(|e| ApiError::Internal(format!("create screenshot dir: {e}")))?;
+
+            let bytes = BASE64_STANDARD
+                .decode(b64_trimmed)
+                .map_err(|e| ApiError::BadRequest(format!("invalid base64 screenshot: {e}")))?;
+
+            let filename = format!("manual-{ts}.jpg");
+            let file_path = screenshot_dir.join(&filename);
+            std::fs::write(&file_path, &bytes)
+                .map_err(|e| ApiError::Internal(format!("write screenshot: {e}")))?;
+
+            Some(format!("screenshots/{filename}"))
+        }
+    } else {
+        None
+    };
+
+    let new_capture = NewCapture {
+        ts,
+        app_name: Some(app_name),
+        app_bundle_id: None,
+        win_title: Some(title),
+        event_type: EventType::Manual,
+        ax_text: None,
+        ax_focused_role: None,
+        ax_focused_id: None,
+        ocr_text: None,
+        screenshot_path: screenshot_path.clone(),
+        screenshot_source: screenshot_path
+            .as_ref()
+            .map(|_| "manual_upload".to_string()),
+        input_text: body.text.and_then(|v| {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }),
+        is_sensitive: false,
+        pii_scrubbed: false,
+        url: None,
+        webpage_title: None,
+    };
+
+    let capture_id = tokio::task::spawn_blocking(move || storage.insert_capture(&new_capture))
+        .await
+        .map_err(|err| ApiError::Internal(err.to_string()))??;
+
+    // 返回创建的采集记录详情
+    let service = BakeService::new(state.storage.clone(), state.sidecar_url.clone());
+    let capture = tokio::task::spawn_blocking(move || service.get_capture_record(capture_id))
+        .await
+        .map_err(|err| ApiError::Internal(err.to_string()))??;
+    Ok(Json(capture))
+}
+
 pub async fn get_bake_capture_screenshot(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
@@ -648,10 +770,39 @@ pub async fn run_bake_pipeline(
         })));
     }
 
+    // no_op 退避守卫：actionable 看似 >0 但最近连续 run 零进展，说明队列口径与
+    // run 时选候不一致（或候选已被预筛光）。继续创建 run 只会每 30 秒空转一次，
+    // 还会通过 hold_capture 抢占 capture 提炼的模型槽，直接跳过并要求调用方指数退避。
+    const NO_PROGRESS_BACKOFF_THRESHOLD: i64 = 3;
+    if queue.recent_no_progress_count >= NO_PROGRESS_BACKOFF_THRESHOLD {
+        let retry_after_ms = (15_000_i64 << queue.recent_no_progress_count.min(6)).min(900_000);
+        tracing::warn!(
+            "bake run skipped: recent_no_progress_count={} actionable={} retry_after_ms={}",
+            queue.recent_no_progress_count,
+            queue.actionable_count,
+            retry_after_ms,
+        );
+        return Ok(Json(serde_json::json!({
+            "id": null,
+            "status": "skipped",
+            "reason": "no_progress_backoff",
+            "retry_after_ms": retry_after_ms,
+            "queue": queue,
+        })));
+    }
+
     let run_id = service.spawn_bake_pipeline(trigger_reason, limit, max_concurrency)?;
+    // 把触发时刻的队列口径快照落到 run 上，便于事后核对 no_op 空转的口径漂移。
+    if let Err(err) = state
+        .storage
+        .set_bake_run_trigger_actionable_count(run_id, queue.actionable_count)
+    {
+        tracing::warn!("bake run {run_id} 记录 trigger_actionable_count 失败: {err}");
+    }
     Ok(Json(serde_json::json!({
         "id": run_id,
         "status": "accepted",
+        "queue": queue,
     })))
 }
 

@@ -1880,3 +1880,354 @@ button.account-profile__heatmap-cell:focus-visible,
     padding: 24px 20px;
   }
 }
+
+/* ===== macOS 暗色模式适配（仅追加，不改动任何亮色规则） ===== */
+@media (prefers-color-scheme: dark) {
+  .account-profile {
+    background: #111315;
+    color: #F3F4F6;
+  }
+
+  .account-profile__avatar {
+    border-color: rgba(255, 177, 122, 0.3);
+    background: rgba(255, 159, 67, 0.14);
+    color: #FFC48D;
+    box-shadow: none;
+  }
+
+  .account-profile__badge-mark {
+    border-color: #111315;
+    box-shadow: 0 5px 12px rgba(0, 0, 0, 0.45);
+  }
+
+  .account-profile__identity h1 { color: #F3F4F6; }
+  .account-profile__identity p { color: #9CA3AF; }
+  .account-profile__identity p span { color: #8E8E93; }
+  .account-profile__identity p .account-profile__account-name { color: #9CA3AF; }
+
+  .account-profile__tabs { border-bottom-color: rgba(255, 255, 255, 0.08); }
+
+  .account-profile__tab { color: #9CA3AF; }
+  .account-profile__tab:hover {
+    background: rgba(255, 255, 255, 0.06);
+    color: #F3F4F6;
+  }
+  .account-profile__tab--active { color: #FFC48D; }
+  .account-profile__tab--active::after { background: #FFC48D; }
+
+  .account-profile__tab:focus-visible,
+  .account-profile__panel-heading button:focus-visible,
+  .account-profile__data-error button:focus-visible,
+  .account-profile__empty button:focus-visible,
+  .account-profile__heatmap-cell:focus-visible,
+  .account-profile__logout-area button:focus-visible,
+  .account-profile__dialog-actions button:focus-visible {
+    outline-color: rgba(10, 132, 255, 0.24);
+  }
+
+  .account-profile__panel {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #1C1C1E;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  }
+
+  .account-profile__panel-heading h2 { color: #F3F4F6; }
+  .account-profile__panel-heading--achievements p,
+  .account-profile__panel-heading--profile p { color: #9CA3AF; }
+
+  .account-profile__panel-heading button {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #232326;
+    color: #9CA3AF;
+  }
+  .account-profile__panel-heading button:hover {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+    color: #FFC48D;
+  }
+
+  .account-profile__edit-form {
+    border-color: rgba(255, 177, 122, 0.3);
+    background: rgba(255, 159, 67, 0.14);
+  }
+  .account-profile__edit-form label { color: #9CA3AF; }
+  .account-profile__edit-form label svg { color: #E8A25C; }
+  .account-profile__edit-form input {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+    color: #F3F4F6;
+  }
+  .account-profile__edit-form input:focus {
+    border-color: #0A84FF;
+    outline-color: rgba(10, 132, 255, 0.24);
+  }
+
+  .account-profile__edit-error {
+    border-color: rgba(255, 69, 58, 0.3);
+    background: rgba(255, 69, 58, 0.16);
+    color: #FF6961;
+  }
+  .account-profile__edit-success {
+    border-color: rgba(52, 199, 89, 0.3);
+    background: rgba(52, 199, 89, 0.14);
+    color: #6EE7A0;
+  }
+
+  .account-profile__edit-actions button {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+    color: #9CA3AF;
+  }
+  .account-profile__edit-actions button:hover:not(:disabled) {
+    border-color: rgba(255, 177, 122, 0.3);
+    background: rgba(255, 159, 67, 0.14);
+    color: #FFC48D;
+  }
+  .account-profile__edit-actions button:focus-visible {
+    outline-color: rgba(10, 132, 255, 0.24);
+  }
+
+  .account-profile__achievement-total strong { color: #FFC48D; }
+  .account-profile__achievement-total span { color: #8E8E93; }
+
+  /* 成就徽章卡片：基础变量暗色化 + 渐变底色替换 */
+  .account-profile__achievement-card {
+    --badge-accent: #EC8A54;
+    --badge-accent-dark: #FFC48D;
+    --badge-wash: rgba(255, 159, 67, 0.14);
+    border-color: color-mix(in srgb, var(--badge-accent) 32%, rgba(255, 255, 255, 0.1));
+    background:
+      radial-gradient(circle at 92% 8%, color-mix(in srgb, var(--badge-accent) 18%, transparent), transparent 32%),
+      linear-gradient(145deg, var(--badge-wash), #232326 70%);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  }
+  .account-profile__achievement-card:hover {
+    border-color: color-mix(in srgb, var(--badge-accent) 55%, rgba(255, 255, 255, 0.14));
+  }
+
+  /* 徽章主题变体：wash 改半透明暗底、accent 提亮一档 */
+  .account-profile__achievement-card--cobalt,
+  .account-profile__achievement-dialog--cobalt {
+    --badge-accent: #6BA3E8;
+    --badge-accent-dark: #B3D1F5;
+    --badge-wash: rgba(10, 132, 255, 0.14);
+  }
+  .account-profile__achievement-card--midnight,
+  .account-profile__achievement-dialog--midnight {
+    --badge-accent: #8F92CF;
+    --badge-accent-dark: #BFC1E8;
+    --badge-wash: rgba(122, 126, 190, 0.16);
+  }
+  .account-profile__achievement-card--forest,
+  .account-profile__achievement-dialog--forest {
+    --badge-accent: #63B98C;
+    --badge-accent-dark: #A3DCBC;
+    --badge-wash: rgba(52, 199, 89, 0.14);
+  }
+  .account-profile__achievement-card--honey,
+  .account-profile__achievement-dialog--honey {
+    --badge-accent: #E8A25C;
+    --badge-accent-dark: #FFC48D;
+    --badge-wash: rgba(255, 159, 67, 0.14);
+  }
+  .account-profile__achievement-card--rose,
+  .account-profile__achievement-dialog--rose {
+    --badge-accent: #E08A95;
+    --badge-accent-dark: #F2BCC3;
+    --badge-wash: rgba(255, 69, 90, 0.14);
+  }
+
+  .account-profile__achievement-new-label {
+    background: color-mix(in srgb, var(--badge-accent) 18%, #1C1C1E);
+  }
+
+  .account-profile__achievement-icon {
+    background: color-mix(in srgb, var(--badge-accent) 16%, #232326);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+  .account-profile__achievement-rarity {
+    background: color-mix(in srgb, var(--badge-accent) 14%, #232326);
+  }
+
+  .account-profile__achievement-open-hint { color: #9CA3AF; }
+
+  .account-profile__achievement-meta {
+    border-top-color: color-mix(in srgb, var(--badge-accent) 25%, rgba(255, 255, 255, 0.09));
+    color: #9CA3AF;
+  }
+
+  .account-profile__achievement-rest-note {
+    background: rgba(255, 255, 255, 0.06);
+    color: #9CA3AF;
+  }
+
+  .account-profile__achievement-actions button {
+    border-color: color-mix(in srgb, var(--badge-accent) 28%, rgba(255, 255, 255, 0.09));
+    background: #2C2C2E;
+  }
+  .account-profile__achievement-actions button:hover,
+  .account-profile__achievement-actions button.is-equipped {
+    color: #111315;
+  }
+
+  .account-profile__achievement-dialog-backdrop {
+    background: rgb(0 0 0 / 55%);
+  }
+
+  .account-profile__achievement-dialog {
+    --badge-accent: #EC8A54;
+    --badge-accent-dark: #FFC48D;
+    --badge-wash: rgba(255, 159, 67, 0.14);
+    border-color: color-mix(in srgb, var(--badge-accent) 38%, rgba(255, 255, 255, 0.14));
+    background:
+      radial-gradient(circle at 92% 8%, color-mix(in srgb, var(--badge-accent) 20%, transparent), transparent 34%),
+      linear-gradient(145deg, var(--badge-wash), #1C1C1E 72%);
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+  }
+
+  .account-profile__achievement-dialog-close {
+    border-color: color-mix(in srgb, var(--badge-accent) 24%, rgba(255, 255, 255, 0.14));
+    background: #2C2C2E;
+  }
+  .account-profile__achievement-dialog-close:hover {
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  .account-profile__achievement-dialog-icon {
+    background: color-mix(in srgb, var(--badge-accent) 16%, #232326);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+
+  .account-profile__achievement-dialog-copy p { color: #9CA3AF; }
+
+  .account-profile__achievement-empty > span {
+    border-color: rgba(255, 177, 122, 0.3);
+    background: rgba(255, 159, 67, 0.14);
+    color: #FFC48D;
+  }
+  .account-profile__achievement-empty strong { color: #F3F4F6; }
+  .account-profile__achievement-empty p { color: #9CA3AF; }
+
+  .account-profile__achievement-message {
+    border-color: rgba(52, 199, 89, 0.3);
+    background: rgba(52, 199, 89, 0.14);
+    color: #6EE7A0;
+  }
+
+  .account-profile__detail-grid > div { border-bottom-color: rgba(255, 255, 255, 0.08); }
+  .account-profile__detail-grid dt { color: #9CA3AF; }
+  .account-profile__detail-grid dd { color: #F3F4F6; }
+
+  .account-profile__detail-grid .account-profile__credit {
+    border-color: rgba(255, 177, 122, 0.3);
+    background: rgba(255, 159, 67, 0.12);
+  }
+  .account-profile__credit dt { color: #FFC48D; }
+  .account-profile__credit dd { color: #FFC48D; }
+  .account-profile__credit small { color: #E8A25C; }
+
+  .account-profile__logout-area button {
+    border-color: rgba(255, 177, 122, 0.3);
+    background: rgba(255, 159, 67, 0.12);
+    color: #FFC48D;
+  }
+  .account-profile__logout-area button:hover {
+    background: rgba(255, 159, 67, 0.18);
+    border-color: rgba(255, 177, 122, 0.45);
+  }
+
+  .account-profile__distribution {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #232326;
+  }
+  .account-profile__distribution h3 { color: #F3F4F6; }
+  .account-profile__distribution-head > span { color: #8E8E93; }
+  .account-profile__distribution-bar { background: #2C2C2E; }
+  .account-profile__distribution li span { color: #9CA3AF; }
+  .account-profile__distribution li strong { color: #F3F4F6; }
+
+  .account-profile__empty { color: #8E8E93; }
+  .account-profile__empty button {
+    border-color: rgba(255, 177, 122, 0.3);
+    background: rgba(255, 159, 67, 0.12);
+    color: #FFC48D;
+  }
+  .account-profile__empty button:hover {
+    background: rgba(255, 159, 67, 0.18);
+    border-color: rgba(255, 177, 122, 0.45);
+  }
+
+  .account-profile__inferred-mood {
+    border-color: rgba(255, 177, 122, 0.3);
+    background: rgba(255, 159, 67, 0.12);
+  }
+  .account-profile__mood-copy > span { color: #E8A25C; }
+  .account-profile__mood-copy > strong { color: #F3F4F6; }
+  .account-profile__mood-copy p { color: #9CA3AF; }
+  .account-profile__mood-evidence { border-top-color: rgba(255, 255, 255, 0.08); }
+  .account-profile__mood-evidence strong { color: #FFC48D; }
+  .account-profile__mood-evidence span,
+  .account-profile__mood-evidence small { color: #9CA3AF; }
+
+  .account-profile__heatmap-section { border-top-color: rgba(255, 255, 255, 0.08); }
+  .account-profile__heatmap-heading h3 { color: #F3F4F6; }
+  .account-profile__heatmap-summary strong { color: #FFC48D; }
+  .account-profile__heatmap-summary span { color: #8E8E93; }
+  .account-profile__heatmap-months { color: #8E8E93; }
+  .account-profile__heatmap-weekdays { color: #8E8E93; }
+  .account-profile__heatmap-cell--0 { background: #2C2C2E; }
+
+  button.account-profile__heatmap-cell:hover,
+  button.account-profile__heatmap-cell:focus-visible,
+  .account-profile__heatmap-cell--pinned {
+    box-shadow: 0 0 0 2px #1C1C1E, 0 0 0 4px #E8A25C;
+  }
+
+  .account-profile__heatmap-legend { color: #8E8E93; }
+
+  .account-profile__data-error {
+    border-color: rgba(255, 177, 122, 0.3);
+    background: rgba(255, 159, 67, 0.12);
+    color: #FFC48D;
+  }
+  .account-profile__data-error span { color: #9CA3AF; }
+
+  .account-profile__skeleton-line,
+  .account-profile__skeleton-grid > div {
+    background: #232326;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .account-profile__skeleton-line,
+    .account-profile__skeleton-grid > div {
+      background: linear-gradient(90deg, #232326 25%, #2C2C2E 45%, #232326 65%);
+    }
+  }
+
+  .account-profile__dialog-backdrop {
+    background: rgb(0 0 0 / 55%);
+  }
+  .account-profile__dialog {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #1C1C1E;
+    color: #F3F4F6;
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+  }
+  .account-profile__dialog-icon {
+    background: rgba(255, 159, 67, 0.16);
+    color: #FFC48D;
+  }
+  .account-profile__dialog h2 { color: #F3F4F6; }
+  .account-profile__dialog p { color: #9CA3AF; }
+  .account-profile__dialog-error {
+    background: rgba(255, 69, 58, 0.16);
+    color: #FF6961;
+  }
+  .account-profile__dialog-actions button:first-child {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+    color: #9CA3AF;
+  }
+  .account-profile__dialog-actions button:hover:first-child {
+    background: rgba(255, 255, 255, 0.1);
+  }
+}

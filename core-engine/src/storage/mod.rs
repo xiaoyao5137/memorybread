@@ -9,6 +9,7 @@ pub mod cleanup;
 pub mod db;
 pub(crate) mod document_identity;
 pub mod error;
+pub(crate) mod extraction_budget;
 pub mod fts;
 pub mod models;
 pub mod models_bake;

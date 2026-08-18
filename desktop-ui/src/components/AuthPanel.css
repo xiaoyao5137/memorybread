@@ -791,3 +791,290 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ===== macOS 暗色模式适配（仅追加，不改动上方亮色规则） ===== */
+@media (prefers-color-scheme: dark) {
+  .auth-panel {
+    background: #111315;
+    color: #F3F4F6;
+  }
+
+  .auth-panel--login {
+    background: #111315;
+  }
+
+  .auth-panel__mark {
+    background: #1C1C1E;
+    border-color: rgba(255, 255, 255, 0.09);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  }
+
+  .auth-panel__eyebrow {
+    color: #E8A25C;
+  }
+
+  .auth-panel__lead {
+    color: #9CA3AF;
+  }
+
+  .auth-panel__facts span {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #232326;
+    color: #D1D5DB;
+  }
+
+  .auth-panel__form {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: linear-gradient(180deg, #1C1C1E, #232326);
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+  }
+
+  .auth-panel__form::before {
+    background: linear-gradient(90deg, #7a3519, #a85f24 55%, rgba(168, 95, 36, 0));
+  }
+
+  .auth-panel--login .auth-panel__form-icon {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #232326;
+  }
+
+  .auth-panel--login .auth-panel__tabs {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #232326;
+  }
+
+  .auth-panel--login .auth-panel__tab--active {
+    background: #2C2C2E;
+  }
+
+  .auth-panel--login .auth-panel__method-tab,
+  .auth-panel--login .auth-panel__wechat-placeholder {
+    background: #232326;
+  }
+
+  .auth-panel--login .auth-panel__form input {
+    background: #2C2C2E;
+  }
+
+  .auth-panel--login .auth-panel__method-tab--active {
+    background: rgba(255, 159, 67, 0.14);
+  }
+
+  .auth-panel__form-icon {
+    background: rgba(255, 159, 67, 0.14);
+    color: #E8A25C;
+  }
+
+  .auth-panel__form-head strong {
+    color: #F3F4F6;
+  }
+
+  .auth-panel__form-head span {
+    color: #9CA3AF;
+  }
+
+  .auth-panel__tabs {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #232326;
+  }
+
+  .auth-panel__tab {
+    color: #9CA3AF;
+  }
+
+  .auth-panel__tab--active {
+    background: #2C2C2E;
+    color: #FFC48D;
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.28);
+  }
+
+  .auth-panel__back,
+  .auth-panel__forgot {
+    color: #FFC48D;
+  }
+
+  .auth-panel__method-tab {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #232326;
+    color: #D1D5DB;
+  }
+
+  .auth-panel__method-tab--active {
+    border-color: rgba(255, 177, 122, 0.3);
+    background: rgba(255, 159, 67, 0.14);
+    color: #FFC48D;
+  }
+
+  .auth-panel__form label {
+    color: #9CA3AF;
+  }
+
+  .auth-panel__field-heading small {
+    color: #8E8E93;
+  }
+
+  .auth-panel__form input {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+    color: #F3F4F6;
+    box-shadow: none;
+  }
+
+  .auth-panel__form input::placeholder {
+    color: #8E8E93;
+    opacity: 1;
+  }
+
+  .auth-panel__input-with-icon svg {
+    color: #E8A25C;
+  }
+
+  .auth-panel__code-button {
+    border-color: rgba(255, 177, 122, 0.3);
+    background: #2C2C2E;
+    color: #FFC48D;
+  }
+
+  .auth-panel__form input:focus {
+    outline: 3px solid rgba(47, 179, 168, 0.3);
+    border-color: #2FB3A8;
+    background: #2C2C2E;
+    box-shadow: none;
+  }
+
+  .auth-panel__profile-note {
+    color: #9CA3AF;
+  }
+
+  .auth-panel__verification-note {
+    color: #9CA3AF;
+  }
+
+  .auth-panel__verification-note::before {
+    background: #34C759;
+  }
+
+  .auth-panel__verification-note time {
+    color: #6EE7A0;
+  }
+
+  .auth-panel__verification-note--expired {
+    color: #FFC48D;
+  }
+
+  .auth-panel__verification-note--expired::before {
+    background: #FF6961;
+  }
+
+  .auth-panel__error {
+    border-color: rgba(255, 69, 58, 0.32);
+    background: rgba(255, 69, 58, 0.16);
+    color: #FF6961;
+  }
+
+  .auth-panel__notice {
+    border-color: rgba(52, 199, 89, 0.32);
+    background: rgba(52, 199, 89, 0.14);
+    color: #6EE7A0;
+  }
+
+  .auth-panel__tab:focus-visible,
+  .auth-panel__method-tab:focus-visible,
+  .auth-panel__code-button:focus-visible,
+  .auth-panel__back:focus-visible,
+  .auth-panel__forgot:focus-visible {
+    outline-color: rgba(47, 179, 168, 0.3);
+  }
+
+  .auth-panel__wechat-placeholder {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #232326;
+    color: #9CA3AF;
+  }
+
+  .auth-panel__profile {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #232326;
+  }
+
+  .auth-panel__avatar-row {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #2C2C2E;
+  }
+
+  .auth-panel__avatar {
+    background: linear-gradient(180deg, #a85f24, #7a3519);
+    color: #F3F4F6;
+  }
+
+  .auth-panel__avatar-row strong {
+    color: #F3F4F6;
+  }
+
+  .auth-panel__avatar-row span:not(.auth-panel__avatar) {
+    color: #9CA3AF;
+  }
+
+  .auth-panel__profile span,
+  .auth-panel__profile-grid span {
+    color: #9CA3AF;
+  }
+
+  .auth-panel__profile strong {
+    color: #F3F4F6;
+  }
+
+  .auth-panel__profile-grid div {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #2C2C2E;
+  }
+
+  .auth-panel__profile-grid strong {
+    color: #FFC48D;
+  }
+
+  .auth-panel__wallet {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #232326;
+  }
+
+  .auth-panel__wallet-head span {
+    color: #F3F4F6;
+  }
+
+  .auth-panel__wallet-grid div {
+    background: #2C2C2E;
+  }
+
+  .auth-panel__wallet-grid span {
+    color: #9CA3AF;
+  }
+
+  .auth-panel__wallet-grid strong {
+    color: #FFC48D;
+  }
+
+  .auth-panel__wallet-error {
+    color: #FF6961;
+  }
+
+  .auth-panel__submit {
+    background: linear-gradient(180deg, #94471f, #7a3519);
+    color: #F3F4F6;
+    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.35);
+  }
+
+  .auth-panel__submit:hover:not(:disabled) {
+    box-shadow: 0 18px 34px rgba(0, 0, 0, 0.45);
+  }
+
+  .auth-panel__submit:focus-visible {
+    outline-color: rgba(47, 179, 168, 0.3);
+  }
+
+  .auth-panel__submit--secondary {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+    color: #FFC48D;
+  }
+}

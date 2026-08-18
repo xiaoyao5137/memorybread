@@ -2708,14 +2708,16 @@ class CreationService:
         query: str,
         requirement: dict,
         selected_skills: Iterable[dict] = (),
+        enabled_tool_ids: Optional[Iterable[str]] = None,
     ) -> tuple[str, str]:
         """系统提示词动态加载各能力的自描述（渐进式披露），由模型决策执行链路。
 
         路由倾向不在这里硬编码：每个 Tool / Agent（Agent as Tool）/ Skill 在自身
         定义处声明解决什么问题、在什么目标下使用，这里只负责加载。
+        可选 Tool 仅在启用时披露，未启用的工具对模型不可见、不可选。
         """
         skill_lines = self._skill_description_lines(selected_skills)
-        capability_lines = routing_capability_lines(skill_lines)
+        capability_lines = routing_capability_lines(skill_lines, enabled_tool_ids)
         system = (
             "你是创作 Agent 的执行链路路由决策器。下面是每个能力自己声明的描述，"
             "请依据这些描述为完成用户请求选择需要的能力，只做选择，不写正文。\n\n"
@@ -2800,13 +2802,14 @@ class CreationService:
         query: str,
         requirement: dict,
         selected_skills: Iterable[dict] = (),
+        enabled_tool_ids: Optional[Iterable[str]] = None,
         creation_model: Optional[str] = None,
         creation_api_key: Optional[str] = None,
         creation_base_url: Optional[str] = None,
     ) -> dict:
         """由模型推理路由决策；失败时降级为保守回退，不阻断创作链路。"""
         system_prompt, user_prompt = self.build_routing_prompts(
-            query, requirement, selected_skills
+            query, requirement, selected_skills, enabled_tool_ids
         )
         started_ms = int(time.time() * 1000)
         model_name = creation_model or self.model
@@ -2820,6 +2823,7 @@ class CreationService:
                 creation_base_url=creation_base_url,
                 num_predict=400,
                 temperature=0.1,
+                disable_thinking=True,
             ):
                 parts.append(chunk)
             response_text = "".join(parts)
@@ -2843,7 +2847,125 @@ class CreationService:
                 status="failed",
                 error_msg=str(exc),
             )
-            return fallback_routing_decision(query, requirement)
+            return fallback_routing_decision(query, requirement, enabled_tool_ids)
+
+    # ------------------------------------------------------------------
+    # 创作提交后的执行时 Skill 召回（模型路由）
+    #
+    # 输入过程中的逐键自动推荐已下线（会造成输入卡顿），这里只在创作提交
+    # 后执行一次：与 Tool/Agent 能力路由同构——自描述渐进式披露 + 白名单
+    # 双重校验 + 失败降级为空召回。召回与否完全由模型依据每个 Skill 自己
+    # 声明的描述决策，不做枚举式意图门控：技能描述没有声明的用途（例如
+    # 文档模板未声明支持画图），模型按通用规则返回空数组即可拦住。
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _skill_match_description(cls, skill: dict) -> str:
+        """只披露路由所需的自描述证据：用途 + 解决的问题，不装载正文模板。"""
+        description_payload = skill.get("skill_description") or {}
+        description = str(
+            description_payload.get("purpose") or skill.get("summary") or ""
+        ).strip()
+        problems = [
+            str(item).strip()
+            for item in (description_payload.get("problems") or [])
+            if str(item).strip()
+        ]
+        if problems:
+            description += f"（解决的问题：{'；'.join(problems)}）"
+        return description
+
+    def build_skill_match_prompts(self, prompt: str, skills: list) -> tuple:
+        lines: list = []
+        for skill in skills:
+            lines.append(
+                f"- id={skill.get('id')} {str(skill.get('title') or '').strip()}: "
+                f"{self._skill_match_description(skill)}"
+            )
+        system_prompt = (
+            "你是创作技能路由器。根据用户输入，从候选 Skill 中选择最多 1 个最匹配的执行时引入。\n"
+            "规则：\n"
+            "1. 只做选择，不写正文，不输出任何创作内容。\n"
+            "2. 严格依据每个 Skill 自述的用途与解决的问题判断：仅当用户的创作目标"
+            "与该 Skill 声明的用途一致时才可选；用户请求（如纯画图、讲解、问答）"
+            "不在任何 Skill 描述声明的用途范围内时，返回空数组。\n"
+            "3. 用户输入是纯问答或闲聊、没有创作诉求时，返回空数组。\n"
+            "4. 没有足够把握时宁可返回空数组，不要强行套用模板。\n"
+            '只输出 JSON：{"skill_ids": [...], "reasoning": "不超过50字的理由"}\n\n'
+            "候选 Skill：\n" + "\n".join(lines)
+        )
+        user_prompt = f"用户输入：{str(prompt).strip()}"
+        return system_prompt, user_prompt
+
+    def parse_skill_match_decision(self, text: str, allowed_ids: set) -> dict:
+        """解析模型决策：剥离围栏、白名单过滤去重、最多保留 1 个。"""
+        cleaned = re.sub(r"```(?:json)?", "", str(text or "")).strip()
+        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        if not match:
+            raise ValueError("技能路由响应缺少 JSON 决策")
+        payload = json.loads(match.group(0))
+        selected: list = []
+        for raw_id in payload.get("skill_ids") or []:
+            try:
+                skill_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if skill_id in allowed_ids and skill_id not in selected:
+                selected.append(skill_id)
+        reasoning = str(payload.get("reasoning") or "").strip()[:200]
+        return {"skill_ids": selected[:1], "reasoning": reasoning}
+
+    async def route_creation_skills(self, *, prompt: str, skills: list) -> dict:
+        """创作提交后由模型路由决定执行时引入哪个 Skill，失败降级为空召回。"""
+        empty_recall = {"skill_ids": [], "source": "fallback", "reasoning": ""}
+        trimmed = str(prompt or "").strip()
+        if not trimmed or not skills:
+            return empty_recall
+        # 候选不做枚举式意图过滤：全量披露自描述，由模型依据描述决策。
+        candidates: list = [
+            skill for skill in skills if skill.get("id") is not None
+        ]
+        if not candidates:
+            return empty_recall
+        allowed_ids = {int(skill["id"]) for skill in candidates}
+        system_prompt, user_prompt = self.build_skill_match_prompts(trimmed, candidates)
+        model_name = self.model
+        started_ms = int(time.time() * 1000)
+        parts: list = []
+        try:
+            async for chunk in self._stream_direct_completion(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                creation_model=None,
+                creation_api_key=None,
+                creation_base_url=None,
+                num_predict=200,
+                temperature=0.1,
+                disable_thinking=True,
+            ):
+                parts.append(chunk)
+            response_text = "".join(parts)
+            decision = self.parse_skill_match_decision(response_text, allowed_ids)
+            decision["source"] = "model"
+            self._log_creation_usage(
+                model_name=model_name,
+                prompt_text=system_prompt + "\n\n" + user_prompt,
+                response_text=response_text,
+                latency_ms=int(time.time() * 1000) - started_ms,
+                status="success",
+            )
+            return decision
+        except Exception as exc:
+            logger.warning("技能召回模型推理失败，降级为空召回: %s", exc)
+            self._log_creation_usage(
+                model_name=model_name,
+                prompt_text=system_prompt + "\n\n" + user_prompt,
+                response_text="".join(parts),
+                latency_ms=int(time.time() * 1000) - started_ms,
+                status="failed",
+                error_msg=str(exc),
+            )
+            return empty_recall
 
     async def run_specialist_agent(
         self,
@@ -2855,42 +2977,57 @@ class CreationService:
         creation_api_key: Optional[str] = None,
         creation_base_url: Optional[str] = None,
     ) -> str:
-        """执行一个需要模型推理的专业子 Agent，并返回可写回环境的结论。"""
-        parts: list[str] = []
-        started_ms = int(time.time() * 1000)
+        """执行一个需要模型推理的专业子 Agent，并返回可写回环境的结论。
+
+        结构化结论调用关闭 Qwen3.5 思考模式：本地单槽推理被抢占中断、或思考
+        占满 num_predict 预算时都会产生 0 token 结果，因此这里直接以非思考
+        模式调用，并在瞬时空输出时自动重试一次，避免击穿整条创作链路。
+        """
         model_name = creation_model or self.model
-        try:
-            async for chunk in self._stream_direct_completion(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                creation_model=creation_model,
-                creation_api_key=creation_api_key,
-                creation_base_url=creation_base_url,
-                num_predict=1600,
-                temperature=0.25,
-            ):
-                parts.append(chunk)
-            result = "".join(parts).strip()
-            if not result:
-                raise RuntimeError(f"{agent_id} 未返回分析结果")
-            self._log_creation_usage(
-                model_name=model_name,
-                prompt_text=system_prompt + "\n\n" + user_prompt,
-                response_text=result,
-                latency_ms=int(time.time() * 1000) - started_ms,
-                status="success",
-            )
-            return result
-        except Exception as exc:
-            self._log_creation_usage(
-                model_name=model_name,
-                prompt_text=system_prompt + "\n\n" + user_prompt,
-                response_text="".join(parts),
-                latency_ms=int(time.time() * 1000) - started_ms,
-                status="failed",
-                error_msg=str(exc),
-            )
-            raise
+        max_attempts = 2
+        for attempt in range(1, max_attempts + 1):
+            parts: list[str] = []
+            started_ms = int(time.time() * 1000)
+            try:
+                async for chunk in self._stream_direct_completion(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    creation_model=creation_model,
+                    creation_api_key=creation_api_key,
+                    creation_base_url=creation_base_url,
+                    num_predict=1600,
+                    temperature=0.25,
+                    disable_thinking=True,
+                ):
+                    parts.append(chunk)
+                result = "".join(parts).strip()
+                if not result:
+                    raise RuntimeError(f"{agent_id} 未返回分析结果")
+                self._log_creation_usage(
+                    model_name=model_name,
+                    prompt_text=system_prompt + "\n\n" + user_prompt,
+                    response_text=result,
+                    latency_ms=int(time.time() * 1000) - started_ms,
+                    status="success",
+                )
+                return result
+            except Exception as exc:
+                self._log_creation_usage(
+                    model_name=model_name,
+                    prompt_text=system_prompt + "\n\n" + user_prompt,
+                    response_text="".join(parts),
+                    latency_ms=int(time.time() * 1000) - started_ms,
+                    status="failed",
+                    error_msg=str(exc),
+                )
+                if attempt < max_attempts and not "".join(parts).strip():
+                    logger.warning(
+                        "子 Agent %s 模型输出为空（推理可能被抢占中断），重试: attempt=%s",
+                        agent_id,
+                        attempt,
+                    )
+                    continue
+                raise
 
     async def stream_agent_document(
         self,
@@ -2923,8 +3060,14 @@ class CreationService:
         creation_base_url: Optional[str],
         num_predict: int,
         temperature: float,
+        disable_thinking: bool = False,
     ) -> AsyncIterator[str]:
-        """统一子 Agent 的本地/自带密钥模型调用，不包含 RAG 等上层编排。"""
+        """统一子 Agent 的本地/自带密钥模型调用，不包含 RAG 等上层编排。
+
+        disable_thinking 用于路由、章节设计等结构化决策调用：Qwen3.5 默认
+        进入思考模式，长上下文下思考可能占满 num_predict 预算导致正文为 0，
+        此时用 /no_think 指令关闭思考，让预算全部留给结论本身。
+        """
         if creation_model and creation_api_key:
             async for chunk in self._generate_cloud(
                 system_prompt,
@@ -2939,9 +3082,14 @@ class CreationService:
         local_model = creation_model or self.model
         is_qwen35 = "qwen3.5" in local_model.lower()
         if is_qwen35:
+            effective_user_prompt = user_prompt
+            if disable_thinking:
+                effective_user_prompt = (
+                    f"{user_prompt}\n/no_think\n直接输出结果，不要输出思考过程。"
+                )
             payload = {
                 "model": local_model,
-                "prompt": self._build_qwen35_prompt(system_prompt, user_prompt),
+                "prompt": self._build_qwen35_prompt(system_prompt, effective_user_prompt),
                 "raw": True,
                 "stream": True,
                 "options": {
@@ -3147,7 +3295,7 @@ Skill 命名与简介原则：
 - skill_description 是给创作 Agent 做触发判断的能力说明，不是宣传文案。必须明确能创作哪些文档、解决哪些问题、涉及哪些领域以及交付什么。
 - execution_steps 描述如何从需求走到成稿。按真实先后顺序给出三至八步，并为每一步明确目标、产出，以及可调用的 Agent、Skill、Tool；没有必要的资源数组留空，不得为了显得智能而堆满能力。
 - 每一步的 Agent 与 Tool 合计最多四个；只列这一步真正需要的能力。同一能力可以在不同步骤重复出现，例如先调研、后复核。
-- Agent 只能从 industry_research_agent、data_analysis_agent、solution_design_agent、document_writer_agent、quality_review_agent 中选择；Tool 只能从 memory_search、internet_search、data_search、webpage_scrape、github_search、plantuml_diagram 中选择。Skill 使用可复用技能名称或稳定标识，没有依赖时留空。
+- Agent 只能从 industry_research_agent、data_analysis_agent、solution_design_agent、document_writer_agent、quality_review_agent 中选择；Tool 只能从 memory_search、internet_search、data_search、webpage_scrape、github_search、plantuml_diagram、mermaid_diagram 中选择。Skill 使用可复用技能名称或稳定标识，没有依赖时留空。
 
 隐私与通用化原则：
 - 禁止出现真实或可推断的公司、事业群、事业部、部门、团队、项目、产品、系统、客户、人员、地域、日期、指标和金额。
@@ -3500,6 +3648,7 @@ JSON 类型硬约束：
             "webpage_scrape",
             "github_search",
             "plantuml_diagram",
+            "mermaid_diagram",
         }
         raw_steps = value if isinstance(value, list) else fallback
         normalized: list[dict] = []

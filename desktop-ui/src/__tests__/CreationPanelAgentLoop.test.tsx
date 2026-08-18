@@ -623,7 +623,8 @@ describe('创作 Agent 多轮 Loop', () => {
 
     await screen.findByRole('button', { name: '技能 (1)' })
     const input = screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/)
-    fireEvent.change(input, { target: { value: '设计创作功能的 Agent 架构方案' } })
+    // 自动推荐已下线，技能必须通过显式 @ 引入。
+    fireEvent.change(input, { target: { value: '@Agent 架构方案风格 设计创作功能的 Agent 架构方案' } })
     fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
 
     await screen.findByRole('heading', { name: 'Agent 架构方案' })
@@ -709,10 +710,10 @@ describe('创作 Agent 多轮 Loop', () => {
     await screen.findByText('本轮补充质量门禁。')
     const emphasized = screen.getByText('目标驱动')
     expect(emphasized.tagName).toBe('STRONG')
-    expect(emphasized).toHaveStyle({ color: '#9a4f1c', textDecoration: 'underline' })
+    expect(emphasized).toHaveStyle({ color: 'var(--mb-brand-strong)', textDecoration: 'underline' })
     expect(screen.getByRole('columnheader', { name: '能力' })).toHaveStyle({
-      background: '#f7eadf',
-      color: '#6b3517',
+      background: 'var(--mb-brand-soft)',
+      color: 'var(--mb-brand-text)',
     })
     expect(screen.getByText('本轮补充质量门禁。')).toHaveClass('creation-latest-change')
     expect(screen.getByText(/本轮改动 3 处/)).toBeInTheDocument()

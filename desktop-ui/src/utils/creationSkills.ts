@@ -120,6 +120,12 @@ export interface MatchedCreationSkill {
   score: number
 }
 
+export interface ExecutionSkillResolution {
+  matches: MatchedCreationSkill[]
+  source: 'mentioned' | 'model' | 'deterministic'
+  reasoning: string
+}
+
 export interface CreationSkillCategory {
   id: string
   key: string
@@ -256,6 +262,7 @@ export const CREATION_SKILL_TOOL_OPTIONS = [
   { id: 'webpage_scrape', label: '网页爬取' },
   { id: 'github_search', label: 'GitHub 检索' },
   { id: 'plantuml_diagram', label: 'PlantUML 画图' },
+  { id: 'mermaid_diagram', label: 'Mermaid 画图' },
 ] as const
 
 export const DEFAULT_CREATION_SKILL_EXAMPLE_DOCUMENT = `# 共享评审空间：预约流程与协作边界优化方案
@@ -1738,11 +1745,28 @@ export function suggestCreationSkillCategory(
   return scored[0]?.score > 0 ? scored[0].item : undefined
 }
 
+// 输入时自动推荐已下线：输入过程中不再做任何召回计算，只有用户显式 @ 才引入 Skill。
 export function matchCreationSkills(
   prompt: string,
   skills: LocalCreationSkill[],
-  categories: CreationSkillCategory[] = OFFLINE_CREATION_SKILL_CATEGORIES,
+  _categories: CreationSkillCategory[] = OFFLINE_CREATION_SKILL_CATEGORIES,
   limit = 3,
+): MatchedCreationSkill[] {
+  if (!prompt.trim()) return []
+  return skills
+    .filter(skill => skill.status === 'saved' && skill.installed)
+    .filter(skill => prompt.includes(`@${skill.title}`))
+    .slice(0, Math.max(1, limit))
+    .map(skill => ({ skill, reason: 'mentioned' as const, score: 1_000 }))
+}
+
+// 提交后的执行时确定性召回：只做词级证据门槛打分，不做枚举式意图门控。
+// 它是模型路由不可用时的降级安全网；正常链路由 sidecar 模型依据 Skill
+// 自描述披露决策召回与否（与 Tool/Agent 路由同构），只采用得分最高的一个主 Skill。
+export function matchCreationSkillsForExecution(
+  prompt: string,
+  skills: LocalCreationSkill[],
+  categories: CreationSkillCategory[] = OFFLINE_CREATION_SKILL_CATEGORIES,
 ): MatchedCreationSkill[] {
   const normalizedPrompt = normalizeMatchText(prompt)
   if (!normalizedPrompt) return []
@@ -1750,45 +1774,139 @@ export function matchCreationSkills(
   const matches = skills
     .filter(skill => skill.status === 'saved' && skill.installed)
     .map(skill => {
-      const mention = `@${skill.title}`
-      const mentioned = prompt.includes(mention)
       const path = categoryPathFor(categories, skill.categoryId)
-      let score = mentioned ? 1_000 : 0
+      let score = 0
+      // 自动召回必须有词级证据：完整标题包含，或至少一个 3 字以上的词组重合。
+      // 只靠“优化/性能”这类泛化 2 字 gram 堆分不能触发，对应 Agent Loop
+      // 降级路由的探针优先保守策略。
+      let phraseEvidence = false
       const normalizedTitle = normalizeMatchText(skill.title)
       const titlePurpose = normalizedTitle.replace(/(?:创作)?(?:skill|文档|方案|报告|规范|指南)$/i, '')
-      if (normalizedTitle && normalizedPrompt.includes(normalizedTitle)) score += 120
-      if (titlePurpose.length >= 4 && normalizedPrompt.includes(titlePurpose)) score += 70
+      if (normalizedTitle && normalizedPrompt.includes(normalizedTitle)) {
+        score += 120
+        phraseEvidence = true
+      }
+      if (titlePurpose.length >= 4 && normalizedPrompt.includes(titlePurpose)) {
+        score += 70
+        phraseEvidence = true
+      }
       for (const commonTitle of skill.commonTitles) {
         const common = normalizeMatchText(commonTitle)
-        if (common.length >= 4 && normalizedPrompt.includes(common)) score += 45
+        if (common.length >= 4 && normalizedPrompt.includes(common)) {
+          score += 45
+          phraseEvidence = true
+        }
       }
       for (const item of path) {
-        if (normalizedPrompt.includes(normalizeMatchText(item.name))) score += item.level * 8
+        const name = normalizeMatchText(item.name)
+        if (name && normalizedPrompt.includes(name)) {
+          score += item.level * 8
+          phraseEvidence = phraseEvidence || name.length >= 3
+        }
       }
-      score += overlapScore(promptGrams, meaningfulNgrams(skill.title), 5, 40)
-      score += overlapScore(promptGrams, meaningfulNgrams(skill.summary), 3, 36)
-      score += overlapScore(promptGrams, meaningfulNgrams([
+      const addOverlap = (grams: Set<string>, weight: number, maximum: number) => {
+        let hits = 0
+        for (const gram of grams) {
+          if (!promptGrams.has(gram)) continue
+          hits += 1
+          phraseEvidence = phraseEvidence || gram.length >= 3
+        }
+        score += Math.min(hits * weight, maximum)
+      }
+      addOverlap(meaningfulNgrams(skill.title), 5, 40)
+      addOverlap(meaningfulNgrams(skill.summary), 3, 36)
+      addOverlap(meaningfulNgrams([
         skill.skillDescription.purpose,
         ...skill.skillDescription.documentTypes,
         ...skill.skillDescription.problems,
         ...skill.skillDescription.domains,
         ...skill.skillDescription.deliverables,
       ].join('\n')), 4, 72)
-      score += overlapScore(promptGrams, meaningfulNgrams(skill.commonTitles.join('\n')), 2, 24)
-      return { skill, reason: mentioned ? 'mentioned' as const : 'automatic' as const, score }
+      addOverlap(meaningfulNgrams(skill.commonTitles.join('\n')), 2, 24)
+      return { skill, score, automaticAllowed: phraseEvidence }
     })
-    .filter(match => match.reason === 'mentioned' || match.score >= 14)
+    .filter(match => match.score >= 14 && match.automaticAllowed)
     .sort((left, right) => right.score - left.score || right.skill.updatedAt - left.skill.updatedAt)
+  return matches.slice(0, 1).map(({ skill, score }) => ({ skill, reason: 'automatic' as const, score }))
+}
 
-  const explicit = matches.filter(match => match.reason === 'mentioned')
-  const automatic = matches.filter(match => match.reason === 'automatic')
-  // @ 提及代表用户已经选定主 Skill。此时再叠加名称相近的自动匹配模板，
-  // 会把每个模板的 execution_steps 都当成并列主流程执行；一次 4 步周报
-  // 会因此膨胀成十几步，并把其它模板的章节写进成稿。
-  if (explicit.length) return explicit.slice(0, Math.max(1, limit))
-  // 没有显式选择时也只采用得分最高的一个主 Skill。组合能力必须由主 Skill
-  // 在 execution_steps[].skills 中明确声明，不能靠模糊匹配静默拼接多套流程。
-  return automatic.slice(0, 1)
+// 调用 sidecar 模型路由（与 Tool/Agent 路由同构：自描述渐进式披露 + 模型决策 + 白名单）。
+async function requestExecutionSkillRoute(
+  apiBaseUrl: string,
+  prompt: string,
+  skills: LocalCreationSkill[],
+  signal?: AbortSignal,
+): Promise<{ matches: MatchedCreationSkill[]; source: 'model' | 'fallback'; reasoning: string }> {
+  const candidates = skills.filter(skill => skill.status === 'saved' && skill.installed)
+  const trimmed = prompt.trim()
+  if (!trimmed || !candidates.length) {
+    return { matches: [], source: 'fallback', reasoning: '' }
+  }
+  const response = await fetchWithLocalhostFallback(
+    `${apiBaseUrl}/api/creation/skills/match`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt: trimmed,
+        skills: candidates.map(skill => ({
+          id: skill.id,
+          title: skill.title,
+          summary: skill.summary,
+          skill_description: {
+            purpose: skill.skillDescription.purpose,
+            document_types: skill.skillDescription.documentTypes,
+            problems: skill.skillDescription.problems,
+            domains: skill.skillDescription.domains,
+            deliverables: skill.skillDescription.deliverables,
+          },
+        })),
+      }),
+      signal,
+    },
+  )
+  if (!response.ok) throw new Error(await parseError(response, '模型技能召回失败'))
+  const payload = await response.json()
+  const byId = new Map(candidates.map(skill => [skill.id, skill]))
+  const rawIds = Array.isArray(payload?.skill_ids) ? payload.skill_ids : []
+  const matches: MatchedCreationSkill[] = []
+  for (const rawId of rawIds) {
+    const skill = byId.get(Number(rawId))
+    if (!skill) continue
+    matches.push({ skill, reason: 'automatic', score: 900 })
+    if (matches.length >= 1) break
+  }
+  return {
+    matches,
+    source: payload?.source === 'model' ? 'model' : 'fallback',
+    reasoning: String(payload?.reasoning || ''),
+  }
+}
+
+// 提交后的 Loop 执行时技能解析：显式 @ 优先；否则由模型路由决策，模型推理
+// 失败的降级空召回（source=fallback）不能静默丢掉确定性命中的 Skill。
+export async function resolveExecutionSkills(options: {
+  apiBaseUrl: string
+  prompt: string
+  skills: LocalCreationSkill[]
+  signal?: AbortSignal
+}): Promise<ExecutionSkillResolution> {
+  const { apiBaseUrl, prompt, skills, signal } = options
+  const mentioned = matchCreationSkills(prompt, skills)
+  if (mentioned.length) {
+    return { matches: mentioned, source: 'mentioned', reasoning: '' }
+  }
+  const deterministic = matchCreationSkillsForExecution(prompt, skills)
+  try {
+    const routed = await requestExecutionSkillRoute(apiBaseUrl, prompt, skills, signal)
+    // 只有模型的明确决策（含主动判定无合适技能）才允许覆写确定性结果。
+    if (routed.source === 'model') {
+      return { matches: routed.matches, source: 'model', reasoning: routed.reasoning }
+    }
+  } catch {
+    // 模型路由不可用时退回确定性匹配，不阻断创作。
+  }
+  return { matches: deterministic, source: 'deterministic', reasoning: '' }
 }
 
 export function resolveCreationSkillDependencies(
@@ -2400,15 +2518,6 @@ function meaningfulNgrams(value: string) {
     }
   }
   return grams
-}
-
-function overlapScore(left: Set<string>, right: Set<string>, weight: number, maximum: number) {
-  let overlap = 0
-  for (const value of right) {
-    if (left.has(value)) overlap += weight
-    if (overlap >= maximum) return maximum
-  }
-  return overlap
 }
 
 function defaultStructureFor(docType: string) {

@@ -16,6 +16,7 @@ import logging
 import dataclasses
 import json
 import os
+import platform
 import sqlite3
 import time
 import fcntl
@@ -2143,7 +2144,14 @@ def merge_bake_document():
 
 # ── 内部工具 ──────────────────────────────────────────────────────────────────
 
-def _get_hardware() -> dict:
+# 硬件信息基本不变，磁盘余量短暂陈旧不影响选型建议；缓存避免每次打开模型页都拉起 system_profiler
+_HARDWARE_CACHE_TTL_S = 60.0
+_hardware_cache: Optional[dict] = None
+_hardware_cache_at = 0.0
+_hardware_cache_lock = threading.Lock()
+
+
+def _detect_hardware() -> dict:
     mem   = psutil.virtual_memory()
     disk  = psutil.disk_usage('/')
     cpu   = psutil.cpu_count(logical=False) or psutil.cpu_count()
@@ -2155,16 +2163,34 @@ def _get_hardware() -> dict:
         'gpu_memory_gb': 0.0,
     }
     # 尝试检测 GPU（macOS Metal / NVIDIA）
-    try:
-        import subprocess
-        result = subprocess.run(
-            ['system_profiler', 'SPDisplaysDataType'],
-            capture_output=True, text=True, timeout=3
-        )
-        if 'VRAM' in result.stdout or 'Metal' in result.stdout:
-            hw['has_gpu'] = True
-    except Exception:
-        pass
+    if platform.system() == 'Darwin' and platform.machine().lower() == 'arm64':
+        # Apple Silicon 自带 Metal GPU，无需再拉起耗时的 system_profiler
+        hw['has_gpu'] = True
+    else:
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['system_profiler', 'SPDisplaysDataType'],
+                capture_output=True, text=True, timeout=3
+            )
+            if 'VRAM' in result.stdout or 'Metal' in result.stdout:
+                hw['has_gpu'] = True
+        except Exception:
+            pass
+    return hw
+
+
+def _get_hardware() -> dict:
+    """检测本机硬件配置（带 TTL 缓存，避免重复拉起 system_profiler）"""
+    global _hardware_cache, _hardware_cache_at
+    now = time.time()
+    with _hardware_cache_lock:
+        if _hardware_cache is not None and now - _hardware_cache_at < _HARDWARE_CACHE_TTL_S:
+            return _hardware_cache
+    hw = _detect_hardware()
+    with _hardware_cache_lock:
+        _hardware_cache = hw
+        _hardware_cache_at = time.time()
     return hw
 
 
@@ -2182,6 +2208,17 @@ if __name__ == '__main__':
     import threading
     threading.Thread(target=_warmup_rag_pipeline_async, daemon=True, name='rag-warmup').start()
     logger.info('RAG pipeline 异步预热已启动')
+
+    # 预热模型页热数据，首次打开模型页不必现等硬件检测和 Ollama 探测
+    def _warmup_model_status_async():
+        try:
+            _get_hardware()
+            model_manager.get_ollama_setup_status()
+            logger.info('模型页热数据预热完成')
+        except Exception as e:
+            logger.warning(f'模型页热数据预热失败: {e}')
+
+    threading.Thread(target=_warmup_model_status_async, daemon=True, name='model-status-warmup').start()
 
     _idle_diary_backfill_worker.start()
 

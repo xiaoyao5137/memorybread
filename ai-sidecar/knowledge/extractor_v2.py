@@ -139,6 +139,10 @@ class BakeOutputError(RuntimeError):
 class BakeOutputTruncatedError(BakeOutputError):
     code = "BAKE_OUTPUT_TRUNCATED"
 
+    def __init__(self, message: str, partial_content: str = ""):
+        super().__init__(message)
+        self.partial_content = str(partial_content or "")
+
 
 class BakeModelRequestError(RuntimeError):
     """保留模型 HTTP 分类，让返回的 5xx 进入候选有界重试而非永久卡头。"""
@@ -679,7 +683,7 @@ def _extract_named_json_value(text: str, key: str) -> Optional[Any]:
 
 def _recover_bake_bundle_artifacts(raw: str) -> Dict[str, Any]:
     recovered: Dict[str, Any] = {}
-    for key in ('classification', 'sop', 'knowledge', 'design'):
+    for key in ('document', 'knowledge', 'sop', 'classification', 'design'):
         value = _extract_named_json_value(raw, key)
         if value is not None:
             recovered[key] = value
@@ -975,16 +979,21 @@ def _sanitize_capture_text(raw_text: str) -> str:
 #
 # 旧逻辑每块固定 [:800]、总量尾部硬切，导致 IM 侧边栏噪声占满配额、
 # 靠后的汇报正文被裁掉。新策略：
-# 1. 按行/句段密度给块分配配额：密集正文块 3000，噪声块 800；
+# 1. 按行/句段密度给块分配配额：密集正文块 16000，噪声块 2000；
 # 2. 总量超限时优先丢弃明确 UI 壳层行与连续短字孤立行；
 # 3. 仍超限时从密度最低的块开始压缩，密集正文块最后才被截。
 # 判定全部是确定性字符串统计，在 LLM 调用前完成，不增加推理负担；
 # 判定不确定时偏向不切（宁可多送噪声，不可丢正文）。
 # ─────────────────────────────────────────────────────────────────────────
-MERGE_BLOCK_QUOTA_DENSE = 3000
-MERGE_BLOCK_QUOTA_DEFAULT = 800
-MERGE_COMPRESSED_QUOTA_LOW = 250
-MERGE_TOTAL_MAX_CHARS = 6000
+# 时间线提炼实际使用 32K token 上下文，并为结构化输出固定预留 8K token。
+# 16K 中文字符按 1.35 安全倍率估算约 14.4K token；加上约 3.2K token
+# 系统 prompt、用户结构和 1K 安全余量后仍处于 23.5K 输入预算内。
+# 多帧合并允许 18K 字符，但单个密集正文块仍限制为 16K，给其他帧元数据留空间。
+TIMELINE_CAPTURE_TEXT_MAX_CHARS = BAKE_CAPTURE_AX_MAX_CHARS
+MERGE_BLOCK_QUOTA_DENSE = TIMELINE_CAPTURE_TEXT_MAX_CHARS
+MERGE_BLOCK_QUOTA_DEFAULT = 2000
+MERGE_COMPRESSED_QUOTA_LOW = 500
+MERGE_TOTAL_MAX_CHARS = 18_000
 MERGE_BLOCK_SEPARATOR = "\n\n---\n\n"
 
 UI_SHELL_SHORT_LINES = {
@@ -1396,6 +1405,9 @@ BAKE_SOP_PAYLOAD_SCHEMA = {
 BAKE_BUNDLE_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
+        "document": _artifact_response_schema(BAKE_DESIGN_PAYLOAD_SCHEMA),
+        "knowledge": _artifact_response_schema(BAKE_KNOWLEDGE_PAYLOAD_SCHEMA),
+        "sop": _artifact_response_schema(BAKE_SOP_PAYLOAD_SCHEMA),
         "classification": {
             "type": "object",
             "properties": {
@@ -1408,11 +1420,8 @@ BAKE_BUNDLE_RESPONSE_SCHEMA = {
             "required": ["primary_type", "reason"],
             "additionalProperties": False,
         },
-        "sop": _artifact_response_schema(BAKE_SOP_PAYLOAD_SCHEMA),
-        "knowledge": _artifact_response_schema(BAKE_KNOWLEDGE_PAYLOAD_SCHEMA),
-        "design": _artifact_response_schema(BAKE_DESIGN_PAYLOAD_SCHEMA),
     },
-    "required": ["classification", "knowledge", "design", "sop"],
+    "required": ["document", "knowledge", "sop", "classification"],
     "additionalProperties": False,
 }
 
@@ -1839,7 +1848,19 @@ accepted=true 时，payload schema:
 
 BAKE_BUNDLE_PROMPT = f"""你在执行一次性 bake bundle 提炼。输入是一条时间线候选工作片段。
 
-第一步先判断候选的主资产类型 `classification.primary_type`，用于描述主导复用价值和后续展示排序；然后独立评估每一种稳定资产：
+必须严格按以下顺序完成判断，后一个检查不得修改前一个检查的结论：
+1. `document_evidence_check`：只依据候选是否存在一份成体系、可整体复用的正文，独立判断 document；不得考虑它是否也能提炼为 knowledge。
+2. `knowledge_evidence_check`：只依据候选是否存在未来工作需要参照的事实、解释、经验、约束、决策或结论，独立判断 knowledge；不得复述或否定 document 的判断。
+3. `sop_evidence_check`：只依据候选是否存在 Core 已验证的多步 action/result 证据，独立判断 sop。
+4. 三项检查全部完成后，最后根据已接受的资产总结 `classification.primary_type`，只用于描述主导复用价值和后续展示排序。
+
+三个检查相互独立：
+- document 已接受，不要求 knowledge 或 sop 拒绝；
+- knowledge 已接受，绝不能成为拒绝 document 的理由；
+- sop 已接受，也不能改变 document 或 knowledge 的既有结论；
+- `primary_type` 只能从已经完成的三个检查中总结，禁止用它反向否决任一资产。
+
+类别边界：
 - data：主要价值是结构化数值观测、业务指标、价格/用量/成本、指标卡、表格、报表、查询结果，或以“对象 + 指标 + 数值”为核心的业务/系统状态快照；
 - knowledge：主要价值是有明确对象和证据的事实、解释、经验、约束、决策或结论；事实包括项目进度、工作状态变化、非数值执行结果、阻塞、责任人、截止时间和下一步承诺，不要求永久不变；
 - document：主要价值是一份成体系、可整体复用的正文；
@@ -1848,24 +1869,24 @@ BAKE_BUNDLE_PROMPT = f"""你在执行一次性 bake bundle 提炼。输入是一
 
 分类边界：项目/任务“已完成、未完成、进行中、被阻塞、已上线、测试通过/失败、问题已解决/未解决”等语义状态和结果应优先归 knowledge，并保留观测时间；不能因为它们会变化或来自聊天就归 data/none。只有主要价值可独立表达为结构化测量值、指标序列或报表快照时才归 data。计划和预计可以作为“已经形成的承诺/安排”进入 knowledge，但不得被改写成已经执行完成。
 
-`primary_type` 只能选择一个，但它不构成其他资产的拒绝理由。knowledge、design、sop 必须各自依据所属类别的证据独立判断；同一候选同时包含可复用事实、成体系正文和实际执行的多步路线时，可以有多个 accepted=true。禁止仅因为 primary_type 不同而返回 not_primary_type。数据页面上的字段定义、计算公式、换算说明通常只是理解数据的上下文，不能据此推测知识或操作；但若 action_trace 另外明确记录了真实多步动作，仍应按 SOP 证据独立判断。
+`primary_type` 只能选择一个，但它不构成其他资产的拒绝理由。document、knowledge、sop 必须各自依据所属类别的证据独立判断；同一候选同时包含成体系正文、可复用事实和实际执行的多步路线时，可以有多个 accepted=true。禁止仅因为 primary_type 不同而返回 not_primary_type。禁止使用“主要价值是 knowledge”“更适合作为 knowledge”“已由 knowledge 覆盖”“不是通用模板”作为拒绝 document 的理由。具体项目的方案、设计稿、汇报、总结、技术文档、PRD、计划、会议纪要同样属于 document，不要求它是通用模板。数据页面上的字段定义、计算公式、换算说明通常只是理解数据的上下文，不能据此推测知识或操作；但若 action_trace 另外明确记录了真实多步动作，仍应按 SOP 证据独立判断。
 
 不能把界面中渲染的历史操作记录、变更日志或动态消息流冒充当前用户产出；但其中明确陈述的项目进度、执行结果或结论仍可作为对应主体在对应时点成立的 knowledge 事实。只有没有实质事实的自动动作壳才 reject。
 
-最终只返回一个 JSON 对象，顶层必须严格按 classification、sop、knowledge、design 的顺序输出。SOP 放在两个长文本资产之前，保证后段正文异常时已完成的操作结果仍可独立保存。classification 固定为：
+最终只返回一个 JSON 对象，顶层必须严格按 document、knowledge、sop、classification 的顺序输出。先写完三个资产检查结果，最后才写 classification。classification 固定为：
 {{"primary_type":"data|knowledge|document|sop|none","reason":"一句话说明主导复用价值"}}
 每个资产子对象固定为：
 {{"accepted": true/false, "reason": "原因或 null", "payload": {{...}} 或 null}}
 
 不要输出解释、代码块或思考过程。Markdown 只能出现在类别 schema 明确允许的字符串字段中。
 
-以下是三个类别各自的判断规则和 payload schema；最终输出顺序仍以 classification、sop、knowledge、design 为准：
+以下是三个类别各自的判断规则和 payload schema；判断和最终输出顺序仍以 document、knowledge、sop、classification 为准：
+
+--- document ---
+{BAKE_DESIGN_PROMPT}
 
 --- knowledge ---
 {BAKE_KNOWLEDGE_PROMPT}
-
---- design ---
-{BAKE_DESIGN_PROMPT}
 
 --- sop ---
 {BAKE_SOP_PROMPT}
@@ -1876,11 +1897,13 @@ BAKE_COMPACT_BUNDLE_PROMPT = (
     + """
 
 这是失败后的紧凑重试。必须优先保证 JSON 完整闭合：
+- 仍须依次完成 document_evidence_check、knowledge_evidence_check、sop_evidence_check，最后总结 classification
+- 顶层仍须严格按 document、knowledge、sop、classification 的顺序输出
 - 每个 Markdown 字段只保留最有证据的要点，不复述同一段内容
 - 数组只保留最重要的项目
 - 同一个 JSON 字段只输出一次；禁止重复 key、重复段落或循环扩写
-- classification 必须只选择一个 primary_type，但 knowledge、design、sop 仍按各自证据独立判断，可以同时 accepted=true
-- 禁止使用 not_primary_type 作为拒绝理由；拒绝时写清该资产自身缺少的证据
+- classification 必须只选择一个 primary_type，但 document、knowledge、sop 仍按各自证据独立判断，可以同时 accepted=true
+- 禁止使用 not_primary_type 或“更适合作为 knowledge”作为拒绝 document 的理由；拒绝时写清该资产自身缺少的证据
 - 若内容无法在限制内可靠表达，对相应类别返回 accepted=false
 """
 )
@@ -2808,7 +2831,8 @@ class KnowledgeExtractorV2:
                                 if window.strip() and joined.count(window) >= 4:
                                     response.close()
                                     raise BakeOutputTruncatedError(
-                                        "本地模型输出陷入重复退化，已提前中止"
+                                        "本地模型输出陷入重复退化，已提前中止",
+                                        partial_content=joined,
                                     )
                         if message.get("thinking"):
                             thinking_parts.append(str(message["thinking"]))
@@ -2945,9 +2969,12 @@ class KnowledgeExtractorV2:
         )
         ocr_text = _sanitize_capture_text(raw_text)
 
-        # 限制文本长度，避免超过上下文；密度感知截断：先剔噪声行，
-        # 密集正文保留完整配额，噪声为主的文本压缩更狠
-        ocr_text = _density_aware_truncate(ocr_text, 2000)
+        # 单条 capture 与合并提炼使用同一正文预算。该预算由 32K 上下文、
+        # 8K 输出预留、系统 prompt 实测开销和中文 token 安全倍率共同确定。
+        ocr_text = _density_aware_truncate(
+            ocr_text,
+            TIMELINE_CAPTURE_TEXT_MAX_CHARS,
+        )
 
         url_line = ""
         page_url = _normalize_page_url(capture_data.get('url'))
@@ -3651,26 +3678,40 @@ class KnowledgeExtractorV2:
     ) -> tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
         from monitor.llm_tracker import LLMCallTracker, estimate_tokens
 
-        started_at = time.time()
+        started_at = time.monotonic()
         logger.info("bake llm start caller=%s", caller_id)
         with LLMCallTracker(
             caller="bake",
             model_name=self.model,
             caller_id=caller_id,
         ) as tracker:
-            response = self._ollama_chat(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                format=response_schema,
-                options={
-                    "temperature": 0.0,
-                    "num_ctx": BAKE_CONTEXT_WINDOW_TOKENS,
-                    "num_predict": num_predict,
-                    "repeat_penalty": repeat_penalty,
-                },
-            )
+            try:
+                response = self._ollama_chat(
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    format=response_schema,
+                    options={
+                        "temperature": 0.0,
+                        "num_ctx": BAKE_CONTEXT_WINDOW_TOKENS,
+                        "num_predict": num_predict,
+                        "repeat_penalty": repeat_penalty,
+                    },
+                )
+            except BakeOutputTruncatedError as exc:
+                if not exc.partial_content:
+                    raise
+                response = {
+                    "model": self.model,
+                    "message": {"content": exc.partial_content},
+                    "done_reason": "repetition",
+                }
+                logger.warning(
+                    "bake llm repetition prefix retained caller=%s raw_len=%s",
+                    caller_id,
+                    len(exc.partial_content),
+                )
             raw_content = _extract_ollama_response_text(response)
             tracker.set_response(response)
             tracker.set_trace(
@@ -3684,7 +3725,7 @@ class KnowledgeExtractorV2:
                     completion=estimate_tokens(raw_content),
                 )
 
-        elapsed_ms = int((time.time() - started_at) * 1000)
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
         done_reason = response.get("done_reason")
         if done_reason == "length":
             _append_bake_error_log(
@@ -4721,7 +4762,7 @@ class KnowledgeExtractorV2:
         retry_error_code: Optional[str] = None,
     ) -> Dict[str, Any]:
         """用一次 LLM 调用同时提炼 knowledge/document/SOP。"""
-        bundle_started_at = time.time()
+        bundle_started_at = time.monotonic()
         source_timeline_id = candidate.get('source_timeline_id')
         logger.info("bake bundle start source_timeline_id=%s", source_timeline_id)
 
@@ -4774,7 +4815,7 @@ class KnowledgeExtractorV2:
                 ),
             )
         except Exception as exc:
-            elapsed_ms = int((time.time() - bundle_started_at) * 1000)
+            elapsed_ms = int((time.monotonic() - bundle_started_at) * 1000)
             logger.error(
                 "bake bundle 提炼失败 caller=%s elapsed_ms=%s error=%s",
                 caller_id,
@@ -4815,11 +4856,19 @@ class KnowledgeExtractorV2:
             if isinstance(classification, dict)
             else ''
         )
-        for artifact_type in ('sop', 'knowledge', 'design'):
+        for artifact_type, parsed_key in (
+            ('design', 'document'),
+            ('knowledge', 'knowledge'),
+            ('sop', 'sop'),
+        ):
+            parsed_artifact = parsed.get(parsed_key)
+            if parsed_artifact is None and artifact_type == 'design':
+                # 兼容升级期间旧模型或历史测试仍返回 design 键；新契约统一要求 document。
+                parsed_artifact = parsed.get('design')
             artifact, artifact_meta = self._normalize_bake_artifact_result(
                 candidate,
                 artifact_type,
-                parsed.get(artifact_type),
+                parsed_artifact,
                 meta,
                 caller_id=caller_id,
             )
@@ -4837,7 +4886,7 @@ class KnowledgeExtractorV2:
             artifact_type: bool(item.get('compatibility_recovered'))
             for artifact_type, item in result_meta.items()
         }
-        total_elapsed_ms = int((time.time() - bundle_started_at) * 1000)
+        total_elapsed_ms = int((time.monotonic() - bundle_started_at) * 1000)
         per_stage_ms = {'bundle': int(meta.get('elapsed_ms') or total_elapsed_ms)}
         logger.info(
             "bake bundle done source_timeline_id=%s total_elapsed_ms=%s stage_elapsed_ms=%s degraded=%s artifact_shapes=%s compatibility_recovered=%s accepted={knowledge:%s,design:%s,sop:%s}",
@@ -5055,10 +5104,10 @@ class KnowledgeExtractorV2:
         """按密度感知配额构建合并提炼文本。
 
         步骤：
-        1. 每块按行/句段密度分配配额：密集正文块 3000 字，其余 800 字；
+        1. 每块按行/句段密度分配配额：密集正文块 16000 字，其余 2000 字；
            正文完全相同的重复 capture（如连续同屏采集）只保留一份；
         2. 拼接后超过总长限制时，先剔除各块中明确 UI 噪声行与连续短字孤立行；
-        3. 仍超限时按密度加权等比缩减各块（密集正文保留更多，保底 250 字），
+        3. 仍超限时按密度加权等比缩减各块（密集正文保留更多，保底 500 字），
            截断时保留数值指标密集段；
         4. 最终兜底才从尾部硬切（旧行为）。
         判定全部为确定性字符串统计，不增加 LLM 调用。
@@ -5121,8 +5170,8 @@ class KnowledgeExtractorV2:
             for e in entries:
                 e['body'] = _strip_pressure_noise_lines(e['body'])
 
-        # 阶段3：仍超限 → 按密度加权等比缩减（密集正文保留更多，保底 250 字），
-        # 避免低密度块压到 250 后仍超限、密集块被尾部硬切整块丢失。
+        # 阶段3：仍超限 → 按密度加权等比缩减（密集正文保留更多，保底 500 字），
+        # 避免低密度块压到 500 后仍超限、密集块被尾部硬切整块丢失。
         overhead = sum(len(e['header']) + 1 for e in entries) + sep_len * (len(entries) - 1)
         body_budget = MERGE_TOTAL_MAX_CHARS - overhead
         total_body_len = sum(len(e['body']) for e in entries)
@@ -5550,7 +5599,7 @@ class KnowledgeExtractorV2:
                         'app_name': seg['app_name'],
                         'window_title': seg['window_title'],
                         'timestamp': datetime.fromtimestamp(seg['end_ts'] / 1000).isoformat(),
-                        'ocr_text': merged_text[:2000],  # 限制长度避免过长
+                        'ocr_text': merged_text[:TIMELINE_CAPTURE_TEXT_MAX_CHARS],
                         'url': seg_url,
                         'webpage_title': seg_webpage_title,
                     }

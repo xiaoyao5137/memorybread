@@ -48,6 +48,7 @@ const renderCapture = (capture: BakeCaptureItem = baseCapture) => render(
     onClearFilters={noop}
     onViewLinkedTimeline={noop}
     onDeleteCapture={noop}
+    onRefresh={noop}
   />,
 )
 

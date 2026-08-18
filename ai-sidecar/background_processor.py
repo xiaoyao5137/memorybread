@@ -50,8 +50,21 @@ _BAKE_BACKLOG_PRESSURE_THRESHOLD = 20
 _CAPTURE_BACKLOG_PRESSURE_THRESHOLD = 20
 _BAKE_BACKLOG_MAX_CONSECUTIVE_RUNS = 3
 _DUAL_BACKLOG_MAX_CONSECUTIVE_BAKE_RUNS = 1
-_DUAL_BACKLOG_CAPTURE_GROUP_QUANTUM = 3
-_DUAL_BACKLOG_BAKE_LIMIT = 3
+# 双队列高压时每轮轮到 6 组 capture / 6 条 bake：保持轮转公平，但把
+# 消费速度翻倍，避免 quantum 过小导致创纪录流入日两侧都排不空。
+_DUAL_BACKLOG_CAPTURE_GROUP_QUANTUM = 6
+_DUAL_BACKLOG_BAKE_LIMIT = 6
+# capture 优先规则：capture 严重积压且 bake 队列很小时，周期性 bake 让位，
+# 把模型槽全部还给提炼（bake 候选本身来自 timeline 产出）；
+# pending 降回恢复阈值以下后自动恢复 bake 周期触发。
+_CAPTURE_PRIORITY_PENDING_THRESHOLD = 500
+_CAPTURE_PRIORITY_BAKE_CEILING = 50
+_CAPTURE_PRIORITY_RESUME_THRESHOLD = 100
+# queue-status 连续报无进展时，继续触发 run 只会空转并抢占 capture 模型槽：
+# 达到阈值后跳过触发、指数退避，且 no_progress run 无权让位 capture。
+_NO_PROGRESS_BAKE_SKIP_THRESHOLD = 3
+_NO_PROGRESS_BAKE_BACKOFF_BASE_SECS = 15
+_NO_PROGRESS_BAKE_MAX_BACKOFF_SECS = 15 * 60
 # 电池模式原本 30 分钟才调度 1 条 bake；当两条队列都高压时，时间线提炼本身
 # 已经持续占用同一个模型槽，因此改为轮转不会增加并发，只会重新分配既有算力。
 _BATTERY_BACKLOG_BAKE_INTERVAL_SECS = 2 * 60
@@ -233,6 +246,12 @@ class BackgroundProcessor:
         self._last_data_extraction_at: float = 0.0
         self._consecutive_backlog_bake_runs = 0
         self._latest_bake_actionable_count = 0
+        # no_op 活锁防护：上一次触发的 run 若被 queue-status 证实零进展则累加，
+        # 达到阈值后暂停周期性触发并指数退避。
+        self._consecutive_no_progress_bake_runs = 0
+        self._last_bake_no_progress_count = 0
+        self._bake_trigger_watch = False
+        self._bake_yield_to_capture = False
 
         # 懒加载 workers
         self._embed_worker = None
@@ -794,6 +813,7 @@ class BackgroundProcessor:
                         "auto_created_count": data.get("auto_created_count"),
                         "candidate_count": data.get("candidate_count"),
                         "discarded_count": data.get("discarded_count"),
+                        "retry_after_ms": data.get("retry_after_ms"),
                         "reason": None if accepted else (data.get("reason") or f"status={status}"),
                     }
             except urllib_error.HTTPError as exc:
@@ -808,6 +828,15 @@ class BackgroundProcessor:
 
         result = await asyncio.to_thread(_send)
         result["actionable_count"] = int(queue_status.get("actionable_count") or 0)
+        result["recent_no_progress_count"] = int(
+            queue_status.get("recent_no_progress_count") or 0
+        )
+        # accepted 分支 Core 不回退避建议；用触发前读到的 queue 快照补齐，
+        # 让周期检查能按 no_progress 指数退避，不再固定短间隔重复触发。
+        if not result.get("retry_after_ms"):
+            result["retry_after_ms"] = int(
+                queue_status.get("recommended_retry_after_ms") or 0
+            )
         if result.get("triggered"):
             logger.info(
                 "统一 bake pipeline 已触发: run_id=%s status=%s auto=%s candidate=%s discarded=%s",
@@ -819,11 +848,14 @@ class BackgroundProcessor:
             )
         return result
 
-    async def _trigger_data_extraction(self, limit: int = 1000) -> dict:
-        """让 Core 基于 capture/timeline 识别数据源和工作数据记忆。
+    async def _trigger_data_extraction(self, limit: int = 200) -> dict:
+        """让 Core 以 timeline 为入口识别数据源和工作数据记忆。
 
-        这里只传数量上限，不传正文或 URL；原始数据始终由共享本机 SQLite 读取。
+        Core 会在本机 SQLite 中读取 timeline 及其关联 captures；这里只传数量上限，
+        不传正文或 URL，原始数据始终留在共享本机数据库。尝试开始即进入冷却，
+        避免 Core 超时或已有任务运行时在后台循环中立即重试形成请求风暴。
         """
+        self._last_data_extraction_at = time.monotonic()
         url = f"{self._get_core_engine_url().rstrip('/')}{_DATA_EXTRACTION_ENDPOINT}"
         payload = json.dumps({"limit": max(1, min(int(limit), 5000))}).encode("utf-8")
         request = urllib_request.Request(
@@ -851,7 +883,6 @@ class BackgroundProcessor:
 
         result = await asyncio.to_thread(_send)
         if result.get("triggered"):
-            self._last_data_extraction_at = time.monotonic()
             if result.get("source_created_count") or result.get("snapshot_created_count"):
                 logger.info(
                     "数据记忆识别完成: scanned=%s sources=%s snapshots=%s",
@@ -3059,6 +3090,54 @@ class BackgroundProcessor:
         if check_ts < next_check_ts:
             return next_check_ts, False
 
+        # capture 优先：capture 严重积压且 bake 队列很小时，周期性 bake 让位，
+        # 把模型槽全部还给提炼；pending 降回恢复阈值以下后自动恢复。
+        if (
+            pending_capture_count >= _CAPTURE_PRIORITY_PENDING_THRESHOLD
+            and self._latest_bake_actionable_count < _CAPTURE_PRIORITY_BAKE_CEILING
+        ):
+            if not self._bake_yield_to_capture:
+                logger.info(
+                    "🔁 capture 优先：pending_capture=%s 已达阈值且 actionable_bake=%s 低于 %s，"
+                    "暂停周期性 bake 触发，模型槽让给提炼",
+                    pending_capture_count,
+                    self._latest_bake_actionable_count,
+                    _CAPTURE_PRIORITY_BAKE_CEILING,
+                )
+            self._bake_yield_to_capture = True
+        elif pending_capture_count < _CAPTURE_PRIORITY_RESUME_THRESHOLD:
+            if self._bake_yield_to_capture:
+                logger.info(
+                    "🔁 capture 积压已降到 %s 以下，恢复周期性 bake 触发",
+                    _CAPTURE_PRIORITY_RESUME_THRESHOLD,
+                )
+            self._bake_yield_to_capture = False
+        if self._bake_yield_to_capture:
+            return (
+                check_ts
+                + self._scheduled_bake_interval_secs(
+                    profile,
+                    pending_capture_count,
+                    self._latest_bake_actionable_count,
+                ),
+                False,
+            )
+
+        # 连续多次触发的 run 都被证实零进展时，继续触发只会空转并抢占
+        # capture 模型槽；直接跳过本轮触发并指数退避。
+        if self._consecutive_no_progress_bake_runs >= _NO_PROGRESS_BAKE_SKIP_THRESHOLD:
+            backoff_secs = min(
+                _NO_PROGRESS_BAKE_BACKOFF_BASE_SECS
+                * (2 ** self._consecutive_no_progress_bake_runs),
+                _NO_PROGRESS_BAKE_MAX_BACKOFF_SECS,
+            )
+            logger.warning(
+                "⛔ 连续 %s 次 bake 触发零进展，跳过本轮触发并退避 %.0fs",
+                self._consecutive_no_progress_bake_runs,
+                backoff_secs,
+            )
+            return check_ts + backoff_secs, False
+
         bake_limit = self._scheduled_bake_limit(profile, pending_capture_count)
         bake_result = await self._maybe_trigger_periodic_bake(
             limit=bake_limit,
@@ -3067,6 +3146,17 @@ class BackgroundProcessor:
         actionable_count = int(bake_result.get("actionable_count") or 0)
         if "actionable_count" in bake_result:
             self._latest_bake_actionable_count = actionable_count
+        no_progress_count = int(bake_result.get("recent_no_progress_count") or 0)
+        # 上一次触发的 run 被本轮 queue-status 证实零进展（recent_no_progress
+        # 增长）则累加；队列恢复进展后清零，避免永久锁死触发。
+        if (
+            self._bake_trigger_watch
+            and no_progress_count > self._last_bake_no_progress_count
+        ):
+            self._consecutive_no_progress_bake_runs += 1
+        elif no_progress_count == 0:
+            self._consecutive_no_progress_bake_runs = 0
+        self._last_bake_no_progress_count = no_progress_count
         scheduled_interval_secs = self._scheduled_bake_interval_secs(
             profile,
             pending_capture_count,
@@ -3076,7 +3166,18 @@ class BackgroundProcessor:
             scheduled_interval_secs,
             int(bake_result.get("retry_after_ms") or 0) / 1000.0,
         )
+        if no_progress_count >= 2:
+            # 队列持续报无进展时指数退避（15s×2^n，上限 15 分钟），
+            # 覆盖 accepted/no_op 两种场景，不再固定短间隔重复触发。
+            retry_after_secs = max(
+                retry_after_secs,
+                min(
+                    _NO_PROGRESS_BAKE_BACKOFF_BASE_SECS * (2 ** no_progress_count),
+                    _NO_PROGRESS_BAKE_MAX_BACKOFF_SECS,
+                ),
+            )
         triggered = bool(bake_result.get("triggered"))
+        self._bake_trigger_watch = triggered
         reason = bake_result.get("reason")
         backlog_burst = (
             actionable_count >= _BAKE_BACKLOG_BURST_THRESHOLD
@@ -3111,6 +3212,9 @@ class BackgroundProcessor:
                 self._consecutive_backlog_bake_runs
                 < burst_run_limit
             )
+        if no_progress_count >= 2:
+            # 无进展的 run 无权抢占 capture 提炼的模型槽。
+            hold_capture = False
         return check_ts + retry_after_secs, hold_capture
 
     def _enforce_runtime_guard(self, reason: str) -> None:
@@ -3278,7 +3382,7 @@ class BackgroundProcessor:
                 )
                 if data_extraction_due:
                     batch_result['data_extraction'] = await self._trigger_data_extraction(
-                        limit=max(1000, timeline_batch_limit * 20),
+                        limit=max(100, min(200, timeline_batch_limit * 4)),
                     )
 
                 if processed > 0:

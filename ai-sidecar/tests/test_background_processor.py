@@ -813,8 +813,10 @@ def test_trigger_unified_bake_pipeline_posts_to_core(tmp_path, monkeypatch) -> N
         "auto_created_count": 3,
         "candidate_count": 1,
         "discarded_count": 0,
+        "retry_after_ms": 0,
         "reason": None,
         "actionable_count": 2,
+        "recent_no_progress_count": 0,
     }
 
 
@@ -984,8 +986,8 @@ def test_dual_backlog_uses_bounded_work_quanta(tmp_path) -> None:
         },
     )()
 
-    assert processor._capture_group_quantum(135, 224) == 3
-    assert processor._scheduled_bake_limit(charging_profile, 135) == 3
+    assert processor._capture_group_quantum(135, 224) == 6
+    assert processor._scheduled_bake_limit(charging_profile, 135) == 6
     assert processor._scheduled_bake_limit(battery_profile, 135) == 1
     assert processor._bake_burst_run_limit(135, 224) == 1
     assert processor._scheduled_bake_interval_secs(
@@ -1060,6 +1062,23 @@ def test_periodic_bake_check_uses_core_queue_status_as_single_source(tmp_path, m
     assert processor._has_pending_bake_timelines() is True
 
 
+def test_data_extraction_failure_enters_cooldown(tmp_path, monkeypatch) -> None:
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    processor._last_data_extraction_at = 0.0
+
+    def _fail_request(*args, **kwargs):
+        raise TimeoutError("core request timed out")
+
+    monkeypatch.setattr("background_processor.urllib_request.urlopen", _fail_request)
+    before = time.monotonic()
+    result = asyncio.run(processor._trigger_data_extraction(limit=100))
+
+    assert result == {"triggered": False, "reason": "request_failed"}
+    assert processor._last_data_extraction_at >= before
+
+
 def test_periodic_bake_check_runs_before_long_capture_batch(tmp_path, monkeypatch) -> None:
     db_path = str(tmp_path / "captures.db")
     _init_db(db_path)
@@ -1114,7 +1133,7 @@ def test_periodic_bake_check_runs_before_long_capture_batch(tmp_path, monkeypatc
 
     asyncio.run(processor.run())
 
-    assert events == [("bake", 3, 1)]
+    assert events == [("bake", 6, 1)]
 
 
 def test_large_bake_backlog_runs_bounded_burst_before_capture_turn(
@@ -1183,7 +1202,7 @@ def test_dual_backlog_rotates_below_single_bake_burst_threshold(
     ])
 
     async def _fake_periodic_bake(*, limit, max_concurrency):
-        assert limit == 3
+        assert limit == 6
         return next(results)
 
     monkeypatch.setattr(processor, "_maybe_trigger_periodic_bake", _fake_periodic_bake)
@@ -1270,6 +1289,157 @@ def test_trigger_unified_bake_pipeline_ignores_retry_hint_when_work_is_actionabl
     assert posted["count"] == 1
     assert result["triggered"] is True
     assert result["run_id"] == "44"
+    # accepted 后也要带回队列的退避建议与 no_progress 计数，供周期检查降速。
+    assert result["retry_after_ms"] == 240_000
+    assert result["recent_no_progress_count"] == 5
+
+
+def _make_charging_profile():
+    return type(
+        "_Profile",
+        (),
+        {
+            "mode": "charging",
+            "bake_interval_secs": 30,
+            "bake_limit": 10,
+            "bake_concurrency": 1,
+        },
+    )()
+
+
+def test_periodic_bake_skips_trigger_after_consecutive_no_progress(
+    tmp_path, monkeypatch
+) -> None:
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    profile = _make_charging_profile()
+
+    async def _fake_periodic_bake(*, limit, max_concurrency):
+        return {
+            "triggered": True,
+            "actionable_count": 36,
+            "recent_no_progress_count": processor._last_bake_no_progress_count + 1,
+        }
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("达到阈值后不应再触发 bake")
+
+    monkeypatch.setattr(processor, "_maybe_trigger_periodic_bake", _fake_periodic_bake)
+
+    holds = []
+    for i in range(4):
+        next_ts, hold = asyncio.run(
+            processor._run_periodic_bake_check(profile, 0.0, now=float(i))
+        )
+        holds.append(hold)
+    # 首轮 run 尚未被证实零进展时仍保留槽位；recent_no_progress>=2 后
+    # 无进展的 run 无权抢占 capture 模型槽。
+    assert holds == [True, False, False, False]
+    assert processor._consecutive_no_progress_bake_runs == 3
+
+    # 第 5 轮直接跳过触发：不发起 run、不让位 capture、指数退避。
+    monkeypatch.setattr(processor, "_maybe_trigger_periodic_bake", _fail_if_called)
+    next_ts, hold = asyncio.run(
+        processor._run_periodic_bake_check(profile, 4.0, now=4.0)
+    )
+    assert hold is False
+    assert next_ts - 4.0 == min(15 * (2 ** 3), 15 * 60)
+
+
+def test_periodic_bake_backoff_grows_exponentially_with_no_progress(
+    tmp_path, monkeypatch
+) -> None:
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    profile = _make_charging_profile()
+    # 退避上限 15 分钟，指数增长不能超过它。
+    processor._consecutive_no_progress_bake_runs = 2
+
+    delays = []
+    for no_progress in (2, 3, 8):
+        # 每轮重置计数态，只验证退避时长与 no_progress 的指数关系。
+        processor._consecutive_no_progress_bake_runs = 0
+        processor._bake_trigger_watch = False
+        processor._last_bake_no_progress_count = no_progress
+
+        async def _fake_periodic_bake(*, limit, max_concurrency, _np=no_progress):
+            return {
+                "triggered": True,
+                "actionable_count": 36,
+                "recent_no_progress_count": _np,
+            }
+
+        monkeypatch.setattr(processor, "_maybe_trigger_periodic_bake", _fake_periodic_bake)
+        next_ts, _ = asyncio.run(
+            processor._run_periodic_bake_check(profile, 0.0, now=0.0)
+        )
+        delays.append(next_ts)
+
+    assert delays[0] == 15 * 4
+    assert delays[1] == 15 * 8
+    assert delays[2] == 15 * 60
+
+
+def test_capture_priority_yields_and_resumes_bake_trigger(
+    tmp_path, monkeypatch
+) -> None:
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    profile = _make_charging_profile()
+    processor._latest_bake_actionable_count = 36
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("capture 优先时不应触发 bake")
+
+    monkeypatch.setattr(processor, "_maybe_trigger_periodic_bake", _fail_if_called)
+
+    # pending>=500 且 actionable<50：让位，不触发。
+    _, hold = asyncio.run(
+        processor._run_periodic_bake_check(
+            profile, 0.0, now=0.0, pending_capture_count=500
+        )
+    )
+    assert hold is False
+    assert processor._bake_yield_to_capture is True
+
+    # pending 降到 100~499 之间：仍处于让位态（滞回，避免阈值抖动）。
+    _, hold = asyncio.run(
+        processor._run_periodic_bake_check(
+            profile, 0.0, now=1.0, pending_capture_count=200
+        )
+    )
+    assert hold is False
+    assert processor._bake_yield_to_capture is True
+
+    # pending < 100：恢复触发。
+    triggers = {"count": 0}
+
+    async def _fake_periodic_bake(*, limit, max_concurrency):
+        triggers["count"] += 1
+        return {"triggered": True, "actionable_count": 36}
+
+    monkeypatch.setattr(processor, "_maybe_trigger_periodic_bake", _fake_periodic_bake)
+    asyncio.run(
+        processor._run_periodic_bake_check(
+            profile, 0.0, now=2.0, pending_capture_count=99
+        )
+    )
+    assert processor._bake_yield_to_capture is False
+    assert triggers["count"] == 1
+
+    # bake 队列本身较大（>=50）时，即使 capture 积压达阈也不让位。
+    processor._bake_yield_to_capture = False
+    processor._latest_bake_actionable_count = 50
+    asyncio.run(
+        processor._run_periodic_bake_check(
+            profile, 0.0, now=3.0, pending_capture_count=500
+        )
+    )
+    assert processor._bake_yield_to_capture is False
+    assert triggers["count"] == 2
 
 
 def test_battery_idle_check_requires_local_and_model_api_queues_idle(

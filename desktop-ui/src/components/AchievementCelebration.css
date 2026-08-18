@@ -276,3 +276,93 @@
   }
   .achievement-celebration__crumbs { display: none; }
 }
+
+/* ===== macOS 暗色模式适配（仅追加，不改动任何亮色规则） ===== */
+@media (prefers-color-scheme: dark) {
+  .achievement-celebration {
+    background: rgb(0 0 0 / 55%);
+  }
+
+  .achievement-celebration__dialog {
+    border-color: rgba(255, 177, 122, 0.3);
+    background: #1C1C1E;
+    color: #F3F4F6;
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+  }
+
+  .achievement-celebration__intro { color: #FFC48D; }
+
+  .achievement-celebration__spark {
+    background: rgba(255, 159, 67, 0.16);
+  }
+
+  .achievement-celebration__card {
+    --celebration-accent: #EC8A54;
+    --celebration-ink: #F3F4F6;
+    --celebration-wash: rgba(255, 159, 67, 0.14);
+    border-color: color-mix(in srgb, var(--celebration-accent) 34%, rgba(255, 255, 255, 0.14));
+    background:
+      radial-gradient(circle at 88% 8%, color-mix(in srgb, var(--celebration-accent) 20%, transparent), transparent 34%),
+      linear-gradient(145deg, var(--celebration-wash), #232326 72%);
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+  }
+
+  /* 庆祝卡片主题变体：wash 改半透明暗底、accent/ink 提亮一档 */
+  .achievement-celebration__card--cobalt {
+    --celebration-accent: #6BA3E8;
+    --celebration-ink: #F3F4F6;
+    --celebration-wash: rgba(10, 132, 255, 0.14);
+  }
+  .achievement-celebration__card--midnight {
+    --celebration-accent: #8F92CF;
+    --celebration-ink: #F3F4F6;
+    --celebration-wash: rgba(122, 126, 190, 0.16);
+  }
+  .achievement-celebration__card--forest {
+    --celebration-accent: #63B98C;
+    --celebration-ink: #F3F4F6;
+    --celebration-wash: rgba(52, 199, 89, 0.14);
+  }
+  .achievement-celebration__card--honey {
+    --celebration-accent: #E8A25C;
+    --celebration-ink: #F3F4F6;
+    --celebration-wash: rgba(255, 159, 67, 0.14);
+  }
+  .achievement-celebration__card--rose {
+    --celebration-accent: #E08A95;
+    --celebration-ink: #F3F4F6;
+    --celebration-wash: rgba(255, 69, 90, 0.14);
+  }
+
+  .achievement-celebration__icon {
+    background: color-mix(in srgb, var(--celebration-accent) 16%, #232326);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+
+  .achievement-celebration__card-status {
+    background: color-mix(in srgb, var(--celebration-accent) 14%, #232326);
+  }
+
+  .achievement-celebration__card > small { color: #9CA3AF; }
+
+  .achievement-celebration__copy h2 { color: #F3F4F6; }
+  .achievement-celebration__copy p { color: #9CA3AF; }
+
+  .achievement-celebration__actions button:first-child {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+    color: #9CA3AF;
+  }
+  .achievement-celebration__actions button:hover:first-child {
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  .achievement-celebration__actions button:focus-visible {
+    outline-color: rgba(10, 132, 255, 0.24);
+  }
+
+  /* 庆祝面包屑粒子：金/橙氛围色提亮 */
+  .achievement-celebration__crumbs span { background: #F0A054; }
+  .achievement-celebration__crumbs span:nth-child(2n) { background: #FFD08A; }
+  .achievement-celebration__crumbs span:nth-child(3n) { background: #E8A25C; }
+}

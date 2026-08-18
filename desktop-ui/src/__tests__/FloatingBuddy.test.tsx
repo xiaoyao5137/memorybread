@@ -28,14 +28,27 @@ describe('FloatingBuddy', () => {
     expect(useAppStore.getState().windowMode).toBe('settings')
   })
 
-  it('普通菜单导航会清除关联返回栈', () => {
+  it('普通菜单导航会清除关联返回栈和临时聚焦状态', () => {
     useAppStore.getState().pushBakeNavigationTarget({ windowMode: 'rag' })
+    useAppStore.setState({
+      repositoryMemoryFocusId: '42',
+      bakeTemplateFocusId: 'doc-1',
+      bakeKnowledgeFocusId: 'knowledge-1',
+      bakeSopFocusId: 'sop-1',
+      repositoryCaptureSourceCaptureId: 'capture-1',
+    })
 
     render(<FloatingBuddy />)
     fireEvent.click(screen.getByTestId('settings-btn'))
 
-    expect(useAppStore.getState().bakeNavigationStack).toHaveLength(0)
-    expect(useAppStore.getState().captureBackTarget).toBeNull()
+    const state = useAppStore.getState()
+    expect(state.bakeNavigationStack).toHaveLength(0)
+    expect(state.captureBackTarget).toBeNull()
+    expect(state.repositoryMemoryFocusId).toBeNull()
+    expect(state.bakeTemplateFocusId).toBeNull()
+    expect(state.bakeKnowledgeFocusId).toBeNull()
+    expect(state.bakeSopFocusId).toBeNull()
+    expect(state.repositoryCaptureSourceCaptureId).toBeNull()
   })
 
   it('记忆菜单排在第二位，采集排在第三位', () => {

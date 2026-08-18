@@ -90,4 +90,17 @@ describe('创作 Tool 配置', () => {
       enabled: false,
     })
   })
+
+  it('Mermaid 画图工具默认未安装，可独立安装并开启', () => {
+    let tools = loadCreationTools()
+    expect(tools.find(tool => tool.id === 'mermaid_diagram')).toMatchObject({
+      installed: false,
+      enabled: false,
+    })
+    expect(enabledCreationToolIds(tools)).not.toContain('mermaid_diagram')
+
+    tools = setCreationToolInstalled(tools, 'mermaid_diagram', true)
+    tools = setCreationToolEnabled(tools, 'mermaid_diagram', true)
+    expect(enabledCreationToolIds(tools)).toContain('mermaid_diagram')
+  })
 })

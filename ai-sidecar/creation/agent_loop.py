@@ -22,8 +22,10 @@ from .tools import (
     GITHUB_SEARCH_TOOL_ID,
     INTERNET_SEARCH_TOOL_ID,
     MEMORY_SEARCH_TOOL_ID,
+    MERMAID_DIAGRAM_TOOL_ID,
     PLANTUML_DIAGRAM_TOOL_ID,
     WEBPAGE_SCRAPE_TOOL_ID,
+    build_mermaid_context,
     build_plantuml_context,
     fallback_routing_decision,
     normalize_creation_tool_ids,
@@ -145,47 +147,6 @@ AI_STYLE_TRANSITIONS = (
     "最后",
     "一方面",
     "另一方面",
-)
-
-
-@dataclass(frozen=True)
-class BuiltinSkill:
-    id: str
-    name: str
-    summary: str
-    triggers: tuple[str, ...]
-    structure: tuple[str, ...]
-    guidelines: tuple[str, ...]
-
-
-BUILTIN_SKILLS = (
-    BuiltinSkill(
-        id="technical-solution-template",
-        name="技术方案模板 Skill",
-        summary=(
-            "仅适用于用户明确要求输出技术方案或技术设计的场景，覆盖技术选型、"
-            "接口设计、模块设计、实施与验证；不用于周报、总结或复盘。"
-        ),
-        triggers=("技术方案", "技术设计", "接口设计", "模块设计", "研发方案", "实现方案"),
-        structure=("背景与目标", "需求与约束", "总体方案", "详细设计", "实施计划", "风险与验证"),
-        guidelines=("明确系统边界和不做事项", "关键取舍必须说明依据", "每项风险给出验证方式"),
-    ),
-    BuiltinSkill(
-        id="architecture-solution-template",
-        name="架构方案模板 Skill",
-        summary="适用于系统架构、平台建设、服务边界和演进路线类方案。",
-        triggers=("架构", "平台", "系统设计", "服务边界", "高可用", "扩展性"),
-        structure=("目标与原则", "现状与约束", "总体架构", "组件与数据流", "关键决策", "演进与验证"),
-        guidelines=("用 Mermaid 表达核心关系", "区分逻辑架构与部署架构", "记录备选方案和决策理由"),
-    ),
-    BuiltinSkill(
-        id="product-prd-template",
-        name="产品 PRD 方案模板 Skill",
-        summary="适用于产品需求、用户流程、功能范围和验收标准类文档。",
-        triggers=("PRD", "产品需求", "用户故事", "功能需求", "产品方案"),
-        structure=("背景与目标", "用户与场景", "范围与优先级", "功能设计", "交互与状态", "验收与指标"),
-        guidelines=("需求必须映射到用户目标", "覆盖加载、空、错误和权限状态", "用可验证条件表达验收标准"),
-    ),
 )
 
 
@@ -849,6 +810,38 @@ class CreationAgentLoop:
             state.environment["strict_skill_ids"] = [
                 str(skill["id"]) for skill in explicit_skills
             ]
+            # 严格 Skill 工作流不注入其他路由工具，但路由决策选中且已启用
+            # 的画图工具要补位：用户明确要图时不能因为 Skill 步骤没声明
+            # 画图工具就静默丢弃该决策。画图步骤放在写作步骤之前，与
+            # 非严格路径“工具先于 Agent”一致，保证撰写时能拿到画图约束；
+            # Skill 步骤已声明的画图工具由工作流自己调度，不重复补位。
+            declared_diagram_tools: set[str] = set()
+            for skill in explicit_skills:
+                for raw_step in skill.get("execution_steps", []) or []:
+                    if not isinstance(raw_step, dict):
+                        continue
+                    for raw_tool in raw_step.get("tools", []) or []:
+                        declared_tool = str(raw_tool)
+                        if declared_tool in (
+                            PLANTUML_DIAGRAM_TOOL_ID,
+                            MERMAID_DIAGRAM_TOOL_ID,
+                        ):
+                            declared_diagram_tools.add(declared_tool)
+            scheduled_step_ids = {str(item.get("id") or "") for item in plan}
+            for diagram_tool_id in (
+                PLANTUML_DIAGRAM_TOOL_ID,
+                MERMAID_DIAGRAM_TOOL_ID,
+            ):
+                if (
+                    diagram_tool_id in routed_tools
+                    and diagram_tool_id in enabled_tools
+                    and diagram_tool_id not in scheduled_step_ids
+                    and diagram_tool_id not in declared_diagram_tools
+                ):
+                    diagram_step = self._tool_plan_step(diagram_tool_id)
+                    if diagram_step:
+                        plan.append(diagram_step)
+                        scheduled_step_ids.add(diagram_tool_id)
             for skill in explicit_skills:
                 workflow = skill.get("execution_steps", [])
                 if not workflow:
@@ -1242,6 +1235,12 @@ class CreationAgentLoop:
                     and not state.environment.get("plantuml_diagram")
                 ):
                     candidates.append(self._tool_plan_step(PLANTUML_DIAGRAM_TOOL_ID))
+                if (
+                    MERMAID_DIAGRAM_TOOL_ID in required_capabilities
+                    and MERMAID_DIAGRAM_TOOL_ID in enabled_tools
+                    and not state.environment.get("mermaid_diagram")
+                ):
+                    candidates.append(self._tool_plan_step(MERMAID_DIAGRAM_TOOL_ID))
                 candidates.extend(
                     self._quality_skill_steps(state, actionable_issues, cycle)
                 )
@@ -1418,6 +1417,7 @@ class CreationAgentLoop:
         "webpage_scrape": "刷新网页实时数据",
         "github_search": "检索 GitHub 线索",
         "plantuml_diagram": "准备图表绘制",
+        "mermaid_diagram": "准备 Mermaid 图示",
         "document_writer_agent": "生成文档内容",
         "chapter_design_agent": "设计章节结构",
         "quality_review_agent": "质量审校",
@@ -1749,6 +1749,10 @@ class CreationAgentLoop:
                 "PlantUML 画图 Tool",
                 PLANTUML_DIAGRAM_TOOL_ID,
             ),
+            MERMAID_DIAGRAM_TOOL_ID: (
+                "Mermaid 画图 Tool",
+                MERMAID_DIAGRAM_TOOL_ID,
+            ),
         }
         definition = definitions.get(tool_id)
         if not definition:
@@ -1969,73 +1973,11 @@ class CreationAgentLoop:
             matches[0]["workflow_role"] = "primary"
             return matches[:1]
 
-        haystack = " ".join(
-            [
-                state.root_request,
-                state.user_message,
-                str(state.environment["requirement"].get("doc_type") or ""),
-            ]
-        )
-        summary_document_intents = (
-            "周报",
-            "日报",
-            "月报",
-            "季报",
-            "年报",
-            "工作总结",
-            "项目总结",
-            "复盘报告",
-        )
-        explicit_solution_intents = (
-            "技术方案",
-            "技术设计",
-            "接口设计",
-            "模块设计",
-            "研发方案",
-            "实现方案",
-            "架构方案",
-            "系统设计方案",
-            "产品方案",
-            "产品需求",
-            "PRD",
-        )
-        # 内置 Skill 只能在文档类型明确时兜底匹配，不能因为“产品研发周报”
-        # 中出现“研发”，或“系统架构周报”中出现“架构”，就把总结类文档
-        # 强行套进方案模板。用户显式 @ 选择的已安装 Skill 已在上方优先处理。
-        suppress_builtin_templates = (
-            any(intent.lower() in haystack.lower() for intent in summary_document_intents)
-            and not any(
-                intent.lower() in haystack.lower()
-                for intent in explicit_solution_intents
-            )
-        )
-        scored = [
-            (sum(1 for trigger in skill.triggers if trigger.lower() in haystack.lower()), skill)
-            for skill in BUILTIN_SKILLS
-        ] if not suppress_builtin_templates else []
-        scored.sort(key=lambda item: item[0], reverse=True)
-        if scored and scored[0][0] > 0:
-            skill = scored[0][1]
-            matches.append(
-                {
-                    "id": skill.id,
-                    "name": skill.name,
-                    "summary": skill.summary,
-                    "structure": list(skill.structure),
-                    "guidelines": list(skill.guidelines),
-                    "source": "builtin_market",
-                }
-            )
-
-        seen: set[str] = set()
-        result = []
-        for item in matches:
-            key = str(item["id"])
-            if key in seen:
-                continue
-            seen.add(key)
-            result.append(item)
-        return result[:4]
+        # 没有客户端选中/召回的 Skill 时不再做内置模板关键词兜底：
+        # 枚举触发词会把“画一张架构图”这类请求套上方案模板。文档结构
+        # 完全由章节设计 Agent 生成，模板能力只经由披露+模型决策的
+        # 召回链路（已安装 Skill）引入。
+        return matches
 
     async def _execute_step(
         self,
@@ -2085,12 +2027,17 @@ class CreationAgentLoop:
         if action == "route":
             requirement = state.environment["requirement"]
             query = str(state.environment.get("context_query") or state.user_message)
+            # 契约：可选 Tool 只有启用后才向路由模型披露，未启用不可见、不可选。
+            enabled_tool_ids = set(
+                normalize_creation_tool_ids(state.options.get("enabled_tools"))
+            )
             yield self._thinking_started(state, "routing")
             if state.model_mode == "external":
                 system_prompt, user_prompt = self.service.build_routing_prompts(
                     query,
                     requirement,
                     state.selected_skills,
+                    enabled_tool_ids,
                 )
                 state.pending_model_step = {
                     "step": step,
@@ -2116,6 +2063,7 @@ class CreationAgentLoop:
                 query=query,
                 requirement=requirement,
                 selected_skills=state.selected_skills,
+                enabled_tool_ids=enabled_tool_ids,
                 creation_model=creation_model,
                 creation_api_key=creation_api_key,
                 creation_base_url=creation_base_url,
@@ -2677,6 +2625,36 @@ class CreationAgentLoop:
             )
             return
 
+        if action == MERMAID_DIAGRAM_TOOL_ID:
+            diagram_context = build_mermaid_context(
+                self._step_context_query(state, step)
+            )
+            state.environment["mermaid_diagram"] = diagram_context
+            state.environment.setdefault("tool_results", []).append(
+                {
+                    "tool_id": MERMAID_DIAGRAM_TOOL_ID,
+                    "status": "completed",
+                    "diagram_type": diagram_context["diagram_type"],
+                    "skill_step_id": step.get("skill_step_id"),
+                }
+            )
+            self._update_goal(state)
+            yield self._event(
+                state,
+                "tool.completed",
+                f"Mermaid 画图准备完成，将生成 {diagram_context['diagram_type']} 图",
+                status="completed",
+                actor=actor,
+                environment_patch={
+                    "mermaid_diagram": {
+                        "diagram_type": diagram_context["diagram_type"],
+                        "language": diagram_context["language"],
+                    }
+                },
+                data={"diagram_type": diagram_context["diagram_type"]},
+            )
+            return
+
         if action == "apply_skill":
             skill = step["skill"]
             state.environment.setdefault("applied_skills", []).append(skill)
@@ -3115,6 +3093,7 @@ class CreationAgentLoop:
                     evidence={"has_diagram": has_diagram},
                     required_capabilities=[
                         PLANTUML_DIAGRAM_TOOL_ID,
+                        MERMAID_DIAGRAM_TOOL_ID,
                         "skill:image_style",
                     ],
                 )
@@ -3460,8 +3439,17 @@ class CreationAgentLoop:
                 decision = self.service.parse_routing_decision(cleaned)
                 decision["source"] = "model"
             except Exception:
-                # 校验失败时降级为保守路由，不阻断创作链路。
-                decision = fallback_routing_decision(query, requirement)
+                # 校验失败时降级为保守路由，不阻断创作链路；降级探针同样
+                # 只产出已启用工具，与模型路径的披露契约保持一致。
+                decision = fallback_routing_decision(
+                    query,
+                    requirement,
+                    set(
+                        normalize_creation_tool_ids(
+                            state.options.get("enabled_tools")
+                        )
+                    ),
+                )
             async for event in self._apply_routing_decision(state, step, decision):
                 yield event
             return
@@ -4213,7 +4201,7 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
                 "detail_polish_agent": """逐章检查观点是否有完整的“对象/边界—依据—动作或机制—结果/验证”。只在已有用户材料、Tool 证据、数据分析和专业 Agent 结论支持的范围内补充细节；需要数据但当前环境没有可用结果时省略对应细节，不得补造数字或主动添加待核验说明。优先深挖质检列出的短章节、跳步推论和只写口号的段落，避免为了变长而重复同义句。""",
                 "table_polish_agent": """修复不合法的 Markdown 表格；对确实需要逐项比较、职责映射、参数口径或验收矩阵的内容使用表格。表头要短而明确，同一列保持同一口径，单元格避免堆整段正文；复杂解释仍放在表格前后。只输出标准 Markdown 表格，不写内联 HTML/CSS。创作页面会自动为合法表头应用品牌背景色、边框、对齐和斑马纹。""",
                 "typography_polish_agent": """只强调读者必须先看到的结论、决策、关键数字、风险和行动项。使用标准 Markdown `**重点**`，每千字通常保留 3—8 处，不能整段加粗，也不要用内联 HTML。页面会把 `strong` 渲染为品牌色、加粗和下划线；标题本身已有层级，不再重复强调。""",
-                "image_polish_agent": """只在组件关系、状态变化、跨角色流程或时间交互用文字难以准确理解时补充代码图示。环境有 PlantUML 约束时优先输出 `plantuml` 代码块；否则使用 `mermaid`。图中对象、连线和标签必须来自正文，先用一段正文说明阅读方式，图后补充异常或边界；不插入装饰图、占位图片或无法编辑的外链图片。""",
+                "image_polish_agent": """只在组件关系、状态变化、跨角色流程或时间交互用文字难以准确理解时补充代码图示。环境有 PlantUML 约束时输出 `plantuml` 代码块；有 Mermaid 约束时输出 `mermaid` 代码块；两者同时存在时跟随各自约束，均不存在时默认使用 `mermaid`。图中对象、连线和标签必须来自正文，先用一段正文说明阅读方式，图后补充异常或边界；不插入装饰图、占位图片或无法编辑的外链图片。""",
                 "document_unify_polisher": """当前文档由多个 Skill 步骤独立推理的产物拼接而成。你的任务只做全文整合润色：统一术语、称谓、时态与数字口径；删除章节之间重复的过渡句、重复背景与相互矛盾的表述；保持 Skill 声明的章节顺序不变，不新增也不删除章节。逐字保留事实、数字、统计周期、来源链接、表格和代码块；环境中 can_use=true 且 validation/verified_claims 已通过校验的指标必须写入对应章节，禁止将它们改成“待补充”“见原文”或任何占位内容；不得补造新事实，也不得删除任何实质性信息。""",
             }
             system = (
@@ -5236,6 +5224,7 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             f"互联网资料：{self._compact_prompt_value(state.environment.get('web_results', []))}",
             f"GitHub 公开仓库：{self._compact_prompt_value(state.environment.get('github_results', []))}",
             f"PlantUML 画图约束：{self._compact_prompt_value(state.environment.get('plantuml_diagram', {}))}",
+            f"Mermaid 画图约束：{self._compact_prompt_value(state.environment.get('mermaid_diagram', {}))}",
             f"数据分析：{state.environment.get('data_analysis', '')}",
             f"行业调研：{state.environment.get('industry_research', '')}",
             f"方案设计：{state.environment.get('solution_design', '')}",

@@ -97,6 +97,25 @@ const nodeMatchesSearch = (node: MemoryGraphNode, query: string) => normalizeSea
   ...node.concepts,
 ].join(' ')).includes(query)
 
+const nodeCreatedAtDate = (timestamp: number) => {
+  if (!timestamp || !Number.isFinite(timestamp)) return null
+  const date = new Date(timestamp)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+const formatNodeCreatedAt = (timestamp: number) => {
+  const date = nodeCreatedAtDate(timestamp)
+  if (!date) return '创建时间未知'
+  return `创建于 ${date.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })}`
+}
+
 const BakeMemoryGraph: React.FC<{
   assets: MemoryGraphAssets
   focusNodeId?: string | null
@@ -429,17 +448,19 @@ const BakeMemoryGraph: React.FC<{
     fullscreen ? 'bake-memory-graph--fullscreen' : '',
   ].filter(Boolean).join(' ')
 
+  const graphTitle = mode === 'overview' ? '今日记忆' : '记忆图谱'
+
   const graphContent = (
     <section
       className={graphClassName}
-      aria-label="记忆图谱"
+      aria-label={graphTitle}
       role={fullscreen || mode === 'dock' ? 'dialog' : 'region'}
       aria-modal={fullscreen || mode === 'dock' || undefined}
     >
       <header className="bake-memory-graph__header">
         <div className="bake-memory-graph__heading">
           <div className="tutorial-title-row">
-            <span className="bake-memory-graph__eyebrow"><Network size={14} /> 记忆图谱</span>
+            <span className="bake-memory-graph__eyebrow"><Network size={mode === 'overview' ? 16 : 14} /> {graphTitle}</span>
             <TutorialLink url={TUTORIAL_URLS.memoryGraph} />
           </div>
         </div>
@@ -665,13 +686,19 @@ const BakeMemoryGraph: React.FC<{
           <div className="bake-memory-graph__inspector" aria-live="polite">
             {selectedNode ? (
               <>
-                <span className="bake-memory-graph__inspector-type">{memoryGraphKindMeta[selectedNode.kind].label}</span>
+                <div className="bake-memory-graph__inspector-meta">
+                  <span className="bake-memory-graph__inspector-type">{memoryGraphKindMeta[selectedNode.kind].label}</span>
+                  <time dateTime={nodeCreatedAtDate(selectedNode.createdAtMs)?.toISOString()}>
+                    {formatNodeCreatedAt(selectedNode.createdAtMs)}
+                  </time>
+                </div>
                 <strong>{selectedNode.label}</strong>
                 <span>{selectedNode.summary}</span>
-                <small>{[
-                  selectedNode.kind === 'knowledge' && selectedNode.heatScore > 0 ? `出现 ${selectedNode.heatScore} 次` : '',
-                  selectedNode.concepts.length > 0 ? `主题：${selectedNode.concepts.slice(0, 4).join('、')}` : '当前关系来自共同来源或显式引用',
-                ].filter(Boolean).join(' · ')}</small>
+                <small>
+                  {selectedNode.concepts.length > 0
+                    ? `主题：${selectedNode.concepts.slice(0, 4).join('、')}`
+                    : '当前关系来自共同来源或显式引用'}
+                </small>
                 {onOpenNode && <button type="button" onClick={() => onOpenNode(selectedNode)}>打开内容</button>}
               </>
             ) : selectedEdge ? (

@@ -15,15 +15,18 @@ import {
   listLocalCreationSkills,
   marketCreationSkillToLocalInput,
   matchCreationSkills,
+  matchCreationSkillsForExecution,
   normalizeCreationSkillTitle,
   parseCodexSkillMarkdown,
   publishCreationSkill,
   resolveCreationSkillDependencies,
+  resolveExecutionSkills,
   searchCreationSkillMarket,
   skillFileText,
   suggestCreationSkillCategory,
   type CreationSkillCategory,
   type LocalCreationSkill,
+  type MatchedCreationSkill,
 } from '../utils/creationSkills'
 import { OFFLINE_CREATION_SKILL_CATEGORIES } from '../data/creationSkillCategories'
 
@@ -725,7 +728,7 @@ describe('技能本地生成与类目容错', () => {
       createdAt: 1,
       updatedAt: 2,
     }
-    const matches = matchCreationSkills('帮我写一份跨部门架构评审会材料', [
+    const matches = matchCreationSkills('请使用@跨部门技术沟通会文档 帮我写一份跨部门架构评审会材料', [
       installedSkill,
       { ...installedSkill, id: 8, title: '未安装版本', installed: false },
       { ...installedSkill, id: 9, title: '草稿版本', status: 'draft' },
@@ -733,7 +736,7 @@ describe('技能本地生成与类目容错', () => {
     const instruction = buildCreationSkillInstruction(matches)
 
     expect(matches.map(item => item.skill.id)).toEqual([7])
-    expect(matches[0].reason).toBe('automatic')
+    expect(matches[0].reason).toBe('mentioned')
     expect(instruction).toContain('适用场景与目标：')
     expect(instruction).toContain('互联网 / 企业服务 / 架构师 / 技术架构设计文档')
     expect(instruction).toContain('Agent Skills 目录内容')
@@ -753,32 +756,7 @@ describe('技能本地生成与类目容错', () => {
     expect(instruction).not.toContain('标题如何传递重点')
   })
 
-  it('使用 Skill 描述中的问题和领域触发自动匹配', () => {
-    const skill: LocalCreationSkill = {
-      ...localSkill,
-      id: 71,
-      title: '决策材料写作法',
-      summary: '用于形成专业材料。',
-      commonTitles: ['目标与路径'],
-      skillDescription: {
-        purpose: '帮助管理团队评估新市场。',
-        documentTypes: ['市场进入决策材料'],
-        problems: ['比较区域机会并设计进入路径'],
-        domains: ['海外市场战略'],
-        deliverables: ['包含证据缺口和关键取舍的决策材料'],
-      },
-      installed: true,
-      createdAt: 1,
-      updatedAt: 2,
-    }
-
-    const matches = matchCreationSkills('请比较区域机会，给出海外市场进入路径', [skill])
-
-    expect(matches).toHaveLength(1)
-    expect(matches[0]).toMatchObject({ reason: 'automatic', skill: { id: 71 } })
-  })
-
-  it('显式 @ 一个 Skill 时不再叠加名称相近的自动匹配模板', () => {
+  it('显式 @ 是引入技能的唯一方式，名称相近的模板不会被带入', () => {
     const primary: LocalCreationSkill = {
       ...localSkill,
       id: 81,
@@ -816,27 +794,32 @@ describe('技能本地生成与类目容错', () => {
     expect(matches[0].reason).toBe('mentioned')
   })
 
-  it('没有 @ 选择时只采用得分最高的一个主 Skill', () => {
-    const first: LocalCreationSkill = {
+  it('自动推荐已下线：输入含标题重合和汇报意图也不自动召回', () => {
+    const weeklyTemplate: LocalCreationSkill = {
       ...localSkill,
-      id: 84,
-      title: '团队工作周报',
-      summary: '整理团队周报。',
+      id: 86,
+      title: 'GPU成本优化周报模板',
+      summary: '用于每周更新大模型性能成本优化周报。',
+      skillDescription: {
+        purpose: '用于每周更新大模型性能成本优化周报。',
+        documentTypes: ['周报', '进度总结报告'],
+        problems: ['GPU指标数据分散，需要按统一口径整理为关键指标表'],
+        domains: ['算力运营', '成本优化'],
+        deliverables: ['包含本周进度总结与关键指标表的结构化周报'],
+      },
       installed: true,
       createdAt: 1,
-      updatedAt: 3,
-    }
-    const second: LocalCreationSkill = {
-      ...first,
-      id: 85,
-      title: '通用工作周报',
       updatedAt: 2,
     }
 
-    const matches = matchCreationSkills('整理一份团队工作周报', [first, second])
+    // 即使输入与技能标题高度重合、且带明确汇报意图，没有 @ 也不召回。
+    const withoutMention = matchCreationSkills('写一份本周的GPU成本优化周报', [weeklyTemplate])
+    expect(withoutMention).toHaveLength(0)
 
-    expect(matches).toHaveLength(1)
-    expect(matches[0].skill.id).toBe(84)
+    // 显式 @ 仍然是唯一入口。
+    const withMention = matchCreationSkills('请使用@GPU成本优化周报模板 写本周周报', [weeklyTemplate])
+    expect(withMention).toHaveLength(1)
+    expect(withMention[0]).toMatchObject({ reason: 'mentioned', skill: { id: 86 } })
   })
 
   it('把执行步骤引用的已安装 Skill 一并加入本轮调用', () => {
@@ -1050,5 +1033,188 @@ describe('技能本地生成与类目容错', () => {
     expect(skill.fieldExamples.diagramStyle).toEqual([])
     expect(skill.fieldExamples.writingGuidelines).toEqual([])
     expect(skill.exampleDocument).toBe('')
+  })
+})
+
+describe('提交后的执行时技能解析', () => {
+  const gpuWeeklyTemplate: LocalCreationSkill = {
+    ...localSkill,
+    id: 91,
+    title: 'GPU成本优化周报模板',
+    summary: '用于每周更新大模型性能成本优化周报。',
+    skillDescription: {
+      purpose: '用于每周更新大模型性能成本优化周报。',
+      documentTypes: ['周报', '进度总结报告'],
+      problems: ['GPU指标数据分散，需要按统一口径整理为关键指标表'],
+      domains: ['算力运营', '成本优化'],
+      deliverables: ['包含本周进度总结与关键指标表的结构化周报'],
+    },
+    commonTitles: ['GPU成本优化周报'],
+    installed: true,
+    createdAt: 1,
+    updatedAt: 2,
+  }
+
+  it('用户原句没有 @ 时，执行时确定性召回仍命中周报模板', () => {
+    const matches = matchCreationSkillsForExecution(
+      '请生成下本周GPU成本优化的周报',
+      [gpuWeeklyTemplate],
+    )
+
+    expect(matches).toHaveLength(1)
+    expect(matches[0]).toMatchObject({ reason: 'automatic', skill: { id: 91 } })
+  })
+
+  it('没有汇报意图的技术问答由模型决策不召回总结类模板', async () => {
+    // 召回与否由模型依据 Skill 自描述披露决策，不做枚举式意图门控。
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      skill_ids: [],
+      source: 'model',
+      reasoning: '纯问答，没有写周报的创作诉求',
+    })))
+
+    const resolution = await resolveExecutionSkills({
+      apiBaseUrl: 'http://127.0.0.1:7070',
+      prompt: '帮我分析GPU成本优化的关键指标应该怎么定',
+      skills: [gpuWeeklyTemplate],
+    })
+
+    expect(resolution.source).toBe('model')
+    expect(resolution.matches).toHaveLength(0)
+  })
+
+  const archPlanTemplate: LocalCreationSkill = {
+    ...localSkill,
+    id: 92,
+    title: '架构方案模板',
+    summary: '用于撰写系统架构方案文档。',
+    skillDescription: {
+      purpose: '把系统架构设计整理成可评审的方案文档。',
+      documentTypes: ['架构方案'],
+      problems: ['架构取舍需要结构化表达'],
+      domains: ['软件架构'],
+      deliverables: ['完整的架构方案文档'],
+    },
+    commonTitles: ['架构方案文档'],
+    installed: true,
+    createdAt: 1,
+    updatedAt: 2,
+  }
+
+  it('纯画图请求由模型判定不在模板声明用途内，不召回方案类模板', async () => {
+    // 模板自述用途是写方案文档、未声明支持画图，模型据此返回空数组。
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      skill_ids: [],
+      source: 'model',
+      reasoning: '画架构图不在模板声明的用途内',
+    })))
+
+    const resolution = await resolveExecutionSkills({
+      apiBaseUrl: 'http://127.0.0.1:7070',
+      prompt: '参考架构方案模板画一张我们系统的架构图',
+      skills: [archPlanTemplate],
+    })
+
+    expect(resolution.source).toBe('model')
+    expect(resolution.matches).toHaveLength(0)
+  })
+
+  it('明确的方案创作意图下模型正常召回方案类模板', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      skill_ids: [92],
+      source: 'model',
+      reasoning: '明确要写技术方案，与模板用途一致',
+    })))
+
+    const resolution = await resolveExecutionSkills({
+      apiBaseUrl: 'http://127.0.0.1:7070',
+      prompt: '用架构方案模板写一份推理服务的技术方案',
+      skills: [archPlanTemplate],
+    })
+
+    expect(resolution.source).toBe('model')
+    expect(resolution.matches).toHaveLength(1)
+    expect(resolution.matches[0]).toMatchObject({ skill: { id: 92 } })
+  })
+
+  it('显式 @ 优先于模型路由，且不请求模型路由接口', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    const resolution = await resolveExecutionSkills({
+      apiBaseUrl: 'http://127.0.0.1:7070',
+      prompt: '请使用@GPU成本优化周报模板 写本周周报',
+      skills: [gpuWeeklyTemplate],
+    })
+
+    expect(resolution.source).toBe('mentioned')
+    expect(resolution.matches.map(match => match.skill.id)).toEqual([91])
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('模型的明确决策（含选中具体技能）覆写确定性结果', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      skill_ids: [91],
+      source: 'model',
+      reasoning: '输入与周报模板的产物一致',
+    })))
+
+    const resolution = await resolveExecutionSkills({
+      apiBaseUrl: 'http://127.0.0.1:7070',
+      prompt: '请生成下本周GPU成本优化的周报',
+      skills: [gpuWeeklyTemplate],
+    })
+
+    expect(resolution.source).toBe('model')
+    expect(resolution.matches.map(match => match.skill.id)).toEqual([91])
+    expect(resolution.reasoning).toBe('输入与周报模板的产物一致')
+  })
+
+  it('模型主动判定无合适技能时尊重空召回', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      skill_ids: [],
+      source: 'model',
+      reasoning: '输入与现有技能都不相关',
+    })))
+
+    const resolution = await resolveExecutionSkills({
+      apiBaseUrl: 'http://127.0.0.1:7070',
+      prompt: '请生成下本周GPU成本优化的周报',
+      skills: [gpuWeeklyTemplate],
+    })
+
+    expect(resolution.source).toBe('model')
+    expect(resolution.matches).toHaveLength(0)
+  })
+
+  it('模型降级空召回（source=fallback）不能丢掉确定性命中的技能', async () => {
+    // sidecar 推理失败时返回 HTTP 200 + 空召回，这是原始缺陷的触发路径。
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      skill_ids: [],
+      source: 'fallback',
+      reasoning: '',
+    })))
+
+    const resolution = await resolveExecutionSkills({
+      apiBaseUrl: 'http://127.0.0.1:7070',
+      prompt: '请生成下本周GPU成本优化的周报',
+      skills: [gpuWeeklyTemplate],
+    })
+
+    expect(resolution.source).toBe('deterministic')
+    expect(resolution.matches.map(match => match.skill.id)).toEqual([91])
+  })
+
+  it('模型路由接口报错时回退确定性匹配，不阻断创作', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 502 })))
+
+    const resolution = await resolveExecutionSkills({
+      apiBaseUrl: 'http://127.0.0.1:7070',
+      prompt: '请生成下本周GPU成本优化的周报',
+      skills: [gpuWeeklyTemplate],
+    })
+
+    expect(resolution.source).toBe('deterministic')
+    expect(resolution.matches.map(match => match.skill.id)).toEqual([91])
   })
 })

@@ -155,12 +155,12 @@ const ApiKeyDialog: React.FC<{
       position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
       display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
     }}>
-      <div style={{ background: 'white', borderRadius: 16, padding: 24, width: 380, boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
+      <div style={{ background: 'var(--mb-bg-card)', borderRadius: 16, padding: 24, width: 380, boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
         <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>配置 {model.name}</div>
-        <div style={{ fontSize: 12, color: '#6E6E73', marginBottom: 18 }}>{model.description}</div>
+        <div style={{ fontSize: 12, color: 'var(--mb-text-secondary)', marginBottom: 18 }}>{model.description}</div>
         {fields.map(f => (
           <div key={f.key} style={{ marginBottom: 14 }}>
-            <label style={{ fontSize: 12, color: '#6E6E73', display: 'block', marginBottom: 4 }}>
+            <label style={{ fontSize: 12, color: 'var(--mb-text-secondary)', display: 'block', marginBottom: 4 }}>
               {f.label}{f.required && <span style={{ color: '#FF3B30' }}> *</span>}
             </label>
             <input
@@ -170,7 +170,8 @@ const ApiKeyDialog: React.FC<{
               onChange={e => setValues(v => ({ ...v, [f.key]: e.target.value }))}
               style={{
                 width: '100%', padding: '9px 12px', borderRadius: 8, fontSize: 13,
-                border: '1px solid rgba(0,0,0,0.15)', outline: 'none', boxSizing: 'border-box',
+                border: '1px solid var(--mb-border-strong)', outline: 'none', boxSizing: 'border-box',
+                background: 'var(--mb-bg-input)', color: 'var(--mb-text-primary)',
               }}
             />
           </div>
@@ -295,12 +296,12 @@ const ModelChatDialog: React.FC<{
       display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
     }}>
       <div style={{
-        background: 'white', borderRadius: 16, width: 520, maxHeight: '80vh',
+        background: 'var(--mb-bg-card)', borderRadius: 16, width: 520, maxHeight: '80vh',
         boxShadow: '0 20px 60px rgba(0,0,0,0.2)', display: 'flex', flexDirection: 'column',
       }}>
         {/* 标题栏 */}
         <div style={{
-          padding: '12px 16px', borderBottom: '1px solid rgba(0,0,0,0.07)',
+          padding: '12px 16px', borderBottom: '1px solid var(--mb-divider)',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -320,10 +321,10 @@ const ModelChatDialog: React.FC<{
         <div style={{
           flex: 1, overflow: 'auto', padding: '12px 16px',
           minHeight: 300, maxHeight: 'calc(80vh - 120px)',
-          background: '#F5F5F7',
+          background: 'var(--mb-bg-page)',
         }}>
           {messages.length === 0 && !chatLoading && (
-            <div style={{ textAlign: 'center', color: '#AEAEB2', fontSize: 13, padding: 60 }}>
+            <div style={{ textAlign: 'center', color: 'var(--mb-text-faint)', fontSize: 13, padding: 60 }}>
               <div>和 {model.name} 开始对话</div>
               <div style={{ fontSize: 11, marginTop: 4 }}>输入任何问题来体验这个模型的能力</div>
             </div>
@@ -335,9 +336,9 @@ const ModelChatDialog: React.FC<{
             }}>
               <div style={{
                 maxWidth: '80%', padding: '8px 12px', borderRadius: 12, fontSize: 13, lineHeight: 1.5,
-                background: msg.role === 'user' ? '#007AFF' : 'white',
-                color: msg.role === 'user' ? 'white' : '#333',
-                border: msg.role === 'user' ? 'none' : '1px solid rgba(0,0,0,0.07)',
+                background: msg.role === 'user' ? '#007AFF' : 'var(--mb-bg-card)',
+                color: msg.role === 'user' ? 'white' : 'var(--mb-text-primary)',
+                border: msg.role === 'user' ? 'none' : '1px solid var(--mb-border)',
               }}>{msg.content}</div>
             </div>
           ))}
@@ -345,7 +346,7 @@ const ModelChatDialog: React.FC<{
             <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 8 }}>
               <div style={{
                 padding: '8px 12px', borderRadius: 12, fontSize: 13,
-                background: 'white', border: '1px solid rgba(0,0,0,0.07)', color: '#AEAEB2',
+                background: 'var(--mb-bg-card)', border: '1px solid var(--mb-border)', color: 'var(--mb-text-faint)',
               }}>思考中...</div>
             </div>
           )}
@@ -361,7 +362,7 @@ const ModelChatDialog: React.FC<{
 
         {/* 输入区域 */}
         <div style={{
-          padding: '8px 16px', borderTop: '1px solid rgba(0,0,0,0.07)',
+          padding: '8px 16px', borderTop: '1px solid var(--mb-divider)',
           display: 'flex', gap: 8,
         }}>
           <input
@@ -380,7 +381,8 @@ const ModelChatDialog: React.FC<{
             disabled={chatLoading}
             style={{
               flex: 1, padding: '8px 12px', borderRadius: 8, fontSize: 13,
-              border: '1px solid rgba(0,0,0,0.15)', outline: 'none',
+              border: '1px solid var(--mb-border-strong)', outline: 'none',
+              background: 'var(--mb-bg-input)', color: 'var(--mb-text-primary)',
             }}
           />
           <button
@@ -417,8 +419,8 @@ const ModelCard: React.FC<{
 
   return (
     <div style={{
-      background: 'white', borderRadius: 12, padding: '12px 14px',
-      border: `1px solid ${isActive ? 'rgba(0,122,255,0.3)' : 'rgba(0,0,0,0.07)'}`,
+      background: 'var(--mb-bg-card)', borderRadius: 12, padding: '12px 14px',
+      border: `1px solid ${isActive ? 'rgba(0,122,255,0.3)' : 'var(--mb-border)'}`,
       marginBottom: 8,
     }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
@@ -426,10 +428,10 @@ const ModelCard: React.FC<{
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 13, fontWeight: 600 }}>{model.name}</span>
             {model.size_gb > 0 && (
-              <span style={{ fontSize: 11, color: '#AEAEB2' }}>{model.size_gb}GB</span>
+              <span style={{ fontSize: 11, color: 'var(--mb-text-faint)' }}>{model.size_gb}GB</span>
             )}
             {(model as any).version && (
-              <span style={{ fontSize: 11, color: '#AEAEB2' }}>v{(model as any).version}</span>
+              <span style={{ fontSize: 11, color: 'var(--mb-text-faint)' }}>v{(model as any).version}</span>
             )}
             <span style={{
               fontSize: 10, padding: '1px 6px', borderRadius: 4,
@@ -443,24 +445,24 @@ const ModelCard: React.FC<{
               }}>推荐</span>
             )}
           </div>
-          <div style={{ fontSize: 12, color: '#6E6E73', marginTop: 3 }}>{model.description}</div>
+          <div style={{ fontSize: 12, color: 'var(--mb-text-secondary)', marginTop: 3 }}>{model.description}</div>
           {model.tags && model.tags.length > 0 && (
             <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 5 }}>
               {model.tags.slice(0, 4).map(t => (
                 <span key={t} style={{
                   fontSize: 10, padding: '1px 6px', borderRadius: 4,
-                  background: 'rgba(0,0,0,0.05)', color: '#6E6E73',
+                  background: 'rgba(0,0,0,0.05)', color: 'var(--mb-text-secondary)',
                 }}>{t}</span>
               ))}
             </div>
           )}
           {isDownloading && (
             <div style={{ marginTop: 8 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#6E6E73', marginBottom: 3 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--mb-text-secondary)', marginBottom: 3 }}>
                 <span>下载中...</span>
                 <span>{model.download_progress || 0}%</span>
               </div>
-              <div style={{ height: 4, borderRadius: 2, background: '#E5E5EA' }}>
+              <div style={{ height: 4, borderRadius: 2, background: 'var(--mb-border-strong)' }}>
                 <div style={{
                   height: '100%', borderRadius: 2, background: '#FF9500',
                   width: `${model.download_progress || 0}%`, transition: 'width 0.3s',
@@ -795,7 +797,7 @@ const ModelManager: React.FC = () => {
   const activeEmb = models.find(m => (m.status === 'active' || m.is_active) && m.category === 'embedding')
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: '#F5F5F7' }}>
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: 'var(--mb-bg-page)' }}>
 
       {/* 顶部激活状态 */}
       <div style={{ padding: '10px 14px 0', display: 'flex', gap: 8 }}>
@@ -804,10 +806,10 @@ const ModelManager: React.FC = () => {
           { label: '向量模型', model: activeEmb },
         ].map(({ label, model }) => (
           <div key={label} style={{
-            flex: 1, background: 'white', borderRadius: 10, padding: '8px 12px',
-            border: '1px solid rgba(0,0,0,0.07)',
+            flex: 1, background: 'var(--mb-bg-card)', borderRadius: 10, padding: '8px 12px',
+            border: '1px solid var(--mb-border)',
           }}>
-            <div style={{ fontSize: 10, color: '#AEAEB2', marginBottom: 2 }}>{label}</div>
+            <div style={{ fontSize: 10, color: 'var(--mb-text-faint)', marginBottom: 2 }}>{label}</div>
             {model ? (
               <div style={{ fontSize: 12, fontWeight: 600, color: '#007AFF' }}>{model.name}</div>
             ) : (
@@ -825,14 +827,14 @@ const ModelManager: React.FC = () => {
         ] as { key: TabType; label: string }[]).map(t => (
           <button key={t.key} onClick={() => setTab(t.key)} style={{
             fontSize: 12, padding: '5px 12px', borderRadius: 8, border: 'none', cursor: 'pointer',
-            background: tab === t.key ? '#007AFF' : 'white',
-            color: tab === t.key ? 'white' : '#6E6E73',
+            background: tab === t.key ? '#007AFF' : 'var(--mb-bg-input)',
+            color: tab === t.key ? 'white' : 'var(--mb-text-secondary)',
             fontWeight: tab === t.key ? 600 : 400,
           }}>{t.label}</button>
         ))}
         <button onClick={loadModels} style={{
           marginLeft: 'auto', fontSize: 11, padding: '5px 10px', borderRadius: 8,
-          border: '1px solid rgba(0,0,0,0.1)', background: 'white', color: '#6E6E73', cursor: 'pointer',
+          border: '1px solid var(--mb-border-strong)', background: 'var(--mb-bg-input)', color: 'var(--mb-text-secondary)', cursor: 'pointer',
         }}>刷新</button>
       </div>
 
@@ -866,7 +868,7 @@ const ModelManager: React.FC = () => {
         ) : (
           <>
         {loading && models.length === 0 && (
-          <div style={{ textAlign: 'center', color: '#AEAEB2', fontSize: 13, padding: 40 }}>加载中...</div>
+          <div style={{ textAlign: 'center', color: 'var(--mb-text-faint)', fontSize: 13, padding: 40 }}>加载中...</div>
         )}
 
         {modelLoadError && (
@@ -879,16 +881,16 @@ const ModelManager: React.FC = () => {
           <div key={category} style={{ marginBottom: 16 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
               <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#007AFF' }} />
-              <span style={{ fontSize: 12, fontWeight: 600, color: '#333' }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--mb-text-primary)' }}>
                 {CATEGORY_LABEL[category] || category}
               </span>
             </div>
 
             {/* 本地运行环境信息 */}
             {category === 'inference_engine' && tab === 'llm' && (
-              <div style={{ background: 'white', borderRadius: 10, padding: 12, border: '1px solid rgba(0,0,0,0.07)', marginBottom: 8 }}>
+              <div style={{ background: 'var(--mb-bg-card)', borderRadius: 10, padding: 12, border: '1px solid var(--mb-border)', marginBottom: 8 }}>
                 {ollamaChecking ? (
-                  <div style={{ fontSize: 12, color: '#AEAEB2' }}>检测中...</div>
+                  <div style={{ fontSize: 12, color: 'var(--mb-text-faint)' }}>检测中...</div>
                 ) : (
                   <>
                     <div style={{ fontSize: 12, color: ollamaSetup?.ollama_running ? '#34C759' : '#6E6E73', marginBottom: 4 }}>
@@ -944,7 +946,7 @@ const ModelManager: React.FC = () => {
         ))}
 
         {!loading && !modelLoadError && filtered.length === 0 && (
-          <div style={{ textAlign: 'center', color: '#AEAEB2', fontSize: 13, padding: 40 }}>
+          <div style={{ textAlign: 'center', color: 'var(--mb-text-faint)', fontSize: 13, padding: 40 }}>
             暂无模型
           </div>
         )}
@@ -984,7 +986,7 @@ const ModelSection: React.FC<{
   <div style={{ marginTop: 14, marginBottom: 16 }}>
     <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
       <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#007AFF' }} />
-      <span style={{ fontSize: 12, fontWeight: 600, color: '#333' }}>{title}</span>
+      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--mb-text-primary)' }}>{title}</span>
     </div>
     {models.map(m => (
       <ModelCard
@@ -1105,24 +1107,24 @@ const CreationModelChatDialog: React.FC<{ entry: CreationChatEntry; onClose: () 
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
-      <div style={{ background: 'white', borderRadius: 16, width: 520, maxHeight: '80vh', boxShadow: '0 20px 60px rgba(0,0,0,0.2)', display: 'flex', flexDirection: 'column' }}>
-        <div style={{ padding: '12px 16px', borderBottom: '1px solid rgba(0,0,0,0.07)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <div style={{ background: 'var(--mb-bg-card)', borderRadius: 16, width: 520, maxHeight: '80vh', boxShadow: '0 20px 60px rgba(0,0,0,0.2)', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--mb-divider)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <span style={{ fontSize: 15, fontWeight: 700 }}>体验 {def.name}</span>
           <div style={{ display: 'flex', gap: 6 }}>
             <button onClick={() => { setMessages([]); setChatError('') }} style={btn('#F2F2F7', '#333', 11)}>重置</button>
             <button onClick={onClose} style={btn('#F2F2F7', '#333', 11)}>关闭</button>
           </div>
         </div>
-        <div style={{ flex: 1, overflow: 'auto', padding: '12px 16px', minHeight: 300, maxHeight: 'calc(80vh - 120px)', background: '#F5F5F7' }}>
+        <div style={{ flex: 1, overflow: 'auto', padding: '12px 16px', minHeight: 300, maxHeight: 'calc(80vh - 120px)', background: 'var(--mb-bg-page)' }}>
           {messages.length === 0 && !loading && (
-            <div style={{ textAlign: 'center', color: '#AEAEB2', fontSize: 13, padding: 60 }}>
+            <div style={{ textAlign: 'center', color: 'var(--mb-text-faint)', fontSize: 13, padding: 60 }}>
               <div style={{ fontSize: 40, marginBottom: 8 }}>💬</div>
               <div>和 {def.name} 开始对话</div>
             </div>
           )}
           {messages.map((msg, idx) => (
             <div key={idx} style={{ display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start', marginBottom: 8 }}>
-              <div style={{ maxWidth: '75%', padding: '8px 12px', borderRadius: msg.role === 'user' ? '12px 12px 4px 12px' : '12px 12px 12px 4px', background: msg.role === 'user' ? '#007AFF' : 'white', color: msg.role === 'user' ? 'white' : '#1D1D1F', fontSize: 13, whiteSpace: 'pre-wrap', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
+              <div style={{ maxWidth: '75%', padding: '8px 12px', borderRadius: msg.role === 'user' ? '12px 12px 4px 12px' : '12px 12px 12px 4px', background: msg.role === 'user' ? '#007AFF' : 'var(--mb-bg-card)', color: msg.role === 'user' ? 'white' : 'var(--mb-text-primary)', fontSize: 13, whiteSpace: 'pre-wrap', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
                 {msg.content || (msg.role === 'assistant' && loading ? '▌' : '')}
               </div>
             </div>
@@ -1130,7 +1132,7 @@ const CreationModelChatDialog: React.FC<{ entry: CreationChatEntry; onClose: () 
           {chatError && <div style={{ fontSize: 11, color: '#FF3B30', textAlign: 'center', padding: 8 }}>{chatError}</div>}
           <div ref={endRef} />
         </div>
-        <div style={{ padding: '10px 16px', borderTop: '1px solid rgba(0,0,0,0.07)', display: 'flex', gap: 8 }}>
+        <div style={{ padding: '10px 16px', borderTop: '1px solid var(--mb-divider)', display: 'flex', gap: 8 }}>
           <input value={input} onChange={e => setInput(e.target.value)}
             onCompositionStart={chatInputImeGuard.onCompositionStart}
             onCompositionEnd={chatInputImeGuard.onCompositionEnd}
@@ -1142,7 +1144,7 @@ const CreationModelChatDialog: React.FC<{ entry: CreationChatEntry; onClose: () 
               }
             }}
             placeholder="输入消息…"
-            style={{ flex: 1, padding: '8px 10px', border: '1px solid #E5E5EA', borderRadius: 8, fontSize: 13, outline: 'none' }} />
+            style={{ flex: 1, padding: '8px 10px', border: '1px solid var(--mb-border-strong)', borderRadius: 8, fontSize: 13, outline: 'none', background: 'var(--mb-bg-input)', color: 'var(--mb-text-primary)' }} />
           <button onClick={handleSend} disabled={loading || !input.trim()} style={btn(loading || !input.trim() ? '#E5E5EA' : '#007AFF', loading || !input.trim() ? '#AEAEB2' : 'white', 12)}>
             {loading ? '…' : '发送'}
           </button>
@@ -1189,14 +1191,14 @@ const CreationModelPanel: React.FC<{
 
   return (
     <div>
-      <div style={{ fontSize: 12, color: '#1D1D1F', marginBottom: 8, fontWeight: 650 }}>
+      <div style={{ fontSize: 12, color: 'var(--mb-text-primary)', marginBottom: 8, fontWeight: 650 }}>
         当前创作模型：{activeModelName}
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
         <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#AF52DE' }} />
-        <span style={{ fontSize: 12, fontWeight: 600, color: '#333' }}>咨询生成模型</span>
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--mb-text-primary)' }}>咨询生成模型</span>
       </div>
-      <div style={{ fontSize: 11, color: '#8E8E93', marginBottom: 10, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 11, color: 'var(--mb-text-tertiary)', marginBottom: 10, lineHeight: 1.5 }}>
         只能启用一个咨询生成模型。未登录或未开启云端创作时，默认使用本地 MBEM v1.0。
         {availableCredit != null ? ` 当前可用 Credit：${availableCredit}` : ''}
       </div>
@@ -1208,17 +1210,17 @@ const CreationModelPanel: React.FC<{
         const disabled = isGatewayModel && !remoteAllowed
         const ts = testState[def.id]
         return (
-          <div key={def.id} style={{ background: 'white', borderRadius: 10, padding: '10px 12px', border: '1px solid rgba(0,0,0,0.07)', marginBottom: 8, opacity: disabled ? 0.58 : 1 }}>
+          <div key={def.id} style={{ background: 'var(--mb-bg-card)', borderRadius: 10, padding: '10px 12px', border: '1px solid var(--mb-border)', marginBottom: 8, opacity: disabled ? 0.58 : 1 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{ width: 8, height: 8, borderRadius: '50%', background: PROVIDER_COLOR[def.provider] || '#AEAEB2', flexShrink: 0 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: '#1D1D1F' }}>{def.name}</span>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--mb-text-primary)' }}>{def.name}</span>
                   {def.sizeGb > 0 && (
-                    <span style={{ fontSize: 11, color: '#AEAEB2' }}>{def.sizeGb}GB</span>
+                    <span style={{ fontSize: 11, color: 'var(--mb-text-faint)' }}>{def.sizeGb}GB</span>
                   )}
                 </div>
-                <div style={{ fontSize: 11, color: '#8E8E93', marginTop: 2 }}>{def.description}</div>
+                <div style={{ fontSize: 11, color: 'var(--mb-text-tertiary)', marginTop: 2 }}>{def.description}</div>
               </div>
               {!isLocalModel && !isGatewayModel && cfg.apiKey && (
                 <button onClick={() => handleTest(def, cfg)} disabled={ts?.loading} style={btn(ts?.result ? '#34C759' : ts?.error ? '#FF3B30' : '#F2F2F7', ts?.result || ts?.error ? 'white' : '#333', 11)}>
@@ -1236,7 +1238,7 @@ const CreationModelPanel: React.FC<{
             {ts?.error && <div style={{ fontSize: 11, color: '#FF3B30', marginTop: 6 }}>{ts.error}</div>}
             {ts?.result && <div style={{ fontSize: 11, color: '#34C759', marginTop: 6 }}>回复：{ts.result}</div>}
             {isGatewayModel && (
-              <div style={{ marginTop: 8, fontSize: 11, color: '#8E8E93', lineHeight: 1.5 }}>
+              <div style={{ marginTop: 8, fontSize: 11, color: 'var(--mb-text-tertiary)', lineHeight: 1.5 }}>
                 {disabled ? '登录且有可用 Credit 后可启用云端创作。' : '云端创作会使用账户 Credit，本地记忆和私有快照内容仍留在你的设备上。'}
               </div>
             )}

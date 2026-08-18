@@ -43,7 +43,6 @@ const BakeKnowledgeTab: React.FC<{
   onToggleFavorite?: (item: BakeKnowledgeItem, isFavorite: boolean) => boolean | Promise<boolean>
   onOpenGraph?: (knowledge: BakeKnowledgeItem) => void
   onDeleteKnowledge: (id: string) => void | boolean | Promise<boolean>
-  onOpenCapture: (captureId?: string) => void
   onViewSourceTimeline: (timelineId?: string) => void
   sourceTimelineTitle?: string
   onCreateKnowledge?: (knowledge: Pick<BakeKnowledgeItem, 'summary' | 'overview' | 'detailedContent' | 'importance'>) => boolean | Promise<boolean>
@@ -74,7 +73,6 @@ const BakeKnowledgeTab: React.FC<{
   onToggleFavorite,
   onOpenGraph,
   onDeleteKnowledge,
-  onOpenCapture,
   onViewSourceTimeline,
   sourceTimelineTitle,
   onCreateKnowledge,
@@ -82,11 +80,6 @@ const BakeKnowledgeTab: React.FC<{
   focusId,
 }) => {
   const selected = items.find(item => item.id === selectedKnowledgeId) ?? items[0]
-  const selectedSourceCaptureIds = selected?.sourceCaptureIds.length
-    ? selected.sourceCaptureIds
-    : selected?.captureId
-      ? [selected.captureId]
-      : []
   const hasActiveFilters = Boolean(query.trim() || from || to || focusId || favoriteFilter !== 'all')
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   const [drawerMode, setDrawerMode] = useState<'detail' | 'edit' | null>(null)
@@ -313,15 +306,8 @@ const BakeKnowledgeTab: React.FC<{
               <div className="bake-kv__title">详细内容</div>
               <BakeMarkdown content={selected.detailedContent} />
             </div>}
-            <div className="bake-knowledge-detail__section">
-              <div className="bake-kv__title">来源采集记录</div>
-              <div className="bake-memory-detail__stats">
-                {selectedSourceCaptureIds.length > 0 ? selectedSourceCaptureIds.map(captureId => <button key={captureId} type="button" className="bake-stat-chip bake-stat-chip--button" onClick={() => onOpenCapture(captureId)}>采集记录 #{captureId}</button>) : <span className="bake-muted">暂无关联采集记录</span>}
-              </div>
-            </div>
             <div className="bake-related-summary">
               <div className="bake-related-row"><span className="bake-related-row__label">关联时间线</span><span className="bake-related-row__value">{sourceTimelineTitle || (selected.sourceTimelineId ? `时间线 #${selected.sourceTimelineId}` : '暂无')}</span></div>
-              <div className="bake-related-row"><span className="bake-related-row__label">来源采集标题</span><span className="bake-related-row__value">{selectedSourceCaptureIds.length > 0 ? selectedSourceCaptureIds.map(captureId => `采集记录 #${captureId}`).join('、') : '暂无'}</span></div>
             </div>
           </>}
         </div>}

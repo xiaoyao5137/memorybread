@@ -263,6 +263,28 @@ impl StorageManager {
         })
     }
 
+    /// OCR 成功后以当前可见画面的文本替换过长 AX/DOM 正文。
+    ///
+    /// 两个字段必须在同一事务中切换，避免提炼线程观察到既没有 AX 也没有 OCR
+    /// 的中间状态。OCR 失败时调用方不会进入此方法，原 AX 仍作为安全兜底保留。
+    pub fn replace_ax_text_with_ocr(
+        &self,
+        id: i64,
+        ocr_text: &str,
+        confidence: f32,
+    ) -> Result<(), StorageError> {
+        self.with_conn(|conn| {
+            let _ = confidence;
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "UPDATE captures SET ocr_text = ?1, ax_text = NULL WHERE id = ?2",
+                params![ocr_text, id],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
     /// 在 Sidecar 完成 ASR 后，将音频转录文本回写。
     pub fn update_audio_text(&self, id: i64, audio_text: &str) -> Result<(), StorageError> {
         self.with_conn(|conn| {
@@ -974,6 +996,20 @@ mod tests {
 
         let rec = mgr.get_capture(id).unwrap().unwrap();
         assert_eq!(rec.ocr_text.as_deref(), Some("OCR识别的文字"));
+    }
+
+    #[test]
+    fn test_replace_ax_text_with_ocr_switches_primary_capture_text_atomically() {
+        let mgr = make_mgr();
+        let id = mgr.insert_capture(&sample_capture()).unwrap();
+
+        mgr.replace_ax_text_with_ocr(id, "当前可见段落", 0.96)
+            .unwrap();
+
+        let rec = mgr.get_capture(id).unwrap().unwrap();
+        assert!(rec.ax_text.is_none());
+        assert_eq!(rec.ocr_text.as_deref(), Some("当前可见段落"));
+        assert_eq!(rec.best_text(), Some("当前可见段落"));
     }
 
     #[test]

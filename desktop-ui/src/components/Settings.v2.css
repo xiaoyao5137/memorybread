@@ -1119,6 +1119,33 @@
     box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.1);
   }
 
+  .settings-v2__textarea {
+    background: #3A3A3C;
+    border-color: rgba(255, 255, 255, 0.15);
+    color: #FFFFFF;
+  }
+
+  .settings-v2__textarea:disabled {
+    background: #2C2C2E;
+    color: #8E8E93;
+  }
+
+  .settings-v2__diagnostic-privacy {
+    background: rgba(255, 159, 67, 0.1);
+    border-color: rgba(255, 177, 122, 0.22);
+    color: #E8DCCF;
+  }
+
+  .settings-v2__diagnostic-privacy strong {
+    color: #FFC48D;
+  }
+
+  .settings-v2__card-icon--bread {
+    background: rgba(255, 159, 67, 0.14);
+    color: #E8A25C;
+    box-shadow: inset 0 0 0 1px rgba(255, 177, 122, 0.18);
+  }
+
   .settings-v2__btn--primary {
     background: #0A84FF;
   }

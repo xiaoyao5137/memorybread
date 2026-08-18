@@ -436,56 +436,78 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  /* 保持浅色背景，不跟随系统深色模式 */
+  /* 暗色模式（macOS 暗色外观） */
   .floating-buddy-v2 {
-    background: rgba(255, 255, 255, 0.95);
-    border-right-color: rgba(0, 0, 0, 0.08);
-    box-shadow: 4px 0 16px rgba(15, 23, 42, 0.06);
+    background: rgba(28, 28, 30, 0.92);
+    border-right-color: rgba(255, 255, 255, 0.09);
+    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.35);
+  }
+
+  .buddy-sidebar-collapse {
+    color: rgba(232, 162, 92, 0.6);
+  }
+
+  .buddy-sidebar-collapse:hover {
+    border-color: rgba(255, 159, 67, 0.12);
+    background: rgba(255, 159, 67, 0.1);
+    color: #E8A25C;
   }
 
   .buddy-sidebar-title {
-    color: #111827;
+    color: #F3F4F6;
   }
 
   .buddy-sidebar-subtitle {
-    color: #6B7280;
-  }
-
-  .buddy-menu-group__label {
     color: #9CA3AF;
   }
 
+  .buddy-menu-group__label {
+    color: #8E8E93;
+  }
+
   .buddy-action-btn {
-    color: #5f4633;
+    color: #D8C7B6;
   }
 
   .buddy-action-btn:hover {
-    background: rgba(255, 255, 255, 0.76);
-    color: #4a2f1e;
+    background: rgba(255, 255, 255, 0.08);
+    color: #F3F4F6;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
   }
 
   .buddy-action-btn--active {
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(255, 246, 232, 0.72));
-    color: #4a2f1e;
-    box-shadow: inset 0 0 0 1px rgba(124, 78, 37, 0.13), 0 8px 18px rgba(84, 48, 20, 0.06);
+    background: linear-gradient(180deg, rgba(255, 159, 67, 0.2), rgba(255, 159, 67, 0.09));
+    color: #FFC48D;
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 177, 122, 0.22),
+      0 8px 18px rgba(0, 0, 0, 0.28);
   }
 
   .buddy-action-btn__icon .bread-icon {
-    --bread-icon-fill: rgba(255, 255, 255, 0.68);
-    --bread-icon-inner: rgba(255, 255, 255, 0.42);
-    --bread-icon-glass-edge: rgba(124, 78, 37, 0.18);
-    --bread-icon-glass-highlight: rgba(255, 255, 255, 0.72);
-    --bread-icon-line: #5e3c24;
-    --bread-icon-accent: #b46f2a;
+    --bread-icon-fill: rgba(255, 159, 67, 0.24);
+    --bread-icon-inner: rgba(255, 177, 122, 0.3);
+    --bread-icon-glass-edge: rgba(255, 177, 122, 0.32);
+    --bread-icon-glass-highlight: rgba(255, 255, 255, 0.14);
+    --bread-icon-line: #FFC48D;
+    --bread-icon-accent: #E8A25C;
+  }
+
+  .buddy-action-btn:hover .bread-icon,
+  .buddy-action-btn--active .bread-icon {
+    --bread-icon-fill: rgba(255, 159, 67, 0.3);
+    --bread-icon-inner: rgba(255, 177, 122, 0.38);
+    --bread-icon-glass-edge: rgba(255, 177, 122, 0.4);
+    --bread-icon-line: #FFC48D;
+    --bread-icon-accent: #E8A25C;
   }
 
   .buddy-sidebar-footer {
-    border-top-color: rgba(78, 48, 27, 0.1);
-    background: rgba(255, 255, 255, 0.58);
+    border-top-color: rgba(255, 255, 255, 0.09);
+    background: rgba(255, 255, 255, 0.04);
   }
 
   .buddy-account-entry {
-    color: #4b3524;
+    color: #E8DCCF;
   }
 
   .buddy-account-entry__avatar {
@@ -494,20 +516,20 @@
   }
 
   .buddy-account-entry__identity span {
-    color: #7a6b5e;
+    color: #9CA3AF;
   }
 
   .buddy-account-entry__identity strong {
-    color: #3a2414;
+    color: #F3F4F6;
   }
 
   .buddy-account-entry__chevron {
-    color: #9a6a31;
+    color: #E8A25C;
   }
 
   .buddy-account-entry:hover,
   .buddy-account-entry--active {
-    background: rgba(180, 111, 42, 0.1);
+    background: rgba(255, 159, 67, 0.12);
   }
 
   .buddy-update-entry {

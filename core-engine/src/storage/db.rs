@@ -360,6 +360,74 @@ static MIGRATIONS: &[(&str, &str)] = &[
         "086_task_creation_link",
         include_str!("migrations/086_task_creation_link.sql"),
     ),
+    (
+        "087_requeue_recoverable_bake_outputs",
+        include_str!("migrations/087_requeue_recoverable_bake_outputs.sql"),
+    ),
+    (
+        "088_bake_artifact_audits",
+        include_str!("migrations/088_bake_artifact_audits.sql"),
+    ),
+    (
+        "089_bake_runs_trigger_actionable",
+        include_str!("migrations/089_bake_runs_trigger_actionable.sql"),
+    ),
+    (
+        "090_repair_document_knowledge_links",
+        include_str!("migrations/090_repair_document_knowledge_links.sql"),
+    ),
+    (
+        "091_timeline_driven_data_materialization",
+        include_str!(
+            "../../../shared/db-schema/migrations/091_timeline_driven_data_materialization.sql"
+        ),
+    ),
+    (
+        "092_timeline_data_materialization_versions",
+        include_str!(
+            "../../../shared/db-schema/migrations/092_timeline_data_materialization_versions.sql"
+        ),
+    ),
+    (
+        "093_reaggregate_timeline_data_sets",
+        include_str!("../../../shared/db-schema/migrations/093_reaggregate_timeline_data_sets.sql"),
+    ),
+    (
+        "094_cleanup_recreated_single_metric_data",
+        include_str!(
+            "../../../shared/db-schema/migrations/094_cleanup_recreated_single_metric_data.sql"
+        ),
+    ),
+    (
+        "095_restore_uncovered_legacy_data_rows",
+        include_str!(
+            "../../../shared/db-schema/migrations/095_restore_uncovered_legacy_data_rows.sql"
+        ),
+    ),
+    (
+        "096_refresh_timeline_dataset_titles",
+        include_str!(
+            "../../../shared/db-schema/migrations/096_refresh_timeline_dataset_titles.sql"
+        ),
+    ),
+    (
+        "097_refine_timeline_dataset_titles",
+        include_str!(
+            "../../../shared/db-schema/migrations/097_refine_timeline_dataset_titles.sql"
+        ),
+    ),
+    (
+        "098_refresh_dataset_natural_summaries",
+        include_str!(
+            "../../../shared/db-schema/migrations/098_refresh_dataset_natural_summaries.sql"
+        ),
+    ),
+    (
+        "099_repair_timeline_dataset_snapshots",
+        include_str!(
+            "../../../shared/db-schema/migrations/099_repair_timeline_dataset_snapshots.sql"
+        ),
+    ),
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -425,6 +493,7 @@ impl StorageManager {
              PRAGMA foreign_keys = ON;
              PRAGMA synchronous   = NORMAL;
              PRAGMA temp_store    = MEMORY;
+             PRAGMA busy_timeout  = 5000;
              PRAGMA mmap_size     = 268435456;", // 256 MB mmap，提升读性能
         )?;
         debug!("SQLite PRAGMA 配置完成");
@@ -1007,6 +1076,114 @@ pub fn current_ts_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timeline_data_materialization_migration_tracks_all_input_versions() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE timelines (id INTEGER PRIMARY KEY);
+             INSERT INTO timelines VALUES (7);",
+        )
+        .unwrap();
+
+        conn.execute_batch(include_str!(
+            "../../../shared/db-schema/migrations/091_timeline_driven_data_materialization.sql"
+        ))
+        .unwrap();
+        conn.execute_batch(include_str!(
+            "../../../shared/db-schema/migrations/092_timeline_data_materialization_versions.sql"
+        ))
+        .unwrap();
+        conn.execute(
+            "INSERT INTO data_timeline_materialization_state (
+                timeline_id, timeline_updated_at_ms, fact_updated_at_ms,
+                fact_accepted_count, fact_contract_version, capture_count,
+                max_capture_id, materialized_at
+             ) VALUES (7, 100, 200, 3, 'timeline-data-fact.v3', 4, 41, 300)",
+            [],
+        )
+        .unwrap();
+
+        let version: (i64, i64, i64, String, i64, i64) = conn
+            .query_row(
+                "SELECT timeline_updated_at_ms, fact_updated_at_ms,
+                        fact_accepted_count, fact_contract_version,
+                        capture_count, max_capture_id
+                 FROM data_timeline_materialization_state WHERE timeline_id = 7",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            version,
+            (100, 200, 3, "timeline-data-fact.v3".to_string(), 4, 41)
+        );
+    }
+
+    #[test]
+    fn document_knowledge_link_repair_maps_timelines_and_preserves_manual_links() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE bake_documents (
+                id INTEGER PRIMARY KEY,
+                source_memory_ids TEXT,
+                linked_knowledge_ids TEXT,
+                creation_mode TEXT,
+                deleted_at INTEGER
+            );
+            CREATE TABLE bake_artifact_source_links (
+                artifact_kind TEXT,
+                artifact_id INTEGER,
+                source_timeline_id INTEGER
+            );
+            INSERT INTO bake_documents VALUES
+                (525, '[\"2688\",\"9999\"]', '[\"2688\",\"9999\",\"42\"]', 'llm_bake', NULL),
+                (526, '[\"2688\"]', '[\"2688\",\"42\"]', 'manual', NULL);
+            INSERT INTO bake_artifact_source_links VALUES ('knowledge', 1605, 2688);",
+        )
+        .unwrap();
+
+        conn.execute_batch(include_str!(
+            "migrations/090_repair_document_knowledge_links.sql"
+        ))
+        .unwrap();
+
+        let repaired: String = conn
+            .query_row(
+                "SELECT linked_knowledge_ids FROM bake_documents WHERE id = 525",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let manual: String = conn
+            .query_row(
+                "SELECT linked_knowledge_ids FROM bake_documents WHERE id = 526",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let repaired_values: std::collections::HashSet<String> =
+            serde_json::from_str::<Vec<String>>(&repaired)
+                .unwrap()
+                .into_iter()
+                .collect();
+
+        assert_eq!(
+            repaired_values,
+            std::collections::HashSet::from(["1605".to_string(), "42".to_string()])
+        );
+        assert_eq!(manual, "[\"2688\",\"42\"]");
+    }
 
     #[test]
     fn creation_skill_structure_migration_drops_hidden_legacy_data() {

@@ -331,3 +331,110 @@
     transition-duration: .01ms !important;
   }
 }
+
+/* ===== macOS 暗色模式适配（仅追加，不改动上方亮色规则） ===== */
+@media (prefers-color-scheme: dark) {
+  .message-panel {
+    background: #111315;
+    color: #F3F4F6;
+  }
+
+  .message-panel.message-panel--embedded {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #1C1C1E;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  }
+
+  .message-panel__header {
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .message-panel__summary > strong {
+    color: #E8A25C;
+  }
+
+  .message-panel__summary > span {
+    color: #9CA3AF;
+  }
+
+  .message-panel__summary button,
+  .message-panel__state button,
+  .message-panel__action {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+    color: #FFC48D;
+  }
+
+  .message-panel button:focus-visible {
+    outline-color: rgba(47, 179, 168, 0.3);
+  }
+
+  .message-panel__state > svg {
+    color: #E8A25C;
+  }
+
+  .message-panel__state p {
+    color: #9CA3AF;
+  }
+
+  .message-panel__skeleton-row {
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .message-panel__skeleton-row > span,
+  .message-panel__skeleton-row i,
+  .message-panel__skeleton-row strong,
+  .message-panel__skeleton-row p {
+    background: #232326;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .message-panel__skeleton-row > span,
+    .message-panel__skeleton-row i,
+    .message-panel__skeleton-row strong,
+    .message-panel__skeleton-row p {
+      background: linear-gradient(90deg, #232326 25%, #2C2C2E 50%, #232326 75%);
+      background-size: 200% 100%;
+    }
+  }
+
+  .message-panel__inline-error {
+    border-color: rgba(255, 69, 58, 0.32);
+    background: rgba(255, 69, 58, 0.16);
+    color: #FF6961;
+  }
+
+  .message-panel__list article {
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .message-panel__item--unread::before {
+    background: #E8A25C;
+  }
+
+  .message-panel__read-dot {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+  }
+
+  .message-panel__read-dot span {
+    background: #E8A25C;
+  }
+
+  .message-panel__copy > div:first-child {
+    color: #8E8E93;
+  }
+
+  .message-panel__copy > div:first-child span {
+    color: #E8A25C;
+  }
+
+  .message-panel__copy p {
+    color: #D1D5DB;
+  }
+
+  .message-panel__action {
+    border-color: transparent;
+    background: rgba(255, 159, 67, 0.14);
+  }
+}

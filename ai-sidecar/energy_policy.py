@@ -29,12 +29,13 @@ BATTERY_BAKE_INTERVAL_SECS = 30 * 60
 BATTERY_BAKE_LIMIT = 1
 BATTERY_BAKE_CONCURRENCY = 1
 
-# 充电时每 30 秒检查一次 bake backlog；已有 run 在执行时 core 会拒绝重复 run，
-# 完成后下一次检查会立即续上，避免大批积压每轮额外空等 5 分钟。
-CHARGING_BAKE_INTERVAL_SECS = 30
+# 充电时每 90 秒检查一次 bake backlog；单模型槽下一次 bake 候选提炼需数分钟，
+# 30 秒检查只会堆出高频空转请求；已有 run 在执行时 core 会拒绝重复 run，
+# 完成后下一次检查会立即续上，不会让大批积压长期空等。
+CHARGING_BAKE_INTERVAL_SECS = 90
 # 32K 长文档单候选可能包含 bundle + merge 两次推理。缩小调度切片不会降低
 # 单路模型吞吐，但能让每个 run 稳定落在 30 分钟总预算内，避免处理已有进度
-# 后被整批误标 failed；完成后 30 秒内会自动续下一批。
+# 后被整批误标 failed；完成后 90 秒内会自动续下一批。
 CHARGING_BAKE_LIMIT = 10
 # 并发 3 用于流水线化候选间的 HTTP 往返与存储写入，已是 core 侧 clamp 上限 1~3；
 # 本地模型推理槽位仍由 inference_queue 的全局上限约束，不会真正放大算力开销。

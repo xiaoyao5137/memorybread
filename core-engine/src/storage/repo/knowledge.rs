@@ -13,8 +13,51 @@ use crate::storage::{
         BakeSopRecord, EpisodicMemoryRecord, NewBakeKnowledge, NewBakeSop, NewEpisodicMemory,
         NewTimeline, TimelineRecord,
     },
+    repo::bake_run::{refresh_doc_member_temp_tables, PRODUCED_DOC_TIMELINES_CTE},
     StorageManager,
 };
+
+fn primary_source_capture_id(source_capture_ids: Option<&str>) -> i64 {
+    source_capture_ids
+        .and_then(|value| serde_json::from_str::<Vec<serde_json::Value>>(value).ok())
+        .into_iter()
+        .flatten()
+        .find_map(|value| match value {
+            serde_json::Value::Number(value) => value.as_i64(),
+            serde_json::Value::String(value) => value.trim().parse::<i64>().ok(),
+            _ => None,
+        })
+        .filter(|value| *value > 0)
+        .unwrap_or(0)
+}
+
+fn details_with_source_timeline_id(details: Option<String>, timeline_id: i64) -> Option<String> {
+    if timeline_id <= 0 {
+        return details;
+    }
+    let mut value = details
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let has_source_timeline = value
+        .get("source_timeline_id")
+        .and_then(|value| match value {
+            serde_json::Value::Number(value) => value.as_i64().filter(|id| *id > 0),
+            serde_json::Value::String(value) => {
+                value.trim().parse::<i64>().ok().filter(|id| *id > 0)
+            }
+            _ => None,
+        })
+        .is_some();
+    if !has_source_timeline {
+        value.insert(
+            "source_timeline_id".to_string(),
+            serde_json::Value::from(timeline_id),
+        );
+    }
+    Some(serde_json::Value::Object(value).to_string())
+}
 
 fn keyword_terms(query: &str) -> Vec<String> {
     let mut terms = query
@@ -271,7 +314,7 @@ impl StorageManager {
                         activity_type: entry.activity_type.clone(),
                         is_self_generated: entry.is_self_generated,
                         evidence_strength: entry.evidence_strength.clone(),
-                        capture_ids: None,
+                        capture_ids: entry.capture_ids.clone(),
                         start_time: None,
                         end_time: None,
                         duration_minutes: None,
@@ -373,40 +416,44 @@ impl StorageManager {
                 let knowledge = self.list_bake_knowledge_new(None, 5000, 0)?;
                 Ok(knowledge
                     .into_iter()
-                    .map(|k| TimelineRecord {
-                        id: k.id,
-                        capture_id: k.timeline_id,
-                        summary: k.summary,
-                        overview: Some(k.title),
-                        details: k.content,
-                        detailed_content: k.detailed_content,
-                        entities: k.entities,
-                        category: "bake_knowledge".to_string(),
-                        importance: k.importance,
-                        occurrence_count: None,
-                        observed_at: None,
-                        event_time_start: None,
-                        event_time_end: None,
-                        history_view: false,
-                        content_origin: None,
-                        activity_type: None,
-                        is_self_generated: false,
-                        evidence_strength: None,
-                        user_verified: k.user_verified,
-                        user_edited: k.user_edited,
-                        created_at: k.created_at,
-                        updated_at: k.updated_at,
-                        created_at_ms: k.created_at_ms,
-                        updated_at_ms: k.updated_at_ms,
-                        capture_ids: None,
-                        start_time: None,
-                        end_time: None,
-                        duration_minutes: None,
-                        frag_app_name: None,
-                        frag_win_title: None,
-                        time_range_start: None,
-                        time_range_end: None,
-                        key_timestamps: None,
+                    .map(|k| {
+                        let capture_id = primary_source_capture_id(k.source_capture_ids.as_deref());
+                        let details = details_with_source_timeline_id(k.content, k.timeline_id);
+                        TimelineRecord {
+                            id: k.id,
+                            capture_id,
+                            summary: k.summary,
+                            overview: Some(k.title),
+                            details,
+                            detailed_content: k.detailed_content,
+                            entities: k.entities,
+                            category: "bake_knowledge".to_string(),
+                            importance: k.importance,
+                            occurrence_count: Some(k.occurrence_count),
+                            observed_at: None,
+                            event_time_start: None,
+                            event_time_end: None,
+                            history_view: false,
+                            content_origin: None,
+                            activity_type: None,
+                            is_self_generated: false,
+                            evidence_strength: None,
+                            user_verified: k.user_verified,
+                            user_edited: k.user_edited,
+                            created_at: k.created_at,
+                            updated_at: k.updated_at,
+                            created_at_ms: k.created_at_ms,
+                            updated_at_ms: k.updated_at_ms,
+                            capture_ids: k.source_capture_ids,
+                            start_time: None,
+                            end_time: None,
+                            duration_minutes: None,
+                            frag_app_name: None,
+                            frag_win_title: None,
+                            time_range_start: None,
+                            time_range_end: None,
+                            key_timestamps: None,
+                        }
                     })
                     .collect())
             }
@@ -559,7 +606,8 @@ impl StorageManager {
                 sql.push_str(" AND k.created_at_ms <= ?");
                 bind_values.push(Box::new(value));
             }
-            sql.push_str(" ORDER BY k.updated_at_ms DESC, k.id DESC LIMIT ? OFFSET ?");
+            // 时间线表格统一按创建时间逆序展示
+            sql.push_str(" ORDER BY k.created_at_ms DESC, k.id DESC LIMIT ? OFFSET ?");
             bind_values.push(Box::new(limit as i64));
             bind_values.push(Box::new(offset as i64));
 
@@ -680,44 +728,49 @@ impl StorageManager {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<TimelineRecord>, StorageError> {
-        // 使用新表，但返回旧格式以保持兼容
+        // 使用新表，但返回旧格式以保持兼容。capture 字段只承载真实采集来源，
+        // timeline 来源写入 details，避免两个独立 ID 命名空间互相污染。
         let knowledge = self.list_bake_knowledge_new(query, limit, offset)?;
         Ok(knowledge
             .into_iter()
-            .map(|k| TimelineRecord {
-                id: k.id,
-                capture_id: k.timeline_id,
-                summary: k.summary,
-                overview: Some(k.title),
-                details: k.content,
-                detailed_content: k.detailed_content,
-                entities: k.entities,
-                category: "bake_knowledge".to_string(),
-                importance: k.importance,
-                occurrence_count: Some(k.occurrence_count),
-                observed_at: None,
-                event_time_start: None,
-                event_time_end: None,
-                history_view: false,
-                content_origin: None,
-                activity_type: None,
-                is_self_generated: false,
-                evidence_strength: None,
-                user_verified: k.user_verified,
-                user_edited: k.user_edited,
-                created_at: k.created_at,
-                updated_at: k.updated_at,
-                created_at_ms: k.created_at_ms,
-                updated_at_ms: k.updated_at_ms,
-                capture_ids: None,
-                start_time: None,
-                end_time: None,
-                duration_minutes: None,
-                frag_app_name: None,
-                frag_win_title: None,
-                time_range_start: None,
-                time_range_end: None,
-                key_timestamps: None,
+            .map(|k| {
+                let capture_id = primary_source_capture_id(k.source_capture_ids.as_deref());
+                let details = details_with_source_timeline_id(k.content, k.timeline_id);
+                TimelineRecord {
+                    id: k.id,
+                    capture_id,
+                    summary: k.summary,
+                    overview: Some(k.title),
+                    details,
+                    detailed_content: k.detailed_content,
+                    entities: k.entities,
+                    category: "bake_knowledge".to_string(),
+                    importance: k.importance,
+                    occurrence_count: Some(k.occurrence_count),
+                    observed_at: None,
+                    event_time_start: None,
+                    event_time_end: None,
+                    history_view: false,
+                    content_origin: None,
+                    activity_type: None,
+                    is_self_generated: false,
+                    evidence_strength: None,
+                    user_verified: k.user_verified,
+                    user_edited: k.user_edited,
+                    created_at: k.created_at,
+                    updated_at: k.updated_at,
+                    created_at_ms: k.created_at_ms,
+                    updated_at_ms: k.updated_at_ms,
+                    capture_ids: k.source_capture_ids,
+                    start_time: None,
+                    end_time: None,
+                    duration_minutes: None,
+                    frag_app_name: None,
+                    frag_win_title: None,
+                    time_range_start: None,
+                    time_range_end: None,
+                    key_timestamps: None,
+                }
             })
             .collect())
     }
@@ -756,7 +809,8 @@ impl StorageManager {
                     bind_values.push(Box::new(pattern.clone()));
                 }
             }
-            sql.push_str(" ORDER BY b.updated_at_ms DESC LIMIT ? OFFSET ?");
+            // 知识表格统一按创建时间逆序展示
+            sql.push_str(" ORDER BY b.created_at_ms DESC, b.id DESC LIMIT ? OFFSET ?");
             bind_values.push(Box::new(limit as i64));
             bind_values.push(Box::new(offset as i64));
 
@@ -972,21 +1026,7 @@ impl StorageManager {
                 AND COALESCE(r.next_retry_at_ms, 0) <= ?4
                 AND NOT EXISTS (SELECT 1 FROM bake_knowledge bk WHERE bk.timeline_id = k.id)
                 AND NOT EXISTS (SELECT 1 FROM bake_sops bs WHERE bs.timeline_id = k.id)
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM bake_documents bd
-                    WHERE bd.deleted_at IS NULL
-                      AND (
-                           (json_valid(COALESCE(bd.source_memory_ids, '[]')) AND EXISTS (
-                               SELECT 1 FROM json_each(bd.source_memory_ids)
-                               WHERE CAST(json_each.value AS TEXT) = CAST(k.id AS TEXT)
-                           ))
-                        OR (json_valid(COALESCE(bd.source_episode_ids, '[]')) AND EXISTS (
-                               SELECT 1 FROM json_each(bd.source_episode_ids)
-                               WHERE CAST(json_each.value AS TEXT) = CAST(k.id AS TEXT)
-                           ))
-                      )
-                )
+                AND CAST(k.id AS TEXT) NOT IN (SELECT tid FROM produced_doc_timelines)
             "#
         } else {
             r#"
@@ -997,31 +1037,26 @@ impl StorageManager {
                     MAX(k.updated_at_ms, COALESCE((SELECT MAX(c2.ts) FROM captures c2 WHERE c2.timeline_id = k.id), 0)) > ?1
                     OR EXISTS (
                         SELECT 1
-                        FROM bake_documents d
+                        FROM doc_member_timeline dm
                         JOIN captures c3 ON c3.timeline_id = k.id
-                        WHERE d.deleted_at IS NULL
-                          AND json_valid(COALESCE(d.source_memory_ids, '[]'))
-                          AND EXISTS (
-                              SELECT 1 FROM json_each(d.source_memory_ids)
-                              WHERE CAST(json_each.value AS TEXT) = CAST(k.id AS TEXT)
-                          )
+                        WHERE dm.timeline_id = CAST(k.id AS TEXT)
                           AND NOT EXISTS (
-                              SELECT 1 FROM json_each(
-                                  CASE
-                                      WHEN json_valid(COALESCE(d.source_capture_ids, '[]'))
-                                      THEN d.source_capture_ids
-                                      ELSE '[]'
-                                  END
-                              )
-                              WHERE CAST(json_each.value AS TEXT) = CAST(c3.id AS TEXT)
+                              SELECT 1 FROM doc_member_capture dc
+                              WHERE dc.doc_id = dm.doc_id
+                                AND dc.capture_id = CAST(c3.id AS TEXT)
                           )
                     )
                 )
             "#
         };
         self.with_conn(|conn| {
+            // 文档成员展开物化为连接级临时表：捆绑 SQLite 会把只引用一次的
+            // CTE 展平为关联子查询，外层每行重跑 json_each，大库上单次要数十
+            // 秒并占满共享连接；监控与调度口径共用同一套临时表。
+            refresh_doc_member_temp_tables(conn)?;
             let sql = format!(
-                "SELECT k.id, k.capture_id, k.summary, k.overview, k.details, k.entities, k.category, k.importance,
+                "WITH {produced_doc_timelines_cte}
+                 SELECT k.id, k.capture_id, k.summary, k.overview, k.details, k.entities, k.category, k.importance,
                         k.occurrence_count, k.observed_at, k.event_time_start, k.event_time_end,
                         k.history_view, k.content_origin, k.activity_type, k.is_self_generated,
                         k.evidence_strength, k.user_verified, k.user_edited, k.created_at, k.updated_at,
@@ -1041,7 +1076,8 @@ impl StorageManager {
                  WHERE k.category NOT IN ('bake_article', 'bake_knowledge', 'bake_sop', 'legacy_bake_candidate')
                    AND ({lane_predicate})
                  ORDER BY MAX(k.updated_at_ms, COALESCE((SELECT MAX(c2.ts) FROM captures c2 WHERE c2.timeline_id = k.id), 0)) ASC, k.id ASC
-                 LIMIT ?2"
+                 LIMIT ?2",
+                produced_doc_timelines_cte = PRODUCED_DOC_TIMELINES_CTE
             );
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map(
@@ -1136,12 +1172,14 @@ impl StorageManager {
 
     pub fn get_timeline_entry(&self, id: i64) -> Result<Option<TimelineRecord>, StorageError> {
         if let Some(knowledge) = self.get_bake_knowledge(id)? {
+            let capture_id = primary_source_capture_id(knowledge.source_capture_ids.as_deref());
+            let details = details_with_source_timeline_id(knowledge.content, knowledge.timeline_id);
             return Ok(Some(TimelineRecord {
                 id: knowledge.id,
-                capture_id: knowledge.timeline_id,
+                capture_id,
                 summary: knowledge.summary,
                 overview: Some(knowledge.title),
-                details: knowledge.content,
+                details,
                 detailed_content: knowledge.detailed_content,
                 entities: knowledge.entities,
                 category: "bake_knowledge".to_string(),
@@ -1161,7 +1199,7 @@ impl StorageManager {
                 updated_at: knowledge.updated_at,
                 created_at_ms: knowledge.created_at_ms,
                 updated_at_ms: knowledge.updated_at_ms,
-                capture_ids: None,
+                capture_ids: knowledge.source_capture_ids,
                 start_time: None,
                 end_time: None,
                 duration_minutes: None,
@@ -1389,7 +1427,9 @@ const URL_AGGREGATION_DEDUP_HEAD_CHARS: usize = 200;
 const MEMBER_AGGREGATION_MAX_CAPTURES: usize = 40;
 const MEMBER_AGGREGATION_TOTAL_BUDGET_CHARS: usize = 32_000;
 const MEMBER_AGGREGATION_PER_CAPTURE_CAP_CHARS: usize = 16_000;
-const MEMBER_AGGREGATION_DEDUP_HEAD_CHARS: usize = 200;
+// 同一页面快照的首部和尾部都相同才视为重复；仅按首部去重会把固定导航栏相同、
+// 但滚动正文不同的文档帧全部误删。
+const MEMBER_AGGREGATION_DEDUP_EDGE_CHARS: usize = 200;
 const ACTION_TRACE_MAX_CAPTURES: usize = 40;
 const ACTION_TRACE_VISIBLE_TEXT_CHARS: usize = 1_000;
 const ACTION_TRACE_INPUT_TEXT_CHARS: usize = 400;
@@ -1488,18 +1528,14 @@ fn annotate_and_compact_action_trace(
         });
         let is_agent_report = is_agent_report_surface(&record);
         let (evidence_kind, evidence_role, evidence_reason) = match record.event_type.as_str() {
-            "browser_navigation" | "app_switch" => {
-                ("navigation", "context", "navigation_only")
-            }
+            "browser_navigation" | "app_switch" => ("navigation", "context", "navigation_only"),
             "key_pause" if has_input => ("input", "action", "explicit_input"),
             "manual" if has_input => ("input", "action", "explicit_input"),
             "mouse_click" if is_interactive_focus => {
                 ("interaction", "action", "focused_control_click")
             }
             "manual" if has_focus => ("interaction", "action", "focused_control_interaction"),
-            _ if state_changed && is_agent_report => {
-                ("context", "context", "agent_report_surface")
-            }
+            _ if state_changed && is_agent_report => ("context", "context", "agent_report_surface"),
             "auto" if state_changed && has_attributable_action => {
                 ("state_change", "result", "observable_state_result")
             }
@@ -1542,15 +1578,25 @@ fn annotate_and_compact_action_trace(
 }
 
 fn is_agent_report_surface(record: &BakeActionTraceRecord) -> bool {
-    let app = record.app_name.as_deref().unwrap_or_default().to_ascii_lowercase();
+    let app = record
+        .app_name
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let title = record
         .win_title
         .as_deref()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    ["workbuddy", "chatgpt", "claude", "copilot chat", "agent chat"]
-        .iter()
-        .any(|marker| title.contains(marker))
+    [
+        "workbuddy",
+        "chatgpt",
+        "claude",
+        "copilot chat",
+        "agent chat",
+    ]
+    .iter()
+    .any(|marker| title.contains(marker))
         || ["chatgpt", "claude"]
             .iter()
             .any(|marker| app.contains(marker))
@@ -1584,8 +1630,16 @@ fn action_contexts_compatible(
             .as_deref()
             .is_some_and(|other| app.eq_ignore_ascii_case(other))
     });
-    let action_app = action.app_name.as_deref().unwrap_or_default().to_ascii_lowercase();
-    let result_app = result.app_name.as_deref().unwrap_or_default().to_ascii_lowercase();
+    let action_app = action
+        .app_name
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let result_app = result
+        .app_name
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let editor_terminal_pair = ["code", "cursor", "terminal", "iterm", "warp"]
         .iter()
         .any(|marker| action_app.contains(marker))
@@ -1713,7 +1767,7 @@ fn truncate_optional_text(value: Option<String>, max_chars: usize) -> Option<Str
 ///
 /// 设计要点：
 /// - 文档型成员（URL 含文档域名）优先靠前，保证有限预算下文档正文不被 IM/编码噪声挤掉；
-/// - 同一份文档的多次 capture 按 head 去重，保留正文最长（同长时最新）的一帧；
+/// - 同一份文档的多次 capture 按首尾联合指纹去重，保留正文最长（同长时最新）的一帧；
 /// - 返回 (聚合文本, 纳入的成员数)。即使去重后只剩一帧，也保留这帧，因为它可能
 ///   比 timeline 主 capture 更完整。
 fn aggregate_member_capture_text(
@@ -1784,26 +1838,33 @@ fn aggregate_member_capture_text(
         return Ok(None);
     }
 
-    // 相同开头通常是同一页面的周期性快照。旧逻辑先到先得，会把更晚、更完整的长
-    // 快照误删，只留下最早的短文本；改为每个 head 保留最长（同长时最新）的版本。
-    let mut best_by_head: std::collections::HashMap<String, Member> =
+    // 只有首部和尾部都相同才视为同屏周期快照。云文档固定导航栏会让不同滚动位置
+    // 拥有相同开头，旧的 head-only 去重会静默丢失后续正文。
+    let mut best_by_edges: std::collections::HashMap<String, Member> =
         std::collections::HashMap::new();
     for member in members {
         let head: String = member
             .text
             .chars()
-            .take(MEMBER_AGGREGATION_DEDUP_HEAD_CHARS)
+            .take(MEMBER_AGGREGATION_DEDUP_EDGE_CHARS)
             .collect();
-        let should_replace = best_by_head.get(&head).map_or(true, |existing| {
+        let tail_reversed: String = member
+            .text
+            .chars()
+            .rev()
+            .take(MEMBER_AGGREGATION_DEDUP_EDGE_CHARS)
+            .collect();
+        let fingerprint = format!("{head}\u{0}{tail_reversed}");
+        let should_replace = best_by_edges.get(&fingerprint).map_or(true, |existing| {
             let member_len = member.text.chars().count();
             let existing_len = existing.text.chars().count();
             member_len > existing_len || (member_len == existing_len && member.ts > existing.ts)
         });
         if should_replace {
-            best_by_head.insert(head, member);
+            best_by_edges.insert(fingerprint, member);
         }
     }
-    let mut members: Vec<Member> = best_by_head.into_values().collect();
+    let mut members: Vec<Member> = best_by_edges.into_values().collect();
 
     // 文档型优先（稳定排序：先 is_doc 降序，再时间升序），保证预算先喂文档正文。
     members.sort_by(|a, b| b.is_doc.cmp(&a.is_doc).then(a.ts.cmp(&b.ts)));
@@ -2771,7 +2832,7 @@ impl StorageManager {
             let mut stmt = conn.prepare(
                 "SELECT id, COALESCE(timeline_id, 0) AS timeline_id, title, summary, content, detailed_content, entities, importance,
                         user_verified, user_edited, created_at, updated_at, created_at_ms, updated_at_ms, source_capture_ids
-                 FROM bake_sops ORDER BY updated_at_ms DESC LIMIT ? OFFSET ?"
+                 FROM bake_sops ORDER BY created_at_ms DESC, id DESC LIMIT ? OFFSET ?"
             )?;
             let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
                 Ok(row_to_bake_sop(row).map_err(|_| rusqlite::Error::InvalidQuery)?)
@@ -3643,7 +3704,7 @@ mod tests {
     }
 
     #[test]
-    fn test_member_aggregation_keeps_longest_snapshot_even_if_only_one_remains() {
+    fn test_member_aggregation_keeps_distinct_frames_when_only_document_head_matches() {
         let mgr = make_mgr();
         let url = "https://docs.example.com/d/home/member-long-document";
         let shared_head = "同一页面固定开头".repeat(60);
@@ -3660,11 +3721,42 @@ mod tests {
         let (aggregated, count) = mgr
             .with_conn(|conn| aggregate_member_capture_text(conn, &[short_id, long_id], short_id))
             .unwrap()
-            .expect("应保留比主 capture 更完整的单一快照");
+            .expect("相同固定页头但正文尾部不同的成员帧都应保留");
 
-        assert_eq!(count, 1);
+        assert_eq!(count, 2);
+        assert!(aggregated.contains("短版本"));
         assert!(aggregated.contains(&long_tail));
         assert!(aggregated.chars().count() >= long_text.chars().count());
+    }
+
+    #[test]
+    fn test_member_aggregation_keeps_scrolled_frames_with_shared_fixed_header() {
+        let mgr = make_mgr();
+        let url = "https://docs.example.com/d/home/scrolled-document";
+        let shared_head = "固定导航栏与文档标题".repeat(30);
+        let first_body = "第一页独有正文".repeat(120);
+        let second_body = "第二页独有正文".repeat(120);
+        let first_id = seed_document_capture(
+            &mgr,
+            1_700_000_000_000,
+            format!("{shared_head}\n{first_body}"),
+            url,
+        );
+        let second_id = seed_document_capture(
+            &mgr,
+            1_700_000_010_000,
+            format!("{shared_head}\n{second_body}"),
+            url,
+        );
+
+        let (aggregated, count) = mgr
+            .with_conn(|conn| aggregate_member_capture_text(conn, &[first_id, second_id], first_id))
+            .unwrap()
+            .expect("不同滚动位置都应进入聚合正文");
+
+        assert_eq!(count, 2);
+        assert!(aggregated.contains(&first_body));
+        assert!(aggregated.contains(&second_body));
     }
 
     #[test]

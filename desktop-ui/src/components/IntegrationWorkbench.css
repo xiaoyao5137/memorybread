@@ -544,6 +544,8 @@
   .integration-query-config > div,
   .integration-workbench button,
   .integration-dialog button { background: #292725; border-color: rgba(255, 255, 255, 0.1); color: #dccfc4; }
+  .integration-skill-card__actions button:not(.is-primary) { background: #292725; border-color: rgba(255, 255, 255, 0.1); color: #dccfc4; }
+  .integration-skill-card__actions button:not(.is-primary):hover { border-color: rgba(255, 255, 255, 0.22); }
   .integration-query-config > div input { color: #f2e8df; }
   .integration-run-history > button.is-active,
   .integration-files-view aside > button.is-active,

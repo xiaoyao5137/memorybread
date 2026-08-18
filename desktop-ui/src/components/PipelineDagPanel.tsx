@@ -30,20 +30,20 @@ const NODE_POS: Record<DagStageKey, { x: number; y: number }> = {
 }
 
 const STAGE_COLOR: Record<DagStageKey, { fill: string; stroke: string; accent: string }> = {
-  capture:   { fill: '#EBF5FF', stroke: '#007AFF', accent: '#007AFF' },
-  timeline:  { fill: '#FFF4E5', stroke: '#FF9500', accent: '#FF9500' },
-  knowledge: { fill: '#F3EBFF', stroke: '#AF52DE', accent: '#AF52DE' },
-  sop:       { fill: '#E8F8EE', stroke: '#34C759', accent: '#34C759' },
-  document:  { fill: '#FFEBEE', stroke: '#FF3B30', accent: '#FF3B30' },
-  data:      { fill: '#E8F7F7', stroke: '#008A8A', accent: '#008A8A' },
+  capture:   { fill: 'color-mix(in srgb, #007AFF 12%, var(--mb-bg-card))', stroke: '#007AFF', accent: '#007AFF' },
+  timeline:  { fill: 'color-mix(in srgb, #FF9500 12%, var(--mb-bg-card))', stroke: '#FF9500', accent: '#FF9500' },
+  knowledge: { fill: 'color-mix(in srgb, #AF52DE 12%, var(--mb-bg-card))', stroke: '#AF52DE', accent: '#AF52DE' },
+  sop:       { fill: 'color-mix(in srgb, #34C759 12%, var(--mb-bg-card))', stroke: '#34C759', accent: '#34C759' },
+  document:  { fill: 'color-mix(in srgb, #FF3B30 12%, var(--mb-bg-card))', stroke: '#FF3B30', accent: '#FF3B30' },
+  data:      { fill: 'color-mix(in srgb, #008A8A 12%, var(--mb-bg-card))', stroke: '#008A8A', accent: '#008A8A' },
 }
 
 const EXTRACTOR_LABEL: Record<string, { text: string; color: string }> = {
   running: { text: '提炼中', color: '#34C759' },
   waiting: { text: '等待中', color: '#FF9500' },
-  idle:    { text: '空闲',   color: '#8E8E93' },
+  idle:    { text: '空闲',   color: 'var(--mb-text-tertiary)' },
   stalled: { text: '已停止', color: '#FF3B30' },
-  paused:  { text: '已暂停', color: '#8E8E93' },
+  paused:  { text: '已暂停', color: 'var(--mb-text-tertiary)' },
 }
 
 function emptyStage(
@@ -87,7 +87,7 @@ function fmtRelTime(ms: number, nowMs: number): string {
 // 兼容字段 bake_watermark_lag_ms 现在表示“最老烘焙候选已等待多久”。
 // 无库存=灰色；<2h=正常；2-24h=橙色提示；>24h=红色异常。
 function fmtWatermarkLag(lagMs: number): { text: string; color: string } {
-  if (lagMs <= 0) return { text: '烘焙队列已清空', color: '#8E8E93' }
+  if (lagMs <= 0) return { text: '烘焙队列已清空', color: 'var(--mb-text-tertiary)' }
   const min = Math.floor(lagMs / 60_000)
   const hr = Math.floor(lagMs / 3_600_000)
   const day = Math.floor(lagMs / 86_400_000)
@@ -216,7 +216,7 @@ const PipelineDagPanel: React.FC<Props> = ({ base, isVisible }) => {
       {error && (
         <div style={{
           background: 'rgba(255,59,48,0.08)', border: '1px solid rgba(255,59,48,0.16)',
-          color: '#C62828', borderRadius: 10, padding: '8px 12px', fontSize: 12, marginBottom: 10,
+          color: 'var(--mb-danger)', borderRadius: 10, padding: '8px 12px', fontSize: 12, marginBottom: 10,
         }}>
           DAG 加载失败：{error}
         </div>
@@ -225,10 +225,10 @@ const PipelineDagPanel: React.FC<Props> = ({ base, isVisible }) => {
       {/* 顶部状态条 */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12,
-        background: 'white', borderRadius: 10, padding: '10px 14px',
-        border: '1px solid rgba(0,0,0,0.07)', fontSize: 12,
+        background: 'var(--mb-bg-card)', borderRadius: 10, padding: '10px 14px',
+        border: '1px solid var(--mb-border)', fontSize: 12,
       }}>
-        <span style={{ color: '#6E6E73' }}>提炼器：</span>
+        <span style={{ color: 'var(--mb-text-secondary)' }}>提炼器：</span>
         <span style={{
           color: EXTRACTOR_LABEL[data?.extractor_status ?? 'idle']?.color ?? '#8E8E93',
           fontWeight: 600,
@@ -237,30 +237,30 @@ const PipelineDagPanel: React.FC<Props> = ({ base, isVisible }) => {
         </span>
         {data?.running_bake_runs && data.running_bake_runs.length > 0 && (
           <>
-            <span style={{ color: '#D1D1D6' }}>|</span>
+            <span style={{ color: 'var(--mb-text-faint)' }}>|</span>
             {data.running_bake_runs.map((run, idx) => (
               <React.Fragment key={run.id}>
                 <span style={{ color: '#FF9500', fontWeight: 600 }}>
                   批次进行中 · #{run.id}
                 </span>
-                <span style={{ color: '#8E8E93' }}>
+                <span style={{ color: 'var(--mb-text-tertiary)' }}>
                   （{run.trigger_reason}，已运行 {fmtRelTime(run.started_at, nowMs)}）
                 </span>
                 {idx < data.running_bake_runs.length - 1 && (
-                  <span style={{ color: '#D1D1D6' }}>·</span>
+                  <span style={{ color: 'var(--mb-text-faint)' }}>·</span>
                 )}
               </React.Fragment>
             ))}
           </>
         )}
-        <span style={{ color: '#D1D1D6' }}>|</span>
+        <span style={{ color: 'var(--mb-text-faint)' }}>|</span>
         {(() => {
           const lag = fmtWatermarkLag(data?.bake_watermark_lag_ms ?? 0)
           if (data?.capture_enabled === false) {
             return (
               <span
                 title="自动采集与提炼已暂停；当前库存会在恢复后继续处理。"
-                style={{ color: '#8E8E93', fontWeight: 600, fontVariantNumeric: 'tabular-nums', marginLeft: 'auto' }}
+                style={{ color: 'var(--mb-text-tertiary)', fontWeight: 600, fontVariantNumeric: 'tabular-nums', marginLeft: 'auto' }}
               >
                 自动烘焙已暂停 · {lag.text}
               </span>
@@ -275,16 +275,16 @@ const PipelineDagPanel: React.FC<Props> = ({ base, isVisible }) => {
             </span>
           )
         })()}
-        <span style={{ color: '#D1D1D6' }}>|</span>
-        <span style={{ color: '#AEAEB2', fontVariantNumeric: 'tabular-nums' }}>
+        <span style={{ color: 'var(--mb-text-faint)' }}>|</span>
+        <span style={{ color: 'var(--mb-text-faint)', fontVariantNumeric: 'tabular-nums' }}>
           3s 自动刷新
         </span>
       </div>
 
       {/* DAG SVG */}
       <div style={{
-        background: 'white', borderRadius: 12, padding: 12,
-        border: '1px solid rgba(0,0,0,0.07)', overflow: 'auto',
+        background: 'var(--mb-bg-card)', borderRadius: 12, padding: 12,
+        border: '1px solid var(--mb-border)', overflow: 'auto',
       }}>
         <svg width={SVG_W} height={SVG_H} style={{ display: 'block' }}>
           {/* 连线 */}
@@ -348,22 +348,22 @@ const PipelineDagPanel: React.FC<Props> = ({ base, isVisible }) => {
                   width={NODE_W}
                   height={NODE_H}
                   rx={10}
-                  fill={color.fill}
+                  style={{ fill: color.fill }}
                   stroke={color.stroke}
                   strokeWidth={ip > 0 ? 2 : 1}
                 />
-                <text x={12} y={20} fontSize={12} fontWeight={600} fill="#1C1C1E">
+                <text x={12} y={20} fontSize={12} fontWeight={600} style={{ fill: 'var(--mb-text-primary)' }}>
                   {label}
                 </text>
-                <text x={12} y={42} fontSize={11} fill="#6E6E73">
+                <text x={12} y={42} fontSize={11} style={{ fill: 'var(--mb-text-secondary)' }}>
                   {inProgressLabel} <tspan fill={color.accent} fontWeight={600}>{ip}</tspan>
                 </text>
                 {showPending && (
-                  <text x={12} y={60} fontSize={11} fill="#6E6E73">
-                    {pendingLabel} <tspan fill="#1C1C1E" fontWeight={600}>{pd}</tspan>
+                  <text x={12} y={60} fontSize={11} style={{ fill: 'var(--mb-text-secondary)' }}>
+                    {pendingLabel} <tspan style={{ fill: 'var(--mb-text-primary)' }} fontWeight={600}>{pd}</tspan>
                   </text>
                 )}
-                <text x={12} y={showPending ? 78 : 62} fontSize={11} fill="#8E8E93">
+                <text x={12} y={showPending ? 78 : 62} fontSize={11} style={{ fill: 'var(--mb-text-tertiary)' }}>
                   今日完成 <tspan fontWeight={600}>{ct}</tspan>
                 </text>
               </g>
@@ -405,23 +405,23 @@ const Drawer: React.FC<{
       />
       <div style={{
         position: 'fixed', top: 0, right: 0, bottom: 0, width: 420,
-        background: 'white', boxShadow: '-2px 0 12px rgba(0,0,0,0.1)',
+        background: 'var(--mb-bg-page)', boxShadow: '-2px 0 12px rgba(0,0,0,0.1)',
         zIndex: 101, display: 'flex', flexDirection: 'column',
       }}>
         <div style={{
-          padding: '14px 16px', borderBottom: '1px solid rgba(0,0,0,0.07)',
+          padding: '14px 16px', borderBottom: '1px solid var(--mb-divider)',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         }}>
           <div>
-            <div style={{ fontSize: 14, fontWeight: 600, color: '#1C1C1E' }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--mb-text-primary)' }}>
               {stage.label}
             </div>
-            <div style={{ fontSize: 11, color: '#8E8E93', marginTop: 2 }}>
+            <div style={{ fontSize: 11, color: 'var(--mb-text-tertiary)', marginTop: 2 }}>
               {inProgressLabel} <span style={{ color: accent, fontWeight: 600 }}>{stage.in_progress_count}</span>
               {showPending && (
                 <>
                   {' · '}
-                  {pendingLabel} <span style={{ color: '#1C1C1E', fontWeight: 600 }}>{stage.pending_count}</span>
+                  {pendingLabel} <span style={{ color: 'var(--mb-text-primary)', fontWeight: 600 }}>{stage.pending_count}</span>
                 </>
               )}
               {' · '}
@@ -432,7 +432,7 @@ const Drawer: React.FC<{
             onClick={onClose}
             style={{
               border: 'none', background: 'transparent', fontSize: 18, cursor: 'pointer',
-              color: '#8E8E93', lineHeight: 1, padding: 4,
+              color: 'var(--mb-text-tertiary)', lineHeight: 1, padding: 4,
             }}
           >×</button>
         </div>
@@ -474,16 +474,16 @@ const Section: React.FC<{
   accent: string
 }> = ({ title, total, items, onItemClick, nowMs, emptyHint, accent }) => (
   <div style={{ marginTop: 12 }}>
-    <div style={{ fontSize: 12, fontWeight: 600, color: '#6E6E73', marginBottom: 8 }}>
+    <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--mb-text-secondary)', marginBottom: 8 }}>
       {title} <span style={{ color: accent }}>({total})</span>
       {total > items.length && (
-        <span style={{ marginLeft: 6, fontWeight: 400, color: '#AEAEB2' }}>
+        <span style={{ marginLeft: 6, fontWeight: 400, color: 'var(--mb-text-faint)' }}>
           仅显示前 {items.length} 条
         </span>
       )}
     </div>
     {items.length === 0 ? (
-      <div style={{ fontSize: 12, color: '#AEAEB2', padding: '8px 0' }}>{emptyHint}</div>
+      <div style={{ fontSize: 12, color: 'var(--mb-text-faint)', padding: '8px 0' }}>{emptyHint}</div>
     ) : (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {items.map((item) => (
@@ -491,15 +491,15 @@ const Section: React.FC<{
             key={`${item.kind}-${item.id}`}
             onClick={() => onItemClick(item)}
             style={{
-              textAlign: 'left', background: '#F5F5F7', border: 'none',
+              textAlign: 'left', background: 'var(--mb-bg-page)', border: 'none',
               borderRadius: 8, padding: '8px 10px', cursor: 'pointer',
               display: 'flex', flexDirection: 'column', gap: 2,
             }}
           >
-            <div style={{ fontSize: 12, fontWeight: 500, color: '#1C1C1E', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--mb-text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {item.title}
             </div>
-            <div style={{ fontSize: 10, color: '#8E8E93', display: 'flex', gap: 8 }}>
+            <div style={{ fontSize: 10, color: 'var(--mb-text-tertiary)', display: 'flex', gap: 8 }}>
               {item.subtitle && <span>{item.subtitle}</span>}
               <span style={{ marginLeft: 'auto' }}>
                 {item.started_at_ms

@@ -1,5 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
-import { Network } from 'lucide-react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
   useDeleteBakeCapture,
   useDeleteBakeMemory,
@@ -87,6 +86,9 @@ const RepositoryPanel: React.FC = () => {
     repositoryCaptureLimit,
     repositoryCaptureSourceCaptureId,
     repositoryMemoryFocusId,
+    repositoryMemoryItems: memories,
+    repositoryMemoryTotal: memoryTotal,
+    repositoryMemoryDrawerOpen: memoryDrawerOpen,
     selectedTemplateId,
     selectedSopId,
     selectedKnowledgeId,
@@ -127,8 +129,6 @@ const RepositoryPanel: React.FC = () => {
   const fetchSops = useFetchBakeSops()
   const fetchSop = useFetchBakeSop()
   const fetchDataSources = useFetchDataSources()
-  const [memories, setMemories] = useState<TimelineItem[]>([])
-  const [memoryTotal, setMemoryTotal] = useState(0)
   const [captureItems, setCaptureItems] = useState<BakeCaptureItem[]>([])
   const [captureTotal, setCaptureTotal] = useState(0)
   const [captureDetail, setCaptureDetail] = useState<BakeCaptureItem | null>(null)
@@ -140,7 +140,6 @@ const RepositoryPanel: React.FC = () => {
     loading: boolean
   }>({ document: null, knowledge: null, sop: null, loading: false })
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
-  const [memoryDrawerOpen, setMemoryDrawerOpen] = useState(false)
   const [draftMemoryQuery, setDraftMemoryQuery] = useState(repositoryMemoryQuery)
   const [draftMemoryFrom, setDraftMemoryFrom] = useState(repositoryMemoryFrom)
   const [draftMemoryTo, setDraftMemoryTo] = useState(repositoryMemoryTo)
@@ -151,12 +150,16 @@ const RepositoryPanel: React.FC = () => {
   const [pendingDeletion, setPendingDeletion] = useState<PendingDeletion | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
   const [graphOpen, setGraphOpen] = useState(false)
+  const [graphFocusTimelineId, setGraphFocusTimelineId] = useState<string | null>(null)
   const [graphAssets, setGraphAssets] = useState<MemoryGraphAssets>(emptyGraphAssets)
   const [graphLoading, setGraphLoading] = useState(false)
   const [graphError, setGraphError] = useState<string | null>(null)
   const [graphRevision, setGraphRevision] = useState(0)
   const memoryRequestSeqRef = useRef(0)
   const captureRequestSeqRef = useRef(0)
+  // 标记当前 captureItems 是否来自一次已完成的列表请求；
+  // 关联跳转进入采集页时列表尚未返回，避免此时把跳转选中的记录误清
+  const captureListLoadedRef = useRef(false)
   const memoryDetailTriggerRef = useRef<HTMLButtonElement | null>(null)
 
   const refreshMemories = async (offset = bakeMemoryOffset) => {
@@ -167,9 +170,11 @@ const RepositoryPanel: React.FC = () => {
       limit: repositoryMemoryLimit,
       offset,
     })
-    setMemories(data.items)
-    setMemoryTotal(data.total)
-    setSelectedMemoryId(null)
+    useAppStore.setState({
+      repositoryMemoryItems: data.items,
+      repositoryMemoryTotal: data.total,
+      selectedMemoryId: null,
+    })
   }
 
   const refreshCaptures = async (
@@ -194,21 +199,31 @@ const RepositoryPanel: React.FC = () => {
   useEffect(() => {
     if (repositoryTab !== 'memory') return
     if (repositoryMemoryFocusId) {
-      const requestSeq = memoryRequestSeqRef.current + 1
-      memoryRequestSeqRef.current = requestSeq
-      void fetchMemory(repositoryMemoryFocusId).then((item) => {
-        if (requestSeq !== memoryRequestSeqRef.current) return
-        setMemories([item])
-        setMemoryTotal(1)
-        setSelectedMemoryId(item.id)
-      }).catch((error) => {
-        if (requestSeq !== memoryRequestSeqRef.current) return
-        setMemories([])
-        setMemoryTotal(0)
-        setStatusMessage(toUserFacingError(error, '未找到这条时间线'))
+    const requestSeq = memoryRequestSeqRef.current + 1
+    memoryRequestSeqRef.current = requestSeq
+    void fetchMemory(repositoryMemoryFocusId).then((item) => {
+      if (requestSeq !== memoryRequestSeqRef.current) return
+      // 列表、选中态、抽屉开关一次 store 更新全部到位，避免本地状态与 zustand
+      // 混用时 React 用旧列表渲染新选中态，导致选中态被清理 effect 误清
+      useAppStore.setState({
+        repositoryMemoryItems: [item],
+        repositoryMemoryTotal: 1,
+        selectedMemoryId: item.id,
+        // 关联跳转的目标时间线到达后直接展开详情抽屉，不依赖自动打开 effect 的时序
+        repositoryMemoryDrawerOpen: true,
       })
-      return
-    }
+    }).catch((error) => {
+      if (requestSeq !== memoryRequestSeqRef.current) return
+      useAppStore.setState({
+        repositoryMemoryFocusId: null,
+        repositoryMemoryItems: [],
+        repositoryMemoryTotal: 0,
+        selectedMemoryId: null,
+      })
+      setStatusMessage(toUserFacingError(error, '未找到这条时间线'))
+    })
+    return
+  }
     const requestSeq = memoryRequestSeqRef.current + 1
     memoryRequestSeqRef.current = requestSeq
     void fetchMemories({
@@ -219,8 +234,7 @@ const RepositoryPanel: React.FC = () => {
       offset: bakeMemoryOffset,
     }).then((data) => {
       if (requestSeq !== memoryRequestSeqRef.current) return
-      setMemories(data.items)
-      setMemoryTotal(data.total)
+      useAppStore.setState({ repositoryMemoryItems: data.items, repositoryMemoryTotal: data.total })
     }).catch((error) => {
       if (requestSeq !== memoryRequestSeqRef.current) return
       setStatusMessage(toUserFacingError(error, '时间线加载失败'))
@@ -242,6 +256,7 @@ const RepositoryPanel: React.FC = () => {
     if (repositoryTab !== 'capture') return
     const requestSeq = captureRequestSeqRef.current + 1
     captureRequestSeqRef.current = requestSeq
+    captureListLoadedRef.current = false
     void fetchCaptures({
       q: repositoryCaptureQuery.trim() || undefined,
       app: repositoryCaptureApp.trim() || undefined,
@@ -252,10 +267,12 @@ const RepositoryPanel: React.FC = () => {
       offset: bakeCaptureOffset,
     }).then((data) => {
       if (requestSeq !== captureRequestSeqRef.current) return
+      captureListLoadedRef.current = true
       setCaptureItems(data.items)
       setCaptureTotal(data.total)
     }).catch((error) => {
       if (requestSeq !== captureRequestSeqRef.current) return
+      captureListLoadedRef.current = true
       setStatusMessage(toUserFacingError(error, '采集记录加载失败'))
     })
   }, [
@@ -380,18 +397,68 @@ const RepositoryPanel: React.FC = () => {
   const resolvedMemoryId = selectedMemoryId
   const resolvedCaptureId = selectedCaptureId
   const selectedMemory = memories.find(item => item.id === resolvedMemoryId) ?? null
+  const graphFocusTimeline = graphFocusTimelineId
+    ? memories.find(item => item.id === graphFocusTimelineId) ?? null
+    : null
+
+  // 从时间线行打开图谱时，只展示由该时间线提炼出的记忆资产，形成“这条时间线的记忆图谱”。
+  const graphAssetsForRender = useMemo<MemoryGraphAssets>(() => {
+    if (!graphFocusTimelineId) return graphAssets
+    const knowledge = graphAssets.knowledge.filter(item => item.sourceTimelineId === graphFocusTimelineId)
+    const documents = graphAssets.documents.filter(item => item.sourceMemoryIds.includes(graphFocusTimelineId))
+    const operations = graphAssets.operations.filter(item => item.sourceTimelineId === graphFocusTimelineId)
+    const data = graphAssets.data.filter(item => (
+      (item.latest_snapshot?.source_timeline_ids ?? []).map(String).includes(graphFocusTimelineId)
+    ))
+    return {
+      knowledge,
+      documents,
+      operations,
+      data,
+      totals: {
+        knowledge: knowledge.length,
+        document: documents.length,
+        operation: operations.length,
+        data: data.length,
+      },
+    }
+  }, [graphAssets, graphFocusTimelineId])
+
+  const graphFocusNodeId = useMemo(() => {
+    if (!graphFocusTimelineId) return null
+    const { knowledge, documents, operations, data } = graphAssetsForRender
+    if (knowledge.length > 0) return `knowledge:${knowledge[0].id}`
+    if (documents.length > 0) return `document:${documents[0].id}`
+    if (operations.length > 0) return `operation:${operations[0].id}`
+    if (data.length > 0) return `data:${data[0].id}`
+    return null
+  }, [graphAssetsForRender, graphFocusTimelineId])
+
+  const handleOpenTimelineGraph = (item: TimelineItem) => {
+    setGraphFocusTimelineId(item.id)
+    setGraphOpen(true)
+  }
+
+  const handleCloseGraph = () => {
+    setGraphOpen(false)
+    setGraphFocusTimelineId(null)
+  }
 
   useEffect(() => {
     if (repositoryTab !== 'memory') return
     if (selectedMemoryId && !memories.some(item => item.id === selectedMemoryId)) {
-      setSelectedMemoryId(null)
-      setMemoryDrawerOpen(false)
+      useAppStore.setState({ selectedMemoryId: null, repositoryMemoryDrawerOpen: false })
     }
   }, [memories, repositoryTab, selectedMemoryId, setSelectedMemoryId])
 
   useEffect(() => {
-    if (repositoryTab === 'memory' && repositoryMemoryFocusId && selectedMemory?.id === repositoryMemoryFocusId) {
-      setMemoryDrawerOpen(true)
+    if (
+      repositoryTab === 'memory'
+      && repositoryMemoryFocusId
+      && selectedMemory
+      && String(selectedMemory.id) === String(repositoryMemoryFocusId)
+    ) {
+      useAppStore.setState({ repositoryMemoryDrawerOpen: true })
     }
   }, [repositoryMemoryFocusId, repositoryTab, selectedMemory?.id])
 
@@ -428,6 +495,8 @@ const RepositoryPanel: React.FC = () => {
 
   useEffect(() => {
     if (repositoryTab !== 'capture') return
+    // 列表还在加载时不清理选中态，保证关联跳转带入的 selectedCaptureId 能存活到列表返回
+    if (!captureListLoadedRef.current) return
     if (captureItems.length === 0) {
       setSelectedCaptureId(null)
       setCaptureDetail(null)
@@ -452,15 +521,12 @@ const RepositoryPanel: React.FC = () => {
 
   const openMemoryDrawer = (item: TimelineItem, trigger: HTMLButtonElement) => {
     memoryDetailTriggerRef.current = trigger
-    setSelectedMemoryId(item.id)
-    setMemoryDrawerOpen(true)
+    useAppStore.setState({ selectedMemoryId: item.id, repositoryMemoryDrawerOpen: true })
   }
 
   const closeMemoryDrawer = () => {
     const trigger = memoryDetailTriggerRef.current
-    setMemoryDrawerOpen(false)
-    setSelectedMemoryId(null)
-    setRepositoryMemoryFocusId(null)
+    useAppStore.setState({ repositoryMemoryDrawerOpen: false, selectedMemoryId: null, repositoryMemoryFocusId: null })
     window.setTimeout(() => trigger?.focus(), 0)
   }
 
@@ -747,12 +813,14 @@ const RepositoryPanel: React.FC = () => {
 
   return (
     <div className="bake-panel bake-panel--repository">
-      <BakeHeader title="采集" subtitle="" />
-      {bakeNavigationStack.length > 0 && (
-        <div className="bake-backbar">
-          <BakeButton compact onClick={handleCaptureGoBack}>返回上一步</BakeButton>
-        </div>
-      )}
+      <BakeHeader
+        title="采集"
+        subtitle=""
+        backAction={bakeNavigationStack.length > 0 ? {
+          label: '返回上一步',
+          onClick: handleCaptureGoBack,
+        } : undefined}
+      />
       {statusMessage && <div className="bake-inline-message">{statusMessage}</div>}
       <div className="bake-tabs-shell">
         <section className="bake-tabs bake-tabs--scroll">
@@ -762,18 +830,6 @@ const RepositoryPanel: React.FC = () => {
             </BakeButton>
           ))}
         </section>
-        {repositoryTab === 'memory' && (
-          <button
-            type="button"
-            className="bake-graph-toggle"
-            aria-pressed={graphOpen}
-            aria-label={graphOpen ? '关闭记忆图谱' : '展开记忆图谱'}
-            onClick={() => setGraphOpen(current => !current)}
-          >
-            <Network size={15} />
-            <span>记忆图谱</span>
-          </button>
-        )}
       </div>
 
       <div className={`bake-graph-workspace ${graphOpen && repositoryTab === 'memory' ? 'bake-graph-workspace--open' : ''}`.trim()}>
@@ -847,7 +903,10 @@ const RepositoryPanel: React.FC = () => {
               onPageChange={setBakeMemoryOffset}
               onLimitChange={setRepositoryMemoryLimit}
               renderActions={item => (
-                <BakeTableActionButton kind="detail" label={`查看时间线：${item.title || '未命名时间线'}`} onClick={trigger => openMemoryDrawer(item, trigger)} />
+                <>
+                  <BakeTableActionButton kind="detail" label={`查看时间线：${item.title || '未命名时间线'}`} onClick={trigger => openMemoryDrawer(item, trigger)} />
+                  <BakeTableActionButton kind="graph" label={`在记忆图谱中查看时间线「${item.title || '未命名时间线'}」`} onClick={() => handleOpenTimelineGraph(item)} />
+                </>
               )}
             />
 
@@ -934,12 +993,12 @@ const RepositoryPanel: React.FC = () => {
                       <div className="bake-memory-action-card">
                         <div className="bake-kv__title">详细内容</div>
                         <div style={{ marginTop: 12 }}>
-                          <div style={{ fontWeight: 600, marginBottom: 12, color: '#333' }}>{timeRange}</div>
-                          <div style={{ paddingLeft: 12, borderLeft: '2px solid #e0e0e0' }}>
+                          <div style={{ fontWeight: 600, marginBottom: 12, color: 'var(--mb-text-primary)' }}>{timeRange}</div>
+                          <div style={{ paddingLeft: 12, borderLeft: '2px solid var(--mb-border-strong)' }}>
                             {items.map((item, idx) => (
                               <div key={idx} style={{ marginBottom: 12, fontSize: 13, lineHeight: 1.6 }}>
                                 <div style={{ marginBottom: 4 }}>
-                                  <span style={{ fontWeight: 600, color: '#666', marginRight: 8 }}>{item.itemTimeRange}</span>
+                                  <span style={{ fontWeight: 600, color: 'var(--mb-text-secondary)', marginRight: 8 }}>{item.itemTimeRange}</span>
                                   <span>{item.summary}</span>
                                 </div>
                                 <div>
@@ -959,7 +1018,7 @@ const RepositoryPanel: React.FC = () => {
                                           setSelectedCaptureId(String(id))
                                           setStatusMessage(`已切换到采集记录 #${id}`)
                                         }}
-                                        style={{ color: '#0066cc', textDecoration: 'none', fontSize: 12 }}
+                                        style={{ color: 'var(--mb-link)', textDecoration: 'none', fontSize: 12 }}
                                       >
                                         #{id}
                                       </a>
@@ -1062,16 +1121,19 @@ const RepositoryPanel: React.FC = () => {
             onClearFilters={handleClearCaptureFilters}
             onViewLinkedTimeline={handleViewLinkedTimeline}
             onDeleteCapture={(id) => setPendingDeletion({ kind: 'capture', id })}
+            onRefresh={handleSearchCaptures}
           />
         )}
         </div>
         {graphOpen && repositoryTab === 'memory' && (
           <BakeMemoryGraph
-            assets={graphAssets}
+            assets={graphAssetsForRender}
+            focusNodeId={graphFocusNodeId}
             loading={graphLoading}
             error={graphError}
             mode="dock"
-            onClose={() => setGraphOpen(false)}
+            defaultScopeLabel={graphFocusTimeline ? `时间线「${graphFocusTimeline.title || '未命名时间线'}」` : undefined}
+            onClose={handleCloseGraph}
             onRetry={() => setGraphRevision(current => current + 1)}
           />
         )}

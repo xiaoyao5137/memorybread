@@ -4,7 +4,10 @@ use std::{
     io::BufWriter,
     path::PathBuf,
     process::{Command, Output, Stdio},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     thread,
     time::Duration,
 };
@@ -38,6 +41,15 @@ const BROWSER_SCROLL_READY_POLL_ATTEMPTS: usize = 30;
 
 #[cfg(target_os = "macos")]
 static BROWSER_SCRAPE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static DATA_EXTRACTION_RUNNING: AtomicBool = AtomicBool::new(false);
+
+struct DataExtractionRunGuard;
+
+impl Drop for DataExtractionRunGuard {
+    fn drop(&mut self) {
+        DATA_EXTRACTION_RUNNING.store(false, Ordering::Release);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrowserScriptKind {
@@ -439,7 +451,7 @@ fn manual_data_payload(
         .collect::<Vec<_>>()
         .join("\n");
     let structured = json!({
-        "extraction_version": "data-memory.v15",
+        "extraction_version": "data-memory.v16",
         "content_render_version": "manual.v1",
         "semantic_origin": "manual",
         "semantic_subject": title.clone(),
@@ -501,11 +513,24 @@ pub async fn extract_data_sources(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ExtractDataRequest>,
 ) -> Result<Json<DataExtractionSummary>, ApiError> {
+    if DATA_EXTRACTION_RUNNING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(ApiError::Upstream {
+            status: StatusCode::CONFLICT,
+            code: "DATA_EXTRACTION_BUSY",
+            message: "数据记忆物化任务已在运行".to_string(),
+        });
+    }
     let storage = state.storage.clone();
     let limit = body.limit.unwrap_or(1000).clamp(1, 5000);
-    let summary = tokio::task::spawn_blocking(move || storage.extract_data_candidates(limit))
-        .await
-        .map_err(|error| ApiError::Internal(error.to_string()))??;
+    let summary = tokio::task::spawn_blocking(move || {
+        let _run_guard = DataExtractionRunGuard;
+        storage.extract_data_candidates(limit)
+    })
+    .await
+    .map_err(|error| ApiError::Internal(error.to_string()))??;
     Ok(Json(summary))
 }
 

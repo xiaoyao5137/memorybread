@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { AccountType, ActionCommand, AuthSession, BakeTab, CloudBalance, CloudSubscription, CloudUser, RagContext, RepositoryTab, ServiceEnvironment, WindowMode } from '../types'
+import type { AccountType, ActionCommand, AuthSession, BakeTab, CloudBalance, CloudSubscription, CloudUser, RagContext, RepositoryTab, ServiceEnvironment, TimelineItem, WindowMode } from '../types'
 
 export interface BakeNavigationTarget {
   windowMode: WindowMode
@@ -146,6 +146,14 @@ export interface AppState {
   creationHistoryOpenTarget: number | null
   selectedCaptureId: string | null
   repositoryMemoryFocusId: string | null
+  /**
+   * 采集页时间线的列表/总数/详情抽屉开关。放在 store 里与 selectedMemoryId、
+   * repositoryMemoryFocusId 一次性原子更新，避免异步回调中本地 setState 与
+   * zustand 更新混用时 React 用旧列表渲染新选中态导致选中态被误清（抽屉不展开）
+   */
+  repositoryMemoryItems: TimelineItem[]
+  repositoryMemoryTotal: number
+  repositoryMemoryDrawerOpen: boolean
   bakeTemplateFocusId: string | null
   bakeKnowledgeFocusId: string | null
   bakeSopFocusId: string | null
@@ -446,6 +454,9 @@ const initialState = {
   creationHistoryOpenTarget: null,
   selectedCaptureId:   null,
   repositoryMemoryFocusId: null,
+  repositoryMemoryItems:  [],
+  repositoryMemoryTotal:  0,
+  repositoryMemoryDrawerOpen: false,
   bakeTemplateFocusId: null,
   bakeKnowledgeFocusId: null,
   bakeSopFocusId: null,
@@ -613,6 +624,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   clearBakeNavigationStack: () => set({
     bakeNavigationStack: [],
     captureBackTarget: null,
+    repositoryMemoryFocusId: null,
+    bakeTemplateFocusId: null,
+    bakeKnowledgeFocusId: null,
+    bakeSopFocusId: null,
+    repositoryCaptureSourceCaptureId: null,
   }),
 
   setCreationDraft: (patch) => set((state) => ({

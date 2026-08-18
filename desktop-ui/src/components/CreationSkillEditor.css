@@ -191,3 +191,122 @@
   .creation-skill-analysis-progress > div > span { transition: none; }
   .creation-skill-category-option { transition: none; }
 }
+
+/* ===== macOS 暗色模式适配（仅覆盖，不改动上方亮色规则）===== */
+@media (prefers-color-scheme: dark) {
+  .creation-skill-modal { background: rgba(0, 0, 0, .6); }
+  .creation-skill-editor { border-color: rgba(255, 255, 255, .14); background: #1C1C1E; box-shadow: 0 18px 40px rgba(0, 0, 0, .5); }
+  .creation-skill-editor__header { border-bottom-color: rgba(255, 255, 255, .08); background: #1C1C1E; }
+  .creation-skill-editor__header span { color: #2FB3A8; }
+  .creation-skill-editor__header h2 { color: #F3F4F6; }
+  .creation-skill-editor__header > button { border-color: rgba(255, 255, 255, .14); background: #2C2C2E; color: #9CA3AF; }
+  .creation-skill-editor__state { color: #9CA3AF; }
+  .creation-skill-editor__state > svg { color: #2FB3A8; }
+  .creation-skill-editor__state strong { color: #F3F4F6; }
+  .creation-skill-analysis-progress > div { border-color: rgba(255, 177, 122, .25); background: #2C2C2E; box-shadow: inset 0 1px 2px rgba(0, 0, 0, .28); }
+  .creation-skill-analysis-progress > div > span { background: linear-gradient(90deg, #C77E3A, #E8A25C); }
+  .creation-skill-analysis-progress > strong { color: #E8A25C; }
+  .creation-skill-workflow-card { border-color: rgba(255, 177, 122, .2); background: linear-gradient(180deg, rgba(255, 159, 67, .12) 0%, #232326 32%); }
+  .creation-skill-workflow-heading span { color: #E8A25C; }
+  .creation-skill-workflow-heading p { color: #9CA3AF; }
+  .creation-skill-workflow-heading h4 { color: #F3F4F6; }
+  .creation-skill-workflow-heading button { border-color: rgba(255, 177, 122, .3); background: #2C2C2E; color: #FFC48D; }
+  .creation-skill-workflow-step { border-color: rgba(255, 255, 255, .09); background: #232326; }
+  .creation-skill-workflow-step > header .creation-skill-workflow-step-drag { color: #8E8E93; }
+  .creation-skill-workflow-step > header .creation-skill-workflow-step-drag:hover { background: rgba(255, 255, 255, .06); color: #E8A25C; }
+  .creation-skill-workflow-step.is-dragging { border-color: rgba(255, 177, 122, .3); background: #29292C; }
+  .creation-skill-workflow-step > header > span { background: rgba(255, 159, 67, .14); color: #E8A25C; }
+  .creation-skill-workflow-step > header input { border-bottom-color: rgba(255, 255, 255, .09); color: #F3F4F6; }
+  .creation-skill-workflow-step > header button { border-color: rgba(255, 255, 255, .09); background: #2C2C2E; color: #FF6961; }
+  .creation-skill-editor label.creation-skill-webpage-screenshot-option { border-color: rgba(255, 177, 122, .18); background: rgba(255, 159, 67, .10); }
+  .creation-skill-editor .creation-skill-webpage-screenshot-option > input { accent-color: #C77E3A; }
+  .creation-skill-webpage-screenshot-option > span { color: #F3F4F6; }
+  .creation-skill-webpage-screenshot-option:has(input:focus-visible) { outline-color: rgba(47, 179, 168, .3); }
+  .creation-skill-workflow-heading button:focus-visible, .creation-skill-workflow-step > header button:focus-visible { outline-color: rgba(47, 179, 168, .3); }
+  .creation-skill-workflow-empty { border-color: rgba(255, 255, 255, .14); background: #232326; color: #8E8E93; }
+  .creation-skill-mention-picker { border-color: rgba(255, 177, 122, .25); background: #232326; box-shadow: 0 18px 40px rgba(0, 0, 0, .5); }
+  .creation-skill-mention-picker > header { border-bottom-color: rgba(255, 255, 255, .08); background: rgba(35, 35, 38, .96); color: #FFC48D; }
+  .creation-skill-mention-picker > header small { color: #8E8E93; }
+  .creation-skill-mention-picker > button { border-bottom-color: rgba(255, 255, 255, .08); color: #F3F4F6; }
+  .creation-skill-mention-picker > button:hover, .creation-skill-mention-picker > button.is-active { background: rgba(255, 159, 67, .10); }
+  .creation-skill-mention-picker > button strong { color: #F3F4F6; }
+  .creation-skill-mention-picker > button span { color: #9CA3AF; }
+  .creation-skill-mention-picker__empty { color: #8E8E93; }
+  .creation-skill-recipe-field { border-color: rgba(255, 255, 255, .09); background: #232326; }
+  .creation-skill-recipe-field > header { border-bottom-color: rgba(255, 255, 255, .08); }
+  .creation-skill-recipe-field > header > span { color: #E8A25C; }
+  .creation-skill-recipe-field > header h3 { color: #F3F4F6; }
+  .creation-skill-recipe-field > header input { color: #F3F4F6; }
+  .creation-skill-recipe-field > header input:hover { border-bottom-color: rgba(255, 255, 255, .14); }
+  .creation-skill-recipe-field > header input:focus { outline-color: rgba(47, 179, 168, .3); border-color: #2FB3A8; }
+  .creation-skill-collapsible > summary > svg { color: #8E8E93; }
+  .creation-skill-collapsible > summary:focus-visible { outline-color: rgba(47, 179, 168, .3); }
+  .creation-skill-recipe-field.creation-skill-collapsible[open] > summary { border-bottom-color: rgba(255, 255, 255, .08); }
+  .creation-skill-recipe-field.creation-skill-collapsible > summary span { color: #E8A25C; }
+  .creation-skill-recipe-field.creation-skill-collapsible > summary h3 { color: #F3F4F6; }
+  .creation-skill-example-field { border-color: rgba(255, 177, 122, .28); background: rgba(255, 159, 67, .12); }
+  .creation-skill-example-field textarea { border-color: rgba(255, 177, 122, .25); background: #2C2C2E; }
+  .creation-skill-distinctive { border-color: rgba(47, 179, 168, .25); background: rgba(47, 179, 168, .08); }
+  .creation-skill-distinctive > summary span { color: #2FB3A8; }
+  .creation-skill-distinctive > summary h3 { color: #F3F4F6; }
+  .creation-skill-distinctive > summary p { color: #9CA3AF; }
+  .creation-skill-distinctive > summary > svg { color: #2FB3A8; }
+  .creation-skill-distinctive-body > button { border-color: rgba(47, 179, 168, .3); background: #232326; color: #2FB3A8; }
+  .creation-skill-distinctive-empty { border-color: rgba(47, 179, 168, .3); background: rgba(255, 255, 255, .03); color: #2FB3A8; }
+  .creation-skill-recipe-field--distinctive { border-color: rgba(47, 179, 168, .25); box-shadow: inset 0 3px 0 rgba(47, 179, 168, .12); }
+  .creation-skill-recipe-field--distinctive > header > span { color: #2FB3A8; }
+  .creation-skill-recipe-field--distinctive > header button { border-color: rgba(255, 255, 255, .09); background: #2C2C2E; color: #FF6961; }
+  .creation-skill-recipe-field--document > p { color: #9CA3AF; }
+  .creation-skill-example-generate { border-color: rgba(255, 177, 122, .3); background: #232326; color: #E8A25C; }
+  .creation-skill-example-generate:hover:not(:disabled) { background: rgba(255, 159, 67, .10); }
+  .creation-skill-editor label { color: #F3F4F6; }
+  .creation-skill-editor label small { color: #8E8E93; }
+  .creation-skill-editor input, .creation-skill-editor textarea, .creation-skill-editor select { border-color: rgba(255, 255, 255, .14); background: #2C2C2E; color: #F3F4F6; }
+  .creation-skill-editor input:focus, .creation-skill-editor textarea:focus, .creation-skill-editor select:focus { outline-color: rgba(47, 179, 168, .3); border-color: #2FB3A8; }
+  .creation-skill-categories { border-color: rgba(255, 177, 122, .18); background: linear-gradient(180deg, #232326 0%, #1C1C1E 100%); }
+  .creation-skill-categories legend { color: #F3F4F6; }
+  .creation-skill-categories > p { color: #9CA3AF; }
+  .creation-skill-recipe-more { border-color: rgba(255, 255, 255, .09); background: #232326; box-shadow: 0 1px 2px rgba(0, 0, 0, .28); }
+  .creation-skill-recipe-more > summary:hover { background: rgba(255, 255, 255, .06); }
+  .creation-skill-recipe-more > summary > svg:first-child { color: #E8A25C; }
+  .creation-skill-recipe-more > summary h3 { color: #F3F4F6; }
+  .creation-skill-recipe-more[open] > summary { border-bottom-color: rgba(255, 255, 255, .08); }
+  .creation-skill-category-option--private { border-color: rgba(255, 177, 122, .2); background: rgba(255, 159, 67, .10); color: #FFC48D; }
+  .creation-skill-category-option--private.is-selected { border-color: rgba(255, 177, 122, .35); background: rgba(255, 159, 67, .16); color: #E8A25C; }
+  .creation-skill-category-level { border-color: rgba(255, 177, 122, .18); background: #232326; }
+  .creation-skill-category-level > header { border-bottom-color: rgba(255, 255, 255, .08); background: #29292C; }
+  .creation-skill-category-level > header > span { color: #F3F4F6; }
+  .creation-skill-category-level > header b { background: rgba(255, 159, 67, .14); color: #E8A25C; }
+  .creation-skill-category-level > header small { color: #8E8E93; }
+  .creation-skill-category-level.is-disabled { background: #232326; border-color: rgba(255, 255, 255, .09); }
+  .creation-skill-category-level.is-disabled > header { background: #29292C; }
+  .creation-skill-category-level.is-disabled > header b { background: #2C2C2E; color: #8E8E93; }
+  .creation-skill-category-options { scrollbar-color: rgba(255, 159, 67, .28) transparent; }
+  .creation-skill-category-option { color: #F3F4F6; }
+  .creation-skill-category-option > svg { color: #8E8E93; }
+  .creation-skill-category-option:hover { border-color: rgba(255, 177, 122, .25); background: rgba(255, 159, 67, .10); color: #FFC48D; }
+  .creation-skill-category-option:focus-visible { outline-color: rgba(255, 177, 122, .35); }
+  .creation-skill-category-option.is-selected { border-color: rgba(255, 177, 122, .35); background: rgba(255, 159, 67, .16); color: #E8A25C; box-shadow: inset 3px 0 0 #E8A25C; }
+  .creation-skill-category-option.is-selected > svg { color: #E8A25C; }
+  .creation-skill-category-empty { color: #8E8E93; }
+  .creation-skill-category-path { border-color: rgba(255, 177, 122, .18); background: rgba(255, 159, 67, .08); color: #9CA3AF; }
+  .creation-skill-category-path strong { color: #F3F4F6; }
+  .creation-skill-category-path > svg { color: #E8A25C; }
+  .creation-skill-category-path.is-complete { border-color: rgba(255, 177, 122, .3); background: rgba(255, 159, 67, .12); }
+  .creation-skill-category-skeleton > div { border-color: rgba(255, 255, 255, .09); background: #232326; }
+  /* 骨架屏 shimmer 底改为暗色系 */
+  .creation-skill-category-skeleton span, .creation-skill-category-skeleton i { background: #2C2C2E; }
+  .creation-skill-notice { border-color: rgba(255, 177, 122, .28); background: rgba(255, 159, 67, .12); color: #FFC48D; }
+  .creation-skill-feedback { background: rgba(47, 179, 168, .14); color: #2FB3A8; }
+  .creation-skill-feedback--error { background: rgba(255, 69, 58, .16); color: #FF6961; }
+  .creation-skill-toast { box-shadow: 0 18px 40px rgba(0, 0, 0, .5); }
+  .creation-skill-toast--error { border-color: rgba(255, 69, 58, .3); background: #232326; color: #FF6961; }
+  .creation-skill-toast--success { border-color: rgba(47, 179, 168, .3); background: #232326; color: #2FB3A8; }
+  .creation-skill-draft-state { border-color: rgba(255, 177, 122, .3); background: rgba(255, 159, 67, .12); color: #FFC48D; }
+  .creation-skill-draft-state svg { color: #E8A25C; }
+  .creation-skill-inline-state { color: #9CA3AF; }
+  .creation-skill-inline-state--error { color: #FF6961; }
+  .creation-skill-editor__footer { border-top-color: rgba(255, 255, 255, .08); background: #1C1C1E; }
+  .creation-skill-button { border-color: rgba(255, 255, 255, .14); background: #2C2C2E; color: #F3F4F6; }
+  .creation-skill-button:focus-visible, .creation-skill-editor__header > button:focus-visible { outline-color: rgba(47, 179, 168, .3); }
+}

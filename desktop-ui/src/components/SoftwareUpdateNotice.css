@@ -214,3 +214,82 @@
   .software-update-notice { backdrop-filter: none; }
   .software-update-notice__progress-track i { transition: none; }
 }
+
+/* macOS 暗色模式适配 */
+@media (prefers-color-scheme: dark) {
+  .software-update-notice {
+    background: rgba(0, 0, 0, 0.55);
+  }
+
+  .software-update-notice__dialog {
+    border-color: rgba(255, 255, 255, 0.14);
+    background:
+      radial-gradient(circle at 90% 0, rgba(255, 159, 67, 0.14), transparent 36%),
+      #1C1C1E;
+    color: #F3F4F6;
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+  }
+
+  .software-update-notice__close {
+    color: #9CA3AF;
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  .software-update-notice__eyebrow {
+    color: #E8A25C;
+  }
+
+  .software-update-notice p {
+    color: #9CA3AF;
+  }
+
+  .software-update-notice p small {
+    color: #8E8E93;
+  }
+
+  .software-update-notice code {
+    color: #FFC48D;
+  }
+
+  .software-update-notice__notes {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: #232326;
+    color: #F3F4F6;
+  }
+
+  .software-update-notice__trust {
+    color: #9CA3AF;
+  }
+
+  .software-update-notice__trust svg {
+    color: #E8A25C;
+  }
+
+  .software-update-notice__progress > div {
+    color: #9CA3AF;
+  }
+
+  .software-update-notice__progress-track {
+    background: rgba(255, 255, 255, 0.09);
+  }
+
+  .software-update-notice details {
+    color: #9CA3AF;
+  }
+
+  .software-update-notice__error {
+    border-color: rgba(255, 69, 58, 0.3);
+    background: rgba(255, 69, 58, 0.16);
+    color: #FF6961;
+  }
+
+  .software-update-notice__actions button {
+    border-color: rgba(255, 255, 255, 0.14);
+    color: #F3F4F6;
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  .software-update-notice button:focus-visible {
+    outline-color: rgba(10, 132, 255, 0.24);
+  }
+}

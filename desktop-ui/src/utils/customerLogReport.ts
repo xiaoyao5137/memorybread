@@ -7,6 +7,10 @@ const INSTALLATION_ID_KEY = 'memory-bread_customer-log-installation-id'
 const MAX_ARCHIVE_BYTES = 10 * 1024 * 1024
 const MAX_LOG_FILES = 8
 
+interface DebugLogFilesResponse {
+  items: DebugLogFile[]
+}
+
 interface PreparedUpload {
   upload_id: string
   oss_object_key: string
@@ -78,7 +82,8 @@ const normalizedArchitecture = (architecture: string): string => {
 const collectArchive = async (localApiBaseUrl: string, metadata: AppMetadata): Promise<Uint8Array> => {
   const response = await fetch(`${localApiBaseUrl}/api/debug/log-files`)
   if (!response.ok) throw new Error('无法读取本机诊断日志')
-  const files = await response.json() as DebugLogFile[]
+  const payload = await response.json() as DebugLogFilesResponse
+  const files = Array.isArray(payload.items) ? payload.items : []
   const available = files.filter((file) => file.exists).slice(0, MAX_LOG_FILES)
   if (available.length === 0) throw new Error('当前没有可上报的诊断日志')
 

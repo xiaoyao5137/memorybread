@@ -44,7 +44,7 @@ def test_charging_profile_matches_model_parallelism(tmp_path):
     assert profile.allow_diary is True
     assert profile.timeline_interval_secs == 30
     assert profile.timeline_batch_size == 20
-    assert profile.bake_interval_secs == 30
+    assert profile.bake_interval_secs == 90
     assert profile.bake_limit == 10
     assert profile.bake_concurrency == 3
 

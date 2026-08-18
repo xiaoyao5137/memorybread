@@ -19,7 +19,12 @@ use crate::{
     api::{error::ApiError, state::AppState},
     capture::engine::{ocr_backfill_metrics_snapshot, OcrBackfillMetricsSnapshot},
     services::bake_service::{BAKE_GENERATION_VERSION, MAX_BAKE_RETRY_FAILURES},
-    storage::{models_bake::BakeQueueStatusRecord, repo::bake_run::load_bake_production_events},
+    storage::{
+        models_bake::BakeQueueStatusRecord,
+        repo::bake_run::{
+            load_bake_production_events, refresh_doc_member_temp_tables, PRODUCED_DOC_TIMELINES_CTE,
+        },
+    },
 };
 
 const SELF_GENERATED_APP_KEYWORDS: [&str; 2] = ["memory-bread", "记忆面包"];
@@ -660,6 +665,8 @@ pub struct KnowledgeFlow {
     /// 全量库存：尚未归入 timeline 的可提炼 capture，不受趋势时间范围影响。
     pub pending_extraction_count: i64,
     pub oldest_pending_extraction_at_ms: Option<i64>,
+    /// 提炼停摆告警：有待提炼 capture 且最老一条已等待超过 60 分钟。
+    pub extraction_stalled: bool,
     /// 全量库存：已有 timeline、尚未生成任一 bake 产物的高价值候选。
     pub pending_bake_count: i64,
     pub oldest_pending_bake_at_ms: Option<i64>,
@@ -1243,6 +1250,11 @@ pub async fn monitor_overview(
                 capture_enabled,
                 pending_extraction_count: backlog.pending_extraction_count,
                 oldest_pending_extraction_at_ms: backlog.oldest_pending_extraction_at_ms,
+                extraction_stalled: backlog.pending_extraction_count > 0
+                    && backlog
+                        .oldest_pending_extraction_at_ms
+                        .map(|ts| now_ms.saturating_sub(ts) > 60 * 60 * 1000)
+                        .unwrap_or(false),
                 pending_bake_count: backlog.pending_bake_count,
                 oldest_pending_bake_at_ms: backlog.oldest_pending_bake_at_ms,
                 bake_drain_rate_per_hour: backlog.bake_drain_rate_per_hour,
@@ -1682,6 +1694,11 @@ pub async fn monitor_extraction_live(
         capture_enabled,
         pending_extraction_count: backlog.pending_extraction_count,
         oldest_pending_extraction_at_ms: backlog.oldest_pending_extraction_at_ms,
+        extraction_stalled: backlog.pending_extraction_count > 0
+            && backlog
+                .oldest_pending_extraction_at_ms
+                .map(|ts| now_ms.saturating_sub(ts) > 60 * 60 * 1000)
+                .unwrap_or(false),
         pending_bake_count: backlog.pending_bake_count,
         oldest_pending_bake_at_ms: backlog.oldest_pending_bake_at_ms,
         bake_drain_rate_per_hour: backlog.bake_drain_rate_per_hour,
@@ -2746,6 +2763,7 @@ pub async fn monitor_pipeline_dag(
         capture_enabled,
         pending_extraction_count: 0,
         oldest_pending_extraction_at_ms: None,
+        extraction_stalled: false,
         pending_bake_count: 0,
         oldest_pending_bake_at_ms: None,
         bake_drain_rate_per_hour: 0.0,
@@ -2782,6 +2800,9 @@ pub async fn monitor_pipeline_dag(
     let aggregated = state
         .storage
         .with_conn_async(move |conn| -> Result<DagAggregated, crate::storage::error::StorageError> {
+            // 今日产量统计需要按文档成员精确匹配 episode；早期 LIKE '%'||id||'%'
+            // 对每条 timeline 全扫 bake_documents 子串，5000×700 次要接近 1 秒。
+            refresh_doc_member_temp_tables(conn)?;
             // ── capture ────────────────────────────────────────────────────
             let placeholders = if extracting_ids.is_empty() {
                 String::new()
@@ -2852,7 +2873,10 @@ pub async fn monitor_pipeline_dag(
             //   3. 排除不满足 is_high_value_candidate 条件的低价值条目
             //      （importance < 4 且 evidence_strength NOT IN ('high','medium')）
             //   4. 排除 unified bake 水位线之前已经处理过但被 LLM 判定丢弃的条目
-            let timeline_pending_sql = "
+            // 产物排除改为查询级 CTE：逐条 timeline 关联 json_each 子查询单次就要
+            // 数秒，3 秒轮询会把共享数据库连接占满，监控页因此打开缓慢。
+            let timeline_pending_sql = format!(
+                "WITH {produced_doc_timelines_cte}
                 SELECT t.id,
                        MAX(
                            COALESCE(t.updated_at_ms, 0),
@@ -2909,20 +2933,7 @@ pub async fn monitor_pipeline_dag(
                   )
                   AND NOT EXISTS (SELECT 1 FROM bake_knowledge bk WHERE bk.timeline_id = t.id)
                   AND NOT EXISTS (SELECT 1 FROM bake_sops bs WHERE bs.timeline_id = t.id)
-                  AND NOT EXISTS (
-                      SELECT 1 FROM bake_documents bd
-                      WHERE bd.deleted_at IS NULL
-                        AND (
-                            EXISTS (
-                                SELECT 1 FROM json_each(bd.source_memory_ids)
-                                WHERE CAST(json_each.value AS TEXT) = CAST(t.id AS TEXT)
-                            )
-                            OR EXISTS (
-                                SELECT 1 FROM json_each(bd.source_episode_ids)
-                                WHERE CAST(json_each.value AS TEXT) = CAST(t.id AS TEXT)
-                            )
-                        )
-                  )
+                  AND CAST(t.id AS TEXT) NOT IN (SELECT tid FROM produced_doc_timelines)
                   AND (
                     MAX(
                         COALESCE(t.updated_at_ms, 0),
@@ -2941,8 +2952,10 @@ pub async fn monitor_pipeline_dag(
                     OR COALESCE(r.failure_count, 0) > 0
                   )
                 ORDER BY ts_ms ASC
-                LIMIT ?1";
-            let mut stmt = conn.prepare(timeline_pending_sql)?;
+                LIMIT ?1",
+                produced_doc_timelines_cte = PRODUCED_DOC_TIMELINES_CTE
+            );
+            let mut stmt = conn.prepare(&timeline_pending_sql)?;
             let timeline_pending_items: Vec<DagItem> = stmt
                 .query_map(rusqlite::params![DAG_ITEM_LIMIT], |r| {
                     let id: i64 = r.get(0)?;
@@ -2976,6 +2989,8 @@ pub async fn monitor_pipeline_dag(
             // 按下游产出表的 created_at 过滤今日，反映真实的今日 bake 产量。
             // 注意 bake_knowledge/bake_sops 的 created_at 是文本 'YYYY-MM-DD HH:MM:SS'，
             // 用 date() 归一化后比较；bake_documents 是毫秒 INTEGER，需 /1000 转 unixepoch。
+            // 文档成员匹配走 doc_member_episode 临时表（精确 JSON 成员），避免
+            // LIKE 子串双重循环；同时也修正了旧子串匹配可能误计 id 前缀重叠的问题。
             let timeline_completed_today: i64 = conn
                 .query_row(
                     "SELECT COUNT(DISTINCT t.id)
@@ -2992,10 +3007,9 @@ pub async fn monitor_pipeline_dag(
                                AND date(bs.created_at) >= date(?1)
                          )
                          OR EXISTS (
-                             SELECT 1 FROM bake_documents bd
-                             WHERE bd.deleted_at IS NULL
-                               AND bd.source_episode_ids LIKE '%' || t.id || '%'
-                               AND date(bd.created_at / 1000, 'unixepoch') >= date(?1)
+                             SELECT 1 FROM doc_member_episode de
+                             WHERE de.episode_id = CAST(t.id AS TEXT)
+                               AND date(de.doc_created_at / 1000, 'unixepoch') >= date(?1)
                          )
                      )",
                     rusqlite::params![day_start_str],

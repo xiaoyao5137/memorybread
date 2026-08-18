@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 MIN_MACOS_MAJOR_FOR_OLLAMA = 12  # DMG 内嵌 Ollama 支持 macOS 12+
 OLLAMA_API_BASE = "http://localhost:11434"
 OLLAMA_MACOS_DOWNLOAD_URL = "https://ollama.com/download/mac"
+# Ollama 安装/运行状态探测结果缓存窗口，避免模型页一次打开重复触发子进程与 HTTP 探测
+SETUP_STATUS_CACHE_TTL_S = 5.0
 MODEL_ID_ALIASES = {
     "qwen3.5-4b": "mbem-v1-local",
     "qwen2.5-3b": "mbem-v1-local",
@@ -131,6 +133,11 @@ class ModelManager:
         # Ollama 升级状态
         self._upgrade_status: Dict[str, str] = {}  # {'status': 'upgrading'/'success'/'error', 'message': '...'}
         self._upgrade_lock = threading.Lock()
+
+        # Ollama 安装状态探测缓存
+        self._setup_status_cache: Optional[Dict] = None
+        self._setup_status_cache_at = 0.0
+        self._setup_status_cache_lock = threading.Lock()
 
     def _load_config(self) -> Dict:
         """加载模型配置"""
@@ -230,7 +237,27 @@ class ModelManager:
         except (urllib.error.URLError, urllib.error.HTTPError, socket.timeout, OSError):
             return False
 
-    def get_ollama_setup_status(self) -> Dict:
+    def get_ollama_setup_status(self, force: bool = False) -> Dict:
+        """获取 Ollama 安装/运行状态（带短 TTL 缓存）。
+
+        安装、启动、升级等动作之后需要最新结果时传 force=True 绕过缓存。
+        """
+        now = time.time()
+        with self._setup_status_cache_lock:
+            if (
+                not force
+                and self._setup_status_cache is not None
+                and now - self._setup_status_cache_at < SETUP_STATUS_CACHE_TTL_S
+            ):
+                return self._setup_status_cache
+
+        detail = self._probe_ollama_setup_status()
+        with self._setup_status_cache_lock:
+            self._setup_status_cache = detail
+            self._setup_status_cache_at = time.time()
+        return detail
+
+    def _probe_ollama_setup_status(self) -> Dict:
         system = platform.system()
         is_macos = system == 'Darwin'
         arch = platform.machine().lower()
@@ -249,7 +276,8 @@ class ModelManager:
         ollama_version = None
         if installed:
             try:
-                result = subprocess.run([ollama_path, '--version'], capture_output=True, text=True, timeout=5)
+                # --version 正常时立即返回，收紧超时避免 CLI 卡住拖慢状态探测
+                result = subprocess.run([ollama_path, '--version'], capture_output=True, text=True, timeout=3)
                 if result.returncode == 0:
                     # 输出格式: "ollama version is 0.1.23"
                     version_line = result.stdout.strip()
@@ -328,7 +356,7 @@ class ModelManager:
         except Exception as exc:
             return {'status': 'error', 'stage': 'install', 'message': f'安装 Ollama 失败: {exc}', 'detail': status}
 
-        refreshed = self.get_ollama_setup_status()
+        refreshed = self.get_ollama_setup_status(force=True)
         if result.returncode == 0 and refreshed['ollama_installed']:
             return {'status': 'ok', 'stage': 'install', 'message': 'Ollama 安装完成。', 'detail': refreshed}
 
@@ -374,11 +402,11 @@ class ModelManager:
         deadline = time.time() + 8
         while time.time() < deadline:
             if self._is_ollama_running():
-                refreshed = self.get_ollama_setup_status()
+                refreshed = self.get_ollama_setup_status(force=True)
                 return {'status': 'ok', 'stage': 'verify', 'message': 'Ollama 服务已启动。', 'detail': refreshed}
             time.sleep(0.5)
 
-        refreshed = self.get_ollama_setup_status()
+        refreshed = self.get_ollama_setup_status(force=True)
         return {'status': 'error', 'stage': 'verify', 'message': 'Ollama 服务启动超时，请手动执行 ollama serve。', 'detail': refreshed}
 
     def upgrade_ollama(self) -> Dict:
@@ -453,7 +481,7 @@ class ModelManager:
                 )
                 time.sleep(2)
 
-                refreshed = self.get_ollama_setup_status()
+                refreshed = self.get_ollama_setup_status(force=True)
                 with self._upgrade_lock:
                     self._upgrade_status = {
                         'status': 'success',
@@ -756,6 +784,11 @@ class ModelManager:
             (meta.id, meta) for meta in REGISTRY_MODELS if meta.id not in AVAILABLE_MODELS
         ]
 
+        # 一次性拉取 Ollama 已装模型清单，避免每个 Ollama 模型都单独请求一次
+        ollama_installed_names = None
+        if any(info.provider == 'ollama' for _, info in all_models):
+            ollama_installed_names = self._fetch_ollama_installed_names()
+
         for model_id, info in all_models:
             error_msg = None
             # 检查是否正在下载
@@ -773,7 +806,7 @@ class ModelManager:
                     error_msg = self._download_errors[model_id]
                     status = 'error'
                     progress = 0
-                elif self._is_installed(model_id, info):
+                elif self._is_installed(model_id, info, ollama_installed_names):
                     status = 'installed'
                     progress = 100
                 else:
@@ -907,19 +940,24 @@ class ModelManager:
             return [model_id.replace('deepseek-r1-', 'deepseek-r1:')]
         return [model_id]
 
-    def _is_installed(self, model_id: str, info) -> bool:
-        """检查模型是否已安装"""
+    def _fetch_ollama_installed_names(self) -> set:
+        """拉取 Ollama 已安装模型名集合，服务不可达时返回空集合"""
+        try:
+            resp = urllib.request.urlopen(f"{OLLAMA_API_BASE}/api/tags", timeout=2)
+            data = json.loads(resp.read())
+            return {m['name'] for m in data.get('models', [])}
+        except Exception:
+            return set()
+
+    def _is_installed(self, model_id: str, info, ollama_installed_names: Optional[set] = None) -> bool:
+        """检查模型是否已安装；可传入预取的 Ollama 模型清单避免重复请求"""
         model_id = MODEL_ID_ALIASES.get(model_id, model_id)
         if info.provider == 'ollama':
-            try:
-                import urllib.request
-                resp = urllib.request.urlopen(f"{OLLAMA_API_BASE}/api/tags", timeout=2)
-                data = __import__('json').loads(resp.read())
-                installed = {m['name'] for m in data.get('models', [])}
-                aliases = self._ollama_names_for_model(model_id)
-                return any(alias == name or name.startswith(f"{alias}:") for alias in aliases for name in installed)
-            except Exception:
-                return False
+            names = ollama_installed_names
+            if names is None:
+                names = self._fetch_ollama_installed_names()
+            aliases = self._ollama_names_for_model(model_id)
+            return any(alias == name or name.startswith(f"{alias}:") for alias in aliases for name in names)
         elif info.provider == 'huggingface':
             hf_dir = Path.home() / '.cache' / 'huggingface' / 'hub'
             return any(hf_dir.glob(f"*{model_id}*"))

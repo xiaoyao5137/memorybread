@@ -4,8 +4,9 @@ use crate::storage::{
     db::current_ts_ms,
     error::StorageError,
     models_bake::{
-        BakeCandidateAuditRecord, BakeQueueStatusRecord, BakeRetryStateRecord, BakeRunRecord,
-        BakeSopFunnelSummaryRecord, BakeWatermarkRecord, NewBakeCandidateAudit, NewBakeRun,
+        BakeArtifactAuditRecord, BakeCandidateAuditRecord, BakeQueueStatusRecord,
+        BakeRetryStateRecord, BakeRunRecord, BakeSopFunnelSummaryRecord, BakeWatermarkRecord,
+        NewBakeArtifactAudit, NewBakeCandidateAudit, NewBakeRun,
     },
     StorageManager,
 };
@@ -26,6 +27,75 @@ const RECOVERABLE_BAKE_FAILURE_PREDICATE: &str = r#"
     OR last_error LIKE 'internal error: 解析 bake sop payload 失败: invalid type:%'
     OR last_error LIKE 'internal error: 解析 bake design payload 失败: invalid type:%'
 "#;
+
+/// 把全部有效 bake_documents 的来源引用一次性展开成 timeline id 集合（TEXT 形式）。
+///
+/// 早期版本对每条 timeline 逐条跑 `NOT EXISTS ... json_each(bake_documents.source_*)`
+/// 关联子查询，5000+ timelines × 700+ documents 会让单次查询耗时数秒；监控页
+/// 3 秒级轮询反复调用后直接占满共享数据库连接。改为查询级 CTE 后 JSON 只展开
+/// 一次，耗时降到几十毫秒。注意保持 TEXT 比较与旧口径严格一致。
+pub const PRODUCED_DOC_TIMELINES_CTE: &str = r#"
+    produced_doc_timelines AS (
+        SELECT DISTINCT CAST(je.value AS TEXT) AS tid
+        FROM bake_documents bd,
+             json_each(CASE WHEN json_valid(COALESCE(bd.source_memory_ids, '[]'))
+                            THEN bd.source_memory_ids ELSE '[]' END) je
+        WHERE bd.deleted_at IS NULL
+        UNION
+        SELECT DISTINCT CAST(je.value AS TEXT)
+        FROM bake_documents bd,
+             json_each(CASE WHEN json_valid(COALESCE(bd.source_episode_ids, '[]'))
+                            THEN bd.source_episode_ids ELSE '[]' END) je
+        WHERE bd.deleted_at IS NULL
+    )
+"#;
+
+/// 把文档成员 JSON 展开物化成连接级临时表（幂等重建）。
+///
+/// 捆绑 SQLite 会把仅被引用一次的 CTE 展平为关联标量子查询，外层每一行都
+/// 重新跑 json_each/json_valid 展开全部文档：约 2 万 captures × 700+ 文档，
+/// 单次查询 28 秒以上并长期占住共享连接，监控页因此打开要 10 秒以上。
+/// 落成带索引的临时表后，关联子查询退化为普通查表，耗时回到毫秒级。
+/// 口径与早期 CTE 版本严格一致：timeline 成员取 source_memory_ids，capture
+/// 成员取 source_capture_ids，episode 成员取 source_episode_ids（附带文档创建
+/// 时间供今日产量统计用），均只统计未删除文档。
+pub(crate) fn refresh_doc_member_temp_tables(conn: &Connection) -> Result<(), StorageError> {
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS temp.doc_member_timeline;
+         DROP TABLE IF EXISTS temp.doc_member_capture;
+         DROP TABLE IF EXISTS temp.doc_member_episode;
+         CREATE TEMP TABLE doc_member_timeline AS
+             SELECT bd.id AS doc_id, CAST(je.value AS TEXT) AS timeline_id
+             FROM bake_documents bd,
+                  json_each(CASE WHEN json_valid(COALESCE(bd.source_memory_ids, '[]'))
+                                 THEN bd.source_memory_ids ELSE '[]' END) je
+             WHERE bd.deleted_at IS NULL;
+         CREATE INDEX temp.idx_doc_member_timeline_tl
+             ON doc_member_timeline(timeline_id, doc_id);
+         CREATE INDEX temp.idx_doc_member_timeline_doc
+             ON doc_member_timeline(doc_id, timeline_id);
+         CREATE TEMP TABLE doc_member_capture AS
+             SELECT bd.id AS doc_id, CAST(je.value AS TEXT) AS capture_id
+             FROM bake_documents bd,
+                  json_each(CASE WHEN json_valid(COALESCE(bd.source_capture_ids, '[]'))
+                                 THEN bd.source_capture_ids ELSE '[]' END) je
+             WHERE bd.deleted_at IS NULL;
+         CREATE INDEX temp.idx_doc_member_capture_pair
+             ON doc_member_capture(doc_id, capture_id);
+         CREATE INDEX temp.idx_doc_member_capture_cap
+             ON doc_member_capture(capture_id, doc_id);
+         CREATE TEMP TABLE doc_member_episode AS
+             SELECT bd.id AS doc_id, CAST(je.value AS TEXT) AS episode_id,
+                    bd.created_at AS doc_created_at
+             FROM bake_documents bd,
+                  json_each(CASE WHEN json_valid(COALESCE(bd.source_episode_ids, '[]'))
+                                 THEN bd.source_episode_ids ELSE '[]' END) je
+             WHERE bd.deleted_at IS NULL;
+         CREATE INDEX temp.idx_doc_member_episode_ep
+             ON doc_member_episode(episode_id, doc_id);",
+    )
+    .map_err(StorageError::Sqlite)
+}
 
 /// 一次可展示的记忆产物生产事件。
 ///
@@ -288,6 +358,104 @@ impl StorageManager {
         })
     }
 
+    pub fn upsert_bake_artifact_audit(
+        &self,
+        audit: &NewBakeArtifactAudit,
+    ) -> Result<(), StorageError> {
+        let now = current_ts_ms();
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO bake_artifact_audits (
+                    run_id, timeline_id, artifact_kind, deterministic_eligible,
+                    deterministic_reason, model_accepted, model_reason, payload_present,
+                    payload_valid, artifact_shape, compatibility_recovered,
+                    persist_status, created_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'extracted', ?12, ?12)
+                 ON CONFLICT(run_id, timeline_id, artifact_kind) DO UPDATE SET
+                    deterministic_eligible = excluded.deterministic_eligible,
+                    deterministic_reason = excluded.deterministic_reason,
+                    model_accepted = excluded.model_accepted,
+                    model_reason = excluded.model_reason,
+                    payload_present = excluded.payload_present,
+                    payload_valid = excluded.payload_valid,
+                    artifact_shape = excluded.artifact_shape,
+                    compatibility_recovered = excluded.compatibility_recovered,
+                    persist_status = 'extracted',
+                    persist_reason = NULL,
+                    artifact_id = NULL,
+                    updated_at_ms = excluded.updated_at_ms",
+                params![
+                    audit.run_id,
+                    audit.timeline_id,
+                    audit.artifact_kind,
+                    audit.deterministic_eligible,
+                    audit.deterministic_reason,
+                    audit.model_accepted,
+                    audit.model_reason,
+                    audit.payload_present,
+                    audit.payload_valid,
+                    audit.artifact_shape,
+                    audit.compatibility_recovered,
+                    now,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn finalize_bake_artifact_audit(
+        &self,
+        run_id: i64,
+        timeline_id: i64,
+        artifact_kind: &str,
+        persist_status: &str,
+        persist_reason: Option<&str>,
+        artifact_id: Option<i64>,
+    ) -> Result<(), StorageError> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE bake_artifact_audits
+                 SET persist_status = ?4, persist_reason = ?5, artifact_id = ?6, updated_at_ms = ?7
+                 WHERE run_id = ?1 AND timeline_id = ?2 AND artifact_kind = ?3",
+                params![
+                    run_id,
+                    timeline_id,
+                    artifact_kind,
+                    persist_status,
+                    persist_reason,
+                    artifact_id,
+                    current_ts_ms(),
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn list_bake_artifact_audits_for_timeline(
+        &self,
+        timeline_id: i64,
+        limit: usize,
+    ) -> Result<Vec<BakeArtifactAuditRecord>, StorageError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, run_id, timeline_id, artifact_kind, deterministic_eligible,
+                        deterministic_reason, model_accepted, model_reason, payload_present,
+                        payload_valid, artifact_shape, compatibility_recovered, persist_status,
+                        persist_reason, artifact_id, created_at_ms, updated_at_ms
+                 FROM bake_artifact_audits
+                 WHERE timeline_id = ?1
+                 ORDER BY created_at_ms DESC, id DESC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(
+                params![timeline_id, limit.min(100) as i64],
+                row_to_bake_artifact_audit,
+            )?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(StorageError::from)
+        })
+    }
+
     pub fn get_bake_run_sop_funnel_summary(
         &self,
         run_id: i64,
@@ -530,6 +698,37 @@ impl StorageManager {
         })
     }
 
+    /// 记录触发时刻读到的队列 actionable 口径，供监控核对“状态说有待烘、run 却选不出候选”的口径漂移。
+    pub fn set_bake_run_trigger_actionable_count(
+        &self,
+        id: i64,
+        trigger_actionable_count: i64,
+    ) -> Result<(), StorageError> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE bake_runs SET trigger_actionable_count = ?1 WHERE id = ?2",
+                params![trigger_actionable_count, id],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// 读取 run 触发时刻记录的队列 actionable 口径；尚未记录时为 None。
+    pub fn get_bake_run_trigger_actionable_count(
+        &self,
+        id: i64,
+    ) -> Result<Option<i64>, StorageError> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT trigger_actionable_count FROM bake_runs WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::Sqlite)
+        })
+    }
+
     pub fn get_bake_watermark(
         &self,
         pipeline_name: &str,
@@ -687,7 +886,8 @@ impl StorageManager {
         let now = current_ts_ms();
         self.with_conn(|conn| {
             let mut status = conn.query_row(
-                r#"
+                &format!(
+                    r#"
                 WITH wm AS (
                     SELECT
                         COALESCE(MAX(last_processed_ts), 0) AS last_processed_ts,
@@ -695,6 +895,7 @@ impl StorageManager {
                     FROM bake_watermarks
                     WHERE pipeline_name = 'unified'
                 ),
+                {produced_doc_timelines_cte},
                 queue AS (
                     SELECT
                         t.id,
@@ -750,21 +951,7 @@ impl StorageManager {
                       )
                       AND NOT EXISTS (SELECT 1 FROM bake_knowledge bk WHERE bk.timeline_id = t.id)
                       AND NOT EXISTS (SELECT 1 FROM bake_sops bs WHERE bs.timeline_id = t.id)
-                      AND NOT EXISTS (
-                          SELECT 1 FROM bake_documents bd
-                          WHERE bd.deleted_at IS NULL
-                            AND (
-                                (json_valid(COALESCE(bd.source_memory_ids, '[]')) AND EXISTS (
-                                    SELECT 1 FROM json_each(bd.source_memory_ids)
-                                    WHERE CAST(json_each.value AS TEXT) = CAST(t.id AS TEXT)
-                                ))
-                                OR
-                                (json_valid(COALESCE(bd.source_episode_ids, '[]')) AND EXISTS (
-                                    SELECT 1 FROM json_each(bd.source_episode_ids)
-                                    WHERE CAST(json_each.value AS TEXT) = CAST(t.id AS TEXT)
-                                ))
-                            )
-                      )
+                      AND CAST(t.id AS TEXT) NOT IN (SELECT tid FROM produced_doc_timelines)
                 )
                 SELECT
                     COALESCE(MAX(watermark_ts), 0),
@@ -796,6 +983,8 @@ impl StorageManager {
                         THEN next_retry_at_ms END)
                 FROM queue
                 "#,
+                    produced_doc_timelines_cte = PRODUCED_DOC_TIMELINES_CTE
+                ),
                 params![max_failures, now],
                 |row| {
                     let fresh_count: i64 = row.get(2)?;
@@ -841,32 +1030,26 @@ impl StorageManager {
                 .unwrap_or((0, None));
             status.watermark_last_processed_ts = watermark_ts;
             status.watermark_updated_at_ms = watermark_updated_at_ms;
+            // 文档成员必须先物化成临时表：捆绑 SQLite 会把只引用一次的 CTE
+            // 展平为关联子查询，外层每行重跑 json_each，单次要数十秒。
+            refresh_doc_member_temp_tables(conn)?;
             status.metadata_refresh_count = conn
                 .query_row(
                     r#"
                     SELECT COUNT(DISTINCT t.id)
                     FROM timelines t
-                    WHERE EXISTS (
-                        SELECT 1
-                        FROM bake_documents d
-                        JOIN captures c ON c.timeline_id = t.id
-                        WHERE d.deleted_at IS NULL
-                          AND json_valid(COALESCE(d.source_memory_ids, '[]'))
-                          AND EXISTS (
-                              SELECT 1 FROM json_each(d.source_memory_ids)
-                              WHERE CAST(json_each.value AS TEXT) = CAST(t.id AS TEXT)
-                          )
-                          AND NOT EXISTS (
-                              SELECT 1 FROM json_each(
-                                  CASE
-                                      WHEN json_valid(COALESCE(d.source_capture_ids, '[]'))
-                                      THEN d.source_capture_ids
-                                      ELSE '[]'
-                                  END
-                              )
-                              WHERE CAST(json_each.value AS TEXT) = CAST(c.id AS TEXT)
-                          )
-                    )
+                    JOIN doc_member_timeline dm ON dm.timeline_id = CAST(t.id AS TEXT)
+                    JOIN captures c ON c.timeline_id = t.id
+                    LEFT JOIN bake_retry_state r ON r.timeline_id = t.id
+                    -- 口径必须与 run 时候选选择一致：failure_count > 0 的 timeline
+                    -- 进不了 fresh lane，而已有文档引用又让它进不了 retry lane，
+                    -- 数进 actionable 只会让触发方永远空转（no_op 活锁）。
+                    WHERE COALESCE(r.failure_count, 0) = 0
+                      AND NOT EXISTS (
+                          SELECT 1 FROM doc_member_capture dc
+                          WHERE dc.doc_id = dm.doc_id
+                            AND dc.capture_id = CAST(c.id AS TEXT)
+                      )
                     "#,
                     [],
                     |row| row.get(0),
@@ -1060,6 +1243,30 @@ fn row_to_bake_candidate_audit(
     })
 }
 
+fn row_to_bake_artifact_audit(
+    row: &rusqlite::Row<'_>,
+) -> Result<BakeArtifactAuditRecord, rusqlite::Error> {
+    Ok(BakeArtifactAuditRecord {
+        id: row.get(0)?,
+        run_id: row.get(1)?,
+        timeline_id: row.get(2)?,
+        artifact_kind: row.get(3)?,
+        deterministic_eligible: row.get::<_, Option<i64>>(4)?.map(|value| value != 0),
+        deterministic_reason: row.get(5)?,
+        model_accepted: row.get::<_, Option<i64>>(6)?.map(|value| value != 0),
+        model_reason: row.get(7)?,
+        payload_present: row.get::<_, Option<i64>>(8)?.map(|value| value != 0),
+        payload_valid: row.get::<_, Option<i64>>(9)?.map(|value| value != 0),
+        artifact_shape: row.get(10)?,
+        compatibility_recovered: row.get::<_, i64>(11)? != 0,
+        persist_status: row.get(12)?,
+        persist_reason: row.get(13)?,
+        artifact_id: row.get(14)?,
+        created_at_ms: row.get(15)?,
+        updated_at_ms: row.get(16)?,
+    })
+}
+
 fn row_to_bake_watermark(row: &rusqlite::Row<'_>) -> Result<BakeWatermarkRecord, StorageError> {
     Ok(BakeWatermarkRecord {
         pipeline_name: row.get(0)?,
@@ -1131,6 +1338,88 @@ mod tests {
         assert_eq!(funnel.model_accepted_count, 1);
         assert_eq!(funnel.payload_valid_count, 1);
         assert_eq!(funnel.persisted_count, 1);
+    }
+
+    #[test]
+    fn artifact_audits_preserve_independent_branch_decisions() {
+        let mgr = make_mgr();
+        let run_id = mgr
+            .insert_bake_run(&NewBakeRun {
+                trigger_reason: "test".to_string(),
+                status: "running".to_string(),
+                started_at: 1_710_000_000_000,
+            })
+            .unwrap();
+
+        for (kind, accepted, reason) in [
+            ("knowledge", true, None),
+            ("document", false, Some("not_a_document")),
+            ("sop", false, Some("missing_real_action")),
+        ] {
+            mgr.upsert_bake_artifact_audit(&NewBakeArtifactAudit {
+                run_id,
+                timeline_id: 42,
+                artifact_kind: kind.to_string(),
+                deterministic_eligible: (kind != "knowledge").then_some(kind == "document"),
+                deterministic_reason: None,
+                model_accepted: accepted,
+                model_reason: reason.map(ToString::to_string),
+                payload_present: accepted,
+                payload_valid: accepted.then_some(true),
+                artifact_shape: Some("object".to_string()),
+                compatibility_recovered: kind == "document",
+            })
+            .unwrap();
+        }
+        mgr.finalize_bake_artifact_audit(
+            run_id,
+            42,
+            "knowledge",
+            "created",
+            Some("created"),
+            Some(2535),
+        )
+        .unwrap();
+        mgr.finalize_bake_artifact_audit(
+            run_id,
+            42,
+            "document",
+            "false_negative",
+            Some("not_a_document"),
+            None,
+        )
+        .unwrap();
+        mgr.finalize_bake_artifact_audit(
+            run_id,
+            42,
+            "sop",
+            "rejected",
+            Some("missing_real_action"),
+            None,
+        )
+        .unwrap();
+
+        let audits = mgr.list_bake_artifact_audits_for_timeline(42, 10).unwrap();
+        assert_eq!(audits.len(), 3);
+        let knowledge = audits
+            .iter()
+            .find(|audit| audit.artifact_kind == "knowledge")
+            .unwrap();
+        assert_eq!(knowledge.persist_status, "created");
+        assert_eq!(knowledge.artifact_id, Some(2535));
+        let document = audits
+            .iter()
+            .find(|audit| audit.artifact_kind == "document")
+            .unwrap();
+        assert_eq!(document.model_accepted, Some(false));
+        assert_eq!(document.persist_status, "false_negative");
+        assert!(document.compatibility_recovered);
+        let sop = audits
+            .iter()
+            .find(|audit| audit.artifact_kind == "sop")
+            .unwrap();
+        assert_eq!(sop.persist_status, "rejected");
+        assert_eq!(sop.persist_reason.as_deref(), Some("missing_real_action"));
     }
 
     #[test]
@@ -1407,6 +1696,104 @@ mod tests {
         assert_eq!(queue.recent_no_progress_count, 3);
         assert_eq!(queue.actionable_count, 0);
         assert_eq!(queue.recommended_retry_after_ms, 300_000);
+    }
+
+    /// 回归：队列排除文档已覆盖 timeline 的 CTE 口径必须与旧逐条 json_each
+    /// 版本一致，包括 source_memory_ids / source_episode_ids 两条路径，以及
+    /// 软删文档不参与排除。
+    #[test]
+    fn test_queue_status_excludes_timelines_referenced_by_documents() {
+        let mgr = make_mgr();
+        mgr.with_conn(|conn| {
+            for id in [211_i64, 212, 213] {
+                conn.execute(
+                    "INSERT INTO captures (id, ts, event_type) VALUES (?1, ?1, 'manual')",
+                    params![id],
+                )?;
+                conn.execute(
+                    "INSERT INTO timelines (id, capture_id, summary) VALUES (?1, ?1, 'test')",
+                    params![id],
+                )?;
+                conn.execute(
+                    "UPDATE timelines SET updated_at_ms = ?2 WHERE id = ?1",
+                    params![id, id + 1_000_000],
+                )?;
+            }
+            // category 为 NULL 时 NOT IN 谓词会直接排除，需给出合法分类与高价值标记。
+            conn.execute(
+                "UPDATE timelines SET category = 'work', importance = 5 WHERE id IN (211, 212, 213)",
+                [],
+            )?;
+            // 211 被 source_memory_ids 覆盖，212 被 source_episode_ids 覆盖；
+            // 引用 213 的文档已软删，不应参与排除。
+            conn.execute_batch(
+                "INSERT INTO bake_documents (id, title, source_memory_ids, created_at, updated_at)
+                     VALUES (1, 'd1', '[\"211\"]', 1, 1);
+                 INSERT INTO bake_documents (id, title, source_episode_ids, created_at, updated_at)
+                     VALUES (2, 'd2', '[\"212\"]', 1, 1);
+                 INSERT INTO bake_documents (id, title, source_memory_ids, deleted_at, created_at, updated_at)
+                     VALUES (3, 'd3', '[\"213\"]', 123, 1, 1);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        mgr.upsert_bake_watermark("unified", 0).unwrap();
+
+        let queue = mgr.get_bake_queue_status(3).unwrap();
+        assert_eq!(queue.fresh_count, 1, "只有未被文档覆盖的 213 应留在队列");
+        assert_eq!(queue.pending_count, 1);
+    }
+
+    /// 回归：metadata-refresh 口径的 CTE 改写必须保持原语义：文档引用了
+    /// timeline 但尚未收录其全部成员 capture 时才计入；补齐后应清零。
+    #[test]
+    fn test_queue_status_metadata_refresh_counts_missing_capture_members() {
+        let mgr = make_mgr();
+        mgr.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO captures (id, ts, event_type) VALUES (311, 311, 'manual')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO captures (id, ts, event_type, timeline_id)
+                 VALUES (312, 312, 'manual', 301)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO timelines (id, capture_id, summary) VALUES (301, 311, 'test')",
+                [],
+            )?;
+            conn.execute("UPDATE timelines SET updated_at_ms = 5 WHERE id = 301", [])?;
+            // 文档引用 timeline 301 但只收录了 capture 311，312 缺失。
+            conn.execute(
+                "INSERT INTO bake_documents
+                     (id, title, source_memory_ids, source_capture_ids, created_at, updated_at)
+                 VALUES (1, 'doc-301', '[\"301\"]', '[311]', 1, 1)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        // 水位线高于 candidate_ts，确保 301 不会同时进 fresh lane。
+        mgr.upsert_bake_watermark("unified", 1_000).unwrap();
+
+        let queue = mgr.get_bake_queue_status(3).unwrap();
+        assert_eq!(queue.metadata_refresh_count, 1);
+        assert_eq!(queue.fresh_count, 0);
+        assert_eq!(queue.actionable_count, 1);
+
+        // 补齐成员 capture 后不再需要 metadata 刷新。
+        mgr.with_conn(|conn| {
+            conn.execute(
+                "UPDATE bake_documents SET source_capture_ids = '[311, 312]' WHERE id = 1",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let queue = mgr.get_bake_queue_status(3).unwrap();
+        assert_eq!(queue.metadata_refresh_count, 0);
+        assert_eq!(queue.actionable_count, 0);
     }
 
     #[test]

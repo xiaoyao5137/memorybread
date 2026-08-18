@@ -9,6 +9,7 @@ export const REQUIRED_CREATION_TOOL_IDS = [
 
 export const OPTIONAL_CREATION_TOOL_IDS = [
   'plantuml_diagram',
+  'mermaid_diagram',
   'github_search',
 ] as const
 
@@ -76,6 +77,14 @@ export const CREATION_TOOL_DEFINITIONS: readonly CreationToolDefinition[] = [
     id: 'plantuml_diagram',
     name: 'PlantUML 画图',
     summary: '在架构、流程和时序类任务中生成可继续编辑的 PlantUML 图示代码。',
+    capability: '按需调用 · 输出代码图示',
+    required: false,
+    official: false,
+  },
+  {
+    id: 'mermaid_diagram',
+    name: 'Mermaid 画图',
+    summary: '在流程、时序和状态类任务中生成可被 Markdown 直接渲染的 Mermaid 图示代码。',
     capability: '按需调用 · 输出代码图示',
     required: false,
     official: false,

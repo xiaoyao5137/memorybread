@@ -214,7 +214,7 @@ def test_ollama_compatible_format_removes_grammar_expanding_string_limits():
     assert _schema_contains_key(BAKE_BUNDLE_RESPONSE_SCHEMA, "maxLength") is True
     assert _schema_contains_key(compatible, "maxLength") is False
     assert _schema_contains_key(compatible, "maxItems") is True
-    assert compatible["required"] == ["classification", "knowledge", "design", "sop"]
+    assert compatible["required"] == ["document", "knowledge", "sop", "classification"]
 
 
 def test_model_request_error_does_not_include_provider_response_in_message():
@@ -390,24 +390,24 @@ def test_extract_bake_artifact_marks_missing_payload_as_degraded():
 def test_extract_bake_bundle_uses_one_llm_call_for_three_artifacts():
     extractor = make_extractor()
     response_payload = {
-        "classification": {
-            "primary_type": "document",
-            "reason": "主体是一份可复用周报",
+        "document": {
+            "accepted": True,
+            "reason": None,
+            "payload": {"name": "周报模板"},
         },
         "knowledge": {
             "accepted": False,
             "reason": "not_a_knowledge",
             "payload": None,
         },
-        "design": {
-            "accepted": True,
-            "reason": None,
-            "payload": {"name": "周报模板"},
-        },
         "sop": {
             "accepted": False,
             "reason": "not_a_sop",
             "payload": None,
+        },
+        "classification": {
+            "primary_type": "document",
+            "reason": "主体是一份可复用周报",
         },
     }
     client = DummyClient(
@@ -483,24 +483,18 @@ def test_extract_bake_bundle_recovers_single_object_artifact_arrays():
     assert result["degraded"] is False
 
 
-def test_extract_bake_bundle_recovers_sop_when_later_knowledge_json_is_broken():
+def test_extract_bake_bundle_recovers_document_when_later_knowledge_json_is_broken():
     extractor = make_extractor()
-    sop = {
+    document = {
         "accepted": True,
         "reason": None,
         "payload": {
-            "summary": "修复并验证 bake 输出",
-            "steps": ["检查结构", "修复解析", "运行验证"],
-            "step_evidence": [
-                {"step_index": 1, "capture_ids": [10]},
-                {"step_index": 2, "capture_ids": [11]},
-                {"step_index": 3, "capture_ids": [12]},
-            ],
+            "name": "招聘方案 - AIGC美学效果提升1.0",
+            "full_content": "# 招聘方案\n\n## 招聘目标\n组建实习团队。",
         },
     }
     raw = (
-        '{"classification":{"primary_type":"sop","reason":"实际执行并验证"},'
-        f'"sop":{json.dumps(sop, ensure_ascii=False)},'
+        f'{{"document":{json.dumps(document, ensure_ascii=False)},'
         '"knowledge":{"accepted":true,"reason":null,"payload":'
         '{"summary":"损坏的知识","details":"模型输出了未转义的"引号"}}'
     )
@@ -519,14 +513,53 @@ def test_extract_bake_bundle_recovers_sop_when_later_knowledge_json_is_broken():
 
     extractor._call_bake_llm = fake_call
 
-    result = extractor.extract_bake_bundle(SAMPLE_CANDIDATE)
+    result = extractor.extract_bake_bundle({
+        **SAMPLE_CANDIDATE,
+        "document_evidence": ELIGIBLE_DOCUMENT_EVIDENCE,
+    })
 
     assert len(calls) == 1
-    assert result["sop"]["accepted"] is True
-    assert result["sop"]["payload"]["summary"] == "修复并验证 bake 输出"
+    assert result["design"]["accepted"] is True
+    assert result["design"]["payload"]["name"] == "招聘方案 - AIGC美学效果提升1.0"
     assert result["knowledge"]["accepted"] is False
     assert result["bundle_fragment_recovered"] is True
     assert result["degraded"] is True
+
+
+def test_call_bake_llm_salvages_partial_content_from_repetition_abort():
+    extractor = make_extractor()
+    partial = json.dumps(
+        {
+            "classification": {"primary_type": "knowledge", "reason": "有事实"},
+            "knowledge": {
+                "accepted": True,
+                "reason": None,
+                "payload": {"summary": "已恢复的知识"},
+            },
+            "design": {"accepted": False, "reason": "not_a_document", "payload": None},
+            "sop": {"accepted": False, "reason": "not_a_sop", "payload": None},
+        },
+        ensure_ascii=False,
+    )
+
+    def abort_with_partial(*_args, **_kwargs):
+        raise BakeOutputTruncatedError(
+            "本地模型输出陷入重复退化，已提前中止",
+            partial_content=partial,
+        )
+
+    extractor._ollama_chat = abort_with_partial
+
+    parsed, meta = extractor._call_bake_llm(
+        "bundle:1",
+        "system",
+        "user",
+        response_schema=BAKE_BUNDLE_RESPONSE_SCHEMA,
+    )
+
+    assert parsed["knowledge"]["payload"]["summary"] == "已恢复的知识"
+    assert meta["done_reason"] == "repetition"
+    assert meta["raw_content"] == partial
 
 
 @pytest.mark.parametrize(
@@ -643,7 +676,8 @@ def test_bake_prompts_classify_progress_results_and_conclusions_as_knowledge_fac
     assert "以“对象 + 指标 + 数值”为核心" in BAKE_BUNDLE_PROMPT
     assert "不能因为它们会变化或来自聊天就归 data/none" in BAKE_BUNDLE_PROMPT
     assert "只有没有实质事实的自动动作壳才 reject" in BAKE_BUNDLE_PROMPT
-    assert "它不构成其他资产的拒绝理由" in BAKE_BUNDLE_PROMPT
+    assert "document、knowledge、sop" in BAKE_BUNDLE_PROMPT
+    assert "最后根据已接受的资产总结" in BAKE_BUNDLE_PROMPT
     assert "可以有多个 accepted=true" in BAKE_BUNDLE_PROMPT
     assert "禁止使用 not_primary_type" in BAKE_COMPACT_BUNDLE_PROMPT
     assert "不得仅因记录来自过去、他人、群聊或动态流而拒绝" in BAKE_SHARED_PROMPT
@@ -652,12 +686,71 @@ def test_bake_prompts_classify_progress_results_and_conclusions_as_knowledge_fac
     assert BAKE_BUNDLE_PROMPT in BAKE_COMPACT_BUNDLE_PROMPT
 
 
+def test_bundle_prompt_requires_independent_checks_before_final_classification():
+    document_check = BAKE_BUNDLE_PROMPT.index("document_evidence_check")
+    knowledge_check = BAKE_BUNDLE_PROMPT.index("knowledge_evidence_check")
+    sop_check = BAKE_BUNDLE_PROMPT.index("sop_evidence_check")
+    final_classification = BAKE_BUNDLE_PROMPT.index("最后根据已接受的资产总结")
+
+    assert document_check < knowledge_check < sop_check < final_classification
+    assert "knowledge 已接受，绝不能成为拒绝 document 的理由" in BAKE_BUNDLE_PROMPT
+    assert "不是通用模板" in BAKE_BUNDLE_PROMPT
+    assert "具体项目的方案" in BAKE_BUNDLE_PROMPT
+    assert "顶层必须严格按 document、knowledge、sop、classification 的顺序输出" in BAKE_BUNDLE_PROMPT
+    assert "最后才写 classification" in BAKE_BUNDLE_PROMPT
+
+
+def test_extract_bake_bundle_keeps_document_when_final_primary_type_is_knowledge():
+    """历史 5439 类回归：先接受招聘方案文档，最终主类型是知识也不得反向拒绝文档。"""
+    extractor = make_extractor()
+    response_payload = {
+        "document": {
+            "accepted": True,
+            "reason": "已独立确认存在成体系的招聘方案正文",
+            "payload": {
+                "name": "招聘方案 - AIGC美学效果提升1.0",
+                "full_content": "# 招聘方案\n\n## 招聘目标\n组建实习团队。",
+            },
+        },
+        "knowledge": {
+            "accepted": True,
+            "reason": "包含招聘目标、岗位要求和时间节点等可复用事实",
+            "payload": {"summary": "AIGC 项目招聘目标和岗位要求"},
+        },
+        "sop": {"accepted": False, "reason": "missing_real_action", "payload": None},
+        "classification": {
+            "primary_type": "knowledge",
+            "reason": "主导复用价值是招聘目标和岗位要求等事实",
+        },
+    }
+    client = DummyClient({
+        "model": "mock-model",
+        "message": {"content": json.dumps(response_payload, ensure_ascii=False)},
+        "prompt_eval_count": 9,
+        "eval_count": 12,
+        "done_reason": "stop",
+    })
+    extractor._ollama_chat = client.chat
+
+    result = extractor.extract_bake_bundle({
+        **SAMPLE_CANDIDATE,
+        "source_timeline_id": 5439,
+        "document_evidence": ELIGIBLE_DOCUMENT_EVIDENCE,
+    })
+
+    assert result["primary_type"] == "knowledge"
+    assert result["design"]["accepted"] is True
+    assert result["design"]["payload"]["name"] == "招聘方案 - AIGC美学效果提升1.0"
+    assert result["knowledge"]["accepted"] is True
+    assert len(client.calls) == 1
+
+
 def test_bake_sop_bundle_schema_is_compact_and_requires_step_evidence():
     assert list(BAKE_BUNDLE_RESPONSE_SCHEMA["properties"]) == [
-        "classification",
-        "sop",
+        "document",
         "knowledge",
-        "design",
+        "sop",
+        "classification",
     ]
     sop_payload = BAKE_BUNDLE_RESPONSE_SCHEMA["properties"]["sop"]["properties"][
         "payload"

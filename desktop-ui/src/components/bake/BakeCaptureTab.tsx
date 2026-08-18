@@ -1,6 +1,7 @@
-import { Eye, X } from 'lucide-react'
+import { Eye, Plus, X } from 'lucide-react'
 import React, { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '../../store/useAppStore'
+import { useCreateBakeCapture } from '../../hooks/useApi'
 import type { BakeCaptureItem } from '../../types'
 import { BakeButton, BakeCard, BakePill } from './BakeShared'
 
@@ -147,6 +148,7 @@ const BakeCaptureTab: React.FC<{
   onClearFilters: () => void
   onViewLinkedTimeline: (timelineId?: string | null) => void
   onDeleteCapture: (id: string) => void
+  onRefresh: () => void
 }> = ({
   captures,
   total,
@@ -174,12 +176,122 @@ const BakeCaptureTab: React.FC<{
   onClearFilters,
   onViewLinkedTimeline,
   onDeleteCapture,
+  onRefresh,
 }) => {
   const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
   const debugModeEnabled = useAppStore((s) => s.debugModeEnabled)
   const [pageInput, setPageInput] = useState('')
   const [isDetailDrawerOpen, setIsDetailDrawerOpen] = useState(false)
   const [isScreenshotOpen, setIsScreenshotOpen] = useState(false)
+
+  // 新建采集记录弹窗状态
+  const [showCreateDialog, setShowCreateDialog] = useState(false)
+  const [createTitle, setCreateTitle] = useState('')
+  const [createAppName, setCreateAppName] = useState('')
+  const [createText, setCreateText] = useState('')
+  const [createScreenshotPreview, setCreateScreenshotPreview] = useState<string | null>(null)
+  const [createScreenshotBase64, setCreateScreenshotBase64] = useState<string | null>(null)
+  const [isCreating, setIsCreating] = useState(false)
+  const [createError, setCreateError] = useState<string | null>(null)
+  const createScreenshotInputRef = useRef<HTMLInputElement>(null)
+  const createCaptureHook = useCreateBakeCapture()
+
+  const canSubmitCreate = !isCreating
+
+  const resetCreateForm = () => {
+    setCreateTitle('')
+    setCreateAppName('')
+    setCreateText('')
+    setCreateScreenshotPreview(null)
+    setCreateScreenshotBase64(null)
+    setCreateError(null)
+    setIsCreating(false)
+  }
+
+  const applyScreenshotResult = (result: string) => {
+    // result 形如 "data:image/jpeg;base64,..."，提取纯 base64 部分
+    const commaIndex = result.indexOf(',')
+    const base64Data = commaIndex >= 0 ? result.slice(commaIndex + 1) : result
+    setCreateScreenshotPreview(result)
+    setCreateScreenshotBase64(base64Data)
+  }
+
+  const handleScreenshotSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      setCreateError('请选择图片文件')
+      return
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      setCreateError('截图大小不能超过 10MB')
+      return
+    }
+    setCreateError(null)
+    const reader = new FileReader()
+    reader.onload = () => {
+      applyScreenshotResult(reader.result as string)
+    }
+    reader.onerror = () => setCreateError('读取图片失败')
+    reader.readAsDataURL(file)
+  }
+
+  const handlePasteScreenshot = (event: React.ClipboardEvent) => {
+    // 仅拦截剪贴板中的图片内容；粘贴纯文本（如文本信息输入框）不受影响
+    const items = Array.from(event.clipboardData?.items ?? [])
+    const imageItem = items.find(item => item.type.startsWith('image/'))
+    if (!imageItem) return
+    event.preventDefault()
+    const file = imageItem.getAsFile()
+    if (!file) return
+    if (file.size > 10 * 1024 * 1024) {
+      setCreateError('截图大小不能超过 10MB')
+      return
+    }
+    setCreateError(null)
+    const reader = new FileReader()
+    reader.onload = () => {
+      applyScreenshotResult(reader.result as string)
+    }
+    reader.onerror = () => setCreateError('读取剪贴板图片失败')
+    reader.readAsDataURL(file)
+  }
+
+  const handleRemoveScreenshot = () => {
+    setCreateScreenshotPreview(null)
+    setCreateScreenshotBase64(null)
+    if (createScreenshotInputRef.current) {
+      createScreenshotInputRef.current.value = ''
+    }
+  }
+
+  const handleCreateCapture = async () => {
+    if (!canSubmitCreate) return
+    setIsCreating(true)
+    setCreateError(null)
+    try {
+      await createCaptureHook({
+        title: createTitle.trim() || '手工录入',
+        appName: createAppName.trim() || '手工录入',
+        text: createText.trim() || undefined,
+        screenshotBase64: createScreenshotBase64 || undefined,
+      })
+      resetCreateForm()
+      setShowCreateDialog(false)
+      onRefresh()
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : '新建失败，请重试')
+    } finally {
+      setIsCreating(false)
+    }
+  }
+
+  const handleCloseCreateDialog = () => {
+    if (isCreating) return
+    resetCreateForm()
+    setShowCreateDialog(false)
+  }
+
   const closeDrawerButtonRef = useRef<HTMLButtonElement>(null)
   const detailTriggerRef = useRef<HTMLButtonElement | null>(null)
   const selectedListItem = captures.find(item => item.id === selectedCaptureId) ?? null
@@ -221,6 +333,14 @@ const BakeCaptureTab: React.FC<{
       setIsScreenshotOpen(false)
     }
   }, [isScreenshotOpen, screenshotUrl])
+
+  // 关联跳转进入采集页时（sourceCaptureId 由跳转方设置），自动展开目标记录的详情抽屉，
+  // 与其他 tab 的 focus 自动打开行为保持一致；用户手动关闭后选中态被清空，不会被重开
+  useEffect(() => {
+    if (sourceCaptureId && selectedCaptureId && selected?.id === selectedCaptureId) {
+      setIsDetailDrawerOpen(true)
+    }
+  }, [sourceCaptureId, selectedCaptureId, selected?.id])
 
   useEffect(() => {
     if (!isDetailDrawerOpen || !selected) return
@@ -310,6 +430,10 @@ const BakeCaptureTab: React.FC<{
               <div className="bake-list-toolbar__repository-primary-actions">
                 <BakeButton compact type="button" onClick={onClearFilters}>清空</BakeButton>
                 <BakeButton compact primary type="submit">搜索</BakeButton>
+                <BakeButton compact primary type="button" onClick={() => setShowCreateDialog(true)}>
+                  <Plus size={14} strokeWidth={2.2} style={{ marginRight: 4, verticalAlign: -2 }} />
+                  新建
+                </BakeButton>
               </div>
             </div>
           </div>
@@ -592,6 +716,86 @@ const BakeCaptureTab: React.FC<{
               </div>
             </div>
           </div>
+      )}
+
+      {showCreateDialog && (
+        <div className="bake-modal-overlay" onClick={handleCloseCreateDialog}>
+          <div className="bake-modal bake-modal--wide" onClick={(event) => event.stopPropagation()}>
+            <div className="bake-modal__header">
+              <h3>新建采集记录</h3>
+              <button className="bake-modal__close" aria-label="关闭" onClick={handleCloseCreateDialog}>×</button>
+            </div>
+            <div className="bake-modal__body" onPaste={handlePasteScreenshot}>
+              <label className="bake-form-field">
+                <span className="bake-form-label">窗口 / 页面标题（可选）</span>
+                <input
+                  className="bake-input"
+                  value={createTitle}
+                  autoFocus
+                  onChange={(event) => setCreateTitle(event.target.value)}
+                  placeholder="未填写时默认为「手工录入」"
+                />
+              </label>
+              <label className="bake-form-field">
+                <span className="bake-form-label">应用名称（可选）</span>
+                <input
+                  className="bake-input"
+                  value={createAppName}
+                  onChange={(event) => setCreateAppName(event.target.value)}
+                  placeholder="例如：飞书、Chrome；未填写时默认为「手工录入」"
+                />
+              </label>
+              <label className="bake-form-field">
+                <span className="bake-form-label">文本信息</span>
+                <textarea
+                  className="bake-textarea"
+                  rows={5}
+                  value={createText}
+                  onChange={(event) => setCreateText(event.target.value)}
+                  placeholder="输入需要采集的文本内容，保存后将自动进入提炼流程"
+                />
+              </label>
+              <div className="bake-form-field">
+                <span className="bake-form-label">截图</span>
+                <div className="bake-muted bake-capture-create__screenshot-tip">
+                  支持选择图片文件，或直接 Ctrl+V 粘贴截图
+                </div>
+                <input
+                  ref={createScreenshotInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="bake-input bake-input--file"
+                  onChange={handleScreenshotSelect}
+                />
+                {createScreenshotPreview && (
+                  <div className="bake-capture-create__screenshot-preview">
+                    <img src={createScreenshotPreview} alt="截图预览" />
+                    <button
+                      type="button"
+                      className="bake-capture-create__screenshot-remove"
+                      aria-label="移除截图"
+                      onClick={handleRemoveScreenshot}
+                    >
+                      <X size={14} aria-hidden="true" />
+                    </button>
+                  </div>
+                )}
+              </div>
+              {createError && (
+                <div className="bake-inline-message bake-inline-message--error">{createError}</div>
+              )}
+              <div className="bake-muted bake-capture-create__hint">
+                标题与应用名称可留空，保存后默认为「手工录入」；手工新建的记录将自动进入提炼流程，与自动采集的记录一样被提炼为时间线和知识。
+              </div>
+            </div>
+            <div className="bake-modal__footer">
+              <BakeButton disabled={isCreating} onClick={handleCloseCreateDialog}>取消</BakeButton>
+              <BakeButton primary disabled={!canSubmitCreate} onClick={handleCreateCapture}>
+                {isCreating ? '保存中…' : '保存'}
+              </BakeButton>
+            </div>
+          </div>
+        </div>
       )}
     </>
   )

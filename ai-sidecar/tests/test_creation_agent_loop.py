@@ -82,7 +82,9 @@ class FakeCreationService:
     async def run_specialist_agent(self, **kwargs):
         return f"{kwargs['agent_id']} 的分析结论"
 
-    def build_routing_prompts(self, query, requirement, selected_skills=()):
+    def build_routing_prompts(
+        self, query, requirement, selected_skills=(), enabled_tool_ids=None
+    ):
         return ("路由决策系统提示", f"请为请求选择执行链路：{query}")
 
     def parse_routing_decision(self, text):
@@ -213,6 +215,80 @@ def test_routing_prompt_loads_every_capability_self_description():
     assert set(ROUTABLE_AGENT_IDS) == {
         item["id"] for item in ROUTING_CAPABILITIES if item["kind"] == "agent"
     }
+
+
+def test_routing_prompt_only_discloses_enabled_optional_tools():
+    # 契约：可选 Tool 只有启用后才向路由模型披露；未启用的工具对模型
+    # 不可见，也就不可能被选择。
+    class PromptAssemblyService:
+        build_routing_prompts = CreationService.build_routing_prompts
+        _skill_description_lines = staticmethod(
+            CreationService._skill_description_lines
+        )
+
+    service = PromptAssemblyService()
+    requirement = {"topic": "流程图", "doc_type": "", "audience": ""}
+
+    system_without, _ = service.build_routing_prompts(
+        "画一张流程图",
+        requirement,
+        selected_skills=[],
+        enabled_tool_ids=(
+            "internet_search",
+            "memory_search",
+            "data_search",
+            "webpage_scrape",
+        ),
+    )
+    assert "mermaid_diagram" not in system_without
+    assert "plantuml_diagram" not in system_without
+    # Agent 自描述不受工具启用状态影响。
+    assert "solution_design_agent" in system_without
+
+    system_with, _ = service.build_routing_prompts(
+        "画一张流程图",
+        requirement,
+        selected_skills=[],
+        enabled_tool_ids=(
+            "internet_search",
+            "memory_search",
+            "data_search",
+            "webpage_scrape",
+            "mermaid_diagram",
+        ),
+    )
+    assert "mermaid_diagram" in system_with
+    assert "plantuml_diagram" not in system_with
+
+
+def test_fallback_routing_decision_respects_enabled_tools():
+    # 降级探针与模型路径同契约：只产出已启用的工具。
+    disabled = fallback_routing_decision(
+        "画一张系统流程图",
+        {},
+        enabled_tool_ids=(
+            "internet_search",
+            "memory_search",
+            "data_search",
+            "webpage_scrape",
+        ),
+    )
+    assert "mermaid_diagram" not in disabled["tools"]
+    assert "plantuml_diagram" not in disabled["tools"]
+
+    enabled = fallback_routing_decision(
+        "画一张系统流程图",
+        {},
+        enabled_tool_ids=(
+            "internet_search",
+            "memory_search",
+            "data_search",
+            "webpage_scrape",
+            "mermaid_diagram",
+        ),
+    )
+    assert "mermaid_diagram" in enabled["tools"]
+    assert "plantuml_diagram" not in enabled["tools"]
 
 
 def test_model_routing_decision_overrides_keyword_heuristics():
@@ -4197,6 +4273,33 @@ async def test_optional_tools_are_called_only_when_enabled_and_matched():
 
 
 @pytest.mark.asyncio
+async def test_mermaid_diagram_tool_is_called_when_enabled_and_matched():
+    events = await collect_events(
+        CreationAgentLoop(FakeCreationService()).run(
+            user_message="用 Mermaid 画一张状态图，说明任务从创建到归档的状态流转",
+            current_document="",
+            conversation=[],
+            selected_skills=[],
+            options=CreationOptions(enabled_tools=("mermaid_diagram",)),
+        )
+    )
+
+    tool_events = [
+        event
+        for event in events
+        if event["type"] == "tool.completed"
+    ]
+    assert "mermaid_diagram" in {
+        event["actor"]["id"] for event in tool_events
+    }
+    mermaid_event = next(
+        event for event in tool_events if event["actor"]["id"] == "mermaid_diagram"
+    )
+    assert mermaid_event["data"]["diagram_type"] == "state"
+    assert events[-1]["type"] == "run.completed"
+
+
+@pytest.mark.asyncio
 async def test_tool_failure_uses_stable_error_code_and_creation_continues():
     class FailingMemoryService(FakeCreationService):
         def retrieve_references(self, *_args):
@@ -4218,19 +4321,23 @@ async def test_tool_failure_uses_stable_error_code_and_creation_continues():
     assert events[-1]["type"] == "run.completed"
 
 
-def test_builtin_technical_skill_does_not_match_product_rd_weekly_report():
+def test_no_selected_skills_means_no_template_without_builtin_fallback():
+    # 内置模板关键词兜底已下线：未召回任何已安装 Skill 时不再套模板，
+    # 含“架构”等主题词的画图请求也不会被套上方案模板。
     loop = CreationAgentLoop(FakeCreationService())
     state = SimpleNamespace(
         selected_skills=[],
-        root_request="生成 AI 会议助手 2.0 产品研发周报",
-        user_message="生成 AI 会议助手 2.0 产品研发周报",
-        environment={"requirement": {"doc_type": "工作周报"}},
+        root_request="画一张快手推理引擎的架构图",
+        user_message="画一张快手推理引擎的架构图",
+        environment={"requirement": {"doc_type": "技术文档"}},
     )
 
     assert loop._match_skills(state) == []
 
 
-def test_builtin_technical_skill_requires_explicit_solution_intent():
+def test_no_builtin_template_even_with_explicit_solution_intent():
+    # 模板能力只经由披露+模型决策的召回链路（已安装 Skill）引入，
+    # 即使输入含明确的方案意图也不再由 Loop 内置兜底。
     loop = CreationAgentLoop(FakeCreationService())
     state = SimpleNamespace(
         selected_skills=[],
@@ -4239,10 +4346,7 @@ def test_builtin_technical_skill_requires_explicit_solution_intent():
         environment={"requirement": {"doc_type": "技术方案"}},
     )
 
-    matched = loop._match_skills(state)
-
-    assert [item["id"] for item in matched] == ["technical-solution-template"]
-    assert "不用于周报、总结或复盘" in matched[0]["summary"]
+    assert loop._match_skills(state) == []
 
 
 def test_installed_skill_keeps_style_but_excludes_fictional_example_facts():
@@ -4331,7 +4435,35 @@ async def test_loop_updates_goal_after_agent_tool_and_skill_results():
             user_message="设计创作功能的 Agent Loop 架构方案",
             current_document="",
             conversation=[],
-            selected_skills=[],
+            selected_skills=[
+                {
+                    "id": "arch-plan",
+                    "title": "架构方案模板",
+                    "summary": "把系统架构设计整理成可评审的方案文档。",
+                    "workflow_role": "primary",
+                    "workflow_role_declared": True,
+                    "execution_steps": [
+                        {
+                            "id": "arch-research",
+                            "title": "检索本地记忆",
+                            "objective": "收集创作功能相关的历史资料",
+                            "output": "记忆检索结果",
+                            "agents": [],
+                            "skills": [],
+                            "tools": ["memory_search"],
+                        },
+                        {
+                            "id": "arch-write",
+                            "title": "撰写架构方案",
+                            "objective": "输出总体架构与关键决策",
+                            "output": "架构方案文档",
+                            "agents": ["solution_design_agent", "document_writer_agent"],
+                            "skills": [],
+                            "tools": [],
+                        }
+                    ],
+                }
+            ],
             options=CreationOptions(enable_rag=True, doc_type="架构设计方案"),
         )
     )
@@ -5006,3 +5138,108 @@ async def test_memory_search_event_keeps_recall_trace_fields():
         "document",
     ]
     assert all("skill_step_title" in ref for ref in patch_references)
+
+
+def _strict_diagram_state(loop, step_tools):
+    return loop._new_state(
+        user_message="用架构方案模板 Skill 生成方案并画架构图",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        selected_skills=[
+            {
+                "id": "arch-plan",
+                "title": "架构方案模板",
+                "executionSteps": [
+                    {
+                        "id": "write",
+                        "title": "撰写方案",
+                        "objective": "撰写完整架构方案。",
+                        "agents": ["document_writer_agent"],
+                        "skills": [],
+                        "tools": list(step_tools),
+                    }
+                ],
+            }
+        ],
+        options=CreationOptions(
+            enabled_tools=("memory_search", "data_search", "mermaid_diagram")
+        ),
+        model_mode="local",
+        session_id="session-strict-diagram",
+        run_id="run-strict-diagram",
+    )
+
+
+def test_strict_skill_workflow_appends_enabled_routed_diagram_tool():
+    # 路由决策选中且已启用的画图工具不得因 Skill 步骤未声明而被丢弃；
+    # 画图步骤在写作步骤之前，保证撰写时能拿到画图约束。
+    loop = CreationAgentLoop(FakeCreationService())
+    state = _strict_diagram_state(loop, step_tools=[])
+
+    plan = resolve_planned(
+        loop,
+        state,
+        decision={
+            "tools": ["mermaid_diagram"],
+            "agents": [],
+            "source": "model",
+            "reasoning": "用户明确要架构图",
+        },
+    )
+
+    plan_ids = [step["id"] for step in plan]
+    assert plan_ids.count("mermaid_diagram") == 1
+    assert state.environment["strict_skill_ids"] == ["arch-plan"]
+    mermaid_index = plan_ids.index("mermaid_diagram")
+    first_skill_step_index = next(
+        index
+        for index, step in enumerate(plan)
+        if step.get("action") in {"skill_step", "activate_skill_step"}
+    )
+    assert mermaid_index < first_skill_step_index
+
+
+def test_strict_skill_workflow_does_not_duplicate_declared_diagram_tool():
+    # Skill 步骤已声明 mermaid 时由工作流自己调度，不再重复补位。
+    loop = CreationAgentLoop(FakeCreationService())
+    state = _strict_diagram_state(loop, step_tools=["mermaid_diagram"])
+
+    plan = resolve_planned(
+        loop,
+        state,
+        decision={
+            "tools": ["mermaid_diagram"],
+            "agents": [],
+            "source": "model",
+            "reasoning": "用户明确要架构图",
+        },
+    )
+
+    assert [step["id"] for step in plan].count("mermaid_diagram") == 1
+
+
+def test_strict_skill_workflow_ignores_unenabled_diagram_decision():
+    # 未启用的画图工具即使出现在决策里也不得进入计划（与披露契约一致）。
+    loop = CreationAgentLoop(FakeCreationService())
+    state = _strict_diagram_state(loop, step_tools=[])
+    state.options = dict(state.options)
+    state.options["enabled_tools"] = (
+        "internet_search",
+        "memory_search",
+        "data_search",
+        "webpage_scrape",
+    )
+
+    plan = resolve_planned(
+        loop,
+        state,
+        decision={
+            "tools": ["mermaid_diagram"],
+            "agents": [],
+            "source": "model",
+            "reasoning": "用户明确要架构图",
+        },
+    )
+
+    assert "mermaid_diagram" not in [step["id"] for step in plan]

@@ -36,3 +36,19 @@
   margin-left: -10px;
   margin-right: 8px;
 }
+
+/* macOS 暗色模式适配 */
+@media (prefers-color-scheme: dark) {
+  .tutorial-link {
+    color: #8E8E93;
+  }
+
+  .tutorial-link:hover {
+    background: rgba(255, 255, 255, 0.06);
+    color: #FFC48D;
+  }
+
+  .tutorial-link:focus-visible {
+    outline-color: rgba(10, 132, 255, 0.24);
+  }
+}

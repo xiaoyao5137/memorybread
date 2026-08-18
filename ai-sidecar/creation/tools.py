@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 INTERNET_SEARCH_TOOL_ID = "internet_search"
 MEMORY_SEARCH_TOOL_ID = "memory_search"
 DATA_SEARCH_TOOL_ID = "data_search"
 WEBPAGE_SCRAPE_TOOL_ID = "webpage_scrape"
 PLANTUML_DIAGRAM_TOOL_ID = "plantuml_diagram"
+MERMAID_DIAGRAM_TOOL_ID = "mermaid_diagram"
 GITHUB_SEARCH_TOOL_ID = "github_search"
 
 REQUIRED_CREATION_TOOL_IDS = (
@@ -19,6 +20,7 @@ REQUIRED_CREATION_TOOL_IDS = (
 )
 OPTIONAL_CREATION_TOOL_IDS = (
     PLANTUML_DIAGRAM_TOOL_ID,
+    MERMAID_DIAGRAM_TOOL_ID,
     GITHUB_SEARCH_TOOL_ID,
 )
 KNOWN_CREATION_TOOL_IDS = (
@@ -77,6 +79,15 @@ ROUTING_CAPABILITIES = (
         ),
     },
     {
+        "id": MERMAID_DIAGRAM_TOOL_ID,
+        "kind": "tool",
+        "name": "Mermaid 画图 Tool",
+        "description": (
+            "解决需要用可被 Markdown 直接渲染的图形表达结构与流程的问题："
+            "流程图、时序图、状态图、类图等图示。"
+        ),
+    },
+    {
         "id": DATA_ANALYSIS_AGENT_ID,
         "kind": "agent",
         "name": "数据分析 Agent",
@@ -114,10 +125,26 @@ ROUTABLE_AGENT_IDS = tuple(
 )
 
 
-def routing_capability_lines(extra_lines: Iterable[str] = ()) -> list[str]:
-    """渐进式披露：每个能力以自己的名称向路由模型呈现自己的自描述。"""
+def routing_capability_lines(
+    extra_lines: Iterable[str] = (),
+    enabled_tool_ids: Optional[Iterable[str]] = None,
+) -> list[str]:
+    """渐进式披露：每个能力以自己的名称向路由模型呈现自己的自描述。
+
+    契约：可选 Tool 只有在启用时才向路由模型披露；未启用的工具对模型
+    不可见，也就不可能被选择。传入 None 表示不做启用过滤（测试/兼容）。
+    """
+    allowed_tool_ids: Optional[set] = None
+    if enabled_tool_ids is not None:
+        allowed_tool_ids = {str(item) for item in enabled_tool_ids}
     lines: list[str] = []
     for item in ROUTING_CAPABILITIES:
+        if (
+            item["kind"] == "tool"
+            and allowed_tool_ids is not None
+            and item["id"] not in allowed_tool_ids
+        ):
+            continue
         label = "Tool" if item["kind"] == "tool" else "Agent"
         lines.append(
             "- {id} ({label} · {name}): {description}".format(
@@ -325,6 +352,25 @@ def should_use_plantuml(text: str, requirement: dict[str, Any]) -> bool:
     )
 
 
+def should_use_mermaid(text: str, requirement: dict[str, Any]) -> bool:
+    if requirement.get("needs_images"):
+        return True
+    return _contains_any(
+        text,
+        (
+            "mermaid",
+            "画图",
+            "图示",
+            "架构图",
+            "流程图",
+            "时序图",
+            "状态图",
+            "类图",
+            "关系图",
+        ),
+    )
+
+
 def build_plantuml_context(text: str) -> dict[str, str]:
     lowered = text.lower()
     if "时序" in text or "sequence" in lowered:
@@ -345,6 +391,49 @@ def build_plantuml_context(text: str) -> dict[str, str]:
         "starter": starter,
         "instruction": (
             "在正文最适合的位置输出一段 ```plantuml 代码块；"
+            "基于正文真实对象替换示例节点，保持图中术语与正文一致，"
+            "只绘制已经说明的边界和关系。"
+        ),
+    }
+
+
+def build_mermaid_context(text: str) -> dict[str, str]:
+    lowered = text.lower()
+    if "时序" in text or "sequence" in lowered:
+        diagram_type = "sequence"
+        starter = (
+            "sequenceDiagram\n"
+            "    用户->>系统: 发起请求\n"
+            "    系统-->>用户: 返回结果"
+        )
+    elif "状态" in text or "state" in lowered:
+        diagram_type = "state"
+        starter = (
+            "stateDiagram-v2\n"
+            "    [*] --> 处理中\n"
+            "    处理中 --> 已完成\n"
+            "    已完成 --> [*]"
+        )
+    elif "部署" in text or "架构" in text or "deployment" in lowered:
+        diagram_type = "flowchart_lr"
+        starter = (
+            "flowchart LR\n"
+            "    客户端 --> 核心服务\n"
+            "    核心服务 --> 数据存储"
+        )
+    else:
+        diagram_type = "flowchart"
+        starter = (
+            "flowchart TD\n"
+            "    A[接收输入] --> B[执行处理]\n"
+            "    B --> C[输出结果]"
+        )
+    return {
+        "diagram_type": diagram_type,
+        "language": "mermaid",
+        "starter": starter,
+        "instruction": (
+            "在正文最适合的位置输出一段 ```mermaid 代码块；"
             "基于正文真实对象替换示例节点，保持图中术语与正文一致，"
             "只绘制已经说明的边界和关系。"
         ),
@@ -377,17 +466,37 @@ def validate_routing_decision(raw: Any) -> dict[str, list[str]]:
 def fallback_routing_decision(
     text: str,
     requirement: dict[str, Any],
+    enabled_tool_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
-    """模型不可用或输出无法解析时的降级路由，沿用探针优先的保守策略。"""
+    """模型不可用或输出无法解析时的降级路由，沿用探针优先的保守策略。
+
+    降级探针与模型路径同契约：只产出已启用的工具，避免选出执行不了的
+    能力；None 表示不过滤（测试/兼容旧调用）。
+    """
     normalized = text.lower()
+    allowed_tool_ids: Optional[set] = None
+    if enabled_tool_ids is not None:
+        allowed_tool_ids = {str(item) for item in enabled_tool_ids}
+
+    def tool_allowed(tool_id: str) -> bool:
+        return allowed_tool_ids is None or tool_id in allowed_tool_ids
+
     tools: list[str] = []
-    if should_use_internet_search(text, requirement):
+    if should_use_internet_search(text, requirement) and tool_allowed(
+        INTERNET_SEARCH_TOOL_ID
+    ):
         tools.append(INTERNET_SEARCH_TOOL_ID)
-    if should_use_github_search(text):
+    if should_use_github_search(text) and tool_allowed(GITHUB_SEARCH_TOOL_ID):
         tools.append(GITHUB_SEARCH_TOOL_ID)
-    if should_use_plantuml(text, requirement):
+    if should_use_plantuml(text, requirement) and tool_allowed(
+        PLANTUML_DIAGRAM_TOOL_ID
+    ):
         tools.append(PLANTUML_DIAGRAM_TOOL_ID)
-    if should_use_data_tools(text, requirement):
+    if should_use_mermaid(text, requirement) and tool_allowed(
+        MERMAID_DIAGRAM_TOOL_ID
+    ):
+        tools.append(MERMAID_DIAGRAM_TOOL_ID)
+    if should_use_data_tools(text, requirement) and tool_allowed(DATA_SEARCH_TOOL_ID):
         tools.append(DATA_SEARCH_TOOL_ID)
     agents: list[str] = []
     if any(

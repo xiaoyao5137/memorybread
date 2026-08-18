@@ -373,3 +373,82 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* 暗色模式（macOS 暗色外观） */
+@media (prefers-color-scheme: dark) {
+  .monitor-panel {
+    background: #111315;
+  }
+
+  .monitor-range-control__label {
+    color: #9CA3AF;
+  }
+
+  .monitor-range-control__amount,
+  .monitor-range-control__unit {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: #2C2C2E;
+    color: #F3F4F6;
+  }
+
+  .monitor-capture-paused {
+    border-color: rgba(255, 177, 122, 0.28);
+    background: rgba(255, 159, 67, 0.1);
+    color: #FFC48D;
+  }
+
+  .monitor-capture-paused__copy strong {
+    color: #F3F4F6;
+  }
+
+  .monitor-capture-paused__copy small {
+    color: #C99B6F;
+  }
+
+  .monitor-capture-paused__error {
+    color: #FF6961;
+  }
+
+  .monitor-capture-paused button {
+    background: #C77E3A;
+    color: #FFF8F0;
+  }
+
+  .monitor-capture-paused button:hover:not(:disabled) {
+    background: #D98F49;
+  }
+
+  .monitor-stat-card__label {
+    color: #9CA3AF;
+  }
+
+  .monitor-stat-card__sub {
+    color: #8E8E93;
+  }
+
+  .monitor-token-distribution__summary,
+  .monitor-token-distribution__max {
+    color: #8E8E93;
+  }
+
+  .monitor-token-distribution__legend {
+    color: #9CA3AF;
+  }
+
+  .monitor-token-distribution__metric {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: rgba(28, 28, 30, 0.68);
+  }
+
+  .monitor-token-distribution__metric-head {
+    color: #F3F4F6;
+  }
+
+  .monitor-token-distribution__metric-head span:last-child {
+    color: #9CA3AF;
+  }
+
+  .monitor-token-distribution__empty {
+    color: #7C7C81;
+  }
+}

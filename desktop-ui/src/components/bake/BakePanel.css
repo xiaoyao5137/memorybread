@@ -101,6 +101,50 @@
   flex-wrap: wrap;
 }
 
+.bake-header__main {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.bake-header__copy {
+  min-width: 0;
+}
+
+.bake-header__back {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  background: #F5F5F7;
+  color: #52525B;
+  cursor: pointer;
+  transition: color 160ms ease, background-color 160ms ease, border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+}
+
+.bake-header__back:hover {
+  border-color: rgba(0, 122, 255, 0.2);
+  background: rgba(0, 122, 255, 0.08);
+  color: #0066D6;
+  transform: translateX(-2px);
+}
+
+.bake-header__back:active {
+  transform: translateX(-1px) scale(0.96);
+}
+
+.bake-header__back:focus-visible {
+  outline: none;
+  border-color: rgba(0, 122, 255, 0.42);
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.16);
+}
+
 .bake-status-group {
   display: flex;
   gap: 8px;
@@ -168,20 +212,6 @@
   font-weight: 600;
 }
 
-.bake-backbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
-  border: 1px solid rgba(0, 122, 255, 0.16);
-  border-radius: 10px;
-  background: rgba(0, 122, 255, 0.08);
-  color: #1D4F8F;
-  font-size: 12px;
-  font-weight: 600;
-}
-
 .bake-form-field {
   display: grid;
   gap: 6px;
@@ -198,9 +228,6 @@
   border-radius: 14px;
   background: #F8F9FB;
   border: 1px solid rgba(0, 0, 0, 0.05);
-  position: sticky;
-  top: 0;
-  z-index: 2;
 }
 
 .bake-list-toolbar--repository {
@@ -217,6 +244,8 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  container-type: inline-size;
+  container-name: bake-repository-toolbar;
 }
 
 .bake-list-toolbar__repository-row {
@@ -349,9 +378,13 @@
 }
 
 .bake-list-toolbar__repository-actions--secondary {
-  grid-column: -2 / -1;
+  grid-column: 1 / -1;
+  width: 100%;
   justify-content: flex-end;
-  justify-self: end;
+  justify-self: stretch;
+  margin-top: 2px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
 }
 
 .bake-list-toolbar__repository-primary-actions {
@@ -373,6 +406,54 @@
 
 .bake-list-toolbar__repository-actions--secondary .bake-btn--primary {
   margin-left: 0;
+}
+
+/*
+ * The app sidebar can make this toolbar narrower without changing the viewport.
+ * Respond to the toolbar's real width so actions move below the date fields
+ * before the fixed-width grid tracks can overlap.
+ */
+@container bake-repository-toolbar (max-width: 1100px) {
+  .bake-list-toolbar__repository-row--asset-filters {
+    grid-template-columns: minmax(180px, 1fr) minmax(132px, 0.65fr) repeat(2, minmax(150px, 0.8fr));
+  }
+
+  .bake-filter-field--date,
+  .bake-filter-field--type,
+  .bake-filter-field--favorite {
+    width: 100%;
+  }
+
+  .bake-list-toolbar__repository-actions--secondary {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+  }
+}
+
+@container bake-repository-toolbar (max-width: 760px) {
+  .bake-list-toolbar__repository-row--dates,
+  .bake-list-toolbar__repository-row--asset-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container bake-repository-toolbar (max-width: 620px) {
+  .bake-list-toolbar__repository-row--search,
+  .bake-list-toolbar__repository-row--dates,
+  .bake-list-toolbar__repository-row--capture-filters,
+  .bake-list-toolbar__repository-row--asset-filters {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .bake-list-toolbar__repository-primary-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .bake-list-toolbar__repository-primary-actions .bake-btn {
+    flex: 1 1 76px;
+    width: auto;
+  }
 }
 
 .bake-list-toolbar--repository .bake-form-field {
@@ -2455,12 +2536,12 @@ button.bake-list-item.bake-list-item--active {
 
 .bake-record-table-region {
   min-width: 0;
-  max-height: min(68vh, 760px);
-  overflow: auto;
+  max-height: none;
+  overflow-x: auto;
+  overflow-y: visible;
   border-top: 1px solid rgba(0, 0, 0, 0.07);
   border-bottom: 1px solid rgba(0, 0, 0, 0.07);
   background: #FFFFFF;
-  scrollbar-gutter: stable;
 }
 
 .bake-record-table-region:focus-visible {
@@ -2668,12 +2749,12 @@ button.bake-list-item.bake-list-item--active {
 
 .bake-capture-table-region {
   min-width: 0;
-  max-height: min(68vh, 760px);
-  overflow: auto;
+  max-height: none;
+  overflow-x: auto;
+  overflow-y: visible;
   border-top: 1px solid rgba(0, 0, 0, 0.07);
   border-bottom: 1px solid rgba(0, 0, 0, 0.07);
   background: #FFFFFF;
-  scrollbar-gutter: stable;
 }
 
 .bake-capture-table-region:focus-visible {
@@ -3181,6 +3262,70 @@ td.bake-capture-table__time .bake-capture-table__id {
   word-break: break-word;
 }
 
+/* 新建采集记录弹窗 */
+.bake-input--file {
+  padding: 6px 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.bake-capture-create__screenshot-preview {
+  position: relative;
+  display: inline-block;
+  margin-top: 8px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  max-width: 320px;
+}
+
+.bake-capture-create__screenshot-preview img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 200px;
+  object-fit: cover;
+}
+
+.bake-capture-create__screenshot-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(15, 23, 42, 0.6);
+  color: #FFFFFF;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.bake-capture-create__screenshot-remove:hover {
+  background: rgba(15, 23, 42, 0.85);
+}
+
+.bake-capture-create__screenshot-tip {
+  margin-bottom: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.bake-capture-create__hint {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.bake-inline-message--error {
+  background: rgba(255, 59, 48, 0.12) !important;
+  color: #C0392B !important;
+}
+
 .bake-knowledge-detail {
   gap: 14px;
 }
@@ -3607,6 +3752,18 @@ td.bake-capture-table__time .bake-capture-table__id {
   .bake-stat-chip {
     background: rgba(10, 132, 255, 0.16);
     color: #9CC7FF;
+  }
+
+  .bake-header__back {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.06);
+    color: #B8BBC2;
+  }
+
+  .bake-header__back:hover {
+    border-color: rgba(10, 132, 255, 0.3);
+    background: rgba(10, 132, 255, 0.14);
+    color: #8FC2FF;
   }
 
   .bake-title,
@@ -4059,6 +4216,15 @@ td.bake-capture-table__time .bake-capture-table__id {
     background: rgba(255, 255, 255, 0.08);
   }
 
+  .bake-capture-create__screenshot-preview {
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+
+  .bake-inline-message--error {
+    background: rgba(255, 69, 58, 0.18) !important;
+    color: #FF6961 !important;
+  }
+
   .bake-modal__body--confirm {
     color: #D1D5DB;
   }
@@ -4282,6 +4448,11 @@ td.bake-capture-table__time .bake-capture-table__id {
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.bake-memory-graph--overview .bake-memory-graph__eyebrow {
+  font-size: 15px;
+  letter-spacing: 0.04em;
 }
 
 .bake-memory-graph__heading p {
@@ -4578,11 +4749,29 @@ td.bake-capture-table__time .bake-capture-table__id {
   backdrop-filter: blur(14px);
 }
 
+.bake-memory-graph__inspector-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .bake-memory-graph__inspector-type {
+  flex-shrink: 0;
   color: #007AFF;
   font-size: 9px;
   font-weight: 800;
   letter-spacing: 0.08em;
+}
+
+.bake-memory-graph__inspector-meta time {
+  overflow: hidden;
+  color: #8E8E93;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .bake-memory-graph__inspector strong {
@@ -4771,6 +4960,17 @@ td.bake-capture-table__time .bake-capture-table__id {
 
   .bake-memory-graph__loader {
     animation: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bake-header__back {
+    transition: none;
+  }
+
+  .bake-header__back:hover,
+  .bake-header__back:active {
+    transform: none;
   }
 }
 

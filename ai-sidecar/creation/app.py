@@ -120,6 +120,11 @@ class AnalyzeCreationSkillRequest(BaseModel):
     doc_type: str = ""
 
 
+class MatchCreationSkillsRequest(BaseModel):
+    prompt: str
+    skills: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class AgentRunRequest(GenerateRequest):
     """创作 Agent Loop 的启动或恢复请求。"""
 
@@ -400,6 +405,21 @@ async def analyze_creation_skill(request: AnalyzeCreationSkillRequest):
     except Exception as e:
         logger.error("Creation skill analysis error: %s", e)
         raise HTTPException(status_code=500, detail="本地技能分析失败")
+
+
+@app.post("/creation/skills/match")
+async def match_creation_skills(request: MatchCreationSkillsRequest):
+    """创作提交后由模型路由决定执行时引入哪个 Skill；失败时返回空召回。"""
+    try:
+        return await creation_service.route_creation_skills(
+            prompt=request.prompt,
+            skills=request.skills,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Creation skill match error: %s", e)
+        raise HTTPException(status_code=500, detail="技能召回路由失败")
 
 
 @app.get("/health")

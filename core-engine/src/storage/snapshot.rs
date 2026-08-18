@@ -97,6 +97,7 @@ const EXCLUDED_TABLES: &[&str] = &[
     "model_events",
     "data_cleanup_log",
     "data_extraction_state",
+    "data_timeline_materialization_state",
 ];
 
 #[derive(Debug, Clone, Copy)]

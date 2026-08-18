@@ -285,6 +285,8 @@ const BakePanel: React.FC = () => {
   const [graphError, setGraphError] = useState<string | null>(null)
   const [graphRevision, setGraphRevision] = useState(0)
   const knowledgeRequestSeqRef = useRef(0)
+  const templateRequestSeqRef = useRef(0)
+  const sopRequestSeqRef = useRef(0)
   const [overviewTodayRange, setOverviewTodayRange] = useState(() => getLocalDayRange(Date.now()))
 
   useEffect(() => {
@@ -544,12 +546,16 @@ const BakePanel: React.FC = () => {
 
   useEffect(() => {
     if (bakeTab !== 'templates') return
+    const requestSeq = templateRequestSeqRef.current + 1
+    templateRequestSeqRef.current = requestSeq
     if (bakeTemplateFocusId) {
       void fetchTemplate(bakeTemplateFocusId).then((item) => {
+        if (requestSeq !== templateRequestSeqRef.current) return
         setTemplates([item])
         setTemplateTotal(1)
         setSelectedTemplateId(item.id)
       }).catch((error) => {
+        if (requestSeq !== templateRequestSeqRef.current) return
         setTemplates([])
         setTemplateTotal(0)
         setStatusMessage(toUserFacingError(error, '未找到这份文档'))
@@ -565,9 +571,11 @@ const BakePanel: React.FC = () => {
       limit: bakeTemplateLimit,
       offset: bakeTemplateOffset,
     }).then((data) => {
+      if (requestSeq !== templateRequestSeqRef.current) return
       setTemplates(data.items)
       setTemplateTotal(data.total)
     }).catch((error) => {
+      if (requestSeq !== templateRequestSeqRef.current) return
       setStatusMessage(toUserFacingError(error, '文档加载失败'))
     })
   }, [bakeTab, bakeTemplateFocusId, bakeTemplateFrom, bakeTemplateLimit, bakeTemplateOffset, bakeTemplateQuery, bakeTemplateTo, fetchTemplate, fetchTemplates, setSelectedTemplateId, templateDocType, templateFavoriteFilter])
@@ -584,12 +592,16 @@ const BakePanel: React.FC = () => {
 
   useEffect(() => {
     if (bakeTab !== 'sop') return
+    const requestSeq = sopRequestSeqRef.current + 1
+    sopRequestSeqRef.current = requestSeq
     if (bakeSopFocusId) {
       void fetchSop(bakeSopFocusId).then((item) => {
+        if (requestSeq !== sopRequestSeqRef.current) return
         setSopCandidates([item])
         setSopTotal(1)
         setSelectedSopId(item.id)
       }).catch((error) => {
+        if (requestSeq !== sopRequestSeqRef.current) return
         setSopCandidates([])
         setSopTotal(0)
         setStatusMessage(toUserFacingError(error, '未找到这份操作手册'))
@@ -604,9 +616,11 @@ const BakePanel: React.FC = () => {
       limit: bakeSopLimit,
       offset: bakeSopOffset,
     }).then((data) => {
+      if (requestSeq !== sopRequestSeqRef.current) return
       setSopCandidates(data.items)
       setSopTotal(data.total)
     }).catch((error) => {
+      if (requestSeq !== sopRequestSeqRef.current) return
       setStatusMessage(toUserFacingError(error, '操作手册加载失败'))
     })
   }, [bakeSopFocusId, bakeSopFrom, bakeSopLimit, bakeSopOffset, bakeSopQuery, bakeSopTo, bakeTab, fetchSop, fetchSops, setSelectedSopId, sopFavoriteFilter])
@@ -1047,7 +1061,7 @@ const BakePanel: React.FC = () => {
   }
 
   const handleOpenGraphNode = (node: MemoryGraphNode) => {
-    setGraphOpen(true)
+    setGraphOpen(false)
     clearBakeNavigationStack()
     if (node.kind === 'knowledge') {
       setBakeTab('knowledge')
@@ -1430,10 +1444,10 @@ const BakePanel: React.FC = () => {
             }}
             style={{
               padding: '6px 12px',
-              border: '1px solid #0f766e',
+              border: '1px solid var(--mb-accent)',
               borderRadius: 6,
-              background: '#fff',
-              color: '#0f766e',
+              background: 'var(--mb-bg-card)',
+              color: 'var(--mb-accent)',
               fontSize: 12,
               fontWeight: 600,
               cursor: 'pointer',
@@ -1447,15 +1461,13 @@ const BakePanel: React.FC = () => {
           </button>
         </div>
       )}
-      <BakeHeader currentTab={bakeTab} />
-      {bakeNavigationStack.length > 0 && (
-        <div className="bake-backbar">
-          <BakeButton compact onClick={handleGoBack}>
-            <ArrowLeft size={14} />
-            返回上一步
-          </BakeButton>
-        </div>
-      )}
+      <BakeHeader
+        currentTab={bakeTab}
+        backAction={bakeNavigationStack.length > 0 ? {
+          label: '返回上一步',
+          onClick: handleGoBack,
+        } : undefined}
+      />
       {statusMessage && <div className="bake-inline-message">{statusMessage}</div>}
 
       {/* 模型未就绪提示 */}
@@ -1463,11 +1475,11 @@ const BakePanel: React.FC = () => {
         <div style={{
           margin: '12px 16px',
           padding: '12px',
-          background: '#FFF3CD',
-          border: '1px solid #FFE69C',
+          background: 'var(--mb-warning-soft)',
+          border: '1px solid var(--mb-warning-border)',
           borderRadius: 8,
           fontSize: 13,
-          color: '#856404',
+          color: 'var(--mb-warning-text)',
         }}>
           <div style={{ fontWeight: 600, marginBottom: 4 }}>AI 能力尚未就绪</div>
           <div style={{ marginBottom: 8 }}>
@@ -1530,18 +1542,6 @@ const BakePanel: React.FC = () => {
             onUpdateKnowledge={handleUpdateKnowledge}
             onViewSourceTimeline={handleViewSourceMemory}
             sourceTimelineTitle={resolvedKnowledgeItem?.sourceTimelineId ? memoryTitleById.get(resolvedKnowledgeItem.sourceTimelineId) : undefined}
-            onOpenCapture={(captureId?: string) => {
-              if (!captureId) {
-                setStatusMessage('当前内容暂无关联采集记录')
-                return
-              }
-              pushBakeNavigationTarget(currentNavigationTarget())
-              setWindowMode('knowledge')
-              setRepositoryTab('capture')
-              setRepositoryCaptureSourceCaptureId(captureId)
-              setSelectedCaptureId(captureId)
-              setStatusMessage('已切换到关联采集记录')
-            }}
           />
         )}
         {bakeTab === 'data' && (

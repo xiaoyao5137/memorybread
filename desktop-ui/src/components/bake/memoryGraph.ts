@@ -90,6 +90,30 @@ const extractLatinConcepts = (value: string) => (
   value.match(/[A-Za-z][A-Za-z0-9_.+-]{1,30}/g) ?? []
 )
 
+type WordSegment = { segment: string; isWordLike?: boolean }
+
+type WordSegmenter = {
+  segment: (value: string) => Iterable<WordSegment>
+}
+
+const createChineseSegmenter = (): WordSegmenter | null => {
+  const Segmenter = (Intl as typeof Intl & {
+    Segmenter?: new (locale?: string | string[], options?: { granularity: 'word' }) => WordSegmenter
+  }).Segmenter
+  return Segmenter ? new Segmenter('zh-CN', { granularity: 'word' }) : null
+}
+
+const chineseSegmenter = createChineseSegmenter()
+
+const extractChineseConcepts = (value: string) => {
+  const chineseRuns = value.match(/\p{Script=Han}+/gu) ?? []
+  if (!chineseSegmenter) return chineseRuns.filter(item => item.length >= 2 && item.length <= 40)
+
+  return chineseRuns.flatMap(run => Array.from(chineseSegmenter.segment(run)))
+    .filter(item => item.isWordLike !== false && /^\p{Script=Han}{2,40}$/u.test(item.segment))
+    .map(item => item.segment)
+}
+
 const normalizeConcept = (value: string) => value
   .normalize('NFKC')
   .toLocaleLowerCase()
@@ -98,6 +122,7 @@ const normalizeConcept = (value: string) => value
 const toConcepts = (values: unknown[], fallbackText = '') => {
   const candidates = values.flatMap(splitConcept)
   extractLatinConcepts(fallbackText).forEach(item => candidates.push(item))
+  extractChineseConcepts(fallbackText).forEach(item => candidates.push(item))
   const seen = new Set<string>()
   return candidates.filter(item => {
     const key = normalizeConcept(item)
@@ -142,10 +167,11 @@ const toNodes = (assets: MemoryGraphAssets): MemoryGraphNode[] => {
     summary: item.overview || item.details || item.summary || '知识条目',
     concepts: toConcepts([...item.entities, item.category], `${item.summary} ${item.overview ?? ''}`),
     sourceMemoryIds: item.sourceTimelineId ? [item.sourceTimelineId] : [],
-    sourceCaptureIds: unique([
-      ...item.sourceCaptureIds,
-      ...(item.captureId ? [item.captureId] : []),
-    ]),
+    sourceCaptureIds: unique(item.sourceCaptureIds.length > 0
+      ? item.sourceCaptureIds
+      : item.captureId && item.captureId !== item.sourceTimelineId
+        ? [item.captureId]
+        : []),
     heatScore: Math.max(0, item.occurrenceCount),
     createdAtMs: item.createdAtMs,
     updatedAtMs: item.updatedAtMs || item.createdAtMs,
@@ -246,16 +272,24 @@ const buildEdges = (
   }
 
   assets.documents.forEach(document => {
-    document.linkedKnowledgeIds.forEach(knowledgeId => addEdge({
-      id: `references:document:${document.id}:knowledge:${knowledgeId}`,
-      source: `document:${document.id}`,
-      target: `knowledge:${knowledgeId}`,
-      relationType: 'references',
-      directed: true,
-      strength: 'strong',
-      evidence: '文档显式引用了这条知识',
-      generationSource: 'explicit',
-    }))
+    const sourceTimelineIds = new Set(document.sourceMemoryIds)
+    document.linkedKnowledgeIds.forEach(knowledgeId => {
+      const knowledge = assets.knowledge.find(item => item.id === knowledgeId)
+      const isLegacyTimelineCollision = sourceTimelineIds.has(knowledgeId)
+        && knowledge?.sourceTimelineId
+        && knowledge.sourceTimelineId !== knowledgeId
+      if (isLegacyTimelineCollision) return
+      addEdge({
+        id: `references:document:${document.id}:knowledge:${knowledgeId}`,
+        source: `document:${document.id}`,
+        target: `knowledge:${knowledgeId}`,
+        relationType: 'references',
+        directed: true,
+        strength: 'strong',
+        evidence: '文档显式引用了这条知识',
+        generationSource: 'explicit',
+      })
+    })
   })
 
   assets.operations.forEach(operation => {
@@ -401,17 +435,9 @@ export const scopeMemoryGraphToDateRange = (
   graph: MemoryGraphData,
   range: { fromMs: number; toMs: number },
 ): MemoryGraphData => {
-  const seedNodeIds = new Set(graph.nodes
+  const includedNodeIds = new Set(graph.nodes
     .filter(node => node.createdAtMs >= range.fromMs && node.createdAtMs <= range.toMs)
     .map(node => node.id))
-  const includedNodeIds = new Set(seedNodeIds)
-
-  graph.edges.forEach(edge => {
-    if (seedNodeIds.has(edge.source) || seedNodeIds.has(edge.target)) {
-      includedNodeIds.add(edge.source)
-      includedNodeIds.add(edge.target)
-    }
-  })
 
   const nodes = graph.nodes.filter(node => includedNodeIds.has(node.id))
   const edges = graph.edges.filter(edge => (

@@ -56,3 +56,24 @@
   color: #98a2b3;
   -webkit-text-fill-color: #98a2b3;
 }
+
+/* macOS 暗色模式适配 */
+@media (prefers-color-scheme: dark) {
+  .mention-highlight-field__mirror {
+    color: #F3F4F6;
+  }
+
+  .mention-highlight-field__mention {
+    background: rgba(255, 159, 67, 0.14);
+    color: #FFC48D;
+  }
+
+  .mention-highlight-field__control {
+    caret-color: #F3F4F6;
+  }
+
+  .mention-highlight-field__control::placeholder {
+    color: #8E8E93;
+    -webkit-text-fill-color: #8E8E93;
+  }
+}
