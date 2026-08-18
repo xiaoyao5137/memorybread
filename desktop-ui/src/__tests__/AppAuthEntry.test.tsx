@@ -80,13 +80,23 @@ describe('App auth entry', () => {
     expect(screen.queryByText(/跳过/)).not.toBeInTheDocument()
   })
 
-  it('已完成初始化时不等待 sidecar 冷启动即显示主界面', () => {
-    initializationMocks.fetchInitializationStatus.mockImplementation(() => new Promise(() => {}))
+  it('已完成初始化的启动也要先在门禁等待 sidecar 核验通过', async () => {
+    let resolveStatus: ((status: ReturnType<typeof initializationStatus>) => void) | undefined
+    initializationMocks.fetchInitializationStatus.mockImplementation(() => new Promise(resolve => {
+      resolveStatus = resolve
+    }))
 
     render(<App />)
 
-    expect(screen.getByTestId('rag-panel')).toBeInTheDocument()
-    expect(screen.queryByLabelText('正在核验本地能力')).not.toBeInTheDocument()
+    expect(screen.getByTestId('initialization-gate')).toBeInTheDocument()
+    expect(screen.getByText('正在启动本地 AI 服务…')).toBeInTheDocument()
+    expect(screen.queryByTestId('rag-panel')).not.toBeInTheDocument()
+
+    await act(async () => {
+      resolveStatus?.(initializationStatus('completed'))
+    })
+
+    expect(await screen.findByTestId('rag-panel')).toBeInTheDocument()
     expect(initializationMocks.fetchInitializationStatus).toHaveBeenCalled()
   })
 
@@ -97,8 +107,16 @@ describe('App auth entry', () => {
     }))
 
     render(<App />)
-    expect(screen.getByTestId('rag-panel')).toBeInTheDocument()
 
+    await act(async () => {
+      resolveStatus?.(initializationStatus('completed'))
+    })
+    expect(await screen.findByTestId('rag-panel')).toBeInTheDocument()
+
+    // 主界面挂载后的后台核验会再次请求状态，此时返回能力失效
+    await waitFor(() => {
+      expect(initializationMocks.fetchInitializationStatus.mock.calls.length).toBeGreaterThanOrEqual(2)
+    })
     await act(async () => {
       resolveStatus?.(initializationStatus('not_started'))
     })
@@ -209,40 +227,13 @@ describe('App auth entry', () => {
     expect(screen.getByRole('button', { name: '未登录，打开登录' })).toBeInTheDocument()
   })
 
-  it('旧消息页面状态会落到个人页消息 Tab', async () => {
-    const sessionUser = {
-      id: '018f0000-0000-7000-8000-000000000009',
-      username: '消息测试用户',
-      status: 'active',
-      roles: ['user'],
-      locale: 'zh-CN',
-      timezone: 'Asia/Shanghai',
-      created_at: new Date().toISOString(),
-    }
-    useAppStore.getState().setAuthSession({
-      access_token: 'mbs_message_token',
-      expires_at: new Date(Date.now() + 86400_000).toISOString(),
-      user: sessionUser,
-    })
+  it('旧消息页面状态会在冷启动门禁后回到咨询主界面', async () => {
     useAppStore.getState().setWindowMode('messages')
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input)
-      if (url.endsWith('/v1/auth/me')) {
-        return { ok: true, json: async () => ({ data: sessionUser }) }
-      }
-      if (url.endsWith('/v1/console/summary')) {
-        return { ok: true, json: async () => ({ data: {} }) }
-      }
-      return { ok: false, status: 404, json: async () => ({}) }
-    }))
 
     render(<App />)
 
-    await waitFor(() => {
-      expect(screen.getByRole('tab', { name: '消息' })).toHaveAttribute('aria-selected', 'true')
-    })
-    expect(screen.queryByTestId('messages-btn')).not.toBeInTheDocument()
-    expect(screen.getByTestId('account-entry')).toHaveAttribute('aria-current', 'page')
+    expect(await screen.findByTestId('rag-panel')).toBeInTheDocument()
+    expect(useAppStore.getState().windowMode).toBe('rag')
   })
 
   it('已有登录会话启动后会自动同步工作投入与工作心情', async () => {
@@ -369,8 +360,9 @@ describe('App auth entry', () => {
     ['操作', { type: 'operation', artifactId: '73' }, 'bake-panel'],
     ['采集', { type: 'capture', captureId: '19' }, 'repository-panel'],
   ])('从创作记录打开%s引用时把创作页写入返回栈', async (_label, detail, targetPanel) => {
-    useAppStore.getState().setWindowMode('creation')
     render(<App />)
+    await screen.findByTestId('rag-panel')
+    useAppStore.getState().setWindowMode('creation')
 
     act(() => {
       window.dispatchEvent(new CustomEvent('view-rag-reference', { detail }))

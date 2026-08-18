@@ -539,6 +539,25 @@ impl StorageManager {
                 continue;
             }
 
+            if *version == "020_add_detailed_content" {
+                // ADD COLUMN 不支持 IF NOT EXISTS。先用 Rust 幂等补列，再执行
+                // FTS 触发器 SQL（触发器体会校验列是否存在）。
+                Self::add_column_if_missing(&conn, "bake_knowledge", "detailed_content", "TEXT")?;
+                Self::add_column_if_missing(&conn, "bake_sops", "detailed_content", "TEXT")?;
+                conn.execute_batch(sql)
+                    .map_err(|e| StorageError::MigrationFailed {
+                        version,
+                        reason: e.to_string(),
+                    })?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_migrations (version, applied_at)
+                     VALUES (?1, ?2)",
+                    rusqlite::params![version, current_ts_ms()],
+                )?;
+                info!("迁移 {} 执行成功", version);
+                continue;
+            }
+
             if *version == "029_rename_capture_knowledge_id_to_timeline_id"
                 && self.capture_timeline_column_already_renamed(&conn)?
             {

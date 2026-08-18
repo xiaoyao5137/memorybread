@@ -458,7 +458,7 @@ describe('AuthPanel', () => {
     expect(screen.getAllByText('烘焙师土豆')).not.toHaveLength(0)
     expect(screen.queryByText('土豆账户')).not.toBeInTheDocument()
     expect(screen.getByText('旧公司')).toBeInTheDocument()
-    expect(screen.getByText(/每项每个自然月最多修改 3 次/)).toBeInTheDocument()
+    expect(screen.getByText(/只会保存个人基础信息和软件心跳/)).toBeInTheDocument()
     expect(screen.getByRole('tablist', { name: '个人信息页面导航' })).toBeInTheDocument()
     expect(screen.getAllByRole('tab')).toHaveLength(5)
     expect(screen.getByRole('tab', { name: '个人信息' })).toHaveAttribute('aria-selected', 'true')

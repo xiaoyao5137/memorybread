@@ -369,16 +369,18 @@ fn seed_artifact_ready_timeline(sm: &StorageManager, summary: &str, overview: &s
             webpage_title: Some("周报模板设计文档".to_string()),
         })
         .unwrap();
+    // 第三条采集必须构成可归因的"结果"证据：Auto 事件 + 窗口状态变化，
+    // 才能通过 SOP 新门禁（action + attributed result）。
     let third_capture_id = sm
         .insert_capture(&NewCapture {
             ts: 1_710_000_002_000,
             app_name: Some("Chrome".to_string()),
             app_bundle_id: Some("com.google.Chrome".to_string()),
-            win_title: Some("周报模板设计文档".to_string()),
-            event_type: EventType::MouseClick,
+            win_title: Some("周报已生成 · 校验通过".to_string()),
+            event_type: EventType::Auto,
             ax_text: Some(format!("{document_body}\n周报已生成并完成校验")),
-            ax_focused_role: Some("AXButton".to_string()),
-            ax_focused_id: Some("verify-output".to_string()),
+            ax_focused_role: None,
+            ax_focused_id: None,
             ocr_text: None,
             screenshot_path: None,
             input_text: None,
@@ -397,6 +399,124 @@ fn seed_artifact_ready_timeline(sm: &StorageManager, summary: &str, overview: &s
             overview: Some(overview.to_string()),
             details: Some(serde_json::json!({"source": "integration_test"}).to_string()),
             entities: r#"["周报","流程"]"#.to_string(),
+            category: "meeting".to_string(),
+            importance: 4,
+            occurrence_count: Some(3),
+            observed_at: Some(1_710_000_002_000),
+            event_time_start: None,
+            event_time_end: None,
+            history_view: false,
+            content_origin: Some("live_interaction".to_string()),
+            activity_type: Some("reading".to_string()),
+            is_self_generated: false,
+            evidence_strength: Some("high".to_string()),
+            capture_ids: Some(
+                serde_json::json!([first_capture_id, second_capture_id, third_capture_id])
+                    .to_string(),
+            ),
+            start_time: None,
+            end_time: None,
+            duration_minutes: None,
+            frag_app_name: None,
+            frag_win_title: None,
+            time_range_start: None,
+            time_range_end: None,
+            key_timestamps: None,
+            work_item: None,
+            work_status: None,
+            work_progress: None,
+        })
+        .unwrap();
+    sm.with_conn(|conn| {
+        conn.execute(
+            "UPDATE captures SET timeline_id = ?1 WHERE id IN (?2, ?3, ?4)",
+            rusqlite::params![
+                timeline_id,
+                first_capture_id,
+                second_capture_id,
+                third_capture_id
+            ],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    timeline_id
+}
+
+// SOP 专属 fixture：非文档证据（普通 URL + 非文档标题），避免文档误漏报保护
+// 把候选转入有界重试；同时保留 action + 可归因 result 证据通过 SOP 门禁。
+fn seed_sop_only_timeline(sm: &StorageManager, summary: &str, overview: &str) -> i64 {
+    let work_body = "这是一份用于验证标准操作流程沉淀的完整操作记录正文。".repeat(12);
+    let first_capture_id = sm
+        .insert_capture(&NewCapture {
+            ts: 1_710_000_000_000,
+            app_name: Some("Chrome".to_string()),
+            app_bundle_id: Some("com.google.Chrome".to_string()),
+            win_title: Some("数据看板操作台".to_string()),
+            event_type: EventType::MouseClick,
+            ax_text: Some(work_body.clone()),
+            ax_focused_role: Some("AXButton".to_string()),
+            ax_focused_id: Some("dashboard-run".to_string()),
+            ocr_text: None,
+            screenshot_path: None,
+            input_text: None,
+            is_sensitive: false,
+            pii_scrubbed: false,
+            screenshot_source: None,
+            url: Some("https://example.com/dashboard/overview".to_string()),
+            webpage_title: Some("数据看板操作台".to_string()),
+        })
+        .unwrap();
+    let second_capture_id = sm
+        .insert_capture(&NewCapture {
+            ts: 1_710_000_001_000,
+            app_name: Some("Chrome".to_string()),
+            app_bundle_id: Some("com.google.Chrome".to_string()),
+            win_title: Some("数据看板操作台".to_string()),
+            event_type: EventType::KeyPause,
+            ax_text: Some(format!("{work_body}\n已确认看板参数")),
+            ax_focused_role: Some("AXTextArea".to_string()),
+            ax_focused_id: Some("dashboard-filter".to_string()),
+            ocr_text: None,
+            screenshot_path: None,
+            input_text: Some("确认看板刷新参数".to_string()),
+            is_sensitive: false,
+            pii_scrubbed: false,
+            screenshot_source: None,
+            url: Some("https://example.com/dashboard/overview".to_string()),
+            webpage_title: Some("数据看板操作台".to_string()),
+        })
+        .unwrap();
+    // 第三条采集必须构成可归因的"结果"证据：Auto 事件 + 窗口状态变化，
+    // 才能通过 SOP 新门禁（action + attributed result）。
+    let third_capture_id = sm
+        .insert_capture(&NewCapture {
+            ts: 1_710_000_002_000,
+            app_name: Some("Chrome".to_string()),
+            app_bundle_id: Some("com.google.Chrome".to_string()),
+            win_title: Some("数据看板已刷新 · 校验通过".to_string()),
+            event_type: EventType::Auto,
+            ax_text: Some(format!("{work_body}\n看板已刷新并完成校验")),
+            ax_focused_role: None,
+            ax_focused_id: None,
+            ocr_text: None,
+            screenshot_path: None,
+            input_text: None,
+            is_sensitive: false,
+            pii_scrubbed: false,
+            screenshot_source: None,
+            url: Some("https://example.com/dashboard/overview".to_string()),
+            webpage_title: Some("数据看板操作台".to_string()),
+        })
+        .unwrap();
+
+    let timeline_id = sm
+        .insert_timeline_entry(&NewTimeline {
+            capture_id: first_capture_id,
+            summary: summary.to_string(),
+            overview: Some(overview.to_string()),
+            details: Some(serde_json::json!({"source": "integration_test"}).to_string()),
+            entities: r#"["看板","流程"]"#.to_string(),
             category: "meeting".to_string(),
             importance: 4,
             occurrence_count: Some(3),
@@ -1760,7 +1880,7 @@ async fn test_bake_run_pipeline_creates_only_sop() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("test.db");
     let sm = StorageManager::open(&db).unwrap();
-    seed_artifact_ready_timeline(&sm, "适合沉淀 SOP 的候选", "应只落 SOP");
+    seed_sop_only_timeline(&sm, "适合沉淀 SOP 的候选", "应只落 SOP");
     let sidecar_url = spawn_bake_sidecar(vec![make_bake_response(
         bake_rejected("not_a_knowledge"),
         bake_rejected("not_a_template"),
