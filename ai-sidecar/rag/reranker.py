@@ -18,6 +18,25 @@ from .retriever import RetrievedChunk
 
 WeightedResultList = tuple[list[RetrievedChunk], float]
 
+# 烘焙产物来源：同 doc_key 冲突时其内容始终优先于原始采集兜底，
+# 避免 capture FTS 的高 BM25 原始分抢占已烘焙文档的正文。
+_ARTIFACT_SOURCE_TYPES = {"document", "bake_knowledge", "operation", "data", "knowledge"}
+
+
+def _is_artifact_chunk(chunk: RetrievedChunk) -> bool:
+    source_type = str((chunk.metadata or {}).get("source_type") or chunk.source or "")
+    return source_type in _ARTIFACT_SOURCE_TYPES
+
+
+def _fusion_doc_key(chunk: RetrievedChunk) -> str:
+    metadata = chunk.metadata or {}
+    source_type = str(metadata.get("source_type") or chunk.source or "")
+    if source_type == "document":
+        document_id = metadata.get("document_id") or metadata.get("artifact_id")
+        if document_id is not None and str(document_id).strip():
+            return f"document:{document_id}"
+    return chunk.doc_key or metadata.get("doc_key") or f"capture:{chunk.capture_id}"
+
 
 def reciprocal_rank_fusion(
     result_lists: Union[list[list[RetrievedChunk]], list[WeightedResultList]],
@@ -46,9 +65,15 @@ def reciprocal_rank_fusion(
         if weight <= 0:
             continue
         for rank, chunk in enumerate(results):
-            doc_key = chunk.doc_key or chunk.metadata.get("doc_key") or f"capture:{chunk.capture_id}"
+            doc_key = _fusion_doc_key(chunk)
             rrf_scores[doc_key] = rrf_scores.get(doc_key, 0.0) + weight / (k + rank + 1)
-            if doc_key not in best_chunk or chunk.score > best_chunk[doc_key].score:
+            current = best_chunk.get(doc_key)
+            is_artifact = _is_artifact_chunk(chunk)
+            if (
+                current is None
+                or (is_artifact and not _is_artifact_chunk(current))
+                or (is_artifact == _is_artifact_chunk(current) and chunk.score > current.score)
+            ):
                 best_chunk[doc_key] = chunk
 
     sorted_doc_keys = [

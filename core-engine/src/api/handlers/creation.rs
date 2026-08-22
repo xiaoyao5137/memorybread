@@ -34,6 +34,8 @@ pub struct GenerateRequest {
     pub enable_web_search: bool,
     #[serde(default)]
     pub enable_image_generation: bool,
+    #[serde(default = "default_true")]
+    pub browser_extension_enabled: bool,
     #[serde(default = "default_creation_tool_ids")]
     pub enabled_tools: Vec<String>,
     #[serde(default = "default_content_weight")]
@@ -99,6 +101,7 @@ struct CreationPayload {
     enable_rag: bool,
     enable_web_search: bool,
     enable_image_generation: bool,
+    browser_extension_enabled: bool,
     enabled_tools: Vec<String>,
     content_weight: f64,
     quality_weight: f64,
@@ -203,6 +206,7 @@ pub async fn generate_document(
         enable_rag: req.enable_rag,
         enable_web_search: req.enable_web_search,
         enable_image_generation: req.enable_image_generation,
+        browser_extension_enabled: req.browser_extension_enabled,
         enabled_tools,
         content_weight: req.content_weight,
         quality_weight: req.quality_weight,
@@ -375,6 +379,7 @@ pub async fn run_creation_agent(
             enable_rag: generation.enable_rag,
             enable_web_search: generation.enable_web_search,
             enable_image_generation: generation.enable_image_generation,
+            browser_extension_enabled: generation.browser_extension_enabled,
             enabled_tools,
             content_weight: generation.content_weight,
             quality_weight: generation.quality_weight,

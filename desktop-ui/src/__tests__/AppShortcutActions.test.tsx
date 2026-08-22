@@ -11,6 +11,7 @@ const shortcutRuntime = vi.hoisted(() => ({
 
 const initializationMocks = vi.hoisted(() => ({
   fetchInitializationStatus: vi.fn(),
+  fetchRuntimeReadiness: vi.fn(),
 }))
 
 vi.mock('@tauri-apps/api/event', () => ({
@@ -35,6 +36,7 @@ vi.mock('../utils/interactionSettings', async importOriginal => {
 vi.mock('../utils/initialization', async importOriginal => ({
   ...(await importOriginal<typeof import('../utils/initialization')>()),
   fetchInitializationStatus: initializationMocks.fetchInitializationStatus,
+  fetchRuntimeReadiness: initializationMocks.fetchRuntimeReadiness,
 }))
 
 vi.mock('../components/FloatingBuddy', () => ({ default: () => <aside /> }))
@@ -61,6 +63,7 @@ beforeEach(() => {
     can_report: false,
     test_mode_enabled: false,
   })
+  initializationMocks.fetchRuntimeReadiness.mockResolvedValue(true)
   shortcutRuntime.handler = null
   mockedInvoke.mockClear()
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, json: async () => ({}) })))

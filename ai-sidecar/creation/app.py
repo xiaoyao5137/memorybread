@@ -47,7 +47,7 @@ def _creation_failure_details(exc: Exception) -> tuple[str, str, bool]:
     if isinstance(exc, httpx.TransportError):
         return (
             "MODEL_TRANSPORT_UNAVAILABLE",
-            "模型服务连接暂时中断，自动重试后仍未恢复，请稍后重试",
+            "模型服务连接中断，已重试仍未恢复，可稍后重试",
             True,
         )
     if isinstance(exc, CloudModelRequestError):
@@ -83,6 +83,7 @@ class GenerateRequest(BaseModel):
     enable_rag: bool = True
     enable_web_search: bool = False
     enable_image_generation: bool = False
+    browser_extension_enabled: bool = True
     enabled_tools: list[str] = Field(
         default_factory=lambda: list(REQUIRED_CREATION_TOOL_IDS)
     )
@@ -482,6 +483,9 @@ def _options_from_request(request) -> CreationOptions:
         enable_rag=bool(getattr(request, "enable_rag", True)),
         enable_web_search=bool(getattr(request, "enable_web_search", False)),
         enable_image_generation=bool(getattr(request, "enable_image_generation", False)),
+        browser_extension_enabled=bool(
+            getattr(request, "browser_extension_enabled", True)
+        ),
         enabled_tools=tuple(
             getattr(request, "enabled_tools", REQUIRED_CREATION_TOOL_IDS)
             or REQUIRED_CREATION_TOOL_IDS

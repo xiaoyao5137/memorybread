@@ -247,7 +247,7 @@ const BakeSopTab: React.FC<{
             <div className="bake-list-toolbar__repository-row bake-list-toolbar__repository-row--search">
               <label className="bake-form-field bake-filter-field bake-filter-field--search">
                 <span className="bake-filter-label">关键词</span>
-                <input className="bake-input" value={draftQuery} onChange={(event) => onDraftQueryChange(event.target.value)} placeholder="搜索操作名称、适用场景或操作内容" />
+                <input className="bake-input" value={draftQuery} onChange={(event) => onDraftQueryChange(event.target.value)} placeholder="搜索操作 ID、名称、适用场景或操作内容" />
               </label>
             </div>
             <div className="bake-list-toolbar__repository-row bake-list-toolbar__repository-row--asset-filters bake-list-toolbar__repository-row--asset-filters-simple">
@@ -325,7 +325,7 @@ const BakeSopTab: React.FC<{
               void Promise.resolve(onDeleteSop(selected.id)).then(deleted => {
                 if (deleted !== false) closeDrawer()
               })
-            }}>删除操作</BakeButton>
+            }}>删除</BakeButton>
             {onUpdateSop && <BakeButton primary onClick={() => setDrawerMode('edit')}>编辑</BakeButton>}
           </>
         ))}

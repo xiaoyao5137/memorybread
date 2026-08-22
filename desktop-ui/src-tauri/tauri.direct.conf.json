@@ -4,12 +4,14 @@
     "createUpdaterArtifacts": true,
     "targets": ["app", "dmg"],
     "externalBin": [
-      "binaries/memory-bread-core"
+      "binaries/memory-bread-core",
+      "binaries/memorybread-browser-bridge"
     ],
     "macOS": {
       "minimumSystemVersion": "12.0",
       "files": {
-        "Helpers/memory-bread-ai.app": "binaries/memory-bread-ai.app"
+        "Helpers/memory-bread-ai.app": "binaries/memory-bread-ai.app",
+        "Resources/chrome-browser-extension": "../../integrations/chrome-browser-extension"
       }
     }
   }

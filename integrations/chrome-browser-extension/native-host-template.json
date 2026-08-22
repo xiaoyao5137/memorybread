@@ -1,0 +1,7 @@
+{
+  "name": "cn.memorybread.browser_bridge",
+  "description": "MemoryBread Chrome background browser bridge",
+  "path": "__BRIDGE_PATH__",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://llkmmkikjolkibaiklpkfhjdpbbohlbe/"]
+}

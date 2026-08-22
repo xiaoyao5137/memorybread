@@ -22,6 +22,7 @@ import BakePanel              from './components/BakePanel'
 import DiaryPanel             from './components/DiaryPanel'
 import IntegrationPanel       from './components/IntegrationPanel'
 import OnboardingWizard       from './components/OnboardingWizard'
+import StartupLoading         from './components/StartupLoading'
 import AuthPanel              from './components/AuthPanel'
 import AchievementCelebration from './components/AchievementCelebration'
 import SystemFloatingAssist   from './components/SystemFloatingAssist'
@@ -37,7 +38,7 @@ import {
   writeFloatingAssistAutoTaskConfig,
 } from './utils/floatingAssistAutoTask'
 import { startGlobalShortcutRuntime } from './utils/interactionSettings'
-import { synchronizeWorkProfile } from './utils/workProfileCloud'
+import { ensureLocalNickname } from './utils/localIdentity'
 import { getAppMetadata } from './utils/appMetadata'
 import {
   fetchSoftwareUpdate,
@@ -47,13 +48,19 @@ import {
   snoozeSoftwareUpdate,
   type SoftwareUpdateCheck,
 } from './utils/softwareUpdate'
-import { fetchInitializationStatus, initializationIsReady } from './utils/initialization'
+import { softwareUpdateSessionBusy, useSoftwareUpdateSession } from './utils/softwareUpdateSession'
+import {
+  fetchInitializationStatus,
+  fetchRuntimeReadiness,
+  initializationIsReady,
+} from './utils/initialization'
 import { createOptionalCloudRequestSignal, optionalCloudIsReachable } from './utils/optionalCloud'
 import type { AccountProfileSection, BreadcrumbAward } from './types'
 
-const WORK_PROFILE_SYNC_INTERVAL_MS = 5 * 60 * 1000
 const ACHIEVEMENT_SYNC_INTERVAL_MS = 5 * 60 * 1000
 const SOFTWARE_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000
+const STARTUP_READINESS_RETRY_MS = 1_000
+const RUNTIME_READINESS_CHECK_INTERVAL_MS = 30_000
 
 interface AccountNavigationRequest {
   section: AccountProfileSection
@@ -91,6 +98,7 @@ const App: React.FC = () => {
     setBakeTemplateFocusId,
     setBakeKnowledgeFocusId,
     setBakeSopFocusId,
+    setBakeDataFocusId,
     setBakeTemplateOffset,
     setBakeTemplateLimit,
     setBakeKnowledgeOffset,
@@ -101,7 +109,6 @@ const App: React.FC = () => {
     pushBakeNavigationTarget,
     clearBakeNavigationStack,
     hasCompletedSetup,
-    setHasCompletedSetup,
     apiBaseUrl,
     adminApiBaseUrl,
     authToken,
@@ -112,6 +119,7 @@ const App: React.FC = () => {
     setAuthSession,
     setCloudBalance,
     setCloudSubscription,
+    setLocalNickname,
     clearAuthSession,
   } = useAppStore()
 
@@ -119,11 +127,12 @@ const App: React.FC = () => {
   const [accountNavigation, setAccountNavigation] = useState<AccountNavigationRequest | null>(null)
   const [softwareUpdate, setSoftwareUpdate] = useState<SoftwareUpdateCheck | null>(null)
   const [softwareUpdateNoticeOpen, setSoftwareUpdateNoticeOpen] = useState(false)
-  // 首次启动时，即使已完成初始化，也需要先确认 sidecar 可用才能进入主界面。
-  // 这确保 DMG 冷启动时用户在引导界面等待，而不是在业务界面看到"AI 能力尚未就绪"。
+  // 初始化完成标记负责区分“首次使用”和“已初始化但本地组件仍在启动”。
+  // 后一种状态只显示轻量启动画面，避免把正常的冷启动误呈现为首次初始化。
   const [initializationValidated, setInitializationValidated] = useState(false)
 
-  const showOnboarding = !initializationValidated || !hasCompletedSetup
+  const showOnboarding = !hasCompletedSetup
+  const showStartupLoading = hasCompletedSetup && !initializationValidated
   const activeAchievementCelebration = achievementCelebrations[0] ?? null
 
   const handleInitializationValidated = useCallback((ready: boolean) => {
@@ -131,27 +140,69 @@ const App: React.FC = () => {
   }, [])
 
   useEffect(() => {
-    if (showOnboarding) return
+    if (!hasCompletedSetup || !initializationValidated) return undefined
+    let cancelled = false
+    void ensureLocalNickname().then((nickname) => {
+      if (!cancelled) setLocalNickname(nickname)
+    })
+    return () => { cancelled = true }
+  }, [hasCompletedSetup, initializationValidated, setLocalNickname])
+
+  useEffect(() => {
+    if (!hasCompletedSetup) {
+      setInitializationValidated(false)
+      return undefined
+    }
+
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let hasBeenReadyThisSession = false
+
+    const schedule = (delayMs: number) => {
+      if (cancelled) return
+      if (timer) window.clearTimeout(timer)
+      timer = window.setTimeout(verify, delayMs)
+    }
+
     const verify = () => {
+      if (cancelled) return
       void fetchInitializationStatus()
-        .then(next => {
-          if (!initializationIsReady(next)) {
-            setHasCompletedSetup(false)
-            setInitializationValidated(false)
+        .then(async next => {
+          if (cancelled) return
+          const ready = initializationIsReady(next) && await fetchRuntimeReadiness()
+          if (cancelled) return
+          setInitializationValidated(ready)
+          if (ready && !hasBeenReadyThisSession) {
+            hasBeenReadyThisSession = true
+            setWindowMode('rag')
           }
+          schedule(ready
+            ? RUNTIME_READINESS_CHECK_INTERVAL_MS
+            : STARTUP_READINESS_RETRY_MS)
         })
         .catch(() => {
-          // 短暂的 sidecar 重启不应清除已经通过质检的本地完成标记。
+          if (cancelled) return
+          // 冷启动期间持续等待；进入过主界面后则忽略一次性的连接抖动。
+          if (!hasBeenReadyThisSession) setInitializationValidated(false)
+          schedule(hasBeenReadyThisSession
+            ? RUNTIME_READINESS_CHECK_INTERVAL_MS
+            : STARTUP_READINESS_RETRY_MS)
         })
     }
-    verify()
-    const interval = window.setInterval(verify, 30_000)
-    window.addEventListener('focus', verify)
-    return () => {
-      window.clearInterval(interval)
-      window.removeEventListener('focus', verify)
+
+    const verifyOnFocus = () => {
+      if (timer) window.clearTimeout(timer)
+      verify()
     }
-  }, [setHasCompletedSetup, showOnboarding])
+
+    verify()
+    window.addEventListener('focus', verifyOnFocus)
+    return () => {
+      cancelled = true
+      if (timer) window.clearTimeout(timer)
+      window.removeEventListener('focus', verifyOnFocus)
+    }
+  }, [hasCompletedSetup, setWindowMode])
 
   const dismissAchievementCelebration = useCallback(() => {
     setAchievementCelebrations((queue) => queue.slice(1))
@@ -457,48 +508,6 @@ const App: React.FC = () => {
   }, [adminApiBaseUrl, authToken, currentUser?.id, serviceEnvironment, showOnboarding])
 
   useEffect(() => {
-    if (!authToken || !currentUser || showOnboarding) return undefined
-    let cancelled = false
-    let syncing = false
-    const lifecycleController = new AbortController()
-
-    const sync = async () => {
-      if (cancelled || syncing || !optionalCloudIsReachable()) return
-      syncing = true
-      const request = createOptionalCloudRequestSignal(lifecycleController.signal)
-      try {
-        await synchronizeWorkProfile({
-          apiBaseUrl,
-          adminApiBaseUrl,
-          authToken,
-          userId: currentUser.id,
-          signal: request.signal,
-        })
-      } catch {
-        // 本地画像始终可用；网络恢复或下个周期会自动重试云端同步。
-      } finally {
-        request.dispose()
-        syncing = false
-      }
-    }
-    const syncWhenVisible = () => {
-      if (document.visibilityState === 'visible') void sync()
-    }
-
-    void sync()
-    const interval = window.setInterval(() => void sync(), WORK_PROFILE_SYNC_INTERVAL_MS)
-    window.addEventListener('online', sync)
-    document.addEventListener('visibilitychange', syncWhenVisible)
-    return () => {
-      cancelled = true
-      lifecycleController.abort()
-      window.clearInterval(interval)
-      window.removeEventListener('online', sync)
-      document.removeEventListener('visibilitychange', syncWhenVisible)
-    }
-  }, [adminApiBaseUrl, apiBaseUrl, authToken, currentUser?.id, serviceEnvironment, showOnboarding])
-
-  useEffect(() => {
     setAchievementCelebrations([])
     setAccountNavigation(null)
   }, [authToken, serviceEnvironment])
@@ -564,9 +573,9 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const openReferenceDetail = (detail: any) => {
-      const { type, captureId, knowledgeId, artifactId, documentId, docKey } = detail || {}
+      const { type, captureId, knowledgeId, artifactId, documentId, dataSourceId, docKey } = detail || {}
       const parsedTargetId = parseReferenceId(docKey)
-      const targetId = String(documentId ?? artifactId ?? parsedTargetId ?? '')
+      const targetId = String(documentId ?? artifactId ?? dataSourceId ?? parsedTargetId ?? '')
       const hasTargetId = targetId.trim().length > 0
       const setReferenceBackTarget = (enabled: boolean) => {
         if (enabled) {
@@ -603,6 +612,13 @@ const App: React.FC = () => {
         setBakeSopLimit(1000)
         setBakeSopFocusId(targetId || null)
         setSelectedSopId(targetId || null)
+        setWindowMode('bake')
+        return
+      }
+      if (type === 'data') {
+        setReferenceBackTarget(hasTargetId)
+        setBakeTab('data')
+        setBakeDataFocusId(targetId || null)
         setWindowMode('bake')
         return
       }
@@ -659,6 +675,7 @@ const App: React.FC = () => {
     setSelectedSopId,
     setSelectedTemplateId,
     setBakeSopFocusId,
+    setBakeDataFocusId,
     setBakeTemplateFocusId,
     setWindowMode,
   ])
@@ -667,6 +684,15 @@ const App: React.FC = () => {
     return (
       <div className="app" data-testid="app-root">
         <OnboardingWizard onStatusValidated={handleInitializationValidated} />
+        <ActionConfirm />
+      </div>
+    )
+  }
+
+  if (showStartupLoading) {
+    return (
+      <div className="app" data-testid="app-root">
+        <StartupLoading />
         <ActionConfirm />
       </div>
     )
@@ -716,7 +742,12 @@ const App: React.FC = () => {
         <SoftwareUpdateNotice
           update={softwareUpdate}
           onDismiss={() => {
-            snoozeSoftwareUpdate(softwareUpdate.latest_version)
+            // 后台更新进行中或已待重启时不写入 24 小时免打扰，
+            // 保证后续还会提醒用户完成重启。
+            const sessionPhase = useSoftwareUpdateSession.getState().phase
+            if (!softwareUpdateSessionBusy(sessionPhase) && sessionPhase !== 'ready_to_restart') {
+              snoozeSoftwareUpdate(softwareUpdate.latest_version)
+            }
             setSoftwareUpdateNoticeOpen(false)
           }}
         />

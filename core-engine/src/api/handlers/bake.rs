@@ -10,18 +10,36 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 
 use crate::{
-    api::{error::ApiError, state::AppState},
-    services::bake_service::{
-        BakeBucket, BakeCaptureFilter, BakeCapturePayload, BakeDocumentPayload,
-        BakeExtractResponse, BakeKnowledgePayload, BakeListFilter, BakeListSort, BakeMemoryFilter,
-        BakeMemoryPayload, BakeOverviewPayload, BakePagedResponse, BakeService, BakeSopPayload,
-        BakeStyleConfig, CreateOrUpdateDocumentRequest, CreateOrUpdateKnowledgeRequest,
-        CreateOrUpdateSopRequest, InitializeBakeMemoriesResponse, MAX_BAKE_RETRY_FAILURES,
+    api::{
+        error::ApiError,
+        handlers::data::{
+            looks_like_terminal_page, normalize_preview_id, scrape_browser_async, DataToolError,
+            BROWSER_DOCUMENT_READY_POLL_ATTEMPTS,
+        },
+        state::AppState,
+    },
+    services::{
+        bake_service::{
+            BakeBucket, BakeCaptureFilter, BakeCapturePayload, BakeDocumentPayload,
+            BakeExtractResponse, BakeKnowledgePayload, BakeListFilter, BakeListSort,
+            BakeMemoryFilter, BakeMemoryPayload, BakeOverviewPayload, BakePagedResponse,
+            BakeService, BakeSopPayload, BakeStyleConfig, CreateOrUpdateDocumentRequest,
+            CreateOrUpdateKnowledgeRequest, CreateOrUpdateSopRequest,
+            DocumentSourceSnapshotPayload, InitializeBakeMemoriesResponse,
+            TimelineRelationsPayload, MAX_BAKE_RETRY_FAILURES,
+        },
+        document_refresh::{
+            source_text_fingerprint, DocumentRefreshDecision, DocumentRefreshSkipReason,
+            DOCUMENT_REFRESH_ERROR_PAGE_GONE,
+        },
     },
     storage::{
         db::current_ts_ms,
+        document_identity::canonical_document_identity,
         models::{EventType, NewCapture},
-        models_bake::{BakeArtifactAuditRecord, BakeQueueStatusRecord},
+        models_bake::{
+            BakeArtifactAuditRecord, BakeQueueStatusRecord, NewBakeDocumentSourceSnapshot,
+        },
         repo::favorite::is_supported_favorite_kind,
     },
 };
@@ -29,6 +47,7 @@ use crate::{
 #[derive(serde::Deserialize)]
 pub struct BakePaginationQuery {
     pub q: Option<String>,
+    pub id: Option<i64>,
     pub app: Option<String>,
     pub doc_type: Option<String>,
     pub favorite: Option<bool>,
@@ -118,6 +137,32 @@ pub struct MemoryFavoriteResponse {
 pub struct BakeArtifactAuditsResponse {
     pub timeline_id: i64,
     pub items: Vec<BakeArtifactAuditRecord>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct RefreshBakeDocumentRequest {
+    /// 浏览器采集目标描述，透传给采集器引导读取。
+    pub objective: Option<String>,
+    /// 用户当前任务明确要求“最新/当前”时，可绕过普通内容 TTL，
+    /// 但不能绕过 never、URL 安全、终态错误和 6 小时节流门禁。
+    #[serde(default)]
+    pub require_latest: bool,
+}
+
+#[derive(serde::Deserialize)]
+pub struct UpdateDocumentRefreshPolicyRequest {
+    pub refresh_policy: String,
+}
+
+/// 刷新结果统一用 200 + status 表达，失败也带可落库原因，
+/// 供创作召回端静默降级而不是报错中断。
+#[derive(serde::Serialize)]
+pub struct RefreshBakeDocumentResponse {
+    pub status: String,
+    pub reason: Option<String>,
+    pub completeness_status: Option<String>,
+    pub document: Option<BakeDocumentPayload>,
+    pub source_snapshot: Option<DocumentSourceSnapshotPayload>,
 }
 
 pub async fn get_bake_artifact_audits(
@@ -359,6 +404,291 @@ pub async fn delete_bake_document(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn set_bake_document_refresh_policy(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<UpdateDocumentRefreshPolicyRequest>,
+) -> Result<Json<BakeDocumentPayload>, ApiError> {
+    let service = BakeService::new(state.storage.clone(), state.sidecar_url.clone());
+    let document = tokio::task::spawn_blocking(move || {
+        service.set_document_refresh_policy(id, body.refresh_policy.trim())
+    })
+    .await
+    .map_err(|err| ApiError::Internal(err.to_string()))??;
+    Ok(Json(document))
+}
+
+/// 创作链路召回文档后的浏览器即时刷新：直接创建一次性隐藏浏览器
+/// 会话加载来源页面，不依赖用户预先打开匹配标签页；抓到的正文保存为
+/// 独立来源快照，本轮直接消费，不覆盖烘焙文档。
+pub async fn refresh_bake_document(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<RefreshBakeDocumentRequest>,
+) -> Result<Json<RefreshBakeDocumentResponse>, ApiError> {
+    let service = BakeService::new(state.storage.clone(), state.sidecar_url.clone());
+    let now = current_ts_ms();
+    let (record, decision) =
+        tokio::task::spawn_blocking(move || service.evaluate_document_refresh(id, now))
+            .await
+            .map_err(|err| ApiError::Internal(err.to_string()))??;
+
+    if let DocumentRefreshDecision::Skip(reason) = decision {
+        let latest_override = should_override_document_ttl(body.require_latest, reason);
+        if latest_override {
+            tracing::info!(
+                document_id = id,
+                "latest creation request overrides document content TTL"
+            );
+        } else if should_reuse_recent_document_snapshot(
+            reason,
+            record.last_refresh_success_at_ms,
+            record.last_refresh_error.as_deref(),
+        ) {
+            let service = BakeService::new(state.storage.clone(), state.sidecar_url.clone());
+            if let Some(source_snapshot) = service.get_latest_document_source_snapshot(id)? {
+                let completeness_status = Some(source_snapshot.completeness_status.clone());
+                return Ok(Json(RefreshBakeDocumentResponse {
+                    status: "reused".to_string(),
+                    reason: Some(reason.as_str().to_string()),
+                    completeness_status,
+                    document: None,
+                    source_snapshot: Some(source_snapshot),
+                }));
+            }
+        } else {
+            return Ok(Json(RefreshBakeDocumentResponse {
+                status: "skipped".to_string(),
+                reason: Some(reason.as_str().to_string()),
+                completeness_status: None,
+                document: None,
+                source_snapshot: None,
+            }));
+        }
+        if !latest_override {
+            return Ok(Json(RefreshBakeDocumentResponse {
+                status: "skipped".to_string(),
+                reason: Some(reason.as_str().to_string()),
+                completeness_status: None,
+                document: None,
+                source_snapshot: None,
+            }));
+        }
+    }
+
+    let url = record.source_url.clone().unwrap_or_default();
+    let source_app_name = record.source_app_name.clone();
+    let objective = body.objective.clone();
+    let scrape_once = |preview_token: Option<String>| {
+        scrape_browser_async(
+            url.clone(),
+            "auto".to_string(),
+            source_app_name.clone(),
+            preview_token,
+            None,
+            objective.clone(),
+            None,
+            None,
+            BROWSER_DOCUMENT_READY_POLL_ATTEMPTS,
+            false,
+        )
+    };
+
+    // 与最新数据取数保持一致：直接创建带唯一标识的一次性隐藏窗口，
+    // 在后台完成页面加载、交互和长页遍历，采集结束后由浏览器采集器清理。
+    let preview_token = normalize_preview_id(None).map_err(scrape_error_to_api)?;
+    tracing::info!(document_id = id, "文档即时刷新开始使用一次性隐藏浏览器会话");
+    let scrape_result = scrape_once(Some(preview_token)).await;
+
+    let result = match scrape_result {
+        Ok(result) => result,
+        Err(error) => {
+            record_refresh_failure(&state, id, error.code(), now).await;
+            return Ok(Json(RefreshBakeDocumentResponse {
+                status: "failed".to_string(),
+                reason: Some(error.code().to_string()),
+                completeness_status: Some("failed".to_string()),
+                document: None,
+                source_snapshot: None,
+            }));
+        }
+    };
+
+    if looks_like_terminal_page(&result.title, &result.url, &result.content_text) {
+        // 页面已不存在：终态错误永久阻止后续刷新，避免反复白开浏览器。
+        record_refresh_failure(&state, id, DOCUMENT_REFRESH_ERROR_PAGE_GONE, now).await;
+        return Ok(Json(RefreshBakeDocumentResponse {
+            status: "failed".to_string(),
+            reason: Some(DOCUMENT_REFRESH_ERROR_PAGE_GONE.to_string()),
+            completeness_status: Some("failed".to_string()),
+            document: None,
+            source_snapshot: None,
+        }));
+    }
+    if result.content_text.trim().is_empty() {
+        record_refresh_failure(&state, id, "SCRAPE_EMPTY", now).await;
+        return Ok(Json(RefreshBakeDocumentResponse {
+            status: "failed".to_string(),
+            reason: Some("SCRAPE_EMPTY".to_string()),
+            completeness_status: Some("failed".to_string()),
+            document: None,
+            source_snapshot: None,
+        }));
+    }
+
+    let identity_match = document_refresh_identity_matches(&url, &result.url);
+    if !identity_match {
+        record_refresh_failure(&state, id, "IDENTITY_MISMATCH", now).await;
+        return Ok(Json(RefreshBakeDocumentResponse {
+            status: "failed".to_string(),
+            reason: Some("IDENTITY_MISMATCH".to_string()),
+            completeness_status: Some("failed".to_string()),
+            document: None,
+            source_snapshot: None,
+        }));
+    }
+
+    let assessment =
+        assess_document_refresh_completeness(&result.structured_data, &result.content_text);
+    let content_hash = source_text_fingerprint(&result.content_text)
+        .ok_or_else(|| ApiError::BadRequest("刷新抓取内容为空".to_string()))?;
+    let service = BakeService::new(state.storage.clone(), state.sidecar_url.clone());
+    let (changed, source_snapshot) =
+        service.record_document_refresh_snapshot(NewBakeDocumentSourceSnapshot {
+            document_id: record.id,
+            source_url: result.url,
+            page_title: result.title,
+            content_text: result.content_text,
+            content_hash,
+            completeness_status: assessment.completeness_status.clone(),
+            identity_match,
+            reached_end: assessment.reached_end,
+            stable_passes: assessment.stable_passes,
+            segment_count: assessment.segment_count,
+            character_count: assessment.character_count,
+            truncated: assessment.truncated,
+            collector: "browser_attach".to_string(),
+            collected_at: now,
+        })?;
+    let document = service.get_document(record.id)?;
+    Ok(Json(RefreshBakeDocumentResponse {
+        status: if changed { "updated" } else { "no_change" }.to_string(),
+        reason: if changed {
+            None
+        } else {
+            Some("source_fingerprint_already_seen".to_string())
+        },
+        completeness_status: Some(assessment.completeness_status),
+        document: Some(document),
+        source_snapshot: Some(source_snapshot),
+    }))
+}
+
+fn should_override_document_ttl(require_latest: bool, reason: DocumentRefreshSkipReason) -> bool {
+    require_latest
+        && matches!(
+            reason,
+            DocumentRefreshSkipReason::NoUpdateEvidence | DocumentRefreshSkipReason::ContentFresh
+        )
+}
+
+fn should_reuse_recent_document_snapshot(
+    reason: DocumentRefreshSkipReason,
+    last_refresh_success_at_ms: i64,
+    last_refresh_error: Option<&str>,
+) -> bool {
+    reason == DocumentRefreshSkipReason::CheckThrottled
+        && last_refresh_success_at_ms > 0
+        && last_refresh_error.is_none()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DocumentRefreshCompleteness {
+    completeness_status: String,
+    reached_end: bool,
+    stable_passes: i64,
+    segment_count: i64,
+    character_count: i64,
+    truncated: bool,
+}
+
+fn document_refresh_identity_matches(expected_url: &str, actual_url: &str) -> bool {
+    match (
+        canonical_document_identity(expected_url),
+        canonical_document_identity(actual_url),
+    ) {
+        (Some(expected), Some(actual)) => expected == actual,
+        _ => expected_url.trim() == actual_url.trim(),
+    }
+}
+
+fn assess_document_refresh_completeness(
+    structured_data: &serde_json::Value,
+    content_text: &str,
+) -> DocumentRefreshCompleteness {
+    let scroll_capture = structured_data
+        .get("scroll_capture")
+        .and_then(serde_json::Value::as_object);
+    let aggregated = scroll_capture
+        .and_then(|value| value.get("aggregated"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let segment_count = scroll_capture
+        .and_then(|value| value.get("segment_count"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    let geometry = scroll_capture
+        .and_then(|value| value.get("geometry"))
+        .and_then(serde_json::Value::as_object);
+    let coverage_complete = geometry
+        .and_then(|value| value.get("coverage_complete"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(!aggregated);
+    let reached_end = geometry
+        .and_then(|value| value.get("reached_end"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(!aggregated);
+    let readiness_timed_out = structured_data
+        .pointer("/page_state/readiness_timed_out")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let character_count = content_text.chars().count() as i64;
+    let truncated = (character_count >= 80_000 && content_text.ends_with('…'))
+        || !coverage_complete
+        || !reached_end;
+    let stable_passes = if readiness_timed_out { 0 } else { 2 };
+    let completeness_status = if !truncated && stable_passes >= 2 {
+        "complete"
+    } else {
+        "partial"
+    };
+    DocumentRefreshCompleteness {
+        completeness_status: completeness_status.to_string(),
+        reached_end,
+        stable_passes,
+        segment_count,
+        character_count,
+        truncated,
+    }
+}
+
+async fn record_refresh_failure(state: &Arc<AppState>, id: i64, error_code: &str, now: i64) {
+    let service = BakeService::new(state.storage.clone(), state.sidecar_url.clone());
+    let code = error_code.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        service.record_document_refresh_failure(id, &code, now)
+    })
+    .await;
+}
+
+fn scrape_error_to_api(error: DataToolError) -> ApiError {
+    ApiError::Upstream {
+        status: error.status(),
+        code: error.code(),
+        message: error.message().to_string(),
+    }
+}
+
 pub async fn list_bake_memories(
     State(state): State<Arc<AppState>>,
     Query(params): Query<BakePaginationQuery>,
@@ -395,6 +725,19 @@ pub async fn delete_bake_memory(
         .await
         .map_err(|err| ApiError::Internal(err.to_string()))??;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// 定向查询时间线关联的知识/文档/操作/数据，供时间线详情回溯区使用，
+/// 避免前端拉全量列表过滤时被分页上限截断。
+pub async fn get_bake_memory_relations(
+    State(state): State<Arc<AppState>>,
+    Path(timeline_id): Path<i64>,
+) -> Result<Json<TimelineRelationsPayload>, ApiError> {
+    let service = BakeService::new(state.storage.clone(), state.sidecar_url.clone());
+    let payload = tokio::task::spawn_blocking(move || service.get_timeline_relations(timeline_id))
+        .await
+        .map_err(|err| ApiError::Internal(err.to_string()))??;
+    Ok(Json(payload))
 }
 
 pub async fn list_bake_knowledge(
@@ -496,7 +839,7 @@ pub async fn list_bake_captures(
         app_name: params.app.filter(|value| !value.trim().is_empty()),
         from_ts: params.from,
         to_ts: params.to,
-        source_capture_id: params.source_capture_id,
+        source_capture_id: params.id.or(params.source_capture_id),
         limit,
         offset,
     };
@@ -774,8 +1117,10 @@ pub async fn run_bake_pipeline(
     // run 时选候不一致（或候选已被预筛光）。继续创建 run 只会每 30 秒空转一次，
     // 还会通过 hold_capture 抢占 capture 提炼的模型槽，直接跳过并要求调用方指数退避。
     const NO_PROGRESS_BACKOFF_THRESHOLD: i64 = 3;
-    if queue.recent_no_progress_count >= NO_PROGRESS_BACKOFF_THRESHOLD {
-        let retry_after_ms = (15_000_i64 << queue.recent_no_progress_count.min(6)).min(900_000);
+    if queue.recent_no_progress_count >= NO_PROGRESS_BACKOFF_THRESHOLD
+        && queue.recommended_retry_after_ms > 0
+    {
+        let retry_after_ms = queue.recommended_retry_after_ms;
         tracing::warn!(
             "bake run skipped: recent_no_progress_count={} actionable={} retry_after_ms={}",
             queue.recent_no_progress_count,
@@ -789,6 +1134,14 @@ pub async fn run_bake_pipeline(
             "retry_after_ms": retry_after_ms,
             "queue": queue,
         })));
+    }
+
+    if queue.recent_no_progress_count >= NO_PROGRESS_BACKOFF_THRESHOLD {
+        tracing::info!(
+            "bake no-progress backoff expired; allowing one half-open probe: count={} actionable={}",
+            queue.recent_no_progress_count,
+            queue.actionable_count,
+        );
     }
 
     let run_id = service.spawn_bake_pipeline(trigger_reason, limit, max_concurrency)?;
@@ -823,4 +1176,100 @@ pub async fn get_bake_overview(
         .await
         .map_err(|err| ApiError::Internal(err.to_string()))??;
     Ok(Json(overview))
+}
+
+#[cfg(test)]
+mod document_refresh_tests {
+    use super::*;
+
+    #[test]
+    fn document_identity_ignores_scheme_case_query_and_fragment() {
+        assert!(document_refresh_identity_matches(
+            "https://Docs.Example.com/d/home/ABC123?section=one#comment",
+            "http://docs.example.com/d/home/abc123?section=two",
+        ));
+        assert!(!document_refresh_identity_matches(
+            "https://docs.example.com/d/home/abc123",
+            "https://docs.example.com/d/home/other",
+        ));
+    }
+
+    #[test]
+    fn static_dom_capture_is_complete_when_ready_and_not_truncated() {
+        let assessment = assess_document_refresh_completeness(
+            &serde_json::json!({"page_state": {"readiness_timed_out": false}}),
+            "完整正文",
+        );
+
+        assert_eq!(assessment.completeness_status, "complete");
+        assert!(assessment.reached_end);
+        assert!(!assessment.truncated);
+        assert_eq!(assessment.stable_passes, 2);
+    }
+
+    #[test]
+    fn scroll_capture_is_partial_when_geometry_did_not_reach_end() {
+        let assessment = assess_document_refresh_completeness(
+            &serde_json::json!({
+                "scroll_capture": {
+                    "aggregated": true,
+                    "segment_count": 20,
+                    "geometry": {
+                        "coverage_complete": false,
+                        "reached_end": false
+                    }
+                },
+                "page_state": {"readiness_timed_out": false}
+            }),
+            "只抓到前半部分",
+        );
+
+        assert_eq!(assessment.completeness_status, "partial");
+        assert!(!assessment.reached_end);
+        assert!(assessment.truncated);
+        assert_eq!(assessment.segment_count, 20);
+    }
+
+    #[test]
+    fn latest_override_only_bypasses_content_evidence_gates() {
+        assert!(should_override_document_ttl(
+            true,
+            DocumentRefreshSkipReason::ContentFresh,
+        ));
+        assert!(should_override_document_ttl(
+            true,
+            DocumentRefreshSkipReason::NoUpdateEvidence,
+        ));
+        assert!(!should_override_document_ttl(
+            true,
+            DocumentRefreshSkipReason::PolicyNever,
+        ));
+        assert!(!should_override_document_ttl(
+            true,
+            DocumentRefreshSkipReason::CheckThrottled,
+        ));
+        assert!(!should_override_document_ttl(
+            false,
+            DocumentRefreshSkipReason::ContentFresh,
+        ));
+    }
+
+    #[test]
+    fn check_throttle_reuses_only_a_successful_snapshot() {
+        assert!(should_reuse_recent_document_snapshot(
+            DocumentRefreshSkipReason::CheckThrottled,
+            100,
+            None,
+        ));
+        assert!(!should_reuse_recent_document_snapshot(
+            DocumentRefreshSkipReason::CheckThrottled,
+            100,
+            Some("SCRAPE_TIMEOUT"),
+        ));
+        assert!(!should_reuse_recent_document_snapshot(
+            DocumentRefreshSkipReason::ContentFresh,
+            100,
+            None,
+        ));
+    }
 }

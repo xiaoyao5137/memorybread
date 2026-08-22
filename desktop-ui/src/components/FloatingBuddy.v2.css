@@ -142,7 +142,7 @@
   width: 100%;
   height: 100%;
   object-fit: contain;
-  border-radius: 12px;
+  transform: scale(1.5);
 }
 
 .buddy-sidebar-title-group {
@@ -253,6 +253,51 @@
 }
 
 .buddy-update-entry--mandatory .buddy-update-entry__icon { background: #aa4d2e; }
+
+.buddy-update-entry--busy,
+.buddy-update-entry--ready_to_restart,
+.buddy-update-entry--failed {
+  position: relative;
+  overflow: hidden;
+}
+
+.buddy-update-entry--busy .buddy-update-entry__icon { background: #8a5a2e; }
+
+.buddy-update-entry--ready_to_restart {
+  border-color: rgba(122, 140, 74, .45);
+  background: linear-gradient(180deg, #fbfdf4, #eef3dd);
+}
+
+.buddy-update-entry--ready_to_restart .buddy-update-entry__icon { background: #6f8442; }
+.buddy-update-entry--ready_to_restart .buddy-update-entry__action { color: #5c7032; }
+
+.buddy-update-entry--failed { border-color: rgba(174, 65, 38, .4); }
+.buddy-update-entry--failed .buddy-update-entry__icon { background: #aa4d2e; }
+.buddy-update-entry--failed .buddy-update-entry__action { color: #aa4d2e; }
+
+.buddy-update-entry__spinner { animation: buddy-update-spin 1.1s linear infinite; }
+
+@keyframes buddy-update-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.buddy-update-entry__progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: rgba(166, 106, 50, .16);
+}
+
+.buddy-update-entry__progress i {
+  display: block;
+  height: 100%;
+  border-radius: 0 3px 3px 0;
+  background: linear-gradient(90deg, #c07a3a, #a66a32);
+  transition: width .25s ease;
+}
 
 .buddy-account-entry {
   width: 100%;

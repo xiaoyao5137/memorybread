@@ -278,8 +278,10 @@ describe('AuthPanel', () => {
     await waitFor(() => {
       expect(useAppStore.getState().authToken).toBe('mbs_register_token')
     })
-    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://memorybread.cn/v1/auth/email/send-code')
-    const request = fetchMock.mock.calls[1]?.[1] as RequestInit
+    const sendCodeCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/v1/auth/email/send-code'))
+    const registerCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/v1/auth/register'))
+    expect(sendCodeCall?.[0]).toBe('https://memorybread.cn/v1/auth/email/send-code')
+    const request = registerCall?.[1] as RequestInit
     expect(JSON.parse(String(request.body))).toEqual({
       email: 'xiaomai@memorybread.local',
       password: 'MemoryBread@2026!',
@@ -393,12 +395,12 @@ describe('AuthPanel', () => {
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('密码已重置'))
     expect(screen.getByLabelText('邮箱或手机号')).toHaveValue('xiaomai@example.com')
     expect(useAppStore.getState().authToken).toBeNull()
-    const sendRequest = fetchMock.mock.calls[0]?.[1] as RequestInit
+    const sendRequest = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/v1/auth/password-reset/send-code'))?.[1] as RequestInit
     expect(JSON.parse(String(sendRequest.body))).toEqual({
       channel: 'email',
       identifier: 'xiaomai@example.com',
     })
-    const confirmRequest = fetchMock.mock.calls[1]?.[1] as RequestInit
+    const confirmRequest = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/v1/auth/password-reset/confirm'))?.[1] as RequestInit
     expect(JSON.parse(String(confirmRequest.body))).toEqual({
       challenge_id: '019c2c7e-706e-7a91-a61a-cd2a582cbb61',
       channel: 'email',
@@ -409,16 +411,20 @@ describe('AuthPanel', () => {
   })
 
   it('忘记密码账号不存在时显示错误且不启动验证码倒计时', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({
-      ok: false,
-      status: 404,
-      json: async () => ({
-        error: {
-          code: 'PASSWORD_RESET_ACCOUNT_NOT_FOUND',
-          message: '账号不存在',
-        },
-      }),
-    }))
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => (
+      String(input).endsWith('/v1/auth/password-reset/send-code')
+        ? {
+            ok: false,
+            status: 404,
+            json: async () => ({
+              error: {
+                code: 'PASSWORD_RESET_ACCOUNT_NOT_FOUND',
+                message: '账号不存在',
+              },
+            }),
+          }
+        : { ok: false, status: 503, json: async () => ({}) }
+    )))
     render(<AuthPanel />)
 
     fireEvent.click(screen.getByRole('button', { name: '忘记密码？' }))

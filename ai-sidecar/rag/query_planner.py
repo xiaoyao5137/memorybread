@@ -96,6 +96,9 @@ _TYPE_TERM_SOURCES: dict[str, frozenset[str]] = {
     "指南": frozenset({"operation"}),
     "手册": frozenset({"operation"}),
     "sop": frozenset({"operation"}),
+    "数据记忆": frozenset({"data"}),
+    "数据": frozenset({"data"}),
+    "data": frozenset({"data"}),
 }
 
 _BOUNDARY_PARTICLES = frozenset("的了着过是在于和与及或把被给向从对中里上下一些这那")
@@ -114,6 +117,14 @@ _ARTIFACT_TABLES: dict[str, tuple[tuple[str, ...], str]] = {
     "bake_sops": (
         ("title", "summary", "content", "detailed_content", "entities"),
         "1=1",
+    ),
+    "data_sources": (
+        ("title", "source_url", "tags", "source_window_title"),
+        "deleted_at IS NULL",
+    ),
+    "data_snapshots": (
+        ("content_text", "structured_data"),
+        "status IN ('success', 'partial')",
     ),
 }
 
@@ -195,6 +206,8 @@ def _surface_terms(
 
     # Longest terms run first so “技术文档” is not reduced to a dangling “技术”.
     for phrase in sorted(_TYPE_TERM_SOURCES, key=len, reverse=True):
+        if phrase == "数据" and "数据库" in working:
+            continue
         if _contains_phrase(working, phrase):
             type_terms.append(phrase)
             source_types.update(_TYPE_TERM_SOURCES[phrase])

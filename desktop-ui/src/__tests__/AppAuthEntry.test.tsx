@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import App from '../App'
 import { useAppStore } from '../store/useAppStore'
 
 const initializationMocks = vi.hoisted(() => ({
   fetchInitializationStatus: vi.fn(),
+  fetchRuntimeReadiness: vi.fn(),
 }))
 
 vi.mock('@tauri-apps/api/event', () => ({
@@ -38,6 +39,7 @@ vi.mock('../components/SystemFloatingAssist', () => ({
 vi.mock('../utils/initialization', async importOriginal => ({
   ...(await importOriginal<typeof import('../utils/initialization')>()),
   fetchInitializationStatus: initializationMocks.fetchInitializationStatus,
+  fetchRuntimeReadiness: initializationMocks.fetchRuntimeReadiness,
 }))
 
 const initializationStatus = (state: 'not_started' | 'completed') => ({
@@ -62,6 +64,7 @@ beforeEach(() => {
   useAppStore.getState().setHasCompletedSetup(true)
   useAppStore.getState().clearAuthSession()
   initializationMocks.fetchInitializationStatus.mockResolvedValue(initializationStatus('completed'))
+  initializationMocks.fetchRuntimeReadiness.mockResolvedValue(true)
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, json: async () => ({}) })))
 })
 
@@ -80,7 +83,7 @@ describe('App auth entry', () => {
     expect(screen.queryByText(/跳过/)).not.toBeInTheDocument()
   })
 
-  it('已完成初始化的启动也要先在门禁等待 sidecar 核验通过', async () => {
+  it('已完成初始化的启动只显示轻量 Loading，等待 sidecar 核验通过', async () => {
     let resolveStatus: ((status: ReturnType<typeof initializationStatus>) => void) | undefined
     initializationMocks.fetchInitializationStatus.mockImplementation(() => new Promise(resolve => {
       resolveStatus = resolve
@@ -88,8 +91,14 @@ describe('App auth entry', () => {
 
     render(<App />)
 
-    expect(screen.getByTestId('initialization-gate')).toBeInTheDocument()
-    expect(screen.getByText('正在启动本地 AI 服务…')).toBeInTheDocument()
+    expect(screen.getByTestId('startup-loading')).toBeInTheDocument()
+    expect(screen.getByRole('status', { name: '记忆面包正在启动' })).toBeInTheDocument()
+    expect(screen.getByText('烘焙中....')).toBeInTheDocument()
+    expect(document.querySelector('.startup-loading__icon')).toHaveAttribute(
+      'src',
+      '/brand/memorybread-bread-mark.png',
+    )
+    expect(screen.queryByTestId('initialization-gate')).not.toBeInTheDocument()
     expect(screen.queryByTestId('rag-panel')).not.toBeInTheDocument()
 
     await act(async () => {
@@ -100,7 +109,20 @@ describe('App auth entry', () => {
     expect(initializationMocks.fetchInitializationStatus).toHaveBeenCalled()
   })
 
-  it('已完成初始化的后台核验发现能力失效时仍回到初始化页', async () => {
+  it('初始化已完成但 AI 管线仍在预热时继续显示 Loading', async () => {
+    initializationMocks.fetchRuntimeReadiness.mockResolvedValue(false)
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(initializationMocks.fetchRuntimeReadiness).toHaveBeenCalled()
+    })
+    expect(screen.getByTestId('startup-loading')).toBeInTheDocument()
+    expect(screen.queryByTestId('rag-panel')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('initialization-gate')).not.toBeInTheDocument()
+  })
+
+  it('已完成初始化的后台核验发现能力未就绪时回到 Loading 而非初始化页', async () => {
     let resolveStatus: ((status: ReturnType<typeof initializationStatus>) => void) | undefined
     initializationMocks.fetchInitializationStatus.mockImplementation(() => new Promise(resolve => {
       resolveStatus = resolve
@@ -113,7 +135,8 @@ describe('App auth entry', () => {
     })
     expect(await screen.findByTestId('rag-panel')).toBeInTheDocument()
 
-    // 主界面挂载后的后台核验会再次请求状态，此时返回能力失效
+    // 主界面获得焦点时会再次核验，此时返回能力未就绪。
+    act(() => window.dispatchEvent(new Event('focus')))
     await waitFor(() => {
       expect(initializationMocks.fetchInitializationStatus.mock.calls.length).toBeGreaterThanOrEqual(2)
     })
@@ -121,16 +144,25 @@ describe('App auth entry', () => {
       resolveStatus?.(initializationStatus('not_started'))
     })
 
-    expect(await screen.findByText('烤面包')).toBeInTheDocument()
-    expect(useAppStore.getState().hasCompletedSetup).toBe(false)
+    expect(await screen.findByTestId('startup-loading')).toBeInTheDocument()
+    expect(screen.queryByText('烤面包')).not.toBeInTheDocument()
+    expect(useAppStore.getState().hasCompletedSetup).toBe(true)
   })
 
-  it('未登录也直接进入主界面，并在侧栏显示未登录入口', async () => {
+  it('未登录也直接进入主界面，并在侧栏显示本地昵称', async () => {
     render(<App />)
 
     expect(await screen.findByTestId('floating-buddy')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '未登录，打开登录' })).toBeInTheDocument()
+    const entry = screen.getByRole('button', { name: /打开.+的个人中心/ })
+    expect(entry).toHaveTextContent('本地模式')
+    expect(entry).not.toHaveTextContent('登录账户')
     expect(screen.queryByTestId('auth-panel')).not.toBeInTheDocument()
+
+    fireEvent.click(entry)
+    expect(await screen.findByRole('tab', { name: '个人信息' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: '面包屑' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: '工作投入' })).toBeInTheDocument()
+    expect(screen.getByText('登录账户')).toBeInTheDocument()
   })
 
   it('离线启动时不访问云端，缓存账号和本地主界面仍然可用', async () => {
@@ -159,7 +191,7 @@ describe('App auth entry', () => {
     render(<App />)
 
     expect(await screen.findByTestId('rag-panel')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '打开离线用户的用户账户' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '打开离线用户的个人中心' })).toBeInTheDocument()
     expect(useAppStore.getState().authToken).toBe('mbs_offline_token')
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/v1/'))).toBe(false)
   })
@@ -224,7 +256,7 @@ describe('App auth entry', () => {
 
     expect(await screen.findByTestId('rag-panel')).toBeInTheDocument()
     await waitFor(() => expect(useAppStore.getState().authToken).toBeNull())
-    expect(screen.getByRole('button', { name: '未登录，打开登录' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /打开.+的个人中心/ })).toHaveTextContent('本地模式')
   })
 
   it('旧消息页面状态会在冷启动门禁后回到咨询主界面', async () => {
@@ -236,7 +268,7 @@ describe('App auth entry', () => {
     expect(useAppStore.getState().windowMode).toBe('rag')
   })
 
-  it('已有登录会话启动后会自动同步工作投入与工作心情', async () => {
+  it('已有登录会话启动后工作画像仍只读取本机数据', async () => {
     const user = {
       id: '018f0000-0000-7000-8000-000000000008',
       username: '同步测试用户',
@@ -332,12 +364,12 @@ describe('App auth entry', () => {
 
     render(<App />)
 
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        'https://memorybread.cn/v1/work-profile',
-        expect.objectContaining({ method: 'PUT' }),
-      )
-    })
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => (
+      String(input).includes('/api/work-profile')
+    ))).toBe(true))
+    expect(fetchMock.mock.calls.some(([input]) => (
+      String(input).includes('/v1/work-profile')
+    ))).toBe(false)
   })
 
   it('打开具体 RAG 引用时才生成返回栈', async () => {
@@ -358,6 +390,7 @@ describe('App auth entry', () => {
     ['文档', { type: 'document', documentId: '42' }, 'bake-panel'],
     ['知识', { type: 'bake_knowledge', artifactId: '86' }, 'bake-panel'],
     ['操作', { type: 'operation', artifactId: '73' }, 'bake-panel'],
+    ['数据', { type: 'data', dataSourceId: '60' }, 'bake-panel'],
     ['采集', { type: 'capture', captureId: '19' }, 'repository-panel'],
   ])('从创作记录打开%s引用时把创作页写入返回栈', async (_label, detail, targetPanel) => {
     render(<App />)
@@ -370,6 +403,21 @@ describe('App auth entry', () => {
 
     expect(screen.getByTestId(targetPanel)).toBeInTheDocument()
     expect(useAppStore.getState().bakeNavigationStack).toEqual([{ windowMode: 'creation' }])
+  })
+
+  it('打开数据记忆域引用时聚焦到记忆力的数据页', async () => {
+    render(<App />)
+    await screen.findByTestId('rag-panel')
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('view-rag-reference', {
+        detail: { type: 'data', dataSourceId: '60' },
+      }))
+    })
+
+    expect(screen.getByTestId('bake-panel')).toBeInTheDocument()
+    expect(useAppStore.getState().bakeTab).toBe('data')
+    expect(useAppStore.getState().bakeDataFocusId).toBe('60')
   })
 
   it('无具体目标的引用跳转会清除旧返回栈', async () => {

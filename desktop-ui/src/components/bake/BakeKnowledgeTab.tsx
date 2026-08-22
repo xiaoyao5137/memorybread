@@ -200,7 +200,7 @@ const BakeKnowledgeTab: React.FC<{
           <div className="bake-list-toolbar__repository-row bake-list-toolbar__repository-row--search">
             <label className="bake-form-field bake-filter-field bake-filter-field--search">
               <span className="bake-filter-label">关键词</span>
-              <input className="bake-input" value={draftQuery} onChange={(event) => onDraftQueryChange(event.target.value)} placeholder="搜索知识标题、内容、分类或来源 URL" />
+              <input className="bake-input" value={draftQuery} onChange={(event) => onDraftQueryChange(event.target.value)} placeholder="搜索知识 ID、标题、内容、分类或来源 URL" />
             </label>
           </div>
           <div className="bake-list-toolbar__repository-row bake-list-toolbar__repository-row--asset-filters bake-list-toolbar__repository-row--asset-filters-simple">
@@ -265,7 +265,7 @@ const BakeKnowledgeTab: React.FC<{
             void Promise.resolve(onDeleteKnowledge(selected.id)).then(deleted => {
               if (deleted !== false) closeDrawer()
             })
-          }}>删除知识</BakeButton>
+          }}>删除</BakeButton>
           {onUpdateKnowledge && <BakeButton primary onClick={() => setDrawerMode('edit')}>编辑</BakeButton>}
         </>)}
       >

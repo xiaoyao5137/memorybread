@@ -164,7 +164,8 @@ describe('显式搜索交互', () => {
     })
 
     const callsBeforeTyping = fetchMock.mock.calls.length
-    fireEvent.change(screen.getByPlaceholderText('搜索知识标题、内容、分类或来源 URL'), { target: { value: '芝士' } })
+    const knowledgeSearchInput = screen.getByPlaceholderText('搜索知识 ID、标题、内容、分类或来源 URL')
+    fireEvent.change(knowledgeSearchInput, { target: { value: '芝士' } })
 
     expect(fetchMock).toHaveBeenCalledTimes(callsBeforeTyping)
 
@@ -174,6 +175,12 @@ describe('显式搜索交互', () => {
       expect(fetchMock).toHaveBeenCalledWith('http://localhost:7070/api/bake/knowledge?q=%E8%8A%9D%E5%A3%AB&limit=20&offset=0')
     })
     expect(screen.queryByText('关键词：芝士')).not.toBeInTheDocument()
+
+    fireEvent.change(knowledgeSearchInput, { target: { value: '#777' } })
+    fireEvent.click(screen.getByRole('button', { name: '搜索' }))
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('http://localhost:7070/api/bake/knowledge?q=%23777&limit=20&offset=0')
+    })
   })
 
   it('总览趋势保留服务端全量统计，不被热度 Top 100 列表覆盖', async () => {
@@ -302,7 +309,7 @@ describe('显式搜索交互', () => {
 
     expect((await screen.findAllByText('旧知识条目')).length).toBeGreaterThan(0)
 
-    fireEvent.change(screen.getByPlaceholderText('搜索知识标题、内容、分类或来源 URL'), { target: { value: '不存在' } })
+    fireEvent.change(screen.getByPlaceholderText('搜索知识 ID、标题、内容、分类或来源 URL'), { target: { value: '不存在' } })
     fireEvent.click(screen.getByRole('button', { name: '搜索' }))
 
     await waitFor(() => {
@@ -494,6 +501,72 @@ describe('显式搜索交互', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
+  it('RepositoryPanel 时间线详情的回溯展示关联数据并支持跳转', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === 'http://localhost:7070/api/knowledge?limit=20&offset=0') {
+        return jsonResponse({
+          entries: [{
+            id: 1,
+            summary: '项目复盘',
+            overview: '复盘本周项目推进',
+            capture_id: 41,
+            importance: 6,
+            created_at: '2026-04-11 09:30',
+            created_at_ms: 0,
+            capture_ids: [],
+          }, {
+            id: 2,
+            summary: '项目启动',
+            overview: '项目启动背景',
+            capture_id: 40,
+            importance: 5,
+            created_at: '2026-04-10 09:30',
+            created_at_ms: 0,
+            capture_ids: [],
+          }],
+          total: 2,
+          limit: 20,
+          offset: 0,
+        })
+      }
+      if (url === 'http://localhost:7070/api/bake/memories/1/relations') {
+        return jsonResponse({
+          knowledge: null,
+          document: null,
+          sop: null,
+          data: {
+            id: 77,
+            title: '本周转化率',
+            source_kind: 'work_memory',
+            access_mode: 'memory_only',
+            refresh_policy: 'never',
+            realtime_level: 'observed',
+            tags: [],
+            first_seen_at: 1,
+            last_seen_at: 1,
+            status: 'active',
+            latest_snapshot: null,
+          },
+        })
+      }
+      throw new Error(`unexpected url: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    useAppStore.setState({ repositoryTab: 'memory' })
+
+    render(<RepositoryPanel />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '查看时间线：项目复盘' }))
+    const drawer = screen.getByRole('dialog', { name: '项目复盘' })
+    expect(await within(drawer).findByText('本周转化率')).toBeInTheDocument()
+
+    fireEvent.click(within(drawer).getByRole('button', { name: '关联数据' }))
+    await waitFor(() => expect(useAppStore.getState().bakeDataFocusId).toBe('77'))
+    expect(useAppStore.getState().windowMode).toBe('bake')
+    expect(useAppStore.getState().bakeTab).toBe('data')
+  })
+
   it('RepositoryPanel 时间线详情补齐 keyTimestamps 未覆盖的关联采集', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
@@ -678,7 +751,8 @@ describe('显式搜索交互', () => {
     })
 
     const callsBeforeTyping = fetchMock.mock.calls.length
-    fireEvent.change(screen.getByPlaceholderText('搜索时间线标题、摘要或详情'), { target: { value: '周报' } })
+    const memorySearchInput = screen.getByPlaceholderText('搜索时间线 ID、标题、摘要或详情')
+    fireEvent.change(memorySearchInput, { target: { value: '周报' } })
     fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2026-04-01' } })
     fireEvent.change(screen.getByLabelText('结束日期'), { target: { value: '2026-04-11' } })
 
@@ -695,6 +769,12 @@ describe('显式搜索交互', () => {
       expect(fetchMock).toHaveBeenCalledWith('http://localhost:7070/api/knowledge?q=%E5%91%A8%E6%8A%A5&from=1774972800000&to=1775923199999&limit=20&offset=0')
     })
     expect(screen.queryByText('关键词：周报')).not.toBeInTheDocument()
+
+    fireEvent.change(memorySearchInput, { target: { value: '#42' } })
+    fireEvent.click(timelineSearchButton)
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('http://localhost:7070/api/knowledge?id=42&from=1774972800000&to=1775923199999&limit=20&offset=0')
+    })
   })
 
   it('RepositoryPanel 时间线搜索无结果后不保留旧详情', async () => {
@@ -726,7 +806,7 @@ describe('显式搜索交互', () => {
 
     expect((await screen.findAllByText('旧时间线')).length).toBeGreaterThan(0)
 
-    fireEvent.change(screen.getByPlaceholderText('搜索时间线标题、摘要或详情'), { target: { value: '不存在' } })
+    fireEvent.change(screen.getByPlaceholderText('搜索时间线 ID、标题、摘要或详情'), { target: { value: '不存在' } })
     fireEvent.click(screen.getByRole('button', { name: '搜索' }))
 
     await waitFor(() => {
@@ -933,6 +1013,12 @@ describe('显式搜索交互', () => {
       expect(fetchMock.mock.calls.filter(([input]) => (
         String(input) === 'http://localhost:7070/api/bake/captures?limit=20&offset=0'
       )).length).toBeGreaterThanOrEqual(2)
+    })
+
+    fireEvent.change(screen.getByPlaceholderText('搜索采集 ID、标题、正文或文本信息'), { target: { value: '123' } })
+    fireEvent.click(screen.getByRole('button', { name: '搜索' }))
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('http://localhost:7070/api/bake/captures?id=123&limit=20&offset=0')
     })
   })
 

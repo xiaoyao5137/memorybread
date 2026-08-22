@@ -349,7 +349,10 @@ any_file_newer_than() {
 }
 
 creation_service_sources_changed() {
-    any_file_newer_than \
+    # 只监控 Python 源码。服务导入 creation 包时会生成 __pycache__/*.pyc；
+    # 若把这些运行时缓存也视为源码变化，15 秒巡检会反复杀掉刚启动的创作
+    # 服务，正在进行的 /creation/agent/run 随即表现为空响应 502。
+    python_sources_newer_than \
         "$CREATION_PID_FILE" \
         "$PROJECT_ROOT/ai-sidecar/creation" \
         "$PROJECT_ROOT/ai-sidecar/start_creation_service.py" \

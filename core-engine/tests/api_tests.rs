@@ -27,7 +27,7 @@ use memory_bread_core::{
     services::bake_service::BakeService,
     storage::{
         models_bake::{NewBakeArtifactAudit, NewBakeRun},
-        NewBakeSop, NewTimeline, StorageManager,
+        NewBakeDocument, NewBakeKnowledge, NewBakeSop, NewTimeline, StorageManager,
     },
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -718,18 +718,19 @@ async fn test_bake_run_skipped_after_consecutive_no_progress_runs() {
     let sm = StorageManager::open(&tmp.path().join("no-progress.db")).unwrap();
     // 队列里确实有可烘候选（actionable>0），但最近连续 run 都零进展。
     seed_artifact_ready_timeline(&sm, "no_progress 退避候选", "队列口径有内容但 run 持续空转");
+    let now = memory_bread_core::storage::db::current_ts_ms();
     for i in 0..3i64 {
         let run_id = sm
             .insert_bake_run(&NewBakeRun {
                 trigger_reason: "knowledge_background".to_string(),
                 status: "running".to_string(),
-                started_at: 1_710_000_000_000 + i,
+                started_at: now - 1_000 + i,
             })
             .unwrap();
         sm.complete_bake_run(
             run_id,
             "no_op",
-            1_710_000_001_000 + i,
+            now - 500 + i,
             0,
             0,
             0,
@@ -754,6 +755,50 @@ async fn test_bake_run_skipped_after_consecutive_no_progress_runs() {
     assert!(json["queue"]["recent_no_progress_count"].as_i64().unwrap() >= 3);
     // 守卫必须拦在创建 run 行之前：最新 run 仍是预置的第 3 条。
     assert_eq!(sm.get_latest_bake_run().unwrap().unwrap().id, 3);
+}
+
+#[tokio::test]
+async fn test_bake_run_allows_half_open_probe_after_no_progress_backoff_expires() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sm = StorageManager::open(&tmp.path().join("no-progress-half-open.db")).unwrap();
+    seed_artifact_ready_timeline(&sm, "退避到期候选", "到期后应允许一个探测批次");
+    let now = memory_bread_core::storage::db::current_ts_ms();
+    for i in 0..3_i64 {
+        let run_id = sm
+            .insert_bake_run(&NewBakeRun {
+                trigger_reason: "knowledge_background".to_string(),
+                status: "running".to_string(),
+                started_at: now - 300_000 + i,
+            })
+            .unwrap();
+        sm.complete_bake_run(
+            run_id,
+            "no_op",
+            now - 299_000 + i,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            Some(10),
+        )
+        .unwrap();
+    }
+    let sidecar_url = spawn_bake_sidecar(vec![make_bake_response(
+        bake_rejected("not_a_knowledge"),
+        bake_template_artifact("半开探测模板", Some("candidate")),
+        bake_rejected("not_a_sop"),
+    )])
+    .await;
+    let router = memory_bread_core::api::create_router(make_bake_state(sm.clone(), sidecar_url));
+
+    let (status, json, body) = run_bake(router, &sm, "knowledge_background").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_ne!(json["reason"], "no_progress_backoff");
+    assert!(sm.get_latest_bake_run().unwrap().unwrap().id > 3);
 }
 
 #[tokio::test]
@@ -912,6 +957,83 @@ async fn test_bake_templates_crud_flow() {
 }
 
 #[tokio::test]
+async fn test_bake_document_refresh_policy_gate_and_endpoint() {
+    let (router, _tmp) = make_test_router().await;
+
+    // 无 source_url 的文档：刷新必须在门禁处被拦下，不能走到浏览器采集。
+    let create_req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/bake/documents")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{
+            "title":"本地周报模板",
+            "doc_type":"周报",
+            "status":"enabled",
+            "tags":[],
+            "applicable_tasks":["creation"],
+            "sections":[],
+            "style_phrases":[],
+            "replacement_rules":[],
+            "image_assets":[],
+            "usage_count":0
+        }"#,
+        ))
+        .unwrap();
+    let (create_status, create_body) = oneshot(router.clone(), create_req).await;
+    assert_eq!(create_status, StatusCode::OK, "body: {create_body}");
+    let created: serde_json::Value = serde_json::from_str(&create_body).unwrap();
+    let doc_id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["refresh_policy"], "auto");
+
+    let refresh_req = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/bake/documents/{doc_id}/refresh"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{}"#))
+        .unwrap();
+    let (refresh_status, refresh_body) = oneshot(router.clone(), refresh_req).await;
+    assert_eq!(refresh_status, StatusCode::OK, "body: {refresh_body}");
+    let refresh_json: serde_json::Value = serde_json::from_str(&refresh_body).unwrap();
+    assert_eq!(refresh_json["status"], "skipped");
+    assert_eq!(refresh_json["reason"], "url_missing");
+
+    // 用户可覆盖策略；never 后门禁优先级高于 URL 判定。
+    let put_req = Request::builder()
+        .method(Method::PUT)
+        .uri(format!("/api/bake/documents/{doc_id}/refresh-policy"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"refresh_policy": "never"}"#))
+        .unwrap();
+    let (put_status, put_body) = oneshot(router.clone(), put_req).await;
+    assert_eq!(put_status, StatusCode::OK, "body: {put_body}");
+    let put_json: serde_json::Value = serde_json::from_str(&put_body).unwrap();
+    assert_eq!(put_json["refresh_policy"], "never");
+
+    let refresh_again_req = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/bake/documents/{doc_id}/refresh"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{}"#))
+        .unwrap();
+    let (again_status, again_body) = oneshot(router.clone(), refresh_again_req).await;
+    assert_eq!(again_status, StatusCode::OK, "body: {again_body}");
+    let again_json: serde_json::Value = serde_json::from_str(&again_body).unwrap();
+    assert_eq!(again_json["status"], "skipped");
+    assert_eq!(again_json["reason"], "policy_never");
+
+    // 非法策略值必须被拒绝。
+    let bad_req = Request::builder()
+        .method(Method::PUT)
+        .uri(format!("/api/bake/documents/{doc_id}/refresh-policy"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"refresh_policy": "weekly"}"#))
+        .unwrap();
+    let (bad_status, _) = oneshot(router, bad_req).await;
+    assert_eq!(bad_status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn test_bake_documents_search_matches_summary_tags_sections_and_content() {
     let (router, _tmp) = make_test_router().await;
 
@@ -940,6 +1062,8 @@ async fn test_bake_documents_search_matches_summary_tags_sections_and_content() 
         .unwrap();
     let (create_status, create_body) = oneshot(router.clone(), create_req).await;
     assert_eq!(create_status, StatusCode::OK, "body: {create_body}");
+    let created_document: serde_json::Value = serde_json::from_str(&create_body).unwrap();
+    let document_id = created_document["id"].as_str().unwrap();
 
     // 无关文档，不应被命中
     let create_other_req = Request::builder()
@@ -997,10 +1121,20 @@ async fn test_bake_documents_search_matches_summary_tags_sections_and_content() 
         .uri("/api/bake/documents?q=%E4%B8%89%E7%A7%8D%E6%8C%87%E4%BB%A4%E6%A0%BC%E5%BC%8F")
         .body(Body::empty())
         .unwrap();
-    let (content_status, content_body) = oneshot(router, content_req).await;
+    let (content_status, content_body) = oneshot(router.clone(), content_req).await;
     assert_eq!(content_status, StatusCode::OK, "body: {content_body}");
     let content_json: serde_json::Value = serde_json::from_str(&content_body).unwrap();
     assert_eq!(content_json["total"].as_i64().unwrap(), 1);
+
+    let id_req = Request::builder()
+        .uri(format!("/api/bake/documents?q=%23{document_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let (id_status, id_body) = oneshot(router, id_req).await;
+    assert_eq!(id_status, StatusCode::OK, "body: {id_body}");
+    let id_json: serde_json::Value = serde_json::from_str(&id_body).unwrap();
+    assert_eq!(id_json["total"], 1);
+    assert_eq!(id_json["items"][0]["id"], document_id);
 }
 
 #[tokio::test]
@@ -1033,6 +1167,16 @@ async fn test_bake_sops_list_and_detail() {
     assert_eq!(list_status, StatusCode::OK, "body: {list_body}");
     let list_json: serde_json::Value = serde_json::from_str(&list_body).unwrap();
     assert_eq!(list_json["items"].as_array().unwrap().len(), 1);
+
+    let id_list_req = Request::builder()
+        .uri(format!("/api/bake/sops?q=%23{sop_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let (id_list_status, id_list_body) = oneshot(router.clone(), id_list_req).await;
+    assert_eq!(id_list_status, StatusCode::OK, "body: {id_list_body}");
+    let id_list_json: serde_json::Value = serde_json::from_str(&id_list_body).unwrap();
+    assert_eq!(id_list_json["total"], 1);
+    assert_eq!(id_list_json["items"][0]["id"], sop_id.to_string());
 
     let detail_req = Request::builder()
         .uri(format!("/api/bake/sops/{sop_id}"))
@@ -1657,7 +1801,7 @@ async fn test_bake_knowledge_api_only_returns_bake_knowledge() {
         "SOP 概述",
         serde_json::json!({}),
     );
-    seed_knowledge_entry(
+    let knowledge_id = seed_knowledge_entry(
         &sm,
         "bake_knowledge",
         "已提炼知识",
@@ -1670,10 +1814,21 @@ async fn test_bake_knowledge_api_only_returns_bake_knowledge() {
         .uri("/api/bake/knowledge")
         .body(Body::empty())
         .unwrap();
-    let (status, body) = oneshot(router, req).await;
+    let (status, body) = oneshot(router.clone(), req).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     let items = json["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+
+    let id_req = Request::builder()
+        .uri(format!("/api/bake/knowledge?q=%23{knowledge_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let (id_status, id_body) = oneshot(router, id_req).await;
+    assert_eq!(id_status, StatusCode::OK, "body: {id_body}");
+    let id_json: serde_json::Value = serde_json::from_str(&id_body).unwrap();
+    assert_eq!(id_json["total"], 1);
+    assert_eq!(id_json["items"][0]["id"], knowledge_id.to_string());
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["category"], "bake_knowledge");
     assert_eq!(items[0]["summary"], "已提炼知识");
@@ -1724,37 +1879,48 @@ async fn test_bake_captures_search_matches_win_title() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("test.db");
     let sm = StorageManager::open(&db).unwrap();
-    sm.insert_capture(&NewCapture {
-        ts: 1_710_000_000_000,
-        app_name: Some("Chrome".to_string()),
-        app_bundle_id: Some("com.google.Chrome".to_string()),
-        win_title: Some("设计稿评审页面".to_string()),
-        event_type: EventType::Manual,
-        ax_text: Some("无关正文".to_string()),
-        ax_focused_role: None,
-        ax_focused_id: None,
-        ocr_text: None,
-        screenshot_path: None,
-        input_text: None,
-        is_sensitive: false,
-        pii_scrubbed: false,
-        screenshot_source: None,
-        url: None,
-        webpage_title: None,
-    })
-    .unwrap();
+    let capture_id = sm
+        .insert_capture(&NewCapture {
+            ts: 1_710_000_000_000,
+            app_name: Some("Chrome".to_string()),
+            app_bundle_id: Some("com.google.Chrome".to_string()),
+            win_title: Some("设计稿评审页面".to_string()),
+            event_type: EventType::Manual,
+            ax_text: Some("无关正文".to_string()),
+            ax_focused_role: None,
+            ax_focused_id: None,
+            ocr_text: None,
+            screenshot_path: None,
+            input_text: None,
+            is_sensitive: false,
+            pii_scrubbed: false,
+            screenshot_source: None,
+            url: None,
+            webpage_title: None,
+        })
+        .unwrap();
 
     let router = memory_bread_core::api::create_router(AppState::new(sm));
     let req = Request::builder()
         .uri("/api/bake/captures?q=%E8%AE%BE%E8%AE%A1%E7%A8%BF")
         .body(Body::empty())
         .unwrap();
-    let (status, body) = oneshot(router, req).await;
+    let (status, body) = oneshot(router.clone(), req).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     let items = json["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["win_title"], "设计稿评审页面");
+
+    let req = Request::builder()
+        .uri(format!("/api/bake/captures?id={capture_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = oneshot(router, req).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["total"], 1);
+    assert_eq!(json["items"][0]["id"], capture_id.to_string());
 }
 
 #[tokio::test]
@@ -2893,6 +3059,39 @@ async fn test_knowledge_api_returns_semantic_fields() {
 }
 
 #[tokio::test]
+async fn test_knowledge_list_filters_by_exact_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("test.db");
+    let sm = StorageManager::open(&db).unwrap();
+    let target_id = seed_knowledge_entry(
+        &sm,
+        "聊天",
+        "目标时间线",
+        "目标概览",
+        serde_json::json!({"note": "target"}),
+    );
+    seed_knowledge_entry(
+        &sm,
+        "聊天",
+        "其他时间线",
+        "其他概览",
+        serde_json::json!({"note": "other"}),
+    );
+
+    let router = memory_bread_core::api::create_router(AppState::new(sm));
+    let req = Request::builder()
+        .uri(format!("/api/knowledge?id={target_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = oneshot(router, req).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["total"], 1);
+    assert_eq!(json["entries"][0]["id"], target_id);
+    assert_eq!(json["entries"][0]["summary"], "目标时间线");
+}
+
+#[tokio::test]
 async fn test_knowledge_detail_api_returns_timeline_entry() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("test.db");
@@ -2921,4 +3120,194 @@ async fn test_knowledge_detail_api_returns_timeline_entry() {
     assert!(json["capture_ids"]
         .as_array()
         .is_some_and(|ids| !ids.is_empty()));
+}
+
+#[tokio::test]
+async fn test_timeline_relations_api_returns_linked_artifacts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("test.db");
+    let sm = StorageManager::open(&db).unwrap();
+    let capture_id = seed_capture(&sm);
+
+    let timeline_id = sm
+        .insert_timeline_entry(&NewTimeline {
+            capture_id,
+            summary: "定向关联查询的目标时间线".to_string(),
+            overview: Some("目标概览".to_string()),
+            details: Some(r#"{"note":"target"}"#.to_string()),
+            entities: "[]".to_string(),
+            category: "meeting".to_string(),
+            importance: 4,
+            occurrence_count: None,
+            observed_at: Some(1_710_000_000_000),
+            event_time_start: None,
+            event_time_end: None,
+            history_view: false,
+            content_origin: None,
+            activity_type: None,
+            is_self_generated: false,
+            evidence_strength: None,
+            capture_ids: None,
+            start_time: None,
+            end_time: None,
+            duration_minutes: None,
+            frag_app_name: None,
+            frag_win_title: None,
+            time_range_start: None,
+            time_range_end: None,
+            key_timestamps: None,
+            work_item: None,
+            work_status: None,
+            work_progress: None,
+        })
+        .unwrap();
+    let other_timeline_id = sm
+        .insert_timeline_entry(&NewTimeline {
+            capture_id,
+            summary: "无关时间线".to_string(),
+            overview: None,
+            details: None,
+            entities: "[]".to_string(),
+            category: "meeting".to_string(),
+            importance: 1,
+            occurrence_count: None,
+            observed_at: Some(1_710_000_000_000),
+            event_time_start: None,
+            event_time_end: None,
+            history_view: false,
+            content_origin: None,
+            activity_type: None,
+            is_self_generated: false,
+            evidence_strength: None,
+            capture_ids: None,
+            start_time: None,
+            end_time: None,
+            duration_minutes: None,
+            frag_app_name: None,
+            frag_win_title: None,
+            time_range_start: None,
+            time_range_end: None,
+            key_timestamps: None,
+            work_item: None,
+            work_status: None,
+            work_progress: None,
+        })
+        .unwrap();
+
+    // 场景一：timeline_id 列直接指向目标时间线
+    let column_knowledge_id = sm
+        .insert_bake_knowledge(&NewBakeKnowledge {
+            timeline_id,
+            title: "列匹配知识".to_string(),
+            summary: "列匹配知识摘要".to_string(),
+            content: Some(format!(r#"{{"source_title":"列匹配知识"}}"#)),
+            detailed_content: None,
+            entities: "[]".to_string(),
+            importance: 5,
+            source_capture_ids: None,
+        })
+        .unwrap();
+    // 场景二：合并场景——timeline_id 列指向别处，仅 content.source_timeline_id 指向目标
+    let merged_knowledge_id = sm
+        .insert_bake_knowledge(&NewBakeKnowledge {
+            timeline_id: other_timeline_id,
+            title: "合并改写知识".to_string(),
+            summary: "合并改写知识摘要".to_string(),
+            content: Some(format!(
+                r#"{{"source_title":"合并改写知识","source_timeline_id":{timeline_id}}}"#
+            )),
+            detailed_content: None,
+            entities: "[]".to_string(),
+            importance: 5,
+            source_capture_ids: None,
+        })
+        .unwrap();
+
+    let document_id = {
+        let mut doc = NewBakeDocument::with_defaults("关联文档".to_string(), "article".to_string());
+        doc.source_memory_ids = format!(r#"["{timeline_id}"]"#);
+        sm.insert_bake_document(&doc).unwrap()
+    };
+
+    let sop_id = sm
+        .insert_bake_sop(&NewBakeSop {
+            timeline_id: other_timeline_id,
+            title: "关联操作".to_string(),
+            summary: "关联操作摘要".to_string(),
+            content: Some(format!(
+                r#"{{"source_title":"关联操作","source_timeline_id":{timeline_id},"steps":["步骤一"],"status":"candidate"}}"#
+            )),
+            detailed_content: None,
+            entities: "[]".to_string(),
+            importance: 5,
+            source_capture_ids: None,
+        })
+        .unwrap();
+
+    let data_id = sm
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO data_sources (
+                    canonical_key, title, source_kind, access_mode, refresh_policy,
+                    realtime_level, tags, first_seen_at, last_seen_at, status,
+                    created_at, updated_at
+                 ) VALUES (
+                    'memory:test-related-data', '关联数据', 'work_memory', 'memory_only',
+                    'never', 'observed', '[]', 100, 100, 'active', 100, 100
+                 )",
+                [],
+            )?;
+            let source_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO data_snapshots (
+                    source_id, collected_at, observed_at, collector, content_text,
+                    structured_data, content_hash, freshness_ttl_seconds, provenance,
+                    source_capture_ids, source_timeline_ids, status, created_at
+                 ) VALUES (?1, 100, 100, 'memory_extract', '转化率 12%',
+                    '{\"metric_rows\":[{\"metric\":\"转化率\",\"value\":\"12%\"}]}',
+                    'related-data', 0, '{}', '[]', ?2, 'success', 100)",
+                rusqlite::params![source_id, format!("[{timeline_id}]")],
+            )?;
+            Ok(source_id)
+        })
+        .unwrap();
+
+    let router = memory_bread_core::api::create_router(AppState::new(sm));
+
+    let req = Request::builder()
+        .uri(format!("/api/bake/memories/{timeline_id}/relations"))
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = oneshot(router.clone(), req).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    // 两条知识均指向目标时间线，接口只需返回其中一条（前端只消费单条关联知识）
+    let knowledge_id = json["knowledge"]["id"].as_str().unwrap().to_string();
+    assert!(
+        knowledge_id == column_knowledge_id.to_string()
+            || knowledge_id == merged_knowledge_id.to_string(),
+        "knowledge: {:?}",
+        json["knowledge"]
+    );
+    assert!(json["knowledge"]["source_timeline_id"] == timeline_id.to_string());
+    assert_eq!(
+        json["document"]["id"].as_str().unwrap(),
+        document_id.to_string()
+    );
+    assert_eq!(json["sop"]["id"].as_str().unwrap(), sop_id.to_string());
+    assert_eq!(json["data"]["id"].as_i64().unwrap(), data_id);
+    assert_eq!(json["data"]["title"], "关联数据");
+
+    // 无任何关联产物的时间线：四个字段均为 null
+    let empty_req = Request::builder()
+        .uri(format!("/api/bake/memories/{other_timeline_id}/relations"))
+        .body(Body::empty())
+        .unwrap();
+    let (empty_status, empty_body) = oneshot(router, empty_req).await;
+    assert_eq!(empty_status, StatusCode::OK, "body: {empty_body}");
+    let empty_json: serde_json::Value = serde_json::from_str(&empty_body).unwrap();
+    assert!(empty_json["knowledge"].is_null());
+    assert!(empty_json["document"].is_null());
+    assert!(empty_json["sop"].is_null());
+    assert!(empty_json["data"].is_null());
 }

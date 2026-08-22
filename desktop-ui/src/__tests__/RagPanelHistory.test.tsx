@@ -118,7 +118,77 @@ describe('咨询输入框提交', () => {
     expect(mocks.ragQuery).not.toHaveBeenCalled()
 
     expect(fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' })).toBe(false)
-    await waitFor(() => expect(mocks.ragQuery).toHaveBeenCalledWith('第一行'))
+    await waitFor(() => expect(mocks.ragQuery).toHaveBeenCalledWith(
+      '第一行',
+      undefined,
+      {},
+      expect.any(AbortSignal),
+    ))
+  })
+
+  it('提问完成后参考资料不自动弹出，点击标签后才展示', async () => {
+    const contexts = [{ capture_id: 1, text: '召回资料', score: 0.9, source: 'capture' as const }]
+    mocks.ragQuery.mockImplementation(async () => {
+      useAppStore.getState().setRagResult('咨询回答', contexts)
+      return { answer: '咨询回答', contexts }
+    })
+
+    render(<RagPanel />)
+    const input = screen.getByTestId('rag-panel-input')
+    fireEvent.change(input, { target: { value: '上周工作' } })
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' })
+
+    await waitFor(() => {
+      expect(screen.getByTestId('rag-panel-answer')).toHaveTextContent('咨询回答')
+    })
+    expect(screen.queryByTestId('rag-panel-contexts')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /参考资料 \(1\)/ }))
+    expect(screen.getByTestId('rag-panel-contexts')).toBeInTheDocument()
+  })
+})
+
+describe('清空当前会话', () => {
+  it('点击清空后重置指令、咨询输出与参考资料', async () => {
+    useAppStore.getState().setRagQuery('上一轮问题')
+    useAppStore.getState().setRagResult('上一轮回答', [{ capture_id: 9, text: '参考资料', score: 0.8, source: 'capture' }])
+
+    render(<RagPanel />)
+    const input = screen.getByTestId('rag-panel-input') as HTMLTextAreaElement
+    fireEvent.change(input, { target: { value: '待清空的指令' } })
+    expect(screen.getByTestId('rag-panel-answer')).toHaveTextContent('上一轮回答')
+    fireEvent.click(screen.getByRole('button', { name: /参考资料 \(1\)/ }))
+    expect(screen.getByTestId('rag-panel-contexts')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('rag-panel-clear'))
+
+    expect(input.value).toBe('')
+    expect(useAppStore.getState().ragQuery).toBe('')
+    expect(useAppStore.getState().ragAnswer).toBe('')
+    expect(useAppStore.getState().ragContexts).toEqual([])
+    expect(screen.getByTestId('rag-panel-answer')).toHaveTextContent('选择模板或输入问题后，咨询输出会在这里呈现。')
+    expect(screen.queryByTestId('rag-panel-contexts')).not.toBeInTheDocument()
+  })
+
+  it('咨询进行中点击清空会中断请求并退出加载状态', async () => {
+    let capturedSignal: AbortSignal | undefined
+    mocks.ragQuery.mockImplementation(() => new Promise(() => {}))
+
+    render(<RagPanel />)
+    fireEvent.change(screen.getByTestId('rag-panel-input'), { target: { value: '长时间咨询' } })
+    fireEvent.click(screen.getByTestId('rag-panel-submit'))
+
+    await waitFor(() => {
+      capturedSignal = mocks.ragQuery.mock.calls[0][3]
+      expect(capturedSignal).toBeInstanceOf(AbortSignal)
+    })
+    // 真实 useRagQuery 会在请求开始时置 loading，这里用 store 模拟同等状态
+    useAppStore.getState().setRagLoading(true)
+
+    fireEvent.click(screen.getByTestId('rag-panel-clear'))
+
+    expect(capturedSignal?.aborted).toBe(true)
+    expect(useAppStore.getState().ragLoading).toBe(false)
   })
 })
 

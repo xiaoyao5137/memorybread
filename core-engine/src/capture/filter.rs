@@ -31,6 +31,7 @@ const SENSITIVE_WIN_KEYWORDS: &[&str] = &[
     "passphrase",
     "Passphrase",
     "memory-bread",
+    "MemoryBread Preview",
     "记忆面包",
     "KnowledgePanel",
     "MonitorPanel",
@@ -187,6 +188,12 @@ mod tests {
     #[test]
     fn test_memory_bread_window_is_sensitive() {
         assert!(f().is_sensitive(None, None, None, Some("memory-bread RagPanel")));
+        assert!(f().is_sensitive(
+            Some("Google Chrome"),
+            Some("com.google.Chrome"),
+            None,
+            Some("MemoryBread Preview 9e3011ca-6991-45a0-9a43-c513c510a6b9 - Google Chrome"),
+        ));
         assert!(f().is_sensitive(None, None, None, Some("记忆面包 KnowledgePanel")));
     }
 

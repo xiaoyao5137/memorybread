@@ -317,7 +317,8 @@ describe('SystemFloatingAssist', () => {
     act(() => {
       vi.advanceTimersByTime(220)
     })
-    expect(screen.getByPlaceholderText('输入你的指令，直接向记忆面包咨询')).toBeInTheDocument()
+    expect(screen.getByText('记忆咨询')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('帮我回顾一下上周项目评审的关键结论')).toBeInTheDocument()
 
     fireEvent.doubleClick(button)
     await act(async () => flushMicrotasks())
@@ -331,7 +332,7 @@ describe('SystemFloatingAssist', () => {
     act(() => {
       vi.advanceTimersByTime(220)
     })
-    expect(screen.getByPlaceholderText('输入你的指令，直接向记忆面包咨询')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('帮我回顾一下上周项目评审的关键结论')).toBeInTheDocument()
 
     mockedInvoke.mockClear()
     act(() => {
@@ -339,7 +340,7 @@ describe('SystemFloatingAssist', () => {
     })
     fireEvent.pointerDown(container.querySelector('.system-floating-assist')!)
 
-    expect(screen.getByPlaceholderText('输入你的指令，直接向记忆面包咨询')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('帮我回顾一下上周项目评审的关键结论')).toBeInTheDocument()
     expect(mockedInvoke.mock.calls).not.toContainEqual([
       'set_floating_assist_size',
       { width: 82, height: 82 },
@@ -363,7 +364,7 @@ describe('SystemFloatingAssist', () => {
     act(() => {
       vi.advanceTimersByTime(220)
     })
-    expect(screen.queryByPlaceholderText('输入你的指令，直接向记忆面包咨询')).not.toBeInTheDocument()
+    expect(screen.queryByPlaceholderText('帮我回顾一下上周项目评审的关键结论')).not.toBeInTheDocument()
 
     fireEvent.doubleClick(button)
     await act(async () => {
@@ -398,7 +399,7 @@ describe('SystemFloatingAssist', () => {
       vi.advanceTimersByTime(220)
     })
 
-    const textarea = screen.getByPlaceholderText('输入你的指令，直接向记忆面包咨询')
+    const textarea = screen.getByPlaceholderText('帮我回顾一下上周项目评审的关键结论')
     fireEvent.change(textarea, { target: { value: '分析当前资料' } })
     await act(async () => {
       fireEvent.submit(textarea.closest('form')!)
@@ -412,6 +413,7 @@ describe('SystemFloatingAssist', () => {
       vi.advanceTimersByTime(28)
     })
 
+    expect(screen.getByText('参考资料（7）')).toBeInTheDocument()
     expect(screen.getByText('参考资料 5')).toBeInTheDocument()
     expect(screen.queryByText('参考资料 6')).not.toBeInTheDocument()
     expect(screen.getByText('参考资料 1').closest('button')?.firstElementChild).toHaveTextContent('知识')
@@ -455,7 +457,7 @@ describe('SystemFloatingAssist', () => {
     act(() => {
       vi.advanceTimersByTime(220)
     })
-    const textarea = screen.getByPlaceholderText('输入你的指令，直接向记忆面包咨询')
+    const textarea = screen.getByPlaceholderText('帮我回顾一下上周项目评审的关键结论')
     fireEvent.change(textarea, { target: { value: '分析这份资料' } })
     await act(async () => {
       fireEvent.submit(textarea.closest('form')!)
@@ -519,7 +521,7 @@ describe('SystemFloatingAssist', () => {
     act(() => {
       vi.advanceTimersByTime(220)
     })
-    const textarea = screen.getByPlaceholderText('输入你的指令，直接向记忆面包咨询')
+    const textarea = screen.getByPlaceholderText('帮我回顾一下上周项目评审的关键结论')
     fireEvent.change(textarea, { target: { value: '分析这份资料' } })
     await act(async () => {
       fireEvent.submit(textarea.closest('form')!)
@@ -559,7 +561,7 @@ describe('SystemFloatingAssist', () => {
     act(() => {
       vi.advanceTimersByTime(220)
     })
-    const textarea = screen.getByPlaceholderText('输入你的指令，直接向记忆面包咨询')
+    const textarea = screen.getByPlaceholderText('帮我回顾一下上周项目评审的关键结论')
     fireEvent.change(textarea, { target: { value: '分析当前问题' } })
     await act(async () => {
       fireEvent.submit(textarea.closest('form')!)
@@ -584,7 +586,7 @@ describe('SystemFloatingAssist', () => {
       vi.advanceTimersByTime(220)
     })
 
-    const textarea = screen.getByPlaceholderText('输入你的指令，直接向记忆面包咨询')
+    const textarea = screen.getByPlaceholderText('帮我回顾一下上周项目评审的关键结论')
     fireEvent.change(textarea, { target: { value: '第一行' } })
 
     expect(fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter', shiftKey: true })).toBe(true)
@@ -613,7 +615,7 @@ describe('SystemFloatingAssist', () => {
       vi.advanceTimersByTime(220)
     })
 
-    const textarea = screen.getByPlaceholderText('输入你的指令，直接向记忆面包咨询')
+    const textarea = screen.getByPlaceholderText('帮我回顾一下上周项目评审的关键结论')
     fireEvent.change(textarea, { target: { value: '你好' } })
     fireEvent.compositionStart(textarea)
     fireEvent.compositionEnd(textarea, { data: '你好' })
@@ -712,7 +714,7 @@ describe('SystemFloatingAssist', () => {
       vi.advanceTimersByTime(220)
     })
 
-    const textarea = screen.getByPlaceholderText('输入你的指令，直接向记忆面包咨询')
+    const textarea = screen.getByPlaceholderText('帮我回顾一下上周项目评审的关键结论')
     fireEvent.change(textarea, { target: { value: '帮我写周报' } })
     await act(async () => {
       fireEvent.submit(textarea.closest('form')!)

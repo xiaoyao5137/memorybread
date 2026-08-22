@@ -147,7 +147,7 @@
 
 .integration-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   margin: 14px 0;
   padding: 6px;
@@ -155,6 +155,270 @@
   border-radius: 15px;
   background: rgba(255, 255, 255, 0.8);
   box-shadow: 0 7px 20px rgba(43, 29, 17, 0.035);
+}
+
+.integration-content--browser {
+  align-content: start;
+}
+
+.browser-integration-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(180px, 240px);
+  align-items: start;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid rgba(105, 67, 35, 0.14);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 8px 20px rgba(66, 42, 21, 0.045);
+}
+
+.browser-integration-card__icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 13px;
+  background: #fff1df;
+  color: #98501f;
+  display: grid;
+  place-items: center;
+}
+
+.browser-integration-card__title-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
+.browser-integration-card h3 {
+  margin: 0;
+  color: #2c1e14;
+  font-size: 16px;
+}
+
+.browser-integration-card__title-row > span {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #f3eee8;
+  color: #75675b;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.browser-integration-card__title-row > span.is-connected {
+  background: rgba(47, 143, 90, 0.11);
+  color: #226a45;
+}
+
+.browser-integration-card__copy > p,
+.browser-integration-fallback p {
+  margin: 7px 0 0;
+  color: #75675b;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.browser-integration-card dl {
+  display: flex;
+  gap: 18px;
+  margin: 14px 0 0;
+  flex-wrap: wrap;
+}
+
+.browser-integration-card dl > div {
+  display: grid;
+  gap: 2px;
+}
+
+.browser-integration-card dt {
+  color: #9a8776;
+  font-size: 9px;
+}
+
+.browser-integration-card dd {
+  margin: 0;
+  color: #4f3b2c;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.browser-integration-card__actions {
+  display: grid;
+  gap: 9px;
+}
+
+.browser-integration-card__primary {
+  min-height: 38px;
+  padding: 0 13px;
+  border: 1px solid #9c521f;
+  border-radius: 10px;
+  background: #9c521f;
+  color: #fffaf4;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.browser-integration-card__primary:disabled {
+  border-color: #ded5cc;
+  background: #f2eee9;
+  color: #9a8d82;
+  cursor: not-allowed;
+}
+
+.browser-integration-card__primary:focus-visible {
+  outline: 3px solid rgba(173, 97, 39, .25);
+  outline-offset: 2px;
+}
+
+.browser-integration-card__actions small {
+  color: #8a7c70;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.browser-integration-fallback {
+  padding: 13px 15px;
+  border-radius: 12px;
+  background: #faf7f3;
+}
+
+.browser-install-guide {
+  display: grid;
+  gap: 14px;
+  padding: 17px 18px;
+  border: 1px solid rgba(156, 82, 31, 0.18);
+  border-radius: 14px;
+  background: #fffaf4;
+}
+
+.browser-install-guide__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.browser-install-guide__heading span {
+  display: block;
+  margin-bottom: 3px;
+  color: #9c521f;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.browser-install-guide__heading h3 {
+  margin: 0;
+  color: #2c1e14;
+  font-size: 15px;
+}
+
+.browser-install-guide__check,
+.browser-install-guide__path-row button {
+  min-height: 34px;
+  padding: 0 11px;
+  border: 1px solid rgba(156, 82, 31, 0.28);
+  border-radius: 9px;
+  background: #fff;
+  color: #87471d;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.browser-install-guide__check:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.browser-install-guide__steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style-position: inside;
+}
+
+.browser-install-guide__steps li {
+  min-width: 0;
+  padding: 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.76);
+  color: #9c521f;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.browser-install-guide__steps strong,
+.browser-install-guide__steps span {
+  display: block;
+}
+
+.browser-install-guide__steps strong {
+  margin: 4px 0 5px;
+  color: #4f3523;
+  font-size: 12px;
+}
+
+.browser-install-guide__steps span {
+  color: #79695c;
+  font-weight: 500;
+  line-height: 1.55;
+}
+
+.browser-install-guide__path-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.browser-install-guide__path-row code {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  padding: 9px 11px;
+  border: 1px solid rgba(105, 67, 35, 0.12);
+  border-radius: 9px;
+  background: #fff;
+  color: #5d4634;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-install-guide > p {
+  margin: -2px 0 0;
+  color: #8a7c70;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.browser-integration-fallback strong {
+  color: #4b3829;
+  font-size: 12px;
+}
+
+@media (max-width: 900px) {
+  .browser-integration-card {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .browser-integration-card__actions {
+    grid-column: 2;
+  }
+
+  .browser-install-guide__steps {
+    grid-template-columns: 1fr;
+  }
 }
 
 .integration-tabs button {
@@ -817,6 +1081,21 @@
   background: #007aff;
 }
 
+/* 备份与浏览器页的内容块统一使用纯白表面。 */
+.integration-content--backup,
+.integration-content--backup .bake-card,
+.integration-content--backup .bake-memory-package-group,
+.integration-content--backup .bake-memory-package-access-state,
+.integration-content--backup .bake-memory-package-privacy-note,
+.integration-content--backup .bake-memory-package-list-state,
+.integration-content--browser,
+.integration-content--browser .browser-integration-card,
+.integration-content--browser .browser-integration-fallback,
+.integration-content--browser .browser-install-guide,
+.integration-content--browser .browser-install-guide__steps li {
+  background: #ffffff;
+}
+
 @media (max-width: 1120px) {
   .integration-hero {
     grid-template-columns: 1fr;
@@ -1010,6 +1289,8 @@
   .integration-hero,
   .integration-tabs,
   .integration-content,
+  .browser-integration-card,
+  .browser-install-guide,
   .integration-custom-list article {
     background: #1c1c1e;
     border-color: rgba(255, 255, 255, 0.09);
@@ -1017,6 +1298,8 @@
 
   .integration-hero h1,
   .integration-section-heading h2,
+  .browser-integration-card h3,
+  .browser-install-guide__heading h3,
   .integration-skill-card h3,
   .integration-skill-card--upload > strong,
   .integration-skill-guide__body h3,
@@ -1027,6 +1310,8 @@
 
   .integration-route__node,
   .integration-skill-card,
+  .browser-integration-fallback,
+  .browser-install-guide__steps li,
   .integration-custom-section__header button {
     background: #252321;
     border-color: rgba(255, 255, 255, 0.09);
@@ -1057,6 +1342,35 @@
 
   .integration-download-toast__copy small {
     color: #b9a99b;
+  }
+
+  .browser-integration-card__copy > p,
+  .browser-integration-card__actions small,
+  .browser-integration-fallback p,
+  .browser-install-guide__steps span,
+  .browser-install-guide > p {
+    color: #b9a99b;
+  }
+
+  .browser-install-guide__check,
+  .browser-install-guide__path-row button,
+  .browser-install-guide__path-row code {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: #242220;
+    color: #e6d7ca;
+  }
+
+  .browser-install-guide__steps strong {
+    color: #eadfd5;
+  }
+
+  .browser-integration-card dt {
+    color: #9f8f82;
+  }
+
+  .browser-integration-card dd,
+  .browser-integration-fallback strong {
+    color: #eadfd5;
   }
 
   .integration-download-toast__actions button {

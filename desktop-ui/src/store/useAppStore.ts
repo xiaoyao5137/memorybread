@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { AccountType, ActionCommand, AuthSession, BakeTab, CloudBalance, CloudSubscription, CloudUser, RagContext, RepositoryTab, ServiceEnvironment, TimelineItem, WindowMode } from '../types'
+import { getLocalNickname, LOCAL_NICKNAME_KEY } from '../utils/localIdentity'
 
 export interface BakeNavigationTarget {
   windowMode: WindowMode
@@ -14,6 +15,7 @@ export interface BakeNavigationTarget {
   bakeTemplateFocusId?: string | null
   bakeKnowledgeFocusId?: string | null
   bakeSopFocusId?: string | null
+  bakeDataFocusId?: string | null
   repositoryCaptureSourceCaptureId?: string | null
 }
 
@@ -44,6 +46,10 @@ export interface CreationReferenceItem {
   source_type?: string
   source_id?: number
   skill_step_title?: string
+  refresh_status?: 'fresh_complete' | 'fresh_recent' | 'fresh_partial' | 'fresh_recent_partial' | 'historical_only' | 'unavailable' | string
+  refresh_completeness?: 'complete' | 'partial' | 'failed' | 'unverified' | string
+  refresh_collected_at?: number
+  refresh_truncated?: boolean
 }
 
 export interface CreationReferencePreview {
@@ -86,7 +92,7 @@ export interface CreationAgentEvent {
   sequence: number
   timestamp: number
   type: string
-  status: 'running' | 'waiting' | 'completed' | 'failed' | string
+  status: 'running' | 'waiting' | 'completed' | 'warning' | 'failed' | string
   actor: {
     kind: 'agent' | 'tool' | 'skill' | string
     id: string
@@ -157,6 +163,7 @@ export interface AppState {
   bakeTemplateFocusId: string | null
   bakeKnowledgeFocusId: string | null
   bakeSopFocusId: string | null
+  bakeDataFocusId: string | null
   bakeMemoryOffset: number
   bakeKnowledgeOffset: number
   bakeKnowledgeQuery: string
@@ -215,6 +222,7 @@ export interface AppState {
   currentUser: CloudUser | null
   cloudBalance: CloudBalance | null
   cloudSubscription: CloudSubscription | null
+  localNickname: string
 
   // ── 首次引导 ─────────────────────────────────────────────────────────────────
   hasCompletedSetup: boolean
@@ -235,6 +243,7 @@ export interface AppState {
   setBakeTemplateFocusId: (id: string | null) => void
   setBakeKnowledgeFocusId: (id: string | null) => void
   setBakeSopFocusId: (id: string | null) => void
+  setBakeDataFocusId: (id: string | null) => void
   setBakeMemoryOffset:  (offset: number) => void
   setBakeKnowledgeOffset:(offset: number) => void
   setBakeKnowledgeQuery: (query: string) => void
@@ -285,6 +294,7 @@ export interface AppState {
   clearAuthSession:      () => void
   setCloudBalance:       (balance: CloudBalance | null) => void
   setCloudSubscription:  (subscription: CloudSubscription | null) => void
+  setLocalNickname:      (nickname: string) => void
   setServiceEnvironment: (environment: ServiceEnvironment) => void
   setDebugModeEnabled: (enabled: boolean) => void
   setHasCompletedSetup:  (v: boolean) => void
@@ -460,6 +470,7 @@ const initialState = {
   bakeTemplateFocusId: null,
   bakeKnowledgeFocusId: null,
   bakeSopFocusId: null,
+  bakeDataFocusId: null,
   bakeMemoryOffset:   0,
   bakeKnowledgeOffset: 0,
   bakeKnowledgeQuery:  '',
@@ -511,6 +522,7 @@ const initialState = {
   currentUser:         initialSession?.user ?? null,
   cloudBalance:        null,
   cloudSubscription:   null,
+  localNickname:       getLocalNickname(),
   hasCompletedSetup:   safeLocalStorage?.getItem(SETUP_KEY) === 'true',
   setupSkipped:        safeLocalStorage?.getItem(SKIP_KEY)  === 'true',
   creationModelConfigs: loadCreationModels(),
@@ -544,6 +556,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setBakeKnowledgeFocusId: (id) => set({ bakeKnowledgeFocusId: id, bakeKnowledgeOffset: 0 }),
 
   setBakeSopFocusId: (id) => set({ bakeSopFocusId: id, bakeSopOffset: 0 }),
+
+  setBakeDataFocusId: (id) => set({ bakeDataFocusId: id }),
 
   setBakeMemoryOffset: (offset) => set({ bakeMemoryOffset: offset }),
 
@@ -597,7 +611,18 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setRepositoryCaptureLimit: (limit) => set({ repositoryCaptureLimit: limit, bakeCaptureOffset: 0 }),
 
-  setRepositoryCaptureSourceCaptureId: (id) => set({ repositoryCaptureSourceCaptureId: id, bakeCaptureOffset: 0 }),
+  // 关联跳转必须能看到目标记录：带上旧筛选条件时目标可能被过滤掉，
+  // 列表为空后选中态会被清理 effect 误清，表现为详情抽屉打不开
+  setRepositoryCaptureSourceCaptureId: (id) => set(id
+    ? {
+      repositoryCaptureSourceCaptureId: id,
+      bakeCaptureOffset: 0,
+      repositoryCaptureQuery: '',
+      repositoryCaptureApp: '',
+      repositoryCaptureFrom: '',
+      repositoryCaptureTo: '',
+    }
+    : { repositoryCaptureSourceCaptureId: id, bakeCaptureOffset: 0 }),
 
   setCaptureBackTarget: (target) => set({ captureBackTarget: target }),
 
@@ -628,6 +653,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     bakeTemplateFocusId: null,
     bakeKnowledgeFocusId: null,
     bakeSopFocusId: null,
+    bakeDataFocusId: null,
     repositoryCaptureSourceCaptureId: null,
   }),
 
@@ -707,6 +733,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   setCloudBalance: (balance) => set({ cloudBalance: balance }),
 
   setCloudSubscription: (subscription) => set({ cloudSubscription: subscription }),
+
+  setLocalNickname: (nickname) => {
+    const normalized = nickname.trim().slice(0, 24)
+    if (!normalized) return
+    safeLocalStorage?.setItem(LOCAL_NICKNAME_KEY, normalized)
+    set({ localNickname: normalized })
+  },
 
   setServiceEnvironment: (environment) => set((state) => {
     const nextEnvironment: ServiceEnvironment = state.debugModeEnabled

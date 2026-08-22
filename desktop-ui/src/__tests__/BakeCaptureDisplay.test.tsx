@@ -78,7 +78,7 @@ describe('采集记录展示', () => {
     const textInformation = screen.getByText('文本信息').nextElementSibling
     expect(textInformation).toHaveTextContent('界面读取到的正文')
     expect(textInformation).toHaveTextContent('截图识别到的补充正文')
-    expect(screen.getByPlaceholderText('搜索标题、正文或文本信息')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('搜索采集 ID、标题、正文或文本信息')).toBeInTheDocument()
     expect(screen.queryByText('AX 文本')).not.toBeInTheDocument()
     expect(screen.queryByText('OCR 文本')).not.toBeInTheDocument()
     expect(screen.queryByText('界面片段')).not.toBeInTheDocument()

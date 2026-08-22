@@ -459,19 +459,41 @@ body {
   flex-shrink: 0;
 }
 
-.rag-panel__submit .bread-icon {
-  --bread-icon-line: currentColor;
-  --bread-icon-accent: currentColor;
-  color: currentColor;
-  flex: 0 0 auto;
-}
-
 .rag-panel__submit:hover:not(:disabled) {
   transform: translateY(-1px);
   box-shadow: 0 5px 12px rgba(165, 98, 19, 0.30);
 }
 
 .rag-panel__submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.rag-panel__clear {
+  margin-left: auto;
+  height: 34px;
+  padding: 0 12px;
+  background: var(--mb-bg-card);
+  color: var(--mb-text-secondary);
+  border: 1px solid var(--mb-border-strong);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.rag-panel__clear:hover:not(:disabled) {
+  color: var(--mb-text-primary);
+  border-color: #D4860B;
+}
+
+.rag-panel__clear:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -1354,15 +1376,42 @@ body {
   background: #f0fff4;
 }
 
-/* 加载旋转动画 */
-@keyframes rag-spin {
-  from { transform: rotate(0deg); }
-  to   { transform: rotate(360deg); }
+.rag-panel__thinking-label {
+  margin-bottom: 4px;
+  color: #0f766e;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 650;
 }
 
-.rag-panel__loading-icon {
-  animation: rag-spin 0.8s linear infinite;
-  transform-origin: center;
+.rag-panel__thinking-label-icon {
+  width: 1em;
+  height: 1em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  flex: 0 0 1em;
+}
+
+.rag-panel__thinking-label-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transform: scale(1.5);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .rag-panel__thinking-label {
+    animation: rag-panel-thinking-bounce 1.15s cubic-bezier(.45, 0, .55, 1) infinite;
+  }
+}
+
+@keyframes rag-panel-thinking-bounce {
+  0%, 100% { transform: translateY(0); }
+  45% { transform: translateY(-5px); }
+  65% { transform: translateY(-2px); }
 }
 
 /* Markdown 渲染区样式 */

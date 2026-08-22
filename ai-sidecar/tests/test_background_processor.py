@@ -148,7 +148,38 @@ def test_charging_catchup_requires_progress(tmp_path) -> None:
 def test_is_self_generated_capture_matches_memory_bread() -> None:
     assert _is_self_generated_capture("memory-bread-desktop", "问答页") is True
     assert _is_self_generated_capture("其他应用", "记忆面包 RagPanel") is True
+    assert _is_self_generated_capture(
+        "Google Chrome",
+        "MemoryBread Preview 9e3011ca-6991-45a0-9a43-c513c510a6b9 - Google Chrome",
+    ) is True
     assert _is_self_generated_capture("Google Chrome", "Claude") is False
+
+
+def test_pending_capture_query_excludes_memory_bread_preview(tmp_path) -> None:
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.executemany(
+        """
+        INSERT INTO captures (
+            id, ts, app_name, win_title, ocr_text, ax_text,
+            input_text, audio_text, timeline_id
+        )
+        VALUES (?, ?, 'Google Chrome', ?, 'OCR 正文', '', '', '', NULL)
+        """,
+        [
+            (1, 1000, "MemoryBread Preview preview-id - Google Chrome"),
+            (2, 2000, "MemoryBread 项目文档 - Google Chrome"),
+        ],
+    )
+    conn.commit()
+
+    processor = BackgroundProcessor(db_path=db_path)
+    captures = processor._get_unprocessed_captures(conn, limit=10)
+    conn.close()
+
+    assert processor._count_unprocessed_captures() == 1
+    assert [capture["id"] for capture in captures] == [2]
 
 
 def test_fragment_grouper_splits_history_review_from_live_chat() -> None:
@@ -961,6 +992,33 @@ def test_battery_backlog_keeps_rate_limited_batch_size(tmp_path) -> None:
     assert processor._timeline_batch_limit(profile, 500) == 4
 
 
+def test_charging_bake_backlog_uses_short_completion_poll(tmp_path) -> None:
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    profile = type(
+        "_Profile",
+        (),
+        {"mode": "charging", "bake_interval_secs": 90},
+    )()
+
+    assert processor._scheduled_bake_interval_secs(profile, 0, 194) == 2
+    assert processor._scheduled_bake_interval_secs(profile, 0, 0) == 90
+
+
+def test_battery_bake_backlog_does_not_use_charging_poll(tmp_path) -> None:
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    profile = type(
+        "_Profile",
+        (),
+        {"mode": "battery", "bake_interval_secs": 1800},
+    )()
+
+    assert processor._scheduled_bake_interval_secs(profile, 0, 194) == 1800
+
+
 def test_dual_backlog_uses_bounded_work_quanta(tmp_path) -> None:
     db_path = str(tmp_path / "captures.db")
     _init_db(db_path)
@@ -1307,7 +1365,7 @@ def _make_charging_profile():
     )()
 
 
-def test_periodic_bake_skips_trigger_after_consecutive_no_progress(
+def test_periodic_bake_allows_half_open_probe_after_consecutive_no_progress(
     tmp_path, monkeypatch
 ) -> None:
     db_path = str(tmp_path / "captures.db")
@@ -1322,9 +1380,6 @@ def test_periodic_bake_skips_trigger_after_consecutive_no_progress(
             "recent_no_progress_count": processor._last_bake_no_progress_count + 1,
         }
 
-    def _fail_if_called(*args, **kwargs):
-        raise AssertionError("达到阈值后不应再触发 bake")
-
     monkeypatch.setattr(processor, "_maybe_trigger_periodic_bake", _fake_periodic_bake)
 
     holds = []
@@ -1338,13 +1393,15 @@ def test_periodic_bake_skips_trigger_after_consecutive_no_progress(
     assert holds == [True, False, False, False]
     assert processor._consecutive_no_progress_bake_runs == 3
 
-    # 第 5 轮直接跳过触发：不发起 run、不让位 capture、指数退避。
-    monkeypatch.setattr(processor, "_maybe_trigger_periodic_bake", _fail_if_called)
+    # 第 5 轮代表前一轮指数退避已经到期，必须允许一次半开探测，
+    # 不能只继续延后导致永久锁死。
+    count_before_probe = processor._last_bake_no_progress_count
     next_ts, hold = asyncio.run(
         processor._run_periodic_bake_check(profile, 4.0, now=4.0)
     )
     assert hold is False
-    assert next_ts - 4.0 == min(15 * (2 ** 3), 15 * 60)
+    assert processor._last_bake_no_progress_count > count_before_probe
+    assert next_ts - 4.0 >= min(15 * (2 ** 3), 15 * 60)
 
 
 def test_periodic_bake_backoff_grows_exponentially_with_no_progress(

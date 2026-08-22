@@ -15,7 +15,6 @@ import {
   listLocalCreationSkills,
   marketCreationSkillToLocalInput,
   matchCreationSkills,
-  matchCreationSkillsForExecution,
   normalizeCreationSkillTitle,
   parseCodexSkillMarkdown,
   publishCreationSkill,
@@ -1055,16 +1054,6 @@ describe('提交后的执行时技能解析', () => {
     updatedAt: 2,
   }
 
-  it('用户原句没有 @ 时，执行时确定性召回仍命中周报模板', () => {
-    const matches = matchCreationSkillsForExecution(
-      '请生成下本周GPU成本优化的周报',
-      [gpuWeeklyTemplate],
-    )
-
-    expect(matches).toHaveLength(1)
-    expect(matches[0]).toMatchObject({ reason: 'automatic', skill: { id: 91 } })
-  })
-
   it('没有汇报意图的技术问答由模型决策不召回总结类模板', async () => {
     // 召回与否由模型依据 Skill 自描述披露决策，不做枚举式意图门控。
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({
@@ -1137,6 +1126,23 @@ describe('提交后的执行时技能解析', () => {
     expect(resolution.matches[0]).toMatchObject({ skill: { id: 92 } })
   })
 
+  it('主题与周报技能相似时仍完全采用模型选择的方案技能', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      skill_ids: [92],
+      source: 'model',
+      reasoning: '交付目标是方案，与方案技能用途一致',
+    })))
+
+    const resolution = await resolveExecutionSkills({
+      apiBaseUrl: 'http://127.0.0.1:7070',
+      prompt: '设计下GPU性能优化的方案',
+      skills: [gpuWeeklyTemplate, archPlanTemplate],
+    })
+
+    expect(resolution.source).toBe('model')
+    expect(resolution.matches.map(match => match.skill.id)).toEqual([92])
+  })
+
   it('显式 @ 优先于模型路由，且不请求模型路由接口', async () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
@@ -1152,7 +1158,7 @@ describe('提交后的执行时技能解析', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('模型的明确决策（含选中具体技能）覆写确定性结果', async () => {
+  it('模型的明确决策会选中具体技能', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({
       skill_ids: [91],
       source: 'model',
@@ -1187,8 +1193,7 @@ describe('提交后的执行时技能解析', () => {
     expect(resolution.matches).toHaveLength(0)
   })
 
-  it('模型降级空召回（source=fallback）不能丢掉确定性命中的技能', async () => {
-    // sidecar 推理失败时返回 HTTP 200 + 空召回，这是原始缺陷的触发路径。
+  it('模型输出不可恢复时不根据主题词猜测技能', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({
       skill_ids: [],
       source: 'fallback',
@@ -1201,11 +1206,11 @@ describe('提交后的执行时技能解析', () => {
       skills: [gpuWeeklyTemplate],
     })
 
-    expect(resolution.source).toBe('deterministic')
-    expect(resolution.matches.map(match => match.skill.id)).toEqual([91])
+    expect(resolution.source).toBe('unavailable')
+    expect(resolution.matches).toHaveLength(0)
   })
 
-  it('模型路由接口报错时回退确定性匹配，不阻断创作', async () => {
+  it('模型路由接口报错时不挂载技能且不阻断普通创作', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 502 })))
 
     const resolution = await resolveExecutionSkills({
@@ -1214,7 +1219,7 @@ describe('提交后的执行时技能解析', () => {
       skills: [gpuWeeklyTemplate],
     })
 
-    expect(resolution.source).toBe('deterministic')
-    expect(resolution.matches.map(match => match.skill.id)).toEqual([91])
+    expect(resolution.source).toBe('unavailable')
+    expect(resolution.matches).toHaveLength(0)
   })
 })

@@ -1349,12 +1349,16 @@
 }
 
 .system-floating-assist__refs {
+  min-height: 0;
+  max-height: min(42vh, 420px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   border-top: 1px solid rgba(124, 78, 37, 0.11);
   padding: 9px 10px 10px;
   background: rgba(255, 248, 235, 0.68);
   display: grid;
   gap: 6px;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
 }
 
 .system-floating-assist__refs-title {

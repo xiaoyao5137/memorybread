@@ -10,11 +10,12 @@
  */
 
 import React, { useState } from 'react'
-import { ArrowDownToLine, ChevronLeft, ChevronRight, LogIn } from 'lucide-react'
+import { ArrowDownToLine, ChevronLeft, ChevronRight, Loader2, RotateCw } from 'lucide-react'
 import { useAppStore } from '../store/useAppStore'
 import { type WindowMode } from '../types'
 import { getRunModeLabel, getUserDisplayName } from '../utils/accountDisplay'
 import type { SoftwareUpdateCheck } from '../utils/softwareUpdate'
+import { softwareUpdateSessionBusy, useSoftwareUpdateSession } from '../utils/softwareUpdateSession'
 import { BreadAppIcon, type BreadAppIconName } from './icons/BreadIcons'
 import './FloatingBuddy.v2.css'
 
@@ -150,9 +151,10 @@ const getAccountInitials = (label: string): string => {
 }
 
 const FloatingBuddy: React.FC<FloatingBuddyProps> = ({ className = '', softwareUpdate, onSoftwareUpdateClick }) => {
-  const { windowMode, setWindowMode, clearBakeNavigationStack, currentUser, cloudSubscription } = useAppStore()
+  const { windowMode, setWindowMode, clearBakeNavigationStack, currentUser, cloudSubscription, localNickname } = useAppStore()
+  const updateSession = useSoftwareUpdateSession()
   const [collapsed, setCollapsed] = useState(loadSidebarCollapsed)
-  const accountLabel = getUserDisplayName(currentUser)
+  const accountLabel = getUserDisplayName(currentUser, localNickname)
   const runModeLabel = getRunModeLabel(currentUser, cloudSubscription)
   const accountInitials = getAccountInitials(accountLabel)
   const handleNavigate = (mode: WindowMode) => {
@@ -178,7 +180,11 @@ const FloatingBuddy: React.FC<FloatingBuddyProps> = ({ className = '', softwareU
     >
       <div className="buddy-sidebar-header">
         <div className="buddy-sidebar-logo">
-          <img src="/logo.png" alt="记忆面包" className="buddy-sidebar-logo-img" />
+          <img
+            src="/brand/memorybread-bread-mark.png"
+            alt="记忆面包"
+            className="buddy-sidebar-logo-img"
+          />
         </div>
         <div className="buddy-sidebar-title-group">
           <h1 className="buddy-sidebar-title">记忆面包</h1>
@@ -224,34 +230,57 @@ const FloatingBuddy: React.FC<FloatingBuddyProps> = ({ className = '', softwareU
       </nav>
 
       <footer className="buddy-sidebar-footer">
-        {softwareUpdate?.update_available && softwareUpdate.release && (
-          <button
-            className={`buddy-update-entry ${softwareUpdate.is_mandatory ? 'buddy-update-entry--mandatory' : ''}`}
-            data-testid="software-update-entry"
-            onClick={onSoftwareUpdateClick}
-            type="button"
-            title={softwareUpdate.is_mandatory ? '需要更新软件' : '有可用软件更新'}
-            aria-label={softwareUpdate.is_mandatory ? '需要更新软件' : '有可用软件更新'}
-          >
-            <span className="buddy-update-entry__icon" aria-hidden="true"><ArrowDownToLine size={17} /></span>
-            <span className="buddy-update-entry__copy">
-              <strong>{softwareUpdate.is_mandatory ? '需要更新' : '更新可用'}</strong>
-              <span>v{softwareUpdate.latest_version}</span>
-            </span>
-            <span className="buddy-update-entry__action">更新</span>
-          </button>
-        )}
+        {softwareUpdate?.update_available && softwareUpdate.release && (() => {
+          const sessionMatches = updateSession.version === softwareUpdate.latest_version
+          const sessionPhase = sessionMatches ? updateSession.phase : 'idle'
+          const sessionBusy = softwareUpdateSessionBusy(sessionPhase)
+          const sessionPercent = sessionMatches ? updateSession.progress?.percent ?? null : null
+          const entryState = sessionBusy ? 'busy' : sessionPhase
+          const entryCopy = sessionBusy
+            ? `更新中${sessionPercent != null ? ` ${sessionPercent}%` : ''}`
+            : sessionPhase === 'ready_to_restart' ? '待重启完成更新'
+            : sessionPhase === 'failed' ? '更新失败'
+            : softwareUpdate.is_mandatory ? '需要更新' : '更新可用'
+          const entryAction = sessionBusy ? '后台' : sessionPhase === 'ready_to_restart' ? '重启' : sessionPhase === 'failed' ? '重试' : '更新'
+          const entryTitle = sessionBusy
+            ? '正在后台更新，点击查看详情'
+            : sessionPhase === 'ready_to_restart' ? '更新已就绪，点击重启完成'
+            : sessionPhase === 'failed' ? '更新失败，点击查看详情'
+            : softwareUpdate.is_mandatory ? '需要更新软件' : '有可用软件更新'
+          return (
+            <button
+              className={`buddy-update-entry ${softwareUpdate.is_mandatory ? 'buddy-update-entry--mandatory' : ''} ${entryState !== 'idle' ? `buddy-update-entry--${entryState}` : ''}`}
+              data-testid="software-update-entry"
+              onClick={onSoftwareUpdateClick}
+              type="button"
+              title={entryTitle}
+              aria-label={entryTitle}
+            >
+              <span className="buddy-update-entry__icon" aria-hidden="true">
+                {sessionBusy ? <Loader2 className="buddy-update-entry__spinner" size={17} /> : sessionPhase === 'ready_to_restart' ? <RotateCw size={17} /> : <ArrowDownToLine size={17} />}
+              </span>
+              <span className="buddy-update-entry__copy">
+                <strong>{entryCopy}</strong>
+                <span>v{softwareUpdate.latest_version}</span>
+              </span>
+              <span className="buddy-update-entry__action">{entryAction}</span>
+              {sessionBusy && sessionPercent != null && (
+                <span className="buddy-update-entry__progress" aria-hidden="true"><i style={{ width: `${sessionPercent}%` }} /></span>
+              )}
+            </button>
+          )
+        })()}
         <button
           className={`buddy-account-entry ${windowMode === 'account' || windowMode === 'messages' ? 'buddy-account-entry--active' : ''}`}
           data-testid="account-entry"
           type="button"
           aria-current={windowMode === 'account' || windowMode === 'messages' ? 'page' : undefined}
-          aria-label={currentUser ? `打开${accountLabel}的用户账户` : '未登录，打开登录'}
-          title={currentUser ? `${accountLabel} · ${runModeLabel}` : '未登录，打开登录'}
+          aria-label={`打开${accountLabel}的个人中心`}
+          title={`${accountLabel} · ${runModeLabel}`}
           onClick={() => handleNavigate('account')}
         >
           <span className="buddy-account-entry__avatar" data-testid="account-avatar" aria-hidden="true">
-            {currentUser ? accountInitials : <LogIn size={17} />}
+            {accountInitials}
           </span>
           <span className="buddy-account-entry__identity">
             <strong>{accountLabel}</strong>

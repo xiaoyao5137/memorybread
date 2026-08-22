@@ -192,8 +192,9 @@ def _start_vector_search_server() -> None:
                     collection_name=vs._collection_name,
                     query=query_vector,
                     # 文档分块后一个 URL 可能命中多个 chunk；先多取一些，
-                    # 再按 doc_key 折叠，避免长文档挤掉其他来源。
-                    limit=min(max(top_k * 4, top_k), 100),
+                    # 再按 doc_key 折叠，避免长文档挤掉其他来源。上限过小会
+                    # 把中等相关度（0.5 左右）的文档截断在候选池之外。
+                    limit=min(max(top_k * 4, top_k), 400),
                     score_threshold=score_threshold,
                     query_filter=qdrant_filter,
                 ).points

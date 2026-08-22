@@ -11,7 +11,7 @@ export interface ModelSelectOption {
 }
 
 interface ModelSelectProps {
-  label: string
+  label?: string
   value: string
   options: readonly ModelSelectOption[]
   disabled?: boolean
@@ -80,13 +80,14 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
       className={`model-select${open && dropUpward ? ' model-select--drop-upward' : ''}`}
       ref={rootRef}
     >
-      <span className="model-select__label">{label}</span>
+      {label && <span className="model-select__label">{label}</span>}
       <button
         type="button"
         className="model-select__trigger"
         disabled={disabled}
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-label={title || label || '选择模型'}
         title={title}
         onClick={toggleOpen}
       >
@@ -98,7 +99,7 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
       </button>
 
       {open && (
-        <div className="model-select__menu" role="listbox" aria-label={title || label}>
+        <div className="model-select__menu" role="listbox" aria-label={title || label || '选择模型'}>
           {options.map(option => {
             const reason = getDisabledReason(option, remoteAllowed)
             const selected = option.id === value

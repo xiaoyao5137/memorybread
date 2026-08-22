@@ -20,6 +20,8 @@ import {
   useFetchBakeTemplate,
   useFetchBakeTemplates,
   useToggleBakeTemplateStatus,
+  useRefreshBakeDocument,
+  useSetBakeDocumentRefreshPolicy,
   useUpdateBakeKnowledge,
   useUpdateBakeSop,
   useUpdateBakeTemplate,
@@ -165,6 +167,7 @@ const BakePanel: React.FC = () => {
     bakeTemplateFocusId,
     bakeKnowledgeFocusId,
     bakeSopFocusId,
+    bakeDataFocusId,
     bakeKnowledgeOffset,
     bakeKnowledgeQuery,
     bakeKnowledgeFrom,
@@ -196,6 +199,7 @@ const BakePanel: React.FC = () => {
     setBakeTemplateFocusId,
     setBakeKnowledgeFocusId,
     setBakeSopFocusId,
+    setBakeDataFocusId,
     setBakeKnowledgeOffset,
     setBakeKnowledgeQuery,
     setBakeKnowledgeLimit,
@@ -222,6 +226,8 @@ const BakePanel: React.FC = () => {
   const updateTemplate = useUpdateBakeTemplate()
   const toggleTemplateStatus = useToggleBakeTemplateStatus()
   const deleteTemplate = useDeleteBakeTemplate()
+  const refreshBakeDocument = useRefreshBakeDocument()
+  const setTemplateRefreshPolicy = useSetBakeDocumentRefreshPolicy()
   const fetchSops = useFetchBakeSops()
   const fetchSop = useFetchBakeSop()
   const createSop = useCreateBakeSop()
@@ -261,6 +267,7 @@ const BakePanel: React.FC = () => {
   const [dataFocusId, setDataFocusId] = useState<number | null>(null)
   const [dataLoading, setDataLoading] = useState(false)
   const [refreshingDataId, setRefreshingDataId] = useState<number | null>(null)
+  const [refreshingTemplateId, setRefreshingTemplateId] = useState<string | null>(null)
   const [deletingDataId, setDeletingDataId] = useState<number | null>(null)
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const [draftKnowledgeQuery, setDraftKnowledgeQuery] = useState(bakeKnowledgeQuery)
@@ -497,6 +504,17 @@ const BakePanel: React.FC = () => {
     })
     return () => { cancelled = true }
   }, [bakeTab, dataFavoriteFilter, dataFocusId, dataFrom, dataLimit, dataOffset, dataQuery, dataSourceKind, dataTo, fetchDataSource, fetchDataSources])
+
+  // 创作参考资料等外部入口通过 store 指定要打开的数据来源，这里同步到
+  // 数据页的本地聚焦状态，复用既有的单条来源加载逻辑。
+  useEffect(() => {
+    if (bakeTab !== 'data' || !bakeDataFocusId) return
+    const focusId = Number(bakeDataFocusId)
+    if (!Number.isFinite(focusId) || focusId <= 0) return
+    setDataFocusId(focusId)
+    setDataOffset(0)
+    setSelectedDataId(focusId)
+  }, [bakeTab, bakeDataFocusId])
 
   useEffect(() => {
     if (!['templates', 'knowledge', 'sop'].includes(bakeTab)) return
@@ -793,6 +811,7 @@ const BakePanel: React.FC = () => {
     bakeTemplateFocusId,
     bakeKnowledgeFocusId,
     bakeSopFocusId,
+    bakeDataFocusId,
   })
 
   const restoreNavigationTarget = (target: BakeNavigationTarget) => {
@@ -808,6 +827,7 @@ const BakePanel: React.FC = () => {
     if (target.bakeTemplateFocusId !== undefined) setBakeTemplateFocusId(target.bakeTemplateFocusId)
     if (target.bakeKnowledgeFocusId !== undefined) setBakeKnowledgeFocusId(target.bakeKnowledgeFocusId)
     if (target.bakeSopFocusId !== undefined) setBakeSopFocusId(target.bakeSopFocusId)
+    if (target.bakeDataFocusId !== undefined) setBakeDataFocusId(target.bakeDataFocusId)
     if (target.repositoryCaptureSourceCaptureId !== undefined) {
       setRepositoryCaptureSourceCaptureId(target.repositoryCaptureSourceCaptureId)
     }
@@ -850,6 +870,7 @@ const BakePanel: React.FC = () => {
   const handleDataFavoriteFilterChange = (value: MemoryFavoriteFilter) => {
     setDataFavoriteFilter(value)
     setDataFocusId(null)
+    setBakeDataFocusId(null)
     setSelectedDataId(null)
     setDataOffset(0)
   }
@@ -943,6 +964,7 @@ const BakePanel: React.FC = () => {
 
   const handleSearchData = () => {
     setDataFocusId(null)
+    setBakeDataFocusId(null)
     setDataOffset(0)
     setDataQuery(draftDataQuery)
     setDataSourceKind(draftDataSourceKind)
@@ -952,6 +974,7 @@ const BakePanel: React.FC = () => {
 
   const handleClearDataSearch = () => {
     setDataFocusId(null)
+    setBakeDataFocusId(null)
     setDraftDataQuery('')
     setDataQuery('')
     setDraftDataSourceKind('')
@@ -1033,6 +1056,7 @@ const BakePanel: React.FC = () => {
       }
       if (selectedDataId === sourceId) setSelectedDataId(null)
       if (dataFocusId === sourceId) setDataFocusId(null)
+      if (Number(bakeDataFocusId) === sourceId) setBakeDataFocusId(null)
       setStatusMessage('已删除数据')
       await refreshOverview()
       return true
@@ -1250,6 +1274,57 @@ const BakePanel: React.FC = () => {
       await refreshOverview()
     } catch (error) {
       setStatusMessage(toUserFacingError(error, '更新文档状态失败'))
+    }
+  }
+
+  const documentRefreshSkipLabels: Record<string, string> = {
+    policy_never: '刷新策略为“从不刷新”，已跳过',
+    url_missing: '该文档没有来源网址，无法刷新',
+    url_invalid: '来源网址格式不合法，无法刷新',
+    page_gone: '来源页面已不存在，已停止自动刷新',
+    check_throttled: '近期已检查过刷新，本次跳过',
+    no_update_evidence: '该文档不满足自动原地更新条件，已跳过',
+    content_fresh: '内容仍在新鲜期内，无需刷新',
+  }
+
+  const handleRefreshTemplate = async (templateId: string) => {
+    setRefreshingTemplateId(templateId)
+    try {
+      // 文档刷新直接使用一次性隐藏浏览器会话，不依赖预先打开的页签。
+      const result = await refreshBakeDocument(templateId)
+      if (result.document) {
+        setTemplates(prev => prev.map(item => item.id === templateId ? result.document! : item))
+      }
+      if (result.status === 'updated') {
+        setStatusMessage(result.completenessStatus === 'partial'
+          ? '已取得新版本，但页面内容只完成部分采集'
+          : '已验证最新来源，发现新版本')
+      } else if (result.status === 'no_change') {
+        setStatusMessage(result.completenessStatus === 'partial'
+          ? '已检查来源页面，但只完成部分采集'
+          : '已检查来源页面，内容暂无变化')
+      } else if (result.status === 'skipped') {
+        setStatusMessage(documentRefreshSkipLabels[result.reason ?? ''] ?? `已跳过刷新（${result.reason ?? '未知原因'}）`)
+      } else {
+        setStatusMessage(`刷新失败（${result.reason ?? '未知原因'}）`)
+      }
+    } catch (error) {
+      setStatusMessage(toUserFacingError(error, '刷新文档失败'))
+    } finally {
+      setRefreshingTemplateId(null)
+    }
+  }
+
+  const handleSetTemplateRefreshPolicy = async (templateId: string, policy: 'auto' | 'always' | 'never'): Promise<boolean> => {
+    try {
+      const updated = await setTemplateRefreshPolicy(templateId, policy)
+      setTemplates(prev => prev.map(item => item.id === templateId ? updated : item))
+      const labels = { auto: '自动判断', always: '每次都刷新', never: '从不刷新' }
+      setStatusMessage(`刷新策略已设为「${labels[policy]}」`)
+      return true
+    } catch (error) {
+      setStatusMessage(toUserFacingError(error, '更新刷新策略失败'))
+      return false
     }
   }
 
@@ -1606,6 +1681,9 @@ const BakePanel: React.FC = () => {
             onUpdateTemplate={handleUpdateTemplate}
             onToggleTemplateStatus={handleToggleTemplateStatus}
             onDeleteTemplate={handleDeleteTemplate}
+            onRefreshTemplate={handleRefreshTemplate}
+            refreshingTemplateId={refreshingTemplateId}
+            onSetTemplateRefreshPolicy={handleSetTemplateRefreshPolicy}
             onSettleSkill={(template) => setCreationSkillEditor({ source: {
               kind: 'bake_document',
               id: template.id,

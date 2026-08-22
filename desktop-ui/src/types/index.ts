@@ -609,6 +609,16 @@ export interface ArticleTemplate {
   reviewStatus: string
   matchScore?: number
   matchLevel?: string
+  refreshPolicy?: 'auto' | 'always' | 'never'
+  lastRefreshCheckedAtMs?: number
+  lastRefreshError?: string
+  lastRefreshSuccessAtMs?: number
+  lastRefreshStatus?: 'fresh_complete' | 'fresh_recent' | 'fresh_partial' | 'fresh_recent_partial' | 'historical_only' | 'unavailable' | string
+  lastRefreshCompleteness?: 'complete' | 'partial' | 'failed' | 'unverified' | string
+  lastRefreshContentHash?: string
+  lastRefreshCharacterCount?: number
+  lastRefreshSegmentCount?: number
+  lastRefreshTruncated?: boolean
   createdAt?: string
   createdAtMs?: number
   updatedAt?: string

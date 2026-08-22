@@ -8,6 +8,10 @@ description = "记忆面包 core engine — capture, storage, executor, API serv
 name = "memory-bread"
 path = "src/main.rs"
 
+[[bin]]
+name = "memorybread-browser-bridge"
+path = "src/bin/browser_bridge.rs"
+
 [lib]
 name = "memory_bread_core"
 path = "src/lib.rs"

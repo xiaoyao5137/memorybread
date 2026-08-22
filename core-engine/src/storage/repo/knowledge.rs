@@ -244,7 +244,12 @@ impl StorageManager {
                         structured_content, prompt_hint, diagram_code, image_assets,
                         source_app_name, source_win_title, source_url, content_hash, language,
                         usage_count, match_score, match_level, creation_mode, review_status,
-                        evidence_summary, generation_version, deleted_at,
+                        evidence_summary, generation_version, refresh_policy,
+                        last_refresh_checked_at_ms, last_refresh_error,
+                        last_refresh_success_at_ms, last_refresh_status,
+                        last_refresh_completeness, last_refresh_content_hash,
+                        last_refresh_character_count, last_refresh_segment_count,
+                        last_refresh_truncated, deleted_at,
                         created_at, updated_at
                  FROM bake_documents
                  WHERE deleted_at IS NULL AND status IN ('active', 'enabled')
@@ -284,9 +289,19 @@ impl StorageManager {
                     review_status: row.get(28)?,
                     evidence_summary: row.get(29)?,
                     generation_version: row.get(30)?,
-                    deleted_at: row.get(31)?,
-                    created_at: row.get(32)?,
-                    updated_at: row.get(33)?,
+                    refresh_policy: row.get(31)?,
+                    last_refresh_checked_at_ms: row.get(32)?,
+                    last_refresh_error: row.get(33)?,
+                    last_refresh_success_at_ms: row.get(34)?,
+                    last_refresh_status: row.get(35)?,
+                    last_refresh_completeness: row.get(36)?,
+                    last_refresh_content_hash: row.get(37)?,
+                    last_refresh_character_count: row.get(38)?,
+                    last_refresh_segment_count: row.get(39)?,
+                    last_refresh_truncated: row.get(40)?,
+                    deleted_at: row.get(41)?,
+                    created_at: row.get(42)?,
+                    updated_at: row.get(43)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -2657,6 +2672,39 @@ impl StorageManager {
         })
     }
 
+    /// 定向查找某条时间线关联的 bake 知识。除 timeline_id 列外，还匹配
+    /// content.source_timeline_id：知识合并时只会改写 content 里的来源，
+    /// timeline_id 列保持首次创建时的值，仅查列会漏掉合并后的时间线。
+    pub fn find_bake_knowledge_by_source_timeline(
+        &self,
+        timeline_id: i64,
+    ) -> Result<Vec<BakeKnowledgeRecord>, StorageError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT b.id, COALESCE(b.timeline_id, 0), b.title, b.summary, b.content, b.detailed_content, b.entities, b.importance,
+                        b.user_verified, b.user_edited, b.created_at, b.updated_at, b.created_at_ms, b.updated_at_ms,
+                        b.source_capture_ids,
+                        COALESCE((
+                            SELECT SUM(COALESCE(t.occurrence_count, 1))
+                            FROM bake_artifact_source_links l
+                            JOIN timelines t ON t.id = l.source_timeline_id
+                            WHERE l.artifact_kind = 'knowledge' AND l.artifact_id = b.id
+                        ), (
+                            SELECT COALESCE(t.occurrence_count, 1)
+                            FROM timelines t WHERE t.id = b.timeline_id
+                        ), 1) AS occurrence_count
+                 FROM bake_knowledge b
+                 WHERE b.timeline_id = ?1
+                    OR CAST(json_extract(COALESCE(b.content, '{}'), '$.source_timeline_id') AS INTEGER) = ?1
+                 ORDER BY b.updated_at_ms DESC, b.id DESC LIMIT 5"
+            )?;
+            let rows = stmt.query_map(params![timeline_id], |row| {
+                row_to_bake_knowledge(row).map_err(|_| rusqlite::Error::InvalidQuery)
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(StorageError::Sqlite)
+        })
+    }
+
     pub fn update_bake_knowledge(
         &self,
         id: i64,
@@ -2845,6 +2893,28 @@ impl StorageManager {
         self.with_conn(|conn| {
             conn.query_row("SELECT COUNT(*) FROM bake_sops", [], |row| row.get(0))
                 .map_err(StorageError::Sqlite)
+        })
+    }
+
+    /// 定向查找某条时间线关联的 bake 操作手册。来源记录在 content.source_timeline_id；
+    /// 没有该字段的旧条目按前端既有语义回退为记录自身 id。
+    pub fn find_bake_sops_by_source_timeline(
+        &self,
+        timeline_id: i64,
+    ) -> Result<Vec<BakeSopRecord>, StorageError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, COALESCE(timeline_id, 0) AS timeline_id, title, summary, content, detailed_content, entities, importance,
+                        user_verified, user_edited, created_at, updated_at, created_at_ms, updated_at_ms, source_capture_ids
+                 FROM bake_sops
+                 WHERE CAST(json_extract(COALESCE(content, '{}'), '$.source_timeline_id') AS INTEGER) = ?1
+                    OR (json_extract(COALESCE(content, '{}'), '$.source_timeline_id') IS NULL AND id = ?1)
+                 ORDER BY updated_at_ms DESC, id DESC LIMIT 5"
+            )?;
+            let rows = stmt.query_map(params![timeline_id], |row| {
+                row_to_bake_sop(row).map_err(|_| rusqlite::Error::InvalidQuery)
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(StorageError::Sqlite)
         })
     }
 

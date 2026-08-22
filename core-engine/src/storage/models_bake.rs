@@ -35,9 +35,56 @@ pub struct BakeDocumentRecord {
     pub review_status: String,
     pub evidence_summary: Option<String>,
     pub generation_version: Option<String>,
+    pub refresh_policy: String,
+    pub last_refresh_checked_at_ms: i64,
+    pub last_refresh_error: Option<String>,
+    pub last_refresh_success_at_ms: i64,
+    pub last_refresh_status: String,
+    pub last_refresh_completeness: String,
+    pub last_refresh_content_hash: Option<String>,
+    pub last_refresh_character_count: i64,
+    pub last_refresh_segment_count: i64,
+    pub last_refresh_truncated: bool,
     pub deleted_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewBakeDocumentSourceSnapshot {
+    pub document_id: i64,
+    pub source_url: String,
+    pub page_title: String,
+    pub content_text: String,
+    pub content_hash: String,
+    pub completeness_status: String,
+    pub identity_match: bool,
+    pub reached_end: bool,
+    pub stable_passes: i64,
+    pub segment_count: i64,
+    pub character_count: i64,
+    pub truncated: bool,
+    pub collector: String,
+    pub collected_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BakeDocumentSourceSnapshotRecord {
+    pub id: i64,
+    pub document_id: i64,
+    pub source_url: String,
+    pub page_title: String,
+    pub content_text: String,
+    pub content_hash: String,
+    pub completeness_status: String,
+    pub identity_match: bool,
+    pub reached_end: bool,
+    pub stable_passes: i64,
+    pub segment_count: i64,
+    pub character_count: i64,
+    pub truncated: bool,
+    pub collector: String,
+    pub collected_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -483,6 +530,12 @@ pub struct BakeArtifactAuditRecord {
     pub persist_status: String,
     pub persist_reason: Option<String>,
     pub artifact_id: Option<i64>,
+    pub decision_state: Option<String>,
+    pub quality_score: Option<f64>,
+    pub decision_reason_code: Option<String>,
+    pub decision_reason_summary: Option<String>,
+    pub decision_rule_version: Option<String>,
+    pub shadow_payload_json: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }

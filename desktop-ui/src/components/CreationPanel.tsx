@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
-import { AtSign, Bot, Check, ChevronDown, ChevronRight, CloudOff, CloudUpload, Copy, ExternalLink, Eye, FileCode2, FileText, Image, Library, Loader2, Maximize2, MessageSquarePlus, Minimize2, PackageCheck, PackagePlus, Paperclip, Pencil, Plus, Search, Send, Sparkles, Square, Store, Trash2, Upload, Wrench, X } from 'lucide-react'
+import { AtSign, Bot, Check, ChevronDown, ChevronRight, CloudOff, CloudUpload, Copy, ExternalLink, Eye, FileCode2, FileText, FolderOpen, Globe2, Image, Library, Loader2, Maximize2, MessageSquarePlus, Minimize2, PackageCheck, PackagePlus, Paperclip, Pencil, Plus, Search, Send, Sparkles, Square, Store, Trash2, Upload, Wrench, X } from 'lucide-react'
 import { serviceEnvironmentHeaders, useAppStore } from '../store/useAppStore'
 import type { CreationAgentEvent, CreationChatMessage, CreationDataReferenceItem, CreationReferenceItem, CreationReferencePreview } from '../store/useAppStore'
 import { fetchWithLocalhostFallback } from '../hooks/useApi'
@@ -122,6 +122,16 @@ interface BrowserPreviewItem {
   focus_policy?: string | null
   focus_takeover_count?: number
 }
+interface BrowserLiveJob {
+  browser_job_id: string
+  url: string
+  title: string
+  status: string
+  stage: string
+  updated_at: number
+  has_preview: boolean
+  preview_revision: number
+}
 type MarkdownBlock =
   | { type: 'markdown'; content: string; startLine: number; endLine: number }
   | { type: 'table'; headers: string[]; alignments: Array<'left' | 'center' | 'right'>; rows: string[][]; startLine: number; endLine: number }
@@ -147,6 +157,7 @@ const defaultPrompt = '请生成一份“数据治理平台建设方案”，参
 const HISTORY_PAGE_SIZE = 20
 const SKILL_MARKET_PAGE_SIZE = 18
 const MAX_CONVERSATION_MESSAGES = 60
+const BROWSER_CRAWLER_PREFERENCE_KEY = 'memory-bread_creation_browser_crawler_enabled'
 
 const intentOperationForRun = (
   events: CreationAgentEvent[],
@@ -232,6 +243,7 @@ const isLegacyMainAgentControlStart = (event: CreationAgentEvent) => (
 const collapseAgentLifecycleEvents = (events: CreationAgentEvent[]) => {
   const startTypeForTerminal: Record<string, string> = {
     'agent.completed': 'agent.started',
+    'agent.failed': 'agent.started',
     'tool.completed': 'tool.started',
     'tool.failed': 'tool.started',
     'skill.completed': 'skill.started',
@@ -622,6 +634,10 @@ const normalizeReferenceItems = (value: unknown): CreationReferenceItem[] => {
       source_type: source.source_type != null ? String(source.source_type) : undefined,
       source_id: source.source_id != null ? Number(source.source_id) : undefined,
       skill_step_title: source.skill_step_title ? String(source.skill_step_title) : undefined,
+      refresh_status: source.refresh_status ? String(source.refresh_status) : undefined,
+      refresh_completeness: source.refresh_completeness ? String(source.refresh_completeness) : undefined,
+      refresh_collected_at: source.refresh_collected_at != null ? Number(source.refresh_collected_at) : undefined,
+      refresh_truncated: source.refresh_truncated === true,
     }]
   })
 }
@@ -1087,7 +1103,6 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const [dataReferencesError, setDataReferencesError] = useState('')
   const [legacyDataReferencesRecovered, setLegacyDataReferencesRecovered] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
-  const [isPreviewing, setIsPreviewing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copySuccess, setCopySuccess] = useState(false)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
@@ -1110,6 +1125,12 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const [lastInferenceMeta, setLastInferenceMeta] = useState<{ model: string; latencyMs: number | null } | null>(null)
   const [attachments, setAttachments] = useState<UserAttachment[]>([])
   const [attachmentError, setAttachmentError] = useState<string | null>(null)
+  const [composerAddMenuOpen, setComposerAddMenuOpen] = useState(false)
+  const [browserExtensionConnected, setBrowserExtensionConnected] = useState(false)
+  const [browserLiveJobs, setBrowserLiveJobs] = useState<BrowserLiveJob[]>([])
+  const [browserCrawlerEnabled, setBrowserCrawlerEnabled] = useState(
+    () => window.localStorage.getItem(BROWSER_CRAWLER_PREFERENCE_KEY) === 'true',
+  )
   const [currentDocumentSource, setCurrentDocumentSource] = useState<CreationSkillSource | null>(null)
   const [localSkills, setLocalSkills] = useState<LocalCreationSkill[]>([])
   const [skillsLoading, setSkillsLoading] = useState(false)
@@ -1162,6 +1183,11 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const abortRef = useRef<AbortController | null>(null)
   const legacyDataRecoveryRef = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const folderInputRef = useRef<HTMLInputElement>(null)
+  const composerAddMenuRef = useRef<HTMLDivElement>(null)
+  const browserCrawlerPreferenceInitializedRef = useRef(
+    window.localStorage.getItem(BROWSER_CRAWLER_PREFERENCE_KEY) != null,
+  )
   const skillPackageInputRef = useRef<HTMLInputElement>(null)
   const skillZipInputRef = useRef<HTMLInputElement>(null)
   const skillUploadMenuRef = useRef<HTMLDivElement>(null)
@@ -1180,6 +1206,60 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   )
   const memorySearchEnabled = enabledToolIds.includes('memory_search')
   const internetSearchEnabled = enabledToolIds.includes('internet_search')
+
+  useEffect(() => {
+    let cancelled = false
+    let timer: number | null = null
+    const refreshBrowserExtensionStatus = async () => {
+      let nextDelay = 5_000
+      try {
+        const response = await fetch(`${apiBaseUrl}/api/browser-integration/status`)
+        if (!response.ok) throw new Error(`browser status ${response.status}`)
+        const status = await response.json() as { connected?: boolean; jobs?: BrowserLiveJob[] }
+        if (cancelled) return
+        const connected = status.connected === true
+        const jobs = Array.isArray(status.jobs) ? status.jobs : []
+        setBrowserExtensionConnected(connected)
+        setBrowserLiveJobs(jobs)
+        if (jobs.some(job => ['queued', 'running'].includes(job.status))) nextDelay = 900
+        if (connected && !browserCrawlerPreferenceInitializedRef.current) {
+          browserCrawlerPreferenceInitializedRef.current = true
+          setBrowserCrawlerEnabled(true)
+          window.localStorage.setItem(BROWSER_CRAWLER_PREFERENCE_KEY, 'true')
+        }
+      } catch {
+        if (!cancelled) {
+          setBrowserExtensionConnected(false)
+          setBrowserLiveJobs([])
+        }
+      } finally {
+        if (!cancelled) timer = window.setTimeout(() => void refreshBrowserExtensionStatus(), nextDelay)
+      }
+    }
+    void refreshBrowserExtensionStatus()
+    return () => {
+      cancelled = true
+      if (timer != null) window.clearTimeout(timer)
+    }
+  }, [apiBaseUrl])
+
+  useEffect(() => {
+    if (!composerAddMenuOpen) return
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!composerAddMenuRef.current?.contains(event.target as Node)) {
+        setComposerAddMenuOpen(false)
+      }
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setComposerAddMenuOpen(false)
+    }
+    document.addEventListener('mousedown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [composerAddMenuOpen])
 
   useEffect(() => {
     if (!skillUploadMenuOpen) return
@@ -1431,7 +1511,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       : sourceType === 'pending_document'
         ? 'capture'
         : sourceType
-    if (!['document', 'bake_knowledge', 'operation', 'action', 'capture'].includes(internalType)) {
+    if (!['document', 'bake_knowledge', 'operation', 'action', 'capture', 'data'].includes(internalType)) {
       if (item.source_url) window.open(item.source_url, '_blank', 'noopener,noreferrer')
       return
     }
@@ -1443,6 +1523,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
           : undefined,
         documentId: internalType === 'document' ? sourceId : undefined,
         captureId: internalType === 'capture' ? sourceId : undefined,
+        dataSourceId: internalType === 'data' ? sourceId : undefined,
       },
     }))
   }
@@ -2049,6 +2130,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       enable_web_search: internetSearchEnabled,
       enabled_tools: enabledToolIds,
       enable_image_generation: enableImageGeneration,
+      browser_extension_enabled: browserCrawlerEnabled,
       content_weight: contentWeight / 100,
       quality_weight: qualityWeight / 100,
       completeness_weight: completenessWeight / 100,
@@ -2326,10 +2408,20 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
         summary: '创作 Agent 执行失败（详细错误未写入轨迹）',
       }
     }
+    if (event.type === 'agent.failed') {
+      // 节点级容错的失败留痕：错误码与原因是历史轨迹里展示失败详情的依据
+      return {
+        ...base,
+        data: { error_code: event.data?.error_code, error_reason: event.data?.error_reason },
+      }
+    }
     if (event.type === 'document.replaced') {
       return {
         ...base,
-        data: { operation: event.data?.operation || 'rewrite_document' },
+        data: {
+          operation: event.data?.operation || 'rewrite_document',
+          assembly_audit: event.data?.assembly_audit,
+        },
       }
     }
     if (event.type === 'document.patch.applied') {
@@ -2487,7 +2579,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     ) {
       phase.document = ''
     }
-    if (!['document.delta', 'document.patch.delta'].includes(event.type)) {
+    if (!['document.delta', 'document.patch.delta', 'document.preview'].includes(event.type)) {
       const current = useAppStore.getState().creationDraft.agentEvents
       setAgentEvents([...current, event])
     }
@@ -2497,6 +2589,10 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
         phase.document += content
         setGeneratedContent(phase.document)
       }
+    }
+    if (event.type === 'document.preview') {
+      phase.document = sanitizeGeneratedContent(String(event.data?.content || ''))
+      if (phase.document) setGeneratedContent(phase.document)
     }
     if (event.type === 'document.replaced') {
       phase.document = sanitizeGeneratedContent(String(event.data?.content || ''))
@@ -2569,7 +2665,19 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       }
       phase.completed = true
     }
-    if (event.type === 'run.failed') throw new Error(event.summary || '创作 Agent 执行失败')
+    if (event.type === 'run.failed') {
+      // phase.document 随预览/写回事件实时更新，失败时即已组装出的部分成果；
+      // 附在异常上抛出，供外层 catch 在中断后保全落库。
+      const failure = new Error(event.summary || '创作 Agent 执行失败') as Error & {
+        partialDocument?: string
+        errorCode?: string
+        retryable?: boolean
+      }
+      failure.partialDocument = phase.document
+      failure.errorCode = String(event.data?.error_code || '')
+      failure.retryable = Boolean(event.data?.retryable)
+      throw failure
+    }
   }
 
   const readAgentPhase = async (response: Response): Promise<AgentPhaseResult> => {
@@ -2646,31 +2754,23 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     })
   }
 
-  const addFiles = async (files: Iterable<File>) => {
+  const addFiles = async (files: Iterable<File>, mentionImages = false) => {
     setAttachmentError(null)
     try {
       const next = await filesToAttachments(files, attachments.length)
       setAttachments(prev => [...prev, ...next])
+      if (mentionImages) {
+        const imageMentions = next
+          .filter(item => item.type.startsWith('image/'))
+          .map(item => `@${item.name}`)
+        if (imageMentions.length) {
+          const separator = prompt && !/\s$/.test(prompt) ? ' ' : ''
+          setPrompt(`${prompt}${separator}${imageMentions.join(' ')} `)
+          window.requestAnimationFrame(() => promptInputRef.current?.focus())
+        }
+      }
     } catch (err) {
       setAttachmentError(toUserFacingError(err, '附件读取失败'))
-    }
-  }
-
-  const handlePreviewReferences = async () => {
-    if (!prompt.trim()) return
-    setIsPreviewing(true)
-    setError(null)
-    try {
-      const response = await postReferencePreview()
-      if (!response.ok) {
-        throw new Error(await readApiErrorMessage(response, `参考资料预览失败: ${response.status}`))
-      }
-      const data = await response.json()
-      setReferencePreview(data)
-    } catch (err) {
-      setError(toUserFacingError(err, '参考资料预览失败'))
-    } finally {
-      setIsPreviewing(false)
     }
   }
 
@@ -2950,6 +3050,25 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
         setError('已中止本次创作')
         return
       }
+      // 保全部分成果：中断时若已组装出文档（如模型连接在后续步骤被掐断），
+      // 先把已生成部分落库，避免中断前完成的章节随失败一起丢失。
+      const partialDocument = sanitizeGeneratedContent(
+        String((err as Error & { partialDocument?: string })?.partialDocument || ''),
+      )
+      if (partialDocument.trim()) {
+        try {
+          const usedModelId = useGatewayCreation && currentUser?.id
+            ? REMOTE_CREATION_MODEL_ID
+            : LOCAL_CREATION_MODEL_ID
+          const latencyMs = Date.now() - startedAt
+          const currentConversation = useAppStore.getState().creationDraft.conversation
+          await persistCreationResult(message, partialDocument, currentConversation, usedModelId, latencyMs)
+          setError('创作中断，已保存已生成部分，可重试继续')
+          return
+        } catch (persistErr) {
+          console.warn('创作中断后保存部分成果失败:', persistErr)
+        }
+      }
       setError(toUserFacingError(err, '生成失败，请稍后重试'))
     } finally {
       if (abortRef.current === controller) abortRef.current = null
@@ -3088,6 +3207,10 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     .find(message => message.role === 'user')
     ?.content
   const creationTimeline = buildCreationTimeline(conversation, agentEvents)
+  const currentAgentTraceKey = [...creationTimeline]
+    .reverse()
+    .find(item => item.kind === 'trace' && item.events.some(event => event.status === 'running'))
+    ?.key
   const referenceGroups = referenceGroupsFromEvents(
     agentEvents,
     referencePreview?.references || [],
@@ -3630,6 +3753,10 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                         key={item.key}
                         events={item.events}
                         onOpenReferences={openBottomTab}
+                        browserLiveJob={browserCrawlerEnabled && item.key === currentAgentTraceKey
+                          ? browserLiveJobs[0]
+                          : undefined}
+                        apiBaseUrl={apiBaseUrl}
                       />
                     )
                   }
@@ -3688,7 +3815,10 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
               <MentionHighlightTextarea
                 ref={promptInputRef}
                 value={prompt}
-                mentionLabels={installedSkills.map(skill => skill.title)}
+                mentionLabels={[
+                  ...installedSkills.map(skill => skill.title),
+                  ...attachments.filter(item => item.type.startsWith('image/')).map(item => item.name),
+                ]}
                 onChange={(event) => handlePromptChange(event.target.value, event.target.selectionStart)}
                 onCompositionStart={promptImeGuard.onCompositionStart}
                 onCompositionEnd={promptImeGuard.onCompositionEnd}
@@ -3732,7 +3862,10 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                 }}
                 onPaste={(event) => {
                   const files = Array.from(event.clipboardData.files || [])
-                  if (files.length) void addFiles(files)
+                  if (files.some(file => file.type.startsWith('image/'))) {
+                    event.preventDefault()
+                    void addFiles(files, true)
+                  }
                 }}
                 placeholder={generatedContent
                   ? '继续告诉 Agent 如何修改当前文档。Enter 发送，Shift+Enter 换行；输入 @ 可选择技能。'
@@ -3821,10 +3954,81 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                 event.currentTarget.value = ''
               }}
             />
+            <input
+              ref={folderInputRef}
+              type="file"
+              multiple
+              style={{ display: 'none' }}
+              aria-label="选择附件文件夹"
+              onChange={(event) => {
+                if (event.target.files) void addFiles(event.target.files)
+                event.currentTarget.value = ''
+              }}
+              {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
+            />
             <div className="creation-composer-actions">
               <div className="creation-model-row">
+                <div className="creation-composer-add" ref={composerAddMenuRef}>
+                  <button
+                    type="button"
+                    className="creation-composer-add__trigger"
+                    aria-label="添加"
+                    aria-haspopup="menu"
+                    aria-expanded={composerAddMenuOpen}
+                    onClick={() => setComposerAddMenuOpen(open => !open)}
+                    disabled={isGenerating}
+                  >
+                    <Plus size={20} strokeWidth={1.5} />
+                  </button>
+                  {composerAddMenuOpen && (
+                    <div className="creation-composer-add__menu" role="menu" aria-label="添加内容和插件">
+                      <span className="creation-composer-add__heading">添加</span>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setComposerAddMenuOpen(false)
+                          fileInputRef.current?.click()
+                        }}
+                      >
+                        <Paperclip size={17} />
+                        <span><strong>文件</strong><small>图片、PDF 或文档</small></span>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setComposerAddMenuOpen(false)
+                          folderInputRef.current?.click()
+                        }}
+                      >
+                        <FolderOpen size={17} />
+                        <span><strong>文件夹</strong><small>最多读取 6 个文件</small></span>
+                      </button>
+                      <span className="creation-composer-add__heading">插件</span>
+                      <button
+                        type="button"
+                        role="menuitemcheckbox"
+                        aria-checked={browserExtensionConnected && browserCrawlerEnabled}
+                        disabled={!browserExtensionConnected}
+                        onClick={() => {
+                          if (!browserExtensionConnected) return
+                          const enabled = !browserCrawlerEnabled
+                          browserCrawlerPreferenceInitializedRef.current = true
+                          setBrowserCrawlerEnabled(enabled)
+                          window.localStorage.setItem(BROWSER_CRAWLER_PREFERENCE_KEY, String(enabled))
+                        }}
+                      >
+                        <Globe2 size={17} />
+                        <span>
+                          <strong>浏览器爬虫</strong>
+                        </span>
+                        <i className={browserExtensionConnected && browserCrawlerEnabled ? 'is-on' : ''} aria-hidden><Check size={12} /></i>
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <ModelSelect
-                  label="模型"
                   value={activeCreationModelId}
                   options={CREATION_MODEL_DEFS}
                   disabled={isGenerating}
@@ -3839,14 +4043,6 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                 )}
               </div>
               <div className="creation-action-buttons">
-                <button onClick={handlePreviewReferences} disabled={!prompt.trim() || isPreviewing || isGenerating} style={secondaryButtonStyle}>
-                  {isPreviewing ? <Loader2 size={16} className="spin" /> : <FileText size={16} />}
-                  预览参考
-                </button>
-                <button onClick={() => fileInputRef.current?.click()} disabled={isGenerating} style={secondaryButtonStyle}>
-                  <Paperclip size={16} />
-                  附件
-                </button>
                 <button onClick={isGenerating ? handleStopGenerate : handleGenerate} disabled={!isGenerating && !prompt.trim()} style={isGenerating ? dangerButtonStyle : primaryButtonStyle}>
                   {isGenerating ? <Loader2 size={16} className="spin" /> : generatedContent ? <Send size={16} /> : <Sparkles size={16} />}
                   {isGenerating ? '中止' : generatedContent ? '发送' : '开始创作'}
@@ -3961,13 +4157,18 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                   <div style={{ height: '100%', display: 'grid', placeItems: 'center', color: 'var(--mb-text-secondary)', fontSize: 14, gap: 12 }}>
                     <Loader2 size={28} className="spin" color="#a45d22" />
                     <div style={{ textAlign: 'center', lineHeight: 1.6 }}>
-                      <div style={{ fontWeight: 600, color: '#a45d22', marginBottom: 4 }}>模型正在深度推理中</div>
+                      <div className="creation-deep-thinking-label">
+                        <span className="creation-deep-thinking-label__icon" aria-hidden="true">
+                          <img src="/brand/memorybread-bread-mark.png" alt="" />
+                        </span>
+                        <span>模型正在深度推理中</span>
+                      </div>
                       <div>已思考 {elapsedSeconds} 秒，预计进度 {generationProgress}%</div>
                     </div>
                   </div>
                 ) : (
                   <div style={{ height: '100%', display: 'grid', placeItems: 'center', color: 'var(--mb-text-tertiary)', fontSize: 14 }}>
-                    输入创作需求后，可以先预览参考资料，也可以直接开始生成。
+                    输入创作需求后即可开始生成，Agent 会按需检索参考资料。
                   </div>
                 )}
               </div>
@@ -4065,7 +4266,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                     ))}
                   </div>
                 ) : (
-                  <div style={{ color: 'var(--mb-text-secondary)', fontSize: 13 }}>暂无资料，请先点击「预览参考」。</div>
+                  <div style={{ color: 'var(--mb-text-secondary)', fontSize: 13 }}>暂无资料；开始创作后，Agent 会按需补充参考资料。</div>
                 )}
               </div>
             )}
@@ -4267,6 +4468,7 @@ const agentEventStatusLabels: Record<string, string> = {
   waiting: '等待中',
   running: '进行中',
   completed: '已完成',
+  warning: '有警告',
   failed: '未完成',
   paused: '已暂停',
 }
@@ -4313,12 +4515,16 @@ const CREATION_THINKING_STAGE_LABELS: Record<string, string> = {
 const AgentExecutionTrace = ({
   events,
   onOpenReferences,
+  browserLiveJob,
+  apiBaseUrl,
 }: {
   events: CreationAgentEvent[]
   onOpenReferences: (
     tab: Extract<BottomTab, 'reference' | 'data'>,
     groupId?: string,
   ) => void
+  browserLiveJob?: BrowserLiveJob
+  apiBaseUrl: string
 }) => {
   const [expanded, setExpanded] = useState(true)
   const [openBlocks, setOpenBlocks] = useState<Record<string, boolean>>({})
@@ -4371,7 +4577,7 @@ const AgentExecutionTrace = ({
       .some(next => (
         next.events.some(event => (
           event.actor?.id === latestEvent.actor?.id
-          && ['completed', 'failed'].includes(event.status)
+          && ['completed', 'warning', 'failed'].includes(event.status)
         ))
       ))
     return resolved ? 'completed' : latestEvent.status
@@ -4380,6 +4586,13 @@ const AgentExecutionTrace = ({
   flatGroups.forEach((group, flatIndex) => {
     groupStatusByKey.set(group.key, resolveGroupStatus(group, flatIndex))
   })
+  const runningGroups = [...flatGroups].reverse().filter(group => (
+    groupStatusByKey.get(group.key) === 'running'
+  ))
+  const browserLiveGroupKey = browserLiveJob
+    ? runningGroups.find(group => group.events.some(event => event.actor?.id === 'webpage_scrape'))?.key
+      || runningGroups[0]?.key
+    : undefined
   const webpageScrapeTerminalStatus = [...events]
     .reverse()
     .find(event => (
@@ -4442,11 +4655,13 @@ const AgentExecutionTrace = ({
           aria-expanded={showDetails}
         >
           <span
-            className={`creation-agent-event__icon is-${actorEvent.actor?.kind || 'agent'}${displayStatus === 'completed' || displayStatus === 'failed' ? ' is-dot' : ''}`}
+            className={`creation-agent-event__icon is-${actorEvent.actor?.kind || 'agent'}${['completed', 'warning', 'failed'].includes(displayStatus) ? ' is-dot' : ''}`}
             aria-hidden="true"
           >
             {displayStatus === 'completed'
                 ? <span className="creation-agent-event__dot is-done" />
+                : displayStatus === 'warning'
+                  ? <span className="creation-agent-event__dot is-warning" />
                 : displayStatus === 'failed'
                   ? <span className="creation-agent-event__dot is-failed" />
                   : actorEvent.actor?.kind === 'tool'
@@ -4466,6 +4681,9 @@ const AgentExecutionTrace = ({
             )}
           </span>
         </div>
+        {browserLiveJob && browserLiveGroupKey === group.key && (
+          <BrowserLiveDock job={browserLiveJob} apiBaseUrl={apiBaseUrl} />
+        )}
         {showDetails && (
           <div className="creation-agent-event__updates">
             <div className="creation-agent-event__capability">
@@ -4568,13 +4786,20 @@ const AgentExecutionTrace = ({
   // 顶层阶段行：序号 + 阶段标题 + 灰色耗时，展开后是思考/动作块，竖线标识层级
   const renderPhaseSegment = (segment: RenderPhaseSegment) => {
     const isRunning = segment.status === 'running'
+    const hasWarning = !isRunning && segment.innerSegments.some((inner) => (
+      inner.kind === 'step'
+        ? ['warning', 'failed'].includes(groupStatusByKey.get(inner.group.key) || '')
+        : inner.innerGroups.some(group => (
+          ['warning', 'failed'].includes(groupStatusByKey.get(group.key) || '')
+        ))
+    ))
     const showBody = isRunning || Boolean(openBlocks[segment.key])
     const durationSeconds = segment.durationMs == null
       ? null
       : Math.max(1, Math.round(segment.durationMs / 1000))
     return (
       <div
-        className={`creation-trace-phase${isRunning ? ' is-running' : ' is-completed'}`}
+        className={`creation-trace-phase${isRunning ? ' is-running' : hasWarning ? ' is-warning' : ' is-completed'}`}
         key={segment.key}
       >
         <button
@@ -4584,14 +4809,14 @@ const AgentExecutionTrace = ({
           aria-expanded={showBody}
         >
           <span
-            className={`creation-trace-phase__dot${isRunning ? '' : ' is-done'}`}
+            className={`creation-trace-phase__dot${isRunning ? '' : hasWarning ? ' is-warning' : ' is-done'}`}
             aria-hidden="true"
           />
           <span className="creation-trace-phase__title">
             {`${phaseIndexes.get(segment.key) || ''}. ${segment.title}`}
           </span>
           <span className="creation-trace-phase__meta">
-            {isRunning ? '进行中' : durationSeconds != null ? `${durationSeconds}s` : '已完成'}
+            {isRunning ? '进行中' : hasWarning ? '有警告' : durationSeconds != null ? `${durationSeconds}s` : '已完成'}
           </span>
         </button>
         {showBody && (
@@ -4756,6 +4981,65 @@ const BrowserPreviewStrip = ({
   )
 }
 
+const BROWSER_LIVE_STAGE_LABELS: Record<string, string> = {
+  queued: '等待浏览器',
+  opening: '创建后台页面',
+  loading: '加载页面',
+  reading: '读取页面数据',
+  finalizing: '整理采集结果',
+  complete: '采集完成',
+  failed: '采集未完成',
+  timeout: '页面加载超时',
+  disconnected: '浏览器连接中断',
+}
+
+const BrowserLiveDock = ({
+  job,
+  apiBaseUrl,
+}: {
+  job: BrowserLiveJob
+  apiBaseUrl: string
+}) => {
+  const isRunning = ['queued', 'running'].includes(job.status)
+  const previewUrl = `${apiBaseUrl}/api/browser-integration/jobs/${job.browser_job_id}/preview?revision=${job.preview_revision}`
+  let hostname = job.url
+  try {
+    hostname = new URL(job.url).hostname
+  } catch {
+    // 保留原始地址作为回退文案。
+  }
+  return (
+    <section className={`creation-browser-live is-${job.status}`} aria-label="浏览器现场">
+      <div className="creation-browser-live__header">
+        <span className="creation-browser-live__eyebrow">
+          <i aria-hidden /> 浏览器现场
+        </span>
+        <span className="creation-browser-live__stage">
+          {isRunning && <Loader2 size={12} className="spin" />}
+          {BROWSER_LIVE_STAGE_LABELS[job.stage] || (isRunning ? '后台读取中' : '采集已结束')}
+        </span>
+      </div>
+      <div className="creation-browser-live__body">
+        <div className="creation-browser-live__screen">
+          {job.has_preview ? (
+            <img src={previewUrl} alt={`${job.title || hostname}后台浏览器实时画面`} />
+          ) : (
+            <div className="creation-browser-live__waiting">
+              <Globe2 size={22} />
+              <span>正在连接页面画面</span>
+              <i aria-hidden />
+            </div>
+          )}
+        </div>
+        <div className="creation-browser-live__meta">
+          <span className="creation-browser-live__title">{job.title || '正在打开页面'}</span>
+          <span>{hostname}</span>
+        </div>
+      </div>
+    </section>
+  )
+}
+
 const BrowserPreviewCard = ({
   preview,
   status,
@@ -4857,8 +5141,11 @@ const agentEventDetails = (event: CreationAgentEvent) => {
   if (event.actor?.kind === 'tool' && data.diagram_type) {
     details.push({ label: '图类型', value: String(data.diagram_type) })
   }
-  if (event.type === 'tool.failed' && data.error_code) {
+  if ((event.type === 'tool.failed' || event.type === 'agent.failed') && data.error_code) {
     details.push({ label: '错误码', value: String(data.error_code) })
+  }
+  if (event.type === 'agent.failed' && data.error_reason) {
+    details.push({ label: '失败原因', value: String(data.error_reason) })
   }
   if (event.type === 'harness.decision') {
     const triggerStatus = agentEventStatusLabels[String(data.trigger_status || '')] || '状态未知'
@@ -5224,12 +5511,26 @@ const DataReferenceRow = ({
   )
 }
 
+const referenceRefreshLabel = (item: ReferenceItem) => {
+  if (item.refresh_status === 'fresh_complete') return '刚刚已校验'
+  if (item.refresh_status === 'fresh_recent') return '近期已校验'
+  if (item.refresh_status === 'fresh_partial') return '部分采集'
+  if (item.refresh_status === 'fresh_recent_partial') return '近期部分采集'
+  if (item.refresh_status === 'unavailable') return '当前不可用'
+  return item.source_url ? '历史版本·本轮未验证' : ''
+}
+
 const ReferenceRow = ({ item, onOpenSource }: { item: ReferenceItem; onOpenSource: (item: ReferenceItem) => void }) => (
   <div style={{ border: '1px solid var(--mb-border-strong)', borderRadius: 8, padding: 12 }}>
     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
       <div style={{ fontSize: 14, fontWeight: 650, lineHeight: 1.35 }}>{item.title}</div>
     </div>
     <div style={{ marginTop: 6, fontSize: 12, color: 'var(--mb-text-secondary)' }}>{item.doc_type || '未分类'} · 打开/引用 {item.usage_count}</div>
+    {referenceRefreshLabel(item) && (
+      <div style={{ marginTop: 6, fontSize: 11, color: ['fresh_complete', 'fresh_recent'].includes(item.refresh_status || '') ? '#287a45' : '#9a5b16', fontWeight: 650 }}>
+        {referenceRefreshLabel(item)}
+      </div>
+    )}
     <div style={{ marginTop: 8, fontSize: 12, color: 'var(--mb-text-secondary)', lineHeight: 1.55 }}>{item.reason}</div>
     <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, fontSize: 11, color: 'var(--mb-text-secondary)' }}>
       <span>相关 {Math.round(item.relevance_score * 100)}</span>

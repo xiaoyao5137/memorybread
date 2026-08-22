@@ -2128,6 +2128,11 @@ button.bake-list-item.bake-list-item--active {
   font: inherit;
 }
 
+.bake-data-content {
+  font-size: 12px;
+  line-height: 1.7;
+}
+
 .bake-data-json {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 11px;

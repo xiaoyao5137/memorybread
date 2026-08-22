@@ -12,9 +12,16 @@ PACKAGE_ROOT="$TAURI_DIR/target/macos-package"
 STAGING_DIR="$TAURI_DIR/binaries"
 MODE="${1:-dmg}"
 DMG_ICON_TEMP_ROOT=""
+DMG_STAGE_ROOT=""
+DMG_TEMP_PATH=""
+DMG_CUSTOMIZATION_MOUNT=""
+DMG_CUSTOMIZATION_DEVICE=""
 
 export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.0}"
+# 禁止 bsdtar/ditto 等工具把扩展属性写成 AppleDouble（._）文件；
+# 更新包里混入 ._ 条目会导致客户端 updater 解包失败（failed to unpack `._xxx.app`）。
+export COPYFILE_DISABLE=1
 
 fail() {
   echo "[macOS build] $*" >&2
@@ -22,9 +29,22 @@ fail() {
 }
 
 cleanup() {
+  if [ -n "$DMG_CUSTOMIZATION_DEVICE" ]; then
+    hdiutil detach "$DMG_CUSTOMIZATION_DEVICE" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$DMG_CUSTOMIZATION_MOUNT" ] && [ -d "$DMG_CUSTOMIZATION_MOUNT" ]; then
+    rmdir "$DMG_CUSTOMIZATION_MOUNT" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$DMG_TEMP_PATH" ] && [ -f "$DMG_TEMP_PATH" ]; then
+    rm -f "$DMG_TEMP_PATH"
+  fi
   if [ -n "$DMG_ICON_TEMP_ROOT" ] && [ -d "$DMG_ICON_TEMP_ROOT" ]; then
     find "$DMG_ICON_TEMP_ROOT" -depth -mindepth 1 -delete >/dev/null 2>&1 || true
     rmdir "$DMG_ICON_TEMP_ROOT" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$DMG_STAGE_ROOT" ] && [ -d "$DMG_STAGE_ROOT" ]; then
+    find "$DMG_STAGE_ROOT" -depth -mindepth 1 -delete >/dev/null 2>&1 || true
+    rmdir "$DMG_STAGE_ROOT" >/dev/null 2>&1 || true
   fi
 }
 
@@ -87,6 +107,48 @@ locate_updater_bundle() {
   find "$TAURI_DIR/target/$TARGET" -path '*/release/bundle/macos/*.app.tar.gz' -type f -print -quit
 }
 
+finalize_updater_bundle() {
+  # Tauri 生成更新包发生在恢复 PyInstaller 符号链接之前，且手动重打包时
+  # macOS bsdtar 会为每个带扩展属性的文件追加 AppleDouble（._）条目；
+  # 客户端 updater 对顶层 ._ 条目解包会直接失败。
+  # 因此基于最终 .app 重新打包并重签，并用门禁拒绝含 ._ 条目的归档。
+  local updater_path bundle_dir app_name updater_password
+  updater_path="$(locate_updater_bundle)"
+  [ -n "$updater_path" ] && [ -f "$updater_path" ] || fail "未找到 Tauri 更新包，无法重新打包"
+  bundle_dir="$(dirname "$updater_path")"
+  app_name="$(basename "$APP_PATH")"
+  [ -d "$bundle_dir/$app_name" ] || fail "更新包目录中未找到 $app_name"
+
+  echo "[macOS build] 基于最终 .app 重新打包更新产物..."
+  find "$APP_PATH" -name '._*' -type f -delete
+  rm -f "$updater_path" "$updater_path.sig"
+  COPYFILE_DISABLE=1 tar -czf "$updater_path" -C "$bundle_dir" "$app_name"
+
+  # 门禁：归档内不得存在任何 ._ AppleDouble 条目（bsdtar 列表会隐藏它们，用 python 核对）
+  python3 - "$updater_path" <<'PY' || fail "更新归档包含 ._ AppleDouble 条目，禁止发布"
+import os, sys, tarfile
+names = tarfile.open(sys.argv[1]).getnames()
+bad = [n for n in names if os.path.basename(n.rstrip('/')).startswith('._')]
+if bad:
+    print('AppleDouble entries:', bad[:3], file=sys.stderr)
+    sys.exit(1)
+PY
+
+  updater_password="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
+  if [ -z "$updater_password" ]; then
+    updater_password="$(security find-generic-password -s com.memory-bread.release.updater -w 2>/dev/null || true)"
+  fi
+  [ -n "$updater_password" ] \
+    || fail "缺少更新签名密码：请设置 TAURI_SIGNING_PRIVATE_KEY_PASSWORD 或钥匙串条目 com.memory-bread.release.updater"
+  (
+    cd "$DESKTOP_DIR"
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$updater_password" \
+      npx tauri signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" "$updater_path" >/dev/null
+  )
+  [ -f "$updater_path.sig" ] || fail "更新包重签名失败：未生成 .sig"
+  echo "[macOS build] 更新产物已基于最终 .app 重新打包并重签（无 ._ 条目）"
+}
+
 apply_dmg_file_icon() {
   local dmg_path="$1"
   local temp_root
@@ -111,6 +173,57 @@ apply_dmg_file_icon() {
   find "$temp_root" -depth -mindepth 1 -delete
   rmdir "$temp_root"
   DMG_ICON_TEMP_ROOT=""
+}
+
+restore_ai_helper_symlinks() {
+  local app_path="$1"
+  local bundled_helper="$app_path/Contents/Helpers/memory-bread-ai.app"
+  local staged_helper="$STAGING_DIR/memory-bread-ai.app"
+  local staged_link_count
+  local bundled_link_count
+
+  [ -d "$bundled_helper" ] || fail "App Bundle 中未找到 AI helper: $bundled_helper"
+  [ -d "$staged_helper" ] || fail "暂存目录中未找到 AI helper: $staged_helper"
+  staged_link_count="$(find "$staged_helper" -type l | wc -l | xargs)"
+  [ "$staged_link_count" -gt 0 ] || fail "暂存的 AI helper 中未找到 PyInstaller 符号链接"
+
+  # Tauri 的 resources 目标位于 Contents/Helpers。重新复制 PyInstaller 原始
+  # .app，避免资源打包阶段把其框架/动态库符号链接展开成普通文件。
+  rm -rf "$bundled_helper"
+  ditto "$staged_helper" "$bundled_helper"
+  bundled_link_count="$(find "$bundled_helper" -type l | wc -l | xargs)"
+  [ "$bundled_link_count" -eq "$staged_link_count" ] \
+    || fail "AI helper 符号链接恢复不完整：期望 ${staged_link_count}，实际 ${bundled_link_count}"
+  echo "[macOS build] AI helper 符号链接已恢复：${bundled_link_count} 个"
+}
+
+create_dmg_with_volume_icon() {
+  local dmg_path="$1"
+  local attach_output
+
+  DMG_TEMP_PATH="$(mktemp "${TMPDIR:-/tmp}/memory-bread-dmg-rw.XXXXXX.dmg")"
+  rm "$DMG_TEMP_PATH"
+  DMG_CUSTOMIZATION_MOUNT="$(mktemp -d "${TMPDIR:-/tmp}/memory-bread-dmg-customize.XXXXXX")"
+
+  cp "$TAURI_DIR/icons/icon.icns" "$DMG_STAGE_ROOT/.VolumeIcon.icns"
+  hdiutil create -volname "记忆面包" -srcfolder "$DMG_STAGE_ROOT" -ov -format UDRW "$DMG_TEMP_PATH" >/dev/null
+  attach_output="$(hdiutil attach -readwrite -nobrowse -mountpoint "$DMG_CUSTOMIZATION_MOUNT" "$DMG_TEMP_PATH")"
+  DMG_CUSTOMIZATION_DEVICE="$(printf '%s\n' "$attach_output" | awk '$1 ~ /^\/dev\/disk[0-9]+$/ {print $1; exit}')"
+  [ -n "$DMG_CUSTOMIZATION_DEVICE" ] || fail "无法确定可写 DMG 的挂载设备"
+
+  # 卷根目录的 FinderInfo 必须在已挂载的可写卷内设置；在 srcfolder 上设置
+  # 会在 hdiutil create 时丢失，导致发布校验看不到自定义图标标记。
+  SetFile -a C "$DMG_CUSTOMIZATION_MOUNT"
+  sync
+  hdiutil detach "$DMG_CUSTOMIZATION_DEVICE" >/dev/null
+  DMG_CUSTOMIZATION_DEVICE=""
+  rmdir "$DMG_CUSTOMIZATION_MOUNT"
+  DMG_CUSTOMIZATION_MOUNT=""
+
+  rm -f "$dmg_path"
+  hdiutil convert "$DMG_TEMP_PATH" -format UDZO -o "$dmg_path" >/dev/null
+  rm "$DMG_TEMP_PATH"
+  DMG_TEMP_PATH=""
 }
 
 prepare_python_helper() {
@@ -282,15 +395,20 @@ prepare_core_helper() {
   rustup target add "$TARGET" >/dev/null
   cargo build --release --target "$TARGET" --manifest-path "$CORE_MANIFEST"
   local core_binary="$PROJECT_ROOT/core-engine/target/$TARGET/release/memory-bread"
+  local browser_bridge_binary="$PROJECT_ROOT/core-engine/target/$TARGET/release/memorybread-browser-bridge"
   [ -x "$core_binary" ] || fail "未生成 core-engine: $core_binary"
+  [ -x "$browser_bridge_binary" ] || fail "未生成 Chrome browser bridge: $browser_bridge_binary"
   cp "$core_binary" "$STAGING_DIR/memory-bread-core-$TARGET"
+  cp "$browser_bridge_binary" "$STAGING_DIR/memorybread-browser-bridge-$TARGET"
   chmod +x "$STAGING_DIR/memory-bread-core-$TARGET"
+  chmod +x "$STAGING_DIR/memorybread-browser-bridge-$TARGET"
 }
 
 verify_staged_helpers() {
   local helper
   for helper in \
     "$STAGING_DIR/memory-bread-core-$TARGET" \
+    "$STAGING_DIR/memorybread-browser-bridge-$TARGET" \
     "$STAGING_DIR/memory-bread-ai.app/Contents/MacOS/memory-bread-ai"; do
     file "$helper" | grep -q 'Mach-O' || fail "helper 不是 Mach-O: $helper"
     file "$helper" | grep -q "${TARGET%%-*}\|$(uname -m)" || fail "helper 架构与 ${TARGET} 不匹配: $helper"
@@ -435,28 +553,25 @@ if [ "$MODE" = "dmg" ]; then
   [ -d "$APP_PATH" ] || fail "未找到生成的 .app"
 
   echo "[macOS build] 恢复 PyInstaller helper 的符号链接..."
-  AI_BUNDLE_PATH="$APP_PATH/Contents/Resources/binaries/memory-bread-ai.app"
-  AI_STAGING_PATH="$STAGING_DIR/memory-bread-ai.app"
-
-  if [ -d "$AI_BUNDLE_PATH" ] && [ -d "$AI_STAGING_PATH" ]; then
-    # 删除 Tauri 复制的版本（符号链接已被解析）
-    rm -rf "$AI_BUNDLE_PATH"
-    # 使用 ditto 重新复制，保留符号链接
-    ditto "$AI_STAGING_PATH" "$AI_BUNDLE_PATH"
-    echo "[macOS build] 符号链接已恢复：$(find "$AI_BUNDLE_PATH" -type l | wc -l | xargs) 个"
-  else
-    echo "[macOS build] 警告：未找到 AI helper，跳过符号链接恢复"
-  fi
+  restore_ai_helper_symlinks "$APP_PATH"
 
   APP_PATH="$(locate_app_bundle)"
   DMG_PATH="$(locate_dmg)"
   [ -d "$APP_PATH" ] || fail "未找到生成的 .app"
   [ -f "$DMG_PATH" ] || fail "未找到生成的 .dmg"
 
-  # 由于符号链接已恢复，需要重新创建 DMG（Tauri 创建的 DMG 不包含符号链接）
+  # 由于符号链接已恢复，需要重新创建 DMG（Tauri 创建的 DMG 不包含符号链接）。
+  # 重建时必须保留 Applications 快捷方式，否则卷里只有 .app，用户会直接双击
+  # 在只读挂载卷里运行，导致应用没有安装进 /Applications、启动台看不到图标。
   echo "[macOS build] 重新创建 DMG（包含符号链接）..."
   rm "$DMG_PATH"
-  hdiutil create -volname "记忆面包" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
+  DMG_STAGE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/memory-bread-dmg-stage.XXXXXX")"
+  ditto "$APP_PATH" "$DMG_STAGE_ROOT/$(basename "$APP_PATH")"
+  ln -s /Applications "$DMG_STAGE_ROOT/Applications"
+  create_dmg_with_volume_icon "$DMG_PATH"
+  find "$DMG_STAGE_ROOT" -depth -mindepth 1 -delete
+  rmdir "$DMG_STAGE_ROOT"
+  DMG_STAGE_ROOT=""
   echo "[macOS build] DMG 已重新创建"
 
   apply_dmg_file_icon "$DMG_PATH"
@@ -464,6 +579,7 @@ if [ "$MODE" = "dmg" ]; then
   echo "[macOS build] App: $APP_PATH"
   echo "[macOS build] DMG: $DMG_PATH"
   if [ "$UPDATER_PRIVATE_KEY_CONFIGURED" -eq 1 ]; then
+    finalize_updater_bundle
     UPDATER_PATH="$(locate_updater_bundle)"
     [ -f "$UPDATER_PATH" ] || fail "未找到 Tauri 更新包"
     [ -f "$UPDATER_PATH.sig" ] || fail "未找到 Tauri 更新签名"
@@ -493,14 +609,7 @@ APP_PATH="$(locate_app_bundle)"
 [ -d "$APP_PATH" ] || fail "未找到生成的 App Store .app"
 
 echo "[macOS build] 恢复 PyInstaller helper 的符号链接..."
-AI_BUNDLE_PATH="$APP_PATH/Contents/Resources/binaries/memory-bread-ai.app"
-AI_STAGING_PATH="$STAGING_DIR/memory-bread-ai.app"
-
-if [ -d "$AI_BUNDLE_PATH" ] && [ -d "$AI_STAGING_PATH" ]; then
-  rm -rf "$AI_BUNDLE_PATH"
-  ditto "$AI_STAGING_PATH" "$AI_BUNDLE_PATH"
-  echo "[macOS build] 符号链接已恢复：$(find "$AI_BUNDLE_PATH" -type l | wc -l | xargs) 个"
-fi
+restore_ai_helper_symlinks "$APP_PATH"
 
 APP_PATH="$(locate_app_bundle)"
 [ -d "$APP_PATH" ] || fail "未找到生成的 App Store .app"

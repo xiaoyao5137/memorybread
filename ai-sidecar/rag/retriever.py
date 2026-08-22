@@ -284,6 +284,77 @@ def _document_url_doc_key(url: Optional[str]) -> str:
     return f"document_url:{canonical}" if canonical else ""
 
 
+_CONSECUTIVE_PHRASE_ASCII_RE = re.compile(r"[a-z0-9][a-z0-9._:/+-]*", re.IGNORECASE)
+_CONSECUTIVE_PHRASE_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{3,}")
+# 连续命中加成：查询子词在产物字段中连续出现时的乘性系数。
+# 标题信号最强、正文字号最弱，多字段命中连乘，让源文档压过仅零散含词的衍生条目。
+_PHRASE_BOOST_TITLE = 1.5
+_PHRASE_BOOST_SUMMARY = 1.3
+_PHRASE_BOOST_BODY = 1.15
+
+
+def _consecutive_query_phrases(query: str) -> list[str]:
+    """提取查询中的连续短语：≥3 字的中文连续段与字母数字词元，用于字段内连续命中加成。"""
+    lowered = (query or "").lower()
+    phrases: list[str] = []
+    seen: set[str] = set()
+    for match in _CONSECUTIVE_PHRASE_CJK_RE.findall(lowered):
+        if match not in seen:
+            seen.add(match)
+            phrases.append(match)
+    for match in _CONSECUTIVE_PHRASE_ASCII_RE.findall(lowered):
+        if len(match) >= 2 and match not in seen:
+            seen.add(match)
+            phrases.append(match)
+    return phrases
+
+
+def _phrase_present(field: str, phrase: str) -> bool:
+    """短语是否在场内连续命中。
+
+    长短语（>4 字）额外接受覆盖度命中：拆出首尾两个 4 字子段，子段均在场内
+    连续出现即视为命中。否则标题嵌入完整查询串的衍生条目会系统性占优，
+    而主题原文档（标题常为同义变体）反而拿不到加成。
+    """
+    if phrase in field:
+        return True
+    if len(phrase) <= 4:
+        return False
+    head = phrase[:4]
+    tail = phrase[-4:]
+    return head in field and tail in field
+
+
+def _phrase_boost(
+    phrases: list[str],
+    title: str,
+    summary: str,
+    body: str,
+) -> float:
+    """查询连续短语在标题/摘要/正文中连续命中时的乘性加成（未命中为 1.0）。
+
+    各字段命中独立连乘；命中的不同短语数作为线性增量，避免指数放大让
+    标题恰好嵌入查询短语的衍生条目无限拔高。
+    """
+    if not phrases:
+        return 1.0
+    matched = {
+        phrase
+        for phrase in phrases
+        if _phrase_present(title, phrase) or _phrase_present(summary, phrase) or _phrase_present(body, phrase)
+    }
+    if not matched:
+        return 1.0
+    boost = 1.0
+    if any(_phrase_present(title, phrase) for phrase in matched):
+        boost *= _PHRASE_BOOST_TITLE
+    if any(_phrase_present(summary, phrase) for phrase in matched):
+        boost *= _PHRASE_BOOST_SUMMARY
+    if any(_phrase_present(body, phrase) for phrase in matched):
+        boost *= _PHRASE_BOOST_BODY
+    return boost * (1.0 + 0.25 * (len(matched) - 1))
+
+
 def _is_link_lookup_query(query: str) -> bool:
     lowered = query.lower()
     return any(term in lowered for term in ("url", "链接", "地址", "网址", "文档地址", "页面"))
@@ -357,7 +428,7 @@ def _rank_keyword_chunks(chunks: list["RetrievedChunk"], terms: list[str], prefe
             score += 4
         if document_query and metadata.get("source_type") == "document":
             score += 24
-        if metadata.get("source_type") in {"document", "operation", "bake_knowledge"}:
+        if metadata.get("source_type") in {"document", "operation", "bake_knowledge", "data"}:
             score += 2
         score += min(float(chunk.score or 0) / 2.0, 80.0)
         time_value = int(metadata.get("time") or metadata.get("ts") or 0)
@@ -528,7 +599,7 @@ class VectorRetriever:
             query_kwargs: dict[str, Any] = {
                 "collection_name": self.collection,
                 "query": query_vector,
-                "limit": min(max(top_k * 4, top_k), 100),
+                "limit": min(max(top_k * 4, top_k), 400),
                 "score_threshold": score_threshold,
             }
             qdrant_filter = self._build_qdrant_filter(filters)
@@ -926,7 +997,6 @@ class KnowledgeFts5Retriever:
         history_view: Optional[bool] = None,
         is_self_generated: Optional[bool] = None,
         evidence_strengths: Optional[list[str]] = None,
-        query_mode: str = "lookup",
         created_start_ts: Optional[int] = None,
         created_end_ts: Optional[int] = None,
     ) -> list[RetrievedChunk]:
@@ -938,10 +1008,7 @@ class KnowledgeFts5Retriever:
             cursor.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_fts'"
             )
-            if not cursor.fetchone():
-                logger.debug("knowledge_fts 表不存在，跳过知识库检索")
-                conn.close()
-                return []
+            has_knowledge_fts = cursor.fetchone() is not None
 
             prefer_url = _is_link_lookup_query(query)
             artifact_chunks = self._search_artifacts(
@@ -966,11 +1033,12 @@ class KnowledgeFts5Retriever:
                 history_view=history_view,
                 is_self_generated=is_self_generated,
                 evidence_strengths=evidence_strengths,
-                query_mode=query_mode,
                 created_start_ts=created_start_ts,
                 created_end_ts=created_end_ts,
-            )
-            fallback_chunks = [] if prefer_url and artifact_chunks else self._search_by_app_fields(
+            ) if has_knowledge_fts else []
+            fallback_chunks = [] if (
+                not has_knowledge_fts or (prefer_url and artifact_chunks)
+            ) else self._search_by_app_fields(
                     cursor,
                     query=query,
                     top_k=top_k,
@@ -986,7 +1054,6 @@ class KnowledgeFts5Retriever:
                     history_view=history_view,
                     is_self_generated=is_self_generated,
                     evidence_strengths=evidence_strengths,
-                    query_mode=query_mode,
                     created_start_ts=created_start_ts,
                     created_end_ts=created_end_ts,
                 )
@@ -998,6 +1065,151 @@ class KnowledgeFts5Retriever:
             logger.error(f"知识库检索失败: {e}")
             return []
 
+    def materialize_durable_knowledge(
+        self,
+        chunks: list[RetrievedChunk],
+        query: str,
+        entity_terms: Optional[list[str]] = None,
+    ) -> list[RetrievedChunk]:
+        """将 timeline ``knowledge`` 命中转换为对应的长期知识产物。
+
+        Timeline 仍可作为向量语义入口，但普通咨询不应直接展示它。没有长期
+        产物的 timeline 会被丢弃；非 timeline 候选保持原顺序和分数。
+        """
+        timeline_ids: list[str] = []
+        for chunk in chunks:
+            metadata = chunk.metadata or {}
+            if (metadata.get("source_type") or chunk.source) != "knowledge":
+                continue
+            value = str(metadata.get("knowledge_id") or "").strip()
+            if value and value not in timeline_ids:
+                timeline_ids.append(value)
+        if not timeline_ids:
+            return list(chunks)
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.cursor()
+            tables = {
+                str(row[0])
+                for row in cursor.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name IN ('bake_knowledge', 'bake_artifact_source_links')"
+                )
+            }
+            if "bake_knowledge" not in tables:
+                return [
+                    chunk for chunk in chunks
+                    if ((chunk.metadata or {}).get("source_type") or chunk.source) != "knowledge"
+                ]
+
+            artifact_ids_by_timeline: dict[str, list[str]] = {
+                timeline_id: [] for timeline_id in timeline_ids
+            }
+            placeholders = ", ".join("?" for _ in timeline_ids)
+            if "bake_artifact_source_links" in tables:
+                cursor.execute(
+                    f"""
+                    SELECT source_timeline_id, artifact_id
+                    FROM bake_artifact_source_links
+                    WHERE artifact_kind = 'knowledge'
+                      AND source_timeline_id IN ({placeholders})
+                    """,
+                    timeline_ids,
+                )
+                for timeline_id, artifact_id in cursor.fetchall():
+                    key = str(timeline_id)
+                    value = str(artifact_id)
+                    if value not in artifact_ids_by_timeline.get(key, []):
+                        artifact_ids_by_timeline.setdefault(key, []).append(value)
+
+            # 兼容尚未回填 source-link 的旧库：以 bake_knowledge 自身的来源字段补映射。
+            cursor.execute(
+                f"""
+                SELECT id, title, summary, content, detailed_content, timeline_id,
+                       source_timeline_ids, source_capture_ids, importance,
+                       user_verified, updated_at_ms
+                FROM bake_knowledge
+                WHERE CAST(timeline_id AS TEXT) IN ({placeholders})
+                   OR EXISTS (
+                       SELECT 1
+                       FROM json_each(
+                           CASE WHEN json_valid(source_timeline_ids)
+                                THEN source_timeline_ids ELSE '[]' END
+                       ) source
+                       WHERE CAST(source.value AS TEXT) IN ({placeholders})
+                   )
+                   OR id IN (
+                       SELECT artifact_id
+                       FROM bake_artifact_source_links
+                       WHERE artifact_kind = 'knowledge'
+                         AND source_timeline_id IN ({placeholders})
+                   )
+                """ if "bake_artifact_source_links" in tables else f"""
+                SELECT id, title, summary, content, detailed_content, timeline_id,
+                       source_timeline_ids, source_capture_ids, importance,
+                       user_verified, updated_at_ms
+                FROM bake_knowledge
+                WHERE CAST(timeline_id AS TEXT) IN ({placeholders})
+                   OR EXISTS (
+                       SELECT 1
+                       FROM json_each(
+                           CASE WHEN json_valid(source_timeline_ids)
+                                THEN source_timeline_ids ELSE '[]' END
+                       ) source
+                       WHERE CAST(source.value AS TEXT) IN ({placeholders})
+                   )
+                """,
+                timeline_ids * (3 if "bake_artifact_source_links" in tables else 2),
+            )
+            rows = cursor.fetchall()
+            plan = build_artifact_query_plan(cursor, query, entity_terms)
+        finally:
+            conn.close()
+
+        chunks_by_artifact: dict[str, RetrievedChunk] = {}
+        for row in rows:
+            artifact_id = str(row["id"])
+            source_ids = self._json_ids(row["source_timeline_ids"])
+            if row["timeline_id"] is not None:
+                source_ids.insert(0, str(row["timeline_id"]))
+            for timeline_id, linked_artifact_ids in artifact_ids_by_timeline.items():
+                if artifact_id in linked_artifact_ids and timeline_id not in source_ids:
+                    source_ids.append(timeline_id)
+            artifact_chunk = self._knowledge_artifact_row_to_chunk(
+                row, plan, _consecutive_query_phrases(query)
+            )
+            chunks_by_artifact[artifact_id] = artifact_chunk
+            for timeline_id in source_ids:
+                if timeline_id in artifact_ids_by_timeline:
+                    linked = artifact_ids_by_timeline[timeline_id]
+                    if artifact_id not in linked:
+                        linked.append(artifact_id)
+
+        result: list[RetrievedChunk] = []
+        seen: set[str] = set()
+        for chunk in chunks:
+            metadata = chunk.metadata or {}
+            source_type = metadata.get("source_type") or chunk.source
+            if source_type != "knowledge":
+                key = chunk.doc_key or str(metadata.get("doc_key") or "")
+                if key and key not in seen:
+                    result.append(chunk)
+                    seen.add(key)
+                continue
+            timeline_id = str(metadata.get("knowledge_id") or "").strip()
+            for artifact_id in artifact_ids_by_timeline.get(timeline_id, []):
+                artifact = chunks_by_artifact.get(artifact_id)
+                if artifact is None or not artifact.doc_key or artifact.doc_key in seen:
+                    continue
+                artifact.score = chunk.score
+                artifact.metadata["retrieval_method"] = "timeline_to_bake_knowledge"
+                artifact.metadata["semantic_source_timeline_id"] = timeline_id
+                result.append(artifact)
+                seen.add(artifact.doc_key)
+        return result
+
     def promote_documents_linked_to_knowledge(
         self,
         chunks: list[RetrievedChunk],
@@ -1006,34 +1218,49 @@ class KnowledgeFts5Retriever:
         entity_terms: Optional[list[str]] = None,
     ) -> list[RetrievedChunk]:
         """把知识命中反向映射为 ``linked_knowledge_ids`` 对应的持久文档。"""
+        if top_k <= 0:
+            return []
+
         ranked_ids: dict[str, tuple[int, float]] = {}
+        ranked_timeline_ids: dict[str, tuple[int, float]] = {}
+
+        def register(
+            target: dict[str, tuple[int, float]],
+            value: object,
+            rank: int,
+            score: float,
+        ) -> None:
+            normalized = str(value or "").strip()
+            if not normalized:
+                return
+            current = target.get(normalized)
+            candidate = (rank, score)
+            if current is None or candidate[0] < current[0]:
+                target[normalized] = candidate
+
         for rank, chunk in enumerate(chunks):
             metadata = chunk.metadata or {}
             source_type = metadata.get("source_type") or chunk.source
             if source_type not in {"knowledge", "bake_knowledge"}:
                 continue
 
-            knowledge_ids: list[str] = []
-            knowledge_id = metadata.get("knowledge_id")
-            if knowledge_id is not None:
-                knowledge_ids.append(str(knowledge_id))
+            score = float(chunk.score or 0.0)
+            if source_type == "bake_knowledge":
+                # bake_documents.linked_knowledge_ids 的稳定契约是
+                # bake_knowledge.id；不能把 timeline id 当作同一命名空间。
+                register(ranked_ids, metadata.get("artifact_id"), rank, score)
+                continue
+
+            register(ranked_timeline_ids, metadata.get("knowledge_id"), rank, score)
             source_timeline_ids = metadata.get("source_timeline_ids")
             if isinstance(source_timeline_ids, list):
-                knowledge_ids.extend(
-                    str(item) for item in source_timeline_ids if item is not None
-                )
+                for value in source_timeline_ids:
+                    register(ranked_timeline_ids, value, rank, score)
             elif isinstance(source_timeline_ids, str):
-                knowledge_ids.extend(re.findall(r"\d+", source_timeline_ids))
+                for value in re.findall(r"\d+", source_timeline_ids):
+                    register(ranked_timeline_ids, value, rank, score)
 
-            for value in knowledge_ids:
-                current = ranked_ids.get(value)
-                candidate = (rank, float(chunk.score or 0.0))
-                if current is None or candidate[0] < current[0]:
-                    ranked_ids[value] = candidate
-
-        if not ranked_ids or top_k <= 0:
-            return []
-
+        direct_artifact_count = len(ranked_ids)
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
@@ -1042,6 +1269,52 @@ class KnowledgeFts5Retriever:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='bake_documents'"
             )
             if not cursor.fetchone():
+                return []
+
+            mapped_timeline_count = 0
+            if ranked_timeline_ids:
+                cursor.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name='bake_artifact_source_links'"
+                )
+                if cursor.fetchone():
+                    timeline_ids = list(ranked_timeline_ids)
+                    timeline_placeholders = ", ".join("?" for _ in timeline_ids)
+                    cursor.execute(
+                        f"""
+                        SELECT source_timeline_id, artifact_id
+                        FROM bake_artifact_source_links
+                        WHERE artifact_kind = 'knowledge'
+                          AND source_timeline_id IN ({timeline_placeholders})
+                        """,
+                        timeline_ids,
+                    )
+                    for source_timeline_id, artifact_id in cursor.fetchall():
+                        source_rank = ranked_timeline_ids.get(str(source_timeline_id))
+                        if source_rank is None:
+                            continue
+                        register(
+                            ranked_ids,
+                            artifact_id,
+                            source_rank[0],
+                            source_rank[1],
+                        )
+                        mapped_timeline_count += 1
+                else:
+                    logger.warning(
+                        "知识关联提升缺少 source link 表，跳过 legacy timeline 映射: "
+                        "timeline_count=%d",
+                        len(ranked_timeline_ids),
+                    )
+
+            logger.info(
+                "知识关联 ID 规范化: direct_artifact_ids=%d timeline_ids=%d "
+                "mapped_timeline_ids=%d",
+                direct_artifact_count,
+                len(ranked_timeline_ids),
+                mapped_timeline_count,
+            )
+            if not ranked_ids:
                 return []
 
             knowledge_ids = list(ranked_ids)
@@ -1081,7 +1354,7 @@ class KnowledgeFts5Retriever:
                 continue
             source_rank = min(ranked_ids[value][0] for value in matched_ids)
             source_score = max(ranked_ids[value][1] for value in matched_ids)
-            chunk = self._document_row_to_chunk(row, plan)
+            chunk = self._document_row_to_chunk(row, plan, _consecutive_query_phrases(query))
             chunk.metadata["retrieval_method"] = "linked_knowledge"
             chunk.metadata["promoted_by_knowledge_ids"] = matched_ids
             chunk.metadata["linked_knowledge_score"] = source_score
@@ -1107,12 +1380,11 @@ class KnowledgeFts5Retriever:
         history_view: Optional[bool],
         is_self_generated: Optional[bool],
         evidence_strengths: Optional[list[str]],
-        query_mode: str,
         created_start_ts: Optional[int] = None,
         created_end_ts: Optional[int] = None,
     ) -> list[RetrievedChunk]:
-        fts_terms = list(dict.fromkeys([*(entity_terms or []), query.strip()]))
-        fts_query = _build_fts_or_query(fts_terms if query_mode == "summary" else [query.strip(), *(entity_terms or [])])
+        fts_terms = list(dict.fromkeys([query.strip(), *(entity_terms or [])]))
+        fts_query = _build_fts_or_query(fts_terms)
         if not fts_query:
             return []
 
@@ -1229,13 +1501,10 @@ class KnowledgeFts5Retriever:
         history_view: Optional[bool],
         is_self_generated: Optional[bool],
         evidence_strengths: Optional[list[str]],
-        query_mode: str,
         created_start_ts: Optional[int] = None,
         created_end_ts: Optional[int] = None,
     ) -> list[RetrievedChunk]:
         terms = entity_terms or _extract_query_terms(query)
-        if query_mode == "summary":
-            terms = [term for term in terms if not _is_app_like_term(term)] or terms
         terms = _bounded_fallback_terms(terms)
         # 任务型宽松检索：terms 为空时允许继续，纯按时间段和 activity_types 扫描
         # 非任务型检索：terms 为空则无意义，直接返回
@@ -1431,10 +1700,12 @@ class KnowledgeFts5Retriever:
         if not plan.candidate_terms and not plan.source_types:
             return []
 
+        phrases = _consecutive_query_phrases(query)
         chunks: list[RetrievedChunk] = []
-        chunks.extend(self._search_document_artifacts(cursor, plan, top_k))
-        chunks.extend(self._search_knowledge_artifacts(cursor, plan, top_k))
-        chunks.extend(self._search_operation_artifacts(cursor, plan, top_k))
+        chunks.extend(self._search_document_artifacts(cursor, plan, top_k, phrases))
+        chunks.extend(self._search_knowledge_artifacts(cursor, plan, top_k, phrases))
+        chunks.extend(self._search_operation_artifacts(cursor, plan, top_k, phrases))
+        chunks.extend(self._search_data_artifacts(cursor, plan, top_k, phrases))
         return _rank_keyword_chunks(
             chunks,
             plan.ranking_terms,
@@ -1446,12 +1717,9 @@ class KnowledgeFts5Retriever:
         cursor: sqlite3.Cursor,
         plan: ArtifactQueryPlan,
         top_k: int,
+        phrases: Optional[list[str]] = None,
     ) -> list[RetrievedChunk]:
-        if (
-            not plan.candidate_terms
-            and plan.source_types
-            and "document" not in plan.source_types
-        ):
+        if plan.source_types and "document" not in plan.source_types:
             return []
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='bake_documents'")
         if not cursor.fetchone():
@@ -1475,7 +1743,7 @@ class KnowledgeFts5Retriever:
         """
         cursor.execute(sql, [*params, max(top_k * 40, 300)])
         rows = cursor.fetchall()
-        chunks = [self._document_row_to_chunk(row, plan) for row in rows]
+        chunks = [self._document_row_to_chunk(row, plan, phrases) for row in rows]
         return chunks
 
     def _search_knowledge_artifacts(
@@ -1483,12 +1751,9 @@ class KnowledgeFts5Retriever:
         cursor: sqlite3.Cursor,
         plan: ArtifactQueryPlan,
         top_k: int,
+        phrases: Optional[list[str]] = None,
     ) -> list[RetrievedChunk]:
-        if (
-            not plan.candidate_terms
-            and plan.source_types
-            and "knowledge" not in plan.source_types
-        ):
+        if plan.source_types and "knowledge" not in plan.source_types:
             return []
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='bake_knowledge'")
         if not cursor.fetchone():
@@ -1512,19 +1777,16 @@ class KnowledgeFts5Retriever:
         """
         cursor.execute(sql, [*params, max(top_k * 40, 300)])
         rows = cursor.fetchall()
-        return [self._knowledge_artifact_row_to_chunk(row, plan) for row in rows]
+        return [self._knowledge_artifact_row_to_chunk(row, plan, phrases) for row in rows]
 
     def _search_operation_artifacts(
         self,
         cursor: sqlite3.Cursor,
         plan: ArtifactQueryPlan,
         top_k: int,
+        phrases: Optional[list[str]] = None,
     ) -> list[RetrievedChunk]:
-        if (
-            not plan.candidate_terms
-            and plan.source_types
-            and "operation" not in plan.source_types
-        ):
+        if plan.source_types and "operation" not in plan.source_types:
             return []
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='bake_sops'")
         if not cursor.fetchone():
@@ -1548,7 +1810,63 @@ class KnowledgeFts5Retriever:
         """
         cursor.execute(sql, [*params, max(top_k * 40, 300)])
         rows = cursor.fetchall()
-        return [self._operation_artifact_row_to_chunk(row, plan) for row in rows]
+        return [self._operation_artifact_row_to_chunk(row, plan, phrases) for row in rows]
+
+    def _search_data_artifacts(
+        self,
+        cursor: sqlite3.Cursor,
+        plan: ArtifactQueryPlan,
+        top_k: int,
+        phrases: Optional[list[str]] = None,
+    ) -> list[RetrievedChunk]:
+        if plan.source_types and "data" not in plan.source_types:
+            return []
+        tables = {
+            str(row[0])
+            for row in cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name IN ('data_sources', 'data_snapshots')"
+            )
+        }
+        if tables != {"data_sources", "data_snapshots"}:
+            return []
+
+        terms = plan.candidate_terms
+        expression = (
+            "LOWER(COALESCE(source.title, '') || ' ' || "
+            "COALESCE(source.tags, '') || ' ' || COALESCE(source.source_url, '') || ' ' || "
+            "COALESCE(snapshot.content_text, '') || ' ' || "
+            "COALESCE(snapshot.structured_data, ''))"
+        )
+        clause, params = _build_like_clauses(expression, terms)
+        candidate_filter = clause or "1=1"
+        cursor.execute(
+            f"""
+            SELECT source.id, source.title, source.source_kind, source.source_url,
+                   source.realtime_level, source.tags, source.updated_at,
+                   snapshot.id AS snapshot_id, snapshot.collected_at,
+                   snapshot.observed_at, snapshot.content_text,
+                   snapshot.content_text AS summary, snapshot.structured_data,
+                   snapshot.source_capture_ids, snapshot.source_timeline_ids
+            FROM data_sources source
+            JOIN data_snapshots snapshot ON snapshot.source_id = source.id
+            WHERE source.deleted_at IS NULL
+              AND source.status = 'active'
+              AND snapshot.status IN ('success', 'partial')
+              AND snapshot.id = (
+                  SELECT latest.id FROM data_snapshots latest
+                  WHERE latest.source_id = source.id
+                    AND latest.status IN ('success', 'partial')
+                  ORDER BY latest.collected_at DESC, latest.id DESC LIMIT 1
+              )
+              AND {candidate_filter}
+            ORDER BY snapshot.collected_at DESC, source.id DESC
+            LIMIT ?
+            """,
+            [*params, max(top_k * 40, 300)],
+        )
+        rows = cursor.fetchall()
+        return [self._data_artifact_row_to_chunk(row, plan, phrases) for row in rows]
 
     @staticmethod
     def _json_ids(value: Optional[str]) -> list[str]:
@@ -1573,6 +1891,7 @@ class KnowledgeFts5Retriever:
         row: sqlite3.Row,
         plan: ArtifactQueryPlan,
         text: str,
+        phrases: Optional[list[str]] = None,
     ) -> float:
         terms = plan.ranking_terms
         base = 50.0
@@ -1589,13 +1908,14 @@ class KnowledgeFts5Retriever:
                 score += weight * 2.0
             if lowered in title:
                 score += weight * 6.0
-        return score
+        return score * _phrase_boost(phrases or [], title, summary, lowered_text)
 
     @staticmethod
     def _bake_artifact_score(
         row: sqlite3.Row,
         plan: ArtifactQueryPlan,
         text: str,
+        phrases: Optional[list[str]] = None,
     ) -> float:
         terms = plan.ranking_terms
         base = 24.0
@@ -1612,12 +1932,13 @@ class KnowledgeFts5Retriever:
                 score += weight * 2.0
             if lowered in title:
                 score += weight * 6.0
-        return score
+        return score * _phrase_boost(phrases or [], title, summary, lowered_text)
 
     def _document_row_to_chunk(
         self,
         row: sqlite3.Row,
         plan: ArtifactQueryPlan,
+        phrases: Optional[list[str]] = None,
     ) -> RetrievedChunk:
         artifact_id = int(row["id"])
         doc_key = (
@@ -1630,7 +1951,7 @@ class KnowledgeFts5Retriever:
         return RetrievedChunk(
             capture_id=0,
             text=text,
-            score=self._document_artifact_score(row, plan, text),
+            score=self._document_artifact_score(row, plan, text, phrases),
             source="document",
             doc_key=doc_key,
             metadata={
@@ -1657,6 +1978,7 @@ class KnowledgeFts5Retriever:
         self,
         row: sqlite3.Row,
         plan: ArtifactQueryPlan,
+        phrases: Optional[list[str]] = None,
     ) -> RetrievedChunk:
         artifact_id = int(row["id"])
         doc_key = _artifact_doc_key("bake_knowledge", artifact_id)
@@ -1667,7 +1989,7 @@ class KnowledgeFts5Retriever:
         return RetrievedChunk(
             capture_id=0,
             text=text,
-            score=self._bake_artifact_score(row, plan, text),
+            score=self._bake_artifact_score(row, plan, text, phrases),
             source="bake_knowledge",
             doc_key=doc_key,
             metadata={
@@ -1691,6 +2013,7 @@ class KnowledgeFts5Retriever:
         self,
         row: sqlite3.Row,
         plan: ArtifactQueryPlan,
+        phrases: Optional[list[str]] = None,
     ) -> RetrievedChunk:
         artifact_id = int(row["id"])
         doc_key = _artifact_doc_key("operation", artifact_id)
@@ -1699,7 +2022,7 @@ class KnowledgeFts5Retriever:
         return RetrievedChunk(
             capture_id=0,
             text=text,
-            score=self._bake_artifact_score(row, plan, text),
+            score=self._bake_artifact_score(row, plan, text, phrases),
             source="operation",
             doc_key=doc_key,
             metadata={
@@ -1716,6 +2039,52 @@ class KnowledgeFts5Retriever:
                 "user_verified": bool(row["user_verified"]),
                 "time": row["updated_at_ms"],
                 "updated_at": row["updated_at_ms"],
+            },
+        )
+
+    def _data_artifact_row_to_chunk(
+        self,
+        row: sqlite3.Row,
+        plan: ArtifactQueryPlan,
+        phrases: Optional[list[str]] = None,
+    ) -> RetrievedChunk:
+        artifact_id = int(row["id"])
+        doc_key = _artifact_doc_key("data", artifact_id)
+        content = str(row["content_text"] or "")
+        structured = str(row["structured_data"] or "")
+        parts = [f"数据：{row['title']}"]
+        if content:
+            parts.append(f"内容：{content[:1200]}")
+        if structured and structured != "{}":
+            parts.append(f"结构化数据：{structured[:800]}")
+        if row["source_url"]:
+            parts.append(f"URL：{row['source_url']}")
+        text = "\n".join(parts)
+        return RetrievedChunk(
+            capture_id=0,
+            text=text,
+            score=self._bake_artifact_score(row, plan, text, phrases),
+            source="data",
+            doc_key=doc_key,
+            metadata={
+                "doc_key": doc_key,
+                "source_type": "data",
+                "retrieval_method": "artifact",
+                "artifact_id": artifact_id,
+                "data_source_id": artifact_id,
+                "snapshot_id": int(row["snapshot_id"]),
+                "title": row["title"],
+                "summary": content[:600],
+                "overview": content[:600],
+                "url": row["source_url"],
+                "source_url": row["source_url"],
+                "source_kind": row["source_kind"],
+                "realtime_level": row["realtime_level"],
+                "observed_at": row["observed_at"],
+                "time": row["collected_at"],
+                "updated_at": row["collected_at"],
+                "source_capture_ids": self._json_ids(row["source_capture_ids"]),
+                "source_timeline_ids": self._json_ids(row["source_timeline_ids"]),
             },
         )
 

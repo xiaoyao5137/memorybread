@@ -80,8 +80,44 @@ const installedStyleSkill = {
 
 describe('创作 Agent 多轮 Loop', () => {
   beforeEach(() => {
+    window.localStorage.clear()
     useAppStore.getState().reset()
     useAppStore.getState().setApiBaseUrl('http://localhost:7070')
+  })
+
+  it('Chrome 扩展连接后默认开启浏览器爬虫，并把粘贴图片转成 @附件', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/browser-integration/status') {
+        return Response.json({ connected: true, extension_version: '0.1.0' })
+      }
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      return new Response('{}', { status: 404 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<CreationPanel />)
+    fireEvent.click(screen.getByRole('button', { name: '添加' }))
+
+    const crawler = await screen.findByRole('menuitemcheckbox', { name: /浏览器爬虫/ })
+    await waitFor(() => expect(crawler).toHaveAttribute('aria-checked', 'true'))
+    expect(screen.queryByText('Chrome 扩展后台读取')).not.toBeInTheDocument()
+    expect(screen.getByText('文件')).toBeInTheDocument()
+    expect(screen.getByText('文件夹')).toBeInTheDocument()
+    fireEvent.click(crawler)
+    expect(crawler).toHaveAttribute('aria-checked', 'false')
+    expect(window.localStorage.getItem('memory-bread_creation_browser_crawler_enabled')).toBe('false')
+
+    const input = screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/)
+    const image = new File(['image-bytes'], '经营看板.png', { type: 'image/png' })
+    fireEvent.paste(input, { clipboardData: { files: [image] } })
+
+    await waitFor(() => expect(input).toHaveValue('@经营看板.png '))
+    expect(screen.getByText('经营看板.png')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /预览参考/ })).not.toBeInTheDocument()
   })
 
   afterEach(() => {
@@ -263,7 +299,7 @@ describe('创作 Agent 多轮 Loop', () => {
 
     render(<CreationPanel />)
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
 
     // 已完成的动作默认折叠为一行，点开后才能看到浏览器缩略预览。
     fireEvent.click(screen.getByRole('button', { name: /后台页面采集已结束/ }))
@@ -280,6 +316,66 @@ describe('创作 Agent 多轮 Loop', () => {
       expect.stringContaining('/api/creation/evidence/'),
     )
     expect(screen.getAllByRole('img', { name: '经营看板网页证据缩略图' })).toHaveLength(1)
+  })
+
+  it('在当前 Agent 执行行下方展示浏览器实时画面', async () => {
+    window.localStorage.setItem('memory-bread_creation_browser_crawler_enabled', 'true')
+    useAppStore.getState().setCreationDraft({
+      sessionId: 'session-agent-test',
+      conversation: [{
+        id: 'message-browser-live',
+        role: 'user',
+        content: '读取经营看板',
+        createdAt: 1_720_000_000_000,
+        runId: 'run-1',
+      }],
+      agentEvents: [event(
+        'tool.started',
+        1,
+        '正在读取经营看板',
+        { kind: 'tool', id: 'webpage_scrape', name: '网页读取 Tool' },
+      )] as any,
+    })
+    const jobId = '57a36a47-9594-401d-ac34-1592be3bcfc6'
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/browser-integration/status') {
+        return Response.json({
+          connected: true,
+          active_job_count: 1,
+          queued_job_count: 0,
+          jobs: [{
+            browser_job_id: jobId,
+            url: 'https://example.com/dashboard',
+            title: '经营看板',
+            status: 'running',
+            stage: 'reading',
+            updated_at: Date.now(),
+            has_preview: true,
+            preview_revision: 4,
+          }],
+        })
+      }
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+
+    const liveDock = await screen.findByLabelText('浏览器现场')
+    const activeLine = screen.getByText('正在读取经营看板').closest('.creation-agent-event')
+    expect(activeLine).toContainElement(liveDock)
+    expect(screen.getByLabelText('生成内容')).not.toContainElement(liveDock)
+    expect(liveDock).toHaveTextContent('读取页面数据')
+    expect(liveDock).not.toHaveTextContent('后台标签 · 不抢焦点')
+    expect(within(liveDock).getByText('经营看板')).toHaveClass('creation-browser-live__title')
+    expect(screen.getByRole('img', { name: '经营看板后台浏览器实时画面' })).toHaveAttribute(
+      'src',
+      `http://localhost:7070/api/browser-integration/jobs/${jobId}/preview?revision=4`,
+    )
   })
 
   it('为运行中的 Agent、Tool 和 Skill 展示呼吸状态灯', async () => {
@@ -320,7 +416,7 @@ describe('创作 Agent 多轮 Loop', () => {
 
     render(<CreationPanel />)
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
     const trace = screen.getByLabelText('Agent 执行情况')
     const runningEvents = trace.querySelectorAll('.creation-agent-event.is-running')
     expect(runningEvents).toHaveLength(3)
@@ -475,10 +571,10 @@ describe('创作 Agent 多轮 Loop', () => {
           event(
             'tool.completed',
             offset + 2,
-            '记忆搜索完成，召回 1 条本地资料',
+            '记忆搜索完成，召回 2 条本地资料',
             { kind: 'tool', id: 'memory_search', name: '记忆搜索 Tool' },
             {
-              result_count: 1,
+              result_count: 2,
               skill_step_title: 'AIGC进度总结',
               query: '当前步骤：AIGC进度总结 用@记忆搜索 Tool 工具获取本周AIGC共建项目的进展，以及AIGC共建项目周报里关于推理性能优化相关的进展，并以列表形式展示，最多10行文字\n整体创作背景：请使用@GPU成本优化周报创作法完成本周周报',
             },
@@ -498,6 +594,21 @@ describe('创作 Agent 多轮 Loop', () => {
                 freshness_score: 0.9,
                 usage_count: 3,
                 reason: '主题高度相关',
+              }, {
+                id: 60,
+                source_id: 60,
+                source_type: 'data',
+                title: '会议录制: GPU 成本优化专项周会',
+                doc_type: 'data',
+                final_weight: 0.72,
+                relevance_score: 0.7,
+                quality_score: 0.9,
+                completeness_score: 0.97,
+                usage_score: 0,
+                format_score: 0.55,
+                freshness_score: 0.8,
+                usage_count: 0,
+                reason: '命中关键词：GPU、成本优化',
               }],
             },
           ),
@@ -641,12 +752,12 @@ describe('创作 Agent 多轮 Loop', () => {
     expect(screen.getByLabelText('Agent 执行情况')).toHaveTextContent('原始需求')
     expect(screen.getByLabelText('Agent 执行情况')).toHaveTextContent('当前没有既有文档')
 
-    const memoryResultLink = screen.getByRole('button', { name: '召回 1 条本地资料，打开参考资料' })
+    const memoryResultLink = screen.getByRole('button', { name: '召回 2 条本地资料，打开参考资料' })
     const scrollIntoView = vi.fn()
     const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
     HTMLElement.prototype.scrollIntoView = scrollIntoView
     fireEvent.click(memoryResultLink)
-    expect(screen.getByRole('tab', { name: '参考资料 (1)' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tab', { name: '参考资料 (2)' })).toHaveAttribute('aria-selected', 'true')
     const referenceGroup = screen.getByLabelText('AIGC进度总结参考资料组')
     await waitFor(() => expect(referenceGroup).toHaveFocus())
     expect(referenceGroup.querySelector('.creation-reference-group__query')).toHaveTextContent(
@@ -660,10 +771,18 @@ describe('创作 Agent 多轮 Loop', () => {
       openedReferences.push((event as CustomEvent<Record<string, unknown>>).detail)
     }
     window.addEventListener('view-rag-reference', handleReferenceOpen)
-    fireEvent.click(within(referenceGroup).getByRole('button', { name: '资料来源' }))
+    const sourceButtons = within(referenceGroup).getAllByRole('button', { name: '资料来源' })
+    fireEvent.click(sourceButtons[0])
     expect(openedReferences).toContainEqual(expect.objectContaining({
       type: 'bake_knowledge',
       artifactId: 2285,
+    }))
+    // 数据记忆域的参考资料没有外链时，也必须能跳转到记忆力的数据页，
+    // 不能因为缺少 source_url 就静默无响应。
+    fireEvent.click(sourceButtons[1])
+    expect(openedReferences).toContainEqual(expect.objectContaining({
+      type: 'data',
+      dataSourceId: 60,
     }))
     window.removeEventListener('view-rag-reference', handleReferenceOpen)
 
@@ -906,6 +1025,73 @@ describe('创作 Agent 多轮 Loop', () => {
     expect(savedHistories[0].agent_trace).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'document.patch.applied' }),
     ]))
+  })
+
+  it('严格 Skill 步骤生成时实时展示临时文档且不把预览写入历史轨迹', async () => {
+    const encoder = new TextEncoder()
+    const savedHistories: any[] = []
+    let releaseFinal: (() => void) | undefined
+    const previewDocument = '# GPU成本优化周报\n\n## AIGC进度总结\n\n- 推理性能优化已完成首轮验证。'
+    const finalDocument = `${previewDocument}\n\n## GPU算力数据\n\n总卡数为 1803.59 卡。`
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history' && (!init?.method || init.method === 'GET')) {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.pathname === '/api/creation/history' && init?.method === 'POST') {
+        savedHistories.push(JSON.parse(String(init.body || '{}')))
+        return Response.json({ id: 91 })
+      }
+      if (url.pathname === '/api/creation/agent/run') {
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(
+              `data: ${JSON.stringify(event(
+                'document.preview',
+                1,
+                '正在生成「AIGC进度总结」内容',
+                undefined,
+                {
+                  content: previewDocument,
+                  section_title: 'AIGC进度总结',
+                  progress_chars: 28,
+                },
+              ))}\n\n`,
+            ))
+            releaseFinal = () => {
+              controller.enqueue(encoder.encode(
+                `data: ${JSON.stringify({
+                  ...event('run.completed', 2, '本轮创作完成', undefined, { document: finalDocument }),
+                  status: 'completed',
+                })}\n\n`,
+              ))
+              controller.close()
+            }
+          },
+        }), { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+    const input = screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/)
+    fireEvent.change(input, { target: { value: '请生成本周 GPU 成本优化周报' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
+
+    await waitFor(() => expect(
+      useAppStore.getState().creationDraft.generatedContent,
+    ).toContain('推理性能优化已完成首轮验证。'))
+    expect(savedHistories).toHaveLength(0)
+    releaseFinal?.()
+
+    await waitFor(() => expect(
+      useAppStore.getState().creationDraft.generatedContent,
+    ).toContain('总卡数为 1803.59 卡。'))
+    await waitFor(() => expect(savedHistories).toHaveLength(1))
+    expect(savedHistories[0].agent_trace).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'document.preview' })]),
+    )
   })
 
   it('浏览器即时刷新完成后重新读取来源快照并保存最新可用状态', async () => {
@@ -1922,5 +2108,63 @@ describe('创作 Agent 多轮 Loop', () => {
       phase_title: '生成文档内容',
       phase_kind: 'plan_step',
     })
+  })
+
+  it('报表校验未通过时步骤及所属阶段显示黄色警告圆点', async () => {
+    const warningEvent = {
+      ...event(
+        'tool.completed',
+        3,
+        '浏览器访问 1 个报表，但没有指标通过页面结构校验，本轮不采用这些页面的数值',
+        { kind: 'tool', id: 'webpage_scrape', name: '网页爬取 Tool' },
+        { result_count: 0, failed_count: 1, attempted_count: 1 },
+      ),
+      status: 'warning',
+    }
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history' && (!init?.method || init.method === 'GET')) {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.pathname === '/api/creation/history' && init?.method === 'POST') {
+        return Response.json({ id: 99 })
+      }
+      if (url.pathname === '/api/creation/agent/run') {
+        return sse([
+          event('run.started', 1, '创作 Agent 已接管目标'),
+          event('phase.started', 2, '阶段开始：刷新 Token 数据', undefined, {
+            phase_id: 'step:webpage_scrape',
+            phase_title: '刷新 Token 数据',
+            phase_kind: 'plan_step',
+          }),
+          warningEvent,
+          event('phase.completed', 4, '阶段完成：刷新 Token 数据', undefined, {
+            phase_id: 'step:webpage_scrape',
+            phase_title: '刷新 Token 数据',
+            phase_kind: 'plan_step',
+          }),
+          { ...event('run.completed', 5, '本轮创作完成', undefined, { document: '# Token 摘要' }), status: 'completed' },
+        ])
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+    const input = screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/)
+    fireEvent.change(input, { target: { value: '生成本周 Token 数据摘要' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
+
+    const phaseTitle = await screen.findByText('1. 刷新 Token 数据')
+    const phase = phaseTitle.closest('.creation-trace-phase')
+    expect(phase).toHaveClass('is-warning')
+    expect(phase?.querySelector('.creation-trace-phase__dot.is-warning')).toBeTruthy()
+    expect(phase).toHaveTextContent('有警告')
+
+    fireEvent.click(phase?.querySelector('.creation-trace-phase__header') as HTMLElement)
+    const warningSummary = await screen.findByText(/没有指标通过页面结构校验/)
+    const warningStep = warningSummary.closest('.creation-agent-event')
+    expect(warningStep).toHaveClass('is-warning')
+    expect(warningStep?.querySelector('.creation-agent-event__dot.is-warning')).toBeTruthy()
   })
 })

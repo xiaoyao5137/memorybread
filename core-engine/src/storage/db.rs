@@ -412,9 +412,7 @@ static MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "097_refine_timeline_dataset_titles",
-        include_str!(
-            "../../../shared/db-schema/migrations/097_refine_timeline_dataset_titles.sql"
-        ),
+        include_str!("../../../shared/db-schema/migrations/097_refine_timeline_dataset_titles.sql"),
     ),
     (
         "098_refresh_dataset_natural_summaries",
@@ -427,6 +425,22 @@ static MIGRATIONS: &[(&str, &str)] = &[
         include_str!(
             "../../../shared/db-schema/migrations/099_repair_timeline_dataset_snapshots.sql"
         ),
+    ),
+    (
+        "100_bake_document_refresh_policy",
+        include_str!("migrations/100_bake_document_refresh_policy.sql"),
+    ),
+    (
+        "101_bake_document_source_snapshots",
+        include_str!("migrations/101_bake_document_source_snapshots.sql"),
+    ),
+    (
+        "102_memory_quality_gates",
+        include_str!("migrations/102_memory_quality_gates.sql"),
+    ),
+    (
+        "103_data_fact_quality_gate",
+        include_str!("migrations/103_data_fact_quality_gate.sql"),
     ),
 ];
 
@@ -799,6 +813,55 @@ impl StorageManager {
                     "breadcrumb_rules",
                     "is_active",
                     "INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))",
+                )?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_migrations (version, applied_at)
+                     VALUES (?1, ?2)",
+                    rusqlite::params![version, current_ts_ms()],
+                )?;
+                info!("迁移 {} 执行成功", version);
+                continue;
+            }
+
+            if *version == "103_data_fact_quality_gate" {
+                // SQLite 的 ADD COLUMN 不支持 IF NOT EXISTS。Sidecar 和 Core
+                // 共用本地库时，进程可能在字段已经补齐、迁移记录尚未登记的
+                // 中间状态退出；逐字段幂等修复，避免后续启动被 duplicate
+                // column 永久阻断。
+                Self::add_column_if_missing(
+                    &conn,
+                    "timeline_data_facts",
+                    "semantic_relation",
+                    "TEXT NOT NULL DEFAULT ''",
+                )?;
+                Self::add_column_if_missing(
+                    &conn,
+                    "timeline_data_facts",
+                    "future_question",
+                    "TEXT NOT NULL DEFAULT ''",
+                )?;
+                Self::add_column_if_missing(
+                    &conn,
+                    "timeline_data_facts",
+                    "decision_reason",
+                    "TEXT NOT NULL DEFAULT ''",
+                )?;
+                Self::add_column_if_missing(
+                    &conn,
+                    "timeline_data_facts",
+                    "decision_state",
+                    "TEXT NOT NULL DEFAULT 'published'",
+                )?;
+                Self::add_column_if_missing(
+                    &conn,
+                    "timeline_data_facts",
+                    "decision_rule_version",
+                    "TEXT NOT NULL DEFAULT ''",
+                )?;
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_timeline_data_facts_decision
+                     ON timeline_data_facts(decision_state, timeline_id, id)",
+                    [],
                 )?;
                 conn.execute(
                     "INSERT OR IGNORE INTO schema_migrations (version, applied_at)
@@ -1379,6 +1442,50 @@ mod tests {
                 let applied: i64 = conn.query_row(
                     "SELECT COUNT(*) FROM schema_migrations
                      WHERE version = '079_breadcrumb_rule_activation'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(applied, 1);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn data_fact_quality_gate_migration_recovers_when_columns_exist_without_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("interrupted-data-fact-quality-gate.db");
+
+        let storage = StorageManager::open(&db).unwrap();
+        drop(storage);
+
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE version = '103_data_fact_quality_gate'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let storage = StorageManager::open(&db).unwrap();
+        storage
+            .with_conn(|conn| {
+                for column in [
+                    "semantic_relation",
+                    "future_question",
+                    "decision_reason",
+                    "decision_state",
+                    "decision_rule_version",
+                ] {
+                    assert!(StorageManager::has_column(
+                        conn,
+                        "timeline_data_facts",
+                        column
+                    )?);
+                }
+                let applied: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM schema_migrations
+                     WHERE version = '103_data_fact_quality_gate'",
                     [],
                     |row| row.get(0),
                 )?;

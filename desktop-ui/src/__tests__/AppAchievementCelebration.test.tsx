@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   fetchConsoleSummary: vi.fn(),
   fetchCurrentUser: vi.fn(),
   fetchInitializationStatus: vi.fn(),
+  fetchRuntimeReadiness: vi.fn(),
   syncEligibleBreadcrumbRules: vi.fn(),
   synchronizeWorkProfile: vi.fn(),
 }))
@@ -36,6 +37,7 @@ vi.mock('../utils/workProfileCloud', () => ({
 vi.mock('../utils/initialization', async importOriginal => ({
   ...(await importOriginal<typeof import('../utils/initialization')>()),
   fetchInitializationStatus: mocks.fetchInitializationStatus,
+  fetchRuntimeReadiness: mocks.fetchRuntimeReadiness,
 }))
 
 vi.mock('../components/RagPanel.v2', () => ({
@@ -106,6 +108,7 @@ beforeEach(() => {
     can_report: false,
     test_mode_enabled: false,
   })
+  mocks.fetchRuntimeReadiness.mockResolvedValue(true)
   mocks.synchronizeWorkProfile.mockResolvedValue(null)
   mocks.syncEligibleBreadcrumbRules.mockResolvedValue([{
     breadcrumb: overnightBadge,

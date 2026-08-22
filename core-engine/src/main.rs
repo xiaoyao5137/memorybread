@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use memory_bread_core::{
     api::{server::start_server, state::AppState},
+    browser_extension::start_browser_bridge_server,
     capture::{
         start_context_watcher, start_input_signal_listener, start_listener,
         start_signal_aggregator, CaptureConfig, CaptureEngine, ListenerConfig,
@@ -133,6 +134,8 @@ async fn main() -> anyhow::Result<()> {
 
     // 创建应用状态
     let state = AppState::new(storage.clone());
+    let bridge_socket = start_browser_bridge_server(state.browser_extension.clone())?;
+    tracing::info!(path = %bridge_socket.display(), "Chrome Native Messaging Bridge 已启动");
 
     // 启动采集引擎
     tracing::info!("启动采集引擎...");

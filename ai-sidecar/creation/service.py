@@ -38,6 +38,35 @@ ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
 CORE_ENGINE_DEFAULT_BASE_URL = "http://127.0.0.1:7070"
 MAX_REPORT_REFRESH_SOURCES = 5
 REPORT_REFRESH_HTTP_TIMEOUT_SECONDS = 140.0
+# 文档刷新只挂接创作链路，限制单次召回的浏览器打开次数；
+# 节流/策略/TTL 门禁都在 core-engine 侧，这里只选权重最高的候选。
+MAX_DOCUMENT_REFRESH_SOURCES = 2
+# 文档刷新位于首个 memory_search 的关键路径上，不能沿用单个报表刷新 140 秒
+# 的读超时并串行叠加。两个来源共享 90 秒总预算；超时后保留
+# 历史烘焙正文继续创作。httpx 自身的超时略大于整批预算，由显式总预算
+# 负责收敛包括持续返回小块数据在内的所有慢请求。
+DOCUMENT_REFRESH_TOTAL_BUDGET_SECONDS = 90.0
+DOCUMENT_REFRESH_HTTP_TIMEOUT_SECONDS = (
+    DOCUMENT_REFRESH_TOTAL_BUDGET_SECONDS + 5.0
+)
+# 前台降级失败后的退避重试间隔；实测同一报表隔几十秒重刷即可成功。
+REPORT_REFRESH_FOREGROUND_RETRY_DELAY_SECONDS = 3.0
+# 刷新失败降级使用旧快照的新鲜度上限（无时间要求时才适用）。
+REPORT_STALE_FALLBACK_MAX_AGE_MS = 24 * 3600 * 1000
+# 浏览器取数通道的瞬态错误码：这些故障重试往往能自愈，不应一次失败就弃用来源。
+TRANSIENT_REPORT_REFRESH_ERROR_CODES = frozenset(
+    {
+        "SCRAPE_FAILED",
+        "SCRAPE_OUTPUT_UNPARSEABLE",
+        "SCRAPE_TIMEOUT",
+        "SCRAPE_UNAVAILABLE",
+        "SCRAPE_INVALID_RESPONSE",
+        "SCRAPE_HTTP_502",
+        "SCRAPE_HTTP_503",
+        "SCRAPE_HTTP_504",
+        "BROWSER_ATTACH_UNAVAILABLE",
+    }
+)
 MIN_CANVAS_OCR_CONFIDENCE = 0.60
 MAX_VERIFIED_SCRAPE_CLAIMS = 120
 MAX_ADAPTIVE_OCR_TILES = 12
@@ -60,6 +89,17 @@ class CloudModelRequestError(RuntimeError):
         self.status_code = status_code
         self.detail = detail
         super().__init__(f"模型请求失败 ({status_code}): {detail}")
+
+
+def _is_retryable_model_transport(exc: BaseException) -> bool:
+    """判断模型调用失败是否属于可重试的传输层故障。
+
+    流中途断连（RemoteProtocolError、读超时等）与瞬时服务端状态码都视为可重试；
+    输出解析失败等业务错误不重试，交给上层降级处理。
+    """
+    if isinstance(exc, CloudModelRequestError):
+        return exc.status_code in {408, 409, 425, 429} or exc.status_code >= 500
+    return isinstance(exc, httpx.TransportError)
 
 CREATION_SKILL_ANALYSIS_SCHEMA = {
     "type": "object",
@@ -201,6 +241,7 @@ class CreationOptions:
     enable_rag: bool = True
     enable_web_search: bool = False
     enable_image_generation: bool = False
+    browser_extension_enabled: bool = True
     content_weight: float = 0.45
     quality_weight: float = 0.15
     completeness_weight: float = 0.15
@@ -257,6 +298,10 @@ class ReferenceDocument:
     lexical_score: float = 0.0
     semantic_score: float = 0.0
     entity_score: float = 0.0
+    refresh_status: str = "historical_only"
+    refresh_completeness: str = "unverified"
+    refresh_collected_at: Optional[int] = None
+    refresh_truncated: bool = False
 
 
 @dataclass
@@ -358,6 +403,7 @@ class CreationService:
         session_id: Optional[str] = None,
         preview_ids: Optional[dict[int, str]] = None,
         retain_screenshot: bool = False,
+        browser_extension_enabled: bool = True,
     ) -> dict:
         """刷新 Top-K 报表源，以 AX/DOM 校验数据并按需保留截图证据。"""
         report_sources = self._select_refreshable_report_sources(data_results)[
@@ -391,13 +437,20 @@ class CreationService:
                 # 不保留截图时先做零焦点读取。只有页面未打开，或静默 DOM
                 # 没有取得有效指标时，才在同一来源上降级为一次性前台会话。
                 # 该会话只用于加载、页签和日期交互，不产生图片资产。
+                # 前台会话遇到瞬态错误（5xx/超时/解析失败）时，再退避重跑一次，
+                # 避免偶发故障让整个来源在本步骤永久缺数据。
                 attempts = (
                     [(True, "allow_once", "evidence_capture")]
                     if retain_screenshot
-                    else [
-                        (False, "never", "silent"),
-                        (True, "allow_once", "foreground_fallback"),
-                    ]
+                    else (
+                        [(False, "never", "extension_background")]
+                        if browser_extension_enabled
+                        else [
+                            (False, "never", "silent"),
+                            (True, "allow_once", "foreground_fallback"),
+                            (True, "allow_once", "foreground_retry"),
+                        ]
+                    )
                 )
                 payload = None
                 evidence = None
@@ -407,11 +460,18 @@ class CreationService:
                     collection_attempt = attempt_name
                     payload = None
                     evidence = None
+                    if attempt_name == "foreground_retry":
+                        await asyncio.sleep(
+                            REPORT_REFRESH_FOREGROUND_RETRY_DELAY_SECONDS
+                        )
                     try:
                         response = await client.post(
                             f"{self.core_engine_base_url}/api/data/sources/{source_id}/refresh",
                             json={
                                 "mode": "auto",
+                                "extension_preference": (
+                                    "auto" if browser_extension_enabled else "disabled"
+                                ),
                                 "capture_evidence": bool(retain_screenshot),
                                 "retain_screenshot": bool(retain_screenshot),
                                 "allow_foreground_refresh": bool(allow_foreground),
@@ -434,9 +494,8 @@ class CreationService:
                                 error_payload.get("error")
                                 or f"SCRAPE_HTTP_{response.status_code}"
                             )
-                            if (
-                                attempt_name == "silent"
-                                and error_code == "FOCUS_POLICY_BLOCKED"
+                            if self._should_continue_refresh_attempts(
+                                attempt_name, error_code
                             ):
                                 continue
                             break
@@ -468,7 +527,21 @@ class CreationService:
                             "网页报表刷新出现未分类异常 source_id=%s", source_id
                         )
                         error_code = "SCRAPE_FAILED"
+                    if self._should_continue_refresh_attempts(
+                        attempt_name, error_code
+                    ):
+                        continue
                     break
+
+                if payload is None:
+                    logger.warning(
+                        "网页报表刷新最终失败 source_id=%s error_code=%s "
+                        "last_attempt=%s source_url=%s",
+                        source_id,
+                        error_code,
+                        collection_attempt,
+                        str(item.get("source_url") or ""),
+                    )
 
                 if payload is not None and isinstance(evidence, dict):
                     payload_by_source[source_id] = payload
@@ -534,8 +607,251 @@ class CreationService:
             payload_by_source,
             evidence_by_source,
             {int(item["source_id"]) for item in report_sources},
+            db_path=self.db_path,
+            time_context=parsed_requirement.get("time_context") or {},
         )
         return {"scrapes": scrapes, "refreshed_data": refreshed}
+
+    async def refresh_recalled_documents(
+        self,
+        references: "list[ReferenceDocument]",
+        query: str,
+        require_latest: bool = False,
+    ) -> dict:
+        """对召回的烘焙文档做浏览器即时校验，并把来源快照放入本轮上下文。
+
+        仅创作链路挂接：静默读取优先，任何失败都静默降级，不中断创作。
+        是否真的刷新由 core-engine 的 refresh_policy/节流/TTL 门禁判定，
+        本方法只负责选候选与消费结果，不覆盖烘焙文档正文。
+        """
+        stats = {
+            "attempted": 0,
+            "updated": 0,
+            "no_change": 0,
+            "reused": 0,
+            "skipped": 0,
+            "failed": 0,
+            "complete": 0,
+            "partial": 0,
+        }
+        candidates = [
+            ref
+            for ref in references
+            if ref.source_type == "document"
+            and ref.source_id
+            and str(ref.source_url or "").strip()
+        ]
+        if not candidates:
+            return stats
+        candidates.sort(key=lambda ref: ref.final_weight, reverse=True)
+        candidates = candidates[:MAX_DOCUMENT_REFRESH_SOURCES]
+
+        async def refresh_one(client, ref):
+            stats["attempted"] += 1
+            document_id = int(ref.source_id)
+            try:
+                response = await client.post(
+                    f"{self.core_engine_base_url}/api/bake/documents/{document_id}/refresh",
+                    json={
+                        "objective": query,
+                        "require_latest": bool(require_latest),
+                    },
+                )
+            except asyncio.CancelledError:
+                ref.refresh_status = "historical_only"
+                ref.refresh_completeness = "failed"
+                stats["failed"] += 1
+                raise
+            except Exception:
+                stats["failed"] += 1
+                logger.warning(
+                    "召回文档刷新不可用 document_id=%s", document_id
+                )
+                return
+            if not response.is_success:
+                stats["failed"] += 1
+                logger.warning(
+                    "召回文档刷新返回异常 document_id=%s status=%s",
+                    document_id,
+                    response.status_code,
+                )
+                return
+            try:
+                payload = response.json()
+            except ValueError:
+                stats["failed"] += 1
+                return
+            status = str(payload.get("status") or "")
+            if status in {"updated", "no_change", "reused"}:
+                # 本轮直接消费已验证的原始来源快照，不等待也不依赖
+                # 烘焙文档被 LLM 补丁覆盖。新旧版本在 Core 中独立持久化。
+                snapshot = payload.get("source_snapshot") or {}
+                completeness = str(
+                    snapshot.get("completeness_status")
+                    or payload.get("completeness_status")
+                    or "failed"
+                )
+                identity_match = snapshot.get("identity_match") is True
+                snapshot_content = str(snapshot.get("content_text") or "")
+                if (
+                    identity_match
+                    and snapshot_content
+                    and completeness in {"complete", "partial"}
+                ):
+                    page_title = str(snapshot.get("page_title") or "")
+                    if page_title:
+                        ref.title = page_title
+                    ref.full_content = snapshot_content
+                    ref.observed_at = int(snapshot.get("collected_at") or 0) or ref.observed_at
+                    ref.refresh_collected_at = int(snapshot.get("collected_at") or 0) or None
+                    ref.refresh_completeness = completeness
+                    if status == "reused":
+                        ref.refresh_status = (
+                            "fresh_recent"
+                            if completeness == "complete"
+                            else "fresh_recent_partial"
+                        )
+                    else:
+                        ref.refresh_status = (
+                            "fresh_complete"
+                            if completeness == "complete"
+                            else "fresh_partial"
+                        )
+                    ref.refresh_truncated = bool(snapshot.get("truncated"))
+                    ref.freshness_score = 1.0 if completeness == "complete" else 0.7
+                    stats[completeness] += 1
+                    stats[status] += 1
+                else:
+                    ref.refresh_status = "historical_only"
+                    ref.refresh_completeness = "failed"
+                    stats["failed"] += 1
+            elif status == "skipped":
+                stats["skipped"] += 1
+            else:
+                ref.refresh_status = "historical_only"
+                ref.refresh_completeness = "failed"
+                stats["failed"] += 1
+                logger.info(
+                    "召回文档刷新失败 document_id=%s reason=%s",
+                    document_id,
+                    str(payload.get("reason") or ""),
+                )
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=DOCUMENT_REFRESH_HTTP_TIMEOUT_SECONDS
+            ) as client:
+                loop = asyncio.get_running_loop()
+                deadline = (
+                    loop.time() + DOCUMENT_REFRESH_TOTAL_BUDGET_SECONDS
+                )
+                for index, ref in enumerate(candidates):
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        logger.warning(
+                            "召回文档刷新达到总预算，降级使用历史版本 pending=%s budget_seconds=%s",
+                            len(candidates) - index,
+                            DOCUMENT_REFRESH_TOTAL_BUDGET_SECONDS,
+                        )
+                        break
+                    try:
+                        await asyncio.wait_for(
+                            refresh_one(client, ref),
+                            timeout=remaining,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "召回文档刷新达到总预算，降级使用历史版本 pending=%s budget_seconds=%s",
+                            len(candidates) - index - 1,
+                            DOCUMENT_REFRESH_TOTAL_BUDGET_SECONDS,
+                        )
+                        break
+        except Exception:
+            logger.exception("召回文档刷新出现未分类异常")
+        return stats
+
+    @staticmethod
+    def _should_continue_refresh_attempts(
+        attempt_name: str, error_code: str
+    ) -> bool:
+        """判断报表来源本次失败后是否还能进入下一次尝试。
+
+        静默读取被焦点门禁拦截时照常升级到前台；5xx/超时/解析失败等瞬态
+        错误在前台通道上再给一次机会——实测同一报表隔几十秒重刷即可成功。
+        """
+        if attempt_name == "silent":
+            return (
+                error_code == "FOCUS_POLICY_BLOCKED"
+                or error_code in TRANSIENT_REPORT_REFRESH_ERROR_CODES
+            )
+        if attempt_name == "foreground_fallback":
+            return error_code in TRANSIENT_REPORT_REFRESH_ERROR_CODES
+        return False
+
+    @staticmethod
+    def _stale_snapshot_fallback_info(
+        db_path: str,
+        source_id: Optional[int],
+        time_context: dict,
+    ) -> Optional[dict]:
+        """刷新失败时，若库内仍有可接受的快照则返回降级信息。
+
+        浏览器刷新失败是采集通道的瞬态故障，不代表数据不存在：当已有快照
+        与要求周期重叠（或无时间要求且采集于 24 小时内）时，应连同时效
+        标记一起交给 Writer，而不是整块数据消失。周期不匹配的快照绝不
+        降级，避免旧周期数据冒充本周数据。
+        """
+        if not db_path or source_id is None:
+            return None
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                row = conn.execute(
+                    "SELECT collected_at,"
+                    " COALESCE(period_start_at, observed_at, collected_at),"
+                    " COALESCE(period_end_at, observed_at, collected_at),"
+                    " content_text, structured_data, collector"
+                    " FROM data_snapshots WHERE source_id = ?"
+                    " ORDER BY collected_at DESC, id DESC LIMIT 1",
+                    (int(source_id),),
+                ).fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        collected_at = int(row[0] or 0)
+        period_start = int(row[1] or 0)
+        period_end = int(row[2] or 0)
+        content_text = str(row[3] or "").strip()
+        try:
+            structured_data = json.loads(str(row[4] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            structured_data = {}
+        if not isinstance(structured_data, dict):
+            structured_data = {}
+        collector = str(row[5] or "snapshot_fallback")
+        if collected_at <= 0:
+            return None
+        if time_context.get("has_relative_time"):
+            start_ms = int(time_context.get("period_start_ms") or 0)
+            end_ms = int(time_context.get("period_end_ms") or 0)
+            if not (period_end >= start_ms and period_start <= end_ms):
+                return None
+            reason = "refresh_failed_period_matched_snapshot"
+        else:
+            now_ms = int(time.time() * 1000)
+            if now_ms - collected_at > REPORT_STALE_FALLBACK_MAX_AGE_MS:
+                return None
+            reason = "refresh_failed_recent_snapshot"
+        return {
+            "reason": reason,
+            "snapshot_collected_at": collected_at,
+            "content_excerpt": content_text,
+            "structured_data": structured_data,
+            "collector": collector,
+        }
 
     @staticmethod
     def _select_canonical_report_sources(items: list[dict]) -> list[dict]:
@@ -641,15 +957,44 @@ class CreationService:
             candidate = " ".join(raw.split()).strip()
             if not candidate or not metric_signal.search(candidate):
                 continue
-            # 根请求和当前 Skill 步骤会同时进入采集目标。
-            # “使用 @某 Skill/Tool”是调度语句，其名称里即使带有
-            # GPU、成本等度量词，也不是待校验的指标。
             if re.search(
-                r"(?:请)?(?:使用|调用|应用|use)\s*@[^\s：:]+",
+                r"^(?:请|帮我|请帮我)?(?:生成|创作|撰写|输出|制作).*(?:周报|月报|报告|方案|文档)$",
                 candidate,
                 re.IGNORECASE,
             ):
                 continue
+            step_prefix = re.match(
+                r"^当前(?:\s*Skill)?\s*步骤(目标|标题)?\s*[：:]\s*",
+                candidate,
+                flags=re.IGNORECASE,
+            )
+            if step_prefix:
+                # 章节标题本身不是指标；“步骤目标”后的动作句则可能包含
+                # 第一个真实指标，需要继续解析。
+                if step_prefix.group(1) != "目标":
+                    continue
+                candidate = candidate[step_prefix.end():].strip()
+            # 根请求和当前 Skill 步骤会同时进入采集目标。
+            # “使用 @某 Skill/Tool”是调度语句，其名称里即使带有
+            # GPU、成本等度量词，也不是待校验的指标。
+            invocation = re.search(
+                r"(?:请)?(?:使用|调用|应用|用|use)\s*@[^\s：:]+",
+                candidate,
+                re.IGNORECASE,
+            )
+            if invocation:
+                # “用 @数据检索 Tool 获取……的算力”同时包含调度语句与
+                # 第一个真实指标。仅在“获取/读取/查询/检索”后确有度量词
+                # 时保留尾部；纯 Skill 名称仍整体忽略。
+                objective_tail = re.split(
+                    r"(?:获取|读取|查询|检索)",
+                    candidate[invocation.end():],
+                    maxsplit=1,
+                )[-1].strip()
+                if objective_tail and metric_signal.search(objective_tail):
+                    candidate = objective_tail
+                else:
+                    continue
             # 自然语言目标常用“任务语境：指标1、指标2”开始枚举。
             # 冒号前的文本只说明数据源/页面，不应并入第一个指标名。
             for separator in ("：", ":"):
@@ -683,6 +1028,14 @@ class CreationService:
                 "",
                 candidate,
             ).strip(" ：:-")
+            candidate = re.sub(r"^(?:以及|并且|同时)", "", candidate).strip()
+            candidate = re.sub(
+                r"(?:最高|最低|TOP|Top|top|前)\s*(?:的)?\s*\d+.*$",
+                "",
+                candidate,
+            ).strip(" 的数据指标：:-")
+            candidate = re.sub(r"^(?:最新|当前|本周|这周)", "", candidate).strip()
+            candidate = re.sub(r"(?:数据|指标)$", "", candidate).strip()
             if not candidate or len(candidate) > 80:
                 continue
             candidate = re.sub(r"tokens?", "Token", candidate, flags=re.IGNORECASE)
@@ -701,6 +1054,8 @@ class CreationService:
         payload_by_source: dict[int, dict],
         evidence_by_source: dict[int, dict],
         attempted_source_ids: set[int],
+        db_path: str = "",
+        time_context: Optional[dict] = None,
     ) -> list[dict]:
         attempted_report_urls = {
             str(item.get("source_url") or "").strip(): int(item["source_id"])
@@ -778,11 +1133,52 @@ class CreationService:
                     item["can_use"] = False
                     item["unavailable_reason"] = "evidence_rejected"
             elif item.get("source_kind") == "report_url" and source_id in attempted_source_ids:
-                item["can_use"] = False
-                item["refresh_required"] = True
-                item["freshness_class"] = "unverified"
-                item["evidence_status"] = "failed"
-                item["unavailable_reason"] = "refresh_failed"
+                stale_fallback = CreationService._stale_snapshot_fallback_info(
+                    db_path, source_id, time_context or {}
+                )
+                if stale_fallback is not None:
+                    # 瞬态刷新失败但库内有可接受快照：保留召回内容，连同
+                    # 时效标记一起交给 Writer，避免整块数据消失。
+                    logger.info(
+                        "报表刷新失败降级使用存量快照 source_id=%s reason=%s",
+                        source_id,
+                        stale_fallback["reason"],
+                    )
+                    item["can_use"] = True
+                    item["refresh_required"] = True
+                    item["freshness_class"] = "stale"
+                    item["evidence_status"] = "failed"
+                    item["collected_at"] = stale_fallback[
+                        "snapshot_collected_at"
+                    ]
+                    item["observed_at"] = stale_fallback[
+                        "snapshot_collected_at"
+                    ]
+                    item["content_excerpt"] = stale_fallback[
+                        "content_excerpt"
+                    ]
+                    item["structured_data"] = stale_fallback[
+                        "structured_data"
+                    ]
+                    item["provenance"] = {
+                        "collector": stale_fallback["collector"],
+                        "collected_at": stale_fallback[
+                            "snapshot_collected_at"
+                        ],
+                        "fallback": True,
+                    }
+                    item["stale_fallback"] = {
+                        "reason": stale_fallback["reason"],
+                        "snapshot_collected_at": stale_fallback[
+                            "snapshot_collected_at"
+                        ],
+                    }
+                else:
+                    item["can_use"] = False
+                    item["refresh_required"] = True
+                    item["freshness_class"] = "unverified"
+                    item["evidence_status"] = "failed"
+                    item["unavailable_reason"] = "refresh_failed"
             merged.append(item)
         return merged
 
@@ -2898,12 +3294,40 @@ class CreationService:
         return system_prompt, user_prompt
 
     def parse_skill_match_decision(self, text: str, allowed_ids: set) -> dict:
-        """解析模型决策：剥离围栏、白名单过滤去重、最多保留 1 个。"""
+        """解析模型决策，非关键字段损坏时仍恢复结构化 Skill ID。
+
+        Skill 的选择完全来自模型。这里的容错只识别输出契约中的
+        ``skill_ids`` 字段，不根据用户文本、Skill 名称或文档类型猜测路由。
+        """
         cleaned = re.sub(r"```(?:json)?", "", str(text or "")).strip()
         match = re.search(r"\{.*\}", cleaned, re.DOTALL)
         if not match:
             raise ValueError("技能路由响应缺少 JSON 决策")
-        payload = json.loads(match.group(0))
+        candidate = match.group(0)
+        parse_status = "complete"
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            # reasoning 只用于解释，不应因其中的中文引号、截断等格式问题
+            # 连带丢失模型已经给出的 skill_ids。仅恢复契约字段本身；如果该
+            # 字段也无法解析，继续抛错并由调用方安全降级为空召回。
+            ids_match = re.search(
+                r'["“”]?skill_ids["“”]?\s*:\s*(\[[^\]]*\])',
+                candidate,
+                re.DOTALL,
+            )
+            if not ids_match:
+                raise ValueError(f"技能路由响应不是合法 JSON: {exc}") from exc
+            try:
+                recovered_ids = json.loads(ids_match.group(1))
+            except json.JSONDecodeError as ids_exc:
+                raise ValueError(
+                    f"技能路由响应中的 skill_ids 无法恢复: {ids_exc}"
+                ) from ids_exc
+            if not isinstance(recovered_ids, list):
+                raise ValueError("技能路由响应中的 skill_ids 必须是数组")
+            payload = {"skill_ids": recovered_ids, "reasoning": ""}
+            parse_status = "recovered"
         selected: list = []
         for raw_id in payload.get("skill_ids") or []:
             try:
@@ -2913,7 +3337,11 @@ class CreationService:
             if skill_id in allowed_ids and skill_id not in selected:
                 selected.append(skill_id)
         reasoning = str(payload.get("reasoning") or "").strip()[:200]
-        return {"skill_ids": selected[:1], "reasoning": reasoning}
+        return {
+            "skill_ids": selected[:1],
+            "reasoning": reasoning,
+            "parse_status": parse_status,
+        }
 
     async def route_creation_skills(self, *, prompt: str, skills: list) -> dict:
         """创作提交后由模型路由决定执行时引入哪个 Skill，失败降级为空召回。"""
@@ -2981,7 +3409,8 @@ class CreationService:
 
         结构化结论调用关闭 Qwen3.5 思考模式：本地单槽推理被抢占中断、或思考
         占满 num_predict 预算时都会产生 0 token 结果，因此这里直接以非思考
-        模式调用，并在瞬时空输出时自动重试一次，避免击穿整条创作链路。
+        模式调用，并在瞬时空输出或传输层断流时自动重试一次，避免击穿整条创作
+        链路。非流式消费下丢弃半截缓冲重试是安全的。
         """
         model_name = creation_model or self.model
         max_attempts = 2
@@ -3020,9 +3449,74 @@ class CreationService:
                     status="failed",
                     error_msg=str(exc),
                 )
+                if attempt < max_attempts and (
+                    not "".join(parts).strip() or _is_retryable_model_transport(exc)
+                ):
+                    logger.warning(
+                        "子 Agent %s 遇到可重试故障（空输出或传输中断 %s），丢弃部分输出重试: attempt=%s",
+                        agent_id,
+                        type(exc).__name__,
+                        attempt,
+                    )
+                    continue
+                raise
+
+    async def stream_specialist_agent(
+        self,
+        *,
+        agent_id: str,
+        system_prompt: str,
+        user_prompt: str,
+        creation_model: Optional[str] = None,
+        creation_api_key: Optional[str] = None,
+        creation_base_url: Optional[str] = None,
+    ) -> AsyncIterator[str]:
+        """流式执行专业子 Agent，供严格 Skill 步骤生成实时文档预览。
+
+        与 ``run_specialist_agent`` 使用相同的非思考参数和空结果重试策略。
+        一旦已经向调用方发送过正文便不再重试，避免把两次输出拼接为一份结果。
+        """
+        model_name = creation_model or self.model
+        max_attempts = 2
+        for attempt in range(1, max_attempts + 1):
+            parts: list[str] = []
+            started_ms = int(time.time() * 1000)
+            try:
+                async for chunk in self._stream_direct_completion(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    creation_model=creation_model,
+                    creation_api_key=creation_api_key,
+                    creation_base_url=creation_base_url,
+                    num_predict=1600,
+                    temperature=0.25,
+                    disable_thinking=True,
+                ):
+                    parts.append(chunk)
+                    yield chunk
+                result = "".join(parts).strip()
+                if not result:
+                    raise RuntimeError(f"{agent_id} 未返回分析结果")
+                self._log_creation_usage(
+                    model_name=model_name,
+                    prompt_text=system_prompt + "\n\n" + user_prompt,
+                    response_text=result,
+                    latency_ms=int(time.time() * 1000) - started_ms,
+                    status="success",
+                )
+                return
+            except Exception as exc:
+                self._log_creation_usage(
+                    model_name=model_name,
+                    prompt_text=system_prompt + "\n\n" + user_prompt,
+                    response_text="".join(parts),
+                    latency_ms=int(time.time() * 1000) - started_ms,
+                    status="failed",
+                    error_msg=str(exc),
+                )
                 if attempt < max_attempts and not "".join(parts).strip():
                     logger.warning(
-                        "子 Agent %s 模型输出为空（推理可能被抢占中断），重试: attempt=%s",
+                        "子 Agent %s 流式输出为空（推理可能被抢占中断），重试: attempt=%s",
                         agent_id,
                         attempt,
                     )
@@ -4915,8 +5409,10 @@ flowchart LR
                 latency_ms=latency_ms,
                 status=status,
                 error_msg=error_msg,
-                raw_preview=prompt_text,
-                response_preview=response_text,
+                # 创作输入和输出可能包含用户私有工作内容。用量埋点只记录
+                # token、耗时、状态和结构化错误，不持久化原文预览。
+                raw_preview=None,
+                response_preview=None,
                 db_path=self.db_path,
             )
         except Exception as exc:
@@ -5140,14 +5636,27 @@ flowchart LR
             detail or resp.reason_phrase,
         )
 
-    def analyze_requirement(self, user_prompt: str, options: CreationOptions) -> dict:
-        """轻量需求解析，先用规则把创作任务结构化。"""
+    def analyze_requirement(
+        self,
+        user_prompt: str,
+        options: CreationOptions,
+        entity_focus_text: str = "",
+    ) -> dict:
+        """轻量需求解析，先用规则把创作任务结构化。
+
+        entity_focus_text 指定核心实体识别专用的焦点文本：步骤级检索会在
+        检索词里附带根请求背景（供关键词/语义召回使用），但实体识别只能
+        看步骤自身主题，否则背景里其他章节的实体会劫持当前步骤的层级
+        排序。缺省时退回全文。
+        """
         text = user_prompt.strip()
         doc_type = options.doc_type.strip() or self._infer_doc_type(text)
         audience = options.audience.strip() or self._infer_audience(text)
         keywords = self._extract_keywords(text)
         time_context = self._relative_time_context(text)
-        entity_context = self._analyze_entity_context(text, keywords)
+        focus_text = entity_focus_text.strip() or text
+        supplement = keywords if entity_focus_text.strip() else None
+        entity_context = self._analyze_entity_context(focus_text, supplement)
 
         return {
             "topic": self._infer_topic(text),
@@ -5224,57 +5733,37 @@ flowchart LR
             ),
         }
 
-    ENTITY_TYPE_SUFFIXES = (
-        "产品",
-        "平台",
-        "系统",
-        "项目",
-        "模型",
-        "服务",
-        "工具",
-        "应用",
-        "助手",
-        "agent",
-        "copilot",
-    )
-    ENTITY_INTENT_PATTERNS = (
-        re.compile(
-            r"(?i)(?:介绍|分析|总结|查询|检索|了解|关于|生成|撰写|制作).*?"
-            r"([A-Za-z][A-Za-z0-9._+\-/]{2,})\s*"
-            r"(?:产品|平台|系统|项目|模型|服务|工具|应用|助手|Agent|Copilot)"
-        ),
-        re.compile(
-            r"(?i)([A-Za-z][A-Za-z0-9._+\-/]{2,})\s*"
-            r"(?:产品|平台|系统|项目|模型|服务|工具|应用|助手|Agent|Copilot)"
-            r"(?:的|介绍|能力|方案|进展|架构|功能)"
-        ),
-        re.compile(
-            r"(?i)(?:介绍|分析|总结|查询|检索|了解|关于)\s*"
-            r"([A-Za-z][A-Za-z0-9._+\-/]{2,})"
-        ),
-    )
-    GENERIC_ENTITY_TERMS = {
-        "aigc",
-        "ai",
-        "agent",
-        "copilot",
-        "llm",
-        "rag",
-        "产品",
-        "平台",
-        "系统",
-        "项目",
-        "模型",
-        "服务",
-        "工具",
-        "应用",
-        "助手",
-        "方案",
-        "文档",
-        "介绍文档",
-        "快手",
-        "快手电商",
-    }
+    # ── 核心实体判定的统计阈值（不维护词表黑白名单）─────────────────
+    # 一个词能否升级为核心实体，完全由本地语料的统计证据决定：
+    # 1. 提炼证据：作为独立实体出现在烘焙产物的实体字段（bake 阶段提炼
+    #    出的专名列表），天然排除“项目/模型”这类只做构词成分的泛词；
+    # 2. 扩展证据：关键词只是某语料实体的片段时，用出现频次最高的完整
+    #    专名升级（如“共建项目”→“AIGC 共建项目”）；
+    # 3. 焦点证据：标题/摘要多次提及，且文档频率不足以被判定为泛词。
+    MIN_EXACT_ENTITY_MENTIONS = 2
+    EXACT_ENTITY_SATURATION = 8.0
+    MIN_STRONG_MENTIONS = 2
+    GENERIC_DOC_FREQUENCY_RATIO = 0.12
+    # 专名实体的词形上限：超过该长度的中文串几乎必然是步骤主题描述
+    # （如“大模型性能成本优化周会会议纪要”）而非实体。这类长短语
+    # 一旦被升级为核心实体，层级过滤会要求候选字面包含整串，把真正
+    # 相关的会议纪要/文档全部挤成 background 再被阈值剔除。
+    ENTITY_MAX_CJK_CHARS = 12
+    ENTITY_MAX_TOTAL_CHARS = 40
+    # 焦点文本之外的补充候选（来自全文关键词，如根请求背景里的实体）
+    # 需要更强的提炼证据才能升级：防止背景章节的弱信号实体劫持当前
+    # 步骤的层级排序。焦点内候选保持原有低门槛。
+    MIN_SUPPLEMENT_EXACT_MENTIONS = 4
+
+    @classmethod
+    def _entity_length_ok(cls, name: str) -> bool:
+        normalized = cls._normalize_entity_name(name)
+        cjk_count = sum(1 for ch in normalized if "\u4e00" <= ch <= "\u9fff")
+        if cjk_count > cls.ENTITY_MAX_CJK_CHARS:
+            return False
+        return len(normalized) <= cls.ENTITY_MAX_TOTAL_CHARS
+
+    ENTITY_SCAN_ROW_LIMIT = 500
     AGGREGATE_PAGE_MARKERS = (
         "云文档主页",
         "最近访问",
@@ -5287,62 +5776,243 @@ flowchart LR
         "javascript未启用",
     )
 
-    def _analyze_entity_context(self, text: str, keywords: list[str]) -> dict:
-        """识别名称槽位，并仅在本地语料有证据时升级为核心实体。"""
-        candidates: list[str] = []
-        for pattern in self.ENTITY_INTENT_PATTERNS:
-            candidates.extend(match.group(1).strip() for match in pattern.finditer(text))
-        # 词形只生成候选，不能单独把英文缩写当作实体。
-        for keyword in keywords:
-            normalized = str(keyword).strip()
+    def _analyze_entity_context(
+        self,
+        focus_text: str,
+        supplement_candidates: Optional[list[str]] = None,
+    ) -> dict:
+        """基于本地语料的统计证据识别当前主题的核心实体。
+
+        候选来自焦点文本的关键词（中英文均可参选）；能否升级为核心实体
+        完全由语料证据决定，不维护泛词/专名词表：
+        1. 提炼证据：候选作为独立实体出现在烘焙产物的实体字段；
+        2. 扩展证据：候选只是语料实体的片段且文档频率不高时，用出现
+           频次最高的完整专名升级；
+        3. 焦点证据：标题/摘要多次提及且文档频率不足以被判定为泛词。
+
+        supplement_candidates 是焦点之外的补充候选（如根请求背景里的
+        实体）：避免步骤焦点不含该实体时彻底丢失真实体，但需要更强
+        的提炼证据才能升级，防止背景章节弱信号劫持当前步骤。
+        """
+        empty = {
+            "primary_entities": [],
+            "candidate_entities": [],
+            "has_high_confidence_entity": False,
+        }
+        text = str(focus_text or "").strip()
+        if not text:
+            return empty
+        keywords = self._extract_keywords(text)
+        candidates = [
+            str(item)
+            for item in keywords
+            if len(str(item)) >= 2 and self._entity_length_ok(str(item))
+        ]
+        focus_folded = {self._normalize_entity_name(item) for item in candidates}
+        for item in supplement_candidates or []:
+            normalized_item = str(item).strip()
             if (
-                re.fullmatch(r"[A-Za-z][A-Za-z0-9._+\-/]{2,}", normalized)
-                and normalized.casefold() not in self.GENERIC_ENTITY_TERMS
+                len(normalized_item) >= 2
+                and self._entity_length_ok(normalized_item)
+                and self._normalize_entity_name(normalized_item) not in focus_folded
             ):
-                candidates.append(normalized)
-        unique_candidates = list(
-            dict.fromkeys(
+                candidates.append(normalized_item)
+        candidates = candidates[:8]
+        if not candidates:
+            return empty
+
+        total_rows = self._corpus_total_rows()
+        verified: list[dict] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            mention_evidence = self._entity_corpus_evidence(candidate)
+            mention_count = int(mention_evidence.get("mention_count") or 0)
+            strong_count = int(mention_evidence.get("strong_mention_count") or 0)
+            curated = self._entity_curated_evidence(candidate)
+            exact_count = int(curated.get("exact_count") or 0)
+            doc_frequency_ratio = mention_count / max(total_rows, 1)
+            discriminative = (
+                total_rows > 0
+                and doc_frequency_ratio <= self.GENERIC_DOC_FREQUENCY_RATIO
+            )
+
+            name = candidate
+            confidence = 0.0
+            evidence_count = 0
+            in_focus = self._normalize_entity_name(
                 candidate
-                for candidate in candidates
-                if candidate.casefold() not in self.GENERIC_ENTITY_TERMS
+            ) in self._normalize_entity_name(text)
+            exact_required = (
+                self.MIN_EXACT_ENTITY_MENTIONS
+                if in_focus
+                else self.MIN_SUPPLEMENT_EXACT_MENTIONS
             )
-        )
-        verified = []
-        for candidate in unique_candidates[:8]:
-            evidence = self._entity_corpus_evidence(candidate)
-            syntax_score = 1.0 if any(
-                candidate.casefold() == match.group(1).strip().casefold()
-                for pattern in self.ENTITY_INTENT_PATTERNS
-                for match in pattern.finditer(text)
-            ) else 0.55
-            corpus_score = min(
-                evidence["mention_count"] / 3.0
-                + evidence["strong_mention_count"] / 2.0,
-                1.0,
+            if exact_count >= exact_required:
+                # 语料把它当独立专名提炼过：直接采信，不受文档频率影响。
+                name = candidate
+                evidence_count = exact_count
+                confidence = self._curated_entity_confidence(exact_count)
+            else:
+                expanded = str(curated.get("expanded_name") or "").strip()
+                expanded_count = int(curated.get("expanded_count") or 0)
+                if (
+                    expanded
+                    and expanded_count >= exact_required
+                    and len(self._normalize_entity_name(candidate)) >= 3
+                    and self._entity_length_ok(expanded)
+                    and discriminative
+                ):
+                    # 关键词是完整专名的片段：用完整形态升级，避免片段
+                    # 匹配把同族项目的资料混在一起。
+                    name = expanded
+                    evidence_count = expanded_count
+                    confidence = self._curated_entity_confidence(expanded_count)
+                elif in_focus and strong_count >= self.MIN_STRONG_MENTIONS and discriminative:
+                    # 无提炼证据但标题/摘要多次聚焦提及，且文档频率证明
+                    # 它不是语料里随处出现的泛词。
+                    confidence = min(
+                        0.55
+                        + 0.10 * min(strong_count / 4.0, 1.0)
+                        + 0.07
+                        * max(
+                            0.0,
+                            1.0
+                            - doc_frequency_ratio / self.GENERIC_DOC_FREQUENCY_RATIO,
+                        ),
+                        0.71,
+                    )
+
+            if confidence <= 0.0:
+                continue
+            normalized = self._normalize_entity_name(name)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            verified.append(
+                {
+                    "name": name,
+                    "normalized": normalized,
+                    "confidence": round(confidence, 4),
+                    "mention_count": mention_count,
+                    "strong_mention_count": strong_count,
+                    "entity_exact_count": evidence_count,
+                }
             )
-            confidence = round(syntax_score * 0.55 + corpus_score * 0.45, 4)
-            if evidence["mention_count"] >= 2 and confidence >= 0.72:
-                verified.append(
-                    {
-                        "name": candidate,
-                        "normalized": candidate.casefold(),
-                        "confidence": confidence,
-                        **evidence,
-                    }
-                )
+
         verified.sort(
             key=lambda item: (
                 float(item["confidence"]),
+                int(item["entity_exact_count"]),
                 int(item["strong_mention_count"]),
-                int(item["mention_count"]),
             ),
             reverse=True,
         )
         return {
             "primary_entities": verified[:2],
-            "candidate_entities": unique_candidates[:8],
+            "candidate_entities": candidates,
             "has_high_confidence_entity": bool(verified),
         }
+
+    @classmethod
+    def _curated_entity_confidence(cls, evidence_count: int) -> float:
+        """提炼证据数转置信度：两例起步，饱和后封顶。"""
+        ratio = min(max(int(evidence_count), 0) / cls.EXACT_ENTITY_SATURATION, 1.0)
+        return round(min(0.72 + 0.28 * ratio, 1.0), 4)
+
+    @staticmethod
+    def _normalize_entity_name(value: object) -> str:
+        """实体名归一化：去空白、转小写，容忍中英文之间的空格差异。"""
+        return re.sub(r"\s+", "", str(value or "")).casefold()
+
+    def _corpus_total_rows(self) -> int:
+        """统一记忆域总行数，用于把提及数换算成文档频率。"""
+        db = Path(getattr(self, "db_path", ""))
+        if not db.exists():
+            return 0
+        conn = sqlite3.connect(str(db))
+        try:
+            total = 0
+            for table in ("bake_documents", "bake_knowledge", "bake_sops"):
+                columns = self._table_columns(conn, table)
+                if not columns:
+                    continue
+                base_where = (
+                    "deleted_at IS NULL" if "deleted_at" in columns else "1=1"
+                )
+                total += int(
+                    conn.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE {base_where}"
+                    ).fetchone()[0]
+                )
+            return total
+        except sqlite3.Error:
+            return 0
+        finally:
+            conn.close()
+
+    def _entity_curated_evidence(self, entity: str) -> dict:
+        """扫描烘焙产物的实体字段，收集候选的提炼证据。
+
+        实体字段保存 bake 阶段提炼出的专名列表：一个词作为独立条目出现
+        即是专名的直接证据；只作为其他实体片段出现时，记录出现频次最高
+        的完整形态供扩展升级。全部依赖语料自身统计，不维护泛词词表。
+        """
+        result = {"exact_count": 0, "expanded_name": "", "expanded_count": 0}
+        normalized = self._normalize_entity_name(entity)
+        if not normalized:
+            return result
+        db = Path(getattr(self, "db_path", ""))
+        if not db.exists():
+            return result
+        escaped = (
+            normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        containing: dict[str, int] = {}
+        conn = sqlite3.connect(str(db))
+        try:
+            for table in ("bake_knowledge", "bake_sops"):
+                columns = self._table_columns(conn, table)
+                if not columns or "entities" not in columns:
+                    continue
+                base_where = (
+                    "deleted_at IS NULL" if "deleted_at" in columns else "1=1"
+                )
+                rows = conn.execute(
+                    f"SELECT entities FROM {table} WHERE {base_where} "
+                    f"AND REPLACE(LOWER(COALESCE(entities, '')), ' ', '') LIKE ? "
+                    f"ESCAPE '\\' ORDER BY id DESC LIMIT ?",
+                    (f"%{escaped}%", self.ENTITY_SCAN_ROW_LIMIT),
+                ).fetchall()
+                for (blob,) in rows:
+                    try:
+                        parsed = json.loads(blob)
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(parsed, list):
+                        continue
+                    doc_exact = False
+                    doc_containing: set[str] = set()
+                    for item in parsed:
+                        item_norm = self._normalize_entity_name(item)
+                        if not item_norm:
+                            continue
+                        if item_norm == normalized:
+                            doc_exact = True
+                        elif normalized in item_norm:
+                            doc_containing.add(str(item).strip())
+                    if doc_exact:
+                        result["exact_count"] += 1
+                    for name in doc_containing:
+                        containing[name] = containing.get(name, 0) + 1
+            if containing:
+                top_name, top_count = max(containing.items(), key=lambda kv: kv[1])
+                result["expanded_name"] = top_name
+                result["expanded_count"] = top_count
+            return result
+        except sqlite3.Error:
+            return result
+        finally:
+            conn.close()
 
     def _entity_corpus_evidence(self, entity: str) -> dict:
         db = Path(getattr(self, "db_path", ""))
@@ -5475,25 +6145,7 @@ flowchart LR
             if existing is None:
                 merged_by_id[identity] = candidate
                 continue
-            existing.setdefault("_retrieval_paths", set()).add(retrieval_path)
-            # 同一云文档的原始采集比旧提炼文档新时，优先让创作直接看到本轮
-            # 完整页面；后台完成合并后，再自然回到持久文档版本。
-            if int(candidate.get("updated_at") or 0) > int(
-                existing.get("updated_at") or 0
-            ):
-                candidate["_vector_similarity"] = max(
-                    float(existing.get("_vector_similarity") or 0),
-                    float(candidate.get("_vector_similarity") or 0),
-                )
-                candidate["_retrieval_paths"].update(
-                    existing.get("_retrieval_paths") or set()
-                )
-                merged_by_id[identity] = candidate
-                continue
-            existing["_vector_similarity"] = max(
-                float(existing.get("_vector_similarity") or 0),
-                float(candidate.get("_vector_similarity") or 0),
-            )
+            merged_by_id[identity] = self._merge_origin_rows(existing, candidate)
         merged_rows = list(merged_by_id.values())
 
         if not merged_rows:
@@ -5530,6 +6182,16 @@ flowchart LR
                 row,
                 primary_entities,
             )
+            if (
+                entity_aware
+                and tier == "related"
+                and diagnostics["semantic_score"]
+                >= self.ENTITY_SEMANTIC_PROMOTE_THRESHOLD
+            ):
+                # 实体已在正文命中且整体语义高度一致时，视同直接资料：
+                # 标题未提到实体的实质性文档（如会议纪要）不应被层级
+                # 加成系统性压低。
+                tier = "direct"
 
             if entity_aware and self._is_aggregate_page(row):
                 # 聚合主页/导航列表只用于发现资料，不能作为目标产品的事实来源。
@@ -6019,9 +6681,74 @@ flowchart LR
     def _memory_row_identity(cls, row: dict) -> str:
         source_type = str(row.get("source_type") or "document")
         source_url = str(row.get("source_url") or "").strip()
-        if source_url and source_type in {"document", "pending_document"}:
-            return f"document_url:{cls._canonical_memory_url(source_url)}"
+        if source_url and source_type in {"document", "pending_document", "data"}:
+            # 同一 URL 的提炼产物与原始采集落入同一桶，由同源优先级
+            # 仲裁谁代表这条记忆，避免数据快照把烘焙文档挤出结果。
+            return f"origin_url:{cls._canonical_memory_url(source_url)}"
         return f"{source_type}:{int(row.get('source_id') or row.get('id') or 0)}"
+
+    # 同源记忆的来源优先级：提炼产物恒优先于原始采集。同一 URL 的低质
+    # 数据快照不能挤掉已烘焙的会议纪要/文档（数值小者优先）。
+    ORIGIN_PRIORITY = {
+        "document": 0,
+        "knowledge": 1,
+        "operation": 1,
+        "data": 2,
+        "pending_document": 3,
+    }
+
+    # related 层实体已在正文命中；语义相似度再达到该阈值时视同直接资料。
+    ENTITY_SEMANTIC_PROMOTE_THRESHOLD = 0.65
+
+    @classmethod
+    def _origin_priority(cls, row: dict) -> int:
+        return cls.ORIGIN_PRIORITY.get(str(row.get("source_type") or ""), 9)
+
+    @staticmethod
+    def _combine_origin_rows(keeper: dict, other: dict) -> dict:
+        keeper.setdefault("_retrieval_paths", set()).update(
+            other.get("_retrieval_paths") or set()
+        )
+        keeper["_vector_similarity"] = max(
+            float(keeper.get("_vector_similarity") or 0),
+            float(other.get("_vector_similarity") or 0),
+        )
+        return keeper
+
+    @staticmethod
+    def _raw_collection_can_take_over(refined: dict, raw: dict) -> bool:
+        # 原始采集只在提炼产物缺少可用证据时充当替身：烘焙产物正文
+        # 为空说明提炼尚未完成；或已有语义证据且分数偏弱、又比原始
+        # 采集陈旧。没有语义分数的文档不视为弱证据，否则向量召回
+        # 关闭时所有烘焙文档都会被新采集覆盖。
+        if not str(refined.get("full_content") or "").strip():
+            return True
+        refined_similarity = refined.get("_vector_similarity")
+        return (
+            refined_similarity is not None
+            and float(refined_similarity) < 0.45
+            and int(raw.get("updated_at") or 0)
+            > int(refined.get("updated_at") or 0)
+        )
+
+    @classmethod
+    def _merge_origin_rows(cls, existing: dict, candidate: dict) -> dict:
+        existing_priority = cls._origin_priority(existing)
+        candidate_priority = cls._origin_priority(candidate)
+        if candidate_priority < existing_priority:
+            if cls._raw_collection_can_take_over(existing, candidate):
+                return cls._combine_origin_rows(candidate, existing)
+            return cls._combine_origin_rows(existing, candidate)
+        if candidate_priority > existing_priority:
+            if cls._raw_collection_can_take_over(candidate, existing):
+                return cls._combine_origin_rows(candidate, existing)
+            return cls._combine_origin_rows(existing, candidate)
+        # 同级来源保留原行为：取较新版本。
+        if int(candidate.get("updated_at") or 0) > int(
+            existing.get("updated_at") or 0
+        ):
+            return cls._combine_origin_rows(candidate, existing)
+        return cls._combine_origin_rows(existing, candidate)
 
     @staticmethod
     def _canonical_memory_url(value: str) -> str:
@@ -6126,7 +6853,12 @@ flowchart LR
         keywords = parsed_requirement.get("keywords") or []
         like_terms = keywords[:12] or [user_prompt[:80]]
         params: list[object] = []
-        clauses: list[str] = ["deleted_at IS NULL"]
+        # 正文与摘要都为空的占位文档没有可引用内容，不能作为创作
+        # 参考；同源原始采集会在后续仲裁中充当替身。
+        clauses: list[str] = [
+            "deleted_at IS NULL",
+            "(COALESCE(full_content, '') <> '' OR COALESCE(summary, '') <> '')",
+        ]
 
         keyword_clauses = []
         for term in like_terms:
@@ -6141,33 +6873,40 @@ flowchart LR
             # 评分完成。这里要求“一半关键词”会让同义表达和长 Skill 目标漏召回。
             clauses.append(f"({' + '.join(keyword_clauses)}) >= 1")
 
-        sql = f"""
-            SELECT id, title, doc_type, summary, full_content, sections_json, style_phrases,
-                   prompt_hint, usage_count, review_status, updated_at, source_url,
-                   'document' AS source_type, id AS source_id, updated_at AS observed_at
-            FROM bake_documents
-            WHERE {' AND '.join(clauses)}
-            ORDER BY usage_count DESC, updated_at DESC, id DESC
-            LIMIT ?
-        """
-        params.append(max(options.max_references * 4, 16))
-
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
+            # status 是后迁移加的列，老库可能缺失，先探测再拼 SQL。
+            columns = self._table_columns(conn, "bake_documents")
+            bake_status_expr = (
+                "COALESCE(status, 'draft')" if "status" in columns else "'draft'"
+            )
+            sql = f"""
+                SELECT id, title, doc_type, summary, full_content, sections_json, style_phrases,
+                       prompt_hint, usage_count, review_status, updated_at, source_url,
+                       {bake_status_expr} AS bake_status,
+                       'document' AS source_type, id AS source_id, updated_at AS observed_at
+                FROM bake_documents
+                WHERE {' AND '.join(clauses)}
+                ORDER BY usage_count DESC, updated_at DESC, id DESC
+                LIMIT ?
+            """
+            params.append(max(options.max_references * 4, 16))
             rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
             if rows:
                 return rows
             return [
                 dict(row)
                 for row in conn.execute(
-                    """
+                    f"""
                     SELECT id, title, doc_type, summary, full_content, sections_json, style_phrases,
                            prompt_hint, usage_count, review_status, updated_at, source_url,
+                           {bake_status_expr} AS bake_status,
                            'document' AS source_type, id AS source_id,
                            updated_at AS observed_at
                     FROM bake_documents
                     WHERE deleted_at IS NULL
+                      AND (COALESCE(full_content, '') <> '' OR COALESCE(summary, '') <> '')
                     ORDER BY usage_count DESC, updated_at DESC, id DESC
                     LIMIT ?
                     """,
@@ -6182,20 +6921,61 @@ flowchart LR
         if not self._embedding_model:
             return []
 
-        # 从数据库加载所有文档及其内容
+        # 从数据库加载文档及其内容
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
-            rows = conn.execute(
-                """
-                SELECT id, title, doc_type, summary, full_content, sections_json, style_phrases,
-                       prompt_hint, usage_count, review_status, updated_at, source_url
-                FROM bake_documents
-                WHERE deleted_at IS NULL AND full_content IS NOT NULL
-                ORDER BY updated_at DESC
-                LIMIT 100
-                """
-            ).fetchall()
+            columns = self._table_columns(conn, "bake_documents")
+            bake_status_expr = (
+                "COALESCE(status, 'draft')" if "status" in columns else "'draft'"
+            )
+            select_fields = (
+                "id, title, doc_type, summary, full_content, sections_json, "
+                "style_phrases, prompt_hint, usage_count, review_status, "
+                f"updated_at, source_url, {bake_status_expr} AS bake_status"
+            )
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    f"""
+                    SELECT {select_fields}
+                    FROM bake_documents
+                    WHERE deleted_at IS NULL AND full_content IS NOT NULL
+                    ORDER BY updated_at DESC
+                    LIMIT 100
+                    """
+                ).fetchall()
+            ]
+
+            # 只按最近性取候选会让更早的强相关文档系统性缺席语义召回；
+            # 用查询主题词做 LIKE 再补一批命中文档。
+            extra_terms = self._vector_recall_terms(query)
+            if extra_terms:
+                like_clauses = [
+                    "(title LIKE ? OR COALESCE(summary, '') LIKE ? OR "
+                    "COALESCE(full_content, '') LIKE ?)"
+                    for _ in extra_terms
+                ]
+                extra_params: list[object] = []
+                for term in extra_terms:
+                    extra_params.extend([f"%{term}%"] * 3)
+                extra_params.append(100)
+                existing_ids = {row["id"] for row in rows}
+                for row in conn.execute(
+                    f"""
+                    SELECT {select_fields}
+                    FROM bake_documents
+                    WHERE deleted_at IS NULL AND full_content IS NOT NULL
+                      AND ({' OR '.join(like_clauses)})
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    extra_params,
+                ).fetchall():
+                    item = dict(row)
+                    if item["id"] not in existing_ids:
+                        rows.append(item)
+                        existing_ids.add(item["id"])
 
             if not rows:
                 return []
@@ -6239,6 +7019,17 @@ flowchart LR
 
         finally:
             conn.close()
+
+    @staticmethod
+    def _vector_recall_terms(query: str) -> list[str]:
+        """从语义查询中提取主题词，用于补充较早文档的 LIKE 候选。"""
+        terms = re.findall(r"[A-Za-z][A-Za-z0-9._+\-/]{1,}", query)
+        terms.extend(re.findall(r"[\u4e00-\u9fff]{2,}", query))
+        unique: list[str] = []
+        for term in terms:
+            if term not in unique:
+                unique.append(term)
+        return unique[:8]
 
     @staticmethod
     def _semantic_recall_query(user_prompt: str, parsed_requirement: dict) -> str:
@@ -6601,20 +7392,19 @@ flowchart LR
                 if len(item) >= 2
             )
 
-        # 先保留所有由语言结构切出的完整短语，再为过长短语生成通用 n-gram
-        # 后备词。这样后面的实体不会被前一段长句产生的大量切片挤掉。
+        # 只保留语言结构切出的完整短语；超长短语额外补一个 4 字前缀作
+        # 后备。不再对长短语生成滑窗 n-gram：“大模型性能成”“模型性能
+        # 成本”这类近重复噪声词会撑大分母，稀释真实命中的相关性。
         tokens.extend(phrases)
+        fallback_prefixes: set[str] = set()
         for phrase in phrases:
-            if 3 <= len(phrase) <= 12:
+            if len(phrase) <= 12:
                 continue
-            for size in (6, 4, 3, 2):
-                for index in range(0, len(phrase) - size + 1):
-                    candidate = phrase[index:index + size]
-                    if candidate.startswith(("以及", "关于", "相关")):
-                        continue
-                    tokens.append(candidate)
-                if len(tokens) >= 40:
-                    break
+            prefix = phrase[:4]
+            tokens.append(prefix)
+            fallback_prefixes.add(prefix.casefold())
+            if len(tokens) >= 40:
+                break
 
         stop = {
             "帮我",
@@ -6646,6 +7436,7 @@ flowchart LR
             "整体创作背景",
             "需要产出",
             "协同",
+            "结果指标",
         }
         seen: set[str] = set()
         result: list[str] = []
@@ -6657,51 +7448,118 @@ flowchart LR
                 or len(normalized) < 2
                 or key in seen
                 or normalized.isdigit()
+                or self._is_format_instruction(normalized)
             ):
                 continue
             seen.add(key)
             result.append(normalized)
-        return result[:16]
+        # 前缀后备词只在父短语缺席时才有价值：父短语已保留时，前缀
+        # 不提供额外区分度，只撑大分母。自然切分出的短词（如“成本
+        # 优化”）是独立主题词，不能因子串关系被误删。
+        deduped: list[str] = []
+        for token in result:
+            folded = token.casefold()
+            if folded in fallback_prefixes and any(
+                folded != other.casefold() and folded in other.casefold()
+                for other in result
+            ):
+                continue
+            deduped.append(token)
+        return deduped[:16]
+
+    # 输出格式/排版指令是执行包装，不是事实主题：进入关键词分母会稀释
+    # 真实命中比例，进入语义查询会拉低 embedding 相似度。这里只匹配通用
+    # 表达模式，不针对具体业务词。
+    FORMAT_INSTRUCTION_PATTERNS = (
+        re.compile(r"^尽可能"),
+        re.compile(r"(?:列表|表格|图表|分行|分点|图文).{0,4}(?:展示|呈现|显示|形式)"),
+        re.compile(r"^(?:展示|呈现|显示|排版)"),
+        re.compile(r"(?:展示|呈现|排版)$"),
+        re.compile(r"最多.{0,4}(?:行|字|条|点)"),
+        re.compile(r"^[不]?少于.{0,4}(?:行|字|条|点)"),
+        re.compile(r"体现.{0,6}(?:数字化|可视化|结构化)"),
+    )
+
+    @classmethod
+    def _is_format_instruction(cls, token: str) -> bool:
+        return any(
+            pattern.search(token) for pattern in cls.FORMAT_INSTRUCTION_PATTERNS
+        )
 
     @staticmethod
     def _select_entity_aware_references(
         references: list[ReferenceDocument],
         limit: int,
     ) -> list[ReferenceDocument]:
-        """实体查询优先直接资料，背景资料最多占 Top-K 的两成。"""
+        """实体查询优先直接资料，背景资料最多占 Top-K 的两成。
+
+        direct/related 已分别带 +0.12/+0.04 的层级加成，这里按 final_weight
+        统一排序而不是先堆叠全部 direct：否则标题顺带提到实体但内容弱相关
+        的记忆会无条件挤掉正文强相关的实质性资料。
+        """
         direct = [item for item in references if item.retrieval_tier == "direct"]
         related = [item for item in references if item.retrieval_tier == "related"]
         background = [item for item in references if item.retrieval_tier == "background"]
-        selected = [*direct, *related][:limit]
+        core = sorted(
+            [*direct, *related],
+            key=lambda item: item.final_weight,
+            reverse=True,
+        )
+        selected = core[:limit]
         background_limit = max(1, math.floor(limit * 0.2))
         if len(selected) < limit:
             selected.extend(background[: min(limit - len(selected), background_limit)])
         return selected
 
-    @staticmethod
+    @classmethod
     def _deduplicate_reference_origins(
+        cls,
         references: list[ReferenceDocument],
     ) -> list[ReferenceDocument]:
-        """同一 URL 或高度一致的标题摘要只保留排序最高的一条。"""
+        """同一 URL 或高度一致的标题摘要只保留一条：提炼产物优先，再看排序。
+
+        原始数据快照常因新鲜度/完备度占优而排在烘焙文档前面；若按排序先后
+        取第一条，会把真正可用的会议纪要挤掉。这里先按来源优先级挑出每个
+        来源的胜者，再按原顺序输出，保持跨来源的全局排序不变。
+        """
+        best_by_origin: dict[str, ReferenceDocument] = {}
+        for reference in references:
+            origin_key = cls._reference_origin_key(reference)
+            current = best_by_origin.get(origin_key)
+            if current is None or cls._reference_beats(reference, current):
+                best_by_origin[origin_key] = reference
         selected: list[ReferenceDocument] = []
         seen: set[str] = set()
         for reference in references:
-            normalized_url = re.sub(
-                r"#.*$",
-                "",
-                str(reference.source_url or "").strip().casefold(),
-            ).rstrip("/")
-            if normalized_url:
-                origin_key = f"url:{normalized_url}"
-            else:
-                title = re.sub(r"\s+", "", reference.title).casefold()
-                summary = re.sub(r"\s+", "", reference.summary).casefold()[:160]
-                origin_key = f"text:{title}:{summary}"
+            origin_key = cls._reference_origin_key(reference)
             if origin_key in seen:
                 continue
             seen.add(origin_key)
-            selected.append(reference)
+            selected.append(best_by_origin[origin_key])
         return selected
+
+    @staticmethod
+    def _reference_origin_key(reference: ReferenceDocument) -> str:
+        normalized_url = re.sub(
+            r"#.*$",
+            "",
+            str(reference.source_url or "").strip().casefold(),
+        ).rstrip("/")
+        if normalized_url:
+            return f"url:{normalized_url}"
+        title = re.sub(r"\s+", "", reference.title).casefold()
+        summary = re.sub(r"\s+", "", reference.summary).casefold()[:160]
+        return f"text:{title}:{summary}"
+
+    @classmethod
+    def _reference_beats(
+        cls, candidate: ReferenceDocument, current: ReferenceDocument
+    ) -> bool:
+        candidate_priority = cls.ORIGIN_PRIORITY.get(candidate.source_type, 9)
+        current_priority = cls.ORIGIN_PRIORITY.get(current.source_type, 9)
+        if candidate_priority != current_priority:
+            return candidate_priority < current_priority
+        return candidate.final_weight > current.final_weight
 
     @classmethod
     def _is_aggregate_page(cls, row: dict) -> bool:
@@ -6858,8 +7716,14 @@ flowchart LR
 
     def _score_quality(self, row: dict) -> float:
         status = str(row.get("review_status") or "")
+        bake_status = str(row.get("bake_status") or "")
         base = 0.55
-        if status in {"adopted", "auto_created", "verified", "enabled"}:
+        # bake_documents.review_status 恒记烘焙动作状态（auto_created），
+        # 文档本身是否启用记在 status 字段，两者任一成立即给质量加成。
+        if (
+            status in {"adopted", "auto_created", "verified", "enabled"}
+            or bake_status in {"enabled", "adopted"}
+        ):
             base += 0.25
         if row.get("summary"):
             base += 0.08
@@ -6881,7 +7745,13 @@ flowchart LR
             return max(0.45, min(content_len / 1200, 1.0))
         sections = self._json_len(row.get("sections_json"))
         section_score = min(sections / 6, 1.0)
-        content_score = min(content_len / 3000, 1.0)
+        # 与提炼型记忆使用同一正文饱和长度，避免会议纪要等短而完整的
+        # 文档被 3000 字分母系统性压低。
+        content_score = min(content_len / 1200, 1.0)
+        if sections == 0:
+            # 没有章节结构是烘焙产物形态差异（如会议纪要），不是内容
+            # 缺失；回退为纯正文长度评分，不被章节权重封顶。
+            return max(0.45, content_score)
         return max(0.25, section_score * 0.55 + content_score * 0.45)
 
     def _score_format(self, row: dict, parsed_requirement: dict) -> float:

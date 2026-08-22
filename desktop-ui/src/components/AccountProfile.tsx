@@ -1,4 +1,4 @@
-import React, { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react'
+import React, { FormEvent, KeyboardEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   AlertCircle,
@@ -43,19 +43,13 @@ import {
 import { toUserFacingError } from '../utils/userFacingError'
 import { useAppMetadata } from '../utils/appMetadata'
 import {
+  fetchWorkProfile,
   fetchWorkProfileDay,
   hasWorkProfileDayDetails,
   toLocalDateKey,
   type InferredWorkMood,
   type WorkProfileSummary,
 } from '../utils/workProfile'
-import {
-  loadCachedWorkProfile,
-  mergeWorkProfiles,
-  synchronizeWorkProfile,
-  WORK_PROFILE_SYNCED_EVENT,
-  type SyncWorkProfileEventDetail,
-} from '../utils/workProfileCloud'
 import MessagePanel from './MessagePanel'
 import AccountContactBindings from './AccountContactBindings'
 import { useAppStore } from '../store/useAppStore'
@@ -64,8 +58,8 @@ import './AccountProfile.css'
 interface AccountProfileProps {
   apiBaseUrl: string
   adminApiBaseUrl: string
-  authToken: string
-  user: CloudUser
+  authToken: string | null
+  user: CloudUser | null
   accountLabel: string
   runModeLabel: string
   cloudBalance: CloudBalance | null
@@ -75,6 +69,7 @@ interface AccountProfileProps {
   onInitialSectionHandled?: () => void
   onUserChange: (user: CloudUser) => void
   onLogout: () => void | Promise<void>
+  signedOutPersonalContent?: ReactNode
 }
 
 const TABS: Array<{
@@ -262,6 +257,7 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
   onInitialSectionHandled,
   onUserChange,
   onLogout,
+  signedOutPersonalContent,
 }) => {
   const appMetadata = useAppMetadata()
   const [workProfile, setWorkProfile] = useState<WorkProfileSummary | null>(null)
@@ -288,8 +284,8 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
   const [profilePending, setProfilePending] = useState(false)
   const [profileError, setProfileError] = useState<string | null>(null)
   const [profileMessage, setProfileMessage] = useState<string | null>(null)
-  const [nicknameDraft, setNicknameDraft] = useState(user.nickname ?? user.username ?? '')
-  const [companyNameDraft, setCompanyNameDraft] = useState(user.company_name ?? '')
+  const [nicknameDraft, setNicknameDraft] = useState(user?.nickname ?? user?.username ?? '')
+  const [companyNameDraft, setCompanyNameDraft] = useState(user?.company_name ?? '')
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
   const logoutTriggerRef = useRef<HTMLButtonElement>(null)
   const logoutCancelRef = useRef<HTMLButtonElement>(null)
@@ -304,9 +300,9 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
 
   useEffect(() => {
     if (profileEditing) return
-    setNicknameDraft(user.nickname ?? user.username ?? '')
-    setCompanyNameDraft(user.company_name ?? '')
-  }, [profileEditing, user.company_name, user.nickname, user.username])
+    setNicknameDraft(user?.nickname ?? user?.username ?? '')
+    setCompanyNameDraft(user?.company_name ?? '')
+  }, [profileEditing, user?.company_name, user?.nickname, user?.username])
 
   useEffect(() => {
     if (!initialSection) return
@@ -321,51 +317,24 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
   }, [initialSection, onInitialSectionHandled, requestedHighlightedAchievementKeys])
 
   useEffect(() => {
-    let cancelled = false
-    let hasProfile = false
-    const applyProfile = (profile: WorkProfileSummary) => {
-      if (cancelled) return
-      hasProfile = true
-      setWorkProfile((current) => current ? mergeWorkProfiles(current, profile) : profile)
-      setWorkProfileLoading(false)
-      setWorkProfileError(null)
-    }
-    const handleSyncedProfile = (event: Event) => {
-      const detail = (event as CustomEvent<SyncWorkProfileEventDetail>).detail
-      if (detail.userId === user.id) applyProfile(detail.profile)
-    }
-
-    const cached = loadCachedWorkProfile(user.id)
-    if (cached) {
-      applyProfile(cached)
-    } else {
-      setWorkProfile(null)
-      setWorkProfileLoading(true)
-    }
+    const controller = new AbortController()
+    setWorkProfile(null)
+    setWorkProfileLoading(true)
     setWorkProfileError(null)
-    window.addEventListener(WORK_PROFILE_SYNCED_EVENT, handleSyncedProfile)
-    if (!cached || retryKey > 0) {
-      synchronizeWorkProfile({
-        apiBaseUrl,
-        adminApiBaseUrl,
-        authToken,
-        userId: user.id,
+    fetchWorkProfile(apiBaseUrl, controller.signal)
+      .then((profile) => {
+        if (!controller.signal.aborted) setWorkProfile(profile)
       })
-        .then((profile) => {
-          applyProfile(profile)
-        })
-        .catch((error) => {
-          if (!cancelled && !hasProfile) {
-            setWorkProfileError(toUserFacingError(error, '工作画像读取失败'))
-            setWorkProfileLoading(false)
-          }
-        })
-    }
-    return () => {
-      cancelled = true
-      window.removeEventListener(WORK_PROFILE_SYNCED_EVENT, handleSyncedProfile)
-    }
-  }, [adminApiBaseUrl, apiBaseUrl, authToken, retryKey, user.id])
+      .catch((error) => {
+        if (!controller.signal.aborted) {
+          setWorkProfileError(toUserFacingError(error, '工作画像读取失败'))
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setWorkProfileLoading(false)
+      })
+    return () => controller.abort()
+  }, [apiBaseUrl, retryKey])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -550,6 +519,7 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
   }
 
   const beginProfileEdit = () => {
+    if (!user) return
     setNicknameDraft(user.nickname ?? user.username ?? '')
     setCompanyNameDraft(user.company_name ?? '')
     setProfileError(null)
@@ -564,6 +534,7 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
 
   const saveProfile = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (!user || !authToken) return
     setProfilePending(true)
     setProfileError(null)
     setProfileMessage(null)
@@ -717,7 +688,7 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
     : null
   const displayedMood = inferredMood ?? GOOD_MOOD_PRESENTATION
   const DisplayedMoodIcon = displayedMood.icon
-  const accountName = user.username ?? user.email ?? user.phone ?? '本地账户'
+  const accountName = user?.username ?? user?.email ?? user?.phone ?? '本地身份'
 
   return (
     <main className="account-profile" data-testid="auth-panel">
@@ -772,7 +743,7 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
             embedded
             hidden={activeSection !== 'messages'}
             id="account-profile-panel-messages"
-            key={`${user.id}:${adminApiBaseUrl}`}
+            key={`${user?.id ?? 'local'}:${adminApiBaseUrl}`}
             labelledBy="account-profile-tab-messages"
           />
 
@@ -783,6 +754,7 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
               id="account-profile-panel-personal"
               role="tabpanel"
             >
+              {!user ? signedOutPersonalContent : <>
               <div className="account-profile__panel-heading account-profile__panel-heading--profile">
                 <div>
                   <h2>个人信息</h2>
@@ -855,7 +827,7 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
 
               <AccountContactBindings
                 adminApiBaseUrl={adminApiBaseUrl}
-                authToken={authToken}
+                authToken={authToken!}
                 onUserChange={onUserChange}
                 user={user}
               />
@@ -872,6 +844,7 @@ const AccountProfile: React.FC<AccountProfileProps> = ({
                   <LogOut size={16} aria-hidden /> 退出登录
                 </button>
               </div>
+              </>}
             </section>
           )}
 

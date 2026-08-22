@@ -30,6 +30,25 @@ const documentStatusLabel = (status: ArticleTemplate['status']) => (
   status === 'enabled' ? '已启用' : status === 'draft' ? '草稿' : status === 'disabled' ? '已停用' : '待确认'
 )
 
+type DocumentRefreshPolicy = 'auto' | 'always' | 'never'
+
+const REFRESH_POLICY_OPTIONS: Array<{ value: DocumentRefreshPolicy; label: string }> = [
+  { value: 'auto', label: '自动判断' },
+  { value: 'always', label: '每次都刷新' },
+  { value: 'never', label: '从不刷新' },
+]
+
+const refreshPolicyLabel = (policy?: string) => (
+  REFRESH_POLICY_OPTIONS.find(option => option.value === policy)?.label ?? '自动判断'
+)
+
+const refreshStatusLabel = (status?: string) => {
+  if (status === 'fresh_complete') return '已验证完整快照'
+  if (status === 'fresh_partial') return '已验证部分快照'
+  if (status === 'unavailable') return '当前不可用'
+  return '历史版本'
+}
+
 const BakeTemplatesTab: React.FC<{
   templates: ArticleTemplate[]
   total: number
@@ -49,6 +68,9 @@ const BakeTemplatesTab: React.FC<{
   onUpdateTemplate: (templateId: string, updater: (template: ArticleTemplate) => ArticleTemplate) => void | boolean | Promise<void | boolean>
   onToggleTemplateStatus: (templateId: string) => void
   onDeleteTemplate: (templateId: string) => void | boolean | Promise<boolean>
+  onRefreshTemplate?: (templateId: string) => void | Promise<void>
+  refreshingTemplateId?: string | null
+  onSetTemplateRefreshPolicy?: (templateId: string, policy: DocumentRefreshPolicy) => boolean | Promise<boolean>
   onSettleSkill?: (template: ArticleTemplate) => void
   relatedSkills?: LocalCreationSkill[]
   onOpenSkill?: (skill: LocalCreationSkill) => void
@@ -86,6 +108,9 @@ const BakeTemplatesTab: React.FC<{
   onUpdateTemplate,
   onToggleTemplateStatus,
   onDeleteTemplate,
+  onRefreshTemplate,
+  refreshingTemplateId = null,
+  onSetTemplateRefreshPolicy,
   onSettleSkill,
   relatedSkills = [],
   onOpenSkill,
@@ -105,6 +130,7 @@ const BakeTemplatesTab: React.FC<{
   focusId,
 }) => {
   const selected = templates.find(item => item.id === selectedTemplateId) ?? templates[0]
+  const isRefreshing = refreshingTemplateId != null && refreshingTemplateId === selected?.id
   const [drawerMode, setDrawerMode] = useState<'detail' | 'edit' | null>(null)
   const [showCreateDialog, setShowCreateDialog] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
@@ -116,11 +142,13 @@ const BakeTemplatesTab: React.FC<{
     name: selected?.title || '',
     category: selected?.docType || '',
     content: selected?.fullContent || selected?.promptHint || '',
+    refreshPolicy: (selected?.refreshPolicy ?? 'auto') as DocumentRefreshPolicy,
   }), [selected])
 
   const [draftName, setDraftName] = useState('')
   const [draftCategory, setDraftCategory] = useState('')
   const [draftContent, setDraftContent] = useState('')
+  const [draftRefreshPolicy, setDraftRefreshPolicy] = useState<DocumentRefreshPolicy>('auto')
   const [newDocument, setNewDocument] = useState({
     title: '新文档',
     docType: 'general_document',
@@ -131,6 +159,7 @@ const BakeTemplatesTab: React.FC<{
     setDraftName(editingValues.name)
     setDraftCategory(editingValues.category)
     setDraftContent(editingValues.content)
+    setDraftRefreshPolicy(editingValues.refreshPolicy)
   }, [editingValues])
 
   useEffect(() => {
@@ -162,7 +191,13 @@ const BakeTemplatesTab: React.FC<{
         updatedAt: new Date().toLocaleString('zh-CN', { hour12: false }),
         updatedAtMs: Date.now(),
       }))
-      if (result !== false) setDrawerMode('detail')
+      if (result === false) return
+      // 刷新策略走专用端点，不在文档全列更新里
+      if (onSetTemplateRefreshPolicy && draftRefreshPolicy !== editingValues.refreshPolicy) {
+        const policyResult = await onSetTemplateRefreshPolicy(selected.id, draftRefreshPolicy)
+        if (policyResult === false) return
+      }
+      setDrawerMode('detail')
     } finally {
       setIsSaving(false)
     }
@@ -172,6 +207,7 @@ const BakeTemplatesTab: React.FC<{
     setDraftName(editingValues.name)
     setDraftCategory(editingValues.category)
     setDraftContent(editingValues.content)
+    setDraftRefreshPolicy(editingValues.refreshPolicy)
     setDrawerMode('detail')
   }
 
@@ -249,7 +285,7 @@ const BakeTemplatesTab: React.FC<{
           <div className="bake-list-toolbar__repository-row bake-list-toolbar__repository-row--search">
             <label className="bake-form-field bake-filter-field bake-filter-field--search">
               <span className="bake-filter-label">关键词</span>
-              <input className="bake-input" value={draftQuery} onChange={(event) => onDraftQueryChange(event.target.value)} placeholder="搜索文档名称、内容或来源 URL" />
+              <input className="bake-input" value={draftQuery} onChange={(event) => onDraftQueryChange(event.target.value)} placeholder="搜索文档 ID、名称、内容或来源 URL" />
             </label>
           </div>
           <div className="bake-list-toolbar__repository-row bake-list-toolbar__repository-row--asset-filters">
@@ -315,6 +351,11 @@ const BakeTemplatesTab: React.FC<{
           <BakeButton primary disabled={isSaving} onClick={handleSave}>{isSaving ? '保存中…' : '保存'}</BakeButton>
         </> : <>
           {onToggleFavorite && <BakeFavoriteButton isFavorite={Boolean(selected.isFavorite)} busy={favoriteBusy} onToggle={handleToggleFavorite} />}
+          {onRefreshTemplate && selected.sourceUrl && (
+            <BakeButton disabled={isRefreshing} onClick={() => void Promise.resolve(onRefreshTemplate(selected.id))}>
+              {isRefreshing ? '刷新中…' : '立即刷新'}
+            </BakeButton>
+          )}
           {onOpenGraph && <BakeButton onClick={() => { closeDrawer(); onOpenGraph(selected) }}>记忆图谱</BakeButton>}
           {selected.sourceMemoryIds[0] && <BakeButton compact onClick={() => onViewSourceMemory(selected.sourceMemoryIds[0])}>来源时间线</BakeButton>}
           {onSettleSkill && <BakeButton onClick={() => onSettleSkill(selected)}>沉淀技能</BakeButton>}
@@ -337,6 +378,18 @@ const BakeTemplatesTab: React.FC<{
               <span className="bake-kv__title">文档分类</span>
               <BakeDocumentCategoryPicker value={draftCategory} onChange={setDraftCategory} />
             </label>
+            <label className="bake-form-field">
+              <span className="bake-kv__title">即时刷新策略</span>
+              <select
+                className="bake-input"
+                value={draftRefreshPolicy}
+                onChange={(event) => setDraftRefreshPolicy(event.target.value as DocumentRefreshPolicy)}
+                aria-label="即时刷新策略"
+              >
+                {REFRESH_POLICY_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+              <span className="bake-muted">创作召回时按策略自动检查来源页面并合入最新内容；“自动判断”会结合更新节奏与内容新鲜度决定是否打开浏览器。</span>
+            </label>
             <div className="bake-form-field">
               <span className="bake-kv__title">文档内容</span>
               <BakeRichTextEditor value={draftContent} onChange={setDraftContent} ariaLabel="文档内容" placeholder="输入文档内容…" />
@@ -350,6 +403,18 @@ const BakeTemplatesTab: React.FC<{
               <div className="bake-kv__title">来源网址</div>
               <a href={selected.sourceUrl} target="_blank" rel="noopener noreferrer" className="bake-source-url-link">{selected.sourceUrl}</a>
             </div>}
+            <div className="bake-knowledge-detail__section">
+              <div className="bake-kv__title">即时刷新</div>
+              <div className="bake-related-summary">
+                <div className="bake-related-row"><span className="bake-related-row__label">刷新策略</span><span className="bake-related-row__value">{refreshPolicyLabel(selected.refreshPolicy)}</span></div>
+                <div className="bake-related-row"><span className="bake-related-row__label">上次检查</span><span className="bake-related-row__value">{formatTemplateTime(selected.lastRefreshCheckedAtMs, '尚未检查')}</span></div>
+                <div className="bake-related-row"><span className="bake-related-row__label">校验状态</span><span className="bake-related-row__value">{refreshStatusLabel(selected.lastRefreshStatus)}</span></div>
+                {selected.lastRefreshSuccessAtMs ? <div className="bake-related-row"><span className="bake-related-row__label">上次成功</span><span className="bake-related-row__value">{formatTemplateTime(selected.lastRefreshSuccessAtMs, '尚未成功')}</span></div> : null}
+                {selected.lastRefreshCharacterCount ? <div className="bake-related-row"><span className="bake-related-row__label">采集范围</span><span className="bake-related-row__value">{selected.lastRefreshCharacterCount.toLocaleString()} 字符 · {selected.lastRefreshSegmentCount || 0} 段{selected.lastRefreshTruncated ? ' · 已截断' : ''}</span></div> : null}
+                {selected.lastRefreshError && <div className="bake-related-row"><span className="bake-related-row__label">上次失败原因</span><span className="bake-related-row__value">{selected.lastRefreshError}</span></div>}
+                {!selected.sourceUrl && <div className="bake-related-row"><span className="bake-related-row__label">提示</span><span className="bake-related-row__value">没有来源网址，无法即时刷新</span></div>}
+              </div>
+            </div>
             <div className="bake-knowledge-detail__section">
               <div className="bake-kv__title">文档内容</div>
               <BakeMarkdown content={selected.fullContent || selected.promptHint} />

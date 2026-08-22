@@ -60,6 +60,7 @@ interface InitializationEnvelope {
 }
 
 const SIDECAR = 'http://127.0.0.1:7071'
+const CORE_ENGINE = 'http://127.0.0.1:7070'
 
 async function requestInitialization(path: string, init?: RequestInit) {
   try {
@@ -97,6 +98,23 @@ export async function fetchInitializationStatus(): Promise<InitializationStatus>
   const data = await readJson(response) as InitializationEnvelope
   if (!data.initialization) throw new Error('本地初始化服务返回了无效状态')
   return data.initialization
+}
+
+export async function fetchRuntimeReadiness(): Promise<boolean> {
+  try {
+    const [coreResponse, sidecarResponse] = await Promise.all([
+      fetch(`${CORE_ENGINE}/health`),
+      fetch(`${SIDECAR}/health`),
+    ])
+    if (!coreResponse.ok || !sidecarResponse.ok) return false
+    const sidecar = await sidecarResponse.json().catch(() => ({})) as {
+      status?: string
+      pipeline_ready?: boolean
+    }
+    return sidecar.status === 'ok' && sidecar.pipeline_ready === true
+  } catch {
+    return false
+  }
 }
 
 export async function startInitialization(mode: 'normal' | 'sandbox'): Promise<InitializationStatus> {

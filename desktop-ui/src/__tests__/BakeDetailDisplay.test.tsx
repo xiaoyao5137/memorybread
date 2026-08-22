@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { ComponentProps } from 'react'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import BakeKnowledgeTab from '../components/bake/BakeKnowledgeTab'
@@ -426,6 +427,7 @@ describe('Bake 详情展示优化', () => {
     )
 
     fireEvent.click(screen.getByRole('button', { name: '查看知识「本地优先知识」详情' }))
+    expect(within(screen.getByRole('dialog', { name: '本地优先知识' })).getByRole('button', { name: '删除' })).toBeInTheDocument()
     expect(screen.getAllByText('本地优先知识').length).toBeGreaterThan(0)
     expect(screen.queryByText(/bake_knowledge/)).not.toBeInTheDocument()
     expect(screen.queryByText(/重复观察/)).not.toBeInTheDocument()
@@ -509,6 +511,7 @@ describe('Bake 详情展示优化', () => {
     expect(within(operationTable).queryByRole('columnheader', { name: '步骤' })).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '查看操作：服务无法启动' }))
+    expect(within(screen.getByRole('dialog', { name: '服务无法启动' })).getByRole('button', { name: '删除' })).toBeInTheDocument()
     expect(screen.queryByText('关联知识')).not.toBeInTheDocument()
     expect(screen.queryByText('已关联 2 条知识（用于补充背景和术语）')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '排查服务健康检查失败' })).not.toBeInTheDocument()
@@ -650,5 +653,100 @@ describe('Bake 详情展示优化', () => {
     fireEvent.click(screen.getByRole('button', { name: '查看文档「周报模板」详情' }))
     fireEvent.click(within(screen.getByRole('dialog', { name: '周报模板' })).getByRole('button', { name: '收藏' }))
     await waitFor(() => expect(onToggleFavorite).toHaveBeenCalledWith(template, true))
+  })
+
+  const renderTemplatesTab = (overrides: Partial<ComponentProps<typeof BakeTemplatesTab>> = {}) => render(
+    <BakeTemplatesTab
+      templates={[template]}
+      total={1}
+      limit={20}
+      offset={0}
+      query=""
+      from=""
+      to=""
+      draftQuery=""
+      draftFrom=""
+      draftTo=""
+      selectedTemplateId={template.id}
+      onSelectTemplate={noop}
+      onCreateTemplate={noop}
+      onUpdateTemplate={noop}
+      onToggleTemplateStatus={noop}
+      onDeleteTemplate={noop}
+      onViewSourceMemory={noop}
+      onPageChange={noop}
+      onLimitChange={noop}
+      onDraftQueryChange={noop}
+      onDraftFromChange={noop}
+      onDraftToChange={noop}
+      onSearch={noop}
+      onClearFilters={noop}
+      {...overrides}
+    />,
+  )
+
+  it('文档详情展示即时刷新字段，点击立即刷新调用刷新回调', async () => {
+    const onRefreshTemplate = vi.fn().mockResolvedValue(undefined)
+    const refreshTemplate = {
+      ...template,
+      sourceUrl: 'https://docs.example.com/weekly',
+      refreshPolicy: 'auto' as const,
+      lastRefreshCheckedAtMs: new Date(2026, 7, 20, 4, 21, 24).getTime(),
+      lastRefreshError: 'FOCUS_POLICY_BLOCKED',
+    }
+    renderTemplatesTab({ templates: [refreshTemplate], onRefreshTemplate })
+
+    fireEvent.click(screen.getByRole('button', { name: '查看文档「周报模板」详情' }))
+    const drawer = screen.getByRole('dialog', { name: '周报模板' })
+    expect(within(drawer).getByText('即时刷新')).toBeInTheDocument()
+    expect(within(drawer).getByText('自动判断')).toBeInTheDocument()
+    expect(within(drawer).getByText('FOCUS_POLICY_BLOCKED')).toBeInTheDocument()
+    expect(within(drawer).getByText(/2026.*8.*20.*04:21:24/)).toBeInTheDocument()
+
+    fireEvent.click(within(drawer).getByRole('button', { name: '立即刷新' }))
+    await waitFor(() => expect(onRefreshTemplate).toHaveBeenCalledWith(template.id))
+  })
+
+  it('无来源网址的文档不展示立即刷新按钮并提示无法刷新', () => {
+    const onRefreshTemplate = vi.fn()
+    renderTemplatesTab({ templates: [{ ...template, sourceUrl: undefined }], onRefreshTemplate })
+
+    fireEvent.click(screen.getByRole('button', { name: '查看文档「周报模板」详情' }))
+    const drawer = screen.getByRole('dialog', { name: '周报模板' })
+    expect(within(drawer).queryByRole('button', { name: '立即刷新' })).not.toBeInTheDocument()
+    expect(within(drawer).getByText('没有来源网址，无法即时刷新')).toBeInTheDocument()
+  })
+
+  it('编辑模式可调整即时刷新策略，保存时调用策略回调', async () => {
+    const onUpdateTemplate = vi.fn().mockResolvedValue(true)
+    const onSetTemplateRefreshPolicy = vi.fn().mockResolvedValue(true)
+    renderTemplatesTab({
+      templates: [{ ...template, sourceUrl: 'https://docs.example.com/weekly', refreshPolicy: 'auto' as const }],
+      onUpdateTemplate,
+      onSetTemplateRefreshPolicy,
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: '编辑文档「周报模板」' }))
+    const policySelect = screen.getByRole('combobox', { name: '即时刷新策略' })
+    expect(policySelect).toHaveValue('auto')
+    fireEvent.change(policySelect, { target: { value: 'never' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(onSetTemplateRefreshPolicy).toHaveBeenCalledWith(template.id, 'never'))
+  })
+
+  it('策略未变更时保存不调用策略回调', async () => {
+    const onUpdateTemplate = vi.fn().mockResolvedValue(true)
+    const onSetTemplateRefreshPolicy = vi.fn().mockResolvedValue(true)
+    renderTemplatesTab({
+      templates: [{ ...template, refreshPolicy: 'always' as const }],
+      onUpdateTemplate,
+      onSetTemplateRefreshPolicy,
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: '编辑文档「周报模板」' }))
+    expect(screen.getByRole('combobox', { name: '即时刷新策略' })).toHaveValue('always')
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(onUpdateTemplate).toHaveBeenCalled())
+    expect(onSetTemplateRefreshPolicy).not.toHaveBeenCalled()
   })
 })

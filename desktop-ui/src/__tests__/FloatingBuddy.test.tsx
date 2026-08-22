@@ -17,6 +17,10 @@ beforeEach(() => {
 describe('FloatingBuddy', () => {
   it('渲染主菜单按钮', () => {
     render(<FloatingBuddy />)
+    expect(screen.getByRole('img', { name: '记忆面包' })).toHaveAttribute(
+      'src',
+      '/brand/memorybread-bread-mark.png',
+    )
     expect(screen.getByTestId('buddy-avatar')).toBeInTheDocument()
     expect(screen.getByTestId('settings-btn')).toBeInTheDocument()
     expect(screen.queryByTestId('messages-btn')).not.toBeInTheDocument()

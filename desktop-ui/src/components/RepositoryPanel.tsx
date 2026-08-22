@@ -9,6 +9,7 @@ import {
   useFetchBakeCaptures,
   useFetchBakeKnowledge,
   useFetchBakeKnowledgeDetail,
+  useFetchBakeMemoryRelations,
   useFetchBakeSop,
   useFetchBakeSops,
   useFetchBakeTemplates,
@@ -21,6 +22,7 @@ import type {
   BakeCaptureItem,
   BakeKnowledgeItem,
   CaptureRecord,
+  DataSource,
   RepositoryTab,
   SopCandidate,
   TimelineItem,
@@ -92,6 +94,7 @@ const RepositoryPanel: React.FC = () => {
     selectedTemplateId,
     selectedSopId,
     selectedKnowledgeId,
+    bakeDataFocusId,
     setWindowMode,
     setBakeTab,
     setRepositoryTab,
@@ -104,6 +107,7 @@ const RepositoryPanel: React.FC = () => {
     setBakeTemplateFocusId,
     setBakeKnowledgeFocusId,
     setBakeSopFocusId,
+    setBakeDataFocusId,
     setBakeMemoryOffset,
     setBakeCaptureOffset,
     setRepositoryMemoryLimit,
@@ -126,6 +130,7 @@ const RepositoryPanel: React.FC = () => {
   const fetchTemplates = useFetchBakeTemplates()
   const fetchKnowledge = useFetchBakeKnowledge()
   const fetchKnowledgeDetail = useFetchBakeKnowledgeDetail()
+  const fetchTimelineRelations = useFetchBakeMemoryRelations()
   const fetchSops = useFetchBakeSops()
   const fetchSop = useFetchBakeSop()
   const fetchDataSources = useFetchDataSources()
@@ -137,8 +142,9 @@ const RepositoryPanel: React.FC = () => {
     document: ArticleTemplate | null
     knowledge: BakeKnowledgeItem | null
     sop: SopCandidate | null
+    data: DataSource | null
     loading: boolean
-  }>({ document: null, knowledge: null, sop: null, loading: false })
+  }>({ document: null, knowledge: null, sop: null, data: null, loading: false })
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const [draftMemoryQuery, setDraftMemoryQuery] = useState(repositoryMemoryQuery)
   const [draftMemoryFrom, setDraftMemoryFrom] = useState(repositoryMemoryFrom)
@@ -286,6 +292,16 @@ const RepositoryPanel: React.FC = () => {
     repositoryCaptureTo,
     repositoryTab,
   ])
+
+  // 关联跳转时 store 已清空应用筛选，这里同步清空草稿输入框，
+  // 避免工具栏残留旧筛选文本与实际列表口径不一致
+  useEffect(() => {
+    if (!repositoryCaptureSourceCaptureId) return
+    setDraftCaptureQuery('')
+    setDraftCaptureApp('')
+    setDraftCaptureFrom('')
+    setDraftCaptureTo('')
+  }, [repositoryCaptureSourceCaptureId])
 
   useEffect(() => {
     if (repositoryTab !== 'capture' || !selectedCaptureId) {
@@ -464,34 +480,33 @@ const RepositoryPanel: React.FC = () => {
 
   useEffect(() => {
     if (repositoryTab !== 'memory' || !resolvedMemoryId) {
-      setSelectedMemoryRelations({ document: null, knowledge: null, sop: null, loading: false })
+      setSelectedMemoryRelations({ document: null, knowledge: null, sop: null, data: null, loading: false })
       return
     }
 
     let cancelled = false
     setSelectedMemoryRelations(prev => ({ ...prev, loading: true }))
-    void Promise.all([
-      fetchTemplates({ limit: 1000 }),
-      fetchKnowledge({ limit: 1000 }),
-      fetchSops({ limit: 1000 }),
-    ]).then(([templateData, knowledgeData, sopData]) => {
+    // 定向接口按来源时间线查关联产物；列表接口分页上限会截断窗口外的关联，
+    // 不能再拉全量列表后按 sourceTimelineId 客户端过滤
+    void fetchTimelineRelations(resolvedMemoryId).then((relations) => {
       if (cancelled) return
       setSelectedMemoryRelations({
-        document: templateData.items.find(template => template.sourceMemoryIds.includes(resolvedMemoryId)) ?? null,
-        knowledge: knowledgeData.items.find(item => item.sourceTimelineId === resolvedMemoryId) ?? null,
-        sop: sopData.items.find(item => item.sourceTimelineId === resolvedMemoryId) ?? null,
+        document: relations.document,
+        knowledge: relations.knowledge,
+        sop: relations.sop,
+        data: relations.data,
         loading: false,
       })
     }).catch(() => {
       if (!cancelled) {
-        setSelectedMemoryRelations({ document: null, knowledge: null, sop: null, loading: false })
+        setSelectedMemoryRelations({ document: null, knowledge: null, sop: null, data: null, loading: false })
       }
     })
 
     return () => {
       cancelled = true
     }
-  }, [fetchKnowledge, fetchSops, fetchTemplates, repositoryTab, resolvedMemoryId])
+  }, [fetchTimelineRelations, repositoryTab, resolvedMemoryId])
 
   useEffect(() => {
     if (repositoryTab !== 'capture') return
@@ -622,7 +637,7 @@ const RepositoryPanel: React.FC = () => {
       setRepositoryMemoryFocusId(null)
       setSelectedMemoryId(null)
       setMemoryCaptures([])
-      setSelectedMemoryRelations({ document: null, knowledge: null, sop: null, loading: false })
+      setSelectedMemoryRelations({ document: null, knowledge: null, sop: null, data: null, loading: false })
       if (nextOffset !== bakeMemoryOffset) {
         setBakeMemoryOffset(nextOffset)
       } else {
@@ -689,6 +704,7 @@ const RepositoryPanel: React.FC = () => {
     selectedKnowledgeId,
     repositoryCaptureSourceCaptureId,
     repositoryMemoryFocusId,
+    bakeDataFocusId,
   })
 
   const restoreNavigationTarget = (target: BakeNavigationTarget) => {
@@ -704,6 +720,7 @@ const RepositoryPanel: React.FC = () => {
     if (target.bakeTemplateFocusId !== undefined) setBakeTemplateFocusId(target.bakeTemplateFocusId)
     if (target.bakeKnowledgeFocusId !== undefined) setBakeKnowledgeFocusId(target.bakeKnowledgeFocusId)
     if (target.bakeSopFocusId !== undefined) setBakeSopFocusId(target.bakeSopFocusId)
+    if (target.bakeDataFocusId !== undefined) setBakeDataFocusId(target.bakeDataFocusId)
     if (target.repositoryCaptureSourceCaptureId !== undefined) {
       setRepositoryCaptureSourceCaptureId(target.repositoryCaptureSourceCaptureId)
     }
@@ -724,8 +741,7 @@ const RepositoryPanel: React.FC = () => {
 
   const handleViewRelatedDocument = async (timelineId: string) => {
     try {
-      const { items: templates } = await fetchTemplates({ limit: 1000 })
-      const relatedDoc = templates.find(template => template.sourceMemoryIds.includes(timelineId))
+      const relatedDoc = (await fetchTimelineRelations(timelineId)).document
       if (!relatedDoc) {
         setStatusMessage('当前时间线还没有关联文档')
         return
@@ -743,8 +759,7 @@ const RepositoryPanel: React.FC = () => {
 
   const handleViewRelatedKnowledge = async (timelineId: string) => {
     try {
-      const { items: knowledgeItems } = await fetchKnowledge({ limit: 1000 })
-      const relatedKnowledge = knowledgeItems.find(item => item.sourceTimelineId === timelineId)
+      const relatedKnowledge = (await fetchTimelineRelations(timelineId)).knowledge
       if (!relatedKnowledge) {
         setStatusMessage('当前时间线还没有关联知识')
         return
@@ -763,8 +778,7 @@ const RepositoryPanel: React.FC = () => {
 
   const handleViewRelatedSop = async (timelineId: string) => {
     try {
-      const { items: sops } = await fetchSops({ limit: 1000 })
-      const relatedSop = sops.find(item => item.sourceTimelineId === timelineId)
+      const relatedSop = (await fetchTimelineRelations(timelineId)).sop
       if (!relatedSop) {
         setStatusMessage('当前时间线还没有关联操作')
         return
@@ -792,6 +806,23 @@ const RepositoryPanel: React.FC = () => {
     setRepositoryMemoryFocusId(timelineId)
     setSelectedMemoryId(timelineId)
     setStatusMessage('已切换到所属时间线')
+  }
+
+  const handleViewRelatedData = async (timelineId: string) => {
+    try {
+      const relatedData = (await fetchTimelineRelations(timelineId)).data
+      if (!relatedData) {
+        setStatusMessage('当前时间线还没有关联数据')
+        return
+      }
+      pushBakeNavigationTarget(currentNavigationTarget())
+      setWindowMode('bake')
+      setBakeTab('data')
+      setBakeDataFocusId(String(relatedData.id))
+      setStatusMessage(`已切换到关联数据「${relatedData.title}」`)
+    } catch {
+      setStatusMessage('查询关联数据失败')
+    }
   }
 
   const handleCaptureGoBack = () => {
@@ -851,7 +882,7 @@ const RepositoryPanel: React.FC = () => {
                       className="bake-input"
                       value={draftMemoryQuery}
                       onChange={(event) => setDraftMemoryQuery(event.target.value)}
-                      placeholder="搜索时间线标题、摘要或详情"
+                      placeholder="搜索时间线 ID、标题、摘要或详情"
                     />
                   </label>
                 </div>
@@ -1054,15 +1085,22 @@ const RepositoryPanel: React.FC = () => {
                         setSelectedCaptureId(selectedMemory.sourceCaptureId)
                         setStatusMessage('已切换到来源采集记录')
                       }}>来源采集记录</BakeButton>
+                      <BakeButton compact onClick={() => handleViewRelatedData(selectedMemory.id)}>关联数据</BakeButton>
                       <BakeButton compact onClick={() => handleViewRelatedDocument(selectedMemory.id)}>关联文档</BakeButton>
                       <BakeButton compact onClick={() => handleViewRelatedKnowledge(selectedMemory.id)}>关联知识</BakeButton>
                       <BakeButton compact onClick={() => handleViewRelatedSop(selectedMemory.id)}>关联操作</BakeButton>
-                      <BakeButton compact danger onClick={() => setPendingDeletion({ kind: 'memory', id: selectedMemory.id })}>删除时间线</BakeButton>
+                      <BakeButton compact danger onClick={() => setPendingDeletion({ kind: 'memory', id: selectedMemory.id })}>删除</BakeButton>
                     </div>
                     <div className="bake-related-summary">
                       <div className="bake-related-row">
                         <span className="bake-related-row__label">来源采集记录</span>
                         <span className="bake-related-row__value">{selectedMemory.sourceCaptureId ? `采集记录 #${selectedMemory.sourceCaptureId}` : '暂无'}</span>
+                      </div>
+                      <div className="bake-related-row">
+                        <span className="bake-related-row__label">关联数据</span>
+                        <span className="bake-related-row__value">
+                          {selectedMemoryRelations.loading ? '查询中...' : selectedMemoryRelations.data?.title ?? '暂无'}
+                        </span>
                       </div>
                       <div className="bake-related-row">
                         <span className="bake-related-row__label">关联文档</span>

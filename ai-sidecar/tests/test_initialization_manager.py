@@ -264,3 +264,41 @@ def test_smoke_generation_disables_long_thinking_and_bounds_output(monkeypatch, 
         "temperature": 0,
     }
     assert captured["timeout"] == 180
+
+
+def test_local_nickname_uses_initialized_local_model(monkeypatch, tmp_path):
+    manager = InitializationManager(base_dir=tmp_path)
+    monkeypatch.setattr(
+        manager,
+        "_load_state",
+        lambda _mode: {"state": "completed", "quality_gate": {"passed": True}},
+    )
+    monkeypatch.setattr(manager, "_refresh_completed_state", lambda state: state)
+    monkeypatch.setattr(manager, "_test_mode_enabled", lambda: False)
+    calls = []
+
+    def generate(mode, prompt):
+        calls.append((mode, prompt))
+        return "“倔强的牛角面包”\n"
+
+    monkeypatch.setattr(manager, "_ollama_generate", generate)
+
+    assert manager.generate_local_nickname() == "倔强的牛角面包"
+    assert calls[0][0] == "normal"
+    assert "只输出昵称" in calls[0][1]
+
+
+def test_local_nickname_requires_completed_normal_initialization(monkeypatch, tmp_path):
+    manager = InitializationManager(base_dir=tmp_path)
+    monkeypatch.setattr(
+        manager,
+        "_load_state",
+        lambda _mode: {"state": "running", "quality_gate": {"passed": False}},
+    )
+    monkeypatch.setattr(manager, "_refresh_completed_state", lambda state: state)
+    monkeypatch.setattr(manager, "_test_mode_enabled", lambda: False)
+
+    with pytest.raises(InitializationFailure) as caught:
+        manager.generate_local_nickname()
+
+    assert caught.value.code == "LOCAL_MODEL_NOT_READY"

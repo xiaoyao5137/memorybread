@@ -58,6 +58,7 @@ pub struct KnowledgeQuery {
     #[serde(default)]
     pub offset: i64,
     pub q: Option<String>,
+    pub id: Option<i64>,
     pub category: Option<String>,
     pub from: Option<i64>,
     pub to: Option<i64>,
@@ -334,6 +335,10 @@ pub async fn list_knowledge(
                  AND COALESCE(is_self_generated, 0) = 0"
             );
             let mut bind: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(noise_prefix.clone())];
+            if let Some(id) = params.id {
+                sql.push_str(" AND id = ?");
+                bind.push(Box::new(id));
+            }
             let query_terms = params
                 .q
                 .as_deref()
@@ -415,6 +420,10 @@ pub async fn list_knowledge(
 
             let mut count_sql = String::from("SELECT COUNT(*) FROM timelines WHERE summary NOT LIKE ? AND COALESCE(is_self_generated, 0) = 0");
             let mut count_bind: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(noise_prefix)];
+            if let Some(id) = params.id {
+                count_sql.push_str(" AND id = ?");
+                count_bind.push(Box::new(id));
+            }
             if !query_terms.is_empty() {
                 let query_clause = query_terms
                     .iter()

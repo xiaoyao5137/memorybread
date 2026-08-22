@@ -68,6 +68,8 @@ const FLOATING_ASSIST_DEFAULT_SIZE: i32 = 82;
 const FLOATING_ASSIST_TEMP_KEEP_SECS: u64 = 24 * 60 * 60;
 const FLOATING_ASSIST_TEMP_CLEANUP_INTERVAL_MS: i64 = 6 * 60 * 60 * 1000;
 const TRAY_TEMPLATE_ICON_SIZE: u32 = 64;
+const CHROME_EXTENSION_ID: &str = "llkmmkikjolkibaiklpkfhjdpbbohlbe";
+const CHROME_NATIVE_HOST_NAME: &str = "cn.memorybread.browser_bridge";
 #[cfg(target_os = "macos")]
 const DOCK_ICON_SCALE: f64 = 1.0;
 #[cfg(target_os = "macos")]
@@ -1554,6 +1556,131 @@ fn open_external_url(app: AppHandle, url: String) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChromeBrowserIntegrationInstallStatus {
+    supported: bool,
+    extension_id: String,
+    extension_directory: Option<String>,
+    store_url: Option<String>,
+    native_host_registered: bool,
+    bridge_available: bool,
+}
+
+fn chrome_native_host_manifest_path() -> Result<PathBuf, String> {
+    let user_home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .map_err(|_| "无法定位用户目录".to_string())?;
+    Ok(user_home
+        .join("Library")
+        .join("Application Support")
+        .join("Google")
+        .join("Chrome")
+        .join("NativeMessagingHosts")
+        .join(format!("{CHROME_NATIVE_HOST_NAME}.json")))
+}
+
+fn chrome_extension_directory(_app: &AppHandle) -> Option<PathBuf> {
+    #[cfg(debug_assertions)]
+    {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../integrations/chrome-browser-extension");
+        return path.canonicalize().ok();
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        _app.path()
+            .resource_dir()
+            .ok()
+            .map(|path| path.join("chrome-browser-extension"))
+            .filter(|path| path.join("manifest.json").is_file())
+    }
+}
+
+fn chrome_bridge_path() -> Option<PathBuf> {
+    #[cfg(debug_assertions)]
+    {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        return [
+            root.join("../../core-engine/target/debug/memorybread-browser-bridge"),
+            root.join("../../core-engine/target/release/memorybread-browser-bridge"),
+        ]
+        .into_iter()
+        .find(|path| path.is_file());
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        bundled_helper_path("memorybread-browser-bridge").ok()
+    }
+}
+
+fn chrome_extension_store_url() -> Option<String> {
+    option_env!("MEMORYBREAD_CHROME_EXTENSION_STORE_URL")
+        .map(str::trim)
+        .filter(|value| value.starts_with("https://chromewebstore.google.com/") || value.starts_with("https://chrome.google.com/webstore/"))
+        .map(ToString::to_string)
+}
+
+#[tauri::command]
+fn get_chrome_browser_integration_install_status(
+    app: AppHandle,
+) -> Result<ChromeBrowserIntegrationInstallStatus, String> {
+    let manifest = chrome_native_host_manifest_path()?;
+    Ok(ChromeBrowserIntegrationInstallStatus {
+        supported: cfg!(target_os = "macos") && !cfg!(feature = "app-store"),
+        extension_id: CHROME_EXTENSION_ID.to_string(),
+        extension_directory: chrome_extension_directory(&app)
+            .map(|path| path.to_string_lossy().into_owned()),
+        store_url: chrome_extension_store_url(),
+        native_host_registered: manifest.is_file(),
+        bridge_available: chrome_bridge_path().is_some(),
+    })
+}
+
+#[tauri::command]
+fn prepare_chrome_browser_integration(
+    app: AppHandle,
+) -> Result<ChromeBrowserIntegrationInstallStatus, String> {
+    if cfg!(feature = "app-store") || !cfg!(target_os = "macos") {
+        return Err("当前发行版本暂不支持安装 Chrome 浏览器集成".to_string());
+    }
+    let bridge = chrome_bridge_path()
+        .ok_or_else(|| "未找到 Chrome Native Messaging Bridge，请重新安装 MemoryBread".to_string())?;
+    let manifest_path = chrome_native_host_manifest_path()?;
+    let manifest_dir = manifest_path
+        .parent()
+        .ok_or_else(|| "无法定位 Chrome Native Messaging 目录".to_string())?;
+    fs::create_dir_all(manifest_dir).map_err(|error| error.to_string())?;
+    let manifest = serde_json::json!({
+        "name": CHROME_NATIVE_HOST_NAME,
+        "description": "MemoryBread Chrome background browser bridge",
+        "path": bridge.to_string_lossy(),
+        "type": "stdio",
+        "allowed_origins": [format!("chrome-extension://{CHROME_EXTENSION_ID}/")],
+    });
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("注册 Chrome Native Host 失败: {error}"))?;
+
+    if let Some(store_url) = chrome_extension_store_url() {
+        open_external_url(app.clone(), store_url)?;
+    } else if let Some(extension_dir) = chrome_extension_directory(&app) {
+        Command::new("open")
+            .args(["-a", "Google Chrome", "chrome://extensions"])
+            .spawn()
+            .map_err(|error| format!("打开 Chrome 扩展页面失败: {error}"))?;
+        Command::new("open")
+            .arg(extension_dir)
+            .spawn()
+            .map_err(|error| format!("打开扩展目录失败: {error}"))?;
+    } else {
+        return Err("未配置 Chrome Web Store 地址，也没有可供开发安装的扩展目录".to_string());
+    }
+    get_chrome_browser_integration_install_status(app)
+}
+
 #[tauri::command]
 fn set_floating_assist_menu_state(app: AppHandle, enabled: bool) -> Result<(), String> {
     let menu_state = app.state::<TrayMenuState>();
@@ -1884,6 +2011,8 @@ pub fn run() {
             #[cfg(not(feature = "app-store"))]
             download_and_install_software_update,
             open_external_url,
+            get_chrome_browser_integration_install_status,
+            prepare_chrome_browser_integration,
             set_capture_menu_state,
             set_floating_assist_menu_state,
             set_floating_assist_auto_task_menu_state,
@@ -1917,11 +2046,11 @@ pub fn run() {
 
             let main_panel = MenuItem::with_id(app, "main-panel", "主面板", true, None::<&str>)?;
             let capture =
-                CheckMenuItem::with_id(app, "capture", "打开/关闭采集", true, false, None::<&str>)?;
+                CheckMenuItem::with_id(app, "capture", "启用采集", true, false, None::<&str>)?;
             let floating_assist = CheckMenuItem::with_id(
                 app,
                 "floating-assist",
-                "打开/关闭悬浮球",
+                "启用悬浮球",
                 true,
                 false,
                 None::<&str>,

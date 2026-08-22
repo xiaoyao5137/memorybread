@@ -1,0 +1,8 @@
+:root { color-scheme: light; font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+body { width: 300px; margin: 0; background: #f7f7f8; color: #2f2822; }
+main { display: grid; gap: 10px; padding: 16px; }
+strong { font-size: 14px; }
+p, small { margin: 0; color: #6f655d; }
+small { font-size: 11px; }
+button { min-height: 36px; border: 1px solid #8d4719; border-radius: 9px; background: #9c521f; color: #fffaf4; font-weight: 700; cursor: pointer; }
+button:focus-visible { outline: 3px solid rgba(156, 82, 31, .25); outline-offset: 2px; }

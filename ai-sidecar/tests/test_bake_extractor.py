@@ -440,6 +440,65 @@ def test_extract_bake_bundle_uses_one_llm_call_for_three_artifacts():
     assert result["total_elapsed_ms"] >= 0
 
 
+def test_extract_bake_bundle_recovers_evidence_check_compatibility_keys():
+    """回归 774：模型跟随旧提示词字段时，不得把有效 Markdown 当作 absent。"""
+    extractor = make_extractor()
+    response_payload = {
+        "document_evidence_check": {
+            "accepted": True,
+            "reason": None,
+            "payload": {
+                "name": "悬浮球 - 飞书云文档",
+                "full_content": "# 悬浮球\n\n## 默认单击\n- 打开悬浮咨询框",
+                "structre_sections": [
+                    {"title": "默认单击", "keywords": ["咨询框"], "notes": "交互说明"}
+                ],
+            },
+        },
+        "knowledge_evidence_check": {
+            "accepted": True,
+            "reason": None,
+            "payload": {"summary": "悬浮球单击打开咨询框"},
+        },
+        "sop_evidence_check": {
+            "accepted": False,
+            "reason": "passive_report_only",
+            "payload": None,
+        },
+        "classification": {
+            "primary_type": "knowledge",
+            "reason": "主要复用价值是交互机制",
+        },
+    }
+    client = DummyClient({
+        "model": "mock-model",
+        "message": {"content": json.dumps(response_payload, ensure_ascii=False)},
+        "prompt_eval_count": 7,
+        "eval_count": 8,
+        "done_reason": "stop",
+    })
+    extractor._ollama_chat = client.chat
+
+    result = extractor.extract_bake_bundle({
+        **SAMPLE_CANDIDATE,
+        "document_evidence": ELIGIBLE_DOCUMENT_EVIDENCE,
+    })
+
+    assert result["design"]["accepted"] is True
+    assert result["design"]["payload"]["full_content"].startswith("# 悬浮球\n\n")
+    assert result["design"]["payload"]["structure_sections"][0]["title"] == "默认单击"
+    assert "structre_sections" not in result["design"]["payload"]
+    assert result["knowledge"]["accepted"] is True
+    assert result["sop"]["reason"] == "passive_report_only"
+    assert result["degraded"] is False
+    assert result["compatibility_recovered"] == {
+        "design": True,
+        "knowledge": True,
+        "sop": True,
+    }
+    assert result["artifact_shapes"]["design"] == "legacy_key:document_evidence_check"
+
+
 def test_extract_bake_bundle_recovers_single_object_artifact_arrays():
     extractor = make_extractor()
     response_payload = {
@@ -687,12 +746,13 @@ def test_bake_prompts_classify_progress_results_and_conclusions_as_knowledge_fac
 
 
 def test_bundle_prompt_requires_independent_checks_before_final_classification():
-    document_check = BAKE_BUNDLE_PROMPT.index("document_evidence_check")
-    knowledge_check = BAKE_BUNDLE_PROMPT.index("knowledge_evidence_check")
-    sop_check = BAKE_BUNDLE_PROMPT.index("sop_evidence_check")
+    document_check = BAKE_BUNDLE_PROMPT.index("1. `document`")
+    knowledge_check = BAKE_BUNDLE_PROMPT.index("2. `knowledge`")
+    sop_check = BAKE_BUNDLE_PROMPT.index("3. `sop`")
     final_classification = BAKE_BUNDLE_PROMPT.index("最后根据已接受的资产总结")
 
     assert document_check < knowledge_check < sop_check < final_classification
+    assert "禁止添加 `_evidence_check` 后缀" in BAKE_BUNDLE_PROMPT
     assert "knowledge 已接受，绝不能成为拒绝 document 的理由" in BAKE_BUNDLE_PROMPT
     assert "不是通用模板" in BAKE_BUNDLE_PROMPT
     assert "具体项目的方案" in BAKE_BUNDLE_PROMPT

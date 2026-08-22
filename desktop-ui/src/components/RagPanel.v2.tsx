@@ -161,6 +161,8 @@ const compactButtonStyle: React.CSSProperties = {
   cursor: 'pointer',
   fontSize: 13,
   fontWeight: 600,
+  whiteSpace: 'nowrap',
+  flexShrink: 0,
 }
 
 const HistoryScreenshotThumbnail = ({
@@ -236,6 +238,9 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
     ragLoading,
     ragError,
     setRagQuery,
+    setRagResult,
+    setRagError,
+    setRagLoading,
     adminApiBaseUrl,
     authToken,
     currentUser,
@@ -260,6 +265,7 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
   const [screenshotPreview, setScreenshotPreview] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const answerRef = useRef<HTMLDivElement>(null)
+  const queryAbortRef = useRef<AbortController | null>(null)
   const queryImeGuard = useImeCompositionGuard<HTMLTextAreaElement>()
   const doQuery = useRagQuery()
   const fetchRagHistory = useFetchRagHistory()
@@ -377,9 +383,11 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
       const q = inputValue.trim()
       if (!q) return
       setRagQuery(q)
+      const controller = new AbortController()
+      queryAbortRef.current = controller
       try {
-        await doQuery(q)
-        setActiveBottomTab('references')
+        await doQuery(q, undefined, {}, controller.signal)
+        // 参考资料不再随提问自动弹出，由用户点击标签按需查看
         if (historyPage === 1) {
           void refreshHistory()
         } else {
@@ -387,10 +395,26 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
         }
       } catch {
         // error is set in store by useRagQuery
+      } finally {
+        if (queryAbortRef.current === controller) queryAbortRef.current = null
       }
     },
     [inputValue, setRagQuery, doQuery, historyPage, refreshHistory, queryImeGuard]
   )
+
+  // 清空当前会话：中断进行中的咨询，重置指令、输出与参考资料，回到全新会话状态
+  const handleClearSession = useCallback(() => {
+    queryAbortRef.current?.abort()
+    queryAbortRef.current = null
+    setInputValue('')
+    setRagQuery('')
+    setRagResult('', [])
+    setRagError(null)
+    setRagLoading(false)
+    setActiveBottomTab(null)
+    setElapsedSeconds(0)
+    textareaRef.current?.focus()
+  }, [setRagQuery, setRagResult, setRagError, setRagLoading])
 
   const handleTemplateClick = useCallback(
     (instruction: string) => {
@@ -661,35 +685,22 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
             </span>
           )}
           <button
+            type="button"
+            className="rag-panel__clear"
+            data-testid="rag-panel-clear"
+            onClick={handleClearSession}
+            title="清空当前会话，开始新的咨询"
+          >
+            清空
+          </button>
+          <button
             type="submit"
             className="rag-panel__submit"
             data-testid="rag-panel-submit"
+            style={{ marginLeft: 0 }}
             disabled={ragLoading || !inputValue.trim() || !modelsReady}
           >
-            {ragLoading ? (
-              <>
-                {/* 加载图标 */}
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  className="rag-panel__loading-icon"
-                >
-                  <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                </svg>
-                思考中...
-              </>
-            ) : (
-              <>
-                <BreadToolIcon name="send" size={16} framed={false} />
-                提问
-              </>
-            )}
+            {ragLoading ? '思考中...' : '提问'}
           </button>
         </div>
       </form>
@@ -748,7 +759,12 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
             <div className="rag-panel__document-empty">
               <Loader2 size={28} className="spin" color="#0f766e" />
               <div>
-                <div style={{ fontWeight: 650, color: '#0f766e', marginBottom: 4 }}>正在整理答案</div>
+                <div className="rag-panel__thinking-label">
+                  <span className="rag-panel__thinking-label-icon" aria-hidden="true">
+                    <img src="/brand/memorybread-bread-mark.png" alt="" />
+                  </span>
+                  <span>正在整理答案</span>
+                </div>
                 <div>已思考 {elapsedSeconds} 秒，预计进度 {thinkingProgress}%</div>
               </div>
             </div>
@@ -923,7 +939,7 @@ const ReferenceRow = ({ item, index, onOpenReference }: { item: RagContext; inde
   return (
     <div className="rag-panel__reference-item" data-testid={`context-item-${index}`}>
       <div className="rag-panel__reference-head">
-        <div>
+        <div style={{ flex: 1, minWidth: 0 }}>
           <div className="rag-panel__reference-title">R#{index + 1} · {label} · {referenceTitle(item)}</div>
           <div className="rag-panel__reference-meta">
             {item.app_name ? `${item.app_name} · ` : ''}{item.win_title ? `${item.win_title} · ` : ''}{formatTs(primaryTime)}

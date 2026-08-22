@@ -56,7 +56,7 @@ describe('采集与时间线删除', () => {
 
     expect((await screen.findAllByText('待删除时间线')).length).toBeGreaterThan(0)
     fireEvent.click(screen.getByRole('button', { name: '查看时间线：待删除时间线' }))
-    fireEvent.click(screen.getByRole('button', { name: '删除时间线' }))
+    fireEvent.click(screen.getByRole('button', { name: '删除' }))
     expect(screen.getByRole('alertdialog', { name: '删除时间线？' })).toBeInTheDocument()
     expect(fetchMock).not.toHaveBeenCalledWith(
       'http://localhost:7070/api/bake/memories/7',

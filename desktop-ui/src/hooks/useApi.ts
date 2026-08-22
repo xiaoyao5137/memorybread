@@ -373,9 +373,10 @@ export async function runGatewayRagQuery(
   const referenceText = contexts.length
     ? `\n\n本地记忆参考资料：\n${contexts.map((item, index) => {
       const title = item.title || item.win_title || item.app_name || item.doc_key || `参考资料 ${index + 1}`
+      const referenceUrl = item.source_url || item.url || ''
       const rawText = item.summary || item.overview || item.text || ''
       const text = rawText.length > 800 ? `${rawText.slice(0, 800)}...` : rawText
-      return `R#${index + 1} ${title}\n${text}`.trim()
+      return `R#${index + 1} ${title}${referenceUrl ? `\nURL：${referenceUrl}` : ''}\n${text}`.trim()
     }).join('\n\n')}`
     : ''
   const normalizedGateway = gatewayApiBaseUrl.replace(/\/+$/, '')
@@ -391,7 +392,7 @@ export async function runGatewayRagQuery(
       messages: [
         {
           role: 'system',
-          content: '你是 MemoryBread 的咨询助手。请用清晰、结构化的中文回答，不要提及底层供应商或模型实现。',
+          content: '你是 MemoryBread 的咨询助手。请用清晰、结构化的中文回答，不要提及底层供应商或模型实现。回答中提到参考资料里的文档时，若该资料带有 URL，请以 Markdown 超链接 [标题](URL) 一并给出。',
         },
         { role: 'user', content: `${query}${referenceText}` },
       ],
@@ -447,9 +448,10 @@ export async function runGatewayRagQueryStream(
   const referenceText = contexts.length
     ? `\n\n本地记忆参考资料：\n${contexts.map((item, index) => {
       const title = item.title || item.win_title || item.app_name || item.doc_key || `参考资料 ${index + 1}`
+      const referenceUrl = item.source_url || item.url || ''
       const rawText = item.summary || item.overview || item.text || ''
       const text = rawText.length > 800 ? `${rawText.slice(0, 800)}...` : rawText
-      return `R#${index + 1} ${title}\n${text}`.trim()
+      return `R#${index + 1} ${title}${referenceUrl ? `\nURL：${referenceUrl}` : ''}\n${text}`.trim()
     }).join('\n\n')}`
     : ''
   const normalizedGateway = gatewayApiBaseUrl.replace(/\/+$/, '')
@@ -469,7 +471,7 @@ export async function runGatewayRagQueryStream(
       messages: [
         {
           role: 'system',
-          content: '你是 MemoryBread 的咨询助手。请用清晰、结构化的中文回答，不要提及底层供应商或模型实现。',
+          content: '你是 MemoryBread 的咨询助手。请用清晰、结构化的中文回答，不要提及底层供应商或模型实现。回答中提到参考资料里的文档时，若该资料带有 URL，请以 Markdown 超链接 [标题](URL) 一并给出。',
         },
         { role: 'user', content: `${query}${referenceText}` },
       ],
@@ -1056,13 +1058,20 @@ export interface BakeCaptureListQueryParams extends BakeListQueryParams {
   source_capture_id?: number
 }
 
+const exactListId = (query?: string) => {
+  const match = query?.trim().match(/^#?(\d+)$/)
+  return match?.[1]
+}
+
 export function useFetchBakeMemories() {
   const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
 
   return useCallback(async (params: BakeListQueryParams = {}): Promise<PaginatedBakeResponse<TimelineItem>> => {
     const buildUrl = (path: string) => {
       const url = new URL(`${apiBaseUrl}${path}`)
-      if (params.q) url.searchParams.set('q', params.q)
+      const id = exactListId(params.q)
+      if (id) url.searchParams.set('id', id)
+      else if (params.q) url.searchParams.set('q', params.q)
       if (params.from != null) url.searchParams.set('from', String(params.from))
       if (params.to != null) url.searchParams.set('to', String(params.to))
       if (params.limit != null) url.searchParams.set('limit', String(params.limit))
@@ -1101,6 +1110,30 @@ export function useDeleteBakeMemory() {
   return useCallback(async (id: string): Promise<void> => {
     const resp = await fetch(`${apiBaseUrl}/api/bake/memories/${encodeURIComponent(id)}`, { method: 'DELETE' })
     if (!resp.ok) throw new Error(`delete timeline failed: ${resp.status}`)
+  }, [apiBaseUrl])
+}
+
+export interface TimelineRelations {
+  knowledge: BakeKnowledgeItem | null
+  document: ArticleTemplate | null
+  sop: SopCandidate | null
+  data: DataSource | null
+}
+
+// 定向查询时间线关联的知识/文档/操作/数据，避免拉全量列表再过滤时被分页上限截断
+export function useFetchBakeMemoryRelations() {
+  const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
+
+  return useCallback(async (timelineId: string): Promise<TimelineRelations> => {
+    const resp = await fetch(`${apiBaseUrl}/api/bake/memories/${encodeURIComponent(timelineId)}/relations`)
+    if (!resp.ok) throw new Error(`timeline relations fetch failed: ${resp.status}`)
+    const data = await resp.json()
+    return {
+      knowledge: data.knowledge ? mapBakeKnowledge(data.knowledge) : null,
+      document: data.document ? mapBakeTemplate(data.document) : null,
+      sop: data.sop ? mapBakeSop(data.sop) : null,
+      data: data.data ?? null,
+    }
   }, [apiBaseUrl])
 }
 
@@ -1192,7 +1225,9 @@ export function useFetchBakeCaptures() {
 
   return useCallback(async (params: BakeCaptureListQueryParams = {}): Promise<PaginatedBakeResponse<BakeCaptureItem>> => {
     const url = new URL(`${apiBaseUrl}/api/bake/captures`)
-    if (params.q) url.searchParams.set('q', params.q)
+    const id = exactListId(params.q)
+    if (id) url.searchParams.set('id', id)
+    else if (params.q) url.searchParams.set('q', params.q)
     if (params.app) url.searchParams.set('app', params.app)
     if (params.from != null) url.searchParams.set('from', String(params.from))
     if (params.to != null) url.searchParams.set('to', String(params.to))
@@ -1386,6 +1421,77 @@ export function useDeleteBakeTemplate() {
   return useCallback(async (id: string): Promise<void> => {
     const resp = await fetch(`${apiBaseUrl}/api/bake/documents/${encodeURIComponent(id)}`, { method: 'DELETE' })
     if (!resp.ok) throw new Error(`delete bake document failed: ${resp.status}`)
+  }, [apiBaseUrl])
+}
+
+export interface BakeDocumentRefreshResult {
+  status: 'skipped' | 'no_change' | 'updated' | 'failed' | string
+  reason?: string
+  completenessStatus?: 'complete' | 'partial' | 'failed' | string
+  document?: ArticleTemplate
+  sourceSnapshot?: {
+    id: number
+    documentId: number
+    sourceUrl: string
+    pageTitle: string
+    contentHash: string
+    completenessStatus: 'complete' | 'partial' | 'failed' | string
+    identityMatch: boolean
+    reachedEnd: boolean
+    stablePasses: number
+    segmentCount: number
+    characterCount: number
+    truncated: boolean
+    collectedAt: number
+  }
+}
+
+export function useRefreshBakeDocument() {
+  const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
+
+  return useCallback(async (id: string): Promise<BakeDocumentRefreshResult> => {
+    const resp = await fetch(`${apiBaseUrl}/api/bake/documents/${encodeURIComponent(id)}/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    if (!resp.ok) throw new Error(`refresh bake document failed: ${resp.status}`)
+    const data = await resp.json()
+    return {
+      status: data.status,
+      reason: data.reason ?? undefined,
+      completenessStatus: data.completeness_status ?? undefined,
+      document: data.document ? mapBakeTemplate(data.document) : undefined,
+      sourceSnapshot: data.source_snapshot ? {
+        id: Number(data.source_snapshot.id),
+        documentId: Number(data.source_snapshot.document_id),
+        sourceUrl: String(data.source_snapshot.source_url || ''),
+        pageTitle: String(data.source_snapshot.page_title || ''),
+        contentHash: String(data.source_snapshot.content_hash || ''),
+        completenessStatus: String(data.source_snapshot.completeness_status || 'failed'),
+        identityMatch: data.source_snapshot.identity_match === true,
+        reachedEnd: data.source_snapshot.reached_end === true,
+        stablePasses: Number(data.source_snapshot.stable_passes || 0),
+        segmentCount: Number(data.source_snapshot.segment_count || 0),
+        characterCount: Number(data.source_snapshot.character_count || 0),
+        truncated: data.source_snapshot.truncated === true,
+        collectedAt: Number(data.source_snapshot.collected_at || 0),
+      } : undefined,
+    }
+  }, [apiBaseUrl])
+}
+
+export function useSetBakeDocumentRefreshPolicy() {
+  const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
+
+  return useCallback(async (id: string, policy: 'auto' | 'always' | 'never'): Promise<ArticleTemplate> => {
+    const resp = await fetch(`${apiBaseUrl}/api/bake/documents/${encodeURIComponent(id)}/refresh-policy`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_policy: policy }),
+    })
+    if (!resp.ok) throw new Error(`set bake document refresh policy failed: ${resp.status}`)
+    return mapBakeTemplate(await resp.json())
   }, [apiBaseUrl])
 }
 
@@ -1725,6 +1831,16 @@ function mapBakeTemplate(item: any): ArticleTemplate {
     reviewStatus: item.review_status ?? '',
     matchScore: item.match_score ?? undefined,
     matchLevel: item.match_level ?? undefined,
+    refreshPolicy: item.refresh_policy ?? undefined,
+    lastRefreshCheckedAtMs: typeof item.last_refresh_checked_at_ms === 'number' ? item.last_refresh_checked_at_ms : undefined,
+    lastRefreshError: item.last_refresh_error ?? undefined,
+    lastRefreshSuccessAtMs: typeof item.last_refresh_success_at_ms === 'number' ? item.last_refresh_success_at_ms : undefined,
+    lastRefreshStatus: item.last_refresh_status ?? undefined,
+    lastRefreshCompleteness: item.last_refresh_completeness ?? undefined,
+    lastRefreshContentHash: item.last_refresh_content_hash ?? undefined,
+    lastRefreshCharacterCount: typeof item.last_refresh_character_count === 'number' ? item.last_refresh_character_count : undefined,
+    lastRefreshSegmentCount: typeof item.last_refresh_segment_count === 'number' ? item.last_refresh_segment_count : undefined,
+    lastRefreshTruncated: item.last_refresh_truncated === true || item.last_refresh_truncated === 1,
     createdAt: item.created_at ?? '',
     createdAtMs,
     updatedAt: item.updated_at,

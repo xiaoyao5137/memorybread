@@ -32,12 +32,20 @@ def _valid_fact():
         "statement": "生服模特库在电商AIGC中的复用节省约6.28万成本。",
         "evidence_quote": SOURCE_TEXT,
         "confidence": "high",
+        "semantic_relation": "生服模特库在电商AIGC复用产生的成本节省金额",
+        "future_question": "生服模特库在电商AIGC中复用节省了多少成本？",
+        "decision_reason": "可用于后续复用决策和收益验证，且事实关系与证据完整",
+        "publishable": True,
+        "needs_more_context": False,
+        "decision_state": "published",
+        "decision_rule_version": "data-open-semantic-v1",
     }
 
 
 def test_validates_complete_model_fact_and_realigns_rewritten_evidence():
     accepted, rejected = _validated_data_facts([_valid_fact()], SOURCE_TEXT)
-    assert accepted == [_valid_fact()]
+    assert accepted[0]["title"] == _valid_fact()["title"]
+    assert accepted[0]["decision_state"] == "published"
     assert rejected == 0
 
     invalid = _valid_fact()
@@ -107,7 +115,7 @@ def test_expands_short_exact_quote_to_include_nearest_named_subject():
 
 
 def test_prompt_requires_plan_dimensions_and_rejects_checklist_thresholds():
-    assert DATA_FACT_CONTRACT_VERSION == "timeline-data-fact.v3"
+    assert DATA_FACT_CONTRACT_VERSION == "timeline-data-fact.v4"
     assert "切换前检查" in DATA_FACT_PROMPT
     assert "每用户每月 4 USD，按年计费" in DATA_FACT_PROMPT
     assert "不得使用浏览器窗口标题" in DATA_FACT_PROMPT
@@ -115,6 +123,240 @@ def test_prompt_requires_plan_dimensions_and_rejects_checklist_thresholds():
     assert "分页条数" in DATA_FACT_PROMPT
     assert "16分31秒" in DATA_FACT_PROMPT
     assert "目标场景" in DATA_FACT_PROMPT
+    assert "编辑器字号" in DATA_FACT_PROMPT
+    assert "低重要性的被动阅读" in DATA_FACT_PROMPT
+    assert "父时间线的重要性" in DATA_FACT_PROMPT
+    assert "subject=通话时长, metric=通话时长" in DATA_FACT_PROMPT
+
+
+def test_weak_ui_metrics_from_low_importance_passive_document_stay_out_of_publish():
+    source = (
+        "美术组-剧本专家经验沉淀工作流C3所有者所有改动已自动保存分享标题"
+        "默认字体22.5插入当前在线编辑此文档人数较多，已为您切换到只读模式。"
+        "本文被引用（0）本文引用（0）暂无引用评论跳转至首条评论进行中"
+        "0/0速度：0 bytes/s全部暂停"
+    )
+    publication_context = {
+        "importance": 2,
+        "activity_type": "reading",
+        "content_origin": "document_reference",
+    }
+    font_fact = {
+        "title": "美术组-剧本专家经验沉淀工作流 字体大小",
+        "subject": "默认字体",
+        "action": "",
+        "target_context": "文档配置",
+        "dimension": "",
+        "metric": "字号设置",
+        "value": "22.5",
+        "unit": "",
+        "statement": "该云文档的标题和正文区域设置的默认字体大小为22.5。",
+        "evidence_quote": source[:120],
+        "confidence": "high",
+        "semantic_relation": "云文档的排版样式配置属性：字号大小",
+        "future_question": "该工作流的默认字体设置是多少？",
+        "decision_reason": "可用于后续UI适配或无障碍检查参考",
+        "publishable": True,
+        "needs_more_context": False,
+    }
+    progress_fact = {
+        "title": "美术组-剧本专家经验沉淀工作流 评论进度统计",
+        "subject": "0/0速度：0 bytes/s全部暂停",
+        "action": "",
+        "target_context": "文档协作实时状态监控面板",
+        "dimension": "",
+        "metric": "任务完成度与传输速率",
+        "value": "0/0,0 bytes/s",
+        "unit": "",
+        "statement": "该云文档当前无评论且数据传输速度为0。",
+        "evidence_quote": source[100:],
+        "confidence": "high",
+        "semantic_relation": "文档协作交互与数据流状态指标",
+        "future_question": "该工作流的评论区当前有多少条有效讨论？",
+        "decision_reason": "可用于判断项目组协作活跃度",
+        "publishable": True,
+        "needs_more_context": False,
+    }
+
+    accepted, rejected = _validated_data_facts(
+        [font_fact, progress_fact],
+        source,
+        publication_context=publication_context,
+    )
+
+    assert rejected == 1
+    assert len(accepted) == 1
+    assert accepted[0]["value"] == "22.5"
+    assert accepted[0]["decision_state"] == "shadow"
+    assert accepted[0]["decision_rule_version"] == "data-open-semantic-v4"
+
+
+def test_low_importance_passive_reference_keeps_specific_price_publishable():
+    source = "Sync Standard $4 USD 每用户每月，按年计费"
+    fact = {
+        "title": "Sync Standard 每用户月费",
+        "subject": "Sync Standard",
+        "action": "",
+        "target_context": "",
+        "dimension": "按年计费",
+        "metric": "每用户月费",
+        "value": "4",
+        "unit": "USD",
+        "statement": "Sync Standard 按年计费时每用户月费为4 USD。",
+        "evidence_quote": source,
+        "confidence": "high",
+        "semantic_relation": "Sync Standard 按年计费条件下的每用户月费",
+        "future_question": "Sync Standard 按年计费时每用户月费是多少？",
+        "decision_reason": "可用于后续套餐比较",
+        "publishable": True,
+        "needs_more_context": False,
+    }
+
+    accepted, rejected = _validated_data_facts(
+        [fact],
+        source,
+        publication_context={
+            "importance": 2,
+            "activity_type": "reading",
+            "content_origin": "document_reference",
+        },
+    )
+
+    assert rejected == 0
+    assert accepted[0]["decision_state"] == "published"
+
+
+def test_important_timeline_does_not_publish_unbound_call_duration():
+    source = "通话时长 02:26"
+    fact = {
+        "title": "语音通话时长",
+        "subject": "通话时长",
+        "action": "",
+        "target_context": "",
+        "dimension": "",
+        "metric": "通话时长",
+        "value": "02:26",
+        "unit": "",
+        "statement": "桂玉乐与徐启东之间的语音通话持续了 02:26。",
+        "evidence_quote": source,
+        "confidence": "high",
+        "semantic_relation": "该次沟通的总耗时可用于评估紧急问题响应周期",
+        "future_question": "本次模型部署调优咨询的语音通话持续了多久？",
+        "decision_reason": "可作为后续复盘决策依据",
+        "publishable": True,
+        "needs_more_context": False,
+    }
+
+    accepted, rejected = _validated_data_facts(
+        [fact],
+        source,
+        publication_context={
+            "importance": 4,
+            "activity_type": "reading",
+            "content_origin": "document_reference",
+        },
+    )
+
+    assert rejected == 0
+    assert accepted[0]["decision_state"] == "shadow"
+    assert "Subject 与 Metric 相同" in accepted[0]["decision_reason"]
+    assert accepted[0]["decision_rule_version"] == "data-open-semantic-v4"
+
+
+def test_same_subject_and_metric_can_publish_when_event_context_is_grounded():
+    source = "华东大区经营周报统计本周订单量1200单"
+    fact = {
+        "title": "华东大区经营周报本周订单量",
+        "subject": "订单量",
+        "action": "统计",
+        "target_context": "华东大区经营周报",
+        "dimension": "本周",
+        "metric": "订单量",
+        "value": "1200",
+        "unit": "单",
+        "statement": "华东大区经营周报统计的本周订单量为1200单。",
+        "evidence_quote": source,
+        "confidence": "high",
+        "semantic_relation": "华东大区经营周报统计的本周订单量",
+        "future_question": "华东大区本周订单量是多少？",
+        "decision_reason": "可用于经营复盘且对象、周期和值均可回证",
+        "publishable": True,
+        "needs_more_context": False,
+    }
+
+    accepted, rejected = _validated_data_facts([fact], source)
+
+    assert rejected == 0
+    assert accepted[0]["decision_state"] == "published"
+
+
+def test_statement_without_grounded_subject_or_target_is_rewritten_before_publish():
+    source = "GPU 使用一览 当前在用项目数 102"
+    fact = {
+        "title": "GPU 使用一览在用项目数",
+        "subject": "GPU 使用一览",
+        "action": "",
+        "target_context": "",
+        "dimension": "当前",
+        "metric": "在用项目数",
+        "value": "102",
+        "unit": "",
+        "statement": "核心生产集群当前承载102个项目。",
+        "evidence_quote": source,
+        "confidence": "high",
+        "semantic_relation": "GPU 使用一览的当前在用项目数",
+        "future_question": "GPU 使用一览当前有多少在用项目？",
+        "decision_reason": "可用于容量规划",
+        "publishable": True,
+        "needs_more_context": False,
+    }
+
+    accepted, rejected = _validated_data_facts([fact], source)
+
+    assert rejected == 0
+    assert accepted[0]["decision_state"] == "published"
+    assert accepted[0]["statement"] == "GPU 使用一览的当前在用项目数为102。"
+    assert accepted[0]["decision_rule_version"] == "data-open-semantic-v4"
+
+
+def test_same_subject_and_metric_keeps_specific_business_metric_publishable():
+    source = "商业体系模型效率度量 当前任务处理率 77.09%"
+    fact = {
+        "title": "当前任务处理率",
+        "subject": "当前任务处理率",
+        "action": "",
+        "target_context": "",
+        "dimension": "",
+        "metric": "当前任务处理率",
+        "value": "77.09%",
+        "unit": "",
+        "statement": "当前任务处理率为77.09%。",
+        "evidence_quote": source,
+        "confidence": "high",
+        "semantic_relation": "商业体系模型效率度量的当前任务处理率",
+        "future_question": "当前任务处理率是多少？",
+        "decision_reason": "可用于后续效率趋势比较",
+        "publishable": True,
+        "needs_more_context": False,
+    }
+
+    accepted, rejected = _validated_data_facts([fact], source)
+
+    assert rejected == 0
+    assert accepted[0]["decision_state"] == "published"
+    assert accepted[0]["decision_rule_version"] == "data-open-semantic-v4"
+
+
+def test_uncertain_open_semantic_fact_enters_shadow_instead_of_being_lost():
+    fact = _valid_fact()
+    fact["publishable"] = False
+    fact["needs_more_context"] = True
+    fact["decision_reason"] = "事实可回证，但需要补充它是否影响后续复用决策"
+
+    accepted, rejected = _validated_data_facts([fact], SOURCE_TEXT)
+
+    assert rejected == 0
+    assert accepted[0]["decision_state"] == "shadow"
 
 
 def test_retries_for_applied_parameters_and_composite_duration_but_not_plain_ids():
@@ -224,7 +466,7 @@ def test_fact_specific_statement_keeps_metric_and_value_when_context_is_too_long
     assert "72.3%" in statement
 
 
-def test_generic_field_or_task_anchor_requires_a_specific_scene():
+def test_generic_field_is_not_blocked_by_a_finite_anchor_enum():
     source = "duration Kling 3.0 支持 3-15 秒。任务总耗时约16分31秒"
     generic_duration = {
         "title": "Kling 3.0 模型支持时长范围",
@@ -247,13 +489,13 @@ def test_generic_field_or_task_anchor_requires_a_specific_scene():
         [contextual_duration], source
     )
 
-    assert rejected_facts == []
-    assert rejected == 1
+    assert rejected == 0
+    assert rejected_facts[0]["decision_state"] == "shadow"
     assert accepted_rejected == 0
     assert accepted_facts[0]["target_context"] == contextual_duration["target_context"]
 
 
-def test_rejects_tool_or_model_execution_shell_as_target_scene():
+def test_execution_shell_is_not_rejected_by_a_finite_context_enum():
     source = "15秒 vedio-aigc系统生成参数配置 Kling 3.0模型生成控制"
     fact = {
         "title": "vedio-aigc系统请求参数时长",
@@ -271,8 +513,8 @@ def test_rejects_tool_or_model_execution_shell_as_target_scene():
 
     accepted, rejected = _validated_data_facts([fact], source)
 
-    assert accepted == []
-    assert rejected == 1
+    assert rejected == 0
+    assert accepted[0]["decision_state"] == "shadow"
 
 
 def test_accepts_concrete_business_scene_even_when_target_ends_with_parameter_config():
@@ -417,6 +659,15 @@ def test_persists_fact_contract_run_and_normalized_fact(tmp_path):
         / "075_timeline_data_fact_period_history.sql"
     )
     conn.executescript(fact_period_migration.read_text(encoding="utf-8"))
+    quality_migration = (
+        Path(__file__).parents[2]
+        / "core-engine"
+        / "src"
+        / "storage"
+        / "migrations"
+        / "103_data_fact_quality_gate.sql"
+    )
+    conn.executescript(quality_migration.read_text(encoding="utf-8"))
     knowledge = {
         "data_fact_contract": DATA_FACT_CONTRACT_VERSION,
         "data_facts": [_valid_fact()],
@@ -430,7 +681,7 @@ def test_persists_fact_contract_run_and_normalized_fact(tmp_path):
         "SELECT contract_version, accepted_count, rejected_count FROM timeline_data_fact_runs WHERE timeline_id = 1416"
     ).fetchone()
     fact = conn.execute(
-        "SELECT title, subject, target_context, metric, value, unit, source_capture_ids FROM timeline_data_facts WHERE timeline_id = 1416"
+        "SELECT title, subject, target_context, metric, value, unit, source_capture_ids, decision_state FROM timeline_data_facts WHERE timeline_id = 1416"
     ).fetchone()
     conn.close()
 
@@ -443,6 +694,7 @@ def test_persists_fact_contract_run_and_normalized_fact(tmp_path):
         "6.28",
         "万",
         "[20859]",
+        "published",
     )
 
 

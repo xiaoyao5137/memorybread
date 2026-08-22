@@ -125,6 +125,48 @@ class InitializationManager:
             state["test_mode_enabled"] = self._test_mode_enabled()
             return self._public_state(state)
 
+    def generate_local_nickname(self) -> str:
+        """Use the installed local model once to create an installation nickname."""
+        with self._lock:
+            state = self._refresh_completed_state(self._load_state("normal"))
+            if (
+                state.get("state") != "completed"
+                or not state.get("quality_gate", {}).get("passed")
+                or self._test_mode_enabled()
+            ):
+                raise InitializationFailure(
+                    "LOCAL_MODEL_NOT_READY",
+                    "本地模型尚未完成初始化",
+                )
+
+        prompt = (
+            "请给一位刚完成记忆面包初始化的用户起一个中文昵称。"
+            "昵称必须有性格或状态形容词，并包含一种面包或烘焙食品，"
+            "例如“倔强的牛角面包”。只输出昵称，不要引号、解释、标点或换行，"
+            "总长度不超过十二个汉字。随机灵感编号："
+            + uuid.uuid4().hex[-8:]
+        )
+        generated = self._ollama_generate("normal", prompt)
+        first_line = generated.strip().splitlines()[0] if generated.strip() else ""
+        nickname = re.sub(r"^昵称\s*[:：]?\s*", "", first_line)
+        nickname = re.sub(r"[\s\"'“”‘’。，、！？!?.:：;；]", "", nickname)
+        bread_words = (
+            "面包", "吐司", "法棍", "可颂", "牛角包", "贝果", "餐包",
+            "碱水结", "司康", "甜甜圈", "椒盐卷饼",
+        )
+        if 2 <= len(nickname) <= 12 and any(word in nickname for word in bread_words):
+            return nickname
+
+        fallbacks = (
+            "倔强的牛角面包",
+            "慢烤的酸种面包",
+            "好奇的小法棍",
+            "踏实的吐司片",
+            "发光的碱水结",
+            "温柔的奶香餐包",
+        )
+        return fallbacks[uuid.uuid4().int % len(fallbacks)]
+
     def start(self, mode: Optional[str] = None) -> dict[str, Any]:
         with self._lock:
             active_mode = "sandbox" if self._test_mode_enabled() else "normal"

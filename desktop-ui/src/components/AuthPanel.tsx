@@ -36,6 +36,7 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
     currentUser,
     cloudBalance,
     cloudSubscription,
+    localNickname,
     setAuthSession,
     setCloudBalance,
     setCloudSubscription,
@@ -395,8 +396,8 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
     )
   }
 
-  return (
-    <main className="auth-panel auth-panel--login" data-testid="auth-panel">
+  const signedOutPersonalContent = (
+    <div className="auth-panel auth-panel--login auth-panel--embedded">
       <form className="auth-panel__form" onSubmit={submit}>
         <div className="auth-panel__form-head">
           <span className="auth-panel__form-icon" aria-hidden="true"><LockKeyhole size={18} /></span>
@@ -717,7 +718,26 @@ const AuthPanel: React.FC<AuthPanelProps> = ({
           <ArrowRight size={16} aria-hidden />
         </button>
       </form>
-    </main>
+    </div>
+  )
+
+  return (
+    <AccountProfile
+      accountLabel={localNickname}
+      adminApiBaseUrl={adminApiBaseUrl}
+      apiBaseUrl={apiBaseUrl}
+      authToken={null}
+      balanceError={null}
+      cloudBalance={null}
+      highlightedAchievementKeys={highlightedAchievementKeys}
+      initialSection={initialProfileSection}
+      onInitialSectionHandled={onInitialProfileSectionHandled}
+      onUserChange={() => {}}
+      onLogout={() => {}}
+      runModeLabel={getRunModeLabel(null, null)}
+      signedOutPersonalContent={signedOutPersonalContent}
+      user={null}
+    />
   )
 }
 

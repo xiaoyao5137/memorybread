@@ -216,7 +216,7 @@ async def test_creation_agent_transport_failure_returns_retryable_user_message(m
 
     event = parse_sse_events(response)[-1]
     assert event["type"] == "run.failed"
-    assert event["summary"] == "模型服务连接暂时中断，自动重试后仍未恢复，请稍后重试"
+    assert event["summary"] == "模型服务连接中断，已重试仍未恢复，可稍后重试"
     assert event["data"] == {
         "error_code": "MODEL_TRANSPORT_UNAVAILABLE",
         "retryable": True,

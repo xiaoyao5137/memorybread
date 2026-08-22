@@ -389,7 +389,7 @@ const BakeCaptureTab: React.FC<{
                 className="bake-input"
                 value={draftQuery}
                 onChange={(event) => onDraftQueryChange(event.target.value)}
-                placeholder="搜索标题、正文或文本信息"
+                placeholder="搜索采集 ID、标题、正文或文本信息"
               />
             </label>
           </div>

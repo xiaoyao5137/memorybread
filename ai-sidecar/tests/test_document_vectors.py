@@ -224,6 +224,51 @@ def test_document_vector_storage_is_idempotent_and_replaces_old_version(tmp_path
     assert len(qdrant.deletes) == 1
 
 
+def test_document_version_exists_detects_embedding_model_change(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = str(tmp_path / "model-change.db")
+    _create_vector_schema(db_path)
+    storage = VectorStorage(db_path=db_path)
+    monkeypatch.setattr(storage, "_get_qdrant_client", lambda: _FakeQdrant())
+    metadata = {
+        "doc_key": "document_url:https://docs.example.com/model-change",
+        "content_hash": "version-one",
+        "ts": 1234,
+        "model_name": "old-backend/bge-small-zh-v1.5:q4_k_m",
+    }
+    assert storage.store_document_vectors(
+        7,
+        ["唯一分块"],
+        [[0.1, 0.2]],
+        metadata,
+    )
+
+    doc_key = metadata["doc_key"]
+    assert storage.document_version_exists(doc_key, "version-one", 1)
+    assert storage.document_version_exists(
+        doc_key, "version-one", 1, "old-backend/bge-small-zh-v1.5:q4_k_m"
+    )
+    assert not storage.document_version_exists(
+        doc_key, "version-one", 1, "BAAI/bge-small-zh-v1.5"
+    )
+
+    # 模型版本不一致时必须重写，而不是沿用旧空间向量。
+    switched = {**metadata, "model_name": "BAAI/bge-small-zh-v1.5"}
+    assert storage.store_document_vectors(
+        7,
+        ["唯一分块"],
+        [[0.9, 0.8]],
+        switched,
+    )
+    with sqlite3.connect(db_path) as conn:
+        recorded = conn.execute(
+            "SELECT model_name FROM vector_index"
+        ).fetchall()
+    assert recorded == [("BAAI/bge-small-zh-v1.5",)]
+
+
 def test_artifact_document_vectors_use_durable_owner_and_retryable_deletion_queue(
     tmp_path,
     monkeypatch,
@@ -296,6 +341,53 @@ def test_artifact_document_vectors_use_durable_owner_and_retryable_deletion_queu
         assert conn.execute(
             "SELECT COUNT(*) FROM vector_deletion_queue"
         ).fetchone()[0] == 0
+
+
+def test_artifact_document_vectors_rebuild_after_embedding_backend_switch(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = str(tmp_path / "artifact-model-change.db")
+    _create_durable_vector_schema(db_path)
+    storage = VectorStorage(db_path=db_path)
+    qdrant = _FakeQdrant()
+    monkeypatch.setattr(storage, "_get_qdrant_client", lambda: qdrant)
+    metadata = {
+        "doc_key": "document_url:https://docs.example/switch",
+        "content_hash": "version-one",
+        "url": "https://docs.example/switch",
+        "title": "切换后端文档",
+        "updated_at": 1234,
+        "model_name": "qllama/bge-small-zh-v1.5:q4_k_m",
+    }
+
+    assert storage.store_artifact_document_vectors(
+        81,
+        ["旧空间分块"],
+        [[0.1, 0.2]],
+        metadata,
+    )
+    assert storage.artifact_document_version_exists(
+        81, metadata["doc_key"], "version-one", 1, "qllama/bge-small-zh-v1.5:q4_k_m"
+    )
+    assert not storage.artifact_document_version_exists(
+        81, metadata["doc_key"], "version-one", 1, "BAAI/bge-small-zh-v1.5"
+    )
+
+    # 内容未变但嵌入后端已切换：同参数重复写入必须触发重建。
+    switched = {**metadata, "model_name": "BAAI/bge-small-zh-v1.5"}
+    assert storage.store_artifact_document_vectors(
+        81,
+        ["旧空间分块"],
+        [[0.5, 0.6]],
+        switched,
+    )
+    assert len(qdrant.upserts) == 2
+    with sqlite3.connect(db_path) as conn:
+        recorded = conn.execute(
+            "SELECT model_name FROM artifact_vector_index WHERE document_id = 81"
+        ).fetchall()
+    assert recorded == [("BAAI/bge-small-zh-v1.5",)]
 
 
 def test_bake_document_snapshot_does_not_need_a_capture() -> None:
@@ -486,3 +578,67 @@ def test_background_backfills_vectors_from_bake_document_without_capture(
     assert document_id == 80
     assert len(chunks) == len(vectors)
     assert metadata["doc_key"].startswith("document_url:")
+
+
+def test_load_pending_bake_documents_includes_stale_embedding_model(
+    tmp_path,
+) -> None:
+    db_path = str(tmp_path / "stale-model.db")
+    _create_durable_vector_schema(db_path)
+    document = {
+        "id": 90,
+        "title": "稳柱的更新文档",
+        "doc_type": "汇报",
+        "summary": None,
+        "full_content": "稳柱产品的更新内容说明。" * 40,
+        "sections_json": "[]",
+        "source_url": "https://docs.example.com/d/home/STALE",
+        "updated_at": 2000,
+    }
+    snapshot = build_bake_document_snapshot(document)
+    assert snapshot is not None
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO bake_documents (
+                id, title, doc_type, full_content, source_url, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                document["id"],
+                document["title"],
+                document["doc_type"],
+                document["full_content"],
+                document["source_url"],
+                document["updated_at"],
+            ),
+        )
+        # 内容与版本均未变化，仅嵌入模型是旧后端的。
+        for index, chunk in enumerate(snapshot.chunks):
+            conn.execute(
+                """
+                INSERT INTO artifact_vector_index (
+                    document_id, qdrant_point_id, doc_key, content_hash,
+                    chunk_index, chunk_text, model_name, indexed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    document["id"],
+                    f"stale-point-{index}",
+                    snapshot.doc_key,
+                    snapshot.content_hash,
+                    index,
+                    chunk,
+                    "qllama/bge-small-zh-v1.5:q4_k_m",
+                    3000,
+                ),
+            )
+
+    processor = BackgroundProcessor(db_path=db_path)
+    assert processor._load_pending_bake_documents(10) == []
+    assert processor._load_pending_bake_documents(
+        10,
+        "BAAI/bge-small-zh-v1.5",
+    ) == [document]

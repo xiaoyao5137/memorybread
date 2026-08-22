@@ -1436,7 +1436,7 @@ const SystemFloatingAssist: React.FC = () => {
         <section className="system-floating-assist__canvas" aria-live="polite">
           <header className="system-floating-assist__canvas-head">
             <div>
-              <span>工作场景咨询</span>
+              <span>记忆咨询</span>
               <strong>{statusText}</strong>
             </div>
             <div className="system-floating-assist__canvas-actions">
@@ -1599,7 +1599,7 @@ const SystemFloatingAssist: React.FC = () => {
                   const files = Array.from(event.clipboardData.files || [])
                   if (files.length) void addFiles(files)
                 }}
-                placeholder={screenshot ? '继续输入你的指令，结合当前界面内容咨询' : '输入你的指令，直接向记忆面包咨询'}
+                placeholder={screenshot ? '继续输入你的指令，结合当前界面内容咨询' : '帮我回顾一下上周项目评审的关键结论'}
                 rows={2}
                 disabled={busy}
                 onCompositionStart={manualInputImeGuard.onCompositionStart}
@@ -1671,7 +1671,7 @@ const SystemFloatingAssist: React.FC = () => {
 
           {visibleReferences.length > 0 && (
             <div className="system-floating-assist__refs">
-              <div className="system-floating-assist__refs-title">参考资料</div>
+              <div className="system-floating-assist__refs-title">参考资料（{visibleReferences.length}）</div>
               {displayedReferences.map((item, index) => {
                 const referenceType = referenceTypeMeta(item)
                 return (

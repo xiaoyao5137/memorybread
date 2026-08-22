@@ -107,6 +107,7 @@ class VectorStorage:
         doc_key: str,
         content_hash: str,
         chunk_count: int,
+        expected_model_name: Optional[str] = None,
     ) -> bool:
         expected = {
             self._document_point_id(doc_key, content_hash, index)
@@ -116,13 +117,21 @@ class VectorStorage:
             with sqlite3.connect(self.db_path) as conn:
                 rows = conn.execute(
                     """
-                    SELECT qdrant_point_id
+                    SELECT qdrant_point_id, model_name
                     FROM vector_index
                     WHERE doc_key = ? AND source_type = 'document'
                     """,
                     (doc_key,),
                 ).fetchall()
-            return bool(expected) and {str(row[0]) for row in rows} == expected
+            if not (bool(expected) and {str(row[0]) for row in rows} == expected):
+                return False
+            # 嵌入后端切换后（如 Ollama 量化 -> sentence-transformers）同名模型
+            # 的向量空间不兼容，旧模型索引的向量视为过期版本，需要重建。
+            if expected_model_name and any(
+                str(row[1] or "") != expected_model_name for row in rows
+            ):
+                return False
+            return True
         except sqlite3.Error as exc:
             logger.warning("检查文档向量版本失败: doc_key=%s error=%s", doc_key, exc)
             return False
@@ -133,6 +142,7 @@ class VectorStorage:
         doc_key: str,
         content_hash: str,
         chunk_count: int,
+        expected_model_name: Optional[str] = None,
     ) -> bool:
         """Check both the durable SQLite ledger and Qdrant when available."""
         expected = {
@@ -145,7 +155,7 @@ class VectorStorage:
             with sqlite3.connect(self.db_path) as conn:
                 rows = conn.execute(
                     """
-                    SELECT qdrant_point_id
+                    SELECT qdrant_point_id, model_name
                     FROM artifact_vector_index
                     WHERE document_id = ? AND content_hash = ?
                     """,
@@ -153,6 +163,12 @@ class VectorStorage:
                 ).fetchall()
             recorded = {str(row[0]) for row in rows}
             if recorded != expected:
+                return False
+            # 嵌入后端切换后（如 Ollama 量化 -> sentence-transformers）同名模型
+            # 的向量空间不兼容，旧模型索引的向量视为过期版本，需要重建。
+            if expected_model_name and any(
+                str(row[1] or "") != expected_model_name for row in rows
+            ):
                 return False
 
             qdrant_client = self._get_qdrant_client()
@@ -208,6 +224,7 @@ class VectorStorage:
             doc_key,
             content_hash,
             len(chunks),
+            metadata.get("model_name"),
         ):
             return True
 
@@ -529,7 +546,12 @@ class VectorStorage:
             self._document_point_id(doc_key, content_hash, index)
             for index in range(len(chunks))
         ]
-        if self.document_version_exists(doc_key, content_hash, len(chunks)):
+        if self.document_version_exists(
+            doc_key,
+            content_hash,
+            len(chunks),
+            metadata.get("model_name"),
+        ):
             logger.debug("文档向量未变化，跳过重写: doc_key=%s", doc_key)
             return True
 

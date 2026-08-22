@@ -4,7 +4,7 @@
 > Status：现有构建能力已实现；个人账号的正式证书、更新签名密钥和生产下载地址仍需本人配置
 > Applies to：从记忆面包官网、CDN 或个人内测下载页分发的 macOS DMG
 > Audience：个人开发者；可选的外部测试者或专业顾问
-> Last reviewed：2026-08-10
+> Last reviewed：2026-08-19
 > Next review trigger：Apple/Tauri 分发规则变化、证书或密钥轮换、发布事故，或每季度复审
 
 ## 先说结论
@@ -117,8 +117,8 @@ export MEMORY_BREAD_UPDATER_PUBLIC_KEY="<matching-public-key>"
 | STEP-04 | 个人开发者 | 在 `desktop-ui` 执行 `npm run macos:build:dmg` | 生成 DMG、`.app.tar.gz`、`.sig` 和散列信息 | 构建日志、产物目录 | 缺少更新产物转 `EX-02` |
 | STEP-05 | 个人开发者 | 验证 `.app` 和 DMG：`codesign --verify --deep --strict --verbose=2 <app>`、`spctl -a -t exec -vv <app>`、`xcrun stapler validate <app>`，并核对构建脚本的 bundle/DMG 校验结果 | 签名、公证、图标、Bundle ID、架构和权限均正确 | 验证命令输出 | Gatekeeper 或票据失败转 `EX-03` |
 | STEP-06 | 个人开发者或外部测试者 | 把 DMG 复制到未装过本版本的测试 Mac，挂载后拖入 `/Applications`，从 Finder 首次启动；按测试用例验证初始化、权限、采集、退出与重启 | 用户不需要关闭系统安全策略即可完成关键路径 | [首次安装测试记录](./macOS首次安装初始化测试用例.md) | 关键路径失败则停止发布并记录缺陷 |
-| STEP-07 | 个人开发者 | 将 DMG 及 updater 文件上传到版本化 HTTPS 路径；重新下载并核对 SHA-256、字节大小和 `.sig` | CDN 文件与本地产物逐字节一致 | URL、散列、大小、下载日志 | 不一致转 `EX-04` |
-| STEP-08 | 个人开发者 | 在 `mb-ops` 创建 `direct` 渠道草稿，填写版本、构建号、架构、最低系统、更新包 URL、SHA-256、大小、签名和发布说明 | 发布记录可以被客户端正确解析 | 草稿截图或 API 响应 | 字段不完整则保持草稿 |
+| STEP-07 | 个人开发者 | 将 DMG 上传到版本化 HTTPS 路径（官网/OSS）；将 `.app.tar.gz` 与 `.app.tar.gz.sig` **两个文件一起**上传到 GitHub Release（tag `vX.Y.Z`）；重新下载全部文件并核对 SHA-256、字节大小和 `.sig` | CDN 与 GitHub Release 文件均与本地产物逐字节一致；Release 资产列表同时包含 tar.gz 与 `.sig` | URL、散列、大小、下载日志、Release 资产列表 | 不一致或缺少 `.sig` 资产转 `EX-04` |
+| STEP-08 | 个人开发者 | 在 `mb-ops` 创建 `direct` 渠道草稿，填写版本、构建号、架构、最低系统、更新包 URL、SHA-256、大小、签名和发布说明；更新签名填写 `.sig` 文件的完整 base64 内容（`base64 -i <file>.sig` 的输出），**不得填写文件名** | 发布记录可以被客户端正确解析；保存时通过服务端签名格式校验 | 草稿截图或 API 响应 | 字段不完整则保持草稿；签名格式被拒转 `EX-04` |
 | STEP-09 | 个人开发者 | 将官网主下载按钮指向 DMG URL，并展示版本、支持架构、最低 macOS 和 SHA-256；先在预发布页面验收 | 用户下载的是已验证 DMG，不是 updater 压缩包 | 预发布页面截图与点击测试 | 链接错误立即撤回页面变更 |
 | STEP-10 | 个人开发者 | 完成独立二次确认后发布 `direct` 记录，按 1%→10%→25%→50%→100% 或个人发布清单规定的节奏放量；监控下载、安装、启动、更新和崩溃指标 | 指标稳定后完成全量 | 二次确认时间、灰度记录、监控截图 | 异常转 `EX-05` |
 | STEP-11 | 个人开发者 | 归档构建提交、命令日志、产物散列、测试结论、线上链接与最终灰度状态 | 发布可复现、可审计 | 发布归档链接 | 证据不全不得关闭发布 |
@@ -132,6 +132,24 @@ desktop-ui/src-tauri/target/<target>/release/bundle/macos/*.app.tar.gz.sig
 ```
 
 实际路径以 `npm run macos:build:dmg` 的末尾输出为准。
+
+构建脚本会在恢复 PyInstaller 符号链接、重建 DMG 之后，基于最终 `.app` 重新打包并重签更新产物，且带门禁：归档内出现任何 `._` AppleDouble 条目即拒绝发布。手动用 macOS `tar`（bsdtar）重打包更新包时必须设置 `COPYFILE_DISABLE=1`，否则签名/公证产生的扩展属性会被写成 `._` 条目，客户端 updater 解包顶层 `._` 条目时会报 `failed to unpack \`._xxx.app\``（v0.2.0 事故根因；且 `tar -t` 列表会隐藏这些条目，核对必须用 `python3 -m tarfile` 或逐条枚举）。
+
+GitHub Release 上传（updater 热更新资产，DMG 不走 GitHub）：
+
+```bash
+# Release 标题固定为「记忆面包 vX.Y.Z」；tar.gz 与 .sig 必须成对上传
+gh release create vX.Y.Z --repo xiaoyao5137/memorybread --title "记忆面包 vX.Y.Z" --notes-file /path/to/release-notes.md
+gh release upload vX.Y.Z \
+  MemoryBread-<version>-aarch64.app.tar.gz \
+  MemoryBread-<version>-aarch64.app.tar.gz.sig \
+  --repo xiaoyao5137/memorybread
+
+# 上传后核对资产清单，确认两个文件都在
+gh release view vX.Y.Z --repo xiaoyao5137/memorybread --json assets --jq '.assets[].name'
+```
+
+缺少 `.sig` 资产时，录入发布记录的人容易把 `.sig` 文件名误粘贴为更新签名，导致客户端报 `Invalid symbol …` 签名校验失败；因此 STEP-07 要求上传后立即核对资产清单。
 
 ## 7. 内部测试 DMG 快速分支
 
@@ -161,9 +179,9 @@ Intel 与 Apple 芯片的架构构建、跨架构限制和测试方法见本指�
 
 读取签名与公证日志，修复 entitlement、证书链、时间戳或嵌套二进制问题后提升构建号重打。相同错误连续出现两次，停止自行重试并联系 Apple Developer Support 或查阅官方公证日志说明；不得建议官网用户全局关闭 Gatekeeper 或执行 `xattr -dr`。
 
-### EX-04: CDN 文件与发布元数据不一致
+### EX-04: CDN/GitHub Release 文件与发布元数据不一致
 
-保持发布记录为草稿或立即暂停；删除错误的未公开对象，使用新的不可变版本路径重新上传并从公网复核。若旧 URL 已公开，不覆盖文件，改发更高构建号。
+保持发布记录为草稿或立即暂停；删除错误的未公开对象，使用新的不可变版本路径重新上传并从公网复核。若旧 URL 已公开，不覆盖文件，改发更高构建号。若发现发布记录的更新签名填成了 `.sig` 文件名或其他非法值（客户端报 `Invalid symbol …`），直接在 `mb-ops` 编辑该已发布记录，将签名更正为 `.sig` 文件的完整 base64 内容；更正对客户端下一次检查更新即时生效，无需重新打包。
 
 ### EX-05: 灰度后出现安装、采集或更新事故
 
@@ -185,6 +203,7 @@ Intel 与 Apple 芯片的架构构建、跨架构限制和测试方法见本指�
 - [ ] 正式应用通过 `codesign`、`spctl` 和 `stapler` 验证。
 - [ ] 干净 Mac 从官网链接下载后可以安装、初始化、授权并采集。
 - [ ] updater URL、SHA-256、大小和签名匹配，客户端只消费 `direct` 渠道。
+- [ ] GitHub Release 资产同时包含 `.app.tar.gz` 与 `.app.tar.gz.sig`；发布记录的更新签名是 `.sig` 文件的完整 base64 内容。
 - [ ] 官网链接、发布说明、隐私政策和支持入口可访问。
 - [ ] 灰度指标稳定，证据归档完整。
 
@@ -196,5 +215,7 @@ Intel 与 Apple 芯片的架构构建、跨架构限制和测试方法见本指�
 
 | 日期 | 变更 | 作者 |
 |---|---|---|
+| 2026-08-19 | STEP-07/08 明确 `.app.tar.gz` 与 `.sig` 必须成对上传 GitHub Release，更新签名必须填 `.sig` 完整 base64 内容；EX-04 补充线上签名更正路径（v0.2.0 签名误填文件名事故复盘） | Codex |
+| 2026-08-19 | 补充更新包 AppleDouble（._）条目禁令与构建脚本门禁（v0.2.0 客户端解包失败事故复盘）；tauri signer 从文件读密钥用 `-f/--private-key-path`，`-k` 传字符串 | Codex |
 | 2026-08-10 | 改为个人 Apple Developer Program 账号视角，统一由 Individual Account Holder 执行并增加单人二次确认 | Codex |
 | 2026-08-09 | 从合并指南拆出官网直装发布流程，明确无需 TestFlight/App Review，并补充完整签名、公证、灰度和异常处理 | Codex |

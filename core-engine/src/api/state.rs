@@ -9,7 +9,9 @@ use std::{
     },
 };
 
-use crate::{capture::CaptureSchedule, storage::StorageManager};
+use crate::{
+    browser_extension::BrowserExtensionBroker, capture::CaptureSchedule, storage::StorageManager,
+};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -111,6 +113,7 @@ pub struct AppState {
     pub capture_enabled: Arc<AtomicBool>,
     pub keyboard_signal_enabled: Arc<AtomicBool>,
     pub capture_schedule: Arc<CaptureSchedule>,
+    pub browser_extension: BrowserExtensionBroker,
 }
 
 impl AppState {
@@ -205,6 +208,7 @@ impl AppState {
             capture_enabled: Arc::new(AtomicBool::new(capture_enabled)),
             keyboard_signal_enabled: Arc::new(AtomicBool::new(keyboard_signal_enabled)),
             capture_schedule: Arc::new(CaptureSchedule::new(capture_interval_secs)),
+            browser_extension: BrowserExtensionBroker::new(),
         })
     }
 

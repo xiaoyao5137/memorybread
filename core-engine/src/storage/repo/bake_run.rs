@@ -383,6 +383,12 @@ impl StorageManager {
                     persist_status = 'extracted',
                     persist_reason = NULL,
                     artifact_id = NULL,
+                    decision_state = NULL,
+                    quality_score = NULL,
+                    decision_reason_code = NULL,
+                    decision_reason_summary = NULL,
+                    decision_rule_version = NULL,
+                    shadow_payload_json = NULL,
                     updated_at_ms = excluded.updated_at_ms",
                 params![
                     audit.run_id,
@@ -431,6 +437,51 @@ impl StorageManager {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn finalize_bake_artifact_audit_decision(
+        &self,
+        run_id: i64,
+        timeline_id: i64,
+        artifact_kind: &str,
+        persist_status: &str,
+        persist_reason: Option<&str>,
+        artifact_id: Option<i64>,
+        decision_state: Option<&str>,
+        quality_score: Option<f64>,
+        decision_reason_code: Option<&str>,
+        decision_reason_summary: Option<&str>,
+        decision_rule_version: Option<&str>,
+        shadow_payload_json: Option<&str>,
+    ) -> Result<(), StorageError> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE bake_artifact_audits
+                 SET persist_status = ?4, persist_reason = ?5, artifact_id = ?6,
+                     decision_state = ?7, quality_score = ?8,
+                     decision_reason_code = ?9, decision_reason_summary = ?10,
+                     decision_rule_version = ?11, shadow_payload_json = ?12,
+                     updated_at_ms = ?13
+                 WHERE run_id = ?1 AND timeline_id = ?2 AND artifact_kind = ?3",
+                params![
+                    run_id,
+                    timeline_id,
+                    artifact_kind,
+                    persist_status,
+                    persist_reason,
+                    artifact_id,
+                    decision_state,
+                    quality_score,
+                    decision_reason_code,
+                    decision_reason_summary,
+                    decision_rule_version,
+                    shadow_payload_json,
+                    current_ts_ms(),
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn list_bake_artifact_audits_for_timeline(
         &self,
         timeline_id: i64,
@@ -441,7 +492,9 @@ impl StorageManager {
                 "SELECT id, run_id, timeline_id, artifact_kind, deterministic_eligible,
                         deterministic_reason, model_accepted, model_reason, payload_present,
                         payload_valid, artifact_shape, compatibility_recovered, persist_status,
-                        persist_reason, artifact_id, created_at_ms, updated_at_ms
+                        persist_reason, artifact_id, decision_state, quality_score,
+                        decision_reason_code, decision_reason_summary, decision_rule_version,
+                        shadow_payload_json, created_at_ms, updated_at_ms
                  FROM bake_artifact_audits
                  WHERE timeline_id = ?1
                  ORDER BY created_at_ms DESC, id DESC
@@ -1059,37 +1112,52 @@ impl StorageManager {
                 .actionable_count
                 .saturating_add(status.metadata_refresh_count);
 
-            status.recent_no_progress_count = conn
-                .query_row(
-                    "SELECT COALESCE(SUM(
-                         status = 'no_op'
-                         OR (
-                             status = 'completed'
-                             AND processed_episode_count = 0
-                             AND candidate_count = 0
-                             AND auto_created_count = 0
-                         )
-                     ), 0)
-                     FROM (
-                         SELECT status, processed_episode_count, candidate_count,
-                                auto_created_count
-                         FROM bake_runs
-                         ORDER BY started_at DESC, id DESC
-                         LIMIT 5
-                     )",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0);
+            // 只读取最近 5 条并计算“从最新一条开始连续”的 no_op 次数。
+            // completed 空产物批次可能只是跳过低价值候选并推进了 watermark，
+            // 不能算无进展；中间出现一次真实进展也必须立即打断连续计数。
+            let (recent_no_progress_count, latest_no_progress_at_ms) = (|| {
+                let mut stmt = conn.prepare(
+                    "SELECT status, completed_at
+                     FROM bake_runs
+                     ORDER BY started_at DESC, id DESC
+                     LIMIT 5",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+                })?;
+                let mut count = 0_i64;
+                let mut latest_completed_at = None;
+                for row in rows {
+                    let (run_status, completed_at) = row?;
+                    if run_status != "no_op" {
+                        break;
+                    }
+                    if latest_completed_at.is_none() {
+                        latest_completed_at = completed_at;
+                    }
+                    count += 1;
+                }
+                Ok::<_, rusqlite::Error>((count, latest_completed_at))
+            })()
+            .unwrap_or((0, None));
+            status.recent_no_progress_count = recent_no_progress_count;
             status.recommended_retry_after_ms = if status.actionable_count == 0 {
                 status
                     .next_retry_at_ms
                     .map(|next| next.saturating_sub(now).clamp(1_000, 300_000))
                     .unwrap_or(300_000)
             } else if status.recent_no_progress_count > 0 {
-                15_000_i64
+                let backoff_ms = 15_000_i64
                     .saturating_mul(1_i64 << status.recent_no_progress_count.min(4))
-                    .min(300_000)
+                    .min(300_000);
+                latest_no_progress_at_ms
+                    .map(|completed_at| {
+                        completed_at
+                            .saturating_add(backoff_ms)
+                            .saturating_sub(now)
+                            .clamp(0, backoff_ms)
+                    })
+                    .unwrap_or(0)
             } else {
                 0
             };
@@ -1262,8 +1330,14 @@ fn row_to_bake_artifact_audit(
         persist_status: row.get(12)?,
         persist_reason: row.get(13)?,
         artifact_id: row.get(14)?,
-        created_at_ms: row.get(15)?,
-        updated_at_ms: row.get(16)?,
+        decision_state: row.get(15)?,
+        quality_score: row.get(16)?,
+        decision_reason_code: row.get(17)?,
+        decision_reason_summary: row.get(18)?,
+        decision_rule_version: row.get(19)?,
+        shadow_payload_json: row.get(20)?,
+        created_at_ms: row.get(21)?,
+        updated_at_ms: row.get(22)?,
     })
 }
 
@@ -1665,7 +1739,7 @@ mod tests {
     }
 
     #[test]
-    fn test_queue_status_counts_legacy_empty_completed_runs_as_no_progress() {
+    fn test_queue_status_does_not_count_completed_watermark_progress_as_no_progress() {
         let mgr = make_mgr();
         for started_at in [100_i64, 200, 300] {
             let run_id = mgr
@@ -1693,9 +1767,48 @@ mod tests {
         }
 
         let queue = mgr.get_bake_queue_status(3).unwrap();
-        assert_eq!(queue.recent_no_progress_count, 3);
+        assert_eq!(queue.recent_no_progress_count, 0);
         assert_eq!(queue.actionable_count, 0);
         assert_eq!(queue.recommended_retry_after_ms, 300_000);
+    }
+
+    #[test]
+    fn test_queue_status_counts_only_consecutive_explicit_no_op_runs() {
+        let mgr = make_mgr();
+        let now = current_ts_ms();
+        for (offset, status, processed) in [
+            (0_i64, "no_op", 0_i64),
+            (1, "completed", 1),
+            (2, "no_op", 0),
+            (3, "no_op", 0),
+        ] {
+            let started_at = now - 4_000 + offset;
+            let run_id = mgr
+                .insert_bake_run(&NewBakeRun {
+                    trigger_reason: "knowledge_background".to_string(),
+                    status: "running".to_string(),
+                    started_at,
+                })
+                .unwrap();
+            mgr.complete_bake_run(
+                run_id,
+                status,
+                now - 1_000 + offset,
+                processed,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                None,
+                Some(10),
+            )
+            .unwrap();
+        }
+
+        let queue = mgr.get_bake_queue_status(3).unwrap();
+        assert_eq!(queue.recent_no_progress_count, 2);
     }
 
     /// 回归：队列排除文档已覆盖 timeline 的 CTE 口径必须与旧逐条 json_each

@@ -28,8 +28,9 @@ use crate::{
 };
 
 const SELF_GENERATED_APP_KEYWORDS: [&str; 2] = ["memory-bread", "记忆面包"];
-const SELF_GENERATED_WINDOW_KEYWORDS: [&str; 5] = [
+const SELF_GENERATED_WINDOW_KEYWORDS: [&str; 6] = [
     "memory-bread",
+    "memorybread preview",
     "记忆面包",
     "KnowledgePanel",
     "MonitorPanel",
@@ -3393,6 +3394,13 @@ fn load_candidate_stage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monitor_backlog_excludes_memory_bread_preview_window() {
+        let clause = build_not_like_clause("c.win_title", &SELF_GENERATED_WINDOW_KEYWORDS);
+        assert!(clause.contains("%memorybread preview%"));
+        assert!(!SELF_GENERATED_WINDOW_KEYWORDS.contains(&"memorybread"));
+    }
 
     #[test]
     fn data_stage_counts_only_non_deleted_snapshot_sources_from_today() {

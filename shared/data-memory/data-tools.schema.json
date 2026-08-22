@@ -140,6 +140,95 @@
         "validation": {"type": "object"}
       }
     },
+    "data_query_plan": {
+      "type": "object",
+      "required": ["schema_version", "mode", "operations"],
+      "properties": {
+        "schema_version": {"const": "memorybread.data-query-plan.v1"},
+        "mode": {"type": "string", "enum": ["relational", "narrative"]},
+        "presentation": {
+          "type": "string",
+          "enum": ["auto", "table", "chart", "prose", "metric"]
+        },
+        "reason": {"type": "string", "maxLength": 400},
+        "source_id": {"type": ["integer", "null"]},
+        "relation_id": {"type": ["string", "null"]},
+        "operations": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "required": ["op"],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": ["filter", "project", "order_by", "distinct", "group_by", "aggregate", "limit"]
+              },
+              "field_id": {"type": ["string", "null"]},
+              "field_ids": {"type": "array", "items": {"type": "string"}},
+              "operator": {
+                "type": "string",
+                "enum": ["eq", "ne", "gt", "gte", "lt", "lte", "contains", "in", "is_null", "not_null"]
+              },
+              "value": {},
+              "direction": {"type": "string", "enum": ["asc", "desc"]},
+              "nulls": {"type": "string", "enum": ["first", "last"]},
+              "function": {
+                "type": "string",
+                "enum": ["count", "count_distinct", "sum", "avg", "min", "max"]
+              },
+              "alias": {"type": "string", "maxLength": 120}
+            },
+            "additionalProperties": false
+          }
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "shape": {"const": "table"},
+            "presentation": {
+              "type": "string",
+              "enum": ["auto", "table", "chart", "prose", "metric"]
+            },
+            "preserve_source_rows": {"type": "boolean"}
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "data_query_result": {
+      "type": "object",
+      "required": ["schema_version", "shape", "plan", "rows", "validation"],
+      "properties": {
+        "schema_version": {"const": "memorybread.data-query-result.v1"},
+        "shape": {"type": "string", "enum": ["narrative", "table"]},
+        "plan": {"$ref": "#/$defs/data_query_plan"},
+        "schema": {"type": "array", "items": {"type": "object"}},
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["row_id", "source_row_ids", "cells"],
+            "properties": {
+              "row_id": {"type": "string"},
+              "source_row_ids": {"type": "array", "items": {"type": "string"}},
+              "cells": {"type": "object"}
+            }
+          }
+        },
+        "coverage": {"type": "object"},
+        "provenance": {"type": "object"},
+        "validation": {
+          "type": "object",
+          "required": ["status", "errors"],
+          "properties": {
+            "status": {"type": "string", "enum": ["verified", "insufficient_coverage", "not_applicable"]},
+            "errors": {"type": "array", "items": {"type": "string"}},
+            "row_identity_preserved": {"type": "boolean"}
+          }
+        }
+      }
+    },
     "data_search_request": {
       "type": "object",
       "required": ["query"],
@@ -230,6 +319,12 @@
           "enum": ["auto", "chrome", "chrome_canary", "edge", "brave", "chromium", "vivaldi", "safari"],
           "default": "auto"
         },
+        "extension_preference": {
+          "type": "string",
+          "enum": ["auto", "disabled"],
+          "default": "auto",
+          "description": "auto 优先使用已连接且已获站点权限的 Chrome 扩展；不可用时自动降级现有浏览器或 HTTP 通道"
+        },
         "capture_evidence": {
           "type": "boolean",
           "default": false,
@@ -291,7 +386,7 @@
       "properties": {
         "schema_version": {"const": "memorybread.webpage-scrape.v1"},
         "source_id": {"type": "integer", "minimum": 1},
-        "collector": {"type": "string", "enum": ["browser_attach", "chrome_attach", "direct_http"]},
+        "collector": {"type": "string", "enum": ["chrome_extension", "browser_attach", "chrome_attach", "direct_http"]},
         "browser": {
           "type": ["string", "null"],
           "enum": ["chrome", "chrome_canary", "edge", "brave", "chromium", "vivaldi", "safari", null]

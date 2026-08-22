@@ -1,15 +1,16 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { listen } from '@tauri-apps/api/event'
-import { Download, RefreshCw, ShieldAlert, ShieldCheck, Sparkles, Store, X } from 'lucide-react'
+import { Download, RefreshCw, Sparkles, Store, X } from 'lucide-react'
 import { useAppStore } from '../store/useAppStore'
 import { openExternalUrl, useAppMetadata } from '../utils/appMetadata'
 import {
-  downloadAndInstallSoftwareUpdate,
-  prepareSoftwareUpdate,
-  restartApplication,
   type SoftwareUpdateCheck,
   type SoftwareUpdateProgress,
 } from '../utils/softwareUpdate'
+import {
+  restartForSoftwareUpdate,
+  startSoftwareUpdateSession,
+  useSoftwareUpdateSession,
+} from '../utils/softwareUpdateSession'
 import './SoftwareUpdateNotice.css'
 
 interface SoftwareUpdateNoticeProps {
@@ -17,36 +18,22 @@ interface SoftwareUpdateNoticeProps {
   onDismiss: () => void
 }
 
-type UpdatePhase = 'idle' | 'preparing' | SoftwareUpdateProgress['phase']
+type UpdatePhase = 'idle' | 'preparing' | SoftwareUpdateProgress['phase'] | 'failed'
 
 const SoftwareUpdateNotice: React.FC<SoftwareUpdateNoticeProps> = ({ update, onDismiss }) => {
   const { adminApiBaseUrl, serviceEnvironment } = useAppStore()
   const metadata = useAppMetadata()
-  const [phase, setPhase] = useState<UpdatePhase>('idle')
-  const [progress, setProgress] = useState<SoftwareUpdateProgress | null>(null)
-  const [error, setError] = useState('')
+  const session = useSoftwareUpdateSession()
+  // 外部跳转（App Store / 无更新公钥的测试构建）没有后台会话，错误留在弹窗本地。
+  const [externalError, setExternalError] = useState('')
   const release = update.release
-  const isBusy = phase !== 'idle' && phase !== 'ready_to_restart'
-  const canDismiss = !update.is_mandatory && !isBusy
-
-  useEffect(() => {
-    let disposed = false
-    let unlisten: (() => void) | undefined
-    void listen<SoftwareUpdateProgress>('software-update-progress', event => {
-      if (disposed) return
-      setProgress(event.payload)
-      setPhase(event.payload.phase)
-    }).then(cleanup => {
-      if (disposed) cleanup()
-      else unlisten = cleanup
-    }).catch(() => {
-      // 浏览器设计预览没有 Tauri event bridge；正式桌面端会注册原生进度事件。
-    })
-    return () => {
-      disposed = true
-      unlisten?.()
-    }
-  }, [])
+  const isDirectFlow = release?.distribution === 'direct' && metadata.update_supported
+  const sessionActive = isDirectFlow && session.version === release?.version
+  const phase: UpdatePhase = sessionActive ? session.phase : 'idle'
+  const progress = sessionActive ? session.progress : null
+  const isBusy = phase !== 'idle' && phase !== 'ready_to_restart' && phase !== 'failed'
+  // 非强制更新允许随时关闭；下载在后台继续，进度由左下角入口承接。
+  const canDismiss = !update.is_mandatory
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -70,39 +57,31 @@ const SoftwareUpdateNotice: React.FC<SoftwareUpdateNoticeProps> = ({ update, onD
   if (!release) return null
 
   const startUpdate = async () => {
-    setError('')
     if (release.distribution === 'app_store' || !metadata.update_supported) {
+      setExternalError('')
       try {
         await openExternalUrl(release.download_url)
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : '无法打开 App Store 页面')
+        setExternalError(cause instanceof Error ? cause.message : '无法打开 App Store 页面')
       }
       return
     }
     if (phase === 'ready_to_restart') {
-      await restartApplication().catch(cause => {
-        setError(cause instanceof Error ? cause.message : '暂时无法重启应用')
+      await restartForSoftwareUpdate().catch(() => {
+        useSoftwareUpdateSession.setState({ error: '暂时无法重启应用' })
       })
       return
     }
-    setPhase('preparing')
-    try {
-      const prepared = await prepareSoftwareUpdate(
-        adminApiBaseUrl,
-        metadata,
-        serviceEnvironment,
-        release.channel,
-      )
-      if (!prepared) throw new Error('此更新已暂停或不再适用于当前设备，请重新检查')
-      if (prepared.version !== release.version) throw new Error('版本清单已变化，请重新检查后再更新')
-      setPhase('downloading')
-      await downloadAndInstallSoftwareUpdate()
-      setPhase('ready_to_restart')
-    } catch (cause) {
-      setPhase('idle')
-      setError(cause instanceof Error ? cause.message : String(cause || '软件更新失败'))
-    }
+    void startSoftwareUpdateSession({
+      adminApiBaseUrl,
+      metadata,
+      environment: serviceEnvironment,
+      channel: release.channel,
+      version: release.version,
+    })
   }
+
+  const error = sessionActive ? session.error : externalError
 
   return (
     <div className="software-update-notice" role="presentation">
@@ -114,10 +93,10 @@ const SoftwareUpdateNotice: React.FC<SoftwareUpdateNoticeProps> = ({ update, onD
         role="dialog"
       >
         <div className="software-update-notice__mark" aria-hidden>
-          {update.is_mandatory ? <ShieldAlert size={30} /> : <Sparkles size={30} />}
+          <Sparkles size={30} />
         </div>
         {canDismiss && (
-          <button aria-label="稍后提醒" className="software-update-notice__close" onClick={onDismiss} type="button">
+          <button aria-label={isBusy ? '后台继续更新' : '稍后提醒'} className="software-update-notice__close" onClick={onDismiss} type="button">
             <X size={18} />
           </button>
         )}
@@ -132,14 +111,14 @@ const SoftwareUpdateNotice: React.FC<SoftwareUpdateNoticeProps> = ({ update, onD
           <small>build {release.build_number}</small>
         </p>
         <div className="software-update-notice__notes">{release.release_notes}</div>
-        <div className="software-update-notice__trust">
-          {release.distribution === 'direct' && metadata.update_supported
-            ? <><ShieldCheck size={17} aria-hidden /><span>更新包会先通过发布签名与 SHA-256 双重校验，再写入应用。</span></>
-            : release.distribution === 'app_store'
+        {(release.distribution === 'app_store' || !metadata.update_supported) && (
+          <div className="software-update-notice__trust">
+            {release.distribution === 'app_store'
               ? <><Store size={17} aria-hidden /><span>此安装来自 Mac App Store，更新将由 App Store 完成。</span></>
               : <><Download size={17} aria-hidden /><span>当前是未配置更新公钥的测试构建，请下载安装正式发布包。</span></>}
-        </div>
-        {phase !== 'idle' && release.distribution === 'direct' && (
+          </div>
+        )}
+        {phase !== 'idle' && phase !== 'failed' && release.distribution === 'direct' && (
           <div className="software-update-notice__progress" role="status" aria-live="polite">
             <div><span>{actionLabel}</span><strong>{progress?.percent != null ? `${progress.percent}%` : ''}</strong></div>
             <span className="software-update-notice__progress-track"><i style={{ width: `${progress?.percent ?? (phase === 'preparing' ? 6 : 100)}%` }} /></span>
@@ -147,7 +126,7 @@ const SoftwareUpdateNotice: React.FC<SoftwareUpdateNoticeProps> = ({ update, onD
         )}
         {error && <div className="software-update-notice__error" role="alert">{error}</div>}
         <div className="software-update-notice__actions">
-          {canDismiss && <button onClick={onDismiss} type="button">24 小时后提醒</button>}
+          {canDismiss && <button onClick={onDismiss} type="button">{isBusy ? '后台继续更新' : '24 小时后提醒'}</button>}
           <button autoFocus className="software-update-notice__download" disabled={isBusy} onClick={() => void startUpdate()} type="button">
             {phase === 'ready_to_restart' ? <RefreshCw size={17} aria-hidden /> : release.distribution === 'app_store' ? <Store size={17} aria-hidden /> : <Download size={17} aria-hidden />}
             {actionLabel}

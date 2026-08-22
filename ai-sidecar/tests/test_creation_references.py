@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -7,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
-from creation.service import CreationOptions, CreationService
+from creation.service import CreationOptions, CreationService, ReferenceDocument
 
 
 def document_408() -> dict:
@@ -58,7 +59,7 @@ def test_semantic_recall_reranks_every_memory_domain_without_query_synonyms(tmp_
     conn = sqlite3.connect(db_path)
     conn.execute(
         "INSERT INTO bake_documents VALUES (?, ?, ?, ?, ?, '[]', '[]', '', 0, "
-        "'auto_created', ?, ?, NULL)",
+        "'auto_created', ?, ?, NULL, 'draft')",
         (
             41,
             "切换保障资料",
@@ -256,7 +257,8 @@ def _create_unified_memory_db(path):
             id INTEGER PRIMARY KEY, title TEXT, doc_type TEXT, summary TEXT,
             full_content TEXT, sections_json TEXT, style_phrases TEXT,
             prompt_hint TEXT, usage_count INTEGER, review_status TEXT,
-            updated_at INTEGER, source_url TEXT, deleted_at INTEGER
+            updated_at INTEGER, source_url TEXT, deleted_at INTEGER,
+            status TEXT DEFAULT 'draft'
         );
         CREATE TABLE bake_knowledge (
             id INTEGER PRIMARY KEY, title TEXT, summary TEXT, content TEXT,
@@ -303,7 +305,7 @@ def test_unified_memory_recall_includes_document_knowledge_operation_and_data(tm
     conn = sqlite3.connect(db_path)
     conn.execute(
         "INSERT INTO bake_documents VALUES (?, ?, ?, ?, ?, '[]', '[]', '', 0, "
-        "'auto_created', ?, ?, NULL)",
+        "'auto_created', ?, ?, NULL, 'draft')",
         (582, "AIGC 共建项目周报", "周报", content, content, now_ms, "https://docs.example/aigc"),
     )
     conn.execute(
@@ -338,7 +340,7 @@ def test_unified_memory_recall_includes_document_knowledge_operation_and_data(tm
     assert ("data", 214) in identities
 
 
-def test_newer_pending_capture_is_used_before_linked_document_finishes_baking(tmp_path):
+def test_refined_document_keeps_representation_over_newer_capture_of_same_url(tmp_path):
     db_path = tmp_path / "memory-bread.db"
     _create_unified_memory_db(db_path)
     service = CreationService.__new__(CreationService)
@@ -352,7 +354,7 @@ def test_newer_pending_capture_is_used_before_linked_document_finishes_baking(tm
     conn = sqlite3.connect(db_path)
     conn.execute(
         "INSERT INTO bake_documents VALUES (?, ?, ?, ?, ?, '[]', '[]', '', 0, "
-        "'auto_created', ?, ?, NULL)",
+        "'auto_created', ?, ?, NULL, 'draft')",
         (
             582,
             "AIGC 共建项目周报",
@@ -382,6 +384,64 @@ def test_newer_pending_capture_is_used_before_linked_document_finishes_baking(tm
         CreationOptions(max_references=30),
     )
 
+    # 烘焙文档正文已可用：同源只保留一条，且由烘焙文档代表，
+    # 更新的原始采集只并入召回路径，不顶替提炼产物。
+    linked = [
+        item
+        for item in references
+        if item.source_url and "docs.example/aigc" in item.source_url
+    ]
+    assert len(linked) == 1
+    assert linked[0].source_type == "document"
+    assert linked[0].source_id == 582
+    assert "keyword" in linked[0].retrieval_paths
+
+
+def test_newer_capture_stands_in_while_document_content_is_still_empty(tmp_path):
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+    service.enable_vector_recall = False
+    service._embedding_model = None
+    query = "本周 AIGC 共建项目周报 推理性能优化"
+    requirement = service.analyze_requirement(query, CreationOptions())
+    capture_ms = requirement["time_context"]["period_start_ms"] + 3_600_000
+    content = ("AIGC 共建项目周报，本周推理性能优化已经完成。" * 30)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO bake_documents VALUES (?, ?, ?, ?, ?, '[]', '[]', '', 0, "
+        "'auto_created', ?, ?, NULL, 'draft')",
+        (
+            582,
+            "AIGC 共建项目周报",
+            "周报",
+            "",
+            "",
+            capture_ms - 1_000,
+            "https://docs.example/aigc",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO captures VALUES (?, ?, ?, '', ?, '', '', '', ?, 0)",
+        (
+            33221,
+            capture_ms,
+            "AIGC 共建项目周报",
+            content,
+            "https://docs.example/aigc?ro=false",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    references = service.retrieve_references(
+        query,
+        requirement,
+        CreationOptions(max_references=30),
+    )
+
+    # 提炼尚未完成（正文为空）时，较新的原始采集充当替身。
     linked = [
         item
         for item in references
@@ -437,6 +497,171 @@ async def test_github_search_maps_public_repository_metadata(monkeypatch):
     assert results[0].stars == 321
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response_status", "expected_refresh_status", "expected_stat"),
+    [
+        ("updated", "fresh_partial", "updated"),
+        ("reused", "fresh_recent_partial", "reused"),
+    ],
+)
+async def test_document_refresh_consumes_verified_snapshot_without_replacing_baked_asset(
+    monkeypatch,
+    response_status,
+    expected_refresh_status,
+    expected_stat,
+):
+    calls = []
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, json):
+            calls.append((url, json))
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", url),
+                json={
+                    "status": response_status,
+                    "completeness_status": "partial",
+                    # document 仍代表烘焙资产；本轮创作必须只消费独立来源快照。
+                    "document": {"full_content": "不可消费的烘焙正文返回值"},
+                    "source_snapshot": {
+                        "page_title": "即时校验标题",
+                        "content_text": "本轮浏览器抓取正文",
+                        "completeness_status": "partial",
+                        "identity_match": True,
+                        "truncated": True,
+                        "collected_at": 1_787_000_000_000,
+                    },
+                },
+            )
+
+    monkeypatch.setattr(
+        "creation.service.httpx.AsyncClient",
+        lambda **_kwargs: FakeAsyncClient(),
+    )
+    reference = ReferenceDocument(
+        id=7,
+        title="历史标题",
+        doc_type="方案",
+        summary="历史摘要",
+        full_content="历史烘焙正文",
+        sections_json="[]",
+        style_phrases="[]",
+        prompt_hint="",
+        usage_count=0,
+        review_status="accepted",
+        updated_at=1,
+        source_url="https://docs.example.com/d/home/abc123",
+        relevance_score=1.0,
+        quality_score=1.0,
+        completeness_score=1.0,
+        usage_score=0.0,
+        format_score=1.0,
+        freshness_score=0.1,
+        final_weight=1.0,
+        reason="直接命中",
+        source_id=7,
+    )
+    service = CreationService.__new__(CreationService)
+
+    stats = await service.refresh_recalled_documents(
+        [reference],
+        "请基于最新版本创作",
+        require_latest=True,
+    )
+
+    assert "allow_foreground" not in calls[0][1]
+    assert calls[0][1]["require_latest"] is True
+    assert reference.full_content == "本轮浏览器抓取正文"
+    assert reference.full_content != "不可消费的烘焙正文返回值"
+    assert reference.refresh_status == expected_refresh_status
+    assert reference.refresh_completeness == "partial"
+    assert reference.refresh_truncated is True
+    expected_stats = {
+        "attempted": 1,
+        "updated": 0,
+        "no_change": 0,
+        "reused": 0,
+        "skipped": 0,
+        "failed": 0,
+        "complete": 0,
+        "partial": 1,
+    }
+    expected_stats[expected_stat] = 1
+    assert stats == expected_stats
+
+
+@pytest.mark.asyncio
+async def test_document_refresh_budget_cancels_slow_source_and_keeps_historical_content(
+    monkeypatch,
+):
+    calls = []
+
+    class SlowAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, json):
+            calls.append((url, json))
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        "creation.service.httpx.AsyncClient",
+        lambda **_kwargs: SlowAsyncClient(),
+    )
+    monkeypatch.setattr(
+        "creation.service.DOCUMENT_REFRESH_TOTAL_BUDGET_SECONDS",
+        0.01,
+    )
+    references = [
+        ReferenceDocument(
+            id=document_id,
+            title=f"历史文档 {document_id}",
+            doc_type="方案",
+            summary="历史摘要",
+            full_content=f"历史正文 {document_id}",
+            sections_json="[]",
+            style_phrases="[]",
+            prompt_hint="",
+            usage_count=0,
+            review_status="accepted",
+            updated_at=1,
+            source_url=f"https://docs.example.com/d/home/{document_id}",
+            relevance_score=1.0,
+            quality_score=1.0,
+            completeness_score=1.0,
+            usage_score=0.0,
+            format_score=1.0,
+            freshness_score=0.1,
+            final_weight=1.0,
+            reason="直接命中",
+            source_id=document_id,
+        )
+        for document_id in (7, 8)
+    ]
+    service = CreationService.__new__(CreationService)
+
+    stats = await service.refresh_recalled_documents(
+        references,
+        "生成一份方案",
+    )
+
+    assert len(calls) == 1
+    assert stats["attempted"] == 1
+    assert stats["failed"] == 1
+    assert [item.full_content for item in references] == ["历史正文 7", "历史正文 8"]
+    assert all(item.refresh_status == "historical_only" for item in references)
+
+
 def test_distilled_memory_domains_are_not_penalized_by_document_structure_scores():
     """提炼型记忆（知识/操作/数据）不得被长文档的结构化标准压低。
 
@@ -457,14 +682,15 @@ def test_distilled_memory_domains_are_not_penalized_by_document_structure_scores
     long_knowledge = dict(knowledge_row, full_content="进" * 1200)
     assert service._score_completeness(long_knowledge) == 1.0
 
-    # 文档域继续按长文档结构标准评分，行为不变。
+    # 文档域：短正文不再被 3000 字分母与章节权重双重压低；无章节
+    # 结构时回退为纯正文长度评分（下限 0.45）。
     document_row = {
         "source_type": "document",
         "full_content": "短正文",
         "sections_json": "[]",
         "style_phrases": "[]",
     }
-    assert service._score_completeness(document_row) == 0.25
+    assert service._score_completeness(document_row) == 0.45
     assert service._score_format(document_row, {}) == 0.2
 
     # 操作、数据域同样豁免结构化惩罚。
@@ -557,6 +783,181 @@ def test_requirement_promotes_only_corpus_verified_name_slot_to_primary_entity(t
     assert generic["entity_context"]["has_high_confidence_entity"] is False
 
 
+def test_entity_focus_text_shields_entities_from_root_background(tmp_path):
+    """步骤级实体识别只看步骤焦点，根请求背景里的实体不得劫持。"""
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    _insert_entity_reference_fixture(db_path)
+    now_ms = int(time.time() * 1000)
+    conn = sqlite3.connect(db_path)
+    for row_id in (9101, 9102):
+        conn.execute(
+            "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, ?, 5, 1, ?, ?)",
+            (
+                row_id,
+                f"GPU 成本治理记录 {row_id}",
+                "GPU 利用率与成本数据。",
+                "GPU 利用率与成本数据。",
+                "GPU 利用率与成本数据。",
+                '["GPU"]',
+                now_ms,
+                now_ms,
+            ),
+        )
+    conn.commit()
+    conn.close()
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+
+    focus = "当前步骤：Onepoint 产品能力总结"
+    full_query = focus + "\n整体创作背景：请生成本周 GPU 成本优化的周报"
+
+    focused = service.analyze_requirement(
+        full_query,
+        CreationOptions(),
+        entity_focus_text=focus,
+    )
+    focused_names = {
+        item["name"] for item in focused["entity_context"]["primary_entities"]
+    }
+    assert focused_names == {"Onepoint"}
+
+    # 不传焦点时退回全文：GPU 在语料有提炼证据且出现在文本中，仍可升级，
+    # 证明隔离只作用于焦点参数而非削弱实体识别本身。
+    unfocused = service.analyze_requirement(full_query, CreationOptions())
+    unfocused_names = {
+        item["name"] for item in unfocused["entity_context"]["primary_entities"]
+    }
+    assert "GPU" in unfocused_names
+
+
+def test_chinese_proper_noun_is_promoted_via_corpus_expansion(tmp_path):
+    """中文专名片段应能通过语料实体证据扩展成完整专名升级。
+
+    旧实现只允许纯英文缩写成为实体候选，“AIGC共建项目”这类中英混合
+    专名永远无法参选；新实现完全由语料统计证据判定。
+    """
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    now_ms = int(time.time() * 1000)
+    conn = sqlite3.connect(db_path)
+    for row_id in (9201, 9202):
+        conn.execute(
+            "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, ?, 5, 1, ?, ?)",
+            (
+                row_id,
+                f"AIGC 共建项目周报进展 {row_id}",
+                "共建项目的推理性能优化进度。",
+                "共建项目的推理性能优化进度。",
+                "共建项目的推理性能优化进度。",
+                '["AIGC 共建项目"]',
+                now_ms,
+                now_ms,
+            ),
+        )
+    # 填充语料把总行数撑到足以计算文档频率的规模，确保“共建项目”
+    # 的占比低于泛词阈值。
+    for index in range(30):
+        conn.execute(
+            "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, '[]', 3, 0, ?, ?)",
+            (
+                9300 + index,
+                f"无关条目 {index}",
+                "其他主题记录。",
+                "其他主题记录。",
+                "其他主题记录。",
+                now_ms,
+                now_ms,
+            ),
+        )
+    conn.commit()
+    conn.close()
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+
+    requirement = service.analyze_requirement(
+        "总结 AIGC共建项目 的进展", CreationOptions()
+    )
+    entity_context = requirement["entity_context"]
+    assert entity_context["has_high_confidence_entity"] is True
+    names = {item["name"] for item in entity_context["primary_entities"]}
+    assert "AIGC 共建项目" in names
+
+
+def test_statistically_generic_terms_are_rejected_without_wordlists(tmp_path):
+    """文档频率过高的泛词靠统计判别出局，不依赖词表黑名单。
+
+    “模型”在语料里几乎每篇都出现：即使标题多次强位置提及，也不得
+    升级为核心实体。
+    """
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    now_ms = int(time.time() * 1000)
+    conn = sqlite3.connect(db_path)
+    for index in range(20):
+        conn.execute(
+            "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, '[]', 3, 0, ?, ?)",
+            (
+                9400 + index,
+                f"模型运行记录 {index}",
+                "模型资源与运行情况。",
+                "模型资源与运行情况。",
+                "模型资源与运行情况。",
+                now_ms,
+                now_ms,
+            ),
+        )
+    conn.commit()
+    conn.close()
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+
+    requirement = service.analyze_requirement("总结 模型 和 成本", CreationOptions())
+    assert requirement["entity_context"]["has_high_confidence_entity"] is False
+
+
+def test_long_step_theme_phrase_is_not_promoted_to_entity(tmp_path):
+    """步骤主题描述长短语不得升级为核心实体，即使语料里有提炼证据。
+
+    复现创作记录 #85：“大模型性能成本优化周会会议纪要”被烘焙产物
+    的 entities 字段自我引用出提炼证据后升级为核心实体，层级过滤
+    要求候选字面包含整串，导致只有 2 条 SOP 被召回、会议纪要文档
+    752 全部被剔。专名实体必须有词形上限。
+    """
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    now_ms = int(time.time() * 1000)
+    phrase = "大模型性能成本优化周会会议纪要"
+    conn = sqlite3.connect(db_path)
+    for row_id in (9501, 9502):
+        conn.execute(
+            "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, ?, 5, 1, ?, ?)",
+            (
+                row_id,
+                f"周会流程记录 {row_id}",
+                "会议纪要整理流程。",
+                "会议纪要整理流程。",
+                "会议纪要整理流程。",
+                '["大模型性能成本优化周会会议纪要"]',
+                now_ms,
+                now_ms,
+            ),
+        )
+    conn.commit()
+    conn.close()
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+
+    ctx = service._analyze_entity_context(f"当前步骤：{phrase}\n获取{phrase}")
+
+    assert ctx["has_high_confidence_entity"] is False
+    assert phrase not in ctx["candidate_entities"]
+    # 短专名不受影响。
+    assert CreationService._entity_length_ok("Onepoint") is True
+    assert CreationService._entity_length_ok("AIGC 共建项目") is True
+    assert CreationService._entity_length_ok(phrase) is False
+
+
 def test_entity_aware_recall_prioritizes_direct_sources_and_filters_aggregate_pages(tmp_path):
     db_path = tmp_path / "memory-bread.db"
     _create_unified_memory_db(db_path)
@@ -634,6 +1035,45 @@ def test_entity_aware_selection_limits_background_to_twenty_percent():
     assert sum(item.retrieval_tier == "background" for item in selected) == 2
 
 
+def test_entity_aware_selection_orders_core_by_final_weight():
+    from creation.service import ReferenceDocument
+
+    def reference(source_id, tier, score):
+        return ReferenceDocument(
+            id=source_id,
+            title=str(source_id),
+            doc_type="knowledge",
+            summary="",
+            full_content="",
+            sections_json="[]",
+            style_phrases="[]",
+            prompt_hint="",
+            usage_count=0,
+            review_status="auto_created",
+            updated_at=0,
+            source_url=None,
+            relevance_score=score,
+            quality_score=0.9,
+            completeness_score=1.0,
+            usage_score=0.0,
+            format_score=0.55,
+            freshness_score=1.0,
+            final_weight=score,
+            reason="",
+            source_type="knowledge",
+            source_id=source_id,
+            retrieval_tier=tier,
+        )
+
+    # 正文强相关的 related 资料不能被标题顺带提到实体的低分 direct
+    # 无条件挤出 Top-K：层级差异已由 +0.12/+0.04 加成表达。
+    ranked = [reference(1, "direct", 0.72), reference(2, "related", 0.86)]
+
+    selected = CreationService._select_entity_aware_references(ranked, 2)
+
+    assert [item.source_id for item in selected] == [2, 1]
+
+
 def test_origin_dedup_prefers_highest_ranked_reference_for_same_url():
     from creation.service import ReferenceDocument
 
@@ -668,3 +1108,153 @@ def test_origin_dedup_prefers_highest_ranked_reference_for_same_url():
     )
 
     assert [(item.source_type, item.source_id) for item in selected] == [("document", 1)]
+
+
+def test_origin_dedup_keeps_refined_document_when_data_snapshot_ranks_higher():
+    from creation.service import ReferenceDocument
+
+    def reference(source_id, source_type, score):
+        return ReferenceDocument(
+            id=source_id,
+            title="大模型资源成本优化专项周会",
+            doc_type="会议纪要",
+            summary="会议纪要摘要",
+            full_content="",
+            sections_json="[]",
+            style_phrases="[]",
+            prompt_hint="",
+            usage_count=0,
+            review_status="auto_created",
+            updated_at=0,
+            source_url="https://docs.example/meeting/fcAC",
+            relevance_score=score,
+            quality_score=0.9,
+            completeness_score=1.0,
+            usage_score=0.0,
+            format_score=0.55,
+            freshness_score=1.0,
+            final_weight=score,
+            reason="",
+            source_type=source_type,
+            source_id=source_id,
+        )
+
+    # 数据快照因新鲜度/完备度占优排在前面，同源去重仍须保留烘焙文档。
+    selected = CreationService._deduplicate_reference_origins(
+        [reference(6121, "data", 0.93), reference(752, "document", 0.71)]
+    )
+
+    assert [(item.source_type, item.source_id) for item in selected] == [
+        ("document", 752)
+    ]
+
+
+def test_refined_document_survives_same_url_data_snapshot(tmp_path):
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    now_ms = int(time.time() * 1000)
+    meeting_url = "https://docs.example/meeting/gpu-weekly"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO bake_documents (id, title, doc_type, summary, full_content, "
+        "sections_json, style_phrases, prompt_hint, usage_count, review_status, "
+        "updated_at, source_url, deleted_at, status) "
+        "VALUES (?, ?, ?, ?, ?, '[]', '[]', '', 0, 'auto_created', ?, ?, NULL, 'enabled')",
+        (
+            752,
+            "大模型资源成本优化专项周会纪要",
+            "会议纪要",
+            "会议梳理 GPU 利用率与成本优化行动项。",
+            "会议梳理潮汐资源接入、GPU 利用率优化与成本优化行动项。" * 3,
+            now_ms - 3_600_000,
+            meeting_url,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO data_sources VALUES (?, ?, ?, 'active', NULL)",
+        (6121, "大模型资源成本优化专项周会", meeting_url),
+    )
+    conn.execute(
+        "INSERT INTO data_snapshots VALUES (?, ?, ?, ?, ?, '{}', 'success', ?, ?)",
+        (6122, 6121, now_ms, now_ms, "GPU利用率 0%", now_ms, now_ms),
+    )
+    conn.commit()
+    conn.close()
+
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+    service.enable_vector_recall = False
+    service._embedding_model = None
+
+    references = service.retrieve_references(
+        "本周GPU成本优化的周会会议纪要",
+        {"keywords": ["GPU", "成本优化"]},
+        CreationOptions(max_references=8),
+    )
+
+    origins = {(item.source_type, item.source_id) for item in references}
+    assert ("document", 752) in origins
+    assert ("data", 6121) not in origins
+
+
+def test_extract_keywords_drops_sliding_ngrams_and_contained_tokens():
+    service = CreationService.__new__(CreationService)
+    query = (
+        "当前步骤：大模型性能成本优化周会会议纪要\n"
+        "用@记忆搜索 Tool 获取本周大模型性能成本优化周会会议纪要，"
+        "并总结为列表展示，最多5行文字，尽可能体现数字化的结果指标"
+    )
+    keywords = service._extract_keywords(query)
+
+    assert len(keywords) <= 16
+    # 不再生成滑窗 n-gram 噪声词。
+    for noise in ("大模型性能成", "模型性能成本", "型性能成本优", "周会会议"):
+        assert noise not in keywords
+    # 完整长短语保留；父短语已在时，4 字前缀后备词不重复进入分母。
+    assert "大模型性能成本优化周会会议纪要" in keywords
+    assert "大模型性" not in keywords
+    # 输出格式指令是执行包装，不能作为主题词进入分母。
+    assert "结果指标" not in keywords
+    assert "列表展示" not in keywords
+    assert not any("尽可能" in keyword for keyword in keywords)
+
+
+def test_meeting_note_lexical_score_not_diluted_by_noise_keywords():
+    # 复现创作记录 #83：步骤主题词被滑窗 n-gram 稀释后，16 个关键词里
+    # 会议纪要文档只命中 2 个，lexical 被压到 0.4 阈值边缘。治理后
+    # 词表收敛为独立主题词，同一文档应给出更高的相关性得分。
+    service = CreationService.__new__(CreationService)
+    keywords = service._extract_keywords(
+        "当前步骤：大模型性能成本优化周会会议纪要\n"
+        "用@记忆搜索 Tool 获取本周大模型性能成本优化周会会议纪要，并总结为列表展示，"
+        "最多5行文字，尽可能体现数字化的结果指标\n"
+        "整体创作背景：请生成下本周GPU成本优化的周报"
+    )
+    assert len(keywords) <= 8
+    row = {
+        "title": "会议录制: 大模型资源成本优化专项周会 - 云文档",
+        "doc_type": "会议纪要",
+        "summary": "会议梳理潮汐资源接入与 GPU 利用率优化。",
+        "full_content": "会议讨论了 GPU 利用率与成本优化行动项。" * 5,
+        "sections_json": "[]",
+        "prompt_hint": "",
+    }
+    diagnostics = service._relevance_diagnostics(
+        row, {"keywords": keywords}
+    )
+    assert diagnostics["lexical_score"] >= 0.45
+    assert "成本优化" in diagnostics["matched_keywords"]
+    assert "GPU" in diagnostics["matched_keywords"]
+
+
+def test_short_complete_document_not_penalized_by_long_content_denominator():
+    # 会议纪要等短而完整的文档（约 1600 字正文）不应被 3000 字分母
+    # 压低完备度；与提炼型记忆使用同一饱和长度。
+    service = CreationService.__new__(CreationService)
+    row = {
+        "source_type": "document",
+        "full_content": "议" * 1600,
+        "sections_json": "[]",
+    }
+
+    assert service._score_completeness(row) >= 0.65

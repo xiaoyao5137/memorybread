@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
+import time
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from creation.agent_loop import CreationAgentLoop
@@ -35,7 +38,7 @@ class FakeCreationService:
         self.scrape_kwargs = {}
         self.routing_decision = None
 
-    def analyze_requirement(self, message, options):
+    def analyze_requirement(self, message, options, entity_focus_text=""):
         return {
             "topic": message,
             "doc_type": options.doc_type or "架构设计方案",
@@ -51,6 +54,11 @@ class FakeCreationService:
         if _args:
             self.reference_options.append(_args[-1])
         return []
+
+    async def refresh_recalled_documents(
+        self, references, query, require_latest=False
+    ):
+        return {"attempted": 0, "updated": 0, "no_change": 0, "skipped": 0, "failed": 0}
 
     async def collect_web_context(self, *_args):
         return []
@@ -81,6 +89,12 @@ class FakeCreationService:
 
     async def run_specialist_agent(self, **kwargs):
         return f"{kwargs['agent_id']} 的分析结论"
+
+    async def stream_specialist_agent(self, **kwargs):
+        result = await self.run_specialist_agent(**kwargs)
+        midpoint = max(1, len(result) // 2)
+        yield result[:midpoint]
+        yield result[midpoint:]
 
     def build_routing_prompts(
         self, query, requirement, selected_skills=(), enabled_tool_ids=None
@@ -877,6 +891,19 @@ def test_requested_metrics_ignore_root_skill_invocation_before_step_objective():
     ]
 
 
+def test_requested_metrics_ignore_document_and_step_titles_for_gpu_report():
+    query = (
+        "请生成下本周GPU成本优化的周报\n"
+        "当前步骤：GPU算力数据\n"
+        "用@数据检索 Tool 获取电商GPU信息平台的最新算力、利用率、收益数据，"
+        "以及业务项目投入成本最高的10个项目的数据，添加到表格中"
+    )
+
+    requested = CreationService._extract_requested_metrics(query)
+
+    assert requested == ["算力", "利用率", "收益", "业务项目投入成本"]
+
+
 def test_unmatched_metric_preferences_retain_cross_checked_page_values():
     available = CreationService._apply_required_metric_coverage(
         {
@@ -1247,9 +1274,12 @@ async def test_screenshot_off_retries_silent_block_with_one_foreground_refresh(
         run_id="run-1",
         session_id="session-1",
         retain_screenshot=False,
+        browser_extension_enabled=False,
     )
 
     assert len(requests) == 2
+    assert requests[0]["extension_preference"] == "disabled"
+    assert requests[1]["extension_preference"] == "disabled"
     assert requests[0]["allow_foreground_refresh"] is False
     assert requests[0]["focus_policy"] == "never"
     assert requests[1]["allow_foreground_refresh"] is True
@@ -1261,6 +1291,62 @@ async def test_screenshot_off_retries_silent_block_with_one_foreground_refresh(
     assert outcome["scrapes"][0]["focus_takeover_count"] == 1
     assert "preview_id" not in outcome["scrapes"][0]
     assert outcome["refreshed_data"][0]["can_use"] is True
+
+
+@pytest.mark.asyncio
+async def test_browser_extension_failure_never_escalates_to_foreground(monkeypatch):
+    requests = []
+
+    class FakeResponse:
+        status_code = 503
+        is_success = False
+
+        @staticmethod
+        def json():
+            return {
+                "error": "BROWSER_EXTENSION_UNAVAILABLE",
+                "message": "Chrome 扩展当前未连接",
+            }
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, json):
+            requests.append(dict(json))
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "creation.service.httpx.AsyncClient",
+        lambda **_kwargs: FakeAsyncClient(),
+    )
+    service = CreationService(model="test", enable_vector_recall=False)
+    outcome = await service.scrape_data_context(
+        [
+            {
+                "source_id": 7,
+                "source_kind": "report_url",
+                "source_url": "https://bi.example.com/report",
+                "title": "经营看板",
+                "refresh_required": True,
+                "refresh_policy": "on_demand",
+                "can_use": False,
+            }
+        ],
+        "获取最新年化总成本",
+        {},
+        browser_extension_enabled=True,
+    )
+
+    assert len(requests) == 1
+    assert requests[0]["extension_preference"] == "auto"
+    assert requests[0]["allow_foreground_refresh"] is False
+    assert requests[0]["focus_policy"] == "never"
+    assert outcome["scrapes"][0]["status"] == "failed"
+    assert outcome["scrapes"][0]["collection_attempt"] == "extension_background"
 
 
 def test_evidence_validation_also_supports_document_style_pages():
@@ -1867,6 +1953,144 @@ def test_rejected_live_report_blocks_same_url_historical_values():
     assert merged[2]["content_excerpt"] == "本周计划"
 
 
+def test_refresh_attempt_decision_only_continues_on_transient_errors():
+    decision = CreationService._should_continue_refresh_attempts
+    # 静默读取被焦点门禁拦截时照常升级到前台，瞬态错误也进入前台。
+    assert decision("silent", "FOCUS_POLICY_BLOCKED") is True
+    assert decision("silent", "SCRAPE_HTTP_502") is True
+    assert decision("silent", "SCRAPE_NOT_FOUND") is False
+    # 前台降级遇瞬态错误再给一次机会，持久性错误不重试。
+    assert decision("foreground_fallback", "SCRAPE_OUTPUT_UNPARSEABLE") is True
+    assert decision("foreground_fallback", "SCRAPE_TIMEOUT") is True
+    assert decision("foreground_fallback", "SCRAPE_AUTH_REQUIRED") is False
+    # 最后一次前台重试是终点，任何错误都不再续命。
+    assert decision("foreground_retry", "SCRAPE_FAILED") is False
+    assert decision("evidence_capture", "SCRAPE_FAILED") is False
+
+
+def _snapshot_db(
+    tmp_path,
+    source_id,
+    collected_at,
+    period_start=None,
+    period_end=None,
+    content_text="在用项目数 102",
+    structured_data=None,
+):
+    db_path = tmp_path / "memory-bread.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE data_snapshots ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER,"
+        " collected_at INTEGER, observed_at INTEGER,"
+        " period_start_at INTEGER, period_end_at INTEGER,"
+        " content_text TEXT, structured_data TEXT, collector TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO data_snapshots (source_id, collected_at, observed_at,"
+        " period_start_at, period_end_at, content_text, structured_data, collector)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            source_id,
+            collected_at,
+            collected_at,
+            period_start,
+            period_end,
+            content_text,
+            json.dumps(structured_data or {"metric_rows": []}),
+            "browser_attach",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return str(db_path)
+
+
+def _failed_refresh_report_item(source_id):
+    return {
+        "source_id": source_id,
+        "title": "AI大模型度量",
+        "source_kind": "report_url",
+        "source_url": "https://bi.example.com/report",
+        "refresh_required": True,
+        "can_use": True,
+        "content_excerpt": "在用项目数 102",
+    }
+
+
+def test_failed_refresh_falls_back_to_period_matched_snapshot(tmp_path):
+    snapshot_tables = {
+        "tables": [[
+            ["项目", "年内成本", "收益"],
+            ["项目甲", "806.4万元", "0万元"],
+        ]]
+    }
+    db_path = _snapshot_db(
+        tmp_path,
+        7,
+        1787155000000,
+        1787100000000,
+        1787700000000,
+        content_text="历史快照正文：在用项目数 102",
+        structured_data=snapshot_tables,
+    )
+    merged = CreationService._merge_scrape_results(
+        [_failed_refresh_report_item(7)],
+        {},
+        {},
+        {7},
+        db_path=db_path,
+        time_context={
+            "has_relative_time": True,
+            "period_start_ms": 1787000000000,
+            "period_end_ms": 1787600000000,
+        },
+    )
+    assert merged[0]["can_use"] is True
+    assert merged[0]["freshness_class"] == "stale"
+    assert (
+        merged[0]["stale_fallback"]["reason"]
+        == "refresh_failed_period_matched_snapshot"
+    )
+    assert merged[0]["content_excerpt"] == "历史快照正文：在用项目数 102"
+    assert merged[0]["structured_data"] == snapshot_tables
+    assert merged[0]["provenance"]["fallback"] is True
+
+
+def test_failed_refresh_rejects_period_mismatched_snapshot(tmp_path):
+    # 快照周期与要求周期不重叠时绝不降级，避免旧周期数据冒充本周数据。
+    db_path = _snapshot_db(tmp_path, 7, 1786000000000, 1785900000000, 1786500000000)
+    merged = CreationService._merge_scrape_results(
+        [_failed_refresh_report_item(7)],
+        {},
+        {},
+        {7},
+        db_path=db_path,
+        time_context={
+            "has_relative_time": True,
+            "period_start_ms": 1787000000000,
+            "period_end_ms": 1787600000000,
+        },
+    )
+    assert merged[0]["can_use"] is False
+    assert merged[0]["unavailable_reason"] == "refresh_failed"
+
+
+def test_failed_refresh_falls_back_to_recent_snapshot_without_time_requirement(tmp_path):
+    now_ms = int(time.time() * 1000)
+    db_path = _snapshot_db(tmp_path, 7, now_ms - 3600 * 1000)
+    merged = CreationService._merge_scrape_results(
+        [_failed_refresh_report_item(7)],
+        {},
+        {},
+        {7},
+        db_path=db_path,
+        time_context={},
+    )
+    assert merged[0]["can_use"] is True
+    assert merged[0]["stale_fallback"]["reason"] == "refresh_failed_recent_snapshot"
+
+
 def test_data_citation_guard_replaces_guessed_source_with_supporting_memory():
     document = """# GPU 治理方案
 
@@ -2346,6 +2570,41 @@ def test_harness_uses_data_search_feedback_to_choose_the_next_capability():
     assert decision["scheduled"] == []
     assert decision["reason_code"] == "source_metadata_only"
 
+    structured_snapshot = state_with(
+        [
+            {
+                "source_id": 3,
+                "source_kind": "report_url",
+                "source_url": "https://bi.example.com/report",
+                "refresh_required": False,
+                "can_use": True,
+                "structured_data": {
+                    "tables": [[['维度', '指标'], ['A', '10']]],
+                    "pagination": {"dataset_complete": True},
+                },
+            }
+        ]
+    )
+    decision = loop._replan_after_feedback(
+        structured_snapshot,
+        {"id": "data_search"},
+        status="completed",
+    )
+    assert decision["scheduled"] == ["data_query_planner"]
+    assert decision["reason_code"] == "structured_data_ready"
+
+    structured_snapshot.cursor += 1
+    structured_snapshot.environment["data_query_plans"] = [
+        {"mode": "narrative", "operations": []}
+    ]
+    decision = loop._replan_after_feedback(
+        structured_snapshot,
+        {"id": "data_query_planner"},
+        status="completed",
+    )
+    assert decision["scheduled"] == ["data_analysis_agent"]
+    assert decision["reason_code"] == "narrative_analysis_required"
+
     no_data = state_with([])
     decision = loop._replan_after_feedback(
         no_data,
@@ -2566,8 +2825,10 @@ def test_quality_replan_does_not_rerun_polisher_for_same_unresolved_issue():
 @pytest.mark.asyncio
 async def test_unresolvable_detail_issue_converges_after_one_polish_attempt():
     class StubbornPlaceholderService(FakeCreationService):
-        def analyze_requirement(self, message, options):
-            requirement = super().analyze_requirement(message, options)
+        def analyze_requirement(self, message, options, entity_focus_text=""):
+            requirement = super().analyze_requirement(
+                message, options, entity_focus_text
+            )
             # 避免默认 doc_type 里的“架构”触发图示质检，只验证占位符问题收敛
             requirement["doc_type"] = "项目复盘"
             return requirement
@@ -2626,8 +2887,10 @@ async def test_unresolvable_detail_issue_converges_after_one_polish_attempt():
 @pytest.mark.asyncio
 async def test_polish_step_streams_progress_instead_of_full_document():
     class StubbornPlaceholderService(FakeCreationService):
-        def analyze_requirement(self, message, options):
-            requirement = super().analyze_requirement(message, options)
+        def analyze_requirement(self, message, options, entity_focus_text=""):
+            requirement = super().analyze_requirement(
+                message, options, entity_focus_text
+            )
             requirement["doc_type"] = "项目复盘"
             return requirement
 
@@ -3133,7 +3396,106 @@ async def test_webpage_scrape_reports_focus_gate_instead_of_structure_rejection(
         if event["type"] == "tool.completed"
         and event["actor"]["id"] == "webpage_scrape"
     )
+    assert completed["status"] == "warning"
     assert "焦点硬门禁中止" in completed["summary"]
+    assert "结构校验" not in completed["summary"]
+
+
+@pytest.mark.asyncio
+async def test_webpage_scrape_without_verified_metrics_emits_warning_status():
+    service = FakeCreationService()
+    report = {
+        "source_id": 12,
+        "source_kind": "report_url",
+        "source_url": "https://bi.example.com/token-report",
+        "title": "Token 数据报表",
+        "refresh_required": True,
+        "can_use": False,
+    }
+    service.data_results = [report]
+    service.scrape_outcome = {
+        "scrapes": [
+            {
+                "source_id": 12,
+                "status": "rejected",
+                "title": "Token 数据报表",
+                "validation_reason": "no_verified_metric",
+                "verified_claim_count": 0,
+            }
+        ],
+        "refreshed_data": [
+            {
+                **report,
+                "freshness_class": "unverified",
+                "evidence_status": "rejected",
+                "unavailable_reason": "validation_failed",
+            }
+        ],
+    }
+
+    events = await collect_events(
+        CreationAgentLoop(service).run(
+            user_message="生成本周 Token 数据摘要",
+            current_document="",
+            conversation=[],
+            selected_skills=[],
+            options=CreationOptions(enabled_tools=()),
+        )
+    )
+
+    completed = next(
+        event
+        for event in events
+        if event["type"] == "tool.completed"
+        and event["actor"]["id"] == "webpage_scrape"
+    )
+    assert completed["status"] == "warning"
+    assert "没有指标通过页面结构校验" in completed["summary"]
+
+
+@pytest.mark.asyncio
+async def test_webpage_scrape_empty_body_reports_collection_failure_not_validation():
+    service = FakeCreationService()
+    report = {
+        "source_id": 13,
+        "source_kind": "report_url",
+        "source_url": "https://bi.example.com/gpu-report",
+        "title": "GPU 数据报表",
+        "refresh_required": True,
+        "can_use": False,
+    }
+    service.data_results = [report]
+    service.scrape_outcome = {
+        "scrapes": [{
+            "source_id": 13,
+            "status": "failed",
+            "error_code": "SCRAPE_EMPTY",
+        }],
+        "refreshed_data": [{
+            **report,
+            "can_use": False,
+            "unavailable_reason": "refresh_failed",
+        }],
+    }
+
+    events = await collect_events(
+        CreationAgentLoop(service).run(
+            user_message="生成本周 GPU 成本周报",
+            current_document="",
+            conversation=[],
+            selected_skills=[],
+            options=CreationOptions(enabled_tools=()),
+        )
+    )
+
+    completed = next(
+        event
+        for event in events
+        if event["type"] == "tool.completed"
+        and event["actor"]["id"] == "webpage_scrape"
+    )
+    assert completed["status"] == "warning"
+    assert "后台页面未提取到正文" in completed["summary"]
     assert "结构校验" not in completed["summary"]
 
 
@@ -3276,6 +3638,10 @@ def test_skill_step_prompt_consumes_harness_tool_result_without_meta_evidence():
     assert "证据不足" in system
     assert "证据完备" in system
     assert "否则不要输出" in system
+    assert "章节结构和字体格式也是当前步骤的交付质量" in system
+    assert "- **短标签：** 事实、动作或结果" in system
+    assert "最多两级的父子列表" in system
+    assert "不得为了版式虚构父子关系" in system
     assert "Tool 执行回执" in user
     assert "'tool_id': 'memory_search'" in user
     assert "'status': 'completed'" in user
@@ -3462,6 +3828,85 @@ def test_strict_skill_document_keeps_gpu_and_token_steps_separate():
     assert "未声明" not in document
     assert document.index("| GPU 指标 | 数值 |") < document.index("## Token用量数据")
     assert document.index("## Token用量数据") < document.index("| Token 指标 | 数值 |")
+
+
+def test_strict_skill_document_preserves_internal_subheadings_without_expanding_workflow():
+    loop = CreationAgentLoop(FakeCreationService())
+    state = SimpleNamespace(
+        environment={
+            "strict_skill_ids": ["gpu-cost-weekly"],
+            "applied_skills": [
+                {
+                    "id": "gpu-cost-weekly",
+                    "name": "GPU成本优化周报创作法",
+                    "execution_steps": [
+                        {"id": "aigc", "title": "AIGC进度总结"},
+                        {"id": "gpu", "title": "GPU算力数据"},
+                    ],
+                }
+            ],
+            "completed_skill_steps": [
+                {
+                    "skill_id": "gpu-cost-weekly",
+                    "step_id": "aigc",
+                    "title": "AIGC进度总结",
+                    "objective": "总结本周 AIGC 项目进度并以列表展示。",
+                    "output": "项目进度列表",
+                    "content": (
+                        "## AIGC进度总结\n\n"
+                        "### 项目进展概览\n\n"
+                        "- 推理性能优化已完成首轮验证。\n\n"
+                        "## 下周计划\n\n这是未声明的扩展章节。\n\n"
+                        "## GPU算力数据\n\n这是其它工作流步骤的内容。"
+                    ),
+                }
+            ],
+        }
+    )
+
+    document, audits = loop._assemble_strict_skill_document(
+        state,
+        include_audit=True,
+    )
+
+    assert "### 项目进展概览" in document
+    assert "推理性能优化已完成首轮验证" in document
+    assert "下周计划" not in document
+    assert "其它工作流步骤的内容" not in document
+    assert audits[0]["step_id"] == "aigc"
+    assert audits[0]["source_chars"] > audits[0]["retained_chars"] > 0
+    assert audits[0]["skipped_heading_count"] == 2
+    assert audits[0]["preserved_subheading_count"] == 1
+    assert audits[0]["recovered_from_empty"] is False
+
+
+def test_strict_skill_document_recovers_text_when_generic_heading_would_empty_step():
+    loop = CreationAgentLoop(FakeCreationService())
+    state = SimpleNamespace(
+        environment={
+            "strict_skill_ids": ["weekly"],
+            "applied_skills": [{"id": "weekly", "name": "周报技能"}],
+            "completed_skill_steps": [
+                {
+                    "skill_id": "weekly",
+                    "step_id": "aigc",
+                    "title": "AIGC进度总结",
+                    "objective": "总结项目状态。",
+                    "output": "项目列表",
+                    "content": "## 重点进展\n\n- 推理性能优化已完成首轮验证。",
+                }
+            ],
+        }
+    )
+
+    document, audits = loop._assemble_strict_skill_document(
+        state,
+        include_audit=True,
+    )
+
+    assert "## 重点进展" not in document
+    assert "推理性能优化已完成首轮验证" in document
+    assert audits[0]["recovered_from_empty"] is True
 
 
 def test_scoped_skill_writer_prompt_uses_current_step_data_and_forbids_expansion():
@@ -3818,6 +4263,13 @@ def test_explicit_skill_mention_drops_legacy_automatic_template_expansion():
     # 四个独立推理步骤后追加一次全文整合润色，共 11 个计划步骤。
     assert len(plan) == 11
     assert plan[-1]["id"] == "document_unify_polisher"
+    unify_system, _ = loop._model_prompts(state, plan[-1])
+    assert "只处理全文结构、术语和表达一致性" in unify_system
+    assert "只处理质检分派给你的问题" not in unify_system
+    assert "保持 Skill 声明的二级章节标题、数量与顺序不变" in unify_system
+    assert "最多两级的父子列表" in unify_system
+    assert "只对关键结论、关键数字、风险和行动项加粗" in unify_system
+    assert "不得虚构归属" in unify_system
     assert {step["id"] for step in plan}.isdisjoint(
         {
             "generic-weekly",
@@ -4135,6 +4587,32 @@ async def test_reference_a889436d_four_step_workflow_order_and_output_structure(
         "build-metrics-table",
         "token-metrics-table",
     ]
+    previews = [event for event in events if event["type"] == "document.preview"]
+    assert previews
+    assert {
+        event["data"]["section_title"] for event in previews
+    } == {
+        "本周大模型性能成本优化周会会议纪要",
+        "AIGC进度总结",
+        "GPU算力数据",
+        "Token数据",
+    }
+    assert any(
+        "## AIGC进度总结" in event["data"]["content"]
+        and "AIGC 项目" in event["data"]["content"]
+        for event in previews
+    )
+    assembly_events = [
+        event
+        for event in events
+        if event["type"] == "document.replaced"
+        and event["data"].get("operation") == "strict_skill_workflow_assembly"
+    ]
+    assert len(assembly_events) == 4
+    assert all(
+        event["data"]["assembly_audit"]["retained_chars"] > 0
+        for event in assembly_events
+    )
     assert len(service.data_queries) == 2
     assert service.data_queries[0].startswith("当前步骤：GPU算力数据")
     assert service.data_queries[1].startswith("当前步骤：Token数据")
@@ -4474,6 +4952,20 @@ async def test_loop_updates_goal_after_agent_tool_and_skill_results():
     assert "skill.completed" in event_types
     assert "document.delta" in event_types
     assert event_types[-1] == "run.completed"
+
+    skill_completed = next(
+        event for event in events if event["type"] == "skill.completed"
+    )
+    assert skill_completed["summary"] == "已应用 架构方案模板"
+    assert "写入环境" not in skill_completed["summary"]
+
+    unify_planned = next(
+        event
+        for event in events
+        if event["type"] == "document.patch.planned"
+        and event["actor"]["id"] == "document_unify_polisher"
+    )
+    assert unify_planned["summary"] == "正在统一全文结构与表达，保留既有章节和事实"
 
     completed = [
         event
@@ -5243,3 +5735,281 @@ def test_strict_skill_workflow_ignores_unenabled_diagram_decision():
     )
 
     assert "mermaid_diagram" not in [step["id"] for step in plan]
+
+
+def _flaky_stream_skill():
+    return {
+        "id": "creation-skill-flaky-stream",
+        "title": "断流重试创作法",
+        "executionSteps": [
+            {
+                "id": "write-section",
+                "title": "章节生成",
+                "objective": "生成一个完整章节。",
+                "output": "章节内容",
+                "agents": [],
+                "skills": [],
+                "tools": [],
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_strict_skill_step_retries_midstream_transport_drop_and_keeps_single_copy():
+    # 流中途断连属于可重试故障：整步重试一次后继续完成创作；
+    # 预览按 document_parts 原子重组，成稿不得拼接两次输出。
+    class FlakyStreamService(FakeCreationService):
+        def __init__(self):
+            super().__init__()
+            self.stream_calls = 0
+
+        async def run_specialist_agent(self, **kwargs):
+            return "这是模型断流恢复后生成的完整章节。"
+
+        async def stream_specialist_agent(self, **kwargs):
+            self.stream_calls += 1
+            result = await self.run_specialist_agent(**kwargs)
+            midpoint = max(1, len(result) // 2)
+            yield result[:midpoint]
+            if self.stream_calls == 1:
+                raise httpx.RemoteProtocolError(
+                    "peer closed connection without sending complete message body"
+                )
+            yield result[midpoint:]
+
+    service = FlakyStreamService()
+    service.routing_decision = {"tools": [], "agents": []}
+
+    events = await collect_events(
+        CreationAgentLoop(service).run(
+            user_message="使用断流重试创作法生成章节",
+            current_document="",
+            conversation=[],
+            selected_skills=[_flaky_stream_skill()],
+            options=CreationOptions(),
+        )
+    )
+
+    assert service.stream_calls == 2
+    retry_events = [
+        event
+        for event in events
+        if event["type"] == "agent.started" and "连接中断" in event["summary"]
+    ]
+    assert len(retry_events) == 1
+    assert any(event["type"] == "run.completed" for event in events)
+    final_documents = [
+        event["data"]["content"]
+        for event in events
+        if event["type"] == "document.replaced"
+    ]
+    assert final_documents
+    assert final_documents[-1].count("模型断流恢复后生成的完整章节") == 1
+
+
+@pytest.mark.asyncio
+async def test_strict_skill_step_skips_node_after_retry_budget_exhausted():
+    # 持续断流时最多重试一次；重试耗尽后不再上抛中止整轮，
+    # 而是把该节点标记为失败并继续收尾。
+    class AlwaysDroppingStreamService(FakeCreationService):
+        def __init__(self):
+            super().__init__()
+            self.stream_calls = 0
+
+        async def stream_specialist_agent(self, **kwargs):
+            self.stream_calls += 1
+            yield "部分输出"
+            raise httpx.RemoteProtocolError("peer closed connection")
+
+    service = AlwaysDroppingStreamService()
+    service.routing_decision = {"tools": [], "agents": []}
+
+    events = await collect_events(
+        CreationAgentLoop(service).run(
+            user_message="使用断流重试创作法生成章节",
+            current_document="",
+            conversation=[],
+            selected_skills=[_flaky_stream_skill()],
+            options=CreationOptions(),
+        )
+    )
+
+    assert service.stream_calls == 2
+    failed_events = [event for event in events if event["type"] == "agent.failed"]
+    assert len(failed_events) == 1
+    assert failed_events[0]["status"] == "failed"
+    assert failed_events[0]["data"]["error_code"] == "MODEL_TRANSPORT_UNAVAILABLE"
+    assert not any(event["type"] == "run.failed" for event in events)
+    completed = [event for event in events if event["type"] == "run.completed"]
+    assert completed
+    assert "1 个节点失败已跳过" in completed[0]["summary"]
+
+
+@pytest.mark.asyncio
+async def test_run_specialist_agent_retries_midstream_transport_drop(tmp_path):
+    # 非流式消费调用：流中途断流且已有部分缓冲时同样在限界内重试一次，
+    # 丢弃半截缓冲是安全的。
+    calls = {"count": 0}
+
+    class MidStreamDropService(CreationService):
+        async def _stream_direct_completion(self, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                yield "部分输出，即将断流"
+                raise httpx.RemoteProtocolError("peer closed connection")
+            yield "完整的结构化结论"
+
+    service = MidStreamDropService(
+        db_path=str(tmp_path / "creation-usage.db"),
+        model="qwen3.5:4b",
+        enable_vector_recall=False,
+    )
+    result = await service.run_specialist_agent(
+        agent_id="chapter_design_agent",
+        system_prompt="系统提示",
+        user_prompt="用户提示",
+    )
+    assert result == "完整的结构化结论"
+    assert calls["count"] == 2
+
+
+def _fault_tolerance_skill(step_titles):
+    return {
+        "id": "creation-skill-fault-tolerance",
+        "title": "节点容错创作法",
+        "executionSteps": [
+            {
+                "id": f"write-{index}",
+                "title": title,
+                "objective": f"生成{title}章节。",
+                "output": "章节内容",
+                "agents": [],
+                "skills": [],
+                "tools": [],
+            }
+            for index, title in enumerate(step_titles, start=1)
+        ],
+    }
+
+
+class FaultToleranceStreamService(FakeCreationService):
+    """按步骤标题注入流式断流故障，其余步骤正常产出；全文润色透传组装稿。"""
+
+    def __init__(self, failing_titles):
+        super().__init__()
+        self.failing_titles = set(failing_titles)
+        self.stream_calls_by_title = {}
+
+    @staticmethod
+    def _step_title(kwargs):
+        prompt = str(kwargs.get("user_prompt") or "")
+        if "步骤：" not in prompt:
+            return ""
+        return prompt.split("步骤：", 1)[1].splitlines()[0].strip()
+
+    async def stream_specialist_agent(self, **kwargs):
+        title = self._step_title(kwargs)
+        self.stream_calls_by_title[title] = (
+            self.stream_calls_by_title.get(title, 0) + 1
+        )
+        if title in self.failing_titles:
+            yield "部分输出"
+            raise httpx.RemoteProtocolError("peer closed connection")
+        yield f"{title}的完整章节内容。"
+
+    async def stream_agent_document(self, **kwargs):
+        system_prompt = str(kwargs.get("system_prompt") or "")
+        if "全文整合润色" in system_prompt:
+            prompt = str(kwargs.get("user_prompt") or "")
+            marker = "现有完整文档：\n"
+            if marker in prompt:
+                yield prompt.split(marker, 1)[1].strip()
+                return
+        async for chunk in super().stream_agent_document(**kwargs):
+            yield chunk
+
+
+@pytest.mark.asyncio
+async def test_model_step_failure_skips_node_and_continues():
+    # 单节点模型推理失败只在该节点标记失败并跳过，后续节点继续执行，整轮不中断。
+    service = FaultToleranceStreamService({"背景梳理"})
+    service.routing_decision = {"tools": [], "agents": []}
+
+    events = await collect_events(
+        CreationAgentLoop(service).run(
+            user_message="使用节点容错创作法生成文档",
+            current_document="",
+            conversation=[],
+            selected_skills=[
+                _fault_tolerance_skill(["背景梳理", "数据分析", "结论建议"])
+            ],
+            options=CreationOptions(),
+        )
+    )
+
+    failed_events = [event for event in events if event["type"] == "agent.failed"]
+    assert len(failed_events) == 1
+    assert failed_events[0]["status"] == "failed"
+    assert failed_events[0]["data"]["error_code"] == "MODEL_TRANSPORT_UNAVAILABLE"
+    assert "背景梳理" in failed_events[0]["summary"]
+    assert "已跳过该节点继续执行" in failed_events[0]["summary"]
+    assert not any(event["type"] == "run.failed" for event in events)
+    completed = [event for event in events if event["type"] == "run.completed"]
+    assert completed
+    assert "1 个节点失败已跳过" in completed[0]["summary"]
+    document = str(completed[0]["data"]["document"])
+    assert "数据分析的完整章节内容。" in document
+    assert "结论建议的完整章节内容。" in document
+    assert "背景梳理的完整章节内容" not in document
+    # 失败步骤重试耗尽（2 次调用），成功步骤只调用一次，没有多余重试。
+    assert service.stream_calls_by_title["背景梳理"] == 2
+    assert service.stream_calls_by_title["数据分析"] == 1
+
+
+@pytest.mark.asyncio
+async def test_consecutive_failures_beyond_budget_abort_run():
+    # 连续失败超过熔断阈值时中止整轮：异常上抛由上层转 run.failed。
+    titles = ["步骤一", "步骤二", "步骤三", "步骤四"]
+    service = FaultToleranceStreamService(set(titles))
+    service.routing_decision = {"tools": [], "agents": []}
+
+    with pytest.raises(httpx.RemoteProtocolError):
+        await collect_events(
+            CreationAgentLoop(service).run(
+                user_message="使用节点容错创作法生成文档",
+                current_document="",
+                conversation=[],
+                selected_skills=[_fault_tolerance_skill(titles)],
+                options=CreationOptions(),
+            )
+        )
+
+    # 前三个失败节点被跳过，第四个连续失败触发熔断，每步各重试一次。
+    assert service.stream_calls_by_title["步骤四"] == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_step_recovery_resets_failure_budget():
+    # 成功节点重置连续失败计数：失败-成功-失败-失败不触发熔断，整轮正常收尾。
+    titles = ["步骤一", "步骤二", "步骤三", "步骤四"]
+    service = FaultToleranceStreamService({"步骤一", "步骤三", "步骤四"})
+    service.routing_decision = {"tools": [], "agents": []}
+
+    events = await collect_events(
+        CreationAgentLoop(service).run(
+            user_message="使用节点容错创作法生成文档",
+            current_document="",
+            conversation=[],
+            selected_skills=[_fault_tolerance_skill(titles)],
+            options=CreationOptions(),
+        )
+    )
+
+    failed_events = [event for event in events if event["type"] == "agent.failed"]
+    assert len(failed_events) == 3
+    completed = [event for event in events if event["type"] == "run.completed"]
+    assert completed
+    assert "3 个节点失败已跳过" in completed[0]["summary"]
+    document = str(completed[0]["data"]["document"])
+    assert "步骤二的完整章节内容。" in document

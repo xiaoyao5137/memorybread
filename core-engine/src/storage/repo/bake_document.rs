@@ -8,7 +8,10 @@ use crate::storage::{
         build_fts_or_query, fts_candidate_ids, render_in_clause, split_query_terms,
         DEFAULT_FTS_CANDIDATE_CAP,
     },
-    models_bake::{BakeDocumentRecord, NewBakeDocument},
+    models_bake::{
+        BakeDocumentRecord, BakeDocumentSourceSnapshotRecord, NewBakeDocument,
+        NewBakeDocumentSourceSnapshot,
+    },
     StorageManager,
 };
 
@@ -20,7 +23,11 @@ const SELECT_COLUMNS: &str =
      diagram_code, image_assets,
      source_app_name, source_win_title, source_url, content_hash, language,
      usage_count, match_score, match_level, creation_mode, review_status,
-     evidence_summary, generation_version, deleted_at,
+     evidence_summary, generation_version,
+     refresh_policy, last_refresh_checked_at_ms, last_refresh_error,
+     last_refresh_success_at_ms, last_refresh_status, last_refresh_completeness,
+     last_refresh_content_hash, last_refresh_character_count,
+     last_refresh_segment_count, last_refresh_truncated, deleted_at,
      created_at, updated_at";
 
 impl StorageManager {
@@ -290,6 +297,184 @@ impl StorageManager {
         })
     }
 
+    /// 按观察时间升序返回文档的来源正文指纹，供刷新资格判定
+    /// 统计“原地更新证据”与更新节奏。
+    pub fn list_bake_document_source_fingerprints(
+        &self,
+        document_id: i64,
+    ) -> Result<Vec<(String, i64)>, StorageError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT fingerprint, created_at
+                 FROM bake_document_source_fingerprints
+                 WHERE document_id = ?1
+                 ORDER BY created_at ASC, rowid ASC",
+            )?;
+            let rows = stmt.query_map(params![document_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(StorageError::Sqlite)
+        })
+    }
+
+    /// 刷新状态是窄字段更新，不走全列 UPDATE，避免把刷新元数据
+    /// 混入内容合并的写路径。last_error 传 None 表示清除历史错误。
+    pub fn touch_document_refresh_state(
+        &self,
+        document_id: i64,
+        checked_at_ms: i64,
+        last_error: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        self.with_conn(|conn| {
+            let affected = conn.execute(
+                "UPDATE bake_documents
+                 SET last_refresh_checked_at_ms = ?1, last_refresh_error = ?2
+                 WHERE id = ?3 AND deleted_at IS NULL",
+                params![checked_at_ms, last_error, document_id],
+            )?;
+            Ok(affected > 0)
+        })
+    }
+
+    pub fn set_bake_document_refresh_policy(
+        &self,
+        document_id: i64,
+        policy: &str,
+    ) -> Result<bool, StorageError> {
+        self.with_conn(|conn| {
+            let affected = conn.execute(
+                "UPDATE bake_documents SET refresh_policy = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+                params![policy, document_id],
+            )?;
+            Ok(affected > 0)
+        })
+    }
+
+    /// 保存不可变的原始来源快照。相同文档和内容指纹
+    /// 只保留一条，重复校验时返回既有记录。
+    pub fn upsert_bake_document_source_snapshot(
+        &self,
+        snapshot: &NewBakeDocumentSourceSnapshot,
+    ) -> Result<BakeDocumentSourceSnapshotRecord, StorageError> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO bake_document_source_snapshots (
+                    document_id, source_url, page_title, content_text, content_hash,
+                    completeness_status, identity_match, reached_end, stable_passes,
+                    segment_count, character_count, truncated, collector, collected_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    snapshot.document_id,
+                    snapshot.source_url,
+                    snapshot.page_title,
+                    snapshot.content_text,
+                    snapshot.content_hash,
+                    snapshot.completeness_status,
+                    snapshot.identity_match,
+                    snapshot.reached_end,
+                    snapshot.stable_passes,
+                    snapshot.segment_count,
+                    snapshot.character_count,
+                    snapshot.truncated,
+                    snapshot.collector,
+                    snapshot.collected_at,
+                ],
+            )?;
+            conn.query_row(
+                "SELECT id, document_id, source_url, page_title, content_text,
+                        content_hash, completeness_status, identity_match, reached_end,
+                        stable_passes, segment_count, character_count, truncated,
+                        collector, collected_at
+                 FROM bake_document_source_snapshots
+                 WHERE document_id = ?1 AND content_hash = ?2
+                 LIMIT 1",
+                params![snapshot.document_id, snapshot.content_hash],
+                row_to_document_source_snapshot,
+            )
+            .map_err(StorageError::Sqlite)
+        })
+    }
+
+    pub fn get_latest_bake_document_source_snapshot(
+        &self,
+        document_id: i64,
+    ) -> Result<Option<BakeDocumentSourceSnapshotRecord>, StorageError> {
+        self.with_conn(|conn| {
+            match conn.query_row(
+                "SELECT id, document_id, source_url, page_title, content_text,
+                        content_hash, completeness_status, identity_match, reached_end,
+                        stable_passes, segment_count, character_count, truncated,
+                        collector, collected_at
+                 FROM bake_document_source_snapshots
+                 WHERE document_id = ?1
+                 ORDER BY collected_at DESC, id DESC
+                 LIMIT 1",
+                params![document_id],
+                row_to_document_source_snapshot,
+            ) {
+                Ok(record) => Ok(Some(record)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(error) => Err(StorageError::Sqlite(error)),
+            }
+        })
+    }
+
+    pub fn record_document_refresh_success(
+        &self,
+        document_id: i64,
+        checked_at_ms: i64,
+        status: &str,
+        snapshot: &BakeDocumentSourceSnapshotRecord,
+    ) -> Result<bool, StorageError> {
+        self.with_conn(|conn| {
+            let affected = conn.execute(
+                "UPDATE bake_documents
+                 SET last_refresh_checked_at_ms = ?1,
+                     last_refresh_success_at_ms = ?1,
+                     last_refresh_error = NULL,
+                     last_refresh_status = ?2,
+                     last_refresh_completeness = ?3,
+                     last_refresh_content_hash = ?4,
+                     last_refresh_character_count = ?5,
+                     last_refresh_segment_count = ?6,
+                     last_refresh_truncated = ?7
+                 WHERE id = ?8 AND deleted_at IS NULL",
+                params![
+                    checked_at_ms,
+                    status,
+                    snapshot.completeness_status,
+                    snapshot.content_hash,
+                    snapshot.character_count,
+                    snapshot.segment_count,
+                    snapshot.truncated,
+                    document_id,
+                ],
+            )?;
+            Ok(affected > 0)
+        })
+    }
+
+    pub fn record_document_refresh_failure(
+        &self,
+        document_id: i64,
+        checked_at_ms: i64,
+        status: &str,
+        error_code: &str,
+    ) -> Result<bool, StorageError> {
+        self.with_conn(|conn| {
+            let affected = conn.execute(
+                "UPDATE bake_documents
+                 SET last_refresh_checked_at_ms = ?1,
+                     last_refresh_error = ?2,
+                     last_refresh_status = ?3
+                 WHERE id = ?4 AND deleted_at IS NULL",
+                params![checked_at_ms, error_code, status, document_id],
+            )?;
+            Ok(affected > 0)
+        })
+    }
+
     pub fn update_bake_document(
         &self,
         id: i64,
@@ -515,9 +700,41 @@ fn row_to_bake_document(row: &rusqlite::Row<'_>) -> Result<BakeDocumentRecord, S
         review_status: row.get(28)?,
         evidence_summary: row.get(29)?,
         generation_version: row.get(30)?,
-        deleted_at: row.get(31)?,
-        created_at: row.get(32)?,
-        updated_at: row.get(33)?,
+        refresh_policy: row.get(31)?,
+        last_refresh_checked_at_ms: row.get(32)?,
+        last_refresh_error: row.get(33)?,
+        last_refresh_success_at_ms: row.get(34)?,
+        last_refresh_status: row.get(35)?,
+        last_refresh_completeness: row.get(36)?,
+        last_refresh_content_hash: row.get(37)?,
+        last_refresh_character_count: row.get(38)?,
+        last_refresh_segment_count: row.get(39)?,
+        last_refresh_truncated: row.get(40)?,
+        deleted_at: row.get(41)?,
+        created_at: row.get(42)?,
+        updated_at: row.get(43)?,
+    })
+}
+
+fn row_to_document_source_snapshot(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<BakeDocumentSourceSnapshotRecord> {
+    Ok(BakeDocumentSourceSnapshotRecord {
+        id: row.get(0)?,
+        document_id: row.get(1)?,
+        source_url: row.get(2)?,
+        page_title: row.get(3)?,
+        content_text: row.get(4)?,
+        content_hash: row.get(5)?,
+        completeness_status: row.get(6)?,
+        identity_match: row.get(7)?,
+        reached_end: row.get(8)?,
+        stable_passes: row.get(9)?,
+        segment_count: row.get(10)?,
+        character_count: row.get(11)?,
+        truncated: row.get(12)?,
+        collector: row.get(13)?,
+        collected_at: row.get(14)?,
     })
 }
 
@@ -671,6 +888,53 @@ mod tests {
         assert!(mgr
             .has_bake_document_source_fingerprint(id, "sha256:abc")
             .unwrap());
+    }
+
+    #[test]
+    fn test_document_source_snapshot_is_idempotent_and_updates_refresh_metadata() {
+        let mgr = make_mgr();
+        let mut document = sample_document();
+        document.full_content = Some("历史烘焙正文，不允许被即时抓取覆盖。".to_string());
+        let id = mgr.insert_bake_document(&document).unwrap();
+        let snapshot = NewBakeDocumentSourceSnapshot {
+            document_id: id,
+            source_url: "https://docs.example.com/d/home/abc123".to_string(),
+            page_title: "即时来源".to_string(),
+            content_text: "浏览器抓取的最新正文".to_string(),
+            content_hash: "sha256:latest".to_string(),
+            completeness_status: "partial".to_string(),
+            identity_match: true,
+            reached_end: false,
+            stable_passes: 2,
+            segment_count: 20,
+            character_count: 30,
+            truncated: true,
+            collector: "browser_attach".to_string(),
+            collected_at: 1_780_000_000_000,
+        };
+
+        let first = mgr.upsert_bake_document_source_snapshot(&snapshot).unwrap();
+        let duplicate = mgr.upsert_bake_document_source_snapshot(&snapshot).unwrap();
+        assert_eq!(first.id, duplicate.id);
+        assert!(mgr
+            .record_document_refresh_success(id, snapshot.collected_at, "fresh_partial", &first)
+            .unwrap());
+
+        let refreshed = mgr.get_bake_document(id).unwrap().unwrap();
+        assert_eq!(
+            refreshed.full_content.as_deref(),
+            Some("历史烘焙正文，不允许被即时抓取覆盖。")
+        );
+        assert_eq!(refreshed.last_refresh_status, "fresh_partial");
+        assert_eq!(refreshed.last_refresh_completeness, "partial");
+        assert!(refreshed.last_refresh_truncated);
+        assert_eq!(
+            mgr.get_latest_bake_document_source_snapshot(id)
+                .unwrap()
+                .unwrap()
+                .content_text,
+            "浏览器抓取的最新正文"
+        );
     }
 
     #[test]

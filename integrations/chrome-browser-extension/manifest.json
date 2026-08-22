@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "MemoryBread 浏览器集成",
+  "version": "0.2.1",
+  "description": "记忆面包浏览器集成插件，自动控制浏览器捕获记忆最新数据",
+  "minimum_chrome_version": "105",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvh72Ho309tzqmdrl19yuFXYhMA5lRZSIGzyBys6bwGcy5JbV1QT0do+1lyFJUBJSzL87aPCFnyzhqlvCKTVa6L6+xqLqfOdqjzRuHmhCLgYdgaAJbv0IzuEmP0OLn74RwIR8gtuCEnQaaaBCNYz0IlXuZuefzmgV7IqYtfWna7FAym9l3zQ+siIvx/v0lFODyT8ENI1Roq7YQ0JsNSnXE1hcUmQS7Mc7JIJpLAyC0L8spY6Z/Pnyi8KJJMeA8/LIk8YUbXphDXy129juGvLjBHsNWtJxaOuTb2NYQ/dwkc4HG9RC4SWPu/2bI1UiPIDba3FCce2Afnca1HocCVBlZwIDAQAB",
+  "permissions": ["nativeMessaging", "tabs", "scripting", "storage", "alarms", "debugger"],
+  "host_permissions": ["https://*/*", "http://*/*"],
+  "background": {"service_worker": "service-worker.js"},
+  "action": {
+    "default_title": "MemoryBread 浏览器集成",
+    "default_popup": "popup.html"
+  }
+}

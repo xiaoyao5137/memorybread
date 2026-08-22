@@ -119,9 +119,53 @@ def test_parse_decision_filters_ids_by_whitelist_and_keeps_one():
 
     assert decision["skill_ids"] == [27]
     assert decision["reasoning"] == "输入要写周报"
+    assert decision["parse_status"] == "complete"
 
     with pytest.raises(ValueError):
         service.parse_skill_match_decision("没有 JSON 的回复", {27})
+
+
+def test_parse_decision_recovers_skill_ids_when_reasoning_json_is_malformed():
+    service = SkillMatchService()
+
+    decision = service.parse_skill_match_decision(
+        '{"skill_ids": [49], "reasoning": "用户需要设计可落地的方案。”}',
+        {27, 49},
+    )
+
+    assert decision == {
+        "skill_ids": [49],
+        "reasoning": "",
+        "parse_status": "recovered",
+    }
+
+
+def test_parse_decision_does_not_guess_when_skill_ids_are_unrecoverable():
+    service = SkillMatchService()
+
+    with pytest.raises(ValueError):
+        service.parse_skill_match_decision(
+            '{"reasoning": "输出损坏。”}',
+            {27, 49},
+        )
+
+
+@pytest.mark.asyncio
+async def test_route_recovers_model_selected_plan_from_malformed_reasoning():
+    service = SkillMatchService()
+    service.completion_text = (
+        '{"skill_ids": [49], "reasoning": '
+        '"用户需求是设计方案，与方案技能用途一致。”}'
+    )
+
+    result = await service.route_creation_skills(
+        prompt="设计下GPU性能优化的方案",
+        skills=[WEEKLY_SKILL, PLAN_SKILL],
+    )
+
+    assert result["skill_ids"] == [49]
+    assert result["source"] == "model"
+    assert result["parse_status"] == "recovered"
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import time
 from dataclasses import asdict, dataclass, field
@@ -15,7 +16,23 @@ from difflib import SequenceMatcher
 from typing import Any, AsyncIterator, Optional
 from uuid import uuid4
 
-from .service import CreationOptions, CreationService, ReferenceDocument
+import httpx
+
+from .query_engine import (
+    QueryPlanError,
+    build_query_planner_prompts,
+    execute_query_plan,
+    parse_query_plan,
+    relation_catalog,
+    validate_query_plan,
+)
+from .service import (
+    CloudModelRequestError,
+    CreationOptions,
+    CreationService,
+    ReferenceDocument,
+    _is_retryable_model_transport,
+)
 from .tools import (
     CreationToolExecutionError,
     DATA_SEARCH_TOOL_ID,
@@ -33,8 +50,11 @@ from .tools import (
 )
 
 SCHEMA_VERSION = "creation.agent.v1"
+logger = logging.getLogger(__name__)
 MAX_LOOP_STEPS = 64
 MAX_QUALITY_CYCLES = 3
+# 节点级容错熔断阈值：单个节点失败只标记并跳过，连续失败超过该阈值才中止整轮。
+MAX_CONSECUTIVE_STEP_FAILURES = 3
 MAX_SKILL_STEP_RESOURCES = 4
 MAX_PROMPT_ENVIRONMENT_CHARS = 56000
 MAX_PROMPT_DATA_RESULTS_CHARS = 22000
@@ -43,6 +63,18 @@ MAX_PROMPT_SKILL_CHARS = 18000
 MAX_PROMPT_COMPLETED_STEPS_CHARS = 9000
 MAX_PROMPT_SCRAPE_CHARS = 5000
 MAX_SKILL_INSTRUCTION_CHARS = 12000
+
+
+def _step_failure_details(exc: BaseException) -> tuple[str, str]:
+    """把节点执行失败收敛为稳定错误码与用户可读原因，不泄露供应商细节。"""
+    if isinstance(exc, httpx.TransportError):
+        return "MODEL_TRANSPORT_UNAVAILABLE", "模型服务连接中断"
+    if isinstance(exc, CloudModelRequestError):
+        return "MODEL_REQUEST_FAILED", f"模型请求失败（状态码 {exc.status_code}）"
+    reason = str(exc).strip() or type(exc).__name__
+    return "STEP_GENERATION_FAILED", reason[:120]
+
+
 KNOWN_SECTION_TITLES = (
     "行业调研",
     "市场调研",
@@ -103,6 +135,7 @@ HARNESS_REASON_TEXTS = {
     "data_search_failed": "数据检索未完成，继续使用其他可用资料",
     "refresh_required": "发现需要即时刷新的报表，安排后台采集",
     "snapshot_ready": "已有可分析的数据快照，安排数据分析",
+    "structured_data_ready": "发现结构化关系数据，安排通用查询规划",
     "source_metadata_only": "只找到来源信息，暂时没有可用数据，保留当前计划",
     "no_matching_data": "没有找到匹配的数据来源，保留当前计划",
     "refresh_failed_stale_snapshot_available": "即时刷新失败，保留历史快照并继续分析",
@@ -322,6 +355,7 @@ class CreationAgentLoop:
                 return
 
         loop_count = 0
+        consecutive_failures = 0
         while state.cursor < len(state.plan) and loop_count < MAX_LOOP_STEPS:
             loop_count += 1
             step = state.plan[state.cursor]
@@ -345,35 +379,118 @@ class CreationAgentLoop:
                     yield event
             except Exception as exc:
                 if step.get("kind") != "tool":
-                    raise
-                tool_id = str(step.get("id") or "")
-                error_code = (
-                    exc.error_code
-                    if isinstance(exc, CreationToolExecutionError)
-                    else "TOOL_EXECUTION_FAILED"
-                )
-                state.environment.setdefault("tool_results", []).append(
-                    {
-                        "tool_id": tool_id,
-                        "status": "failed",
-                        "error_code": error_code,
-                        "skill_step_id": step.get("skill_step_id"),
-                    }
-                )
-                self._update_goal(state)
-                yield self._event(
-                    state,
-                    "tool.failed",
-                    f"{step.get('name', 'Tool')} 暂时不可用，Agent 将基于已有上下文继续",
-                    status="failed",
-                    actor=self._actor(
-                        "tool",
-                        tool_id,
-                        str(step.get("name") or "Tool"),
-                    ),
-                    data={"error_code": error_code},
-                )
-                step_status = "failed"
+                    # 节点级容错：模型节点失败只在该节点标记失败并跳过，
+                    # 仅当连续失败超过熔断阈值时才中止整轮创作。
+                    consecutive_failures += 1
+                    if consecutive_failures > MAX_CONSECUTIVE_STEP_FAILURES:
+                        logger.error(
+                            "创作节点已连续失败 %s 次，超过容错阈值，中止本轮创作: %s",
+                            consecutive_failures,
+                            exc,
+                        )
+                        raise
+                    error_code, failure_reason = _step_failure_details(exc)
+                    logger.warning(
+                        "节点 %s 执行失败（%s），跳过该节点继续执行: %s",
+                        step.get("id"),
+                        error_code,
+                        exc,
+                    )
+                    state.environment.setdefault("failed_steps", []).append(
+                        {
+                            "step_id": str(step.get("id") or ""),
+                            "name": str(step.get("name") or ""),
+                            "action": str(step.get("action") or ""),
+                            "skill_step_id": step.get("skill_step_id"),
+                            "error_code": error_code,
+                            "reason": failure_reason,
+                        }
+                    )
+                    if (
+                        step.get("action") in {"skill_step", "writer"}
+                        and step.get("skill_step_id")
+                        and state.environment.get("strict_skill_workflow")
+                    ):
+                        self._record_failed_skill_step(state, step, failure_reason)
+                        # 重组不含失败步骤的文档，替换页面上断流前残留的部分预览。
+                        assembled = self._assemble_strict_skill_document(state)
+                        state.environment["document"] = assembled
+                        state.current_document = assembled
+                        yield self._event(
+                            state,
+                            "document.replaced",
+                            "节点失败后文档已更新为最新可用版本",
+                            status="completed",
+                            actor=self._actor(
+                                "agent",
+                                str(step.get("id") or ""),
+                                str(step.get("name") or "创作 Agent"),
+                            ),
+                            data={
+                                "content": assembled,
+                                "operation": "failed_step_assembly",
+                            },
+                        )
+                    self._update_goal(state)
+                    # thinking.started 已在 _execute_step 内发出，失败时也要配对关闭思考块。
+                    yield self._thinking_completed(
+                        state,
+                        "generation",
+                        f"节点执行失败：{failure_reason}",
+                    )
+                    step_title = (
+                        self._step_content_title(step)
+                        or str(step.get("skill_step_title") or "")
+                        or str(step.get("name") or "当前节点")
+                    )
+                    yield self._event(
+                        state,
+                        "agent.failed",
+                        f"「{step_title}」生成失败：{failure_reason}，已跳过该节点继续执行",
+                        status="failed",
+                        actor=self._actor(
+                            "agent",
+                            str(step.get("id") or ""),
+                            str(step.get("name") or "创作 Agent"),
+                        ),
+                        data={
+                            "error_code": error_code,
+                            "error_reason": failure_reason,
+                            "skill_step_id": step.get("skill_step_id"),
+                        },
+                    )
+                    step_status = "failed"
+                else:
+                    tool_id = str(step.get("id") or "")
+                    error_code = (
+                        exc.error_code
+                        if isinstance(exc, CreationToolExecutionError)
+                        else "TOOL_EXECUTION_FAILED"
+                    )
+                    state.environment.setdefault("tool_results", []).append(
+                        {
+                            "tool_id": tool_id,
+                            "status": "failed",
+                            "error_code": error_code,
+                            "skill_step_id": step.get("skill_step_id"),
+                        }
+                    )
+                    self._update_goal(state)
+                    yield self._event(
+                        state,
+                        "tool.failed",
+                        f"{step.get('name', 'Tool')} 暂时不可用，Agent 将基于已有上下文继续",
+                        status="failed",
+                        actor=self._actor(
+                            "tool",
+                            tool_id,
+                            str(step.get("name") or "Tool"),
+                        ),
+                        data={"error_code": error_code},
+                    )
+                    step_status = "failed"
+            if step_status == "completed":
+                consecutive_failures = 0
             if not state.pending_model_step:
                 decision = self._replan_after_feedback(
                     state,
@@ -512,10 +629,20 @@ class CreationAgentLoop:
                 "quality_warnings": quality_warnings,
             },
         )
+        failed_steps = [
+            item
+            for item in state.environment.get("failed_steps", [])
+            if isinstance(item, dict)
+        ]
+        completed_summary = (
+            f"本轮创作完成，其中 {len(failed_steps)} 个节点失败已跳过，可继续对话补充"
+            if failed_steps
+            else "本轮创作完成，可以继续对话优化文档"
+        )
         yield self._event(
             state,
             "run.completed",
-            "本轮创作完成，可以继续对话优化文档",
+            completed_summary,
             status="completed",
             data={
                 "document": state.environment.get("document", state.current_document),
@@ -525,6 +652,7 @@ class CreationAgentLoop:
                 "edit_intent": state.environment.get("edit_intent", {}),
                 "document_patch": state.environment.get("last_document_patch"),
                 "evidence": state.environment.get("creation_evidence", []),
+                "failed_steps": failed_steps,
                 "goal": asdict(state.goal),
             },
         )
@@ -1045,10 +1173,41 @@ class CreationAgentLoop:
         if strict_skill_workflow and step_id not in {
             DATA_SEARCH_TOOL_ID,
             WEBPAGE_SCRAPE_TOOL_ID,
+            "data_query_planner",
         }:
             return None
         if step_id == "quality_review_agent":
             return self._replan_quality_issues(state, status=status)
+        if step_id == "data_query_planner":
+            query_plans = [
+                item
+                for item in state.environment.get("data_query_plans", [])
+                if isinstance(item, dict)
+            ]
+            latest_plan = query_plans[-1] if query_plans else {}
+            scheduled_steps: list[dict[str, Any]] = []
+            if latest_plan.get("mode") == "narrative" and not strict_skill_workflow:
+                scheduled_steps.append(self._agent_plan_step("data_analysis_agent"))
+            inserted = self._insert_harness_steps(state, scheduled_steps)
+            decision = {
+                "trigger": step_id,
+                "trigger_status": status,
+                "reason_code": (
+                    "narrative_analysis_required"
+                    if scheduled_steps
+                    else "query_execution_complete"
+                ),
+                "result_count": len(
+                    state.environment.get("current_data_results") or []
+                ),
+                "refreshable_count": 0,
+                "analyzable_count": 0,
+                "scheduled": [item["id"] for item in inserted],
+                "error_code": error_code,
+            }
+            state.environment.setdefault("harness_decisions", []).append(decision)
+            self._update_goal(state)
+            return decision
         if step_id not in {DATA_SEARCH_TOOL_ID, WEBPAGE_SCRAPE_TOOL_ID}:
             return None
 
@@ -1073,6 +1232,9 @@ class CreationAgentLoop:
             elif refreshable_count > 0:
                 scheduled_steps.append(self._tool_plan_step(WEBPAGE_SCRAPE_TOOL_ID))
                 reason_code = "refresh_required"
+            elif relation_catalog(results):
+                scheduled_steps.append(self._agent_plan_step("data_query_planner"))
+                reason_code = "structured_data_ready"
             elif analyzable_count > 0:
                 if not strict_skill_workflow:
                     scheduled_steps.append(self._agent_plan_step("data_analysis_agent"))
@@ -1081,6 +1243,9 @@ class CreationAgentLoop:
                 reason_code = "source_metadata_only"
             else:
                 reason_code = "no_matching_data"
+        elif relation_catalog(results):
+            scheduled_steps.append(self._agent_plan_step("data_query_planner"))
+            reason_code = "structured_data_ready"
         elif analyzable_count > 0:
             if not strict_skill_workflow:
                 scheduled_steps.append(self._agent_plan_step("data_analysis_agent"))
@@ -1424,6 +1589,8 @@ class CreationAgentLoop:
         "anti_ai_style_agent": "润色行文风格",
         "document_unify_polisher": "全文整合润色",
         "data_analysis_agent": "分析数据快照",
+        "data_query_plan": "编译并执行数据查询",
+        "data_query_planner": "编译并执行数据查询",
     }
 
     def _step_purpose(self, step: dict[str, Any]) -> str:
@@ -1778,6 +1945,11 @@ class CreationAgentLoop:
                 "specialist",
                 "data_analysis",
             ),
+            "data_query_planner": (
+                "数据查询规划 Agent",
+                "data_query_plan",
+                "data_query_plan",
+            ),
             "solution_design_agent": (
                 "方案设计 Agent",
                 "specialist",
@@ -2076,12 +2248,26 @@ class CreationAgentLoop:
             options = CreationOptions(**state.options)
             query = self._step_context_query(state, step)
             # Skill 步骤目标必须重新进入需求解析；根请求画像只适合路由，不能
-            # 继续支配“AIGC 共建项目”等步骤级检索对象。
-            requirement = self.service.analyze_requirement(query, options)
+            # 继续支配“AIGC 共建项目”等步骤级检索对象。实体识别进一步只看
+            # 步骤自身主题，避免“整体创作背景”里其他章节的实体（如 GPU）
+            # 被误当作本步骤核心实体。
+            focus_text = self._step_focus_query(step) or query
+            requirement = self.service.analyze_requirement(
+                query,
+                options,
+                entity_focus_text=focus_text,
+            )
             references = self.service.retrieve_references(
                 query,
                 requirement,
                 options,
+            )
+            # 创作消费召回结果前先对命中文档做浏览器即时刷新，把最新正文
+            # 回写进召回对象；任何失败都静默降级，不中断创作主链路。
+            document_refresh_stats = await self.service.refresh_recalled_documents(
+                references,
+                query,
+                require_latest=bool(requirement.get("needs_latest")),
             )
             batch_references = [
                 {
@@ -2123,6 +2309,10 @@ class CreationAgentLoop:
                     "summary": self.service._clip(item.summary, 600),
                     "source_url": item.source_url,
                     "observed_at": item.observed_at,
+                    "refresh_status": item.refresh_status,
+                    "refresh_completeness": item.refresh_completeness,
+                    "refresh_collected_at": item.refresh_collected_at,
+                    "refresh_truncated": item.refresh_truncated,
                     "skill_step_id": step.get("skill_step_id"),
                     "skill_step_title": step.get("skill_step_title"),
                 }
@@ -2153,6 +2343,7 @@ class CreationAgentLoop:
                     "keywords": requirement.get("keywords", []),
                     "entity_context": requirement.get("entity_context", {}),
                     "time_context": requirement.get("time_context", {}),
+                    "document_refresh": document_refresh_stats,
                 }
             )
             self._update_goal(state)
@@ -2177,6 +2368,7 @@ class CreationAgentLoop:
                     "query": query,
                     "keywords": requirement.get("keywords", []),
                     "entity_context": requirement.get("entity_context", {}),
+                    "document_refresh": document_refresh_stats,
                     "skill_step_id": step.get("skill_step_id"),
                     "skill_step_title": step.get("skill_step_title"),
                 },
@@ -2361,6 +2553,9 @@ class CreationAgentLoop:
                     for preview in previews
                 },
                 retain_screenshot=retain_screenshot,
+                browser_extension_enabled=bool(
+                    state.options.get("browser_extension_enabled", True)
+                ),
             )
             scrapes = list(outcome.get("scrapes") or [])
             refreshed = list(outcome.get("refreshed_data") or [])
@@ -2409,6 +2604,23 @@ class CreationAgentLoop:
                 for item in scrapes
                 if item.get("error_code") == "FOCUS_POLICY_BLOCKED"
             )
+            empty_scrape_count = sum(
+                1
+                for item in scrapes
+                if item.get("error_code") == "SCRAPE_EMPTY"
+            )
+            extension_timeout_count = sum(
+                1
+                for item in scrapes
+                if item.get("error_code") == "BROWSER_EXTENSION_TIMEOUT"
+            )
+            stale_fallback_count = sum(
+                1
+                for item in refreshed
+                if isinstance(item, dict)
+                and isinstance(item.get("stale_fallback"), dict)
+                and item.get("can_use") is True
+            )
             scrape_summaries = [
                 {
                     "source_id": item.get("source_id"),
@@ -2453,6 +2665,22 @@ class CreationAgentLoop:
                     f"浏览器访问 {len(scrapes)} 个报表，"
                     f"{completed_count} 个来源通过页面结构校验{evidence_suffix}"
                 )
+            elif stale_fallback_count:
+                failure_details = []
+                if empty_scrape_count:
+                    failure_details.append(
+                        f"{empty_scrape_count} 个后台页面未提取到正文"
+                    )
+                if extension_timeout_count:
+                    failure_details.append(
+                        f"{extension_timeout_count} 个后台页面读取超时"
+                    )
+                detail = "、".join(failure_details) or "后台即时读取未完成"
+                summary = (
+                    f"即时刷新 {len(scrapes)} 个报表未完成（{detail}）；"
+                    f"已使用 {stale_fallback_count} 个与目标周期匹配的历史快照，"
+                    "并保留采集时间标记"
+                )
             elif focus_blocked_count:
                 summary = (
                     f"即时刷新 {len(scrapes)} 个报表时，{focus_blocked_count} 个来源"
@@ -2462,6 +2690,16 @@ class CreationAgentLoop:
                 summary = (
                     f"浏览器访问 {len(scrapes)} 个报表，其中 {loading_timeout_count} 个"
                     "达到等待上限后仍在加载；本轮不把未完成渲染的数值当作当前事实"
+                )
+            elif empty_scrape_count:
+                summary = (
+                    f"浏览器访问 {len(scrapes)} 个报表，其中 {empty_scrape_count} 个"
+                    "后台页面未提取到正文；本轮没有可验证的即时数值"
+                )
+            elif extension_timeout_count:
+                summary = (
+                    f"浏览器访问 {len(scrapes)} 个报表，其中 {extension_timeout_count} 个"
+                    "后台页面读取超时；本轮没有可验证的即时数值"
                 )
             elif scrapes:
                 summary = (
@@ -2477,7 +2715,11 @@ class CreationAgentLoop:
                 state,
                 "tool.completed",
                 summary,
-                status="completed",
+                status=(
+                    "warning"
+                    if scrapes and (completed_count == 0 or failed_count > 0)
+                    else "completed"
+                ),
                 actor=actor,
                 environment_patch={
                     "attempted_source_count": len(scrapes),
@@ -2662,7 +2904,7 @@ class CreationAgentLoop:
             yield self._event(
                 state,
                 "skill.completed",
-                f"已把 {step['name']} 的执行步骤与写作规则写入环境",
+                f"已应用 {step['name']}",
                 status="completed",
                 actor=actor,
                 environment_patch={
@@ -2729,16 +2971,26 @@ class CreationAgentLoop:
             )
             return
 
-        if action in {"specialist", "writer", "polisher", "skill_step"}:
+        if action in {
+            "specialist",
+            "writer",
+            "polisher",
+            "skill_step",
+            "data_query_plan",
+        }:
             intent = state.environment.get("edit_intent", {})
             is_revision = action == "writer" and state.mode == "revision"
             is_document_mutation = action in {"writer", "polisher"}
             if is_revision or action == "polisher":
                 targets = [str(item) for item in intent.get("target_sections", [])]
                 if action == "polisher":
-                    planned_summary = (
-                        f"{step['name']}将按质检问题局部润色相关细节，未涉及章节保持原样"
-                    )
+                    if step.get("id") == "document_unify_polisher":
+                        planned_summary = "正在统一全文结构与表达，保留既有章节和事实"
+                    else:
+                        planned_summary = (
+                            f"{step['name']}将按质检问题局部润色相关细节，"
+                            "未涉及章节保持原样"
+                        )
                 elif targets:
                     planned_summary = (
                         f"{step['name']}将以{'、'.join(targets)}为线索检查全文联动"
@@ -2759,7 +3011,22 @@ class CreationAgentLoop:
                     },
                 )
 
-            system_prompt, user_prompt = self._model_prompts(state, step)
+            if action == "data_query_plan":
+                current_results = [
+                    item
+                    for item in (
+                        state.environment.get("current_data_results")
+                        or state.environment.get("data_results")
+                        or []
+                    )
+                    if isinstance(item, dict)
+                ]
+                system_prompt, user_prompt = build_query_planner_prompts(
+                    self._step_context_query(state, step),
+                    relation_catalog(current_results),
+                )
+            else:
+                system_prompt, user_prompt = self._model_prompts(state, step)
             # 内容生成是真正的深度思考点：用思考事件包裹大模型调用。
             yield self._thinking_started(state, "generation")
             if state.model_mode == "external":
@@ -2784,50 +3051,138 @@ class CreationAgentLoop:
                 )
                 return
 
-            if is_document_mutation:
-                document_parts: list[str] = []
+            if (
+                action == "skill_step"
+                and state.environment.get("strict_skill_workflow")
+                and hasattr(self.service, "stream_specialist_agent")
+            ):
+                # 流中途断连属于可重试故障：预览按 document_parts 原子重组，
+                # 整步重试时清空重新生成不会把两次输出拼接为一份结果。
+                max_stream_attempts = 2
+                for stream_attempt in range(1, max_stream_attempts + 1):
+                    document_parts = []
+                    last_preview_ts = 0.0
+                    try:
+                        async for chunk in self.service.stream_specialist_agent(
+                            agent_id=step["id"],
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                            creation_model=creation_model,
+                            creation_api_key=creation_api_key,
+                            creation_base_url=creation_base_url,
+                        ):
+                            document_parts.append(chunk)
+                            now_ts = time.monotonic()
+                            if now_ts - last_preview_ts < 0.15:
+                                continue
+                            last_preview_ts = now_ts
+                            preview, preview_audit = self._assemble_strict_skill_document(
+                                state,
+                                pending_step=step,
+                                pending_content="".join(document_parts),
+                                include_audit=True,
+                            )
+                            if preview:
+                                yield self._event(
+                                    state,
+                                    "document.preview",
+                                    f"正在生成「{self._step_content_title(step)}」内容",
+                                    actor=actor,
+                                    data={
+                                        "content": preview,
+                                        "section_title": self._step_content_title(step),
+                                        "progress_chars": sum(len(item) for item in document_parts),
+                                        "assembly_audit": preview_audit,
+                                    },
+                                )
+                        result = "".join(document_parts)
+                        break
+                    except Exception as exc:
+                        if (
+                            stream_attempt >= max_stream_attempts
+                            or not _is_retryable_model_transport(exc)
+                        ):
+                            raise
+                        logger.warning(
+                            "Skill 步骤 %s 流式输出中途断连（%s），重新生成整步: attempt=%s",
+                            step["id"],
+                            type(exc).__name__,
+                            stream_attempt,
+                        )
+                        yield self._event(
+                            state,
+                            "agent.started",
+                            f"模型连接中断，正在重试生成「{self._step_content_title(step)}」内容",
+                            actor=actor,
+                        )
+            elif is_document_mutation:
                 is_local_polish = action == "polisher"
-                polish_received_chars = 0
-                last_polish_progress_ts = 0.0
-                async for chunk in self.service.stream_agent_document(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    creation_model=creation_model,
-                    creation_api_key=creation_api_key,
-                    creation_base_url=creation_base_url,
-                ):
-                    document_parts.append(chunk)
-                    if is_local_polish:
-                        # 润色只是局部重写相关细节：不把全文流式推给页面，
-                        # 避免用户误以为整篇文档在重新生成；只同步节流进度。
-                        polish_received_chars += len(chunk)
-                        now_ts = time.monotonic()
-                        if now_ts - last_polish_progress_ts >= 1.5:
-                            last_polish_progress_ts = now_ts
+                # 本地润色只推进度事件不推正文，断流可安全整步重试；
+                # document.delta 路径 UI 侧增量追加，重试会重复内容，不重试。
+                max_stream_attempts = 2 if is_local_polish else 1
+                for stream_attempt in range(1, max_stream_attempts + 1):
+                    document_parts: list[str] = []
+                    polish_received_chars = 0
+                    last_polish_progress_ts = 0.0
+                    try:
+                        async for chunk in self.service.stream_agent_document(
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                            creation_model=creation_model,
+                            creation_api_key=creation_api_key,
+                            creation_base_url=creation_base_url,
+                        ):
+                            document_parts.append(chunk)
+                            if is_local_polish:
+                                # 润色只是局部重写相关细节：不把全文流式推给页面，
+                                # 避免用户误以为整篇文档在重新生成；只同步节流进度。
+                                polish_received_chars += len(chunk)
+                                now_ts = time.monotonic()
+                                if now_ts - last_polish_progress_ts >= 1.5:
+                                    last_polish_progress_ts = now_ts
+                                    yield self._event(
+                                        state,
+                                        "document.patch.delta",
+                                        f"{step['name']}正在局部润色相关细节，其余章节保持原样",
+                                        actor=actor,
+                                        data={"progress_chars": polish_received_chars},
+                                    )
+                                continue
                             yield self._event(
                                 state,
-                                "document.patch.delta",
-                                f"{step['name']}正在局部润色相关细节，其余章节保持原样",
+                                (
+                                    "document.patch.delta"
+                                    if is_revision
+                                    else "document.delta"
+                                ),
+                                (
+                                    f"{step['name']}正在联动修订全文"
+                                    if is_revision
+                                    else f"{step['name']}正在更新文档"
+                                ),
                                 actor=actor,
-                                data={"progress_chars": polish_received_chars},
+                                data={"content": chunk},
                             )
-                        continue
-                    yield self._event(
-                        state,
-                        (
-                            "document.patch.delta"
-                            if is_revision
-                            else "document.delta"
-                        ),
-                        (
-                            f"{step['name']}正在联动修订全文"
-                            if is_revision
-                            else f"{step['name']}正在更新文档"
-                        ),
-                        actor=actor,
-                        data={"content": chunk},
-                    )
-                result = "".join(document_parts)
+                        result = "".join(document_parts)
+                        break
+                    except Exception as exc:
+                        if (
+                            stream_attempt >= max_stream_attempts
+                            or not _is_retryable_model_transport(exc)
+                        ):
+                            raise
+                        logger.warning(
+                            "%s 流式输出中途断连（%s），重新生成整步: attempt=%s",
+                            step["name"],
+                            type(exc).__name__,
+                            stream_attempt,
+                        )
+                        yield self._event(
+                            state,
+                            "agent.started",
+                            f"模型连接中断，正在重试{step['name']}",
+                            actor=actor,
+                        )
             else:
                 result = await self.service.run_specialist_agent(
                     agent_id=step["id"],
@@ -3299,13 +3654,151 @@ class CreationAgentLoop:
         name = re.sub(r"\s*Skill$", "", name, flags=re.IGNORECASE).strip()
         return name or "创作结果"
 
-    def _assemble_strict_skill_document(self, state: LoopState) -> str:
+    @classmethod
+    def _strict_skill_step_content(
+        cls,
+        item: dict[str, Any],
+        workflow_titles: list[str],
+    ) -> tuple[str, dict[str, Any]]:
+        """把单个 Skill 步骤结果收敛到当前章节，不误删章节内部结构。"""
+        content = str(item.get("content") or "").strip()
+        title = str(item.get("title") or item.get("step_id") or "执行结果").strip()
+        declared_heading_scope = cls._normalize_section_name(
+            " ".join(
+                (
+                    title,
+                    str(item.get("objective") or ""),
+                    str(item.get("output") or ""),
+                )
+            )
+        )
+        other_titles = {
+            cls._normalize_section_name(value)
+            for value in workflow_titles
+            if cls._normalize_section_name(value)
+            != cls._normalize_section_name(title)
+        }
+        forbidden_top_level_markers = (
+            "结论",
+            "重点进展",
+            "风险",
+            "阻塞",
+            "下周计划",
+            "后续计划",
+        )
+        normalized_lines: list[str] = []
+        skipped_headings: list[str] = []
+        preserved_subheadings: list[str] = []
+        fallback_lines: list[str] = []
+        skip_undeclared_block = False
+        skip_reason = ""
+        for line in content.splitlines():
+            heading = re.match(r"^\s*(#{1,6})\s+(.+?)\s*$", line)
+            if not heading:
+                if not skip_undeclared_block:
+                    normalized_lines.append(line)
+                elif skip_reason == "forbidden_expansion":
+                    fallback_lines.append(line)
+                continue
+            level = len(heading.group(1))
+            heading_title = heading.group(2).strip()
+            normalized_heading = cls._normalize_section_name(heading_title)
+            if (
+                not any(value.strip() for value in normalized_lines)
+                and normalized_heading == cls._normalize_section_name(title)
+            ):
+                skip_undeclared_block = False
+                skip_reason = ""
+                continue
+
+            is_other_workflow_step = normalized_heading in other_titles
+            is_forbidden_expansion = (
+                level <= 2
+                and normalized_heading not in declared_heading_scope
+                and any(
+                    marker in heading_title
+                    for marker in forbidden_top_level_markers
+                )
+            )
+            if is_other_workflow_step or is_forbidden_expansion:
+                skip_undeclared_block = True
+                skip_reason = (
+                    "other_workflow_step"
+                    if is_other_workflow_step
+                    else "forbidden_expansion"
+                )
+                skipped_headings.append(heading_title)
+                continue
+
+            # 当前步骤的子标题属于章节内部表达。即使模型用了 H1/H2，也降为
+            # H3 后保留，避免合法的列表、指标表被连同标题整块静默删除。
+            skip_undeclared_block = False
+            skip_reason = ""
+            normalized_level = min(6, max(3, level))
+            normalized_lines.append(f"{'#' * normalized_level} {heading_title}")
+            preserved_subheadings.append(heading_title)
+
+        normalized = "\n".join(normalized_lines).strip()
+        recovered_from_empty = False
+        if content and not normalized and any(line.strip() for line in fallback_lines):
+            # 最后一道防丢失保护：如果模型把所有有效文字都包在一个未声明的
+            # 通用顶层标题下，移除标题但保留正文。其它工作流步骤仍不会恢复。
+            normalized = "\n".join(fallback_lines).strip()
+            recovered_from_empty = bool(normalized)
+        audit = {
+            "step_id": str(item.get("step_id") or ""),
+            "source_chars": len(content),
+            "retained_chars": len(normalized),
+            "skipped_heading_count": len(skipped_headings),
+            "preserved_subheading_count": len(preserved_subheadings),
+            "recovered_from_empty": recovered_from_empty,
+        }
+        return normalized, audit
+
+    def _assemble_strict_skill_document(
+        self,
+        state: LoopState,
+        *,
+        pending_step: Optional[dict[str, Any]] = None,
+        pending_content: str = "",
+        include_audit: bool = False,
+    ) -> Any:
         strict_ids = {
             str(item) for item in state.environment.get("strict_skill_ids", [])
         }
+        workflow_titles = [
+            str(raw_step.get("title") or "")
+            for skill in state.environment.get("applied_skills", [])
+            if isinstance(skill, dict)
+            and (not strict_ids or str(skill.get("id") or "") in strict_ids)
+            for raw_step in skill.get("execution_steps", []) or []
+            if isinstance(raw_step, dict)
+        ]
+        completed_items = list(state.environment.get("completed_skill_steps", []))
+        if pending_step is not None and pending_content.strip():
+            completed_items = [
+                item
+                for item in completed_items
+                if not (
+                    isinstance(item, dict)
+                    and item.get("skill_id") == pending_step.get("skill_id")
+                    and item.get("step_id") == pending_step.get("skill_step_id")
+                )
+            ]
+            completed_items.append(
+                {
+                    "skill_id": pending_step.get("skill_id"),
+                    "step_id": pending_step.get("skill_step_id"),
+                    "title": pending_step.get("skill_step_title"),
+                    "objective": pending_step.get("skill_step_objective"),
+                    "output": pending_step.get("skill_step_output"),
+                    "content": pending_content,
+                }
+            )
         sections: list[str] = []
+        audits: list[dict[str, Any]] = []
         seen_steps: set[tuple[str, str]] = set()
-        for item in state.environment.get("completed_skill_steps", []):
+        for item in completed_items:
             if not isinstance(item, dict):
                 continue
             skill_id = str(item.get("skill_id") or "")
@@ -3318,48 +3811,19 @@ class CreationAgentLoop:
             if not content or key in seen_steps:
                 continue
             seen_steps.add(key)
-            declared_heading_scope = self._normalize_section_name(
-                " ".join(
-                    (
-                        title,
-                        str(item.get("objective") or ""),
-                        str(item.get("output") or ""),
-                    )
-                )
+            normalized, audit = self._strict_skill_step_content(
+                item,
+                workflow_titles,
             )
-            normalized_lines: list[str] = []
-            skip_undeclared_block = False
-            for line in content.splitlines():
-                heading = re.match(r"^\s*#{1,6}\s+(.+?)\s*$", line)
-                if not heading:
-                    if not skip_undeclared_block:
-                        normalized_lines.append(line)
-                    continue
-                heading_title = heading.group(1).strip()
-                if (
-                    not any(item.strip() for item in normalized_lines)
-                    and self._normalize_section_name(heading_title)
-                    == self._normalize_section_name(title)
-                ):
-                    skip_undeclared_block = False
-                    continue
-                # Skill 步骤是章节白名单。模型生成的通用“结论/进展/风险/计划”
-                # 等标题及其内容只有在步骤 title/objective/output 明确声明时
-                # 才能保留，避免仅删标题后仍把发散内容塞回合法章节。
-                normalized_heading = self._normalize_section_name(heading_title)
-                if normalized_heading and normalized_heading in declared_heading_scope:
-                    skip_undeclared_block = False
-                    normalized_lines.append(f"### {heading_title}")
-                else:
-                    skip_undeclared_block = True
-            normalized = "\n".join(normalized_lines).strip()
+            audits.append(audit)
             sections.append(f"## {title}\n\n{normalized}")
         if not sections:
-            return ""
-        return (
+            return ("", audits) if include_audit else ""
+        document = (
             f"# {self._strict_skill_document_title(state)}\n\n"
             + "\n\n".join(sections)
         ).strip()
+        return (document, audits) if include_audit else document
 
     @staticmethod
     def _record_completed_skill_step(
@@ -3388,6 +3852,31 @@ class CreationAgentLoop:
         ]
         completed_steps.append(step_result)
         return step_result
+
+    @staticmethod
+    def _record_failed_skill_step(
+        state: LoopState,
+        step: dict[str, Any],
+        reason: str,
+    ) -> None:
+        """记录失败的 Skill 步骤；失败步骤不写入文档，只在执行轨迹中展示原因。"""
+        failed_record = {
+            "skill_id": step.get("skill_id"),
+            "step_id": step.get("skill_step_id"),
+            "title": step.get("skill_step_title"),
+            "reason": reason,
+        }
+        failed_steps = state.environment.setdefault("failed_skill_steps", [])
+        failed_steps[:] = [
+            item
+            for item in failed_steps
+            if not (
+                isinstance(item, dict)
+                and item.get("skill_id") == failed_record["skill_id"]
+                and item.get("step_id") == failed_record["step_id"]
+            )
+        ]
+        failed_steps.append(failed_record)
 
     @staticmethod
     def _markdown_table_quality(document: str) -> tuple[bool, int]:
@@ -3453,6 +3942,93 @@ class CreationAgentLoop:
             async for event in self._apply_routing_decision(state, step, decision):
                 yield event
             return
+        if step.get("action") == "data_query_plan":
+            current_results = [
+                item
+                for item in (
+                    state.environment.get("current_data_results")
+                    or state.environment.get("data_results")
+                    or []
+                )
+                if isinstance(item, dict)
+            ]
+            catalog = relation_catalog(current_results)
+            try:
+                plan = validate_query_plan(parse_query_plan(cleaned), catalog)
+                query_result = execute_query_plan(plan, current_results)
+                planner_status = "completed"
+                planner_error = None
+            except QueryPlanError as exc:
+                # 规划失败只关闭确定性关系执行，不阻断既有的叙述总结、分析和
+                # 数据渲染路径；不能用猜测性代码替模型补造字段绑定。
+                plan = {
+                    "schema_version": "memorybread.data-query-plan.v1",
+                    "mode": "narrative",
+                    "operations": [],
+                    "reason": "planner_validation_failed",
+                }
+                query_result = execute_query_plan(plan, current_results)
+                planner_status = "fallback"
+                planner_error = exc.code
+            scoped_plan = {
+                **plan,
+                "skill_step_id": step.get("skill_step_id"),
+                "skill_step_title": step.get("skill_step_title"),
+            }
+            scoped_result = {
+                **query_result,
+                "skill_step_id": step.get("skill_step_id"),
+                "skill_step_title": step.get("skill_step_title"),
+            }
+            state.environment.setdefault("data_query_plans", []).append(scoped_plan)
+            state.environment.setdefault("data_query_results", []).append(scoped_result)
+            state.environment.setdefault("tool_results", []).append(
+                {
+                    "tool_id": "data_query_executor",
+                    "status": planner_status,
+                    "mode": plan.get("mode"),
+                    "result_shape": query_result.get("shape"),
+                    "result_row_count": len(query_result.get("rows") or []),
+                    "validation_status": (
+                        query_result.get("validation") or {}
+                    ).get("status"),
+                    "error_code": planner_error,
+                    "skill_step_id": step.get("skill_step_id"),
+                }
+            )
+            self._update_goal(state)
+            yield self._event(
+                state,
+                "agent.completed",
+                (
+                    "已完成通用数据查询规划与确定性执行"
+                    if plan.get("mode") == "relational"
+                    else "当前目标保留叙述型数据分析路径"
+                ),
+                status="completed",
+                actor=actor,
+                environment_patch={
+                    "data_query_plan": scoped_plan,
+                    "data_query_result": {
+                        "shape": scoped_result.get("shape"),
+                        "row_count": len(scoped_result.get("rows") or []),
+                        "validation": scoped_result.get("validation"),
+                    },
+                },
+                data={
+                    "mode": plan.get("mode"),
+                    "result_shape": query_result.get("shape"),
+                    "result_row_count": len(query_result.get("rows") or []),
+                    "validation": query_result.get("validation"),
+                    "error_code": planner_error,
+                },
+            )
+            yield self._thinking_completed(
+                state,
+                "generation",
+                "已把自然语言目标编译为受控数据计划，并由程序执行可验证算子",
+            )
+            return
         if (
             step.get("action") == "writer"
             and step.get("skill_step_id")
@@ -3461,7 +4037,14 @@ class CreationAgentLoop:
             if not cleaned:
                 raise RuntimeError(f"{step['name']} 未返回步骤产出")
             step_result = self._record_completed_skill_step(state, step, cleaned)
-            assembled = self._assemble_strict_skill_document(state)
+            assembled, assembly_audits = self._assemble_strict_skill_document(
+                state,
+                include_audit=True,
+            )
+            assembly_audit = assembly_audits[-1] if assembly_audits else {}
+            state.environment.setdefault("strict_skill_assembly_audits", []).append(
+                assembly_audit
+            )
             if assembled:
                 state.environment["document"] = assembled
                 state.current_document = assembled
@@ -3474,6 +4057,7 @@ class CreationAgentLoop:
                     data={
                         "content": assembled,
                         "operation": "strict_skill_workflow_assembly",
+                        "assembly_audit": assembly_audit,
                     },
                 )
             self._update_goal(state)
@@ -3654,7 +4238,14 @@ class CreationAgentLoop:
                 }
             }
             if not state.environment.get("strict_skill_document_owned_by_agent"):
-                assembled = self._assemble_strict_skill_document(state)
+                assembled, assembly_audits = self._assemble_strict_skill_document(
+                    state,
+                    include_audit=True,
+                )
+                assembly_audit = assembly_audits[-1] if assembly_audits else {}
+                state.environment.setdefault(
+                    "strict_skill_assembly_audits", []
+                ).append(assembly_audit)
                 if assembled:
                     state.environment["document"] = assembled
                     state.current_document = assembled
@@ -3667,6 +4258,7 @@ class CreationAgentLoop:
                         data={
                             "content": assembled,
                             "operation": "strict_skill_workflow_assembly",
+                            "assembly_audit": assembly_audit,
                         },
                     )
         else:
@@ -4167,6 +4759,9 @@ class CreationAgentLoop:
 execution_steps 是唯一流程和章节白名单。只生成当前步骤 title/objective/output 所要求的内容，不得输出整篇文档、总标题或其它步骤内容，不得把不同步骤的数据或表格合并。
 workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 execution_steps 不是本轮流程，也不得据此增加章节。
 除非当前步骤逐字要求，否则不得自行添加“结论”“重点进展”“风险/阻塞”“下周计划”等通用模板栏目。只使用当前步骤环境中的 Tool 结果、上一步产出和用户材料；缺少信息时直接省略，不得补造事实或占位说明。
+章节结构和字体格式也是当前步骤的交付质量：外层二级标题会由 Harness 使用步骤 title 统一生成，不要重复输出。objective/output 明确包含多个子主题时，可使用与这些子主题语义一致的三级标题；不得新增未声明的通用栏目。
+要求列表展示时，不要把多个长句无差别平铺：同级列表项统一采用 `- **短标签：** 事实、动作或结果`。当至少四项内容存在由当前证据直接支持的稳定分类时，使用最多两级的父子列表，父项写 `- **分类名称**`，子项写 `  - **对象：** 具体进展`；无法确认分类时保留同级列表，不得为了版式虚构父子关系。步骤、优先级或时间顺序才使用有序列表。标题本身不重复加粗，不使用内联 HTML、字号或颜色。
+环境存在“确定性数据查询结果”时，筛选、排序、分组、聚合、去重和行数限制必须服从该结果；不得从原始表格重新计算或跨行拼接。只有 validation.status=verified 的结果可以写成完整集合或全局排名。plan.presentation 只决定使用表格、图表、正文或指标卡表达，不得改变执行结果或强制把所有数据写成表格。
 输出可直接放入当前步骤对应章节的 Markdown 正文，不输出 JSON、修改说明或思考过程。"""
             else:
                 system = """你是 MemoryBread 的文档撰写 Agent。请依据目标、子 Agent 结论、Tool 证据和 Skill 规则，输出完整 Markdown 文档。
@@ -4174,6 +4769,8 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
 章节设计 Agent 已给出章节蓝图时，以蓝图作为初稿骨架；信息缺乏支持时省略无法确认的内容，不能用套话把章节撑满。
 对于已安装的技能，优先复刻 title_design_style 中的子标题句式、writing_design 中的行文推进、voice_style 中的惯用话术和 image_generation 中的代码生图方式；field_examples 只用于学习写法，不得照抄主题或事实。示例文档不会进入运行时事实环境。不要把这些鲜明特征稀释成通用公文。
 除非用户要求或当前 Skill execution_steps 的目标/产出明确要求分析证据状态，否则不要输出“证据不足”“证据缺口”“证据完备”“待核验说明”等元说明。
+环境存在“确定性数据查询结果”时，筛选、排序、分组、聚合、去重和行数限制必须逐字服从该结果；不得从原始表格重新计算或跨行拼接。只有 validation.status=verified 的结果可以表述为完整集合或全局排名，insufficient_coverage 只能描述已捕获范围。plan.presentation 只控制最终表达形式；auto 时根据当前文档语境选择正文、表格、图表或指标卡。
+参考文档的 `refresh_status=fresh_complete` 表示本轮已校验当前原文；`fresh_recent` 表示节流窗口内复用近期完整校验，可继续支持当前事实；`fresh_partial` / `fresh_recent_partial` 只能支持已读取段落，不得声称已通读全文；`historical_only` 只能作历史背景，不得用来证明“当前/最新”事实。
 要求：保留可验证事实；不编造政策编号、指标或来源；对外部信息给出链接；数据、文档、知识、操作和互联网线索是平权证据，不因所属模块获得额外优先级，按相关性、可靠性、时效和口径适配度取舍；“本周/今日”等相对时间只能使用环境给出的确定日期、年份和周次，禁止输出“第X周”等占位符；使用数据时写明统计周期和采集时间，`can_use=false` 或陈旧快照不得写成当前结论；数据来源名称、URL 与采集时间只能逐字取自同一条可用数据结果，不能根据相邻参考资料猜测或拼接，页面筛选日期只能写成统计周期，不能冒充浏览器采集时间；无法确认归属时省略相关事实与“数据来源”行；缺失指标直接省略，不得写“数据未明确区分”等占位值；环境包含 PlantUML 画图约束时必须输出对应的 ```plantuml 代码块，否则技术关系优先使用 Mermaid；只输出文档正文。"""
             if state.mode == "revision" and not step.get("skill_step_id"):
                 intent = state.environment.get("edit_intent", {})
@@ -4183,6 +4780,7 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
 环境中存在“已激活的 Skill 步骤”时，必须按记录顺序消费每一步的 content，并把这些中间产物用于对应章节；不得跳过步骤、调换步骤，或只依据最后一次 Tool 结果覆盖已有有效内容。
 对于已安装的技能，优先复刻 title_design_style 中的子标题句式、writing_design 中的行文推进、voice_style 中的惯用话术和 image_generation 中的代码生图方式；field_examples 只用于学习写法，不得照抄主题或事实。示例文档不会进入运行时事实环境。
 除非用户要求或当前 Skill execution_steps 的目标/产出明确要求分析证据状态，否则不要新增“证据不足”“证据缺口”“证据完备”“待核验说明”等元说明。
+参考文档中 `refresh_status=fresh_complete` 表示本轮完整校验，`fresh_recent` 表示节流窗口内复用近期完整校验，两者均可支持当前事实；`fresh_partial` / `fresh_recent_partial` 不得支撑全文结论；`historical_only` 不得用来证明“当前/最新”事实。
 本轮已识别的改动线索：{target_hint}。这些只是线索，不是唯一可修改范围。
 先判断新要求在全文中的合理位置和全部影响面，再执行修订：
 1. 新内容必须放在语义与叙事顺序最合理的位置，不得机械追加到文末；
@@ -4193,7 +4791,11 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
 6. 保留可验证事实，不编造政策编号、指标或来源；外部结论保留链接；数据、文档、知识、操作和互联网线索按相关性、可靠性、时效和口径适配度平权取舍；数据结论写明统计周期和采集时间，`can_use=false` 或陈旧快照不得写成当前结论；来源名称、URL 与采集时间必须来自支持该数字的同一条数据结果，筛选日期不是采集时间，无法逐项匹配时省略相关事实与“数据来源”行。
 只输出最终完整文档正文，不要输出 JSON 或修订说明；不要用代码围栏包裹整篇文档，但 Tool 要求的 PlantUML 或 Mermaid 图示代码块必须保留。"""
         elif step["action"] == "polisher":
-            common = """请基于当前完整文档做一次有边界的二次编辑，并输出润色后的完整 Markdown 文档。
+            if agent_id == "document_unify_polisher":
+                common = """请基于当前完整文档完成一次全文整合，并输出润色后的完整 Markdown 文档。
+只处理全文结构、术语和表达一致性，保留全部事实、来源 URL、数据口径、代码块和用户明确要求。不得编造数字、案例、政策编号或来源；缺少支持的信息直接省略，除非用户或 Skill 明确要求，否则不要新增证据状态或待核验说明。不要输出 JSON、修改说明或思考过程，也不要用代码围栏包住整篇文档。"""
+            else:
+                common = """请基于当前完整文档做一次有边界的二次编辑，并输出润色后的完整 Markdown 文档。
 只处理质检分派给你的问题，保留未受影响的章节、事实、来源 URL、数据口径、代码块和用户明确要求。不得编造数字、案例、政策编号或来源；缺少支持的信息直接省略，除非用户或 Skill 明确要求，否则不要新增证据状态或待核验说明。不要输出 JSON、修改说明或思考过程，也不要用代码围栏包住整篇文档。"""
             role_instructions = {
                 "anti_ai_style_agent": """目标是提高中文表达的自然度和作者感，不以规避 AIGC 检测为目标。
@@ -4202,7 +4804,9 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
                 "table_polish_agent": """修复不合法的 Markdown 表格；对确实需要逐项比较、职责映射、参数口径或验收矩阵的内容使用表格。表头要短而明确，同一列保持同一口径，单元格避免堆整段正文；复杂解释仍放在表格前后。只输出标准 Markdown 表格，不写内联 HTML/CSS。创作页面会自动为合法表头应用品牌背景色、边框、对齐和斑马纹。""",
                 "typography_polish_agent": """只强调读者必须先看到的结论、决策、关键数字、风险和行动项。使用标准 Markdown `**重点**`，每千字通常保留 3—8 处，不能整段加粗，也不要用内联 HTML。页面会把 `strong` 渲染为品牌色、加粗和下划线；标题本身已有层级，不再重复强调。""",
                 "image_polish_agent": """只在组件关系、状态变化、跨角色流程或时间交互用文字难以准确理解时补充代码图示。环境有 PlantUML 约束时输出 `plantuml` 代码块；有 Mermaid 约束时输出 `mermaid` 代码块；两者同时存在时跟随各自约束，均不存在时默认使用 `mermaid`。图中对象、连线和标签必须来自正文，先用一段正文说明阅读方式，图后补充异常或边界；不插入装饰图、占位图片或无法编辑的外链图片。""",
-                "document_unify_polisher": """当前文档由多个 Skill 步骤独立推理的产物拼接而成。你的任务只做全文整合润色：统一术语、称谓、时态与数字口径；删除章节之间重复的过渡句、重复背景与相互矛盾的表述；保持 Skill 声明的章节顺序不变，不新增也不删除章节。逐字保留事实、数字、统计周期、来源链接、表格和代码块；环境中 can_use=true 且 validation/verified_claims 已通过校验的指标必须写入对应章节，禁止将它们改成“待补充”“见原文”或任何占位内容；不得补造新事实，也不得删除任何实质性信息。""",
+                "document_unify_polisher": """当前文档由多个 Skill 步骤独立推理的产物拼接而成。你的任务只做全文整合润色：统一术语、称谓、时态与数字口径；删除章节之间重复的过渡句、重复背景与相互矛盾的表述；保持 Skill 声明的二级章节标题、数量与顺序不变，不新增也不删除二级章节。
+同时统一章节内部的 Markdown 表达：步骤目标中已经声明多个子主题时，用语义一致的三级标题分隔；并列项使用 `- **短标签：** 事实、动作或结果`。同一章节有至少四项内容且现有事实能够直接支持稳定分类时，改成最多两级的父子列表，父项写 `- **分类名称**`，子项写 `  - **对象：** 具体进展`；没有可靠分类时保留同级列表，不得虚构归属。只对关键结论、关键数字、风险和行动项加粗，不加粗整段，也不在标题上重复加粗。连续解释因果或取舍的内容保留为自然段，不为追求形式强行列表化。
+逐字保留事实、数字、统计周期、来源链接、表格和代码块；环境中 can_use=true 且 validation/verified_claims 已通过校验的指标必须写入对应章节，禁止将它们改成“待补充”“见原文”或任何占位内容；不得补造新事实，也不得删除任何实质性信息。""",
             }
             system = (
                 f"你是 MemoryBread 的{step['name']}。\n"
@@ -4213,8 +4817,11 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
 已安装 Skill 的 execution_steps 是唯一流程和章节白名单。只生成当前步骤 title/objective/output 要求的内容，不得把其它步骤的数据、结论或表格合并进来；不得输出总标题或整篇文档。
 workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 execution_steps 不是本轮流程，也不得据此增加章节。
 除非当前步骤逐字要求，否则不得自行添加“结论”“重点进展”“风险/阻塞”“下周计划”等通用模板栏目，也不得用文档类型常见结构补齐 Skill 没有声明的内容。
+章节结构和字体格式也是当前步骤的交付质量：外层二级标题会由 Harness 使用步骤 title 统一生成，不要重复输出。objective/output 明确包含多个子主题时，可使用与这些子主题语义一致的三级标题；不得新增未声明的通用栏目。
+要求列表展示时，不要把多个长句无差别平铺：同级列表项统一采用 `- **短标签：** 事实、动作或结果`。当至少四项内容存在由当前证据直接支持的稳定分类时，使用最多两级的父子列表，父项写 `- **分类名称**`，子项写 `  - **对象：** 具体进展`；无法确认分类时保留同级列表，不得为了版式虚构父子关系。步骤、优先级或时间顺序才使用有序列表。标题本身不重复加粗，不使用内联 HTML、字号或颜色。
 当前步骤声明的 Tool 已由 Harness 在你开始处理前执行。objective 中“用 @某 Tool 获取”表示直接消费当前环境中的“Tool 执行回执”及对应结果，不是要求你再次调用 Tool；不得声称工具列表缺少接口、自己无法调用 Tool，或要求后续再调用已经执行完成的 Tool。
 只使用当前环境中已有的 Tool 结果、上一步产出和用户材料，按照当前步骤的 objective 形成明确中间产物；预期产出为空时，根据步骤标题和目标给出最适合后续拼接的结构。
+环境存在“确定性数据查询结果”时，它是筛选、排序、分组、聚合、去重和行数限制的唯一依据：validation.status=verified 才能把结果写成完整确定结论；不得绕过该结果重新从原始表格计算。insufficient_coverage 只能支持已捕获范围内的观察，不得写成全局排名或完整集合。plan.presentation 只控制最终表达形式；没有表格要求时可正常输出正文、图表或指标卡，不得为了使用查询结果强制生成表格。
 结果必须可直接交给下一个 Skill 步骤或最终文档撰写 Agent：保留有依据的事实、数字、来源和时间口径，不得把不同来源的名称、时间与数值混拼，不得补造信息。
 “本周/今日”等相对时间必须逐字服从环境中的当前确定时间；禁止输出“第X周”等占位符。缺失的指标或进展直接省略，不得写“数据未明确区分”“暂无明确进展”等占位内容。
 除非用户要求或当前 Skill 步骤的 objective/output 明确要求分析证据状态，否则不要输出“证据不足”“证据缺口”“证据完备”“待核验说明”等元说明；结果无法支持某项事实时，直接省略该事实，只保留有依据的内容。
@@ -4251,10 +4858,13 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
         return system, user
 
     @staticmethod
-    def _step_context_query(state: LoopState, step: dict[str, Any]) -> str:
-        context_query = str(
-            state.environment.get("context_query") or state.user_message
-        ).strip()
+    def _step_focus_query(step: dict[str, Any]) -> str:
+        """步骤自身主题文本，不含根请求背景。
+
+        核心实体识别必须只用这段文本：根请求可能包含其他章节的主题
+        （如 GPU 成本章节），若参与实体识别会通过“整体创作背景”劫持
+        当前步骤的层级排序。
+        """
         objective = str(step.get("skill_step_objective") or "").strip()
         output = str(step.get("skill_step_output") or "").strip()
         step_title = str(step.get("skill_step_title") or "").strip()
@@ -4263,7 +4873,7 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             for item in step.get("skill_step_skills", [])
             if str(item).strip()
         ]
-        step_specific_query = "\n".join(
+        return "\n".join(
             item
             for item in (
                 f"当前步骤：{step_title}" if step_title else "",
@@ -4273,7 +4883,16 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             )
             if item
         )
+
+    @classmethod
+    def _step_context_query(cls, state: LoopState, step: dict[str, Any]) -> str:
+        context_query = str(
+            state.environment.get("context_query") or state.user_message
+        ).strip()
+        step_specific_query = cls._step_focus_query(step)
         step_id = str(step.get("id") or "")
+        if step_id == "data_query_planner" and step_specific_query:
+            return step_specific_query
         if (
             step.get("skill_step_id")
             and step_id in {MEMORY_SEARCH_TOOL_ID, DATA_SEARCH_TOOL_ID}
@@ -4329,16 +4948,11 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
                 return context_query
         if step_id == MEMORY_SEARCH_TOOL_ID and step.get("skill_step_id"):
             return context_query
-        if not objective and not output and not skills:
+        if not step_specific_query:
             return context_query
         return "\n".join(
             item
-            for item in (
-                context_query,
-                f"当前 Skill 步骤目标：{objective}" if objective else "",
-                f"需要支持的步骤产出：{output}" if output else "",
-                f"本步骤协同 Skill：{'、'.join(skills)}" if skills else "",
-            )
+            for item in (context_query, step_specific_query)
             if item
         )
 
@@ -4993,6 +5607,10 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
                     "observed_at",
                     "data_use_policy",
                     "data_freshness",
+                    "refresh_status",
+                    "refresh_completeness",
+                    "refresh_collected_at",
+                    "refresh_truncated",
                 )
                 if raw.get(key) is not None
             }
@@ -5002,10 +5620,17 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             if raw_content is not None:
                 text = " ".join(str(raw_content).split()).strip()
                 if text:
+                    refresh_status = str(raw.get("refresh_status") or "")
+                    status_limit = 1600
+                    if refresh_status in {"fresh_complete", "fresh_recent"}:
+                        status_limit = 6000
+                    elif refresh_status in {"fresh_partial", "fresh_recent_partial"}:
+                        status_limit = 3000
+                    effective_limit = min(content_limit, status_limit)
                     item["content"] = (
                         text
-                        if len(text) <= content_limit
-                        else text[:content_limit].rstrip() + "…"
+                        if len(text) <= effective_limit
+                        else text[:effective_limit].rstrip() + "…"
                     )
             candidate_size = len(str(item))
             if compacted and used_chars + candidate_size > MAX_PROMPT_REFERENCE_CHARS:
@@ -5021,7 +5646,7 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
         step: Optional[dict[str, Any]] = None,
     ) -> list[dict[str, Any]]:
         ordered, matched_keys = cls._scope_references_for_step(references, step)
-        compacted = cls._compact_reference_items(ordered, content_limit=1600)
+        compacted = cls._compact_reference_items(ordered, content_limit=6000)
         if matched_keys:
             matched_in = sum(
                 1
@@ -5058,6 +5683,57 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
                 break
             compacted.append(item)
             used_chars += candidate_size
+        return compacted
+
+    @classmethod
+    def _prompt_query_results(
+        cls,
+        values: Any,
+        step: Optional[dict[str, Any]] = None,
+    ) -> list[dict[str, Any]]:
+        """QueryResult 是一个原子执行产物，按结果而不是零散 claim 裁剪。"""
+        step_id = str((step or {}).get("skill_step_id") or "")
+        compacted: list[dict[str, Any]] = []
+        used_chars = 2
+        for raw in list(values or []):
+            if not isinstance(raw, dict):
+                continue
+            if step_id and str(raw.get("skill_step_id") or "") != step_id:
+                continue
+            item = {
+                key: raw.get(key)
+                for key in (
+                    "schema_version",
+                    "shape",
+                    "plan",
+                    "schema",
+                    "rows",
+                    "coverage",
+                    "provenance",
+                    "validation",
+                    "skill_step_id",
+                    "skill_step_title",
+                )
+                if raw.get(key) is not None
+            }
+            # 行是确定性执行结果，必须保持行边界；只在整个结果超过环境预算
+            # 时截取可容纳的完整前缀，不把单元格拆成独立事实。
+            rows = item.get("rows")
+            if isinstance(rows, list):
+                item["rows"] = rows[:100]
+            candidate_size = len(str(item))
+            if compacted and used_chars + candidate_size > 18000:
+                break
+            if candidate_size > 18000 and isinstance(item.get("rows"), list):
+                bounded_rows = []
+                base_size = len(str({**item, "rows": []}))
+                for row in item["rows"]:
+                    if base_size + len(str(bounded_rows)) + len(str(row)) > 18000:
+                        break
+                    bounded_rows.append(row)
+                item["rows"] = bounded_rows
+            compacted.append(item)
+            used_chars += len(str(item))
         return compacted
 
     @classmethod
@@ -5161,6 +5837,10 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             if isinstance(item, dict) and item.get("source_id") is not None
         }
         compact_data_results = self._prompt_data_results(prompt_data_results)
+        compact_query_results = self._prompt_query_results(
+            state.environment.get("data_query_results", []),
+            step,
+        )
         compact_scrapes = self._prompt_webpage_scrapes(
             state.environment.get("webpage_scrapes", []),
             current_source_ids if is_scoped_skill_step else set(),
@@ -5211,6 +5891,7 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             f"原始需求：{state.root_request}",
             f"本轮编辑意图：{state.environment.get('edit_intent', {})}",
             f"任务画像：{state.environment.get('requirement', {})}",
+            f"确定性数据查询结果：{compact_query_results}",
             f"当前步骤数据事实：{compact_data_results}",
             f"当前步骤网页采集回执：{compact_scrapes}",
             (
@@ -5273,6 +5954,7 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
         return f"文档目录：\n{outline}\n\n目标章节上下文：\n{section_context}"
 
     def _reference_to_state(self, item: ReferenceDocument) -> dict[str, Any]:
+        content_limit = 8000 if item.refresh_status.startswith("fresh_") else 1600
         return {
             "id": item.id,
             "source_id": item.source_id,
@@ -5281,7 +5963,7 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             "doc_type": item.doc_type,
             "summary": self.service._clip(item.summary, 600),
             "content": self.service._clip(
-                self.service._best_reference_content(item), 1600
+                self.service._best_reference_content(item), content_limit
             ),
             "reason": item.reason,
             "final_weight": round(item.final_weight, 4),
@@ -5294,6 +5976,10 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             "entity_score": round(item.entity_score, 4),
             "source_url": item.source_url,
             "observed_at": item.observed_at,
+            "refresh_status": item.refresh_status,
+            "refresh_completeness": item.refresh_completeness,
+            "refresh_collected_at": item.refresh_collected_at,
+            "refresh_truncated": item.refresh_truncated,
         }
 
     @staticmethod

@@ -12,6 +12,7 @@ RAG 模块测试
 from __future__ import annotations
 
 import sqlite3
+import time
 from typing import Optional
 
 import pytest
@@ -20,7 +21,14 @@ from embedding.base  import EmbeddingBackend, EmbeddingVector
 from embedding.model import EmbeddingModel
 from rag.llm.base    import LlmBackend, LlmResponse
 from rag.llm.ollama  import OllamaBackend
-from rag.pipeline    import RagPipeline, RagResult, _normalize_evidence_references, _normalize_weekly_report
+from rag.pipeline    import (
+    RagPipeline,
+    RagResult,
+    _attach_document_links,
+    _collect_document_links,
+    _lookup_baked_mention,
+    _normalize_doc_title,
+)
 from rag.query_planner import build_artifact_query_plan
 from rag.retriever   import (
     Fts5Retriever,
@@ -29,6 +37,9 @@ from rag.retriever   import (
     VectorRetriever,
     VectorSearchFilter,
     _bounded_fallback_terms,
+    _consecutive_query_phrases,
+    _phrase_boost,
+    _phrase_present,
 )
 from rag.reranker    import reciprocal_rank_fusion
 
@@ -112,7 +123,6 @@ class MockFts5Retriever:
         history_view: Optional[bool] = None,
         is_self_generated: Optional[bool] = None,
         evidence_strengths: Optional[list[str]] = None,
-        query_mode: str = "lookup",
         created_start_ts: Optional[int] = None,
         created_end_ts: Optional[int] = None,
     ) -> list[RetrievedChunk]:
@@ -132,7 +142,6 @@ class MockFts5Retriever:
             "history_view": history_view,
             "is_self_generated": is_self_generated,
             "evidence_strengths": evidence_strengths,
-            "query_mode": query_mode,
             "created_start_ts": created_start_ts,
             "created_end_ts": created_end_ts,
         }
@@ -404,10 +413,137 @@ class TestRrf:
         )
         assert [chunk.doc_key for chunk in merged] == ["document:2"]
 
+    def test_baked_artifact_wins_doc_key_over_high_score_capture(self):
+        """同 doc_key 冲突时烘焙产物内容优先于原始 capture（不受 BM25 原始分影响）"""
+        artifact = _chunk(
+            1, score=90.8, source="keyword", doc_key="document_url:https://x/a",
+            metadata={"source_type": "document", "doc_key": "document_url:https://x/a"},
+        )
+        capture = _chunk(
+            2, score=1009.0, source="capture_fts", doc_key="document_url:https://x/a",
+            metadata={"source_type": "pending_document", "doc_key": "document_url:https://x/a"},
+        )
+        merged = reciprocal_rank_fusion([([capture], 0.7), ([artifact], 0.45)], top_k=2)
+        assert len(merged) == 1
+        assert merged[0].capture_id == 1
+        assert (merged[0].metadata or {}).get("source_type") == "document"
+        assert merged[0].metadata.get("retrieval_score") == 90.8
+
+    def test_document_id_deduplicates_vector_and_url_artifact_keys(self):
+        vector = _chunk(
+            0, score=0.7, source="vector", doc_key="bake_document:366",
+            metadata={
+                "source_type": "document", "doc_key": "bake_document:366",
+                "document_id": 366,
+            },
+        )
+        artifact = _chunk(
+            0, score=90.0, source="document",
+            doc_key="document_url:https://docs.example/item",
+            metadata={
+                "source_type": "document",
+                "doc_key": "document_url:https://docs.example/item",
+                "artifact_id": 366,
+            },
+        )
+
+        merged = reciprocal_rank_fusion([[vector], [artifact]], top_k=5)
+
+        assert [chunk.doc_key for chunk in merged] == ["document:366"]
+
+
+# ── 连续短语命中加成 ──────────────────────────────────────────────────────────
+
+class TestPhraseBoost:
+    def test_consecutive_query_phrases_extracts_cjk_runs_and_ascii(self):
+        phrases = _consecutive_query_phrases("本周 AIGC 项目周报内容")
+        assert "项目周报内容" in phrases
+        assert "aigc" in phrases
+        # 两字中文段不作为短语（由逐词计分覆盖）
+        assert "本周" not in phrases
+
+    def test_phrase_present_requires_consecutive_match(self):
+        assert _phrase_present("团队项目周报汇总", "项目周报")
+        assert not _phrase_present("项目进度与周报", "项目周报")
+
+    def test_phrase_present_long_phrase_accepts_head_tail_coverage(self):
+        # 长短语拆首尾 4 字子段：项目周报 + 周报内容 均连续出现即命中
+        assert _phrase_present("共建项目周报的周报内容整理", "项目周报内容")
+        assert not _phrase_present("只有项目周报", "项目周报内容")
+
+    def test_phrase_boost_multiplies_field_hits(self):
+        phrases = ["项目周报"]
+        no_hit = _phrase_boost(phrases, "无关标题", "无关摘要", "无关正文")
+        title_hit = _phrase_boost(phrases, "项目周报标题", "无关摘要", "无关正文")
+        all_hit = _phrase_boost(phrases, "项目周报标题", "项目周报摘要", "项目周报正文")
+        assert no_hit == 1.0
+        assert title_hit > no_hit
+        assert all_hit > title_hit
+
+    def test_artifact_with_consecutive_phrase_outranks_scattered_match(self, tmp_path):
+        """标题/摘要/正文连续命中查询短语的产物分数高于仅零散含词的产物"""
+        db_path = str(tmp_path / "phrase-boost.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE bake_knowledge (
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                content TEXT,
+                detailed_content TEXT,
+                entities TEXT,
+                timeline_id INTEGER,
+                source_timeline_ids TEXT DEFAULT '[]',
+                source_capture_ids TEXT NOT NULL DEFAULT '[]',
+                importance INTEGER DEFAULT 3,
+                user_verified BOOLEAN DEFAULT 0,
+                updated_at_ms INTEGER
+            );
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO bake_knowledge
+                (id, title, summary, content, detailed_content, entities, updated_at_ms)
+            VALUES (?, ?, ?, ?, '', '[]', 1720000000000)
+            """,
+            [
+                (1, "GPU 成本优化项目周报", "项目周报的完整内容记录", "周报正文"),
+                (2, "记录一次周报相关的排查", "内容零散", "提及周报与内容与项目"),
+            ],
+        )
+        conn.commit()
+        conn.row_factory = sqlite3.Row
+
+        retriever = KnowledgeFts5Retriever(db_path)
+        results = retriever._search_artifacts(
+            conn.cursor(), "项目周报内容", top_k=5, entity_terms=None,
+        )
+        conn.close()
+        scores = {chunk.doc_key: float(chunk.score or 0) for chunk in results}
+        assert scores["bake_knowledge:1"] > scores["bake_knowledge:2"]
+
 
 # ── RagPipeline ───────────────────────────────────────────────────────────────
 
 class TestRagPipeline:
+    def test_unified_selection_allows_all_supported_memory_sources(self):
+        chunks = [
+            _chunk(1, source="knowledge", doc_key="knowledge:1", metadata={"source_type": "knowledge", "doc_key": "knowledge:1", "knowledge_id": 1}),
+            _chunk(2, source="document", doc_key="document:2", metadata={"source_type": "document", "doc_key": "document:2"}),
+            _chunk(3, source="bake_knowledge", doc_key="bake_knowledge:3", metadata={"source_type": "bake_knowledge", "doc_key": "bake_knowledge:3"}),
+            _chunk(4, source="operation", doc_key="operation:4", metadata={"source_type": "operation", "doc_key": "operation:4"}),
+            _chunk(5, source="data", doc_key="data:5", metadata={"source_type": "data", "doc_key": "data:5"}),
+            _chunk(6, source="pending_document", doc_key="pending_document:6", metadata={"source_type": "pending_document", "doc_key": "pending_document:6"}),
+        ]
+
+        selected = RagPipeline._select_contexts(chunks, top_k=10)
+
+        assert [chunk.metadata["source_type"] for chunk in selected] == [
+            "knowledge", "document", "bake_knowledge", "operation", "data", "pending_document"
+        ]
+
     def test_raw_document_keyword_after_ax_prefix_is_recalled(self):
         deep_keyword = "潮汐特性"
         raw_text = "AX：" + ("背景资料 " * 100) + deep_keyword + "可用于弹性调度。"
@@ -529,8 +665,8 @@ class TestRagPipeline:
 
     def test_contexts_included(self):
         knowledge = [
-            _chunk(1, 0.9, source="knowledge", doc_key="knowledge:1", metadata={"source_type": "knowledge", "doc_key": "knowledge:1", "knowledge_id": 1}),
-            _chunk(2, 0.7, source="knowledge", doc_key="knowledge:2", metadata={"source_type": "knowledge", "doc_key": "knowledge:2", "knowledge_id": 2}),
+            _chunk(1, 0.9, source="bake_knowledge", doc_key="bake_knowledge:1", metadata={"source_type": "bake_knowledge", "doc_key": "bake_knowledge:1", "artifact_id": 1}),
+            _chunk(2, 0.7, source="operation", doc_key="operation:2", metadata={"source_type": "operation", "doc_key": "operation:2", "artifact_id": 2}),
         ]
         pipeline = _make_pipeline(knowledge_chunks=knowledge)
         result = pipeline.query("工作内容")
@@ -540,6 +676,66 @@ class TestRagPipeline:
         pipeline = _make_pipeline()
         result   = pipeline.query("问题")
         assert result.model == "mock-llm"
+
+    def test_parse_query_intent_resolves_this_week_period(self):
+        """本周等相对时间应解析出确定性周期描述（含周次与起止日期）"""
+        intent = RagPipeline._parse_query_intent("请提供 AIGC 项目的本周工作进展报告")
+        assert intent.period_kind == "current_week"
+        assert intent.period_phrase == "本周"
+        assert "年第" in intent.period_display and "周" in intent.period_display
+        assert "至" in intent.period_display
+        assert intent.start_ts is not None
+
+    def test_relative_time_clause_injected_into_prompt(self):
+        """含本周的查询应在 prompt 中注入确定性时间口径，供模型佐证证据归属"""
+        pipeline = _make_pipeline(
+            knowledge_chunks=[
+                _chunk(
+                    1,
+                    0.9,
+                    source="knowledge",
+                    doc_key="knowledge:1",
+                    metadata={
+                        "source_type": "knowledge",
+                        "doc_key": "knowledge:1",
+                        "knowledge_id": 1,
+                        "observed_at": int(time.time() * 1000),
+                    },
+                )
+            ],
+        )
+        pipeline.query("请总结我本周的工作进展")
+        prompt = pipeline._llm.last_prompt  # type: ignore[attr-defined]
+        assert "【时间口径】" in prompt
+        assert "本周" in prompt
+        assert "今天是" in prompt
+
+    def test_no_time_clause_without_relative_time(self):
+        pipeline = _make_pipeline()
+        pipeline.query("X40 的价格是多少")
+        prompt = pipeline._llm.last_prompt  # type: ignore[attr-defined]
+        assert "【时间口径】" not in prompt
+
+    def test_build_context_marks_artifact_updated_time(self):
+        """烘焙产物缺少看到/事件时间时，应补充创建/更新时间供周期归属佐证"""
+        ts = int(time.time() * 1000)
+        artifact = _chunk(
+            1,
+            24.0,
+            source="bake_knowledge",
+            doc_key="bake_knowledge:9",
+            metadata={"source_type": "bake_knowledge", "doc_key": "bake_knowledge:9", "updated_at": ts},
+        )
+        pending = _chunk(
+            2,
+            5.0,
+            source="capture_fts",
+            doc_key="pending_document:doc",
+            metadata={"source_type": "pending_document", "doc_key": "pending_document:doc", "time": ts},
+        )
+        context = RagPipeline._build_context([artifact, pending])
+        assert "创建/更新时间=" in context
+        assert "采集时间=" in context
 
     def test_empty_context_still_answers(self):
         """无上下文时 LLM 仍然被调用"""
@@ -632,6 +828,196 @@ class TestRagPipeline:
 
         assert any(chunk.doc_key == "document:80" for chunk in result.contexts)
 
+    def test_query_deduplicates_document_id_and_url_rescue_for_same_artifact(self):
+        source_url = "https://docs.example/container-gpu"
+        document_by_id = _chunk(
+            0,
+            120.0,
+            source="document",
+            doc_key="document:80",
+            metadata={
+                "source_type": "document",
+                "doc_key": "document:80",
+                "artifact_id": 80,
+                "document_id": 80,
+                "source_url": source_url,
+                "title": "容器云 GPU 指标采集项目",
+            },
+        )
+        same_document_by_url = _chunk(
+            0,
+            110.0,
+            source="document",
+            doc_key=f"document_url:{source_url}",
+            metadata={
+                "source_type": "document",
+                "doc_key": f"document_url:{source_url}",
+                "artifact_id": 80,
+                "document_id": 80,
+                "source_url": source_url,
+                "title": "容器云 GPU 指标采集项目",
+            },
+        )
+        pipeline = _make_pipeline(
+            knowledge_chunks=[document_by_id, same_document_by_url],
+            vector_chunks=[document_by_id],
+            top_k=3,
+        )
+
+        result = pipeline.query("SMACT 产品简介")
+
+        matches = [
+            chunk
+            for chunk in result.contexts
+            if (chunk.metadata or {}).get("document_id") == 80
+        ]
+        assert len(matches) == 1
+
+    def test_unified_selection_keeps_rrf_order_across_incomparable_source_scores(self):
+        keyword_rescue = RetrievedChunk(
+            capture_id=0,
+            text="关键词产物",
+            score=164.0,
+            source="bake_knowledge",
+            doc_key="bake_knowledge:1",
+            metadata={
+                "source_type": "bake_knowledge",
+                "doc_key": "bake_knowledge:1",
+                "artifact_id": 1,
+                "selection_origin": "artifact_rescue",
+            },
+        )
+        fused = [
+            RetrievedChunk(
+                capture_id=0,
+                text=f"融合候选 {document_id}",
+                score=rrf_score,
+                source="merged",
+                doc_key=f"document:{document_id}",
+                metadata={
+                    "source_type": "document",
+                    "doc_key": f"document:{document_id}",
+                    "document_id": document_id,
+                    "retrieval_score": retrieval_score,
+                    "rrf_score": rrf_score,
+                },
+            )
+            for document_id, retrieval_score, rrf_score in (
+                (366, 0.67, 0.0163),
+                (80, 0.65, 0.0158),
+                (173, 0.64, 0.0149),
+            )
+        ]
+
+        selected = RagPipeline._select_contexts(
+            [*fused, keyword_rescue],
+            top_k=3,
+        )
+
+        assert [chunk.doc_key for chunk in selected] == [
+            "document:366",
+            "document:80",
+            "bake_knowledge:1",
+        ]
+
+    def test_unified_selection_limits_artifact_rescue_to_one_slot(self):
+        fused = [
+            _chunk(
+                index,
+                score=0.02 - index * 0.001,
+                source="merged",
+                doc_key=f"document:{index}",
+                metadata={
+                    "source_type": "document",
+                    "doc_key": f"document:{index}",
+                    "document_id": index,
+                    "rrf_score": 0.02 - index * 0.001,
+                },
+            )
+            for index in range(1, 6)
+        ]
+        rescues = [
+            _chunk(
+                100 + index,
+                score=100.0 - index,
+                source="bake_knowledge",
+                doc_key=f"bake_knowledge:{100 + index}",
+                metadata={
+                    "source_type": "bake_knowledge",
+                    "doc_key": f"bake_knowledge:{100 + index}",
+                    "artifact_id": 100 + index,
+                    "selection_origin": "artifact_rescue",
+                },
+            )
+            for index in range(4)
+        ]
+
+        selected = RagPipeline._select_contexts(
+            [*fused, *rescues],
+            top_k=5,
+        )
+
+        assert sum(
+            1
+            for chunk in selected
+            if (chunk.metadata or {}).get("selection_origin") == "artifact_rescue"
+        ) == 1
+        assert [chunk.doc_key for chunk in selected[:4]] == [
+            "document:1",
+            "document:2",
+            "document:3",
+            "document:4",
+        ]
+
+    def test_unified_selection_gives_larger_top_k_more_rescue_slots(self):
+        fused = [
+            _chunk(
+                index,
+                score=0.02 - index * 0.001,
+                source="merged",
+                doc_key=f"document:{index}",
+                metadata={
+                    "source_type": "document",
+                    "doc_key": f"document:{index}",
+                    "document_id": index,
+                    "rrf_score": 0.02 - index * 0.001,
+                },
+            )
+            for index in range(1, 12)
+        ]
+        rescues = [
+            _chunk(
+                100 + index,
+                score=100.0 - index,
+                source="document",
+                doc_key=f"document_url:https://docs.example/{100 + index}",
+                metadata={
+                    "source_type": "document",
+                    "doc_key": f"document_url:https://docs.example/{100 + index}",
+                    "document_id": 100 + index,
+                    "selection_origin": "artifact_rescue",
+                },
+            )
+            for index in range(4)
+        ]
+
+        selected = RagPipeline._select_contexts(
+            [*fused, *rescues],
+            top_k=10,
+        )
+
+        rescue_keys = [
+            chunk.doc_key
+            for chunk in selected
+            if (chunk.metadata or {}).get("selection_origin") == "artifact_rescue"
+        ]
+        # top_k=10 时应保留 2 个补位槽，次高词法命中不再被单个高分候选压制。
+        assert rescue_keys == [
+            "document_url:https://docs.example/100",
+            "document_url:https://docs.example/101",
+        ]
+        assert len(selected) == 10
+
     def test_query_intent_passes_time_and_entity_filters(self):
         knowledge = MockFts5Retriever(chunks=[_chunk(1, source="knowledge")])
         vector_r = MockVectorRetriever()
@@ -650,7 +1036,8 @@ class TestRagPipeline:
         assert filters is not None
         assert filters.start_ts is not None
         assert filters.source_types == ["knowledge", "document"]
-        assert "gemini" in (filters.app_names or [])
+        # 近期活动总结不以应用名再次收窄向量召回。
+        assert filters.app_names is None
 
     def test_chinese_question_extracts_meaningful_terms(self):
         knowledge = MockFts5Retriever(chunks=[_chunk(1, source="knowledge")])
@@ -682,14 +1069,15 @@ class TestRagPipeline:
         )
         pipeline.query("我今天问 Gemini 了什么")
         assert knowledge.last_kwargs["observed_start_ts"] is not None
-        assert knowledge.last_kwargs["activity_types"] == ["ask_ai"]
-        assert knowledge.last_kwargs["history_view"] is False
+        # summary/ask_ai 标记只影响排序与 top_k，不再向检索层传收窄过滤
+        assert knowledge.last_kwargs["activity_types"] is None
+        assert knowledge.last_kwargs["history_view"] is None
         assert knowledge.last_kwargs["is_self_generated"] is False
-        assert knowledge.last_kwargs["evidence_strengths"] == ["medium", "high"]
+        assert knowledge.last_kwargs["evidence_strengths"] is None
         filters = vector_r.last_kwargs["filters"]
         assert filters.observed_start_ts is not None
-        assert filters.activity_types == ["ask_ai"]
-        assert filters.history_view is False
+        assert filters.activity_types is None
+        assert filters.history_view is None
         assert filters.is_self_generated is False
 
     def test_query_intent_applies_history_policy(self):
@@ -705,14 +1093,15 @@ class TestRagPipeline:
         )
         pipeline.query("我今天看了什么历史消息")
         assert knowledge.last_kwargs["observed_start_ts"] is not None
-        assert knowledge.last_kwargs["history_view"] is True
-        assert knowledge.last_kwargs["content_origins"] == ["historical_content"]
-        assert knowledge.last_kwargs["activity_types"] == ["reviewing_history", "chat", "reading"]
+        # 历史类查询保留时间语义，但不再向检索层传收窄过滤
+        assert knowledge.last_kwargs["history_view"] is None
+        assert knowledge.last_kwargs["content_origins"] is None
+        assert knowledge.last_kwargs["activity_types"] is None
         filters = vector_r.last_kwargs["filters"]
-        assert filters.history_view is True
-        assert filters.content_origins == ["historical_content"]
+        assert filters.history_view is None
+        assert filters.content_origins is None
 
-    def test_query_intent_applies_recent_summary_mode(self):
+    def test_recent_query_uses_time_filter_without_switching_retrieval_mode(self):
         knowledge = MockFts5Retriever(chunks=[_chunk(1, source="knowledge")])
         vector_r = MockVectorRetriever()
         llm = MockLlmBackend()
@@ -724,252 +1113,156 @@ class TestRagPipeline:
             llm=llm,
         )
         pipeline.query("我最近关于aigc的工作有哪些")
-        assert knowledge.last_kwargs["query_mode"] == "summary"
+        assert "query_mode" not in knowledge.last_kwargs
+        assert knowledge.last_kwargs["observed_start_ts"] is not None
         assert "aigc" in (knowledge.last_kwargs["entity_terms"] or [])
         filters = vector_r.last_kwargs["filters"]
         assert filters.app_names in (None, [])
 
-    def test_weekly_report_intent_detected(self):
-        """'帮我写工作周报' 应识别为 weekly_report 任务型意图"""
-        intent = RagPipeline._parse_query_intent("帮我写下我的工作周报")
-        assert intent.task_type == "weekly_report"
-        assert intent.query_mode == "summary"
-        assert intent.observed_start_ts is not None  # 默认本周
-        # 报告任务在召回阶段不过滤活动类型，由 _select_contexts 做精细筛选。
-        assert intent.activity_types == []
-        assert intent.evidence_strengths == []
-        assert intent.history_view is None
-
-    def test_daily_report_intent_detected(self):
-        """'帮我写今天的日报' 应识别为 daily_report 任务型意图"""
-        intent = RagPipeline._parse_query_intent("帮我写今天的工作日报")
-        assert intent.task_type == "daily_report"
-        assert intent.query_mode == "summary"
-        assert intent.observed_start_ts is not None  # 今天
-
-    def test_weekly_report_last_week(self):
-        """'帮我写上周周报' 应识别为 weekly_report + 上周时间范围"""
-        intent = RagPipeline._parse_query_intent("帮我写上周的工作周报")
-        assert intent.task_type == "weekly_report"
-        # 上周 end_ts 应早于本周开始
-        from rag.pipeline import _week_start_ms
-        this_week_start = _week_start_ms()
-        assert intent.observed_end_ts is not None
-        assert intent.observed_end_ts < this_week_start
-
-    def test_weekly_report_uses_large_top_k(self):
-        """周报查询应自动扩大 top_k 到 18"""
+    def test_report_keyword_query_not_gated(self):
+        """含"周报"的查询不再触发任务门控：knowledge 收到非空查询词，pending_document 通道被调用"""
         knowledge = MockFts5Retriever(chunks=[_chunk(1, source="knowledge")])
-        vector_r = MockVectorRetriever()
-        llm = MockLlmBackend()
-        pipeline = RagPipeline(
-            embedding_model=EmbeddingModel(backend=MockEmbeddingBackend()),
-            vector_retriever=vector_r,               # type: ignore[arg-type]
-            fts5_retriever=MockFts5Retriever(),      # type: ignore[arg-type]
-            knowledge_retriever=knowledge,           # type: ignore[arg-type]
-            llm=llm,
-        )
-        pipeline.query("帮我写工作周报")
-        # weekly_report 分支会将 effective_top_k 拉到至少 18，因此 knowledge 检索 top_k 至少是 36
-        assert knowledge.last_kwargs["top_k"] >= 36
-
-    def test_project_weekly_report_intent_and_kpi_mode(self):
-        intent = RagPipeline._parse_query_intent("帮我生成本周项目周报，包含OKR和KPI进展")
-        assert intent.task_type == "project_weekly_report"
-        assert intent.kpi_mode is True
-        assert intent.query_mode == "summary"
-
-    def test_weekly_report_kpi_mode_sets_flag(self):
-        intent = RagPipeline._parse_query_intent("帮我写工作周报，重点看OKR达成率")
-        assert intent.task_type == "weekly_report"
-        assert intent.kpi_mode is True
-
-    def test_project_weekly_report_prompt_requires_quant_section(self):
-        evidence_chunk = RetrievedChunk(
-            capture_id=34,
-            text="本周完成 3 项核心需求，KPI 达成率 75%，上线 2 个接口",
-            score=0.95,
-            source="knowledge",
-            doc_key="knowledge:12",
-            metadata={
-                "source_type": "knowledge",
-                "doc_key": "knowledge:12",
-                "knowledge_id": 12,
-                "capture_id": 34,
-                "importance": 5,
-                "user_verified": 1,
-                "evidence_strength": "high",
-                "activity_type": "coding",
-            },
-        )
-        llm = MockLlmBackend(model_name="qwen2.5:3b")
+        fts5 = MockFts5Retriever()
         pipeline = RagPipeline(
             embedding_model=EmbeddingModel(backend=MockEmbeddingBackend()),
             vector_retriever=MockVectorRetriever(),  # type: ignore[arg-type]
-            fts5_retriever=MockFts5Retriever(),      # type: ignore[arg-type]
-            knowledge_retriever=MockFts5Retriever(chunks=[evidence_chunk]),  # type: ignore[arg-type]
-            llm=llm,
+            fts5_retriever=fts5,                     # type: ignore[arg-type]
+            knowledge_retriever=knowledge,           # type: ignore[arg-type]
+            llm=MockLlmBackend(),
         )
+        pipeline.query("AIGC 项目周报总结")
+        assert knowledge.last_kwargs["query"] == "AIGC 项目周报总结"
+        assert fts5.call_count >= 1
+        assert fts5.last_kwargs["query"] == "AIGC 项目周报总结"
 
-        pipeline.query("帮我生成项目周报，包含OKR/KPI/专项进展")
-        assert "## 本周量化进展（OKR/KPI/专项）" in llm.last_prompt
-        assert "【量化证据】（仅可引用以下证据中的数字结论）" in llm.last_prompt
-        assert "证据：R#1" in llm.last_prompt
-        assert "K#12/C#34" not in llm.last_prompt
-
-    def test_quant_evidence_extractor_filters_noise_numbers(self):
-        candidate = (
-            "2026-04-15 查看文档 v1.2.3；完成 3 项接口联调，成功率 99%，耗时 30 分钟；"
-            "工单编号 12345"
-        )
-        lines = RagPipeline._extract_quant_fact_lines(candidate, kpi_mode=False)
-        assert any("完成 3 项接口联调" in line for line in lines)
-        assert all("2026-04-15" not in line for line in lines)
-
-    def test_quant_evidence_block_uses_best_evidence(self, tmp_path):
-        db_path = str(tmp_path / "captures.db")
-        _init_knowledge_db(db_path)
-
+    def test_pending_capture_skipped_when_url_already_baked(self, tmp_path):
+        """已有烘焙产物的 URL 不走 capture 兜底，烘焙正文进入上下文"""
+        import sqlite3
+        url = "https://docs.corp.example.com/k/home/abc/def"
+        db_path = str(tmp_path / "memory.db")
         conn = sqlite3.connect(db_path)
-        conn.executemany(
-            """
-            INSERT INTO timelines (
-                id, capture_id, summary, overview, details, start_time, end_time, duration_minutes,
-                frag_app_name, frag_win_title, entities, category, user_verified, observed_at,
-                event_time_start, event_time_end, history_view, content_origin, activity_type,
-                is_self_generated, evidence_strength
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    21, 101, "", "本周完成 4 项需求", "本周完成 4 项需求，KPI 达成率 80%", 1_710_000_000_000,
-                    1_710_000_600_000, 60, "IDE", "", "[]", "开发", 1, 1_710_000_600_000,
-                    1_710_000_000_000, 1_710_000_600_000, 0, "live_interaction", "coding", 0, "high"
-                ),
-                (
-                    22, 102, "", "本周完成 4 项需求", "本周完成 4 项需求，KPI 达成率 80%", 1_709_000_000_000,
-                    1_709_000_600_000, 60, "IDE", "", "[]", "开发", 0, 1_709_000_600_000,
-                    1_709_000_000_000, 1_709_000_600_000, 0, "live_interaction", "coding", 0, "low"
-                ),
-            ],
+        conn.execute(
+            "CREATE TABLE bake_documents (id INTEGER PRIMARY KEY, source_url TEXT, deleted_at INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO bake_documents (id, source_url, deleted_at) VALUES (582, ?, NULL)",
+            (url,),
         )
         conn.commit()
         conn.close()
 
-        chunk_high = RetrievedChunk(
-            capture_id=101,
-            text="本周完成 4 项需求，KPI 达成率 80%",
-            score=0.9,
+        doc_key = "document_url:" + url
+        artifact = RetrievedChunk(
+            capture_id=0,
+            text="烘焙周报正文内容",
+            score=90.8,
             source="knowledge",
-            doc_key="knowledge:21",
-            metadata={
-                "source_type": "knowledge",
-                "doc_key": "knowledge:21",
-                "knowledge_id": 21,
-                "capture_id": 101,
-                "importance": 5,
-                "user_verified": 1,
-                "evidence_strength": "high",
-                "observed_at": 1_710_000_600_000,
-                "activity_type": "coding",
-            },
+            doc_key=doc_key,
+            metadata={"source_type": "document", "doc_key": doc_key, "artifact_id": 582},
         )
-        chunk_low = RetrievedChunk(
-            capture_id=102,
-            text="本周完成 4 项需求，KPI 达成率 80%",
-            score=0.88,
-            source="knowledge",
-            doc_key="knowledge:22",
-            metadata={
-                "source_type": "knowledge",
-                "doc_key": "knowledge:22",
-                "knowledge_id": 22,
-                "capture_id": 102,
-                "importance": 2,
-                "user_verified": 0,
-                "evidence_strength": "low",
-                "observed_at": 1_709_000_600_000,
-                "activity_type": "coding",
-            },
+        capture = RetrievedChunk(
+            capture_id=46384,
+            text="AIGC 共建项目周报 " + "目录导航无权限文本 " * 30,
+            score=1009.8,
+            source="fts5",
+            doc_key="capture:46384",
+            metadata={"url": url, "win_title": "2026Q2 AIGC 共建项目周报"},
         )
-
         pipeline = RagPipeline(
             embedding_model=EmbeddingModel(backend=MockEmbeddingBackend()),
-            vector_retriever=MockVectorRetriever(),  # type: ignore[arg-type]
-            fts5_retriever=MockFts5Retriever(),      # type: ignore[arg-type]
-            knowledge_retriever=MockFts5Retriever(chunks=[chunk_high, chunk_low]),  # type: ignore[arg-type]
+            vector_retriever=MockVectorRetriever(),      # type: ignore[arg-type]
+            fts5_retriever=MockFts5Retriever(chunks=[capture]),   # type: ignore[arg-type]
+            knowledge_retriever=MockFts5Retriever(chunks=[artifact]),  # type: ignore[arg-type]
             llm=MockLlmBackend(),
             db_path=db_path,
         )
+        result = pipeline.query("AIGC 项目周报总结", references_only=True)
+        selected = [
+            c for c in result.contexts
+            if (c.metadata or {}).get("artifact_id") == 582
+        ]
+        assert len(selected) == 1
+        assert selected[0].doc_key == "document:582"
+        assert "烘焙周报正文内容" in selected[0].text
+        assert (selected[0].metadata or {}).get("source_type") == "document"
 
-        block = pipeline._build_quant_evidence_block([chunk_high, chunk_low], kpi_mode=True, top_n=3)
-        assert "【量化证据】" in block
-        assert "R#1" in block
-        assert "K#21/C#101" not in block
-        assert "K#22/C#102" not in block
-
-    def test_weekly_report_normalizes_internal_evidence_refs(self):
-        chunk = RetrievedChunk(
-            capture_id=101,
-            text="完成 4 项需求",
-            score=0.9,
+    def test_unified_selection_selects_baked_document_chunks(self):
+        """activity_type='document' 的烘焙文档可沿统一链路入选。"""
+        doc_chunk = RetrievedChunk(
+            capture_id=50,
+            text="AIGC 项目周报文档内容",
+            score=0.6,
             source="knowledge",
-            doc_key="knowledge:21",
+            doc_key="document:50",
             metadata={
-                "source_type": "knowledge",
-                "doc_key": "knowledge:21",
-                "knowledge_id": 21,
-                "capture_id": 101,
+                "source_type": "document",
+                "doc_key": "document:50",
+                "activity_type": "document",
+                "importance": 3,
             },
         )
+        selected = RagPipeline._select_contexts([doc_chunk], top_k=5)
+        assert any(chunk.doc_key == "document:50" for chunk in selected)
 
-        answer = "## 本周核心产出\n- **修复问题**：完成 4 项需求（证据：K#21/C#101）。"
-        normalized = _normalize_evidence_references(answer, [chunk])
-        assert "证据：R#1" in normalized
-        assert "K#21/C#101" not in normalized
+    def test_unified_selection_does_not_replace_rrf_order_with_importance(self):
+        """importance 不能通过离散模式整体覆盖已经融合好的 RRF 顺序。"""
+        low = RetrievedChunk(
+            capture_id=1,
+            text="低重要性浏览记录",
+            score=0.9,
+            source="knowledge",
+            doc_key="knowledge:1",
+            metadata={
+                "source_type": "knowledge",
+                "doc_key": "knowledge:1",
+                "importance": 1,
+                "activity_type": "reading",
+            },
+        )
+        high = RetrievedChunk(
+            capture_id=2,
+            text="高重要性开发记录",
+            score=0.5,
+            source="knowledge",
+            doc_key="knowledge:2",
+            metadata={
+                "source_type": "knowledge",
+                "doc_key": "knowledge:2",
+                "importance": 5,
+                "activity_type": "coding",
+            },
+        )
+        selected = RagPipeline._select_contexts([low, high], top_k=5)
+        assert [chunk.doc_key for chunk in selected] == ["knowledge:1", "knowledge:2"]
 
-    def test_weekly_report_drops_leaked_evidence_appendix(self):
-        answer = "## 本周核心产出\n- **修复问题**：完成 4 项需求。\n\n依据证据\n- [1] 完成 4 项需求"
-        normalized = _normalize_weekly_report(answer)
-        assert "修复问题" in normalized
-        assert "依据证据" not in normalized
-        assert "[1] 完成 4 项需求" not in normalized
+    def test_time_window_empty_expands_to_recent_14_days(self):
+        """显式时间窗召回为空时，自动扩大到最近 14 天重试一次"""
+        fallback_chunk = _chunk(9, source="knowledge")
+        calls: list[dict] = []
 
-    def test_weekly_report_system_prompt_used(self):
-        """周报任务应使用专属 system prompt，而非默认 prompt"""
-        knowledge = MockFts5Retriever(chunks=[_chunk(1, source="knowledge")])
-        llm = MockLlmBackend(model_name="qwen2.5:3b")
+        class EmptyThenFallbackKnowledge:
+            def search(self, query, top_k=10, **kwargs):
+                calls.append({"query": query, "top_k": top_k, **kwargs})
+                if len(calls) >= 2:
+                    return [fallback_chunk]
+                return []
+
         pipeline = RagPipeline(
             embedding_model=EmbeddingModel(backend=MockEmbeddingBackend()),
             vector_retriever=MockVectorRetriever(),  # type: ignore[arg-type]
             fts5_retriever=MockFts5Retriever(),      # type: ignore[arg-type]
-            knowledge_retriever=knowledge,           # type: ignore[arg-type]
-            llm=llm,
+            knowledge_retriever=EmptyThenFallbackKnowledge(),  # type: ignore[arg-type]
+            llm=MockLlmBackend(),
         )
-        pipeline.query("帮我写工作周报")
-        assert "周报" in llm.last_system
-        assert "activity_type" in llm.last_system
+        result = pipeline.query("生成下本周的工作周报", references_only=True)
 
-    def test_weekly_report_passes_empty_entity_terms_to_knowledge(self):
-        """周报任务应传空 entity_terms，实现宽松全量时间段召回"""
-        knowledge = MockFts5Retriever(chunks=[_chunk(1, source="knowledge")])
-        vector_r = MockVectorRetriever()
-        llm = MockLlmBackend()
-        pipeline = RagPipeline(
-            embedding_model=EmbeddingModel(backend=MockEmbeddingBackend()),
-            vector_retriever=vector_r,               # type: ignore[arg-type]
-            fts5_retriever=MockFts5Retriever(),      # type: ignore[arg-type]
-            knowledge_retriever=knowledge,           # type: ignore[arg-type]
-            llm=llm,
-        )
-        pipeline.query("帮我写工作周报")
-        # 任务型意图不按关键词过滤
-        assert knowledge.last_kwargs.get("entity_terms") is None
-
-    def test_non_write_intent_not_treated_as_report(self):
-        """纯浏览型查询不应识别为任务型意图"""
-        intent = RagPipeline._parse_query_intent("本周工作总结是什么")
-        assert intent.task_type is None
+        assert len(calls) == 2
+        assert calls[1]["observed_start_ts"] is not None
+        now_ms = int(time.time() * 1000)
+        fourteen_days_ms = 14 * 24 * 60 * 60 * 1000
+        assert calls[1]["observed_start_ts"] >= now_ms - fourteen_days_ms - 5000
+        assert calls[1]["observed_start_ts"] <= now_ms
+        assert any(chunk.doc_key == "capture:9" for chunk in result.contexts)
 
     def test_select_contexts_filters_noise_knowledge(self):
         llm = MockLlmBackend()
@@ -1077,14 +1370,14 @@ class TestRagPipeline:
                 _chunk(1, source="fts5", doc_key="capture:1", metadata={"source_type": "capture", "doc_key": "capture:1"})
             ]),        # type: ignore[arg-type]
             knowledge_retriever=MockFts5Retriever(chunks=[
-                _chunk(3, source="knowledge", doc_key="knowledge:3", metadata={"source_type": "knowledge", "doc_key": "knowledge:3", "knowledge_id": 3})
+                _chunk(3, score=10.0, source="bake_knowledge", doc_key="bake_knowledge:3", metadata={"source_type": "bake_knowledge", "doc_key": "bake_knowledge:3", "artifact_id": 3})
             ]),  # type: ignore[arg-type]
             llm=llm,
             top_k=3,
         )
         pipeline.query("Gemini")
         first_context_line = llm.last_prompt.splitlines()[1]
-        assert "[knowledge]" in first_context_line
+        assert "[bake_knowledge]" in first_context_line
 
     def test_query_only_keeps_knowledge_contexts(self):
         llm = MockLlmBackend()
@@ -1116,10 +1409,66 @@ class TestRagPipeline:
         result = pipeline.query("问题", top_k=2)
         assert len(result.contexts) <= 2
 
-    def test_embedding_failure_degrades_gracefully(self):
-        """embedding 失败应降级为纯 knowledge 检索，不抛异常"""
+    def test_wrapped_aigc_link_query_keeps_strict_top_k_and_core_query(self):
         knowledge = [
-            _chunk(1, 0.8, source="knowledge", doc_key="knowledge:1", metadata={"source_type": "knowledge", "doc_key": "knowledge:1", "knowledge_id": 1})
+            _chunk(
+                index,
+                0.9 - index * 0.01,
+                source="knowledge",
+                doc_key=f"knowledge:{index}",
+                metadata={
+                    "source_type": "knowledge",
+                    "doc_key": f"knowledge:{index}",
+                    "knowledge_id": index,
+                },
+            )
+            for index in range(30)
+        ]
+        retriever = MockFts5Retriever(chunks=knowledge)
+        pipeline = RagPipeline(
+            embedding_model=EmbeddingModel(backend=MockEmbeddingBackend()),
+            vector_retriever=MockVectorRetriever(),  # type: ignore[arg-type]
+            fts5_retriever=MockFts5Retriever(),  # type: ignore[arg-type]
+            knowledge_retriever=retriever,  # type: ignore[arg-type]
+            llm=MockLlmBackend(),
+            top_k=10,
+        )
+        wrapped_query = (
+            "核心问题：如何获取 AIGC 共建的周报表？\n"
+            "检索问题：AIGC 共建周报地址\n"
+            "用户问题理解：请回答用户的问题。"
+        )
+
+        result = pipeline.query(wrapped_query, top_k=10, references_only=True)
+
+        assert retriever.last_kwargs["query"] == "AIGC 共建周报地址"
+        assert "query_mode" not in retriever.last_kwargs
+        assert len(result.contexts) == 10
+
+    def test_summary_word_does_not_expand_requested_top_k(self):
+        knowledge = [
+            _chunk(
+                index,
+                source="knowledge",
+                doc_key=f"knowledge:{index}",
+                metadata={
+                    "source_type": "knowledge",
+                    "doc_key": f"knowledge:{index}",
+                    "knowledge_id": index,
+                },
+            )
+            for index in range(20)
+        ]
+        pipeline = _make_pipeline(knowledge_chunks=knowledge, top_k=10)
+
+        result = pipeline.query("总结本周 AIGC 共建进展", top_k=4, references_only=True)
+
+        assert len(result.contexts) <= 4
+
+    def test_embedding_failure_degrades_gracefully(self):
+        """embedding 失败应降级为持久记忆检索，不抛异常"""
+        knowledge = [
+            _chunk(1, 0.8, source="bake_knowledge", doc_key="bake_knowledge:1", metadata={"source_type": "bake_knowledge", "doc_key": "bake_knowledge:1", "artifact_id": 1})
         ]
         pipeline = _make_pipeline(
             knowledge_chunks=knowledge,
@@ -1128,7 +1477,7 @@ class TestRagPipeline:
         result = pipeline.query("工作记录")
         assert result.answer is not None
         assert len(result.contexts) >= 1
-        assert all(chunk.metadata.get("source_type") == "knowledge" for chunk in result.contexts)
+        assert all(chunk.metadata.get("source_type") == "bake_knowledge" for chunk in result.contexts)
 
     def test_prompt_contains_query(self):
         llm = MockLlmBackend(model_name="qwen2.5:3b")
@@ -1300,7 +1649,6 @@ class TestSqliteRetrievers:
             history_view=None,
             is_self_generated=None,
             evidence_strengths=None,
-            query_mode="lookup",
             created_start_ts=None,
             created_end_ts=None,
         )
@@ -1418,6 +1766,11 @@ class TestSqliteRetrievers:
                 deleted_at INTEGER,
                 updated_at INTEGER
             );
+            CREATE TABLE bake_artifact_source_links (
+                artifact_kind TEXT NOT NULL,
+                artifact_id INTEGER NOT NULL,
+                source_timeline_id INTEGER NOT NULL
+            );
             """
         )
         conn.execute(
@@ -1438,6 +1791,13 @@ class TestSqliteRetrievers:
                 '["605","1884"]',
                 1_720_000_000_000,
             ),
+        )
+        conn.execute(
+            """
+            INSERT INTO bake_artifact_source_links
+                (artifact_kind, artifact_id, source_timeline_id)
+            VALUES ('knowledge', 605, 1884)
+            """
         )
         conn.commit()
         conn.close()
@@ -1462,9 +1822,117 @@ class TestSqliteRetrievers:
 
         assert [chunk.metadata["document_id"] for chunk in promoted] == [87]
         assert promoted[0].metadata["retrieval_method"] == "linked_knowledge"
-        assert promoted[0].metadata["promoted_by_knowledge_ids"] == ["1884"]
+        assert promoted[0].metadata["promoted_by_knowledge_ids"] == ["605"]
 
-    def test_artifact_search_returns_document_and_knowledge_for_gpu_metric_doc_query(self, tmp_path):
+    def test_bake_knowledge_artifact_id_promotes_linked_document(self, tmp_path):
+        db_path = str(tmp_path / "bake-linked-document.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE bake_documents (
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                doc_type TEXT NOT NULL,
+                summary TEXT,
+                full_content TEXT,
+                sections_json TEXT NOT NULL DEFAULT '[]',
+                source_url TEXT,
+                source_memory_ids TEXT NOT NULL DEFAULT '[]',
+                linked_knowledge_ids TEXT NOT NULL DEFAULT '[]',
+                deleted_at INTEGER,
+                updated_at INTEGER
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO bake_documents
+                (id, title, doc_type, summary, full_content, source_url,
+                 source_memory_ids, linked_knowledge_ids, updated_at)
+            VALUES (80, '容器云 GPU 指标采集项目', '技术文档',
+                    'SMACT 指标说明', 'SMACT 用于衡量空分利用率。',
+                    'https://docs.example/smact', '["1079"]', '["482"]', 1000)
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        knowledge_hit = RetrievedChunk(
+            capture_id=0,
+            text="SMACT 空分利用率",
+            score=164.0,
+            source="bake_knowledge",
+            doc_key="bake_knowledge:482",
+            metadata={
+                "source_type": "bake_knowledge",
+                "artifact_id": 482,
+                "source_timeline_ids": ["1079"],
+                "doc_key": "bake_knowledge:482",
+            },
+        )
+
+        promoted = KnowledgeFts5Retriever(db_path).promote_documents_linked_to_knowledge(
+            [knowledge_hit],
+            "SMACT 产品介绍",
+            top_k=5,
+        )
+
+        assert [chunk.metadata["document_id"] for chunk in promoted] == [80]
+        assert promoted[0].metadata["promoted_by_knowledge_ids"] == ["482"]
+
+    def test_legacy_timeline_id_collision_does_not_promote_without_source_link(self, tmp_path):
+        db_path = str(tmp_path / "timeline-id-collision.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE bake_documents (
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                doc_type TEXT NOT NULL,
+                summary TEXT,
+                full_content TEXT,
+                sections_json TEXT NOT NULL DEFAULT '[]',
+                source_url TEXT,
+                source_memory_ids TEXT NOT NULL DEFAULT '[]',
+                linked_knowledge_ids TEXT NOT NULL DEFAULT '[]',
+                deleted_at INTEGER,
+                updated_at INTEGER
+            );
+            CREATE TABLE bake_artifact_source_links (
+                artifact_kind TEXT NOT NULL,
+                artifact_id INTEGER NOT NULL,
+                source_timeline_id INTEGER NOT NULL
+            );
+            INSERT INTO bake_documents
+                (id, title, doc_type, linked_knowledge_ids, updated_at)
+            VALUES (80, '无关文档', '技术文档', '["482"]', 1000);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        legacy_hit = RetrievedChunk(
+            capture_id=1,
+            text="时间线知识",
+            score=0.8,
+            source="knowledge",
+            doc_key="knowledge:482",
+            metadata={
+                "source_type": "knowledge",
+                "knowledge_id": 482,
+                "doc_key": "knowledge:482",
+            },
+        )
+
+        promoted = KnowledgeFts5Retriever(db_path).promote_documents_linked_to_knowledge(
+            [legacy_hit],
+            "时间线知识",
+            top_k=5,
+        )
+
+        assert promoted == []
+
+    def test_artifact_search_honors_explicit_document_type(self, tmp_path):
         db_path = str(tmp_path / "artifacts.db")
         conn = sqlite3.connect(db_path)
         conn.executescript(
@@ -1547,7 +2015,7 @@ class TestSqliteRetrievers:
 
         doc_keys = [chunk.doc_key for chunk in results]
         assert "document_url:https://docs.example/container-gpu" in doc_keys
-        assert "bake_knowledge:229" in doc_keys
+        assert "bake_knowledge:229" not in doc_keys
 
     def test_artifact_query_plan_keeps_rare_identifier_across_generic_word_variants(self, tmp_path):
         db_path = str(tmp_path / "artifact-query-plan.db")
@@ -1717,7 +2185,7 @@ class TestSqliteRetrievers:
         conn.close()
 
         retriever = KnowledgeFts5Retriever(db_path)
-        results = retriever.search("我最近关于aigc的工作有哪些", top_k=5, entity_terms=["aigc"], query_mode="summary")
+        results = retriever.search("我最近关于aigc的工作有哪些", top_k=5, entity_terms=["aigc"])
         assert [chunk.metadata["knowledge_id"] for chunk in results] == [2]
 
 
@@ -1741,6 +2209,130 @@ class TestSqliteRetrievers:
         assert results[0].metadata["knowledge_id"] == 1
 
 
+class TestDurableMemoryMaterialization:
+    def test_timeline_hit_becomes_bake_knowledge_and_unmapped_timeline_is_dropped(self, tmp_path):
+        db_path = str(tmp_path / "durable-knowledge.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE bake_knowledge (
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                content TEXT,
+                detailed_content TEXT,
+                entities TEXT,
+                timeline_id INTEGER,
+                source_timeline_ids TEXT DEFAULT '[]',
+                source_capture_ids TEXT NOT NULL DEFAULT '[]',
+                importance INTEGER DEFAULT 3,
+                user_verified BOOLEAN DEFAULT 0,
+                updated_at_ms INTEGER
+            );
+            CREATE TABLE bake_artifact_source_links (
+                artifact_kind TEXT NOT NULL,
+                artifact_id INTEGER NOT NULL,
+                source_timeline_id INTEGER NOT NULL
+            );
+            INSERT INTO bake_knowledge
+                (id, title, summary, content, detailed_content, entities,
+                 timeline_id, source_timeline_ids, updated_at_ms)
+            VALUES
+                (2467, '电商 AI 模型效率方案', 'SMACT 指标长期结论',
+                 'SMACT 用于衡量空分利用率', '', '[]', 5341, '[5341]', 1000);
+            INSERT INTO bake_artifact_source_links
+                (artifact_kind, artifact_id, source_timeline_id)
+            VALUES ('knowledge', 2467, 5341);
+            """
+        )
+        conn.commit()
+        conn.close()
+        hits = [
+            _chunk(1, score=0.8, source="vector", doc_key="knowledge:5341", metadata={"source_type": "knowledge", "doc_key": "knowledge:5341", "knowledge_id": 5341}),
+            _chunk(2, score=0.7, source="vector", doc_key="knowledge:3333", metadata={"source_type": "knowledge", "doc_key": "knowledge:3333", "knowledge_id": 3333}),
+        ]
+
+        results = KnowledgeFts5Retriever(db_path).materialize_durable_knowledge(
+            hits, "SMACT 产品简介"
+        )
+
+        assert [chunk.doc_key for chunk in results] == ["bake_knowledge:2467"]
+        assert results[0].score == pytest.approx(0.8)
+        assert results[0].metadata["retrieval_method"] == "timeline_to_bake_knowledge"
+        assert results[0].metadata["semantic_source_timeline_id"] == "5341"
+
+    def test_data_latest_snapshot_is_a_regular_artifact(self, tmp_path):
+        db_path = str(tmp_path / "data-memory.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE data_sources (
+                id INTEGER PRIMARY KEY,
+                canonical_key TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_url TEXT,
+                access_mode TEXT NOT NULL,
+                refresh_policy TEXT NOT NULL,
+                realtime_level TEXT NOT NULL,
+                source_app_name TEXT,
+                source_window_title TEXT,
+                tags TEXT NOT NULL DEFAULT '[]',
+                first_seen_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL,
+                last_collected_at INTEGER,
+                last_success_at INTEGER,
+                last_error_code TEXT,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                deleted_at INTEGER
+            );
+            CREATE TABLE data_snapshots (
+                id INTEGER PRIMARY KEY,
+                source_id INTEGER NOT NULL,
+                collected_at INTEGER NOT NULL,
+                observed_at INTEGER,
+                collector TEXT NOT NULL,
+                content_text TEXT NOT NULL,
+                structured_data TEXT NOT NULL DEFAULT '{}',
+                content_hash TEXT NOT NULL,
+                freshness_ttl_seconds INTEGER NOT NULL DEFAULT 0,
+                provenance TEXT NOT NULL DEFAULT '{}',
+                source_capture_ids TEXT NOT NULL DEFAULT '[]',
+                source_timeline_ids TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            INSERT INTO data_sources
+                (id, canonical_key, title, source_kind, access_mode, refresh_policy,
+                 realtime_level, first_seen_at, last_seen_at, status, created_at, updated_at)
+            VALUES
+                (7, 'memory:gpu', '电商 GPU 信息平台', 'work_memory', 'memory_only',
+                 'never', 'observed', 1, 2, 'active', 1, 2);
+            INSERT INTO data_snapshots
+                (id, source_id, collected_at, observed_at, collector, content_text,
+                 structured_data, content_hash, status, created_at)
+            VALUES
+                (70, 7, 1000, 900, 'memory_extract', 'GPU 利用率为 42%',
+                 '{"metric":"GPU 利用率","value":"42%"}', 'old', 'success', 1000),
+                (71, 7, 2000, 1900, 'memory_extract', 'GPU 利用率为 55%',
+                 '{"metric":"GPU 利用率","value":"55%"}', 'new', 'success', 2000);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        results = KnowledgeFts5Retriever(db_path).search("GPU 利用率数据", top_k=5)
+
+        data_results = [chunk for chunk in results if chunk.doc_key == "data:7"]
+        assert len(data_results) == 1
+        assert "55%" in data_results[0].text
+        assert "42%" not in data_results[0].text
+        assert data_results[0].metadata["source_type"] == "data"
+        assert data_results[0].metadata["snapshot_id"] == 71
+
+
 class TestOllamaBackend:
     def test_model_name(self):
         backend = OllamaBackend(model="qwen2.5:7b")
@@ -1754,3 +2346,143 @@ class TestOllamaBackend:
     def test_default_model(self):
         backend = OllamaBackend()
         assert "qwen" in backend.model_name.lower()
+
+
+class TestAttachDocumentLinks:
+    """咨询答案中提及的文档应被补上超链接。"""
+
+    @staticmethod
+    def _chunk(title=None, url=None, text="", source_type="document"):
+        return RetrievedChunk(
+            capture_id=0,
+            text=text,
+            score=1.0,
+            source=source_type,
+            doc_key=f"document:{title or text[:8]}",
+            metadata={
+                "source_type": source_type,
+                "title": title,
+                "source_url": url,
+            },
+        )
+
+    def test_normalize_doc_title_strips_cloud_doc_suffix(self):
+        assert _normalize_doc_title("《稳柱 - 收入巡检归因复盘》") == "稳柱-收入巡检归因复盘"
+        assert _normalize_doc_title("稳柱-收入巡检归因复盘 - 云文档") == "稳柱-收入巡检归因复盘"
+        assert _normalize_doc_title("某文档（云文档）") == "某文档"
+
+    def test_inline_replaces_book_title_mention(self):
+        chunks = [
+            self._chunk(
+                title="稳柱-收入巡检归因复盘 - 云文档",
+                url="https://docs.example.com/d/home/abc",
+            ),
+        ]
+        answer = "最相关的是《稳柱 - 收入巡检归因复盘》，记录了故障复盘。"
+        result = _attach_document_links(answer, chunks)
+        assert "[《稳柱 - 收入巡检归因复盘》](https://docs.example.com/d/home/abc)" in result
+
+    def test_mentioned_doc_without_mention_marker_appends_section(self):
+        chunks = [
+            self._chunk(
+                title="稳柱-收入巡检归因复盘 - 云文档",
+                url="https://docs.example.com/d/home/abc",
+            ),
+        ]
+        answer = "最相关的是 稳柱-收入巡检归因复盘，记录了故障复盘。"
+        result = _attach_document_links(answer, chunks)
+        assert "相关文档链接：" in result
+        assert "- [稳柱-收入巡检归因复盘 - 云文档](https://docs.example.com/d/home/abc)" in result
+
+    def test_unmentioned_document_not_linked(self):
+        chunks = [
+            self._chunk(title="另一篇文档", url="https://docs.example.com/other"),
+        ]
+        answer = "本次只讨论《稳柱 - 收入巡检归因复盘》。"
+        assert _attach_document_links(answer, chunks) == answer
+
+    def test_existing_url_not_duplicated(self):
+        chunks = [
+            self._chunk(
+                title="稳柱-收入巡检归因复盘",
+                url="https://docs.example.com/d/home/abc",
+            ),
+        ]
+        answer = "文档地址已给出：https://docs.example.com/d/home/abc （《稳柱-收入巡检归因复盘》）"
+        assert _attach_document_links(answer, chunks) == answer
+
+    def test_collects_url_from_chunk_text(self):
+        chunks = [
+            self._chunk(
+                text="文档：万擎top10模型数据 - 云文档"
+                "\nURL：https://docs.example.com/sheet/1",
+            ),
+        ]
+        links = _collect_document_links(chunks)
+        assert links == [("万擎top10模型数据 - 云文档", "https://docs.example.com/sheet/1")]
+
+    def test_baked_document_lookup_fills_missing_url(self, tmp_path):
+        db_path = str(tmp_path / "memory-bread.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE bake_documents ("
+            "id INTEGER PRIMARY KEY, title TEXT, source_url TEXT, deleted_at INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO bake_documents (title, source_url, deleted_at) VALUES (?, ?, NULL)",
+            ("MaaS的一些联想 - 云文档", "https://docs.example.com/d/home/maas"),
+        )
+        conn.commit()
+        conn.close()
+
+        # 阅读时间线片段自身没有 URL，应按烘焙文档标题索引兜底补链接。
+        chunks = [
+            self._chunk(title="MaaS的一些联想", source_type="knowledge"),
+        ]
+        answer = "你看过《MaaS的一些联想》。"
+        result = _attach_document_links(answer, chunks, db_path=db_path)
+        assert "[《MaaS的一些联想》](https://docs.example.com/d/home/maas)" in result
+
+    @staticmethod
+    def _seed_baked_documents(db_path, rows):
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE bake_documents ("
+            "id INTEGER PRIMARY KEY, title TEXT, source_url TEXT, deleted_at INTEGER)"
+        )
+        for index, (title, url) in enumerate(rows, 1):
+            conn.execute(
+                "INSERT INTO bake_documents (id, title, source_url, deleted_at) VALUES (?, ?, ?, NULL)",
+                (index, title, url),
+            )
+        conn.commit()
+        conn.close()
+
+    def test_baked_suffix_match_only_when_unique(self, tmp_path):
+        db_path = str(tmp_path / "memory-bread.db")
+        self._seed_baked_documents(
+            db_path,
+            [("2026-07-21 商业化收入波动自检报告", "https://docs.example.com/d/0721")],
+        )
+        index = {"2026-07-21商业化收入波动自检报告": ("2026-07-21 商业化收入波动自检报告", "https://docs.example.com/d/0721")}
+        assert _lookup_baked_mention(index, "商业化收入波动自检报告") is not None
+
+        index["2026-07-24商业化收入波动自检报告"] = ("2026-07-24 商业化收入波动自检报告", "https://docs.example.com/d/0724")
+        # 多个同名日报无法确定具体版本，不得误链。
+        assert _lookup_baked_mention(index, "商业化收入波动自检报告") is None
+
+        answer = "已完成《商业化收入波动自检报告》测试。"
+        result = _attach_document_links(answer, [], db_path=db_path)
+        assert "[《商业化收入波动自检报告》](https://docs.example.com/d/0721)" in result
+
+    def test_broken_mention_falls_back_to_section(self, tmp_path):
+        db_path = str(tmp_path / "memory-bread.db")
+        self._seed_baked_documents(
+            db_path,
+            [("[进度日报]智能应急处置归因 - 稳柱产品", "https://docs.example.com/d/533")],
+        )
+        # 模型输出的标题缺少开头书名号，无法原位替换，应兜底到文末链接列表。
+        answer = "工作汇报类：[进度日报]智能应急处置归因 - 稳柱产品》（云文档）。"
+        result = _attach_document_links(answer, [], db_path=db_path)
+        assert "相关文档链接：" in result
+        assert "- [[进度日报]智能应急处置归因 - 稳柱产品](https://docs.example.com/d/533)" in result

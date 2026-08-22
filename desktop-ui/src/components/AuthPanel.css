@@ -36,6 +36,17 @@
   overflow: auto;
 }
 
+.auth-panel--embedded {
+  min-height: auto;
+  padding: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.auth-panel--embedded .auth-panel__form {
+  margin: 0 auto;
+}
+
 .auth-panel__copy {
   max-width: 620px;
   position: relative;

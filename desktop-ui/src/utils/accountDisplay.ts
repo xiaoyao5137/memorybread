@@ -55,8 +55,11 @@ const normalizeRunModeLabel = (value?: string | null): string | null => {
   return RUN_MODE_LABELS[normalized] ?? RUN_MODE_LABELS[normalized.toLowerCase()] ?? normalized
 }
 
-export const getUserDisplayName = (user?: CloudUser | null): string => {
-  if (!user) return '登录账户'
+export const getUserDisplayName = (
+  user?: CloudUser | null,
+  localNickname = '新鲜出炉的面包',
+): string => {
+  if (!user) return localNickname
   return (
     firstNonEmpty(
       user.nickname,

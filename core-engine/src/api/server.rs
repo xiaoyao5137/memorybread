@@ -18,11 +18,12 @@ use super::{
             delete_bake_capture, delete_bake_document, delete_bake_knowledge, delete_bake_memory,
             delete_bake_sop, get_bake_artifact_audits, get_bake_capture,
             get_bake_capture_screenshot, get_bake_document, get_bake_knowledge,
-            get_bake_memory_preview, get_bake_overview, get_bake_queue_status, get_bake_sop,
-            get_bake_style_config, ignore_bake_memory, initialize_bake_memories,
-            list_bake_captures, list_bake_documents, list_bake_knowledge, list_bake_memories,
-            list_bake_sops, promote_bake_memory_to_document, promote_bake_memory_to_sop,
-            run_bake_pipeline, toggle_bake_document_status, update_bake_document,
+            get_bake_memory_preview, get_bake_memory_relations, get_bake_overview,
+            get_bake_queue_status, get_bake_sop, get_bake_style_config, ignore_bake_memory,
+            initialize_bake_memories, list_bake_captures, list_bake_documents, list_bake_knowledge,
+            list_bake_memories, list_bake_sops, promote_bake_memory_to_document,
+            promote_bake_memory_to_sop, refresh_bake_document, run_bake_pipeline,
+            set_bake_document_refresh_policy, toggle_bake_document_status, update_bake_document,
             update_bake_knowledge, update_bake_sop, update_bake_style_config,
             update_memory_favorite,
         },
@@ -30,6 +31,7 @@ use super::{
             award_breadcrumb, equip_breadcrumb, list_breadcrumb_rules, list_breadcrumbs,
             sync_breadcrumb_rules,
         },
+        browser_extension::{get_browser_extension_preview, get_browser_extension_status},
         capture_health::monitor_capture_health,
         captures::list_captures,
         config_checks::{
@@ -159,6 +161,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/creation/history", post(save_history))
         .route("/api/creation/history", get(list_history))
         .route("/api/creation/history/:id", get(get_history))
+        .route(
+            "/api/browser-integration/status",
+            get(get_browser_extension_status),
+        )
+        .route(
+            "/api/browser-integration/jobs/:job_id/preview",
+            get(get_browser_extension_preview),
+        )
         .route(
             "/api/data/sources",
             get(list_data_sources).post(create_data_source),
@@ -344,9 +354,21 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/bake/documents/:id/toggle-status",
             post(toggle_bake_document_status),
         )
+        .route(
+            "/api/bake/documents/:id/refresh",
+            post(refresh_bake_document),
+        )
+        .route(
+            "/api/bake/documents/:id/refresh-policy",
+            put(set_bake_document_refresh_policy),
+        )
         .route("/api/bake/articles", get(list_bake_memories))
         .route("/api/bake/memories", get(list_bake_memories))
         .route("/api/bake/memories/:id", delete(delete_bake_memory))
+        .route(
+            "/api/bake/memories/:id/relations",
+            get(get_bake_memory_relations),
+        )
         .route(
             "/api/bake/knowledge",
             get(list_bake_knowledge).post(create_bake_knowledge),

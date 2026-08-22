@@ -19,7 +19,7 @@ const REPORT_FRESH_SECONDS: i64 = 15 * 60;
 const DATA_TEXT_MAX_CHARS: usize = 80_000;
 const DATA_MEMORY_VERSION: &str = "data-memory.v16";
 const DATA_CONTENT_RENDER_VERSION: &str = "fact-specific.v1";
-const CURRENT_TIMELINE_DATA_FACT_VERSION: &str = "timeline-data-fact.v3";
+const CURRENT_TIMELINE_DATA_FACT_VERSION: &str = "timeline-data-fact.v4";
 const DATA_PERIOD_GRANULARITY: &str = "week";
 const WEEK_MILLIS: i64 = 7 * 24 * 60 * 60 * 1000;
 const EPOCH_FIRST_MONDAY_MILLIS: i64 = 4 * 24 * 60 * 60 * 1000;
@@ -184,6 +184,7 @@ impl StorageManager {
         offset: usize,
     ) -> Result<(Vec<DataSourceRecord>, i64), StorageError> {
         self.with_conn(|conn| {
+            let exact_id = query.and_then(parse_exact_data_source_id);
             let favorite_ids = {
                 let mut stmt = conn.prepare(
                     "SELECT resource_id FROM memory_favorites WHERE resource_kind = 'data'",
@@ -207,13 +208,20 @@ impl StorageManager {
                 record.is_favorite = favorite_ids.contains(&record.id);
                 candidates.push(record);
             }
+            if let Some(id) = exact_id {
+                candidates.retain(|source| source.id == id);
+            }
             // FTS5 预筛：data_snapshots_fts 命中快照对应的 source_id 可用时，
             // 在加载快照文本前先收窄候选（source 级字段命中的候选保留）；
             // FTS 不可用时返回 None，回退原有全量校验。
-            let fts_source_ids = query
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .and_then(|q| data_snapshot_fts_source_ids(conn, q));
+            let fts_source_ids = if exact_id.is_some() {
+                None
+            } else {
+                query
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .and_then(|q| data_snapshot_fts_source_ids(conn, q))
+            };
             for record in &mut candidates {
                 let passes_prefilter = match &fts_source_ids {
                     Some(ids) => {
@@ -241,8 +249,10 @@ impl StorageManager {
             if let Some(favorite) = favorite {
                 candidates.retain(|source| source.is_favorite == favorite);
             }
-            if let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) {
-                candidates.retain(|source| data_source_matches_query(source, query));
+            if exact_id.is_none() {
+                if let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) {
+                    candidates.retain(|source| data_source_matches_query(source, query));
+                }
             }
             // 数据表格统一按创建时间逆序展示，与页面创建时间列保持一致。
             candidates.sort_by(|left, right| {
@@ -263,6 +273,7 @@ impl StorageManager {
         limit: usize,
     ) -> Result<(Vec<DataSourceRecord>, i64), StorageError> {
         self.with_conn(|conn| {
+            let exact_id = query.and_then(parse_exact_data_source_id);
             let mut stmt = conn.prepare(
                 "SELECT id, title, source_kind, source_url, access_mode, refresh_policy,
                         realtime_level, source_app_name, source_window_title, tags,
@@ -279,7 +290,9 @@ impl StorageManager {
             )?;
             let rows = stmt.query_map([], map_data_source_row)?;
             let mut pending = rows.collect::<Result<Vec<_>, _>>()?;
-            if let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(id) = exact_id {
+                pending.retain(|source| source.id == id);
+            } else if let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) {
                 pending.retain(|source| data_source_matches_query(source, query));
             }
             let total = pending.len() as i64;
@@ -316,6 +329,33 @@ impl StorageManager {
             }
             Ok(record)
         })
+    }
+
+    /// 定向查找最新快照关联指定时间线的数据来源，供时间线详情回溯使用。
+    pub fn find_data_source_by_timeline(
+        &self,
+        timeline_id: i64,
+    ) -> Result<Option<DataSourceRecord>, StorageError> {
+        let source_id = self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT snapshot.source_id
+                 FROM data_snapshots snapshot
+                 JOIN data_sources source ON source.id = snapshot.source_id
+                 JOIN json_each(COALESCE(snapshot.source_timeline_ids, '[]')) timeline_ref
+                 WHERE CAST(timeline_ref.value AS INTEGER) = ?1
+                   AND source.deleted_at IS NULL
+                 ORDER BY snapshot.collected_at DESC, snapshot.id DESC
+                 LIMIT 1",
+                [timeline_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(StorageError::from)
+        })?;
+        match source_id {
+            Some(id) => self.get_data_source(id),
+            None => Ok(None),
+        }
     }
 
     pub fn create_manual_data_source(
@@ -1102,7 +1142,7 @@ fn linked_current_model_fact_views(
             "SELECT title, subject, action, target_context, dimension, metric, value, unit,
                     statement, evidence_quote, confidence, observed_at
              FROM timeline_data_facts
-             WHERE timeline_id = ?1
+             WHERE timeline_id = ?1 AND decision_state = 'published'
              ORDER BY id ASC",
         )?;
         let facts = fact_stmt
@@ -2024,7 +2064,7 @@ fn upsert_work_memory_view(
     conn: &Connection,
     candidate: &CaptureCandidate,
     timeline_id: i64,
-    part_index: usize,
+    _part_index: usize,
     context: &TimelineDataContext,
     view: &SemanticDataView,
 ) -> Result<(i64, bool, bool), StorageError> {
@@ -2038,16 +2078,20 @@ fn upsert_work_memory_view(
         candidate.app_name.as_deref(),
         &format!("timeline:{timeline_id}"),
     );
-    let identity_hash = hash_text(&format!("timeline:{timeline_id}:dataset:{part_index}"));
-    let key = format!("memory:timeline-dataset:{DATA_MEMORY_VERSION}:{identity_hash}");
-    let existed = source_exists(conn, &key)?;
-    let source_title = clip_text(&view.title, 240);
     let source_url = candidate
         .url
         .as_deref()
         .and_then(canonical_data_url)
         .filter(|url| !url.is_empty())
         .or_else(|| context.source_urls.first().cloned());
+    let stable_scope = source_url
+        .as_deref()
+        .and_then(stable_data_source_scope)
+        .unwrap_or_else(|| scope.clone());
+    let identity_hash = hash_text(&format!("{stable_scope}|{}", view.identity));
+    let key = format!("memory:semantic:{DATA_MEMORY_VERSION}:{identity_hash}");
+    let existed = source_exists(conn, &key)?;
+    let source_title = clip_text(&view.title, 240);
     let now = current_ts_ms();
     conn.execute(
         "INSERT INTO data_sources (
@@ -2100,20 +2144,58 @@ fn upsert_work_memory_view(
             ],
         )?;
     }
-    let content = clip_text(&semantic_view_content(view), DATA_TEXT_MAX_CHARS);
     let observed_at = view.latest_observed_at.unwrap_or(context.observed_at);
     let period = weekly_period_tag(observed_at);
-    let mut structured = semantic_view_to_json(view.clone());
-    attach_period_tag(&mut structured, &period);
-    let content_hash = hash_text(&format!("{content}\n{structured}"));
-    let previous_hash = conn
+    let previous = conn
         .query_row(
-            "SELECT content_hash FROM data_snapshots
+            "SELECT content_hash, structured_data, source_capture_ids, source_timeline_ids
+             FROM data_snapshots
              WHERE source_id = ?1 AND period_key = ?2 LIMIT 1",
             params![source_id, &period.key],
-            |row| row.get::<_, String>(0),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
         )
         .optional()?;
+    let mut merged_view = view.clone();
+    if let Some((_, previous_structured, _, _)) = &previous {
+        if let Ok(previous_json) = serde_json::from_str::<Value>(previous_structured) {
+            if let Some(previous_view) = semantic_view_from_existing_v3(&previous_json) {
+                merge_semantic_rows(&mut merged_view.rows, previous_view.rows);
+                for statement in previous_view.statements {
+                    if !merged_view.statements.contains(&statement) {
+                        merged_view.statements.push(statement);
+                    }
+                }
+            }
+        }
+    }
+    merged_view.rows.truncate(120);
+    merged_view.statements.truncate(80);
+    merged_view.summary = clip_text(
+        &semantic_summary(&merged_view.title, &merged_view.rows, None),
+        500,
+    );
+    let content = clip_text(&semantic_view_content(&merged_view), DATA_TEXT_MAX_CHARS);
+    let mut structured = semantic_view_to_json(merged_view);
+    attach_period_tag(&mut structured, &period);
+    let content_hash = hash_text(&format!("{content}\n{structured}"));
+    let previous_hash = previous.as_ref().map(|(hash, _, _, _)| hash.clone());
+    let mut source_capture_ids = context.capture_ids.clone();
+    let mut source_timeline_ids = vec![timeline_id];
+    if let Some((_, _, previous_capture_ids, previous_timeline_ids)) = previous {
+        source_capture_ids.extend(parse_json_i64(previous_capture_ids));
+        source_timeline_ids.extend(parse_json_i64(previous_timeline_ids));
+    }
+    source_capture_ids.sort_unstable();
+    source_capture_ids.dedup();
+    source_timeline_ids.sort_unstable();
+    source_timeline_ids.dedup();
     let mut provenance = json!({
         "source": "timeline",
         "observed_at_is_lower_bound": true,
@@ -2156,8 +2238,8 @@ fn upsert_work_memory_view(
             structured.to_string(),
             content_hash,
             provenance.to_string(),
-            serde_json::to_string(&context.capture_ids)?,
-            serde_json::to_string(&vec![timeline_id])?,
+            serde_json::to_string(&source_capture_ids)?,
+            serde_json::to_string(&source_timeline_ids)?,
             now,
         ],
     )?;
@@ -2269,7 +2351,7 @@ fn load_timeline_data_context(
             "SELECT title, subject, action, target_context, dimension, metric, value, unit,
                     statement, evidence_quote, confidence, observed_at
              FROM timeline_data_facts
-             WHERE timeline_id = ?1
+             WHERE timeline_id = ?1 AND decision_state = 'published'
              ORDER BY id ASC",
         )?;
         let rows = fact_stmt.query_map([timeline_id], |row| {
@@ -2398,6 +2480,14 @@ fn data_source_matches_query(source: &DataSourceRecord, query: &str) -> bool {
     .contains(&query)
 }
 
+fn parse_exact_data_source_id(query: &str) -> Option<i64> {
+    let value = query.trim().strip_prefix('#').unwrap_or(query.trim());
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse::<i64>().ok()
+}
+
 fn semantic_views_for_timeline_context(
     context: &TimelineDataContext,
     semantic_context: &str,
@@ -2471,7 +2561,13 @@ fn timeline_dataset_title(candidate: &CaptureCandidate) -> String {
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .or_else(|| candidate.win_title.as_deref().map(str::trim).filter(|value| !value.is_empty()));
+        .or_else(|| {
+            candidate
+                .win_title
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        });
     let raw = window_title
         .filter(|value| !generic_dataset_title(value))
         .or(context_title.filter(|value| !process_like_dataset_title(value)))
@@ -2590,14 +2686,24 @@ fn dataset_semantic_title(
         }
     }
     if !titles.is_empty() {
-        let title_text = titles.iter().take(2).cloned().collect::<Vec<_>>().join("、");
+        let title_text = titles
+            .iter()
+            .take(2)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("、");
         return clip_text(&format!("{title_text}等{}项数据", titles.len()), 120);
     }
     if !metrics.is_empty() {
         return clip_text(
             &format!(
                 "{}等{}项指标数据",
-                metrics.iter().take(2).cloned().collect::<Vec<_>>().join("、"),
+                metrics
+                    .iter()
+                    .take(2)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("、"),
                 metrics.len()
             ),
             120,
@@ -2676,7 +2782,9 @@ fn aggregate_timeline_data_views(
     for view in views {
         let view_title = clean_dataset_fact_title(&view.title);
         if !view_title.is_empty()
-            && !view_titles.iter().any(|existing: &String| existing == &view_title)
+            && !view_titles
+                .iter()
+                .any(|existing: &String| existing == &view_title)
         {
             view_titles.push(view_title);
         }
@@ -2705,7 +2813,9 @@ fn aggregate_timeline_data_views(
             })
             .collect::<Vec<_>>();
         if subject_is_meaningful
-            && !subjects.iter().any(|existing: &String| existing == &subject)
+            && !subjects
+                .iter()
+                .any(|existing: &String| existing == &subject)
         {
             subjects.push(subject);
         }
@@ -2724,8 +2834,7 @@ fn aggregate_timeline_data_views(
         normalize_identity_text(&left.dimension)
             .cmp(&normalize_identity_text(&right.dimension))
             .then_with(|| {
-                normalize_identity_text(&left.metric)
-                    .cmp(&normalize_identity_text(&right.metric))
+                normalize_identity_text(&left.metric).cmp(&normalize_identity_text(&right.metric))
             })
     });
     rows.truncate(TIMELINE_DATASET_MAX_ROWS * TIMELINE_DATASET_MAX_PARTS);
@@ -2738,8 +2847,7 @@ fn aggregate_timeline_data_views(
     metrics.sort();
     metrics.dedup();
     let semantic_title = dataset_semantic_title(dataset_title, &view_titles, &subjects, &metrics);
-    let part_count = ((rows.len() + TIMELINE_DATASET_MAX_ROWS - 1)
-        / TIMELINE_DATASET_MAX_ROWS)
+    let part_count = ((rows.len() + TIMELINE_DATASET_MAX_ROWS - 1) / TIMELINE_DATASET_MAX_ROWS)
         .min(TIMELINE_DATASET_MAX_PARTS);
     let mut datasets = Vec::with_capacity(part_count);
     for part_index in 0..part_count {
@@ -3077,17 +3185,6 @@ fn model_data_fact_is_valid(fact: &ModelDataFact, normalized_source: &str) -> bo
     {
         return false;
     }
-    if generic_model_fact_anchor(&fact.subject)
-        && !specific_model_fact_context(&fact.target_context)
-    {
-        return false;
-    }
-    if generic_model_execution_context(&fact.target_context)
-        && (generic_model_fact_anchor(&fact.subject)
-            || model_fact_subject_is_value_like(&fact.subject, &fact.value))
-    {
-        return false;
-    }
     let evidence = normalize_evidence_text(&fact.evidence_quote);
     let subject = normalize_evidence_text(&fact.subject);
     let statement = normalize_evidence_text(&fact.statement);
@@ -3113,71 +3210,6 @@ fn model_data_fact_is_valid(fact: &ModelDataFact, normalized_source: &str) -> bo
     let dimension_ok =
         dimension.is_empty() || evidence.contains(&dimension) || statement.contains(&dimension);
     semantic_anchor_ok && value_ok && unit_ok && dimension_ok
-}
-
-fn generic_model_fact_anchor(value: &str) -> bool {
-    matches!(
-        normalize_identity_text(value).as_str(),
-        "duration"
-            | "aspectratio"
-            | "width"
-            | "height"
-            | "size"
-            | "value"
-            | "参数"
-            | "生成参数"
-            | "请求参数"
-            | "配置参数"
-            | "已用时"
-            | "耗时"
-            | "总耗时"
-            | "任务耗时"
-            | "任务总耗时"
-            | "整个任务"
-            | "本次任务"
-            | "该任务"
-    )
-}
-
-fn specific_model_fact_context(value: &str) -> bool {
-    let normalized = normalize_identity_text(value);
-    normalized.chars().count() >= 6
-        && !matches!(
-            normalized.as_str(),
-            "视频参数配置"
-                | "生成参数配置"
-                | "任务处理过程"
-                | "api接口调用"
-                | "接口调用"
-                | "当前任务"
-                | "本次任务"
-                | "整个任务"
-        )
-        && !generic_model_execution_context(value)
-}
-
-fn generic_model_execution_context(value: &str) -> bool {
-    let normalized = normalize_identity_text(value);
-    [
-        "参数配置",
-        "生成控制",
-        "过程监控",
-        "接口调用",
-        "任务处理过程",
-    ]
-    .iter()
-    .any(|suffix| normalized.ends_with(suffix))
-}
-
-fn model_fact_subject_is_value_like(subject: &str, value: &str) -> bool {
-    let subject = normalize_evidence_text(subject);
-    let value = normalize_evidence_text(value);
-    let Some(value_start) = (!value.is_empty()).then(|| subject.find(&value)).flatten() else {
-        return false;
-    };
-    let value_end = value_start + value.len();
-    let residue = format!("{}{}", &subject[..value_start], &subject[value_end..]);
-    residue.chars().filter(|ch| ch.is_alphabetic()).count() <= 4
 }
 
 /// 提取字符串中的数字 token（以数字开头，后跟 0-9 : . %），与 sidecar 的
@@ -7152,7 +7184,11 @@ fn extract_http_urls(text: &str) -> Vec<String> {
 }
 
 fn canonical_data_url(raw: &str) -> Option<String> {
-    let mut parsed = reqwest::Url::parse(raw.trim()).ok()?;
+    let trimmed = raw.trim();
+    if contains_embedded_url(trimmed) {
+        return None;
+    }
+    let mut parsed = reqwest::Url::parse(trimmed).ok()?;
     if !matches!(parsed.scheme(), "http" | "https")
         || !parsed.username().is_empty()
         || parsed.password().is_some()
@@ -7188,6 +7224,31 @@ fn canonical_data_url(raw: &str) -> Option<String> {
         parsed.set_path(&trimmed);
     }
     Some(parsed.to_string())
+}
+
+fn stable_data_source_scope(raw: &str) -> Option<String> {
+    let canonical = canonical_data_url(raw)?;
+    let mut parsed = reqwest::Url::parse(&canonical).ok()?;
+    // 页面内锚点只描述当前视口，不改变数据来源身份。查询参数可能承载真实的
+    // 看板或对象身份，因此不维护有限参数名单，也不一概删除。
+    parsed.set_fragment(None);
+    Some(parsed.to_string())
+}
+
+/// 模型提炼偶发把相邻两条 URL 拼进同一个地址（例如看板 URL 的 query 里追加
+/// 另一报表的完整链接）。这类畸形地址会生成错误的数据源身份：去重键失效、
+/// 刷新时实际打开的是错误页面，因此必须在入口拒收。
+fn contains_embedded_url(raw: &str) -> bool {
+    // 跳过首个合法 scheme 前缀后，正文中再出现任何 URL scheme（含百分号
+    // 编码形式）即视为拼接畸形。
+    let tail = raw
+        .strip_prefix("https://")
+        .or_else(|| raw.strip_prefix("http://"))
+        .unwrap_or(raw);
+    let lowered = tail.to_lowercase();
+    ["http://", "https://", "http%3a%2f%2f", "https%3a%2f%2f"]
+        .iter()
+        .any(|needle| lowered.contains(needle))
 }
 
 fn is_sensitive_url_parameter(key: &str) -> bool {
@@ -7427,6 +7488,12 @@ mod tests {
             items[0].source_url.as_deref(),
             Some("https://bi.example.com/live")
         );
+
+        let (id_items, id_total) = storage
+            .list_data_sources_filtered(Some("#2"), None, None, None, None, 20, 0)
+            .unwrap();
+        assert_eq!(id_total, 1);
+        assert_eq!(id_items[0].id, 2);
 
         let (items, total) = storage
             .list_data_sources_filtered(Some("bi.example.com/live"), None, None, None, None, 20, 0)
@@ -8170,8 +8237,14 @@ mod tests {
         assert_eq!(datasets.len(), 1);
         assert_eq!(datasets[0].title, "算力资源盘点");
         assert_eq!(datasets[0].rows.len(), 2);
-        assert!(datasets[0].rows.iter().any(|row| row.dimension == "模型A · 本周"));
-        assert!(datasets[0].rows.iter().any(|row| row.dimension == "模型B · 本周"));
+        assert!(datasets[0]
+            .rows
+            .iter()
+            .any(|row| row.dimension == "模型A · 本周"));
+        assert!(datasets[0]
+            .rows
+            .iter()
+            .any(|row| row.dimension == "模型B · 本周"));
     }
 
     #[test]
@@ -8276,7 +8349,9 @@ mod tests {
             "MyFlicker",
         );
         assert_eq!(single[0].title, "MyFlicker 技能安装量");
-        assert!(single[0].summary.contains("这批数据汇总“MyFlicker 技能安装量”"));
+        assert!(single[0]
+            .summary
+            .contains("这批数据汇总“MyFlicker 技能安装量”"));
         assert!(!single[0].summary.contains("涉及23.7k"));
 
         let mixed = dataset_semantic_title(
@@ -8287,7 +8362,11 @@ mod tests {
                 "技能自动搜索安装量".to_string(),
             ],
             &[],
-            &["月成本".to_string(), "耗时".to_string(), "安装量".to_string()],
+            &[
+                "月成本".to_string(),
+                "耗时".to_string(),
+                "安装量".to_string(),
+            ],
         );
         assert_eq!(mixed, "KAT-Coder-Pro-V2模型月成本、审批流程耗时等3项数据");
     }
@@ -8590,7 +8669,7 @@ mod tests {
     }
 
     #[test]
-    fn model_fact_generic_anchor_requires_a_specific_scene() {
+    fn model_fact_gate_does_not_depend_on_finite_anchor_or_context_enums() {
         let evidence = "duration Kling 3.0 支持 3-15 秒";
         let generic = ModelDataFact {
             title: "Kling 3.0 模型支持时长范围".to_string(),
@@ -8606,12 +8685,15 @@ mod tests {
             confidence: "high".to_string(),
             observed_at: Some(1),
         };
-        assert!(semantic_views_from_model_facts(
-            std::slice::from_ref(&generic),
-            evidence,
-            CURRENT_TIMELINE_DATA_FACT_VERSION,
-        )
-        .is_empty());
+        assert_eq!(
+            semantic_views_from_model_facts(
+                std::slice::from_ref(&generic),
+                evidence,
+                CURRENT_TIMELINE_DATA_FACT_VERSION,
+            )
+            .len(),
+            1
+        );
 
         let contextual = ModelDataFact {
             target_context: "MemoryBread 官网首屏静音背景视频生成".to_string(),
@@ -8641,12 +8723,15 @@ mod tests {
             confidence: "high".to_string(),
             observed_at: Some(1),
         };
-        assert!(semantic_views_from_model_facts(
-            &[execution_shell],
-            "15秒 Kling 3.0模型生成控制",
-            CURRENT_TIMELINE_DATA_FACT_VERSION,
-        )
-        .is_empty());
+        assert_eq!(
+            semantic_views_from_model_facts(
+                &[execution_shell],
+                "15秒 Kling 3.0模型生成控制",
+                CURRENT_TIMELINE_DATA_FACT_VERSION,
+            )
+            .len(),
+            1
+        );
 
         let concrete_config = ModelDataFact {
             title: "MemoryBread 官网首屏视频生成时长".to_string(),
@@ -8848,30 +8933,27 @@ mod tests {
         let extraction = storage.extract_data_candidates(100).unwrap();
         let (sources, total) = storage.list_data_sources(None, 20, 0).unwrap();
 
-        assert_eq!(total, 2);
-        assert_eq!(sources.len(), 2);
-        assert_eq!(extraction.source_created_count, 2);
-        assert_eq!(extraction.source_updated_count, 0);
+        assert_eq!(total, 1);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(extraction.source_created_count, 1);
+        assert_eq!(extraction.source_updated_count, 1);
         assert!(sources.iter().all(|source| {
             source.source_window_title.as_deref() == Some("GPU 周报")
                 && source
                     .latest_snapshot
                     .as_ref()
-                    .is_some_and(|snapshot| snapshot.source_timeline_ids.len() == 1)
+                    .is_some_and(|snapshot| snapshot.source_timeline_ids == vec![11, 12])
         }));
         assert!(sources.iter().any(|source| {
-            source
-                .latest_snapshot
-                .as_ref()
-                .is_some_and(|snapshot| {
-                    snapshot.structured_data["summary"]
-                        .as_str()
-                        .is_some_and(|summary| {
-                            summary.contains("国内")
-                                && summary.contains("GPU 利用率")
-                                && summary.contains("55%")
-                        })
-                })
+            source.latest_snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.structured_data["summary"]
+                    .as_str()
+                    .is_some_and(|summary| {
+                        summary.contains("国内")
+                            && summary.contains("GPU 利用率")
+                            && summary.contains("55%")
+                    })
+            })
         }));
     }
 
@@ -9042,7 +9124,13 @@ mod tests {
         let presented = storage.get_data_source(91).unwrap().unwrap();
         let presented_structured = &presented.latest_snapshot.unwrap().structured_data;
         assert_eq!(presented_structured["summary"], "清晰摘要");
-        assert_eq!(presented_structured["metric_rows"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            presented_structured["metric_rows"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -9154,7 +9242,10 @@ mod tests {
         assert_eq!(summary.historical_regenerated_count, 0);
         assert_eq!(source.id, 1);
         assert_eq!(snapshot.content_text, shared_statement);
-        assert!(snapshot.structured_data.get("content_render_version").is_none());
+        assert!(snapshot
+            .structured_data
+            .get("content_render_version")
+            .is_none());
 
         let second = storage.regenerate_historical_data_memories(100).unwrap();
         assert_eq!(second.historical_regenerated_count, 0);
@@ -9259,17 +9350,11 @@ mod tests {
 
         let summary = storage.extract_data_candidates(100).unwrap();
         let (sources, total) = storage.list_data_sources(None, 20, 0).unwrap();
-        let dataset = sources
-            .iter()
-            .find(|source| source.id > 2)
-            .unwrap();
+        let dataset = sources.iter().find(|source| source.id > 2).unwrap();
 
         assert_eq!(summary.source_created_count, 1);
         assert_eq!(total, 1);
-        assert_eq!(
-            dataset.title,
-            "MemoryBread 官网首页视觉与文案优化任务耗时"
-        );
+        assert_eq!(dataset.title, "MemoryBread 官网首页视觉与文案优化任务耗时");
         let structured = &dataset.latest_snapshot.as_ref().unwrap().structured_data;
         assert_eq!(structured["semantic_origin"], "model_structured_fact");
         assert_eq!(structured["metric_rows"][0]["value"], "16分31秒");
@@ -9399,10 +9484,7 @@ mod tests {
 
         let summary = storage.extract_data_candidates(100).unwrap();
         let (sources, _) = storage.list_data_sources(None, 20, 0).unwrap();
-        let dataset = sources
-            .iter()
-            .find(|source| source.id > 3)
-            .unwrap();
+        let dataset = sources.iter().find(|source| source.id > 3).unwrap();
         let structured = &dataset.latest_snapshot.as_ref().unwrap().structured_data;
 
         assert_eq!(summary.source_created_count, 1);
@@ -9411,12 +9493,16 @@ mod tests {
             "MemoryBread 官网首屏静音背景视频生成时长与MemoryBread 官网首屏静音背景视频画幅比例"
         );
         assert_eq!(structured["metric_rows"].as_array().unwrap().len(), 2);
-        assert!(structured["metric_rows"].as_array().unwrap().iter().any(|row| {
-            row["metric"] == "生成时长" && row["value"] == "15秒"
-        }));
-        assert!(structured["metric_rows"].as_array().unwrap().iter().any(|row| {
-            row["metric"] == "画幅比例" && row["value"] == "16:9"
-        }));
+        assert!(structured["metric_rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| { row["metric"] == "生成时长" && row["value"] == "15秒" }));
+        assert!(structured["metric_rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| { row["metric"] == "画幅比例" && row["value"] == "16:9" }));
     }
 
     #[test]
@@ -9702,6 +9788,22 @@ mod tests {
             Some("https://bi.example.com/report?team=a#chart")
         );
         assert!(canonical_data_url("file:///tmp/report.html").is_none());
+    }
+
+    #[test]
+    fn canonical_url_rejects_concatenated_urls() {
+        // 看板 URL 后面拼接另一报表的完整链接（含百分号编码形式）必须拒收。
+        assert!(canonical_data_url(
+            "https://kwaibi.example.com/pc/dashboard/preview?dashboardId=1&sheetId=2\
+             https%3A%2F%2Ffinops.example.com%2Fresource-analysis%3Farea%3Dx"
+        )
+        .is_none());
+        assert!(canonical_data_url(
+            "https://bi.example.com/report?next=https://other.example.com/x"
+        )
+        .is_none());
+        // 正常 URL 不受影响。
+        assert!(canonical_data_url("https://bi.example.com/report?team=a").is_some());
     }
 
     #[test]
@@ -10399,9 +10501,8 @@ mod tests {
                     "INSERT INTO timeline_data_fact_runs (
                         timeline_id, contract_version, accepted_count, rejected_count,
                         created_at, updated_at
-                     ) VALUES (7, 'timeline-data-fact.v3', 0, 0,
-                               1700000000000, 1700000000000)",
-                    [],
+                     ) VALUES (7, ?1, 0, 0, 1700000000000, 1700000000000)",
+                    [CURRENT_TIMELINE_DATA_FACT_VERSION],
                 )?;
                 Ok(())
             })
@@ -10418,18 +10519,43 @@ mod tests {
                     "INSERT INTO timeline_data_facts (
                         timeline_id, fact_key, title, subject, action, target_context,
                         dimension, metric, value, unit, statement, evidence_quote,
-                        confidence, observed_at, source_capture_ids, created_at, updated_at
+                        confidence, observed_at, source_capture_ids, decision_state,
+                        created_at, updated_at
                      ) VALUES (
                         7, 'orders', '经营复盘订单量', '经营复盘', '统计', '订单量',
                         '本周', '订单量', '1200', '单', '本周经营复盘订单量为1200单。',
                         '本周订单量 1200 单', 'high', 1700000000000, '[41]',
-                        1700000001000, 1700000001000
+                        'shadow', 1700000001000, 1700000001000
                      )",
                     [],
                 )?;
                 conn.execute(
                     "UPDATE timeline_data_fact_runs
                      SET accepted_count = 1, updated_at = 1700000001000
+                     WHERE timeline_id = 7",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let shadow_requeued = storage.extract_data_candidates(100).unwrap();
+        assert_eq!(shadow_requeued.scanned_count, 1);
+        assert_eq!(shadow_requeued.snapshot_created_count, 0);
+        let (_, shadow_total) = storage.list_data_sources(Some("订单量"), 20, 0).unwrap();
+        assert_eq!(shadow_total, 0);
+
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE timeline_data_facts
+                     SET decision_state = 'published', updated_at = 1700000002000
+                     WHERE timeline_id = 7 AND fact_key = 'orders'",
+                    [],
+                )?;
+                conn.execute(
+                    "UPDATE timeline_data_fact_runs
+                     SET updated_at = 1700000002000
                      WHERE timeline_id = 7",
                     [],
                 )?;

@@ -122,7 +122,7 @@ export interface MatchedCreationSkill {
 
 export interface ExecutionSkillResolution {
   matches: MatchedCreationSkill[]
-  source: 'mentioned' | 'model' | 'deterministic'
+  source: 'mentioned' | 'model' | 'unavailable'
   reasoning: string
 }
 
@@ -1760,76 +1760,6 @@ export function matchCreationSkills(
     .map(skill => ({ skill, reason: 'mentioned' as const, score: 1_000 }))
 }
 
-// 提交后的执行时确定性召回：只做词级证据门槛打分，不做枚举式意图门控。
-// 它是模型路由不可用时的降级安全网；正常链路由 sidecar 模型依据 Skill
-// 自描述披露决策召回与否（与 Tool/Agent 路由同构），只采用得分最高的一个主 Skill。
-export function matchCreationSkillsForExecution(
-  prompt: string,
-  skills: LocalCreationSkill[],
-  categories: CreationSkillCategory[] = OFFLINE_CREATION_SKILL_CATEGORIES,
-): MatchedCreationSkill[] {
-  const normalizedPrompt = normalizeMatchText(prompt)
-  if (!normalizedPrompt) return []
-  const promptGrams = meaningfulNgrams(prompt)
-  const matches = skills
-    .filter(skill => skill.status === 'saved' && skill.installed)
-    .map(skill => {
-      const path = categoryPathFor(categories, skill.categoryId)
-      let score = 0
-      // 自动召回必须有词级证据：完整标题包含，或至少一个 3 字以上的词组重合。
-      // 只靠“优化/性能”这类泛化 2 字 gram 堆分不能触发，对应 Agent Loop
-      // 降级路由的探针优先保守策略。
-      let phraseEvidence = false
-      const normalizedTitle = normalizeMatchText(skill.title)
-      const titlePurpose = normalizedTitle.replace(/(?:创作)?(?:skill|文档|方案|报告|规范|指南)$/i, '')
-      if (normalizedTitle && normalizedPrompt.includes(normalizedTitle)) {
-        score += 120
-        phraseEvidence = true
-      }
-      if (titlePurpose.length >= 4 && normalizedPrompt.includes(titlePurpose)) {
-        score += 70
-        phraseEvidence = true
-      }
-      for (const commonTitle of skill.commonTitles) {
-        const common = normalizeMatchText(commonTitle)
-        if (common.length >= 4 && normalizedPrompt.includes(common)) {
-          score += 45
-          phraseEvidence = true
-        }
-      }
-      for (const item of path) {
-        const name = normalizeMatchText(item.name)
-        if (name && normalizedPrompt.includes(name)) {
-          score += item.level * 8
-          phraseEvidence = phraseEvidence || name.length >= 3
-        }
-      }
-      const addOverlap = (grams: Set<string>, weight: number, maximum: number) => {
-        let hits = 0
-        for (const gram of grams) {
-          if (!promptGrams.has(gram)) continue
-          hits += 1
-          phraseEvidence = phraseEvidence || gram.length >= 3
-        }
-        score += Math.min(hits * weight, maximum)
-      }
-      addOverlap(meaningfulNgrams(skill.title), 5, 40)
-      addOverlap(meaningfulNgrams(skill.summary), 3, 36)
-      addOverlap(meaningfulNgrams([
-        skill.skillDescription.purpose,
-        ...skill.skillDescription.documentTypes,
-        ...skill.skillDescription.problems,
-        ...skill.skillDescription.domains,
-        ...skill.skillDescription.deliverables,
-      ].join('\n')), 4, 72)
-      addOverlap(meaningfulNgrams(skill.commonTitles.join('\n')), 2, 24)
-      return { skill, score, automaticAllowed: phraseEvidence }
-    })
-    .filter(match => match.score >= 14 && match.automaticAllowed)
-    .sort((left, right) => right.score - left.score || right.skill.updatedAt - left.skill.updatedAt)
-  return matches.slice(0, 1).map(({ skill, score }) => ({ skill, reason: 'automatic' as const, score }))
-}
-
 // 调用 sidecar 模型路由（与 Tool/Agent 路由同构：自描述渐进式披露 + 模型决策 + 白名单）。
 async function requestExecutionSkillRoute(
   apiBaseUrl: string,
@@ -1883,8 +1813,9 @@ async function requestExecutionSkillRoute(
   }
 }
 
-// 提交后的 Loop 执行时技能解析：显式 @ 优先；否则由模型路由决策，模型推理
-// 失败的降级空召回（source=fallback）不能静默丢掉确定性命中的 Skill。
+// 提交后的 Loop 执行时技能解析：显式 @ 优先；否则完全由模型依据 Skill
+// 自描述决策。模型输出不可恢复或服务不可用时安全降级为不挂载 Skill，
+// 不再根据主题词重合度猜测模板，避免错误模板取得严格工作流控制权。
 export async function resolveExecutionSkills(options: {
   apiBaseUrl: string
   prompt: string
@@ -1896,17 +1827,15 @@ export async function resolveExecutionSkills(options: {
   if (mentioned.length) {
     return { matches: mentioned, source: 'mentioned', reasoning: '' }
   }
-  const deterministic = matchCreationSkillsForExecution(prompt, skills)
   try {
     const routed = await requestExecutionSkillRoute(apiBaseUrl, prompt, skills, signal)
-    // 只有模型的明确决策（含主动判定无合适技能）才允许覆写确定性结果。
     if (routed.source === 'model') {
       return { matches: routed.matches, source: 'model', reasoning: routed.reasoning }
     }
   } catch {
-    // 模型路由不可用时退回确定性匹配，不阻断创作。
+    // Skill 路由不可用不应阻断普通创作，也不能猜测并强制套用模板。
   }
-  return { matches: deterministic, source: 'deterministic', reasoning: '' }
+  return { matches: [], source: 'unavailable', reasoning: '' }
 }
 
 export function resolveCreationSkillDependencies(
@@ -2498,26 +2427,6 @@ function inferAbstractSkillTitle(source: CreationSkillSource, docType: string) {
   ]
   return purposeByType.find(([pattern]) => pattern.test(docType))?.[1]
     || `${docType.replace(/文档$/, '').replace(/报告$/, '')}创作文档`
-}
-
-const MATCH_STOP_GRAMS = new Set([
-  '文档', '创作', '写作', '方案', '内容', '一个', '一份', '帮我', '需要', '用于', '适合', '帮助', '生成', '总结', '设计',
-])
-
-function normalizeMatchText(value: string) {
-  return value.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '')
-}
-
-function meaningfulNgrams(value: string) {
-  const compact = normalizeMatchText(value)
-  const grams = new Set<string>()
-  for (const size of [2, 3, 4]) {
-    for (let index = 0; index <= compact.length - size; index += 1) {
-      const gram = compact.slice(index, index + size)
-      if (!MATCH_STOP_GRAMS.has(gram) && !/^\d+$/.test(gram)) grams.add(gram)
-    }
-  }
-  return grams
 }
 
 function defaultStructureFor(docType: string) {

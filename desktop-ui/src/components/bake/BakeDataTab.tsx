@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import type { DataSnapshot, DataSource, MemoryFavoriteFilter } from '../../types'
 import { BakeFavoriteButton, BakeFavoriteFilterControl } from './BakeFavoriteControls'
 import { BakeDetailDrawer, BakeRecordTable, BakeTableActionButton, type BakeRecordColumn } from './BakeRecordTable'
-import { BakeButton, BakePill } from './BakeShared'
+import { BakeButton } from './BakeShared'
 
 type DataMetricRow = {
   dimension: string
@@ -353,7 +353,7 @@ const BakeDataTab: React.FC<{
                 className="bake-input"
                 value={draftQuery}
                 onChange={(event) => onDraftQueryChange(event.target.value)}
-                placeholder="搜索数据内容、指标、数值或来源 URL"
+                placeholder="搜索数据 ID、内容、指标、数值或来源 URL"
               />
             </label>
           </div>
@@ -415,7 +415,7 @@ const BakeDataTab: React.FC<{
         wide
         eyebrow={drawerMode === 'edit' ? '编辑数据' : '数据详情'}
         title={selectedPresentation?.title || selected?.title || '未命名数据'}
-        meta={selected ? <>数据 #{selected.id} · {sourceKindLabel(selected.source_kind)} · {freshnessLabel(selected)}</> : undefined}
+        meta={selected ? <>数据 #{selected.id} · {sourceKindLabel(selected.source_kind)} · {freshnessLabel(selected)} · 数据时间 {formatTimestamp(selected.latest_snapshot?.observed_at ?? selected.latest_snapshot?.collected_at)}</> : undefined}
         closeLabel="关闭数据详情"
         onClose={closeDrawer}
         footer={selected && selectedPresentation && selected.latest_snapshot && (drawerMode === 'edit' ? (
@@ -433,14 +433,13 @@ const BakeDataTab: React.FC<{
                 {refreshingId === selected.id ? '刷新中…' : '即时刷新数据'}
               </BakeButton>
             )}
-            {selected.source_url && <BakeButton onClick={() => window.open(selected.source_url!, '_blank', 'noopener,noreferrer')}>打开原始来源</BakeButton>}
             {onDelete && (
               <BakeButton danger disabled={deletingId === selected.id} onClick={() => {
                 void Promise.resolve(onDelete(selected.id)).then(deleted => {
                   if (deleted !== false) closeDrawer()
                 })
               }}>
-                {deletingId === selected.id ? '删除中…' : '删除数据'}
+                {deletingId === selected.id ? '删除中…' : '删除'}
               </BakeButton>
             )}
             {onUpdate && <BakeButton primary onClick={() => setDrawerMode('edit')}>编辑</BakeButton>}
@@ -480,10 +479,6 @@ const BakeDataTab: React.FC<{
           <div className="bake-kv bake-capture-detail bake-knowledge-detail">
             <div className="bake-data-detail-heading">
               <div className="bake-data-detail-heading__summary">{selectedPresentation.summary}</div>
-              <div className="bake-inline-pills" style={{ justifyContent: 'flex-start', marginTop: 8 }}>
-                <BakePill text={freshnessLabel(selected)} />
-                <BakePill text={`数据时间 ${formatTimestamp(selected.latest_snapshot.observed_at ?? selected.latest_snapshot.collected_at)}`} />
-              </div>
             </div>
             <section className="bake-knowledge-detail__section bake-data-detail-section">
               <div className="bake-kv__title">数据表</div>
@@ -532,7 +527,7 @@ const BakeDataTab: React.FC<{
               {selected.last_error_code && <div className="bake-data-error">最近刷新失败：{selected.last_error_code}</div>}
             </section>
             <details className="bake-data-disclosure">
-              <summary>查看完整采集内容</summary>
+              <summary>完整采集内容</summary>
               <div className="bake-data-content">{selected.latest_snapshot.content_text || '暂无完整采集内容'}</div>
             </details>
           </div>

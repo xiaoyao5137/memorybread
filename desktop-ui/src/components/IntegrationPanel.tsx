@@ -10,6 +10,7 @@ import {
   Braces,
   Check,
   CheckCircle2,
+  Globe2,
   ChevronRight,
   Code2,
   Copy,
@@ -33,6 +34,11 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react'
+import {
+  getBrowserIntegrationStatus,
+  prepareBrowserIntegration,
+  type BrowserIntegrationStatus,
+} from '../utils/browserIntegration'
 import {
   agentSkillZipBytes,
   importAgentSkillPackage,
@@ -74,7 +80,7 @@ import TutorialLink, { TUTORIAL_URLS } from './TutorialLink'
 import './IntegrationPanel.css'
 import './IntegrationWorkbench.css'
 
-type IntegrationTab = IntegrationDirection | 'backup'
+type IntegrationTab = IntegrationDirection | 'backup' | 'browser'
 type WorkbenchView = 'run' | 'files'
 
 const INTEGRATION_SKILL_CATEGORY: Record<IntegrationDirection, string> = {
@@ -111,6 +117,7 @@ const TABS: Array<{ id: IntegrationTab; label: string; description: string; icon
   { id: 'input', label: '输入', description: '导入外部记忆', icon: ArrowDownToLine },
   { id: 'output', label: '输出', description: '导出上下文或安装 Skill', icon: ArrowUpFromLine },
   { id: 'backup', label: '备份与恢复', description: '备份本地记忆与恢复', icon: RefreshCw },
+  { id: 'browser', label: '浏览器', description: '浏览器后台读取数据', icon: Globe2 },
 ]
 
 const RUN_STATUS_COPY: Record<string, string> = {
@@ -147,6 +154,11 @@ const IntegrationPanel: React.FC = () => {
   const [runPending, setRunPending] = useState(false)
   const [workbenchError, setWorkbenchError] = useState('')
   const [notice, setNotice] = useState('')
+  const [browserStatus, setBrowserStatus] = useState<BrowserIntegrationStatus | null>(null)
+  const [browserStatusLoading, setBrowserStatusLoading] = useState(false)
+  const [browserInstallPending, setBrowserInstallPending] = useState(false)
+  const [browserError, setBrowserError] = useState('')
+  const [browserConnectionFeedbackError, setBrowserConnectionFeedbackError] = useState('')
   const [downloadToast, setDownloadToast] = useState<{ id: number; title: string; path: string | null } | null>(null)
   const downloadToastTimerRef = useRef<number | undefined>(undefined)
   const dataInputRef = useRef<HTMLInputElement>(null)
@@ -160,6 +172,68 @@ const IntegrationPanel: React.FC = () => {
   const skillPackageInputRef = useRef<HTMLInputElement>(null)
   const skillZipInputRef = useRef<HTMLInputElement>(null)
   const pendingDirectionRef = useRef<IntegrationDirection>('input')
+
+  const loadBrowserStatus = useCallback(async (announceResult = false) => {
+    setBrowserStatusLoading(true)
+    setBrowserError('')
+    try {
+      const status = await getBrowserIntegrationStatus(apiBaseUrl)
+      setBrowserStatus(status)
+      if (status.runtime.connected) setBrowserConnectionFeedbackError('')
+      if (announceResult) {
+        if (status.runtime.connected) {
+          setNotice('浏览器扩展已连接成功。')
+        } else {
+          setNotice('')
+          setBrowserConnectionFeedbackError(status.install.nativeHostRegistered
+            ? '尚未检测到浏览器扩展连接。请在 Chrome 扩展页重新加载扩展后再试。'
+            : '尚未完成本机连接注册。请先点击“本地安装”，再按指引加载扩展。')
+        }
+      }
+    } catch (error) {
+      setBrowserError(toUserFacingError(error, '读取 Chrome 浏览器集成状态失败'))
+    } finally {
+      setBrowserStatusLoading(false)
+    }
+  }, [apiBaseUrl])
+
+  useEffect(() => {
+    if (activeTab !== 'browser') return
+    void loadBrowserStatus()
+    const timer = window.setInterval(() => void loadBrowserStatus(), 5000)
+    return () => window.clearInterval(timer)
+  }, [activeTab, loadBrowserStatus])
+
+  const installBrowserIntegration = async () => {
+    setBrowserInstallPending(true)
+    setBrowserError('')
+    setBrowserConnectionFeedbackError('')
+    try {
+      const prepared = await prepareBrowserIntegration()
+      setBrowserStatus(current => current ? { ...current, install: prepared } : current)
+      setNotice(prepared.storeUrl
+        ? '已打开 Chrome 网上应用店，请在商店页面确认安装。'
+        : '已打开 Chrome 扩展页和 MemoryBread 扩展目录，请按下方指引完成加载。')
+      await loadBrowserStatus()
+    } catch (error) {
+      setBrowserError(toUserFacingError(error, '准备 Chrome 扩展安装失败'))
+    } finally {
+      setBrowserInstallPending(false)
+    }
+  }
+
+  const copyBrowserExtensionDirectory = async () => {
+    const extensionDirectory = browserStatus?.install.extensionDirectory
+    if (!extensionDirectory) return
+    setBrowserError('')
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('当前环境不支持复制到剪贴板')
+      await navigator.clipboard.writeText(extensionDirectory)
+      setNotice('扩展目录已复制。请在 Chrome 文件选择器中按 Command + Shift + G 后粘贴。')
+    } catch (error) {
+      setBrowserError(toUserFacingError(error, '复制扩展目录失败'))
+    }
+  }
 
   const loadCatalog = useCallback(async () => {
     setCatalogLoading(true)
@@ -219,10 +293,11 @@ const IntegrationPanel: React.FC = () => {
     [selectedSkillId, skills],
   )
   const selectedFile = skillDetail?.files.find(file => file.path === viewingFilePath) || null
-  const visibleSkills = activeTab === 'backup' ? [] : skills.filter(skill => skill.direction === activeTab)
-  const visibleCustomSkills = activeTab === 'backup'
-    ? []
-    : customSkills.filter(skill => skill.categoryId === INTEGRATION_SKILL_CATEGORY[activeTab])
+  const isSkillTab = activeTab === 'input' || activeTab === 'output'
+  const visibleSkills = isSkillTab ? skills.filter(skill => skill.direction === activeTab) : []
+  const visibleCustomSkills = isSkillTab
+    ? customSkills.filter(skill => skill.categoryId === INTEGRATION_SKILL_CATEGORY[activeTab])
+    : []
   const runInputReady = selectedSkill
     ? selectedSkill.inputKind === 'folder' || selectedSkill.inputKind === 'files'
       ? inputFiles.length > 0
@@ -496,6 +571,107 @@ const IntegrationPanel: React.FC = () => {
             </div>
           </div>
           <MemoryBackupSection />
+        </section>
+      ) : activeTab === 'browser' ? (
+        <section
+          className="integration-content integration-content--browser"
+          id="integration-panel-browser"
+          role="tabpanel"
+          aria-labelledby="integration-tab-browser"
+        >
+          <div className="integration-section-heading">
+            <div>
+              <span>Chrome background access</span>
+              <h2>浏览器集成</h2>
+            </div>
+          </div>
+
+          {notice && <div className="integration-notice" role="status"><CheckCircle2 size={16} />{notice}</div>}
+          {(browserError || browserConnectionFeedbackError) && (
+            <div className="integration-error" role="alert">
+              <span>{browserError || browserConnectionFeedbackError}</span>
+              <button type="button" onClick={() => void loadBrowserStatus(Boolean(browserConnectionFeedbackError))}>重试</button>
+            </div>
+          )}
+
+          <article className="browser-integration-card">
+            <div className="browser-integration-card__icon" aria-hidden><Globe2 size={26} /></div>
+            <div className="browser-integration-card__copy">
+              <div className="browser-integration-card__title-row">
+                <h3>MemoryBread Chrome 扩展程序</h3>
+                <span className={browserStatus?.runtime.connected ? 'is-connected' : 'is-disconnected'}>
+                  {browserStatus?.runtime.connected
+                    ? '已连接'
+                    : browserStatus?.install.nativeHostRegistered
+                      ? '等待扩展连接'
+                      : '未安装'}
+                </span>
+              </div>
+              <dl>
+                <div><dt>扩展版本</dt><dd>{browserStatus?.runtime.extension_version || '尚未连接'}</dd></div>
+                <div><dt>本机连接</dt><dd>{browserStatus?.install.nativeHostRegistered ? '已注册' : '未注册'}</dd></div>
+                <div><dt>后台任务</dt><dd>{browserStatus ? `${browserStatus.runtime.active_job_count} 个执行中，${browserStatus.runtime.queued_job_count} 个排队` : '读取中'}</dd></div>
+              </dl>
+            </div>
+            <div className="browser-integration-card__actions">
+              <button
+                type="button"
+                className="browser-integration-card__primary"
+                onClick={() => void installBrowserIntegration()}
+                disabled={browserInstallPending || browserStatus?.runtime.connected || browserStatus?.install.supported === false}
+              >
+                {browserInstallPending ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
+                {browserStatus?.runtime.connected
+                  ? '已安装并连接'
+                  : browserInstallPending
+                    ? '正在准备'
+                    : browserStatus?.install.storeUrl
+                      ? '前往 Chrome 商店'
+                      : '本地安装'}
+              </button>
+              <small>
+                {browserStatus?.install.storeUrl
+                  ? '安装时一次允许所有网站，创作过程中不再逐站点询问，并可实时展示后台页面画面。'
+                  : '本地扩展默认读取所有网站并提供实时画面；仍可在创作页随时关闭浏览器控制'}
+              </small>
+            </div>
+          </article>
+
+          {!browserStatus?.runtime.connected
+            && browserStatus?.install.supported
+            && !browserStatus.install.storeUrl
+            && browserStatus.install.extensionDirectory && (
+            <section className="browser-install-guide" aria-labelledby="browser-install-guide-title">
+              <div className="browser-install-guide__heading">
+                <div>
+                  <span>本地扩展安装</span>
+                  <h3 id="browser-install-guide-title">在 Chrome 中加载 MemoryBread</h3>
+                </div>
+                <button
+                  type="button"
+                  className="browser-install-guide__check"
+                  onClick={() => void loadBrowserStatus(true)}
+                  disabled={browserStatusLoading}
+                >
+                  {browserStatusLoading ? <Loader2 className="spin" size={15} /> : <RefreshCw size={15} />}
+                  我已安装，检查连接
+                </button>
+              </div>
+              <ol className="browser-install-guide__steps">
+                <li><strong>开启开发者模式</strong><span>在 Chrome 扩展页打开右上角的“开发者模式”。</span></li>
+                <li><strong>加载未打包的扩展程序</strong><span>点击页面左上角的同名按钮，Chrome 会打开文件选择器。</span></li>
+                <li><strong>选择 MemoryBread 目录</strong><span>按 Command + Shift + G，粘贴下方目录并选择它。</span></li>
+              </ol>
+              <div className="browser-install-guide__path-row">
+                <code title={browserStatus.install.extensionDirectory}>{browserStatus.install.extensionDirectory}</code>
+                <button type="button" onClick={() => void copyBrowserExtensionDirectory()}>
+                  <Copy size={15} />
+                  复制扩展目录
+                </button>
+              </div>
+              <p>加载成功后，扩展列表会出现“MemoryBread Browser Connector”。如果浏览器策略禁止加载未打包扩展，请联系组织管理员或使用后续上架的商店版本。</p>
+            </section>
+          )}
         </section>
       ) : (
         <section

@@ -23,6 +23,11 @@ const integrationMocks = vi.hoisted(() => ({
   copyIntegrationArtifact: vi.fn(),
 }))
 
+const browserMocks = vi.hoisted(() => ({
+  getBrowserIntegrationStatus: vi.fn(),
+  prepareBrowserIntegration: vi.fn(),
+}))
+
 vi.mock('../utils/creationSkills', async importOriginal => ({
   ...(await importOriginal<typeof import('../utils/creationSkills')>()),
   importAgentSkillPackage: skillMocks.importAgentSkillPackage,
@@ -34,6 +39,11 @@ vi.mock('../utils/creationSkills', async importOriginal => ({
 vi.mock('../utils/integrationSkills', async importOriginal => ({
   ...(await importOriginal<typeof import('../utils/integrationSkills')>()),
   ...integrationMocks,
+}))
+
+vi.mock('../utils/browserIntegration', () => ({
+  getBrowserIntegrationStatus: browserMocks.getBrowserIntegrationStatus,
+  prepareBrowserIntegration: browserMocks.prepareBrowserIntegration,
 }))
 
 vi.mock('../components/MemoryBackupSection', () => ({
@@ -113,10 +123,35 @@ beforeEach(() => {
   ])
   integrationMocks.downloadIntegrationSkillBundle.mockReset().mockResolvedValue(undefined)
   integrationMocks.downloadIntegrationSkillFile.mockReset().mockResolvedValue(undefined)
+  browserMocks.getBrowserIntegrationStatus.mockReset().mockResolvedValue({
+    runtime: {
+      schema_version: 'memorybread.browser-extension-status.v1',
+      connected: false,
+      extension_version: null,
+      active_job_count: 0,
+      queued_job_count: 0,
+    },
+    install: {
+      supported: true,
+      extensionId: 'llkmmkikjolkibaiklpkfhjdpbbohlbe',
+      extensionDirectory: '/tmp/memorybread-chrome-extension',
+      storeUrl: null,
+      nativeHostRegistered: false,
+      bridgeAvailable: true,
+    },
+  })
+  browserMocks.prepareBrowserIntegration.mockReset().mockResolvedValue({
+    supported: true,
+    extensionId: 'llkmmkikjolkibaiklpkfhjdpbbohlbe',
+    extensionDirectory: '/tmp/memorybread-chrome-extension',
+    storeUrl: null,
+    nativeHostRegistered: true,
+    bridgeAvailable: true,
+  })
 })
 
 describe('IntegrationPanel', () => {
-  it('默认展示真正可执行的输入 Skill 与三类集成 Tab', async () => {
+  it('默认展示真正可执行的输入 Skill 与四类集成 Tab', async () => {
     render(<IntegrationPanel />)
 
     expect(screen.getByRole('heading', { name: '集成' })).toBeInTheDocument()
@@ -124,6 +159,7 @@ describe('IntegrationPanel', () => {
       '输入导入外部记忆',
       '输出导出上下文或安装 Skill',
       '备份与恢复备份本地记忆与恢复',
+      '浏览器浏览器后台读取数据',
     ])
     expect(screen.getByRole('heading', { name: '导入记忆Skill' })).toBeInTheDocument()
     expect(screen.queryByText(/每个内置 Skill 都在本机真实执行/)).not.toBeInTheDocument()
@@ -133,6 +169,123 @@ describe('IntegrationPanel', () => {
     expect(screen.getByText('记忆导入')).toBeInTheDocument()
     expect(screen.getByText('记忆输出')).toBeInTheDocument()
     expect(screen.getAllByText('执行')).toHaveLength(2)
+  })
+
+  it('浏览器 Tab 展示 Chrome 安装状态并可启动安装', async () => {
+    render(<IntegrationPanel />)
+    fireEvent.click(screen.getByRole('tab', { name: /浏览器/ }))
+
+    expect(await screen.findByRole('heading', { name: '浏览器集成' })).toBeInTheDocument()
+    expect(screen.getByText('MemoryBread Chrome 扩展程序')).toBeInTheDocument()
+    expect(screen.getByText('未安装')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: '在 Chrome 中加载 MemoryBread' })).toBeInTheDocument()
+    expect(screen.getByText('加载未打包的扩展程序', { selector: 'strong' })).toBeInTheDocument()
+    expect(screen.getByText('/tmp/memorybread-chrome-extension')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '刷新状态' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '本地安装' }))
+
+    await waitFor(() => expect(browserMocks.prepareBrowserIntegration).toHaveBeenCalledTimes(1))
+    expect(await screen.findByRole('status')).toHaveTextContent('已打开 Chrome 扩展页和 MemoryBread 扩展目录')
+  })
+
+  it('手动检查连接成功后显示明确反馈', async () => {
+    browserMocks.getBrowserIntegrationStatus
+      .mockResolvedValueOnce({
+        runtime: {
+          schema_version: 'memorybread.browser-extension-status.v1',
+          connected: false,
+          extension_version: null,
+          active_job_count: 0,
+          queued_job_count: 0,
+        },
+        install: {
+          supported: true,
+          extensionId: 'llkmmkikjolkibaiklpkfhjdpbbohlbe',
+          extensionDirectory: '/tmp/memorybread-chrome-extension',
+          storeUrl: null,
+          nativeHostRegistered: true,
+          bridgeAvailable: true,
+        },
+      })
+      .mockResolvedValueOnce({
+        runtime: {
+          schema_version: 'memorybread.browser-extension-status.v1',
+          connected: true,
+          extension_version: '0.1.1',
+          active_job_count: 0,
+          queued_job_count: 0,
+        },
+        install: {
+          supported: true,
+          extensionId: 'llkmmkikjolkibaiklpkfhjdpbbohlbe',
+          extensionDirectory: '/tmp/memorybread-chrome-extension',
+          storeUrl: null,
+          nativeHostRegistered: true,
+          bridgeAvailable: true,
+        },
+      })
+
+    render(<IntegrationPanel />)
+    fireEvent.click(screen.getByRole('tab', { name: /浏览器/ }))
+    const checkButton = await screen.findByRole('button', { name: '我已安装，检查连接' })
+    fireEvent.click(checkButton)
+
+    expect(await screen.findByRole('status')).toHaveTextContent('浏览器扩展已连接成功')
+    expect(screen.getByText('已连接')).toBeInTheDocument()
+    expect(screen.getByText('0.1.1')).toBeInTheDocument()
+  })
+
+  it('手动检查未连接时给出可操作提示', async () => {
+    browserMocks.getBrowserIntegrationStatus.mockResolvedValue({
+      runtime: {
+        schema_version: 'memorybread.browser-extension-status.v1',
+        connected: false,
+        extension_version: null,
+        active_job_count: 0,
+        queued_job_count: 0,
+      },
+      install: {
+        supported: true,
+        extensionId: 'llkmmkikjolkibaiklpkfhjdpbbohlbe',
+        extensionDirectory: '/tmp/memorybread-chrome-extension',
+        storeUrl: null,
+        nativeHostRegistered: true,
+        bridgeAvailable: true,
+      },
+    })
+
+    render(<IntegrationPanel />)
+    fireEvent.click(screen.getByRole('tab', { name: /浏览器/ }))
+    fireEvent.click(await screen.findByRole('button', { name: '我已安装，检查连接' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('尚未检测到浏览器扩展连接')
+    expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument()
+  })
+
+  it('配置商店地址时使用 Chrome 商店安装入口', async () => {
+    browserMocks.getBrowserIntegrationStatus.mockResolvedValue({
+      runtime: {
+        schema_version: 'memorybread.browser-extension-status.v1',
+        connected: false,
+        extension_version: null,
+        active_job_count: 0,
+        queued_job_count: 0,
+      },
+      install: {
+        supported: true,
+        extensionId: 'llkmmkikjolkibaiklpkfhjdpbbohlbe',
+        extensionDirectory: null,
+        storeUrl: 'https://chromewebstore.google.com/detail/memorybread/example',
+        nativeHostRegistered: false,
+        bridgeAvailable: true,
+      },
+    })
+
+    render(<IntegrationPanel />)
+    fireEvent.click(screen.getByRole('tab', { name: /浏览器/ }))
+
+    expect(await screen.findByRole('button', { name: '前往 Chrome 商店' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '在 Chrome 中加载 MemoryBread' })).not.toBeInTheDocument()
   })
 
   it('输出 Tab 展示上下文包与可安装编码 Agent Skill', async () => {

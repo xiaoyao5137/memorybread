@@ -39,6 +39,9 @@ _DATA_SOURCE_DISCOVERED_ENDPOINT = "/api/data/sources/discovered"
 _INFERENCE_QUEUE_STATUS_ENDPOINT = "/api/inference/queue-status"
 _CHARGING_CATCHUP_MAX_BATCH_SIZE = 100
 _CHARGING_CATCHUP_SLEEP_SECS = 1
+# 充电且已有可执行 bake 积压时，Core run 完成后快速续批。这里只缩短只读
+# queue-status / run-in-progress 检查，不增加候选数量或模型推理次数。
+_CHARGING_BACKLOG_BAKE_POLL_SECS = 2
 # 单模型槽下不能只按“批次数”做公平调度：100 条 capture 可能拆成十几个模型
 # 请求，一轮就独占十几分钟。双队列高压时把两侧都切成有界工作片，保证轮转。
 _BAKE_BACKLOG_BURST_THRESHOLD = 100
@@ -98,6 +101,7 @@ _SELF_GENERATED_APP_KEYWORDS = (
 
 _SELF_GENERATED_WINDOW_KEYWORDS = (
     "memory-bread",
+    "memorybread preview",
     "记忆面包",
     "KnowledgePanel",
     "MonitorPanel",
@@ -246,6 +250,7 @@ class BackgroundProcessor:
         self._last_data_extraction_at: float = 0.0
         self._consecutive_backlog_bake_runs = 0
         self._latest_bake_actionable_count = 0
+        self._latest_pending_capture_count = 0
         # no_op 活锁防护：上一次触发的 run 若被 queue-status 证实零进展则累加，
         # 达到阈值后暂停周期性触发并指数退避。
         self._consecutive_no_progress_bake_runs = 0
@@ -556,6 +561,11 @@ class BackgroundProcessor:
         actionable_bake_count: int,
     ) -> float:
         interval_secs = max(1.0, float(profile.bake_interval_secs))
+        if (
+            profile.mode in {"charging", "unrestricted"}
+            and int(actionable_bake_count) > 0
+        ):
+            return min(interval_secs, float(_CHARGING_BACKLOG_BAKE_POLL_SECS))
         if (
             profile.mode == "battery"
             and cls._is_dual_backlog_pressure(
@@ -1228,8 +1238,14 @@ class BackgroundProcessor:
                         timeline_id, fact_key, title, subject, action, target_context,
                         dimension, metric, value, unit, statement, evidence_quote,
                         confidence, observed_at, period_granularity, period_key,
-                        period_start_at, period_end_at, source_capture_ids, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'week', ?, ?, ?, ?, ?, ?)
+                        period_start_at, period_end_at, source_capture_ids,
+                        semantic_relation, future_question, decision_reason,
+                        decision_state, decision_rule_version, created_at, updated_at
+                    ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                        ?13, ?14, 'week', ?15, ?16, ?17, ?18, ?19, ?20, ?21,
+                        ?22, ?23, ?24, ?25
+                    )
                     ON CONFLICT(timeline_id, fact_key, dimension, value, unit) DO UPDATE SET
                         title = excluded.title,
                         statement = excluded.statement,
@@ -1237,6 +1253,11 @@ class BackgroundProcessor:
                         confidence = excluded.confidence,
                         observed_at = COALESCE(excluded.observed_at, timeline_data_facts.observed_at),
                         source_capture_ids = excluded.source_capture_ids,
+                        semantic_relation = excluded.semantic_relation,
+                        future_question = excluded.future_question,
+                        decision_reason = excluded.decision_reason,
+                        decision_state = excluded.decision_state,
+                        decision_rule_version = excluded.decision_rule_version,
                         updated_at = excluded.updated_at
                     """,
                     (
@@ -1258,6 +1279,11 @@ class BackgroundProcessor:
                         period_start_at,
                         period_end_at,
                         capture_ids_json,
+                        fact.get('semantic_relation', ''),
+                        fact.get('future_question', ''),
+                        fact.get('decision_reason', ''),
+                        fact.get('decision_state', 'shadow'),
+                        fact.get('decision_rule_version', 'data-open-semantic-v4'),
                         now_ms,
                         now_ms,
                     ),
@@ -2305,6 +2331,21 @@ class BackgroundProcessor:
             logger.error(f"片段提炼异常: {e}")
             return False
 
+    def _current_embedding_model_name(self) -> Optional[str]:
+        """当前嵌入模型名，用于识别旧后端索引的过期向量。
+
+        嵌入后端切换后（如 Ollama 量化 -> sentence-transformers）同名模型
+        的向量空间不兼容，需要用当前模型重建；获取失败返回 None，表示跳过
+        模型版本校验，保持原有行为。
+        """
+        try:
+            from model_registry_global import get_shared_embedding
+
+            return get_shared_embedding().model_name
+        except Exception as exc:
+            logger.debug("未能获取当前嵌入模型名，跳过向量模型版本校验: %s", exc)
+            return None
+
     async def _process_vectorization_batch(self, group: list[dict]):
         """对一组 captures 批量向量化。
 
@@ -2338,6 +2379,7 @@ class BackgroundProcessor:
                 snapshot.doc_key,
                 snapshot.content_hash,
                 len(snapshot.chunks),
+                self._current_embedding_model_name(),
             )
         ]
         document_texts = [
@@ -2473,9 +2515,13 @@ class BackgroundProcessor:
     async def backfill_bake_document_vectors(self, limit: int = 128) -> dict:
         """Backfill vectors from durable bake documents, independent of captures."""
         try:
+            expected_model_name = await asyncio.to_thread(
+                self._current_embedding_model_name
+            )
             documents = await asyncio.to_thread(
                 self._load_pending_bake_documents,
                 limit,
+                expected_model_name,
             )
             if not documents:
                 return {"candidate_count": 0, "processed_count": 0}
@@ -2515,6 +2561,7 @@ class BackgroundProcessor:
         if callable(availability_check) and not availability_check():
             logger.debug("Qdrant 暂不可写，延后持久 bake 文档向量补齐")
             return 0
+        expected_model_name = self._current_embedding_model_name()
         snapshots = [
             snapshot
             for document in documents
@@ -2524,6 +2571,7 @@ class BackgroundProcessor:
                 snapshot.doc_key,
                 snapshot.content_hash,
                 len(snapshot.chunks),
+                expected_model_name,
             )
         ]
         if not snapshots:
@@ -2578,7 +2626,11 @@ class BackgroundProcessor:
                 processed += 1
         return processed
 
-    def _load_pending_bake_documents(self, limit: int) -> list[dict]:
+    def _load_pending_bake_documents(
+        self,
+        limit: int,
+        expected_model_name: Optional[str] = None,
+    ) -> list[dict]:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 tables = {
@@ -2593,8 +2645,15 @@ class BackgroundProcessor:
                 }
                 if tables != {"bake_documents", "artifact_vector_index"}:
                     return []
+                # 嵌入后端切换后，旧模型索引的向量也视为待重建。
+                stale_model_clause = ""
+                if expected_model_name:
+                    stale_model_clause = (
+                        "OR SUM(CASE WHEN COALESCE(v.model_name, '') != ? "
+                        "THEN 1 ELSE 0 END) > 0"
+                    )
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT
                         d.id,
                         d.title,
@@ -2615,12 +2674,18 @@ class BackgroundProcessor:
                     GROUP BY d.id
                     HAVING COUNT(v.id) = 0
                         OR MAX(v.indexed_at) < d.updated_at
+                        {stale_model_clause}
                     ORDER BY d.updated_at DESC, d.id DESC
                     LIMIT ?
                     """,
                     (
                         _SUBSTANTIVE_DOCUMENT_MIN_CHARS,
                         _SUBSTANTIVE_DOCUMENT_MIN_CHARS,
+                        *(
+                            [expected_model_name]
+                            if expected_model_name
+                            else []
+                        ),
                         max(1, int(limit)),
                     ),
                 ).fetchall()
@@ -3123,20 +3188,20 @@ class BackgroundProcessor:
                 False,
             )
 
-        # 连续多次触发的 run 都被证实零进展时，继续触发只会空转并抢占
-        # capture 模型槽；直接跳过本轮触发并指数退避。
+        # 连续无进展时，前一轮已经把 next_check_ts 推到指数退避之后。
+        # 到达这里说明退避已到期，必须允许一次半开探测；若继续直接跳过，
+        # 计数永远不会被新进展清零，重启前都会永久锁死。
         if self._consecutive_no_progress_bake_runs >= _NO_PROGRESS_BAKE_SKIP_THRESHOLD:
             backoff_secs = min(
                 _NO_PROGRESS_BAKE_BACKOFF_BASE_SECS
                 * (2 ** self._consecutive_no_progress_bake_runs),
                 _NO_PROGRESS_BAKE_MAX_BACKOFF_SECS,
             )
-            logger.warning(
-                "⛔ 连续 %s 次 bake 触发零进展，跳过本轮触发并退避 %.0fs",
+            logger.info(
+                "🔎 连续 %s 次 bake 触发零进展，%.0fs 退避已到期，执行一次半开探测",
                 self._consecutive_no_progress_bake_runs,
                 backoff_secs,
             )
-            return check_ts + backoff_secs, False
 
         bake_limit = self._scheduled_bake_limit(profile, pending_capture_count)
         bake_result = await self._maybe_trigger_periodic_bake(
@@ -3238,8 +3303,11 @@ class BackgroundProcessor:
         logger.info(f"🚀 后台处理器启动 (间隔={self.interval}s, 批量={self.batch_size})")
 
         _next_periodic_bake_check_ts: float = 0.0
-        _last_artifact_vector_check_ts: float = 0.0
-        _last_vector_consistency_audit_ts: float = 0.0
+        # 启动后的首要任务是消费采集/bake 积压。向量补齐和一致性审计属于
+        # 可延后维护，不能在启动阶段先占用数分钟，让 LLM 有工作却空闲。
+        _maintenance_started_at = time.monotonic()
+        _last_artifact_vector_check_ts: float = _maintenance_started_at
+        _last_vector_consistency_audit_ts: float = _maintenance_started_at
         _last_runtime_guard_ts: float = 0.0
 
         # 启动即清扫一次：上次退出可能遗留孤儿 llama-server（宿主被杀后 reparent 到 launchd）。
@@ -3253,8 +3321,13 @@ class BackgroundProcessor:
                 await asyncio.to_thread(self._drain_vector_deletion_queue)
 
                 now = time.monotonic()
+                has_known_extraction_backlog = (
+                    self._latest_pending_capture_count > 0
+                    or self._latest_bake_actionable_count > 0
+                )
                 if (
-                    now - _last_vector_consistency_audit_ts
+                    not has_known_extraction_backlog
+                    and now - _last_vector_consistency_audit_ts
                     >= _VECTOR_CONSISTENCY_AUDIT_INTERVAL_SECS
                 ):
                     audit = await asyncio.to_thread(self._audit_vector_consistency)
@@ -3269,10 +3342,11 @@ class BackgroundProcessor:
                                 audit.get("orphan_count"),
                             )
                 if (
-                    now - _last_artifact_vector_check_ts
+                    not has_known_extraction_backlog
+                    and now - _last_artifact_vector_check_ts
                     >= _ARTIFACT_VECTOR_CHECK_INTERVAL_SECS
                 ):
-                    await self.backfill_bake_document_vectors(limit=16)
+                    await self.backfill_bake_document_vectors(limit=64)
                     _last_artifact_vector_check_ts = now
 
                 if now - _last_runtime_guard_ts >= _RUNTIME_GUARD_INTERVAL_SECS:
@@ -3317,6 +3391,7 @@ class BackgroundProcessor:
                 pending_before = await asyncio.to_thread(
                     self._count_unprocessed_captures
                 )
+                self._latest_pending_capture_count = pending_before
 
                 # 先给已到期的 bake 一次调度机会，再进入 capture 工作片。
                 (
@@ -3404,6 +3479,7 @@ class BackgroundProcessor:
                 pending_after = await asyncio.to_thread(
                     self._count_unprocessed_captures
                 )
+                self._latest_pending_capture_count = pending_after
                 if maximum_throughput and pending_before > profile.timeline_batch_size:
                     if self._should_continue_charging_catchup(
                         profile,
@@ -3439,9 +3515,9 @@ class BackgroundProcessor:
                         1.0,
                         _next_periodic_bake_check_ts - time.monotonic(),
                     )
-                    sleep_secs = max(
+                    sleep_secs = min(
                         sleep_secs,
-                        min(profile.timeline_interval_secs, wait_until_check),
+                        wait_until_check,
                     )
 
                 # 等待下一轮

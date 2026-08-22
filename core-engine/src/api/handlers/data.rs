@@ -9,7 +9,7 @@ use std::{
         Arc, Mutex, OnceLock,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     api::{error::ApiError, state::AppState},
+    browser_extension::{BrowserExtensionError, BrowserExtensionJob},
     storage::{
         repo::creation_evidence::NewCreationEvidenceAsset, CreationEvidenceAssetView,
         DataExtractionSummary, DataSearchResult, DataSourceRecord, DiscoveredSourceOutcome,
@@ -36,8 +37,21 @@ use uuid::Uuid;
 
 const MAX_SCRAPED_CHARS: usize = 80_000;
 const BROWSER_DATA_READY_POLL_ATTEMPTS: usize = 120;
+/// 文档正文持续增量渲染时不能等待完整的报表稳定预算；20 秒后先读取当前
+/// DOM，并由文档完整性协议将结果标为 complete 或 partial。
+pub(crate) const BROWSER_DOCUMENT_READY_POLL_ATTEMPTS: usize = 40;
 const BROWSER_INTERACTION_READY_POLL_ATTEMPTS: usize = 80;
 const BROWSER_SCROLL_READY_POLL_ATTEMPTS: usize = 30;
+// Chrome 扩展在后台标签中等待 SPA 报表异步取数。45 秒只够页面导航，
+// 对先渲染壳层、再请求指标的 BI 页面偏短；Sidecar 的单来源预算为 140 秒，
+// 这里给扩展 75 秒，同时仍早于上游超时收敛。
+const BROWSER_EXTENSION_REFRESH_TIMEOUT_SECONDS: u64 = 75;
+// 单次浏览器脚本执行的硬超时；客户端刷新超时为 140s，这里必须更早收敛。
+const BROWSER_SCRIPT_TIMEOUT_SECONDS: u64 = 120;
+// 抽取结果无法解析属于瞬态故障（页面仍在流式渲染、AppleScript 结果被截断），
+// 专用窗口还开着，原地重跑脚本即可自愈，无需重新打开页面。
+const BROWSER_EXTRACT_MAX_ATTEMPTS: usize = 3;
+const BROWSER_EXTRACT_RETRY_DELAY_MS: u64 = 1_500;
 
 #[cfg(target_os = "macos")]
 static BROWSER_SCRAPE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -192,6 +206,10 @@ pub struct RefreshDataSourceRequest {
     pub mode: String,
     #[serde(default = "default_browser_preference")]
     pub browser_preference: String,
+    /// Chrome 扩展执行偏好。auto 优先扩展并在任何不可用状态下降级；
+    /// disabled 跳过扩展，直接沿用旧浏览器/HTTP 通道。
+    #[serde(default = "default_extension_preference")]
+    pub extension_preference: String,
     #[serde(default)]
     pub capture_evidence: bool,
     /// 是否额外保留网页截图；缺省关闭。关闭不影响 DOM/AX 即时取数。
@@ -297,15 +315,15 @@ struct BrowserScreenshot {
 }
 
 #[derive(Debug)]
-struct ScrapeResult {
+pub(crate) struct ScrapeResult {
     collector: &'static str,
     browser: Option<&'static str>,
     interaction_mode: &'static str,
     focus_takeover_count: usize,
-    title: String,
-    url: String,
-    content_text: String,
-    structured_data: Value,
+    pub(crate) title: String,
+    pub(crate) url: String,
+    pub(crate) content_text: String,
+    pub(crate) structured_data: Value,
     screenshot: Option<BrowserScreenshot>,
 }
 
@@ -323,6 +341,20 @@ impl DataToolError {
             code,
             message,
         }
+    }
+
+    /// 供文档刷新等其他 handler 按错误码做降级/重试决策。
+    pub(crate) fn code(&self) -> &'static str {
+        self.code
+    }
+
+    /// 供文档刷新等 handler 把采集失败转成统一 ApiError。
+    pub(crate) fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    pub(crate) fn message(&self) -> &'static str {
+        self.message
     }
 }
 
@@ -637,6 +669,43 @@ pub async fn search_data(
     }))
 }
 
+fn structured_table_content_text(structured_data: &Value) -> Option<String> {
+    let tables = structured_data.get("tables")?.as_array()?;
+    let mut lines = Vec::new();
+    for table in tables.iter().take(24) {
+        let rows = table
+            .as_array()
+            .or_else(|| table.get("rows").and_then(Value::as_array));
+        let Some(rows) = rows else {
+            continue;
+        };
+        for row in rows.iter().take(200) {
+            let Some(cells) = row.as_array() else {
+                continue;
+            };
+            let line = cells
+                .iter()
+                .take(40)
+                .filter_map(|cell| {
+                    cell.as_str()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToString::to_string)
+                        .or_else(|| {
+                            (cell.is_number() || cell.is_boolean()).then(|| cell.to_string())
+                        })
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !line.is_empty() {
+                lines.push(line);
+            }
+        }
+    }
+    let text = lines.join("\n");
+    (!text.trim().is_empty()).then(|| text.chars().take(MAX_SCRAPED_CHARS).collect())
+}
+
 pub async fn refresh_data_source(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
@@ -660,6 +729,14 @@ pub async fn refresh_data_source(
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
             "浏览器偏好无效或当前不受支持",
+        ));
+    }
+    let extension_preference = body.extension_preference.trim().to_lowercase();
+    if !matches!(extension_preference.as_str(), "auto" | "disabled") {
+        return Err(DataToolError::new(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Chrome 扩展执行偏好无效",
         ));
     }
     let capture_visual_evidence = body.capture_evidence && body.retain_screenshot;
@@ -717,6 +794,78 @@ pub async fn refresh_data_source(
     })?;
     validate_scrape_url(&url)?;
 
+    // 截图证据仍由现有显式证据通道处理；常规 DOM/表格读取交给 Chrome
+    // 扩展。默认控制开启后，扩展失败必须返回稳定错误并让创作使用历史快照，
+    // 不能再静默降级到会抢占焦点的 Apple Events 浏览器窗口。
+    let extension_result = if extension_preference == "auto" && !capture_visual_evidence {
+        let timeout = Duration::from_secs(BROWSER_EXTENSION_REFRESH_TIMEOUT_SECONDS);
+        let job = BrowserExtensionJob::new(
+            url.clone(),
+            body.objective.clone(),
+            if body.requested_metrics.is_empty() {
+                body.required_metrics.clone()
+            } else {
+                body.requested_metrics.clone()
+            },
+            body.expected_period_start.clone(),
+            body.expected_period_end.clone(),
+            timeout,
+        );
+        match state.browser_extension.submit(job, timeout).await {
+            Ok(extension) => {
+                let mut structured_data = extension.structured_data;
+                if let Some(object) = structured_data.as_object_mut() {
+                    object.insert("completeness".to_string(), extension.completeness);
+                } else {
+                    structured_data = json!({
+                        "content": structured_data,
+                        "completeness": extension.completeness,
+                    });
+                }
+                Some(ScrapeResult {
+                    collector: "chrome_extension",
+                    browser: Some("chrome"),
+                    interaction_mode: "background_tab",
+                    focus_takeover_count: 0,
+                    title: extension.title,
+                    url: extension.url,
+                    content_text: extension.content_text,
+                    structured_data,
+                    screenshot: None,
+                })
+            }
+            Err(error) => {
+                let detail = format!("{error:?}");
+                let (code, message) = match error {
+                    BrowserExtensionError::Unavailable => {
+                        ("BROWSER_EXTENSION_UNAVAILABLE", "Chrome 扩展当前未连接")
+                    }
+                    BrowserExtensionError::Timeout => {
+                        ("BROWSER_EXTENSION_TIMEOUT", "Chrome 后台页面读取超时")
+                    }
+                    BrowserExtensionError::Failed(_, _) => {
+                        ("BROWSER_EXTENSION_FAILED", "Chrome 扩展未能读取该页面")
+                    }
+                    BrowserExtensionError::Internal => {
+                        ("BROWSER_EXTENSION_INTERNAL", "Chrome 扩展通信异常")
+                    }
+                };
+                tracing::info!(
+                    source_id = id,
+                    reason = detail,
+                    "Chrome 扩展采集未完成，保留历史快照且不打开前台浏览器"
+                );
+                return Err(DataToolError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    code,
+                    message,
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
     let preview_token = foreground_preview_token;
     let evidence_path = evidence_capture
         .as_ref()
@@ -732,27 +881,33 @@ pub async fn refresh_data_source(
             body.objective.clone(),
             body.expected_period_start.clone(),
             body.expected_period_end.clone(),
+            BROWSER_DATA_READY_POLL_ATTEMPTS,
+            true,
         )
     };
 
-    let scrape_result = match mode.as_str() {
-        _ if evidence_capture.is_some() => scrape_in_browser().await,
-        "browser" => scrape_in_browser().await,
-        "http" => scrape_http(&url).await,
-        _ if source.access_mode == "browser_session" => match scrape_in_browser().await {
-            Ok(result) => Ok(result),
-            Err(browser_error) => match scrape_http(&url).await {
+    let scrape_result = if let Some(result) = extension_result {
+        Ok(result)
+    } else {
+        match mode.as_str() {
+            _ if evidence_capture.is_some() => scrape_in_browser().await,
+            "browser" => scrape_in_browser().await,
+            "http" => scrape_http(&url).await,
+            _ if source.access_mode == "browser_session" => match scrape_in_browser().await {
                 Ok(result) => Ok(result),
-                Err(_) => Err(browser_error),
+                Err(browser_error) => match scrape_http(&url).await {
+                    Ok(result) => Ok(result),
+                    Err(_) => Err(browser_error),
+                },
             },
-        },
-        _ => match scrape_http(&url).await {
-            Ok(result) => Ok(result),
-            Err(_) => scrape_in_browser().await,
-        },
+            _ => match scrape_http(&url).await {
+                Ok(result) => Ok(result),
+                Err(_) => scrape_in_browser().await,
+            },
+        }
     };
 
-    let result = match scrape_result {
+    let mut result = match scrape_result {
         Ok(result) => result,
         Err(error) => {
             cleanup_pending_evidence(evidence_capture.as_ref());
@@ -779,12 +934,16 @@ pub async fn refresh_data_source(
         ));
     }
     if result.content_text.trim().is_empty() {
-        cleanup_pending_evidence(evidence_capture.as_ref());
-        return Err(DataToolError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "SCRAPE_EMPTY",
-            "页面没有可采纳的数据正文或表格",
-        ));
+        if let Some(table_text) = structured_table_content_text(&result.structured_data) {
+            result.content_text = table_text;
+        } else {
+            cleanup_pending_evidence(evidence_capture.as_ref());
+            return Err(DataToolError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "SCRAPE_EMPTY",
+                "页面没有可采纳的数据正文或表格",
+            ));
+        }
     }
 
     let collected_at = now_ms();
@@ -966,7 +1125,7 @@ pub async fn validate_creation_evidence(
     Ok(Json(asset.into()))
 }
 
-async fn scrape_browser_async(
+pub(crate) async fn scrape_browser_async(
     url: String,
     browser_preference: String,
     source_app_name: Option<String>,
@@ -975,6 +1134,8 @@ async fn scrape_browser_async(
     objective: Option<String>,
     expected_period_start: Option<String>,
     expected_period_end: Option<String>,
+    readiness_poll_attempts: usize,
+    collect_structured_segments: bool,
 ) -> Result<ScrapeResult, DataToolError> {
     tokio::task::spawn_blocking(move || {
         scrape_with_browser(
@@ -986,6 +1147,8 @@ async fn scrape_browser_async(
             objective.as_deref(),
             expected_period_start.as_deref(),
             expected_period_end.as_deref(),
+            readiness_poll_attempts,
+            collect_structured_segments,
         )
     })
     .await
@@ -1001,6 +1164,8 @@ fn scrape_with_browser(
     objective: Option<&str>,
     expected_period_start: Option<&str>,
     expected_period_end: Option<&str>,
+    readiness_poll_attempts: usize,
+    collect_structured_segments: bool,
 ) -> Result<ScrapeResult, DataToolError> {
     #[cfg(not(target_os = "macos"))]
     {
@@ -1013,6 +1178,8 @@ fn scrape_with_browser(
             objective,
             expected_period_start,
             expected_period_end,
+            readiness_poll_attempts,
+            collect_structured_segments,
         );
         return Err(DataToolError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1077,9 +1244,11 @@ fn scrape_with_browser(
                     &readiness_javascript,
                     &javascript,
                     evidence_path.is_some(),
+                    readiness_poll_attempts,
                 );
-                let mut output = run_browser_script(&script)?;
-                if output.status.success() && evidence_path.is_none() {
+                let mut output = run_browser_script_with_extract_retry(&script)?;
+                if output.status.success() && evidence_path.is_none() && collect_structured_segments
+                {
                     let segment_payloads = collect_background_browser_structured_segments(
                         adapter,
                         &session,
@@ -1162,7 +1331,7 @@ fn scrape_with_browser(
                     &javascript,
                 ),
             };
-            (run_browser_script(&script)?, None)
+            (run_browser_script_with_extract_retry(&script)?, None)
         };
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
@@ -1202,9 +1371,11 @@ fn scrape_with_browser(
             ));
         }
         let payload: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+            // 已在 run_browser_script_with_extract_retry 内原地重试过；到这里仍
+            // 无法解析时，给调用方明确的瞬态错误码，便于编排层退避重试。
             DataToolError::new(
                 StatusCode::BAD_GATEWAY,
-                "SCRAPE_FAILED",
+                "SCRAPE_OUTPUT_UNPARSEABLE",
                 "浏览器返回的页面数据无法解析",
             )
         })?;
@@ -1340,7 +1511,7 @@ fn prepare_evidence_capture(
     })
 }
 
-fn normalize_preview_id(preview_id: Option<&str>) -> Result<String, DataToolError> {
+pub(crate) fn normalize_preview_id(preview_id: Option<&str>) -> Result<String, DataToolError> {
     match preview_id.map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) => Uuid::parse_str(value)
             .map(|id| id.to_string())
@@ -1499,17 +1670,94 @@ fn resolve_browser_adapter(
 
 #[cfg(target_os = "macos")]
 fn run_browser_script(script: &str) -> Result<Output, DataToolError> {
-    Command::new("osascript")
+    let mut child = Command::new("osascript")
         .arg("-e")
         .arg(script)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|_| {
             DataToolError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "BROWSER_ATTACH_UNAVAILABLE",
                 "无法附加本机浏览器会话",
             )
-        })
+        })?;
+    // osascript 卡死时不能无限阻塞刷新请求，否则会吃掉客户端的全部超时预算。
+    let deadline = Instant::now() + Duration::from_secs(BROWSER_SCRIPT_TIMEOUT_SECONDS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                if let Some(mut pipe) = child.stdout.take() {
+                    use std::io::Read;
+                    let _ = pipe.read_to_end(&mut stdout);
+                }
+                if let Some(mut pipe) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = pipe.read_to_end(&mut stderr);
+                }
+                return Ok(Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    tracing::warn!(
+                        timeout_seconds = BROWSER_SCRIPT_TIMEOUT_SECONDS,
+                        "浏览器取数脚本超时，已中止 osascript"
+                    );
+                    return Err(DataToolError::new(
+                        StatusCode::GATEWAY_TIMEOUT,
+                        "SCRAPE_TIMEOUT",
+                        "浏览器取数脚本执行超时",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(_) => {
+                return Err(DataToolError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "BROWSER_ATTACH_UNAVAILABLE",
+                    "无法附加本机浏览器会话",
+                ));
+            }
+        }
+    }
+}
+
+/// 执行浏览器脚本并在“执行成功但输出无法解析为 JSON”时原地重试。
+///
+/// 重型 BI 看板在页面仍流式渲染时，AppleScript 回传的抽取结果可能被截断
+/// 成非法 JSON。这类故障是瞬态的，窗口/页签仍在原处，直接重跑脚本即可。
+/// 非零退出码（焦点门禁、脚本禁用等）保持原有语义，直接返回给调用方分类。
+#[cfg(target_os = "macos")]
+fn run_browser_script_with_extract_retry(script: &str) -> Result<Output, DataToolError> {
+    let mut last_output = None;
+    for attempt in 1..=BROWSER_EXTRACT_MAX_ATTEMPTS {
+        let output = run_browser_script(script)?;
+        if !output.status.success() {
+            return Ok(output);
+        }
+        if serde_json::from_slice::<Value>(&output.stdout).is_ok() {
+            return Ok(output);
+        }
+        tracing::warn!(
+            attempt,
+            stdout_bytes = output.stdout.len(),
+            "浏览器抽取结果无法解析，准备原地重试"
+        );
+        last_output = Some(output);
+        if attempt < BROWSER_EXTRACT_MAX_ATTEMPTS {
+            thread::sleep(Duration::from_millis(BROWSER_EXTRACT_RETRY_DELAY_MS));
+        }
+    }
+    Ok(last_output.expect("重试循环至少执行一次"))
 }
 
 #[cfg(target_os = "macos")]
@@ -1571,11 +1819,25 @@ fn background_browser_window_origin(preview_id: &Uuid) -> (i32, i32) {
 
 #[cfg(target_os = "macos")]
 fn cleanup_background_browser_window(adapter: BrowserAdapter, session: &BrowserWindowSession) {
-    let _ = run_browser_script(&build_background_browser_cleanup_script(
+    let cleanup_result = run_browser_script(&build_background_browser_cleanup_script(
         adapter,
         &session.apple_script_id,
         session.launched_browser,
     ));
+    if matches!(&cleanup_result, Ok(output) if output.status.success()) {
+        return;
+    }
+
+    tracing::warn!(
+        browser = adapter.id,
+        preview_token = %session.preview_token,
+        "按窗口 ID 清理后台浏览器预览失败，改按 Preview 标识兜底清理"
+    );
+    cleanup_orphaned_background_browser_window(
+        adapter,
+        &session.preview_token,
+        session.launched_browser,
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -1824,6 +2086,48 @@ fn browser_axis_positions(content_size: u32, viewport_size: u32, limit: usize) -
     positions
 }
 
+fn browser_axis_coverage_complete(
+    positions: &[u32],
+    content_size: u32,
+    viewport_size: u32,
+) -> bool {
+    let viewport = viewport_size.max(1);
+    let maximum = content_size.saturating_sub(viewport);
+    positions.first().copied() == Some(0)
+        && positions.last().copied() == Some(maximum)
+        && positions
+            .windows(2)
+            .all(|window| window[1].saturating_sub(window[0]) <= viewport)
+}
+
+fn annotate_scroll_geometry(
+    payloads: &mut [Value],
+    geometry: &BrowserPageGeometry,
+    coverage_complete: bool,
+) {
+    let Some(first) = payloads.first_mut() else {
+        return;
+    };
+    let Some(structured) = first
+        .get_mut("structured_data")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    structured.insert(
+        "scroll_geometry".to_string(),
+        json!({
+            "scroll_mode": geometry.scroll_mode,
+            "scroll_width": geometry.scroll_width,
+            "scroll_height": geometry.scroll_height,
+            "viewport_width": geometry.inner_width,
+            "viewport_height": geometry.inner_height,
+            "reached_end": true,
+            "coverage_complete": coverage_complete,
+        }),
+    );
+}
+
 fn browser_scroll_reached(actual: u32, expected: u32) -> bool {
     actual.abs_diff(expected) <= 3
 }
@@ -1927,11 +2231,23 @@ fn merge_browser_payloads(mut primary: Value, segments: &[Value]) -> Value {
             }
         }
     }
+    let scroll_geometry = segments
+        .iter()
+        .find_map(|segment| segment.pointer("/structured_data/scroll_geometry"))
+        .cloned();
+    if let Some(pagination) = segments
+        .iter()
+        .find_map(|segment| segment.pointer("/structured_data/pagination"))
+        .cloned()
+    {
+        structured_object.insert("pagination".to_string(), pagination);
+    }
     structured_object.insert(
         "scroll_capture".to_string(),
         json!({
             "segment_count": segments.len(),
             "aggregated": !segments.is_empty(),
+            "geometry": scroll_geometry,
             "scroll_positions": segments.iter().filter_map(|segment| {
                 segment.get("structured_data")?.get("page_state")?
                     .get("active_scroll_top").cloned()
@@ -2079,6 +2395,132 @@ fn collect_background_browser_structured_segments(
     extraction_javascript: &str,
     readiness_javascript: &str,
 ) -> Result<Vec<Value>, DataToolError> {
+    const MAX_TABLE_PAGES: usize = 25;
+    let mut all_payloads = Vec::new();
+    let mut visited_page_keys = std::collections::HashSet::new();
+    let mut started_at_first_page = true;
+    let mut reached_last_page = false;
+
+    for page_index in 0..MAX_TABLE_PAGES {
+        all_payloads.extend(collect_background_browser_single_page_segments(
+            adapter,
+            session,
+            extraction_javascript,
+            readiness_javascript,
+        )?);
+        let advance = advance_background_browser_table_page(adapter, session)?;
+        if page_index == 0 {
+            started_at_first_page = advance
+                .get("at_first_page")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+        }
+        let page_key = advance
+            .get("page_key")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if !page_key.is_empty() && !visited_page_keys.insert(page_key) {
+            break;
+        }
+        if advance.get("advanced").and_then(Value::as_bool) != Some(true) {
+            reached_last_page = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        wait_for_background_browser_segment(adapter, session, readiness_javascript, false)?;
+    }
+
+    let dataset_complete = started_at_first_page && reached_last_page;
+    for payload in &mut all_payloads {
+        let Some(structured) = payload
+            .get_mut("structured_data")
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        structured.insert(
+            "pagination".to_string(),
+            json!({
+                "adapter": "semantic_dom_pagination.v1",
+                "pages_captured": visited_page_keys.len().max(1),
+                "started_at_first_page": started_at_first_page,
+                "reached_last_page": reached_last_page,
+                "dataset_complete": dataset_complete,
+            }),
+        );
+    }
+    if started_at_first_page && visited_page_keys.len() > 1 {
+        restore_background_browser_first_table_page(adapter, session);
+    }
+    Ok(all_payloads)
+}
+
+#[cfg(target_os = "macos")]
+fn restore_background_browser_first_table_page(
+    adapter: BrowserAdapter,
+    session: &BrowserWindowSession,
+) {
+    let javascript = r#"(function(){var visible=function(n){if(!n)return false;var s=getComputedStyle(n),r=n.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};var scopes=Array.prototype.slice.call(document.querySelectorAll('nav,[role="navigation"],[class*="pagination" i],[class*="pager" i]')).filter(visible);for(var i=0;i<scopes.length;i++){var controls=Array.prototype.slice.call(scopes[i].querySelectorAll('button,a,[role="button"]')).filter(visible).map(function(node){return {node:node,value:Number(String(node.innerText||node.textContent||'').trim())};}).filter(function(item){return Number.isInteger(item.value)&&item.value>0;}).sort(function(a,b){return a.value-b.value;});if(controls.length){controls[0].node.click();return JSON.stringify({restored:true,page:controls[0].value});}}return JSON.stringify({restored:false});})()"#;
+    let _ = run_browser_script(&build_background_browser_silent_evaluate_script(
+        adapter,
+        &session.apple_script_id,
+        javascript,
+    ));
+}
+
+#[cfg(target_os = "macos")]
+fn advance_background_browser_table_page(
+    adapter: BrowserAdapter,
+    session: &BrowserWindowSession,
+) -> Result<Value, DataToolError> {
+    let output = run_browser_script(&build_background_browser_silent_evaluate_script(
+        adapter,
+        &session.apple_script_id,
+        background_browser_table_pagination_javascript(),
+    ))?;
+    if !output.status.success() {
+        return Err(background_browser_script_error(
+            &output,
+            "SCRAPE_FAILED",
+            "无法读取网页表格分页状态",
+        ));
+    }
+    serde_json::from_slice(&output.stdout).map_err(|_| internal_scrape_error())
+}
+
+#[cfg(target_os = "macos")]
+fn background_browser_table_pagination_javascript() -> &'static str {
+    r#"(function(){
+        var visible=function(node){if(!node)return false;var style=getComputedStyle(node),rect=node.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&rect.width>0&&rect.height>0;};
+        var disabled=function(node){return !!(node.disabled||node.getAttribute('disabled')!==null||String(node.getAttribute('aria-disabled')||'').toLowerCase()==='true'||/(?:^|\s)(?:disabled|is-disabled)(?:\s|$)/i.test(String(node.className||'')));};
+        var clean=function(value){return String(value||'').replace(/\s+/g,' ').trim();};
+        var tables=Array.prototype.slice.call(document.querySelectorAll('table,[role="table"],[role="grid"]')).filter(visible);
+        if(!tables.length)return JSON.stringify({advanced:false,reason:'no_relation_table',at_first_page:true,page_key:'single'});
+        var scopes=Array.prototype.slice.call(document.querySelectorAll('nav,[role="navigation"],[class*="pagination" i],[class*="pager" i]')).filter(visible);
+        scopes=scopes.filter(function(scope){var text=clean(scope.innerText||scope.textContent);return /\d/.test(text);});
+        if(!scopes.length)return JSON.stringify({advanced:false,reason:'no_pagination',at_first_page:true,page_key:'single'});
+        var scope=scopes.sort(function(a,b){var ar=a.getBoundingClientRect(),br=b.getBoundingClientRect();return Math.abs(ar.top-tables[tables.length-1].getBoundingClientRect().bottom)-Math.abs(br.top-tables[tables.length-1].getBoundingClientRect().bottom);})[0];
+        var controls=Array.prototype.slice.call(scope.querySelectorAll('button,a,[role="button"]')).filter(visible);
+        var current=controls.find(function(node){return String(node.getAttribute('aria-current')||'').toLowerCase()==='page'||/(?:^|\s)(?:active|selected|current)(?:\s|$)/i.test(String(node.className||''));});
+        var currentText=clean(current&&(current.innerText||current.textContent));
+        var previous=controls.find(function(node){var label=clean((node.getAttribute('aria-label')||'')+' '+(node.getAttribute('title')||'')+' '+(node.innerText||node.textContent));return /^(?:previous|prev|上一页|上页|‹|<|←)$/i.test(label);});
+        var next=controls.find(function(node){var label=clean((node.getAttribute('aria-label')||'')+' '+(node.getAttribute('title')||'')+' '+(node.innerText||node.textContent));return /^(?:next|下一页|下页|›|>|→)$/i.test(label);});
+        var atFirst=!previous||disabled(previous);
+        var pageKey=currentText||clean(scope.innerText||scope.textContent).slice(0,160);
+        if(!next||disabled(next))return JSON.stringify({advanced:false,reason:'last_page',at_first_page:atFirst,page_key:pageKey});
+        next.click();
+        return JSON.stringify({advanced:true,reason:'next_page',at_first_page:atFirst,page_key:pageKey});
+    })()"#
+}
+
+#[cfg(target_os = "macos")]
+fn collect_background_browser_single_page_segments(
+    adapter: BrowserAdapter,
+    session: &BrowserWindowSession,
+    extraction_javascript: &str,
+    readiness_javascript: &str,
+) -> Result<Vec<Value>, DataToolError> {
     let geometry_output = run_browser_script(&build_background_browser_silent_evaluate_script(
         adapter,
         &session.apple_script_id,
@@ -2150,6 +2592,16 @@ fn collect_background_browser_structured_segments(
                 payloads.push(value);
             }
         }
+        let coverage_complete = browser_axis_coverage_complete(
+            &x_positions,
+            geometry.scroll_width,
+            geometry.inner_width,
+        ) && browser_axis_coverage_complete(
+            &y_positions,
+            geometry.scroll_height,
+            geometry.inner_height,
+        );
+        annotate_scroll_geometry(&mut payloads, &geometry, coverage_complete);
         let _ = run_browser_script(&build_background_browser_silent_evaluate_script(
             adapter,
             &session.apple_script_id,
@@ -2158,7 +2610,8 @@ fn collect_background_browser_structured_segments(
         return Ok(payloads);
     }
 
-    for position in browser_scroll_positions(&geometry) {
+    let positions = browser_scroll_positions(&geometry);
+    for position in &positions {
         let scroll_script = format!(
             "window.scrollTo(0,{position});JSON.stringify({{scrollY:Math.round(window.scrollY||0)}})"
         );
@@ -2192,6 +2645,9 @@ fn collect_background_browser_structured_segments(
         merge_accessibility_segment_into_payload(adapter, session, &mut value);
         payloads.push(value);
     }
+    let coverage_complete =
+        browser_axis_coverage_complete(&positions, geometry.scroll_height, geometry.inner_height);
+    annotate_scroll_geometry(&mut payloads, &geometry, coverage_complete);
     let _ = run_browser_script(&build_background_browser_silent_evaluate_script(
         adapter,
         &session.apple_script_id,
@@ -2857,6 +3313,7 @@ fn build_background_browser_extract_script(
     readiness_javascript: &str,
     javascript: &str,
     require_foreground: bool,
+    readiness_poll_attempts: usize,
 ) -> String {
     let window_id = applescript_window_id_literal(apple_script_id);
     let focus_guard = if require_foreground {
@@ -2921,7 +3378,7 @@ fn build_background_browser_extract_script(
             interaction_javascript = escape_applescript_string(interaction_javascript),
             interaction_poll_attempts = BROWSER_INTERACTION_READY_POLL_ATTEMPTS,
             readiness_javascript = escape_applescript_string(readiness_javascript),
-            readiness_poll_attempts = BROWSER_DATA_READY_POLL_ATTEMPTS,
+            readiness_poll_attempts = readiness_poll_attempts,
             javascript = escape_applescript_string(javascript),
         ),
         BrowserScriptKind::Safari => format!(
@@ -2979,7 +3436,7 @@ fn build_background_browser_extract_script(
             interaction_javascript = escape_applescript_string(interaction_javascript),
             interaction_poll_attempts = BROWSER_INTERACTION_READY_POLL_ATTEMPTS,
             readiness_javascript = escape_applescript_string(readiness_javascript),
-            readiness_poll_attempts = BROWSER_DATA_READY_POLL_ATTEMPTS,
+            readiness_poll_attempts = readiness_poll_attempts,
             javascript = escape_applescript_string(javascript),
         ),
     }
@@ -3233,10 +3690,6 @@ fn build_background_browser_cleanup_script(
     };
     format!(
         r#"
-        tell application "System Events"
-            set current_front_app to name of first application process whose frontmost is true
-            if current_front_app is not "{process_name}" then return "FOCUS_POLICY_BLOCKED"
-        end tell
         tell application "{app_name}"
             try
                 close first window whose id is {window_id}
@@ -3245,7 +3698,6 @@ fn build_background_browser_cleanup_script(
         end tell
         "#,
         app_name = adapter.app_name,
-        process_name = adapter.process_name,
         window_id = window_id,
         quit_if_empty = quit_if_empty,
     )
@@ -3745,7 +4197,7 @@ fn looks_like_auth_page(title: &str, url: &str, content: &str) -> bool {
     .any(|marker| evidence.contains(marker))
 }
 
-fn looks_like_terminal_page(title: &str, url: &str, content: &str) -> bool {
+pub(crate) fn looks_like_terminal_page(title: &str, url: &str, content: &str) -> bool {
     let normalized_title = title
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -3897,6 +4349,10 @@ fn default_browser_preference() -> String {
     "auto".to_string()
 }
 
+fn default_extension_preference() -> String {
+    "auto".to_string()
+}
+
 fn default_focus_policy() -> String {
     "never".to_string()
 }
@@ -3926,6 +4382,32 @@ fn validate_focus_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structured_tables_supply_text_when_extension_body_is_empty() {
+        let arrays = json!({
+            "tables": [[
+                ["项目", "年内成本", "ROI"],
+                ["项目甲", "806.4万元", "0.00x"]
+            ]]
+        });
+        let legacy_objects = json!({
+            "tables": [{"rows": [
+                ["指标", "数值"],
+                ["总卡数", "1803.59"]
+            ]}]
+        });
+
+        assert_eq!(
+            structured_table_content_text(&arrays).as_deref(),
+            Some("项目 年内成本 ROI\n项目甲 806.4万元 0.00x")
+        );
+        assert_eq!(
+            structured_table_content_text(&legacy_objects).as_deref(),
+            Some("指标 数值\n总卡数 1803.59")
+        );
+        assert!(structured_table_content_text(&json!({"tables": []})).is_none());
+    }
 
     #[test]
     fn direct_html_extraction_removes_scripts_and_decodes_text() {
@@ -4063,6 +4545,7 @@ mod tests {
             &readiness_javascript,
             &javascript,
             true,
+            BROWSER_DATA_READY_POLL_ATTEMPTS,
         );
         let safari_extract = build_background_browser_extract_script(
             *BROWSER_ADAPTERS.last().unwrap(),
@@ -4071,6 +4554,7 @@ mod tests {
             &readiness_javascript,
             &javascript,
             true,
+            BROWSER_DATA_READY_POLL_ATTEMPTS,
         );
         let chromium_hidden_extract = build_background_browser_extract_script(
             BROWSER_ADAPTERS[0],
@@ -4079,6 +4563,7 @@ mod tests {
             &readiness_javascript,
             &javascript,
             false,
+            BROWSER_DOCUMENT_READY_POLL_ATTEMPTS,
         );
         let chromium_prepare = build_background_browser_prepare_capture_script(
             BROWSER_ADAPTERS[0],
@@ -4158,8 +4643,9 @@ mod tests {
             assert!(script.contains("MemoryBread"));
         }
         for script in [&chromium_cleanup, &safari_cleanup] {
-            assert!(script.contains("current_front_app"));
-            assert!(script.contains("FOCUS_POLICY_BLOCKED"));
+            assert!(!script.contains("current_front_app"));
+            assert!(!script.contains("FOCUS_POLICY_BLOCKED"));
+            assert!(!script.contains("frontmost"));
         }
         assert!(chromium_cleanup.contains("close first window whose id is 12345"));
         assert!(safari_cleanup.contains("close first window whose id is 54321"));
@@ -4429,6 +4915,16 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn semantic_table_pagination_adapter_is_relation_scoped_and_fail_closed() {
+        let script = background_browser_table_pagination_javascript();
+        assert!(script.contains("table,[role=\"table\"],[role=\"grid\"]"));
+        assert!(script.contains("no_relation_table"));
+        assert!(script.contains("aria-disabled"));
+        assert!(script.contains("at_first_page"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn repeated_scroll_frame_detection_rejects_stale_view_but_keeps_real_change() {
         use image::{Rgba, RgbaImage};
 
@@ -4530,6 +5026,8 @@ mod tests {
             None,
             None,
             None,
+            BROWSER_DATA_READY_POLL_ATTEMPTS,
+            true,
         )
         .unwrap();
         server.join().unwrap();

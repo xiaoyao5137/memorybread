@@ -1305,6 +1305,8 @@ BAKE_KNOWLEDGE_PAYLOAD_SCHEMA = {
         "activity_type": _bounded_string(40, nullable=True),
         "evidence_strength": _bounded_string(16, nullable=True),
         "evidence_summary": _bounded_string(400, nullable=True),
+        "future_question": _bounded_string(240, nullable=True),
+        "decision_reason": _bounded_string(400, nullable=True),
         "match_score": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
         "match_level": _bounded_string(16, nullable=True),
         "review_status": _bounded_string(32, nullable=True),
@@ -1706,7 +1708,7 @@ BAKE_KNOWLEDGE_PROMPT = """类别:knowledge
 
 只提炼未来工作中需要回想起来参照使用的有用知识。知识既包括长期稳定的解释、经验、约束、决策、结论和方法理解，也包括有明确对象、时间与证据的工作事实。
 当你理解该时间线及对应采集记录描述的信息，是未来工作中会被拿来参考的事实、经验、约束、决策、结论、方法理解，或未来工作中需要参考某个设计方案的知识时，accepted=true。
-事实不要求永远不变：项目进度、工作状态和执行结果只要在观测时点明确成立，未来需要据此继续推进、追溯变化或避免重复确认，就属于知识。典型事实包括：
+事实不要求永远不变：项目进度、工作状态和执行结果只要在观测时点明确成立，未来需要据此继续推进、追溯变化或避免重复确认，就属于知识。以下仅是帮助理解的例子，不是保护类型清单，也不能据此自动通过：
 - 某项工作已完成、尚未完成、正在处理、被阻塞、等待协作或已取消；
 - 功能是否上线、集成或测试是否完成、问题是否解决、验收是否通过，以及其他明确的执行结果；
 - 已确认的结论、决定、责任人、截止时间、依赖关系、风险和下一步承诺；
@@ -1732,6 +1734,8 @@ accepted=true 时，payload schema:
   "activity_type": "meeting|coding|reading|chat|ask_ai|reviewing_history|other|null",
   "evidence_strength": "low|medium|high|null",
   "evidence_summary": "一句话说明依据",
+  "future_question": "这条知识未来能够独立回答的具体问题",
+  "decision_reason": "为什么该事实会实质影响未来的决策、执行或验证，以及对象、关系、时间和证据是否完整",
   "match_score": 0.0,
   "match_level": "high|medium|low",
   "review_status": "auto_created"
@@ -1744,8 +1748,11 @@ accepted=true 时，payload schema:
 - 严格区分已发生事实与计划、预计、建议、猜测：可以记录“已承诺/计划/预计做什么”这一事实，但不得把计划中的动作改写成已经完成
 - 只有“同步一下进度”“后续再看”等没有给出具体对象和实际状态的空泛消息才应 reject；来源明确、可归因的事实即使只出现一次也可以 accepted=true
 - 输入即使含有写作模板特征或行动步骤，只要其中存在独立可复用的事实/经验/约束/决策/结论，就在 knowledge 中保留这部分；模板部分会由 design 处理，步骤部分由 sop 处理，不要替对方做拒绝判断
-- `match_score` 使用 0-1 小数
-- 接受的结果统一使用 `auto_created`
+- 必须先写出 `future_question`，并确认脱离本次操作过程后仍能独立回答；无法写出具体问题时不要给高分
+- `decision_reason` 使用开放文本说明未来复用价值、事实完整性和是否已有等价资产，禁止用对象类型、指标名或关键词名单代替判断
+- `match_score` 使用 0-1 小数，是统一质量分：未来复用价值 30%、事实具体性 25%、证据强度 20%、持续有效性 15%、相对已有资产的新颖性 10%
+- 只有对象、关系、适用时间或观测时点、证据均完整，且没有等价资产时才可达到发布区间；不确定时应落在 0.62-0.77，纯过程或流水账低于 0.62
+- `review_status` 仅表达模型建议，最终发布门槛由 Core 统一裁决
 - 若只是模糊猜测或噪声，直接 reject"""
 
 BAKE_DESIGN_PROMPT = """类别:design（用于沉淀「文档」资产）
@@ -1848,10 +1855,10 @@ accepted=true 时，payload schema:
 
 BAKE_BUNDLE_PROMPT = f"""你在执行一次性 bake bundle 提炼。输入是一条时间线候选工作片段。
 
-必须严格按以下顺序完成判断，后一个检查不得修改前一个检查的结论：
-1. `document_evidence_check`：只依据候选是否存在一份成体系、可整体复用的正文，独立判断 document；不得考虑它是否也能提炼为 knowledge。
-2. `knowledge_evidence_check`：只依据候选是否存在未来工作需要参照的事实、解释、经验、约束、决策或结论，独立判断 knowledge；不得复述或否定 document 的判断。
-3. `sop_evidence_check`：只依据候选是否存在 Core 已验证的多步 action/result 证据，独立判断 sop。
+必须严格按以下顺序完成判断，后一个检查不得修改前一个检查的结论。检查名称就是最终 JSON 的顶层字段名，禁止添加 `_evidence_check` 后缀：
+1. `document`：只依据候选是否存在一份成体系、可整体复用的正文，独立判断 document；不得考虑它是否也能提炼为 knowledge。
+2. `knowledge`：只依据候选是否存在未来工作需要参照的事实、解释、经验、约束、决策或结论，独立判断 knowledge；不得复述或否定 document 的判断。
+3. `sop`：只依据候选是否存在 Core 已验证的多步 action/result 证据，独立判断 sop。
 4. 三项检查全部完成后，最后根据已接受的资产总结 `classification.primary_type`，只用于描述主导复用价值和后续展示排序。
 
 三个检查相互独立：
@@ -1897,7 +1904,7 @@ BAKE_COMPACT_BUNDLE_PROMPT = (
     + """
 
 这是失败后的紧凑重试。必须优先保证 JSON 完整闭合：
-- 仍须依次完成 document_evidence_check、knowledge_evidence_check、sop_evidence_check，最后总结 classification
+- 仍须依次完成 document、knowledge、sop 三项独立检查，最后总结 classification；这三个名称必须直接作为顶层字段，禁止添加 `_evidence_check` 后缀
 - 顶层仍须严格按 document、knowledge、sop、classification 的顺序输出
 - 每个 Markdown 字段只保留最有证据的要点，不复述同一段内容
 - 数组只保留最重要的项目
@@ -2025,7 +2032,7 @@ SYSTEM_PROMPT = """你是一个专业的工作记录提炼助手。你的任务�
 **注意**:输出必须是有效的 JSON 格式，字符串中的引号要转义，不要包含未转义的换行符。
 """
 
-DATA_FACT_CONTRACT_VERSION = "timeline-data-fact.v3"
+DATA_FACT_CONTRACT_VERSION = "timeline-data-fact.v4"
 DATA_FACT_PROMPT = """
 
 **结构化数据事实（与上述时间线提炼在同一次输出中完成）**:
@@ -2040,6 +2047,13 @@ DATA_FACT_PROMPT = """
 - `statement` 是完整、可独立理解的事实句，必须包含对象、动作或目标场景、指标和值。工作语境可以帮助补全标题和独立事实句，但 `evidence_quote` 仍只能逐字复制原始采集证据。
 - `value` 只放原始数字、数字范围或复合数值；`unit` 使用证据中的原始单位。`16分31秒`、`1小时20分钟` 等复合时长必须作为一个完整 value 保留且 unit 留空，不能只取最后的 `31秒`。不要自行换算单位。
 - 同一对象、动作、目标场景、指标和数值在重复截图或“整个任务耗时/任务总耗时”等同义句中多次出现时只输出一条，不得按措辞拆成多个数据源。
+- 每条候选还必须用开放文本写出 `semantic_relation`、`future_question` 和 `decision_reason`：说明数值如何作为明确对象的可复用属性、测量或关系，未来能独立回答什么问题，以及为什么它在脱离本次交互后仍值得用于决策、执行或验证。不得用对象类型、指标名、关键词名单或预设枚举代替判断。
+- 当关系完整且证据充分时设置 `publishable=true`；事实可靠但上下文仍不足以默认展示时设置 `needs_more_context=true` 并进入 shadow；只是操作过程中的偶发状态时两者都为 false。对象、指标和来源领域都是开放集合，不得因为未出现在示例中而拒绝。
+- 编辑器字号、缩放比例、评论跳转、下载/上传进度、传输速度、按钮角标等界面控件当前值，默认属于 UI 状态而不是业务数据。只有原文明示它是某个具体业务对象已经应用的配置或测量结果时才可发布；不得把相邻的评论区、工具栏和传输控件拼接成一个业务指标。
+- 当时间线只是低重要性的被动阅读时，缺少单位、比较维度、业务动作、原文可回证场景或明确命名对象的孤立数字必须设置 `needs_more_context=true`，不能仅靠一段推测性的 `decision_reason` 发布。
+- 父时间线的重要性只描述整段工作，不能替其中每条数字事实背书。每条事实必须独立证明自己的对象与复用价值；不能因为时间线涉及故障、会议或重要项目，就把同屏出现的通话时长、消息时间和界面进度一并发布。
+- `subject` 应优先写成数据所属的具体事件或业务对象。Subject 与 Metric 相同并不自动拒绝：带单位、明确业务指标名，或具有原文可回证动作、目标场景、维度时仍可发布。只有“通话时长 02:26”这类短弱标签且没有单位和任何具体上下文时，`subject=通话时长, metric=通话时长` 才必须进入 shadow；若证据同时说明具体哪次通话、会议或任务则可发布。
+- `statement` 必须明确包含已经回证的 `subject` 或 `target_context`，不能借用同屏其他聊天、卡片或窗口中的人名与项目名补写一条看似完整但关系未经证明的事实。
 
 提取前必须在内部依次完成以下检查，但不要输出检查过程：
 1. **事实状态**：先判断数字是已发生/已观测结果，还是目标、上限、验收条件、检查清单、预案阈值、配置建议。处在“检查清单、预案、目标、要求、应当、阈值、切换前检查”等上下文中的 `< 1%`、`CPU < 40%` 一律不是观测事实；只有原文另有“监控显示当前值为…”“实测为…”等明确观测证据时才可输出。
@@ -2063,11 +2077,16 @@ DATA_FACT_PROMPT = """
   "unit": "原始单位；没有时为空字符串",
   "statement": "包含完整上下文的独立事实句",
   "evidence_quote": "输入中逐字存在的最短充分证据",
-  "confidence": "high|medium|low"
+  "confidence": "high|medium|low",
+  "semantic_relation": "对象与该数值之间可复用的属性、测量或关系",
+  "future_question": "该事实未来能够独立回答的具体问题",
+  "decision_reason": "脱离本次交互后仍应发布或需要补充上下文的理由",
+  "publishable": true,
+  "needs_more_context": false
 }
 
 示例：输入“生服模特库在电商AIGC中的复用已成功合并，节省约6.28万成本”，应输出：
-{"title":"生服模特库在电商AIGC中复用的成本节省金额","subject":"生服模特库","action":"复用","target_context":"电商AIGC","dimension":"","metric":"成本节省金额","value":"6.28","unit":"万","statement":"生服模特库在电商AIGC中的复用节省约6.28万成本。","evidence_quote":"生服模特库在电商AIGC中的复用已成功合并，节省约6.28万成本","confidence":"high"}
+{"title":"生服模特库在电商AIGC中复用的成本节省金额","subject":"生服模特库","action":"复用","target_context":"电商AIGC","dimension":"","metric":"成本节省金额","value":"6.28","unit":"万","statement":"生服模特库在电商AIGC中的复用节省约6.28万成本。","evidence_quote":"生服模特库在电商AIGC中的复用已成功合并，节省约6.28万成本","confidence":"high","semantic_relation":"生服模特库在电商AIGC复用产生的成本节省金额","future_question":"生服模特库在电商AIGC中复用节省了多少成本？","decision_reason":"该结果可用于后续复用决策和收益验证，且对象、场景、指标和值均有原文证据","publishable":true,"needs_more_context":false}
 
 套餐示例：输入“Sync Standard $4 USD 每用户每月，按年计费；$5 USD 每用户每月，按月计费；1 GB 总存储空间”时，至少分别输出：
 - `subject=Sync Standard, metric=每用户月费, dimension=按年计费, value=4, unit=USD`
@@ -2075,7 +2094,7 @@ DATA_FACT_PROMPT = """
 - `subject=Sync Standard, metric=总存储空间, dimension=空字符串, value=1, unit=GB`
 三条事实的标题分别使用“Sync Standard 每用户月费”和“Sync Standard 总存储空间”；每条 `evidence_quote` 都必须包含对应套餐名和数值，价格事实还必须包含计费维度。其他套餐按相同方式独立输出，禁止只保留最后一个套餐或最后一个数字。
 
-正确价格事实示例：`{"title":"Sync Standard 每用户月费","subject":"Sync Standard","action":"","target_context":"","dimension":"按年计费","metric":"每用户月费","value":"4","unit":"USD","statement":"Sync Standard 按年计费时每用户月费为 4 USD。","evidence_quote":"Sync Standard $4 USD 每用户每月，按年计费","confidence":"high"}`。若无法截取一段同时包含 `subject`、维度、值和单位的原文证据，则不要输出该事实。
+正确价格事实示例还必须补全开放语义字段，例如 `semantic_relation=Sync Standard 按年计费条件下的每用户月费`、`future_question=Sync Standard 按年计费时每用户月费是多少？`，并说明其可用于套餐比较后再设置 `publishable=true`。若无法截取一段同时包含 `subject`、维度、值和单位的原文证据，则不要输出该事实。
 """
 
 DATA_PAGE_CONTRACT_VERSION = "timeline-data-page.v1"
@@ -2407,72 +2426,6 @@ def _data_fact_retry_needed(source_text: str) -> bool:
     )
 
 
-def _generic_fact_anchor(value: str) -> bool:
-    normalized = re.sub(r"[\s_\-:：/]+", "", str(value or "")).casefold()
-    return normalized in {
-        "duration",
-        "aspectratio",
-        "width",
-        "height",
-        "size",
-        "value",
-        "参数",
-        "生成参数",
-        "请求参数",
-        "配置参数",
-        "已用时",
-        "耗时",
-        "总耗时",
-        "任务耗时",
-        "任务总耗时",
-        "整个任务",
-        "本次任务",
-        "该任务",
-    }
-
-
-def _specific_fact_context(value: str) -> bool:
-    normalized = re.sub(r"[\s_\-:：/]+", "", str(value or "")).casefold()
-    if len(normalized) < 6:
-        return False
-    if normalized in {
-        "视频参数配置",
-        "生成参数配置",
-        "任务处理过程",
-        "api接口调用",
-        "接口调用",
-        "当前任务",
-        "本次任务",
-        "整个任务",
-    }:
-        return False
-    # 模型/系统名加“参数配置、生成控制、过程监控”等执行壳，仍没有说明
-    # 参数最终服务于什么交付物或业务用途。此类文本看似具体，实际仍会产出
-    # “Kling 生成控制时长”一类无法脱离采集记录理解的标题。
-    return not normalized.endswith(
-        ("参数配置", "生成控制", "过程监控", "接口调用", "任务处理过程")
-    )
-
-
-def _generic_execution_context(value: str) -> bool:
-    normalized = re.sub(r"[\s_\-:：/]+", "", str(value or "")).casefold()
-    return bool(normalized) and normalized.endswith(
-        ("参数配置", "生成控制", "过程监控", "接口调用", "任务处理过程")
-    )
-
-
-def _value_like_fact_subject(subject: str, value: str) -> bool:
-    normalized_subject = _normalize_fact_evidence(subject)
-    normalized_value = _normalize_fact_evidence(value)
-    if not normalized_value or normalized_value not in normalized_subject:
-        return False
-    residue = normalized_subject.replace(normalized_value, "", 1)
-    meaningful_residue = re.sub(r"[^a-z\u4e00-\u9fff]", "", residue.casefold())
-    # `308秒`、`15秒`、`横屏16:9` 是值的展示形态，不是业务对象；
-    # `MemoryBread V2` 等带数字的命名对象保留足够多的文本语义，不会命中。
-    return len(meaningful_residue) <= 4
-
-
 def _fact_value_is_stated(fact: Dict[str, Any]) -> bool:
     statement = _normalize_fact_evidence(fact.get("statement"))
     value = _normalize_fact_evidence(fact.get("value"))
@@ -2513,7 +2466,110 @@ def _fact_specific_statement(fact: Dict[str, Any]) -> str:
     return f"{prefix}{dimension[:dimension_budget]}{suffix}"
 
 
-def _validated_data_facts(raw_facts: Any, source_text: str, relaxed_subject: bool = False) -> tuple[List[Dict[str, Any]], int]:
+def _numeric_led_fact_subject(value: str) -> bool:
+    """数值开头的控件状态不能独自充当可复用业务对象。"""
+    normalized = _normalize_fact_evidence(value)
+    return bool(normalized) and normalized[0].isdigit()
+
+
+def _low_importance_passive_fact_needs_context(
+    fact: Dict[str, Any],
+    evidence: str,
+    publication_context: Optional[Dict[str, Any]],
+) -> bool:
+    """识别低重要性被动阅读中的弱上下文数字，并将其留在 shadow。
+
+    这里不维护指标或业务对象白名单。价格、报表 KPI、产品规格等只要带有
+    单位、维度、业务动作、原文可回证场景或足够具体的命名对象，仍可发布。
+    """
+    if not isinstance(publication_context, dict):
+        return False
+    try:
+        importance = int(publication_context.get("importance") or 3)
+    except (TypeError, ValueError):
+        importance = 3
+    activity_type = _normalize_inline_text(
+        publication_context.get("activity_type")
+    ).casefold()
+    content_origin = _normalize_inline_text(
+        publication_context.get("content_origin")
+    ).casefold()
+    passive = activity_type in {"reading", "reviewing_history"} or content_origin in {
+        "document_reference",
+        "historical_content",
+    }
+    if importance > 2 or not passive:
+        return False
+
+    subject = _normalize_fact_evidence(fact.get("subject"))
+    target_context = _normalize_fact_evidence(fact.get("target_context"))
+    dimension = _normalize_fact_evidence(fact.get("dimension"))
+    grounded_target = bool(target_context and target_context in evidence)
+    grounded_dimension = bool(dimension and dimension in evidence)
+    has_action = bool(_normalize_inline_text(fact.get("action")))
+    has_unit = bool(_normalize_inline_text(fact.get("unit")))
+    named_subject_chars = len(
+        re.sub(r"[^a-z\u4e00-\u9fff]", "", subject.casefold())
+    )
+    return not any(
+        (
+            grounded_target,
+            grounded_dimension,
+            has_action,
+            has_unit,
+            named_subject_chars >= 6,
+        )
+    )
+
+
+def _fact_level_publication_shadow_reason(
+    fact: Dict[str, Any],
+    evidence: str,
+) -> str:
+    """独立判断单条事实能否发布，不继承父时间线的重要性。"""
+    subject = _normalize_fact_evidence(fact.get("subject"))
+    metric = _normalize_fact_evidence(fact.get("metric"))
+    action = _normalize_fact_evidence(fact.get("action"))
+    target_context = _normalize_fact_evidence(fact.get("target_context"))
+    dimension = _normalize_fact_evidence(fact.get("dimension"))
+    statement = _normalize_fact_evidence(fact.get("statement"))
+
+    grounded_event_context = any(
+        value and value in evidence
+        for value in (action, target_context, dimension)
+    )
+    # Subject=Metric 本身不是低质量信号：看板 KPI、成本、利用率等事实经常天然
+    # 使用同一个业务指标名。只有短弱标签既没有单位，也没有可回证的动作、目标
+    # 或维度时才进入 shadow；例如“通话时长 02:26”。较长的业务指标名或带
+    # 单位的指标仍可独立复用，避免误伤“当前任务处理率”“GPU 利用率”等数据。
+    named_subject_chars = len(
+        re.sub(r"[^a-z\u4e00-\u9fff]", "", subject.casefold())
+    )
+    weak_same_subject_metric = bool(
+        subject
+        and subject == metric
+        and not grounded_event_context
+        and not _normalize_fact_evidence(fact.get("unit"))
+        and named_subject_chars < 6
+    )
+    if weak_same_subject_metric:
+        return "Subject 与 Metric 相同且缺少可回证的具体事件或业务对象"
+
+    statement_has_bound_context = bool(
+        (subject and subject in statement)
+        or (target_context and target_context in statement)
+    )
+    if not statement_has_bound_context:
+        return "Statement 未包含已回证的 Subject 或目标场景"
+    return ""
+
+
+def _validated_data_facts(
+    raw_facts: Any,
+    source_text: str,
+    relaxed_subject: bool = False,
+    publication_context: Optional[Dict[str, Any]] = None,
+) -> tuple[List[Dict[str, Any]], int]:
     """验证模型事实；不修补语义，只接受能够逐字回证的完整结构。
 
     防幻觉底线只有两条：evidence 逐字回证原文、subject/value 的数字或文本
@@ -2554,6 +2610,9 @@ def _validated_data_facts(raw_facts: Any, source_text: str, relaxed_subject: boo
             "statement": _normalize_inline_text(raw.get("statement")),
             "evidence_quote": _normalize_inline_text(raw.get("evidence_quote")),
             "confidence": _normalize_inline_text(raw.get("confidence") or "medium").lower(),
+            "semantic_relation": _normalize_inline_text(raw.get("semantic_relation")),
+            "future_question": _normalize_inline_text(raw.get("future_question")),
+            "decision_reason": _normalize_inline_text(raw.get("decision_reason")),
         }
         fact["evidence_quote"] = _expand_fact_evidence(
             source_text,
@@ -2614,28 +2673,12 @@ def _validated_data_facts(raw_facts: Any, source_text: str, relaxed_subject: boo
         if fact["dimension"] and _normalize_fact_evidence(fact["dimension"]) not in evidence:
             fact["dimension"] = ""
 
-        # 字段名、任务泛称和“已用时”只能作为指标锚点，不能独自承担业务对象。
-        # 必须同时带有具体产品、工作项或目标场景，避免 duration/任务总耗时
-        # 重新变成无上下文标题。
-        if _generic_fact_anchor(fact["subject"]) and not _specific_fact_context(
-            fact["target_context"]
-        ):
-            _reject("generic_anchor_without_specific_context")
-            continue
-        if _generic_execution_context(fact["target_context"]) and (
-            _generic_fact_anchor(fact["subject"])
-            or _value_like_fact_subject(fact["subject"], fact["value"])
-        ):
-            _reject("generic_execution_context")
-            continue
-
         required = ("title", "subject", "metric", "value", "statement", "evidence_quote")
         if any(not fact[field] for field in required):
             _reject("missing_required_field")
             continue
         if fact["confidence"] not in {"low", "medium", "high"}:
-            _reject("bad_confidence")
-            continue
+            fact["confidence"] = "medium"
         if any(len(fact[field]) > limit for field, limit in (
             ("title", 120), ("subject", 80), ("metric", 60),
             ("value", 40), ("unit", 24), ("statement", 500), ("evidence_quote", 500),
@@ -2663,7 +2706,13 @@ def _validated_data_facts(raw_facts: Any, source_text: str, relaxed_subject: boo
         target_context = _normalize_fact_evidence(fact["target_context"])
         # 至少一个语义锚点和值必须回证；其余展示字段可降级，不整条丢弃。
         subject_ok = numeric_subject_ok or subject in evidence
-        semantic_anchor_ok = subject_ok or metric in evidence or target_context in evidence
+        grounded_metric = bool(metric and metric in evidence)
+        grounded_target_context = bool(target_context and target_context in evidence)
+        semantic_anchor_ok = (
+            (subject_ok and not _numeric_led_fact_subject(fact["subject"]))
+            or grounded_metric
+            or grounded_target_context
+        )
         # value 常带格式差异（如 "87%+" vs 原文 "87%"）：逐字命中失败时，
         # 退化为 value 的全部数字 token 都命中 evidence 即视为可靠。
         value_ok = value in evidence
@@ -2683,6 +2732,52 @@ def _validated_data_facts(raw_facts: Any, source_text: str, relaxed_subject: boo
         if dimension and dimension not in evidence:
             _reject("dimension_not_grounded")
             continue
+        open_semantic_complete = all(
+            fact[field]
+            for field in ("semantic_relation", "future_question", "decision_reason")
+        )
+        if raw.get("publishable") is True and open_semantic_complete:
+            fact["decision_state"] = "published"
+        elif raw.get("needs_more_context") is True and (
+            fact["semantic_relation"] or fact["future_question"]
+        ):
+            fact["decision_state"] = "shadow"
+        elif not any(
+            key in raw
+            for key in (
+                "semantic_relation", "future_question", "decision_reason",
+                "publishable", "needs_more_context",
+            )
+        ):
+            # v3/旧模型输出缺少开放语义判断时不能默认发布，也不能直接丢失；
+            # 作为不确定候选进入 shadow，等待后续重提炼或人工确认。
+            fact["decision_state"] = "shadow"
+            fact["decision_reason"] = "旧契约缺少开放语义判断，等待补充上下文"
+        else:
+            _reject("not_reusable_property_relation")
+            continue
+        # Statement 是展示字段。模型写出的句子只要没有绑定已回证的 Subject/
+        # 目标场景，或没有写出当前值，就先用已验证的原子字段确定性重写，再进入
+        # 发布门禁。证据仍由 evidence_quote 单独保存，不允许展示文案决定事实去留。
+        statement = _normalize_fact_evidence(fact["statement"])
+        statement_has_bound_context = bool(
+            (subject and subject in statement)
+            or (target_context and target_context in statement)
+        )
+        if not statement_has_bound_context or not _fact_value_is_stated(fact):
+            fact["statement"] = _fact_specific_statement(fact)
+        if fact["decision_state"] == "published":
+            shadow_reason = _fact_level_publication_shadow_reason(fact, evidence)
+            if not shadow_reason and _low_importance_passive_fact_needs_context(
+                fact,
+                evidence,
+                publication_context,
+            ):
+                shadow_reason = "低重要性被动阅读中的孤立数值缺少可回证的业务上下文"
+            if shadow_reason:
+                fact["decision_state"] = "shadow"
+                fact["decision_reason"] = f"{shadow_reason}，等待补充或人工确认"
+        fact["decision_rule_version"] = "data-open-semantic-v4"
         semantic_key = tuple(
             _normalize_fact_evidence(fact[field])
             for field in (
@@ -2923,7 +3018,9 @@ class KnowledgeExtractorV2:
                 logger.warning("数据事实聚焦补提炼无法解析: caller_id=%s", caller_id)
                 return [], 0
             facts, rejected = _validated_data_facts(
-                parsed.get("data_facts"), source_text
+                parsed.get("data_facts"),
+                source_text,
+                publication_context=result,
             )
             logger.info(
                 "数据事实聚焦补提炼完成: caller_id=%s accepted=%d rejected=%d",
@@ -3843,6 +3940,12 @@ class KnowledgeExtractorV2:
         accepted = bool(parsed.get('accepted', False))
         reason = parsed.get('reason')
         payload = parsed.get('payload')
+        if artifact_type == 'design' and isinstance(payload, dict):
+            # 兼容小模型在 774 类输出中出现过的稳定拼写漂移。若正确字段同时
+            # 存在，以正确字段为准，避免错误字段覆盖已受 schema 约束的内容。
+            if 'structure_sections' not in payload and 'structre_sections' in payload:
+                payload = dict(payload)
+                payload['structure_sections'] = payload.pop('structre_sections')
         if accepted and payload is None:
             logger.warning(
                 "bake %s accepted without payload caller=%s elapsed_ms=%s",
@@ -4055,6 +4158,14 @@ class KnowledgeExtractorV2:
         accepted = bool(parsed.get('accepted', False))
         reason = parsed.get('reason')
         payload = parsed.get('payload')
+        if artifact_type == 'design' and isinstance(payload, dict):
+            # bundle 也必须兼容同一拼写漂移；否则顶层信封虽恢复成功，章节仍会
+            # 在 Core 反序列化时静默丢失。
+            if 'structure_sections' not in payload and 'structre_sections' in payload:
+                payload = dict(payload)
+                payload['structure_sections'] = payload.pop('structre_sections')
+                recovered = True
+                shape = f'{shape}:field_alias:structre_sections'
         if accepted and payload is None:
             return {
                 'accepted': False,
@@ -4856,15 +4967,23 @@ class KnowledgeExtractorV2:
             if isinstance(classification, dict)
             else ''
         )
-        for artifact_type, parsed_key in (
-            ('design', 'document'),
-            ('knowledge', 'knowledge'),
-            ('sop', 'sop'),
+        for artifact_type, parsed_key, compatibility_keys in (
+            ('design', 'document', ('design', 'document_evidence_check', 'design_evidence_check')),
+            ('knowledge', 'knowledge', ('knowledge_evidence_check',)),
+            ('sop', 'sop', ('sop_evidence_check',)),
         ):
             parsed_artifact = parsed.get(parsed_key)
-            if parsed_artifact is None and artifact_type == 'design':
-                # 兼容升级期间旧模型或历史测试仍返回 design 键；新契约统一要求 document。
-                parsed_artifact = parsed.get('design')
+            compatibility_key = None
+            if parsed_artifact is None:
+                # 兼容旧模型的 design 键，以及曾被提示词误导而输出的
+                # *_evidence_check 键。新请求只要求 document/knowledge/sop，
+                # 但已生成的有效资产不能因为信封字段漂移而被当作 absent 丢弃。
+                for candidate_key in compatibility_keys:
+                    candidate_artifact = parsed.get(candidate_key)
+                    if candidate_artifact is not None:
+                        parsed_artifact = candidate_artifact
+                        compatibility_key = candidate_key
+                        break
             artifact, artifact_meta = self._normalize_bake_artifact_result(
                 candidate,
                 artifact_type,
@@ -4872,6 +4991,15 @@ class KnowledgeExtractorV2:
                 meta,
                 caller_id=caller_id,
             )
+            if compatibility_key is not None:
+                artifact_meta['compatibility_recovered'] = True
+                artifact_meta['artifact_shape'] = f'legacy_key:{compatibility_key}'
+                logger.warning(
+                    "bake bundle artifact recovered from compatibility key type=%s caller=%s key=%s",
+                    artifact_type,
+                    caller_id,
+                    compatibility_key,
+                )
             results[artifact_type] = artifact
             result_meta[artifact_type] = artifact_meta
 
@@ -4995,6 +5123,7 @@ class KnowledgeExtractorV2:
             data_facts, rejected_data_fact_count = _validated_data_facts(
                 result.get('data_facts'),
                 source_text,
+                publication_context=result,
             )
             if not data_facts:
                 recovered_facts, recovered_rejected = self._recover_missing_data_facts(
@@ -5473,6 +5602,7 @@ class KnowledgeExtractorV2:
             data_facts, rejected_data_fact_count = _validated_data_facts(
                 result.get('data_facts'),
                 merged_text,
+                publication_context=result,
             )
             if not data_facts:
                 recovered_facts, recovered_rejected = self._recover_missing_data_facts(

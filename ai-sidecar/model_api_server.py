@@ -1116,6 +1116,29 @@ def initialization_status():
     })
 
 
+@app.route('/api/local-identity/nickname', methods=['POST'])
+def local_identity_nickname():
+    """首次初始化后由本地模型生成一次安装级面包昵称。"""
+    try:
+        return jsonify({
+            'status': 'ok',
+            'nickname': initialization_manager.generate_local_nickname(),
+        })
+    except InitializationFailure as exc:
+        return jsonify({
+            'status': 'error',
+            'error_code': exc.code,
+            'message': str(exc),
+        }), 409
+    except Exception as exc:
+        logger.warning("本地昵称生成失败: %s", exc)
+        return jsonify({
+            'status': 'error',
+            'error_code': 'LOCAL_NICKNAME_GENERATION_FAILED',
+            'message': '本地昵称暂时生成失败',
+        }), 503
+
+
 @app.route('/api/initialization/start', methods=['POST'])
 def initialization_start():
     """启动或继续唯一的后台初始化任务；重复请求返回同一任务。"""
