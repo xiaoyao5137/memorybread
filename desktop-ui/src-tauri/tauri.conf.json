@@ -40,7 +40,7 @@
     "active": true,
     "targets": "all",
     "macOS": {
-      "bundleVersion": "6"
+      "bundleVersion": "7"
     },
     "icon": [
       "icons/32x32.png",
