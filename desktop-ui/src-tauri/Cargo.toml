@@ -1,6 +1,6 @@
 [package]
 name = "memory-bread-desktop"
-version = "0.3.0"
+version = "0.3.1"
 description = "记忆面包 Desktop Application"
 authors = ["记忆面包 Team"]
 edition = "2021"
