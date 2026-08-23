@@ -142,7 +142,9 @@ PY
     || fail "缺少更新签名密码：请设置 TAURI_SIGNING_PRIVATE_KEY_PASSWORD 或钥匙串条目 com.memory-bread.release.updater"
   (
     cd "$DESKTOP_DIR"
-    TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$updater_password" \
+    # env -u 屏蔽 TAURI_SIGNING_PRIVATE_KEY_PATH：tauri CLI 会同时读取该环境变量，
+    # 与显式 -k 参数冲突导致签名失败。
+    env -u TAURI_SIGNING_PRIVATE_KEY_PATH TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$updater_password" \
       npx tauri signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" "$updater_path" >/dev/null
   )
   [ -f "$updater_path.sig" ] || fail "更新包重签名失败：未生成 .sig"
@@ -573,6 +575,12 @@ if [ "$MODE" = "dmg" ]; then
   rmdir "$DMG_STAGE_ROOT"
   DMG_STAGE_ROOT=""
   echo "[macOS build] DMG 已重新创建"
+
+  # 重建后的 DMG 丢失了 Tauri 原产物的签名；公证前先补签，
+  # 否则 spctl 会报 "no usable signature"（签名必须在公证前，公证后补签会使 ticket 失效）。
+  if [ "${APPLE_SIGNING_IDENTITY:-}" != "-" ] && [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+    codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp "$DMG_PATH"
+  fi
 
   apply_dmg_file_icon "$DMG_PATH"
   "$SCRIPT_DIR/verify-macos-bundle.sh" "$APP_PATH" dmg "$DMG_PATH"
