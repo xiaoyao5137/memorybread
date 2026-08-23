@@ -38,6 +38,13 @@ MANAGED_OLLAMA_URL = (
     "https://github.com/ollama/ollama/releases/download/"
     f"v{MANAGED_OLLAMA_VERSION}/ollama-darwin.tgz"
 )
+# 境内访问 GitHub Release 不稳定，提供加速代理作为候选源。
+# 所有候选源下载后都必须通过同一个 SHA256 校验，镜像内容无法被篡改。
+# 可通过 MEMORY_BREAD_OLLAMA_DOWNLOAD_MIRRORS 追加自建镜像（逗号分隔，优先级最高）。
+MANAGED_OLLAMA_MIRROR_PREFIXES = (
+    "https://ghfast.top/",
+    "https://gh-proxy.com/",
+)
 MANAGED_OLLAMA_SHA256 = "52acbca4e89c53db9abc586a22b5633fd101db293177264b9a0fe5d64a42a064"
 NORMAL_OLLAMA_PORT = 11434
 SANDBOX_OLLAMA_PORT = 11435
@@ -78,7 +85,7 @@ ERROR_SUGGESTIONS = {
     "UNSUPPORTED_PLATFORM": "当前版本暂不支持此操作系统，请升级到受支持的 macOS。",
     "UNSUPPORTED_ARCHITECTURE": "当前处理器架构暂不受支持。",
     "INSUFFICIENT_DISK_SPACE": "请释放至少 6 GB 可用空间后重试。",
-    "RUNTIME_DOWNLOAD_FAILED": "请检查网络连接后重试，已经完成的内容不会重复下载。",
+    "RUNTIME_DOWNLOAD_FAILED": "请检查网络连接后重试（已依次尝试境内加速源与官方源），已经完成的内容不会重复下载。",
     "RUNTIME_CHECKSUM_MISMATCH": "下载文件校验失败，请重试；应用不会执行未通过校验的文件。",
     "RUNTIME_START_FAILED": "本地 AI 引擎未能启动，请重试或上报诊断。",
     "MODEL_DOWNLOAD_FAILED": "模型下载未完成，请检查网络和磁盘空间后重试。",
@@ -659,14 +666,28 @@ class InitializationManager:
 
     # ── managed runtime ───────────────────────────────────────────────────
 
-    def _install_managed_ollama(self, mode: str) -> Path:
-        root = self._runtime_root(mode)
-        version_dir = root / f"v{MANAGED_OLLAMA_VERSION}"
-        version_dir.mkdir(parents=True, exist_ok=True)
-        archive = version_dir / "ollama-darwin.tgz.part"
-        url = os.environ.get("MEMORY_BREAD_OLLAMA_DOWNLOAD_URL", MANAGED_OLLAMA_URL)
-        expected_sha = os.environ.get("MEMORY_BREAD_OLLAMA_SHA256", MANAGED_OLLAMA_SHA256).lower()
+    @staticmethod
+    def _ollama_download_candidates() -> list[str]:
+        """构造运行时下载候选源列表（境内加速源优先）。
 
+        顺序：显式覆盖地址 -> 自建镜像 -> 内置加速代理 -> GitHub 官方。
+        所有候选产物统一做 SHA256 校验，任一候选成功即止。
+        """
+        candidates: list[str] = []
+        override = os.environ.get("MEMORY_BREAD_OLLAMA_DOWNLOAD_URL", "").strip()
+        if override:
+            candidates.append(override)
+        extra = os.environ.get("MEMORY_BREAD_OLLAMA_DOWNLOAD_MIRRORS", "").strip()
+        if extra:
+            candidates.extend(u.strip() for u in extra.split(",") if u.strip())
+        for prefix in MANAGED_OLLAMA_MIRROR_PREFIXES:
+            candidates.append(prefix + MANAGED_OLLAMA_URL)
+        if not override:
+            candidates.append(MANAGED_OLLAMA_URL)
+        return candidates
+
+    def _download_archive_with_resume(self, url: str, archive: Path) -> None:
+        """单个候选源的下载（支持断点续传，单源内重试 3 次）。"""
         last_error: Optional[Exception] = None
         for attempt in range(3):
             downloaded = archive.stat().st_size if archive.exists() else 0
@@ -694,12 +715,34 @@ class InitializationManager:
                                     min(80, int(downloaded * 80 / total)),
                                     "正在下载本地 AI 引擎",
                                 )
-                last_error = None
-                break
+                return
             except Exception as exc:
                 last_error = exc
                 if attempt < 2:
                     time.sleep(attempt + 1)
+        assert last_error is not None
+        raise last_error
+
+    def _install_managed_ollama(self, mode: str) -> Path:
+        root = self._runtime_root(mode)
+        version_dir = root / f"v{MANAGED_OLLAMA_VERSION}"
+        version_dir.mkdir(parents=True, exist_ok=True)
+        archive = version_dir / "ollama-darwin.tgz.part"
+        expected_sha = os.environ.get("MEMORY_BREAD_OLLAMA_SHA256", MANAGED_OLLAMA_SHA256).lower()
+
+        # 逐候选源尝试：境内加速源优先，全部失败才报下载错误。
+        # 切换候选源时丢弃旧的部分文件，避免不同源之间断点不兼容。
+        last_error: Optional[Exception] = None
+        for url in self._ollama_download_candidates():
+            try:
+                logger.info("尝试从 %s 下载本地 AI 引擎", url)
+                self._download_archive_with_resume(url, archive)
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.warning("本地 AI 引擎下载失败，切换下一个候选源: %s (%s)", url, exc)
+                archive.unlink(missing_ok=True)
         if last_error is not None:
             raise InitializationFailure(
                 "RUNTIME_DOWNLOAD_FAILED",

@@ -3,12 +3,17 @@ SentenceTransformers Embedding 后端
 
 当 Ollama 不可用时（如 Ollama 0.30.x 移除 llama-server 导致 GGUF 模型失效），
 使用 sentence-transformers 直接在进程内加载模型，作为 fallback。
+
+加载策略（离线优先）：先通过 model_sources 解析本地模型目录（应用自有目录
+或 huggingface 缓存），再以 local_files_only 方式加载，避免断网环境下
+huggingface.co 在线校验拖慢启动。模型缺失时才走境内镜像级联下载。
 """
 
 from __future__ import annotations
 
 import logging
 from .base import EmbeddingBackend, EmbeddingVector
+from .model_sources import build_local_files_only_kwargs, resolve_embedding_model_source
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +38,15 @@ class SentenceTransformersBackend(EmbeddingBackend):
     def _load(self):
         if self._model is None:
             from sentence_transformers import SentenceTransformer
-            logger.info("加载本地 embedding 模型: %s", self._model_name)
-            self._model = SentenceTransformer(self._model_name)
+            model_source = resolve_embedding_model_source()
+            logger.info("加载本地 embedding 模型: %s (源: %s)", self._model_name, model_source)
+            kwargs = build_local_files_only_kwargs()
+            try:
+                self._model = SentenceTransformer(model_source, **kwargs)
+            except TypeError:
+                # 旧版 sentence-transformers 不识别 local_files_only，
+                # 传入的是本地目录，去掉参数重试仍然不会联网。
+                self._model = SentenceTransformer(model_source)
         return self._model
 
     def encode(self, texts: list[str]) -> list[EmbeddingVector]:

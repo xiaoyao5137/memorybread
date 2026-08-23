@@ -740,6 +740,30 @@ def get_rag_pipeline():
     return _rag_pipeline
 
 
+# 预热失败后的重试节奏：间隔递增，避免断网等瞬时故障让
+# pipeline_ready 永久停留在 false（前端会一直停在启动画面）。
+RAG_WARMUP_RETRY_DELAYS_S = (15, 30, 60, 120, 300)
+
+
+def ensure_rag_pipeline_with_retry():
+    """后台预热 RAG pipeline，失败后按退避间隔重试直到成功。"""
+    try:
+        get_rag_pipeline()
+        logger.info('RAG pipeline 预热完成')
+        return
+    except Exception as e:
+        logger.warning(f'RAG pipeline 预热失败，将自动重试: {e}')
+    for delay in RAG_WARMUP_RETRY_DELAYS_S:
+        time.sleep(delay)
+        try:
+            get_rag_pipeline()
+            logger.info('RAG pipeline 重试预热完成')
+            return
+        except Exception as e:
+            logger.warning(f'RAG pipeline 重试预热仍失败（{delay}s 后已试）: {e}')
+    logger.error('RAG pipeline 预热多次失败，后续用户发起咨询时将再次尝试初始化')
+
+
 def _build_rag_llm_override(data: dict, timeout: int = 360, num_predict: int = 1536):
     """根据创作模型配置构造 RAG 本次查询使用的 LLM。"""
     model = (data.get('creation_model') or '').strip()
@@ -1048,13 +1072,8 @@ def activate_model(model_id: str):
 
             with _rag_pipeline_lock:
                 _rag_pipeline = None
-            # 后台初始化 RAG pipeline
-            def init_pipeline():
-                try:
-                    get_rag_pipeline()
-                except Exception as e:
-                    logger.warning(f"RAG pipeline 初始化失败: {e}")
-            threading.Thread(target=init_pipeline, daemon=True).start()
+            # 后台初始化 RAG pipeline（失败自动重试）
+            threading.Thread(target=ensure_rag_pipeline_with_retry, daemon=True).start()
             return jsonify({'status': 'ok', 'message': f'模型 {model_id} 已激活'})
         return jsonify({'status': 'error', 'message': f'模型 {model_id} 激活失败'}), 500
     except Exception as e:
@@ -2220,16 +2239,10 @@ def _get_hardware() -> dict:
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
 
-    # 异步预热 RAG pipeline，避免阻塞启动
-    def _warmup_rag_pipeline_async():
-        try:
-            get_rag_pipeline()
-            logger.info('RAG pipeline 预热完成')
-        except Exception as e:
-            logger.error(f'RAG pipeline 预热失败: {e}', exc_info=True)
-
+    # 异步预热 RAG pipeline，避免阻塞启动；失败自动重试，
+    # 防止瞬时故障（如断网）导致前端永久停在启动画面。
     import threading
-    threading.Thread(target=_warmup_rag_pipeline_async, daemon=True, name='rag-warmup').start()
+    threading.Thread(target=ensure_rag_pipeline_with_retry, daemon=True, name='rag-warmup').start()
     logger.info('RAG pipeline 异步预热已启动')
 
     # 预热模型页热数据，首次打开模型页不必现等硬件检测和 Ollama 探测

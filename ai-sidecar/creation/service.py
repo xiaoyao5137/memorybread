@@ -6766,14 +6766,28 @@ flowchart LR
         user_prompt: str,
         parsed_requirement: dict,
     ) -> list[WebSearchResult]:
-        """执行轻量互联网检索。无专用搜索 API 时使用 DuckDuckGo HTML 降级。"""
+        """执行轻量互联网检索。
+
+        引擎按顺序降级：Bing（境内外均可直连）-> DuckDuckGo HTML，
+        可通过 MEMORYBREAD_WEB_SEARCH_ENGINES 调整顺序（逗号分隔）。
+        任一引擎可用即返回，全部失败静默降级为空结果，不阻塞创作。
+        """
+        engines = self._web_search_engines()
         queries = self._build_search_queries(user_prompt, parsed_requirement)
         results: list[WebSearchResult] = []
         for query in queries[:3]:
-            try:
-                results.extend(await self._search_duckduckgo(query))
-            except Exception as exc:
-                logger.warning("互联网检索失败 query=%s error=%s", query, exc)
+            for engine in engines:
+                try:
+                    if engine == "bing":
+                        found = await self._search_bing(query)
+                    else:
+                        found = await self._search_duckduckgo(query)
+                except Exception as exc:
+                    logger.warning("互联网检索失败 engine=%s query=%s error=%s", engine, query, exc)
+                    continue
+                if found:
+                    results.extend(found)
+                    break
 
         deduped: list[WebSearchResult] = []
         seen: set[str] = set()
@@ -7127,6 +7141,47 @@ flowchart LR
             f"{base} 行业方案 案例",
             f"{base} 技术架构 最佳实践",
         ]
+
+    @staticmethod
+    def _web_search_engines() -> list[str]:
+        raw = os.environ.get("MEMORYBREAD_WEB_SEARCH_ENGINES", "").strip().lower()
+        if raw:
+            engines = [e.strip() for e in raw.split(",") if e.strip() in ("bing", "duckduckgo")]
+            if engines:
+                return engines
+        # Bing 在中国境内可直连，DuckDuckGo 境内不可达，仅作兜底。
+        return ["bing", "duckduckgo"]
+
+    async def _search_bing(self, query: str) -> list[WebSearchResult]:
+        url = f"https://cn.bing.com/search?q={quote_plus(query)}&count=10"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) MemoryBreadCreation/1.0",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        }
+        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True, headers=headers) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+
+        results: list[WebSearchResult] = []
+        # Bing 自然结果块：<li class="b_algo"> 内含 <h2><a href> 标题链接，
+        # 摘要位于后续 <p> 或 .b_caption 中。
+        block_pattern = re.compile(r'<li class="b_algo".*?</li>', re.S)
+        link_pattern = re.compile(r'<h2[^>]*>\s*<a[^>]+href="(?P<url>[^"]+)"[^>]*>(?P<title>.*?)</a>', re.S)
+        snippet_pattern = re.compile(r'<p[^>]*>(?P<snippet>.*?)</p>', re.S)
+        for block in block_pattern.finditer(response.text):
+            chunk = block.group(0)
+            link = link_pattern.search(chunk)
+            if not link:
+                continue
+            title = self._strip_html(link.group("title"))
+            result_url = link.group("url")
+            if result_url.startswith("//"):
+                result_url = "https:" + result_url
+            snippet_match = snippet_pattern.search(chunk)
+            snippet = self._strip_html(snippet_match.group("snippet")) if snippet_match else ""
+            if title and result_url.startswith("http") and self._is_reasonable_web_url(result_url):
+                results.append(WebSearchResult(title=title, url=result_url, snippet=snippet))
+        return results[:4]
 
     async def _search_duckduckgo(self, query: str) -> list[WebSearchResult]:
         url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
