@@ -20,5 +20,12 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles:  ['./src/__tests__/setup.ts'],
     css:         false,
+    // 构建产物里可能混入扩展测试文件的副本（node:test 格式），不应被 vitest 收集
+    exclude: [
+      '**/node_modules/**',
+      '**/dist/**',
+      '**/.git/**',
+      'src-tauri/target/**',
+    ],
   },
 })

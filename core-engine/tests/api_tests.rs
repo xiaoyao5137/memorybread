@@ -580,6 +580,8 @@ fn bake_knowledge_artifact(summary: &str, review_status: Option<&str>) -> serde_
             "importance": 5,
             "occurrence_count": 2,
             "evidence_summary": "来自测试 sidecar",
+            "future_question": "下次写周报时如何复用这套流程",
+            "decision_reason": "存在可复用的流程事实，满足发布门禁",
             "match_score": 0.91,
             "match_level": "high",
             "review_status": review_status,
@@ -2272,6 +2274,8 @@ async fn test_bake_run_pipeline_keeps_all_accepted_artifacts_auto_created() {
                 "importance": 5,
                 "occurrence_count": 2,
                 "evidence_summary": "来自测试 sidecar",
+                "future_question": "下次写周报时如何复用这套流程",
+                "decision_reason": "存在可复用的流程事实，满足发布门禁",
                 "match_score": 0.95,
                 "match_level": "low",
                 "review_status": "auto_created"
