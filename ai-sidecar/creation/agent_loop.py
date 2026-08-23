@@ -2185,7 +2185,7 @@ class CreationAgentLoop:
             yield self._event(
                 state,
                 "agent.completed",
-                f"已根据目标动态选择 {len(state.plan) - 1} 个后续能力",
+                f"已根据目标规划 {len(state.plan) - 1} 个执行步骤",
                 status="completed",
                 actor=actor,
                 environment_patch={"plan": state.environment["plan_summary"]},

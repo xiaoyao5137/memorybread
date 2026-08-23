@@ -1672,6 +1672,163 @@ button.bake-list-item.bake-list-item--active {
   background: rgba(191, 122, 58, 0.16);
 }
 
+.bake-backup-activity {
+  display: grid;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.bake-backup-activity .bake-section-header {
+  margin-bottom: 0;
+}
+
+.bake-backup-activity__empty {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 72px;
+  padding: 14px;
+  border: 1px dashed rgba(110, 98, 88, 0.22);
+  border-radius: 12px;
+  color: #7B6E64;
+}
+
+.bake-backup-activity__empty > div {
+  display: grid;
+  gap: 3px;
+}
+
+.bake-backup-activity__empty strong {
+  color: #33261D;
+  font-size: 13px;
+}
+
+.bake-backup-activity__empty span {
+  font-size: 12px;
+}
+
+.bake-backup-activity__list {
+  display: grid;
+  max-height: 520px;
+  overflow-y: auto;
+  border: 1px solid rgba(153, 101, 53, 0.14);
+  border-radius: 12px;
+  background: #FFFCF8;
+}
+
+.bake-backup-activity__item + .bake-backup-activity__item {
+  border-top: 1px solid rgba(153, 101, 53, 0.11);
+}
+
+.bake-backup-activity__item summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 68px;
+  padding: 11px 13px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.bake-backup-activity__item summary::-webkit-details-marker {
+  display: none;
+}
+
+.bake-backup-activity__item summary:focus-visible {
+  outline: 3px solid rgba(0, 102, 204, 0.28);
+  outline-offset: -3px;
+}
+
+.bake-backup-activity__status-icon {
+  display: inline-flex;
+  color: #2F7D52;
+}
+
+.bake-backup-activity__item.is-running .bake-backup-activity__status-icon {
+  color: #0066CC;
+}
+
+.bake-backup-activity__item.is-failed .bake-backup-activity__status-icon {
+  color: #A33A3A;
+}
+
+.bake-backup-activity__main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.bake-backup-activity__title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.bake-backup-activity__title-row strong {
+  color: #2F241D;
+  font-size: 13px;
+}
+
+.bake-backup-activity__status {
+  color: #2F7D52;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.is-running .bake-backup-activity__status { color: #0066CC; }
+.is-failed .bake-backup-activity__status { color: #A33A3A; }
+
+.bake-backup-activity__summary {
+  overflow: hidden;
+  color: #6E6258;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bake-backup-activity__item time {
+  color: #8A7C70;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.bake-backup-activity__disclosure {
+  display: inline-flex;
+  color: #8A7C70;
+  transition: transform 150ms ease;
+}
+
+.bake-backup-activity__item[open] .bake-backup-activity__disclosure {
+  transform: rotate(90deg);
+}
+
+.bake-backup-activity__item dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 18px;
+  margin: 0;
+  padding: 0 40px 14px;
+}
+
+.bake-backup-activity__item dl > div {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.35fr) minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+}
+
+.bake-backup-activity__item dt,
+.bake-backup-activity__item dd {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.bake-backup-activity__item dt { color: #8A7C70; }
+.bake-backup-activity__item dd { color: #49372A; overflow-wrap: anywhere; }
+
 .bake-stat-chip--button {
   border: none;
   cursor: pointer;
@@ -3617,6 +3774,19 @@ td.bake-capture-table__time .bake-capture-table__id {
     width: 100%;
   }
 
+  .bake-backup-activity__item summary {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .bake-backup-activity__item time {
+    display: none;
+  }
+
+  .bake-backup-activity__item dl {
+    grid-template-columns: 1fr;
+    padding-inline: 40px 14px;
+  }
+
   .bake-title {
     font-size: 22px;
   }
@@ -3753,6 +3923,31 @@ td.bake-capture-table__time .bake-capture-table__id {
     background: rgba(255, 159, 67, 0.14);
     color: #FFD6B0;
   }
+
+  .bake-backup-activity__empty,
+  .bake-backup-activity__list {
+    background: #23201E;
+    border-color: rgba(255, 196, 141, 0.12);
+  }
+
+  .bake-backup-activity__item + .bake-backup-activity__item {
+    border-top-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .bake-backup-activity__empty strong,
+  .bake-backup-activity__title-row strong {
+    color: #F3EAE2;
+  }
+
+  .bake-backup-activity__empty,
+  .bake-backup-activity__summary,
+  .bake-backup-activity__item time,
+  .bake-backup-activity__item dt,
+  .bake-backup-activity__disclosure {
+    color: #B8ACA2;
+  }
+
+  .bake-backup-activity__item dd { color: #E5D8CD; }
 
   .bake-stat-chip {
     background: rgba(10, 132, 255, 0.16);

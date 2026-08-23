@@ -211,6 +211,17 @@ const retainConversationContext = (messages: CreationChatMessage[]) => {
   return [...messages.slice(0, 4), ...messages.slice(-(MAX_CONVERSATION_MESSAGES - 4))]
 }
 
+const isRunTerminalEvent = (event: CreationAgentEvent) => (
+  ['run.completed', 'run.failed', 'run.cancelled'].includes(event.type)
+)
+
+const terminalEventForLatestRun = (events: CreationAgentEvent[]) => {
+  const latestRunId = [...events].reverse().find(event => event.run_id)?.run_id
+  return [...events].reverse().find(event => (
+    isRunTerminalEvent(event) && (!latestRunId || event.run_id === latestRunId)
+  ))
+}
+
 type CreationTimelineItem =
   | { kind: 'message'; key: string; message: CreationChatMessage }
   | { kind: 'trace'; key: string; events: CreationAgentEvent[] }
@@ -2340,7 +2351,10 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
         || liveDraft.conversation.find(item => item.role === 'user')?.content
         || messageWithAttachments(message),
       current_document: liveDraft.generatedContent,
-      conversation: chat.map(item => ({ role: item.role, content: item.content })),
+      // “用户中止”需要留在可见对话里，但不是下一轮交给模型的创作指令。
+      conversation: chat
+        .filter(item => item.kind !== 'user_abort')
+        .map(item => ({ role: item.role, content: item.content })),
       selected_skills: selectedSkillPayload(),
       model_mode: useGatewayCreation && currentUser?.id ? 'external' : 'local',
       ...extras,
@@ -3047,7 +3061,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
         return
       }
       if (err instanceof DOMException && err.name === 'AbortError') {
-        setError('已中止本次创作')
+        // 点击中止时已经把行为写入对话与执行轨迹，这里只结束异步流程。
         return
       }
       // 保全部分成果：中断时若已组装出文档（如模型连接在后续步骤被掐断），
@@ -3089,10 +3103,71 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   }
 
   const handleStopGenerate = () => {
-    abortRef.current?.abort()
+    const controller = abortRef.current
+    if (!controller || controller.signal.aborted) return
+
+    const state = useAppStore.getState().creationDraft
+    const now = Date.now()
+    const activeUserEntry = activeUserEntryRef.current
+    const activeUserMessage = activeUserEntry
+      ? state.conversation.find(item => item.id === activeUserEntry.id)
+      : [...state.conversation].reverse().find(item => (
+        item.role === 'user' && item.kind !== 'user_abort'
+      ))
+    const activeRunIds = new Set([
+      ...(activeUserMessage?.runIds || []),
+      ...(activeUserMessage?.runId ? [activeUserMessage.runId] : []),
+    ])
+    const latestRunEvent = [...state.agentEvents]
+      .reverse()
+      .find(item => activeRunIds.has(item.run_id))
+    const runId = latestRunEvent?.run_id
+      || [...activeRunIds].reverse()[0]
+      || `cancelled-${now}`
+    const runEvents = state.agentEvents.filter(item => item.run_id === runId)
+
+    if (!runEvents.some(event => event.type === 'run.cancelled')) {
+      const latestGoal = [...runEvents].reverse().find(event => event.goal)?.goal
+      setAgentEvents([...state.agentEvents, {
+        schema_version: 'creation.agent.v1',
+        event_id: `user-cancelled-${now}`,
+        session_id: state.sessionId || 'current',
+        run_id: runId,
+        sequence: Math.max(0, ...runEvents.map(event => Number(event.sequence) || 0)) + 1,
+        timestamp: now,
+        type: 'run.cancelled',
+        status: 'cancelled',
+        actor: { kind: 'user', id: 'current_user', name: userDisplayName },
+        summary: '用户已中止，本轮创作结束',
+        goal: latestGoal ? { ...latestGoal, status: 'cancelled' } : undefined,
+        environment_patch: {},
+        data: { reason: 'user_requested' },
+      }])
+    }
+
+    const conversationWithRun = state.conversation.map(item => (
+      activeUserMessage && item.id === activeUserMessage.id
+        ? {
+          ...item,
+          runIds: [...new Set([...(item.runIds || []), ...(item.runId ? [item.runId] : []), runId])],
+        }
+        : item
+    ))
+    if (!conversationWithRun.some(item => item.kind === 'user_abort' && item.runId === runId)) {
+      setConversation([...conversationWithRun, {
+        id: `user-abort-${now}`,
+        role: 'user',
+        kind: 'user_abort',
+        content: '中止了本次创作',
+        createdAt: now,
+        runId,
+      }])
+    }
+
+    controller.abort()
     setIsGenerating(false)
     stopTimer()
-    setError('已中止本次创作')
+    setError(null)
   }
 
   const hasActiveSession = Boolean(
@@ -3209,7 +3284,11 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const creationTimeline = buildCreationTimeline(conversation, agentEvents)
   const currentAgentTraceKey = [...creationTimeline]
     .reverse()
-    .find(item => item.kind === 'trace' && item.events.some(event => event.status === 'running'))
+    .find(item => (
+      item.kind === 'trace'
+      && item.events.some(event => event.status === 'running')
+      && !terminalEventForLatestRun(item.events)
+    ))
     ?.key
   const referenceGroups = referenceGroupsFromEvents(
     agentEvents,
@@ -3765,11 +3844,16 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                   return (
                     <article
                       key={item.key}
-                      className={`creation-chat-message is-${item.message.role}`}
-                      aria-label={item.message.role === 'user' ? '用户消息' : 'Agent 消息'}
+                      className={`creation-chat-message is-${item.message.role}${item.message.kind === 'user_abort' ? ' is-abort' : ''}`}
+                      aria-label={item.message.kind === 'user_abort'
+                        ? '用户中止消息'
+                        : item.message.role === 'user' ? '用户消息' : 'Agent 消息'}
                     >
                       <div className="creation-chat-message__meta">
                         <span>{item.message.role === 'user' ? userDisplayName : '创作 Agent'}</span>
+                        {item.message.kind === 'user_abort' && (
+                          <span className="creation-chat-message__end-badge">已结束</span>
+                        )}
                         {timestamp && (
                           <time
                             dateTime={timestamp.iso}
@@ -4470,6 +4554,7 @@ const agentEventStatusLabels: Record<string, string> = {
   completed: '已完成',
   warning: '有警告',
   failed: '未完成',
+  cancelled: '已结束',
   paused: '已暂停',
 }
 
@@ -4569,6 +4654,9 @@ const AgentExecutionTrace = ({
     phaseCounter += 1
     phaseIndexes.set(segment.key, phaseCounter)
   })
+  const runTerminalEvent = terminalEventForLatestRun(events)
+  const runWasCancelled = runTerminalEvent?.type === 'run.cancelled'
+  const runFailed = runTerminalEvent?.type === 'run.failed'
   const resolveGroupStatus = (group: AgentEventGroup, flatIndex: number) => {
     const latestEvent = group.events[group.events.length - 1]
     if (latestEvent.status !== 'running') return latestEvent.status
@@ -4580,7 +4668,10 @@ const AgentExecutionTrace = ({
           && ['completed', 'warning', 'failed'].includes(event.status)
         ))
       ))
-    return resolved ? 'completed' : latestEvent.status
+    if (resolved) return 'completed'
+    if (runWasCancelled) return 'cancelled'
+    if (runFailed) return 'failed'
+    return latestEvent.status
   }
   const groupStatusByKey = new Map<string, string>()
   flatGroups.forEach((group, flatIndex) => {
@@ -4655,7 +4746,7 @@ const AgentExecutionTrace = ({
           aria-expanded={showDetails}
         >
           <span
-            className={`creation-agent-event__icon is-${actorEvent.actor?.kind || 'agent'}${['completed', 'warning', 'failed'].includes(displayStatus) ? ' is-dot' : ''}`}
+            className={`creation-agent-event__icon is-${actorEvent.actor?.kind || 'agent'}${['completed', 'warning', 'failed', 'cancelled'].includes(displayStatus) ? ' is-dot' : ''}`}
             aria-hidden="true"
           >
             {displayStatus === 'completed'
@@ -4664,6 +4755,8 @@ const AgentExecutionTrace = ({
                   ? <span className="creation-agent-event__dot is-warning" />
                 : displayStatus === 'failed'
                   ? <span className="creation-agent-event__dot is-failed" />
+                  : displayStatus === 'cancelled'
+                    ? <span className="creation-agent-event__dot is-cancelled" />
                   : actorEvent.actor?.kind === 'tool'
                     ? <Wrench size={13} />
                     : actorEvent.actor?.kind === 'skill'
@@ -4728,7 +4821,7 @@ const AgentExecutionTrace = ({
   }
 
   const renderThinkingSegment = (segment: RenderThinkingSegment) => {
-    const isRunning = segment.status === 'running'
+    const isRunning = segment.status === 'running' && !runTerminalEvent
     const showBody = isRunning || Boolean(openBlocks[segment.key])
     const stageLabel = CREATION_THINKING_STAGE_LABELS[segment.stage] || ''
     const durationSeconds = segment.durationMs == null
@@ -4785,7 +4878,7 @@ const AgentExecutionTrace = ({
 
   // 顶层阶段行：序号 + 阶段标题 + 灰色耗时，展开后是思考/动作块，竖线标识层级
   const renderPhaseSegment = (segment: RenderPhaseSegment) => {
-    const isRunning = segment.status === 'running'
+    const isRunning = segment.status === 'running' && !runTerminalEvent
     const hasWarning = !isRunning && segment.innerSegments.some((inner) => (
       inner.kind === 'step'
         ? ['warning', 'failed'].includes(groupStatusByKey.get(inner.group.key) || '')
@@ -4816,7 +4909,15 @@ const AgentExecutionTrace = ({
             {`${phaseIndexes.get(segment.key) || ''}. ${segment.title}`}
           </span>
           <span className="creation-trace-phase__meta">
-            {isRunning ? '进行中' : hasWarning ? '有警告' : durationSeconds != null ? `${durationSeconds}s` : '已完成'}
+            {isRunning
+              ? '进行中'
+              : runWasCancelled
+                ? '已结束'
+                : runFailed
+                  ? '未完成'
+                  : hasWarning
+                    ? '有警告'
+                    : durationSeconds != null ? `${durationSeconds}s` : '已完成'}
           </span>
         </button>
         {showBody && (

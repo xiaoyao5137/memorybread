@@ -375,10 +375,12 @@ export interface MemoryPackageImportReport {
   payload_sha256: string
   dry_run: boolean
   database_replaced?: boolean
+  target_directory?: string | null
   local_files?: {
     incoming: number
     written: number
     unchanged: number
+    conflicts?: number
   }
   client_state?: Record<string, string>
   capture_refs: MemoryPackageTableImportReport

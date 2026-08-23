@@ -80,8 +80,8 @@ describe('MemoryBackupCard', () => {
       },
     })
 
-    expect(screen.getByLabelText('记忆包导入结果')).toHaveTextContent('数据记录 新增 1 / 更新 2 / 跳过 0')
-    expect(screen.getByLabelText('记忆包导入结果')).toHaveTextContent('操作 新增 1 / 更新 0 / 跳过 0')
+    expect(screen.getByLabelText('记忆包导入结果')).toHaveTextContent('数据记录 新增 1 / 更新 2 / 保留本机 0')
+    expect(screen.getByLabelText('记忆包导入结果')).toHaveTextContent('操作 新增 1 / 更新 0 / 保留本机 0')
     fireEvent.click(screen.getByRole('button', { name: '查看数据记录导入明细' }))
     expect(onOpenImportDetails).toHaveBeenCalledWith('data_sources')
   })

@@ -582,7 +582,10 @@ const IntegrationPanel: React.FC = () => {
           <div className="integration-section-heading">
             <div>
               <span>Chrome background access</span>
-              <h2>浏览器集成</h2>
+              <div className="tutorial-title-row">
+                <h2>浏览器集成</h2>
+                <TutorialLink url={TUTORIAL_URLS.browserIntegration} label="浏览器集成教程" />
+              </div>
             </div>
           </div>
 

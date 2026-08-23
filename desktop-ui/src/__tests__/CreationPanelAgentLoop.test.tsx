@@ -2167,4 +2167,56 @@ describe('创作 Agent 多轮 Loop', () => {
     expect(warningStep).toHaveClass('is-warning')
     expect(warningStep?.querySelector('.creation-agent-event__dot.is-warning')).toBeTruthy()
   })
+
+  it('用户中止后在对话中记录行为，并把进行中的执行轨迹标记为结束', async () => {
+    const encoder = new TextEncoder()
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.pathname === '/api/creation/agent/run') {
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode([
+              event('run.started', 1, '创作 Agent 已接管目标'),
+              event('phase.started', 2, '阶段开始：生成文档内容', undefined, {
+                phase_id: 'step:document_writer_agent',
+                phase_title: '生成文档内容',
+                phase_kind: 'plan_step',
+              }),
+              event('thinking.started', 3, '深度思考中：生成文档内容', undefined, {
+                stage: 'generation',
+              }),
+            ].map(item => `data: ${JSON.stringify(item)}\n\n`).join('')))
+            init?.signal?.addEventListener('abort', () => {
+              controller.error(new DOMException('The operation was aborted.', 'AbortError'))
+            }, { once: true })
+          },
+        }), { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+    const input = screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/)
+    fireEvent.change(input, { target: { value: '生成一份产品研发周报' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
+
+    const phaseTitle = await screen.findByText('1. 生成文档内容')
+    expect(phaseTitle.closest('.creation-trace-phase')).toHaveTextContent('进行中')
+
+    fireEvent.click(within(screen.getByLabelText('创作对话')).getByRole('button', { name: '中止' }))
+
+    const abortMessage = await screen.findByLabelText('用户中止消息')
+    expect(abortMessage).toHaveTextContent('中止了本次创作')
+    expect(abortMessage).toHaveTextContent('已结束')
+    expect(phaseTitle.closest('.creation-trace-phase')).toHaveTextContent('已结束')
+    expect(phaseTitle.closest('.creation-trace-phase')).not.toHaveTextContent('进行中')
+    expect(useAppStore.getState().creationDraft.agentEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'run.cancelled', status: 'cancelled' }),
+    ]))
+    expect(screen.queryByText('已中止本次创作')).not.toBeInTheDocument()
+  })
 })

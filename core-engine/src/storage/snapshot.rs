@@ -253,6 +253,7 @@ pub struct AssetSnapshotImportReport {
     pub payload_sha256: String,
     pub dry_run: bool,
     pub database_replaced: bool,
+    pub target_directory: Option<String>,
     pub local_files: LocalFileImportReport,
     pub client_state: BTreeMap<String, String>,
     pub capture_refs: TableImportReport,
@@ -264,6 +265,9 @@ pub struct LocalFileImportReport {
     pub incoming: usize,
     pub written: usize,
     pub unchanged: usize,
+    /// Files whose original path was occupied by different local content. The
+    /// imported copy is kept under a deterministic conflict name.
+    pub conflicts: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -437,6 +441,10 @@ impl StorageManager {
             let mut report = AssetSnapshotImportReport {
                 payload_sha256: actual_payload_sha256,
                 dry_run,
+                target_directory: conn
+                    .path()
+                    .and_then(|path| Path::new(path).parent())
+                    .map(|path| path.display().to_string()),
                 ..Default::default()
             };
 
@@ -534,46 +542,34 @@ impl StorageManager {
     ) -> Result<AssetSnapshotImportReport, StorageError> {
         let database_bytes = decode_database_snapshot(database)?;
         let decoded_files = decode_local_files(&snapshot.local_files)?;
-        let mut report = AssetSnapshotImportReport {
-            payload_sha256: actual_payload_sha256,
-            dry_run,
-            database_replaced: !dry_run,
-            local_files: LocalFileImportReport {
-                incoming: decoded_files.len(),
-                ..Default::default()
-            },
-            client_state: snapshot.client_state.clone(),
-            tables: snapshot
-                .manifest
-                .table_summaries
-                .iter()
-                .map(|summary| TableImportReport {
-                    name: summary.name.clone(),
-                    incoming: summary.row_count,
-                    inserted: if dry_run { 0 } else { summary.row_count },
-                    skipped: if dry_run { summary.row_count } else { 0 },
-                    ..Default::default()
-                })
-                .collect(),
-            ..Default::default()
-        };
-
-        if dry_run {
-            report.local_files.unchanged = decoded_files.len();
-            return Ok(report);
-        }
-
         let data_root = self.with_conn(|conn| {
             Ok(conn
                 .path()
                 .and_then(|path| Path::new(path).parent())
                 .map(Path::to_path_buf))
         })?;
-        if let Some(root) = data_root.as_deref() {
-            report.local_files = restore_local_files(root, &decoded_files)?;
-        }
+        let mut report = AssetSnapshotImportReport {
+            payload_sha256: actual_payload_sha256,
+            dry_run,
+            database_replaced: false,
+            target_directory: data_root.as_deref().map(|path| path.display().to_string()),
+            local_files: LocalFileImportReport {
+                incoming: decoded_files.len(),
+                ..Default::default()
+            },
+            client_state: snapshot.client_state.clone(),
+            ..Default::default()
+        };
 
-        restore_database_snapshot(self, &database_bytes)?;
+        report.tables = merge_database_snapshot(self, &database_bytes, dry_run)?;
+
+        if dry_run {
+            report.local_files.unchanged = decoded_files.len();
+        } else {
+            if let Some(root) = data_root.as_deref() {
+                report.local_files = restore_local_files(root, &decoded_files)?;
+            }
+        }
         Ok(report)
     }
 }
@@ -691,10 +687,9 @@ fn decode_database_snapshot(database: &DatabaseSnapshot) -> Result<Vec<u8>, Stor
     Ok(bytes)
 }
 
-fn restore_database_snapshot(
-    storage: &StorageManager,
+fn open_database_snapshot(
     database_bytes: &[u8],
-) -> Result<(), StorageError> {
+) -> Result<(tempfile::TempDir, Connection), StorageError> {
     let temp_dir = tempfile::tempdir()?;
     let database_path = temp_dir.path().join(DATABASE_FILE_NAME);
     fs::write(&database_path, database_bytes)?;
@@ -705,18 +700,547 @@ fn restore_database_snapshot(
             "完整数据库快照完整性检查失败：{integrity}"
         )));
     }
+    Ok((temp_dir, source))
+}
 
-    let mut target = storage.conn.lock()?;
-    target.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA foreign_keys = OFF;")?;
-    {
-        let backup = Backup::new(&source, &mut target)?;
-        backup.run_to_completion(100, Duration::from_millis(5), None)?;
+#[derive(Debug, Clone)]
+struct MergeTable {
+    name: String,
+    columns: Vec<String>,
+    primary_key: Option<String>,
+    foreign_keys: Vec<MergeForeignKey>,
+    unique_keys: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+struct MergeForeignKey {
+    column: String,
+    parent_table: String,
+}
+
+/// Merge a complete snapshot without replacing any local row. Business unique
+/// keys and semantic identities win over SQLite row ids. If an unrelated row
+/// already occupies an incoming integer id, SQLite allocates a new id and the
+/// map is applied to child foreign keys imported later in the same transaction.
+fn merge_database_snapshot(
+    storage: &StorageManager,
+    database_bytes: &[u8],
+    dry_run: bool,
+) -> Result<Vec<TableImportReport>, StorageError> {
+    let (_temp_dir, source) = open_database_snapshot(database_bytes)?;
+    let mut tables = merge_tables(&source)?;
+    sort_merge_tables(&mut tables);
+
+    let target = storage.conn.lock()?;
+    target.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let result = (|| {
+        let tx = target.unchecked_transaction()?;
+        let mut id_maps: BTreeMap<String, BTreeMap<i64, i64>> = BTreeMap::new();
+        let mut reports = Vec::new();
+
+        for table in &tables {
+            if !table_exists(&tx, &table.name)? {
+                continue;
+            }
+            let target_columns = table_columns(&tx, &table.name)?;
+            let columns = table
+                .columns
+                .iter()
+                .filter(|column| target_columns.contains(column))
+                .cloned()
+                .collect::<Vec<_>>();
+            if columns.is_empty() {
+                continue;
+            }
+            let rows = read_merge_rows(&source, table, &columns)?;
+            let mut report = TableImportReport {
+                name: table.name.clone(),
+                incoming: rows.len(),
+                ..Default::default()
+            };
+
+            for mut row in rows {
+                sanitize_and_remap_foreign_keys(&mut row, table, &id_maps);
+                let source_id = table
+                    .primary_key
+                    .as_deref()
+                    .and_then(|column| json_i64(&row, column));
+
+                if let Some(existing_id) = find_existing_merge_row(&tx, table, &row, &columns)? {
+                    if let (Some(source_id), Some(existing_id)) = (source_id, existing_id) {
+                        id_maps
+                            .entry(table.name.clone())
+                            .or_default()
+                            .insert(source_id, existing_id);
+                    }
+                    report.skipped += 1;
+                    continue;
+                }
+
+                let mut insert_columns = columns.clone();
+                if let (Some(primary_key), Some(source_id)) =
+                    (table.primary_key.as_deref(), source_id)
+                {
+                    if primary_key_is_occupied(&tx, &table.name, primary_key, source_id)? {
+                        insert_columns.retain(|column| column != primary_key);
+                    }
+                }
+                let inserted = insert_merge_row(&tx, &table.name, &insert_columns, &row)?;
+                if !inserted {
+                    report.skipped += 1;
+                    continue;
+                }
+                report.inserted += 1;
+                if let (Some(primary_key), Some(source_id)) =
+                    (table.primary_key.as_deref(), source_id)
+                {
+                    let target_id = if insert_columns.iter().any(|column| column == primary_key) {
+                        source_id
+                    } else {
+                        tx.last_insert_rowid()
+                    };
+                    id_maps
+                        .entry(table.name.clone())
+                        .or_default()
+                        .insert(source_id, target_id);
+                }
+            }
+            reports.push(report);
+        }
+
+        let violation = tx
+            .query_row("PRAGMA foreign_key_check", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()?;
+        if let Some(table) = violation {
+            return Err(snapshot_import_error(&format!(
+                "合并后外键检查失败：{table}"
+            )));
+        }
+        if dry_run {
+            tx.rollback()?;
+        } else {
+            tx.commit()?;
+        }
+        Ok(reports)
+    })();
+    target.execute_batch("PRAGMA foreign_keys = ON;")?;
+    result
+}
+
+fn merge_tables(conn: &Connection) -> Result<Vec<MergeTable>, StorageError> {
+    let mut tables = Vec::new();
+    for name in table_names(conn)? {
+        if !is_mergeable_complete_table(&name) {
+            continue;
+        }
+        let columns = table_columns(conn, &name)?;
+        let mut primary_key = None;
+        let mut info = conn.prepare(&format!("PRAGMA table_info({})", quote_identifier(&name)))?;
+        let column_info = info
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let primary_columns = column_info
+            .into_iter()
+            .filter(|(_, _, position)| *position > 0)
+            .collect::<Vec<_>>();
+        if primary_columns.len() == 1 && primary_columns[0].1.eq_ignore_ascii_case("INTEGER") {
+            primary_key = Some(primary_columns[0].0.clone());
+        }
+
+        let mut foreign_keys = Vec::new();
+        let mut foreign_key_stmt = conn.prepare(&format!(
+            "PRAGMA foreign_key_list({})",
+            quote_identifier(&name)
+        ))?;
+        for foreign_key in foreign_key_stmt
+            .query_map([], |row| {
+                Ok(MergeForeignKey {
+                    parent_table: row.get(2)?,
+                    column: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        {
+            foreign_keys.push(foreign_key);
+        }
+
+        tables.push(MergeTable {
+            unique_keys: unique_keys(conn, &name)?,
+            name,
+            columns,
+            primary_key,
+            foreign_keys,
+        });
     }
-    target.execute_batch(
-        "PRAGMA foreign_keys = ON;
-         PRAGMA wal_checkpoint(TRUNCATE);",
+    Ok(tables)
+}
+
+fn table_names(conn: &Connection) -> Result<Vec<String>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+         ORDER BY name",
     )?;
-    Ok(())
+    let names = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::Sqlite)?;
+    Ok(names)
+}
+
+fn is_mergeable_complete_table(name: &str) -> bool {
+    !name.contains("_fts")
+        && !matches!(
+            name,
+            "schema_migrations"
+                | "capture_attempts"
+                | "vector_index"
+                | "artifact_vector_index"
+                | "vector_deletion_queue"
+                | "system_metrics"
+                | "llm_usage_logs"
+                | "model_events"
+                | "data_cleanup_log"
+                | "data_extraction_state"
+                | "data_timeline_materialization_state"
+                | "bake_runs"
+                | "bake_watermarks"
+                | "bake_retry_state"
+                | "bake_candidate_audits"
+                | "bake_artifact_audits"
+        )
+}
+
+fn unique_keys(conn: &Connection, table: &str) -> Result<Vec<Vec<String>>, StorageError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA index_list({})", quote_identifier(table)))?;
+    let indexes = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut keys = Vec::new();
+    for (index, is_unique) in indexes {
+        if is_unique == 0 {
+            continue;
+        }
+        let mut index_stmt =
+            conn.prepare(&format!("PRAGMA index_info({})", quote_identifier(&index)))?;
+        let columns = index_stmt
+            .query_map([], |row| row.get::<_, String>(2))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !columns.is_empty() {
+            keys.push(columns);
+        }
+    }
+    Ok(keys)
+}
+
+fn sort_merge_tables(tables: &mut Vec<MergeTable>) {
+    let mut remaining = std::mem::take(tables);
+    remaining.sort_by_key(|table| (merge_table_priority(&table.name), table.name.clone()));
+    let mut sorted: Vec<MergeTable> = Vec::new();
+    while !remaining.is_empty() {
+        let known = sorted
+            .iter()
+            .map(|table| table.name.as_str())
+            .collect::<Vec<_>>();
+        let position = remaining.iter().position(|table| {
+            table.name == "captures"
+                || table.foreign_keys.iter().all(|foreign_key| {
+                    foreign_key.parent_table == table.name
+                        || known.contains(&foreign_key.parent_table.as_str())
+                        || !remaining
+                            .iter()
+                            .any(|candidate| candidate.name == foreign_key.parent_table)
+                })
+        });
+        sorted.push(remaining.remove(position.unwrap_or(0)));
+    }
+    *tables = sorted;
+}
+
+fn merge_table_priority(table: &str) -> u8 {
+    match table {
+        "captures" => 0,
+        "timelines" | "creation_history" | "data_sources" => 10,
+        "bake_knowledge" | "bake_sops" | "data_snapshots" | "data_source_links" => 20,
+        "bake_documents" | "creation_skills" => 30,
+        "bake_document_sections" => 40,
+        "memory_favorites" => 100,
+        _ => 50,
+    }
+}
+
+fn read_merge_rows(
+    conn: &Connection,
+    table: &MergeTable,
+    columns: &[String],
+) -> Result<Vec<JsonRow>, StorageError> {
+    let selected = columns
+        .iter()
+        .map(|column| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let order = table
+        .primary_key
+        .as_deref()
+        .map(|column| format!(" ORDER BY {}", quote_identifier(column)))
+        .unwrap_or_default();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {selected} FROM {}{order}",
+        quote_identifier(&table.name)
+    ))?;
+    let rows = stmt
+        .query_map([], |row| row_to_json(columns, row))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::Sqlite)?;
+    Ok(rows)
+}
+
+fn sanitize_and_remap_foreign_keys(
+    row: &mut JsonRow,
+    table: &MergeTable,
+    id_maps: &BTreeMap<String, BTreeMap<i64, i64>>,
+) {
+    // A capture in a portable snapshot is only a redacted reference. Back
+    // links would create a captures <-> timelines cycle and are not evidence.
+    if table.name == "captures" {
+        for column in ["knowledge_id", "timeline_id"] {
+            if row.contains_key(column) {
+                row.insert(column.to_string(), Value::Null);
+            }
+        }
+    }
+    for foreign_key in &table.foreign_keys {
+        let Some(old_id) = json_i64(row, &foreign_key.column) else {
+            continue;
+        };
+        if let Some(new_id) = id_maps
+            .get(&foreign_key.parent_table)
+            .and_then(|mapping| mapping.get(&old_id))
+        {
+            row.insert(foreign_key.column.clone(), Value::from(*new_id));
+        }
+    }
+    for (column, parent_table) in json_reference_columns(&table.name) {
+        if let Some(mapping) = id_maps.get(*parent_table) {
+            remap_json_id_array(row, column, mapping);
+        }
+    }
+    if table.name == "memory_favorites" {
+        let parent_table = match json_string(row, "resource_kind").as_deref() {
+            Some("knowledge") => Some("bake_knowledge"),
+            Some("operation") => Some("bake_sops"),
+            Some("document") => Some("bake_documents"),
+            Some("data") => Some("data_sources"),
+            _ => None,
+        };
+        if let (Some(parent_table), Some(old_id)) = (parent_table, json_i64(row, "resource_id")) {
+            if let Some(new_id) = id_maps
+                .get(parent_table)
+                .and_then(|mapping| mapping.get(&old_id))
+            {
+                row.insert("resource_id".to_string(), Value::from(*new_id));
+            }
+        }
+    }
+}
+
+fn json_reference_columns(table: &str) -> &'static [(&'static str, &'static str)] {
+    match table {
+        "timelines" => &[("capture_ids", "captures")],
+        "bake_knowledge" | "bake_sops" => &[
+            ("source_capture_ids", "captures"),
+            ("source_timeline_ids", "timelines"),
+        ],
+        "bake_documents" => &[
+            ("source_memory_ids", "timelines"),
+            ("source_capture_ids", "captures"),
+            ("source_episode_ids", "timelines"),
+            ("linked_knowledge_ids", "bake_knowledge"),
+        ],
+        "data_snapshots" => &[
+            ("source_capture_ids", "captures"),
+            ("source_timeline_ids", "timelines"),
+        ],
+        "diaries" => &[
+            ("source_timeline_ids", "timelines"),
+            ("source_diary_ids", "diaries"),
+        ],
+        _ => &[],
+    }
+}
+
+fn remap_json_id_array(row: &mut JsonRow, column: &str, mapping: &BTreeMap<i64, i64>) {
+    let Some(raw) = json_string(row, column) else {
+        return;
+    };
+    let Ok(mut value) = serde_json::from_str::<Value>(&raw) else {
+        return;
+    };
+    let Some(items) = value.as_array_mut() else {
+        return;
+    };
+    for item in items {
+        let old_id = item
+            .as_i64()
+            .or_else(|| item.as_str().and_then(|value| value.parse::<i64>().ok()));
+        let Some(new_id) = old_id.and_then(|old_id| mapping.get(&old_id)) else {
+            continue;
+        };
+        *item = if item.is_string() {
+            Value::String(new_id.to_string())
+        } else {
+            Value::from(*new_id)
+        };
+    }
+    row.insert(column.to_string(), Value::String(value.to_string()));
+}
+
+fn find_existing_merge_row(
+    conn: &Connection,
+    table: &MergeTable,
+    row: &JsonRow,
+    columns: &[String],
+) -> Result<Option<Option<i64>>, StorageError> {
+    for key in semantic_keys(&table.name)
+        .into_iter()
+        .chain(table.unique_keys.clone())
+    {
+        if key.iter().all(|column| {
+            columns.contains(column)
+                && row
+                    .get(column)
+                    .map(|value| !value.is_null())
+                    .unwrap_or(false)
+        }) {
+            if let Some(id) = find_row_by_columns(conn, table, row, &key)? {
+                return Ok(Some(id));
+            }
+        }
+    }
+    let exact_columns = columns
+        .iter()
+        .filter(|column| table.primary_key.as_ref() != Some(*column))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !exact_columns.is_empty() {
+        if let Some(id) = find_row_by_columns(conn, table, row, &exact_columns)? {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
+fn semantic_keys(table: &str) -> Vec<Vec<String>> {
+    let keys: &[&[&str]] = match table {
+        "captures" => &[&["ts", "event_type"]],
+        "timelines" => &[
+            &["capture_id", "created_at"],
+            &["summary", "created_at_ms"],
+            &["summary", "time_range_start", "time_range_end"],
+            &["summary", "start_time", "end_time"],
+        ],
+        "bake_knowledge" | "bake_sops" => &[
+            &["timeline_id", "created_at"],
+            &["timeline_id", "title", "summary"],
+        ],
+        "bake_documents" => &[
+            &["document_identity"],
+            &["content_hash"],
+            &["title", "full_content", "created_at"],
+        ],
+        "bake_document_sections" => &[
+            &["document_id", "section_index"],
+            &["document_id", "section_index", "content_hash"],
+        ],
+        "creation_history" => &[
+            &["session_id", "revision_no"],
+            &["prompt", "generated_content", "created_at"],
+        ],
+        "scheduled_tasks" => &[
+            &["template_id"],
+            &["name", "created_at"],
+            &["name", "cron_expression", "user_instruction"],
+        ],
+        "notification_channels" => &[&["channel_type", "webhook_url"]],
+        _ => &[],
+    };
+    keys.iter()
+        .map(|key| key.iter().map(|column| column.to_string()).collect())
+        .collect()
+}
+
+fn find_row_by_columns(
+    conn: &Connection,
+    table: &MergeTable,
+    row: &JsonRow,
+    columns: &[String],
+) -> Result<Option<Option<i64>>, StorageError> {
+    let predicate = columns
+        .iter()
+        .map(|column| format!("{} IS ?", quote_identifier(column)))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let selected = table
+        .primary_key
+        .as_deref()
+        .map(quote_identifier)
+        .unwrap_or_else(|| "NULL".to_string());
+    let sql = format!(
+        "SELECT {selected} FROM {} WHERE {predicate} LIMIT 1",
+        quote_identifier(&table.name)
+    );
+    let values = values_for_columns(row, columns);
+    conn.query_row(&sql, params_from_iter(values.iter()), |result| {
+        Ok(result.get::<_, Option<i64>>(0)?)
+    })
+    .optional()
+    .map_err(StorageError::Sqlite)
+}
+
+fn primary_key_is_occupied(
+    conn: &Connection,
+    table: &str,
+    primary_key: &str,
+    id: i64,
+) -> Result<bool, StorageError> {
+    conn.query_row(
+        &format!(
+            "SELECT 1 FROM {} WHERE {} = ?1 LIMIT 1",
+            quote_identifier(table),
+            quote_identifier(primary_key)
+        ),
+        [id],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|value| value.is_some())
+    .map_err(StorageError::Sqlite)
+}
+
+fn insert_merge_row(
+    conn: &Connection,
+    table: &str,
+    columns: &[String],
+    row: &JsonRow,
+) -> Result<bool, StorageError> {
+    if columns.is_empty() {
+        return Ok(false);
+    }
+    let sql = insert_sql("INSERT OR IGNORE", table, columns, None);
+    let values = values_for_columns(row, columns);
+    conn.execute(&sql, params_from_iter(values.iter()))
+        .map(|affected| affected > 0)
+        .map_err(StorageError::Sqlite)
 }
 
 fn export_all_table_summaries(
@@ -841,19 +1365,46 @@ fn restore_local_files(
     };
     for file in files {
         let target = root.join(&file.relative_path);
-        if target.is_file() && sha256_hex(&fs::read(&target)?) == sha256_hex(&file.bytes) {
-            report.unchanged += 1;
-            continue;
+        let file_sha256 = sha256_hex(&file.bytes);
+        let mut write_target = target.clone();
+        if target.is_file() {
+            if sha256_hex(&fs::read(&target)?) == file_sha256 {
+                report.unchanged += 1;
+                continue;
+            }
+            report.conflicts += 1;
+            write_target = conflict_file_path(&target, &file_sha256);
+            if write_target.is_file() && sha256_hex(&fs::read(&write_target)?) == file_sha256 {
+                report.unchanged += 1;
+                continue;
+            }
         }
-        if let Some(parent) = target.parent() {
+        if let Some(parent) = write_target.parent() {
             fs::create_dir_all(parent)?;
         }
-        let temporary = target.with_extension(format!("memorybread-restore-{}", current_ts_ms()));
+        let temporary =
+            write_target.with_extension(format!("memorybread-restore-{}", current_ts_ms()));
         fs::write(&temporary, &file.bytes)?;
-        fs::rename(&temporary, &target)?;
+        fs::rename(&temporary, &write_target)?;
         report.written += 1;
     }
     Ok(report)
+}
+
+fn conflict_file_path(target: &Path, sha256: &str) -> PathBuf {
+    let short_hash = &sha256[..sha256.len().min(12)];
+    let stem = target
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("restored");
+    let extension = target.extension().and_then(|value| value.to_str());
+    let name = match extension {
+        Some(extension) if !extension.is_empty() => {
+            format!("{stem}.memorybread-restored-{short_hash}.{extension}")
+        }
+        _ => format!("{stem}.memorybread-restored-{short_hash}"),
+    };
+    target.with_file_name(name)
 }
 
 fn is_excluded_local_path(path: &Path) -> bool {
@@ -1567,8 +2118,8 @@ fn upsert_by_unique_columns_where(
     table: &TableSnapshot,
     unique_columns: &[&str],
     wanted_columns: &[&str],
-    update_columns: &[&str],
-    update_condition: Option<&str>,
+    _update_columns: &[&str],
+    _update_condition: Option<&str>,
 ) -> Result<TableImportReport, StorageError> {
     let existing_columns = table_columns(conn, &table.name)?;
     let insert_columns = wanted_columns
@@ -1592,23 +2143,9 @@ fn upsert_by_unique_columns_where(
         });
     }
 
-    let update_clause = update_columns
-        .iter()
-        .filter(|column| insert_columns.iter().any(|existing| existing == **column))
-        .map(|column| format!("{column} = excluded.{column}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let conflict = if update_clause.is_empty() {
-        format!("ON CONFLICT({}) DO NOTHING", unique_columns.join(", "))
-    } else {
-        let condition = update_condition
-            .map(|condition| format!(" WHERE {condition}"))
-            .unwrap_or_default();
-        format!(
-            "ON CONFLICT({}) DO UPDATE SET {update_clause}{condition}",
-            unique_columns.join(", ")
-        )
-    };
+    // Restores are additive. A row already identified by a stable business
+    // key always keeps the local value, even when the backup is newer.
+    let conflict = format!("ON CONFLICT({}) DO NOTHING", unique_columns.join(", "));
     let sql = insert_sql("INSERT", &table.name, &insert_columns, Some(&conflict));
     let exists_sql = format!(
         "SELECT 1 FROM {} WHERE {}",
@@ -1643,12 +2180,14 @@ fn upsert_by_unique_columns_where(
             })
             .optional()?
             .is_some();
+        if existed {
+            report.skipped += 1;
+            continue;
+        }
         let values = values_for_columns(row, &insert_columns);
         let affected = stmt.execute(params_from_iter(values.iter()))?;
         if affected == 0 {
             report.skipped += 1;
-        } else if existed {
-            report.updated += affected;
         } else {
             report.inserted += affected;
         }
@@ -1970,7 +2509,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_snapshot_restores_all_content_but_excludes_raw_captures() {
+    fn complete_snapshot_merges_all_content_but_excludes_raw_captures() {
         let source = StorageManager::open_in_memory().unwrap();
         seed_assets(&source);
         source
@@ -2091,8 +2630,98 @@ mod tests {
         assert_eq!(restored_capture.2, "snapshot_ref");
         assert_eq!(restored_capture.3, 1);
         assert_eq!(count_table(&target, "captures"), 1);
-        assert!(first.database_replaced);
+        assert!(!first.database_replaced);
         assert_eq!(first.client_state, client_state);
+    }
+
+    #[test]
+    fn complete_snapshot_preserves_local_rows_and_remaps_colliding_ids() {
+        let source = StorageManager::open_in_memory().unwrap();
+        seed_assets(&source);
+        let snapshot = source.export_asset_snapshot().unwrap();
+
+        let target = StorageManager::open_in_memory().unwrap();
+        target
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO captures (id, ts, event_type, is_sensitive, pii_scrubbed)
+                     VALUES (42, 1800000000000, 'manual', 1, 1)",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO timelines (id, capture_id, summary, created_at_ms, updated_at_ms)
+                     VALUES (7, 42, '本机独有时间线', 1800000000000, 1800000000000)",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO bake_knowledge (
+                        id, timeline_id, title, summary, content, source_capture_ids
+                     ) VALUES (9, 7, '本机知识', '不得被覆盖', '本机内容', '[42]')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let first = target.import_asset_snapshot(&snapshot, false).unwrap();
+        target
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE bake_knowledge
+                     SET content = '本机导入后编辑的内容'
+                     WHERE title = '知识标题'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let second = target.import_asset_snapshot(&snapshot, false).unwrap();
+        let (
+            local_summary,
+            imported_timeline_id,
+            imported_capture_id,
+            imported_knowledge_timeline_id,
+            imported_knowledge_content,
+        ): (String, i64, i64, i64, String) = target
+            .with_conn(|conn| {
+                let local_summary =
+                    conn.query_row("SELECT summary FROM timelines WHERE id = 7", [], |row| {
+                        row.get(0)
+                    })?;
+                let (imported_timeline_id, imported_capture_id) = conn.query_row(
+                    "SELECT id, capture_id FROM timelines WHERE summary = '一次重要时间线'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let imported_knowledge_timeline_id = conn.query_row(
+                    "SELECT timeline_id FROM bake_knowledge WHERE title = '知识标题'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let imported_knowledge_content = conn.query_row(
+                    "SELECT content FROM bake_knowledge WHERE title = '知识标题'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                Ok((
+                    local_summary,
+                    imported_timeline_id,
+                    imported_capture_id,
+                    imported_knowledge_timeline_id,
+                    imported_knowledge_content,
+                ))
+            })
+            .unwrap();
+
+        assert_eq!(local_summary, "本机独有时间线");
+        assert_ne!(imported_timeline_id, 7);
+        assert_ne!(imported_capture_id, 42);
+        assert_eq!(imported_knowledge_timeline_id, imported_timeline_id);
+        assert_eq!(imported_knowledge_content, "本机导入后编辑的内容");
+        assert_eq!(count_table(&target, "timelines"), 2);
+        assert_eq!(count_table(&target, "bake_knowledge"), 2);
+        assert!(!first.database_replaced);
+        assert!(second.tables.iter().all(|table| table.inserted == 0));
     }
 
     #[test]
@@ -2148,6 +2777,45 @@ mod tests {
         );
         assert!(!target_root.join("captures/screenshots/raw.jpg").exists());
         assert_eq!(report.local_files.written, 2);
+        assert_eq!(
+            report.target_directory.as_deref(),
+            fs::canonicalize(&target_root).unwrap().to_str()
+        );
+    }
+
+    #[test]
+    fn complete_snapshot_keeps_both_different_same_path_files() {
+        let dir = tempdir().unwrap();
+        let source_root = dir.path().join("source-conflict");
+        let target_root = dir.path().join("target-conflict");
+        fs::create_dir_all(&source_root).unwrap();
+        fs::create_dir_all(&target_root).unwrap();
+        fs::write(source_root.join("notes.txt"), b"backup-version").unwrap();
+        fs::write(target_root.join("notes.txt"), b"local-version").unwrap();
+
+        let source = StorageManager::open(&source_root.join(DATABASE_FILE_NAME)).unwrap();
+        let snapshot = source.export_asset_snapshot().unwrap();
+        let target = StorageManager::open(&target_root.join(DATABASE_FILE_NAME)).unwrap();
+        let report = target.import_asset_snapshot(&snapshot, false).unwrap();
+
+        assert_eq!(
+            fs::read(target_root.join("notes.txt")).unwrap(),
+            b"local-version"
+        );
+        let restored = fs::read_dir(&target_root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.starts_with("notes.memorybread-restored-"))
+                    .unwrap_or(false)
+            })
+            .expect("conflicting backup file retained under a new name");
+        assert_eq!(fs::read(restored).unwrap(), b"backup-version");
+        assert_eq!(report.local_files.conflicts, 1);
+        assert_eq!(report.local_files.written, 1);
     }
 
     #[test]
@@ -2242,7 +2910,7 @@ mod tests {
         assert!(second
             .tables
             .iter()
-            .any(|table| table.name == "data_sources" && table.updated == 1));
+            .any(|table| table.name == "data_sources" && table.skipped == 1));
         assert!(second
             .tables
             .iter()
@@ -2308,7 +2976,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(raw_capture_count, 0);
-        assert!(report.database_replaced);
+        assert!(!report.database_replaced);
     }
 
     fn summary_count(manifest: &AssetSnapshotManifest, table: &str) -> i64 {

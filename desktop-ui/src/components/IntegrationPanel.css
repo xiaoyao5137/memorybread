@@ -499,6 +499,15 @@
   background: rgba(255, 253, 250, 0.94);
 }
 
+.integration-content--backup .integration-section-heading > div {
+  display: grid;
+  justify-items: start;
+}
+
+.integration-content--backup .tutorial-title-row h2 {
+  white-space: nowrap;
+}
+
 .integration-section-heading {
   display: flex;
   align-items: flex-end;

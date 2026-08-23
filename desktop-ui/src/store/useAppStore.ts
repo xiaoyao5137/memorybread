@@ -78,6 +78,7 @@ export interface CreationDataReferenceItem {
 export interface CreationChatMessage {
   id: string
   role: 'user' | 'assistant'
+  kind?: 'message' | 'user_abort'
   content: string
   createdAt: number
   runId?: string

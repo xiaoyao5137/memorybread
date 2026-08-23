@@ -15,6 +15,7 @@ export const TUTORIAL_URLS = {
   data: 'https://my.feishu.cn/wiki/B2hjwF4cCiw1uyk4B9cc5qAxncc',
   memoryGraph: 'https://my.feishu.cn/wiki/M2OXwOSumibN2fkLhgeckI8pnTM',
   backup: 'https://my.feishu.cn/wiki/S2V6wDZmhig0SZkebNccxiEznNc',
+  browserIntegration: 'https://my.feishu.cn/wiki/QI6RwITYziz15fkY0z9c4Hh6nWh',
 } as const
 
 const TutorialLink: React.FC<{

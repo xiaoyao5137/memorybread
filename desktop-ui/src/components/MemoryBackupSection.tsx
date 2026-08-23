@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { ChevronRight, Cloud, FolderOpen, HardDriveDownload, LockKeyhole, LogIn, ShieldCheck } from 'lucide-react'
+import { CheckCircle2, ChevronRight, Cloud, FolderOpen, HardDriveDownload, History, LoaderCircle, LockKeyhole, LogIn, ShieldCheck, XCircle } from 'lucide-react'
 import {
   useBackupMemoryPackageToCloud,
   useExportMemoryPackage,
@@ -58,7 +58,9 @@ const restoreClientStateFromBackup = (state?: Record<string, string>) => {
   if (!state) return
   clientStateBackupKeys.forEach(key => {
     const value = state[key]
-    if (typeof value === 'string') window.localStorage.setItem(key, value)
+    if (typeof value === 'string' && window.localStorage.getItem(key) === null) {
+      window.localStorage.setItem(key, value)
+    }
   })
 }
 
@@ -80,17 +82,148 @@ const formatBytes = (bytes: number) => {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
-const summarizeImportReport = (report: MemoryPackageImportReport) => {
-  if (report.database_replaced) {
-    const tableCount = report.tables.filter(item => item.incoming > 0).length
-    const localFiles = report.local_files?.incoming || 0
-    return `已恢复完整内容（${tableCount} 个数据表，${localFiles} 个本地文件）`
+const BACKUP_ACTIVITY_STORAGE_KEY = 'memory-bread_backup_activity_v1'
+const MAX_BACKUP_ACTIVITIES = 100
+
+type BackupActivityKind = 'local-export' | 'local-import' | 'cloud-backup' | 'cloud-restore'
+type BackupActivityStatus = 'running' | 'success' | 'failed'
+
+interface BackupActivityDetail {
+  label: string
+  value: string
+}
+
+interface BackupActivity {
+  id: string
+  kind: BackupActivityKind
+  title: string
+  status: BackupActivityStatus
+  createdAt: number
+  completedAt?: number
+  summary: string
+  details: BackupActivityDetail[]
+}
+
+const readBackupActivities = (): BackupActivity[] => {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(BACKUP_ACTIVITY_STORAGE_KEY) || '[]')
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter(item => item
+        && typeof item.id === 'string'
+        && typeof item.title === 'string'
+        && typeof item.createdAt === 'number'
+        && ['running', 'success', 'failed'].includes(item.status)
+        && Array.isArray(item.details))
+      .slice(0, MAX_BACKUP_ACTIVITIES) as BackupActivity[]
+  } catch {
+    return []
   }
+}
+
+const parentPath = (path: string) => {
+  const normalized = path.replace(/[\\/]+$/, '')
+  const separator = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'))
+  return separator > 0 ? normalized.slice(0, separator) : normalized
+}
+
+const importCounts = (report: MemoryPackageImportReport) => {
+  const rows = [report.capture_refs, ...report.tables]
+  return {
+    incoming: rows.reduce((sum, item) => sum + (item.incoming || 0), 0),
+    deduplicated: rows.reduce((sum, item) => sum + (item.skipped || 0), 0),
+    imported: rows.reduce((sum, item) => sum + (item.inserted || 0) + (item.updated || 0), 0),
+  }
+}
+
+const importActivityDetails = (report: MemoryPackageImportReport): BackupActivityDetail[] => {
+  const counts = importCounts(report)
+  const details: BackupActivityDetail[] = [
+    { label: '输入数据行数', value: String(counts.incoming) },
+    { label: '去重行数', value: String(counts.deduplicated) },
+    { label: '实际导入行数', value: String(counts.imported) },
+  ]
+  if (report.target_directory) details.push({ label: '恢复目录', value: report.target_directory })
+  if (report.local_files) {
+    details.push(
+      { label: '输入本地文件', value: String(report.local_files.incoming) },
+      { label: '写入本地文件', value: String(report.local_files.written) },
+      { label: '同名文件冲突', value: String(report.local_files.conflicts || 0) },
+    )
+  }
+  importReportRows(report).forEach(row => {
+    details.push({
+      label: row.label,
+      value: `输入 ${row.incoming}，去重 ${row.skipped}，实际导入 ${row.inserted + row.updated}`,
+    })
+  })
+  return details
+}
+
+const activityStatusText: Record<BackupActivityStatus, string> = {
+  running: '进行中',
+  success: '已完成',
+  failed: '失败',
+}
+
+const BackupActivityLedger: React.FC<{ activities: BackupActivity[] }> = ({ activities }) => (
+  <BakeCard className="bake-backup-activity" aria-label="备份记录">
+    <BakeSectionHeader title="备份记录" />
+    {activities.length === 0 ? (
+      <div className="bake-backup-activity__empty">
+        <History size={19} aria-hidden />
+        <div>
+          <strong>还没有备份记录</strong>
+          <span>导出、导入和云端备份操作会记录在这里。</span>
+        </div>
+      </div>
+    ) : (
+      <div className="bake-backup-activity__list" role="list" aria-label="备份操作流水">
+        {activities.map(activity => {
+          const StatusIcon = activity.status === 'success'
+            ? CheckCircle2
+            : activity.status === 'failed' ? XCircle : LoaderCircle
+          return (
+            <details className={`bake-backup-activity__item is-${activity.status}`} key={activity.id} role="listitem">
+              <summary>
+                <span className="bake-backup-activity__status-icon" aria-hidden><StatusIcon size={17} /></span>
+                <span className="bake-backup-activity__main">
+                  <span className="bake-backup-activity__title-row">
+                    <strong>{activity.title}</strong>
+                    <span className="bake-backup-activity__status">{activityStatusText[activity.status]}</span>
+                  </span>
+                  <span className="bake-backup-activity__summary">{activity.summary}</span>
+                </span>
+                <time dateTime={new Date(activity.createdAt).toISOString()}>
+                  {new Date(activity.createdAt).toLocaleString('zh-CN')}
+                </time>
+                <span className="bake-backup-activity__disclosure" aria-hidden><ChevronRight size={16} /></span>
+              </summary>
+              <dl>
+                <div><dt>操作类型</dt><dd>{activity.title}</dd></div>
+                <div><dt>开始时间</dt><dd>{new Date(activity.createdAt).toLocaleString('zh-CN')}</dd></div>
+                {activity.completedAt && (
+                  <div><dt>耗时</dt><dd>{Math.max(0, activity.completedAt - activity.createdAt) / 1000} 秒</dd></div>
+                )}
+                {activity.details.map((detail, index) => (
+                  <div key={`${detail.label}-${index}`}><dt>{detail.label}</dt><dd>{detail.value}</dd></div>
+                ))}
+              </dl>
+            </details>
+          )
+        })}
+      </div>
+    )}
+  </BakeCard>
+)
+
+const summarizeImportReport = (report: MemoryPackageImportReport) => {
   const rows = [report.capture_refs, ...report.tables]
   const inserted = rows.reduce((sum, item) => sum + (item.inserted || 0), 0)
   const updated = rows.reduce((sum, item) => sum + (item.updated || 0), 0)
   const skipped = rows.reduce((sum, item) => sum + (item.skipped || 0), 0)
-  return `新增 ${inserted}，更新 ${updated}，跳过 ${skipped}`
+  const fileConflicts = report.local_files?.conflicts || 0
+  return `合并完成：新增 ${inserted}，保留本机 ${skipped}${updated ? `，更新 ${updated}` : ''}${fileConflicts ? `，同名文件冲突 ${fileConflicts}` : ''}`
 }
 
 const importReportRows = (report: MemoryPackageImportReport | null) => {
@@ -168,7 +301,7 @@ export const MemoryBackupCard: React.FC<MemoryBackupCardProps> = ({
             </span>
             <div>
               <div id="local-backup-title" className="bake-memory-package-group__title">本机备份</div>
-              <div className="bake-muted">备份全部用户内容、设置与本地 Skill；不包含原始采集记录和采集截图。</div>
+              <div className="bake-muted">备份全部用户内容、设置与本地 Skill；导入时判重合并，不覆盖本机内容。</div>
             </div>
           </div>
           <div className="bake-actions bake-actions--secondary bake-memory-package-actions">
@@ -196,7 +329,7 @@ export const MemoryBackupCard: React.FC<MemoryBackupCardProps> = ({
             </span>
             <div>
               <div id="cloud-backup-title" className="bake-memory-package-group__title">云端备份</div>
-              <div className="bake-muted">把同一份完整内容包加密上传，换机后可直接恢复；占用账户云空间。</div>
+              <div className="bake-muted">把完整内容包加密上传；恢复时与本机内容判重合并，不会整体覆盖。</div>
             </div>
           </div>
 
@@ -286,7 +419,7 @@ export const MemoryBackupCard: React.FC<MemoryBackupCardProps> = ({
       {lastImportReport && (
         <div className="bake-memory-package-report" aria-label="记忆包导入结果">
           {importReportRows(lastImportReport).map(row => {
-            const content = `${row.label} 新增 ${row.inserted} / 更新 ${row.updated} / 跳过 ${row.skipped}`
+            const content = `${row.label} 新增 ${row.inserted} / 更新 ${row.updated} / 保留本机 ${row.skipped}`
             return importDetailTabs[row.name] && row.inserted + row.updated > 0 ? (
               <button key={row.name} type="button" onClick={() => onOpenImportDetails?.(row.name)} aria-label={`查看${row.label}导入明细`}>
                 {content}<ChevronRight size={13} aria-hidden />
@@ -321,12 +454,49 @@ const MemoryBackupSection: React.FC = () => {
   const [cloudSnapshotsError, setCloudSnapshotsError] = useState<string | null>(null)
   const [selectedCloudSnapshotId, setSelectedCloudSnapshotId] = useState('')
   const [lastImportReport, setLastImportReport] = useState<MemoryPackageImportReport | null>(null)
+  const [backupActivities, setBackupActivities] = useState<BackupActivity[]>(readBackupActivities)
   const cloudSnapshotsRequestSeqRef = useRef(0)
   const importFileInputRef = useRef<HTMLInputElement | null>(null)
 
   const setStatusMessage = useCallback((message: string, exportPath?: string) => {
     setStatusNotice({ message, exportPath })
   }, [])
+
+  const storeActivities = useCallback((update: (current: BackupActivity[]) => BackupActivity[]) => {
+    setBackupActivities(current => {
+      const next = update(current).slice(0, MAX_BACKUP_ACTIVITIES)
+      try {
+        window.localStorage.setItem(BACKUP_ACTIVITY_STORAGE_KEY, JSON.stringify(next))
+      } catch {
+        // 流水写入失败不应中断实际备份或恢复操作。
+      }
+      return next
+    })
+  }, [])
+
+  const beginActivity = useCallback((kind: BackupActivityKind, title: string, details: BackupActivityDetail[] = []) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    storeActivities(current => [{
+      id,
+      kind,
+      title,
+      status: 'running',
+      createdAt: Date.now(),
+      summary: '操作正在进行',
+      details,
+    }, ...current])
+    return id
+  }, [storeActivities])
+
+  const finishActivity = useCallback((id: string, status: Exclude<BackupActivityStatus, 'running'>, summary: string, details: BackupActivityDetail[]) => {
+    storeActivities(current => current.map(activity => activity.id === id ? {
+      ...activity,
+      status,
+      completedAt: Date.now(),
+      summary,
+      details: [...activity.details, ...details],
+    } : activity))
+  }, [storeActivities])
 
   const isSignedIn = Boolean(authToken && currentUser)
   const cloudBackupAccessState: CloudBackupAccessState = isSignedIn ? 'available' : 'signed-out'
@@ -340,6 +510,7 @@ const MemoryBackupSection: React.FC = () => {
   }
 
   const handleExportMemoryPackage = async () => {
+    const activityId = beginActivity('local-export', '导出记忆包')
     setMemoryPackageBusy('export')
     setLastImportReport(null)
     try {
@@ -355,8 +526,18 @@ const MemoryBackupSection: React.FC = () => {
         `完整备份包已保存：${result.path}（${formatBytes(result.file_size_bytes)}，${contentSummary}；不含原始采集）`,
         result.path,
       )
+      finishActivity(activityId, 'success', `${formatBytes(result.file_size_bytes)}，${contentSummary}`, [
+        { label: '导出目录', value: parentPath(result.path) },
+        { label: '导出文件', value: result.path },
+        { label: '文件大小', value: formatBytes(result.file_size_bytes) },
+        { label: '数据表数量', value: String(result.manifest.table_summaries.length) },
+        { label: '本地文件数量', value: String(result.manifest.local_file_count || 0) },
+        { label: 'Skill 数量', value: String(skillCount) },
+      ])
     } catch (error) {
-      setStatusMessage(toUserFacingError(error, '记忆包导出失败'))
+      const message = toUserFacingError(error, '记忆包导出失败')
+      setStatusMessage(message)
+      finishActivity(activityId, 'failed', message, [])
     } finally {
       setMemoryPackageBusy(null)
     }
@@ -364,6 +545,10 @@ const MemoryBackupSection: React.FC = () => {
 
   const handleImportMemoryPackageFile = async (file?: File | null) => {
     if (!file) return
+    const activityId = beginActivity('local-import', '导入记忆包', [
+      { label: '导入文件', value: file.name },
+      { label: '文件大小', value: formatBytes(file.size) },
+    ])
     setMemoryPackageBusy('import')
     setLastImportReport(null)
     try {
@@ -371,13 +556,14 @@ const MemoryBackupSection: React.FC = () => {
       const report = await importMemoryPackage(content, false)
       restoreClientStateFromBackup(report.client_state)
       setLastImportReport(report)
-      setStatusMessage(`备份包导入完成：${summarizeImportReport(report)}${report.database_replaced ? '，软件将自动重启以加载全部内容' : ''}`)
+      setStatusMessage(`备份包导入完成：${summarizeImportReport(report)}`)
+      const counts = importCounts(report)
+      finishActivity(activityId, 'success', `输入 ${counts.incoming} 行，去重 ${counts.deduplicated} 行，实际导入 ${counts.imported} 行`, importActivityDetails(report))
       setBakeMemoryOffset(0)
-      if (report.database_replaced) {
-        window.setTimeout(() => void invoke('restart_application'), 300)
-      }
     } catch (error) {
-      setStatusMessage(toUserFacingError(error, '记忆包导入失败'))
+      const message = toUserFacingError(error, '记忆包导入失败')
+      setStatusMessage(message)
+      finishActivity(activityId, 'failed', message, [])
     } finally {
       setMemoryPackageBusy(null)
       if (importFileInputRef.current) importFileInputRef.current.value = ''
@@ -453,6 +639,7 @@ const MemoryBackupSection: React.FC = () => {
       setStatusMessage('请先登录账户')
       return
     }
+    const activityId = beginActivity('cloud-backup', '云端备份')
     setMemoryPackageBusy('cloud-backup')
     try {
       const deviceId = await ensureCloudDevice()
@@ -468,8 +655,16 @@ const MemoryBackupSection: React.FC = () => {
       setCloudSnapshotsStatus('ready')
       setCloudSnapshotsError(null)
       setStatusMessage(`云端备份完成：${formatBytes(result.encrypted_size)}，校验值 ${result.checksum_sha256.slice(0, 12)}...`)
+      finishActivity(activityId, 'success', `${formatBytes(result.encrypted_size)}，已加密上传`, [
+        { label: '云端备份编号', value: result.snapshot.id },
+        { label: '本机加密包', value: result.local_encrypted_path },
+        { label: '加密包大小', value: formatBytes(result.encrypted_size) },
+        { label: 'SHA-256', value: result.checksum_sha256 },
+      ])
     } catch (error) {
-      setStatusMessage(toUserFacingError(error, '云端上传失败'))
+      const message = toUserFacingError(error, '云端上传失败')
+      setStatusMessage(message)
+      finishActivity(activityId, 'failed', message, [])
     } finally {
       setMemoryPackageBusy(null)
     }
@@ -480,6 +675,9 @@ const MemoryBackupSection: React.FC = () => {
       setStatusMessage('请先登录账户')
       return
     }
+    const activityId = beginActivity('cloud-restore', '云端导入', [
+      { label: '云端备份编号', value: selectedCloudSnapshotId },
+    ])
     if (!selectedCloudSnapshotId) {
       setStatusMessage('请选择云端记忆包')
       return
@@ -498,14 +696,23 @@ const MemoryBackupSection: React.FC = () => {
       restoreClientStateFromBackup(result.import_report?.client_state)
       setLastImportReport(result.import_report ?? null)
       setStatusMessage(result.import_report
-        ? `云端下载并恢复完成：${summarizeImportReport(result.import_report)}${result.import_report.database_replaced ? '，软件将自动重启以加载全部内容' : ''}`
+        ? `云端下载并恢复完成：${summarizeImportReport(result.import_report)}`
         : '云端记忆包已下载')
+      const counts = result.import_report ? importCounts(result.import_report) : null
+      finishActivity(activityId, 'success', counts
+        ? `输入 ${counts.incoming} 行，去重 ${counts.deduplicated} 行，实际导入 ${counts.imported} 行`
+        : '云端记忆包已下载', [
+        { label: '下载目录', value: parentPath(result.local_decrypted_path) },
+        { label: '解密记忆包', value: result.local_decrypted_path },
+        { label: '本机加密包', value: result.local_encrypted_path },
+        { label: '加密包大小', value: formatBytes(result.encrypted_size) },
+        ...(result.import_report ? importActivityDetails(result.import_report) : []),
+      ])
       setBakeMemoryOffset(0)
-      if (result.import_report?.database_replaced) {
-        window.setTimeout(() => void invoke('restart_application'), 300)
-      }
     } catch (error) {
-      setStatusMessage(toUserFacingError(error, '云端下载失败'))
+      const message = toUserFacingError(error, '云端下载失败')
+      setStatusMessage(message)
+      finishActivity(activityId, 'failed', message, [])
     } finally {
       setMemoryPackageBusy(null)
     }
@@ -543,6 +750,7 @@ const MemoryBackupSection: React.FC = () => {
         onRestoreFromCloud={() => void handleRestoreMemoryPackageFromCloud()}
         onOpenImportDetails={handleOpenImportDetails}
       />
+      <BackupActivityLedger activities={backupActivities} />
     </section>
   )
 }

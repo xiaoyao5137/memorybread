@@ -562,6 +562,21 @@
   color: #57381f;
 }
 
+.creation-chat-message.is-abort p {
+  border-color: #e6b9b2;
+  background: #fff7f5;
+  color: #9f2f25;
+}
+
+.creation-chat-message__meta .creation-chat-message__end-badge {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: #fce8e5;
+  color: #b42318;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
 .creation-agent-trace {
   width: 100%;
   min-width: 0;
@@ -811,6 +826,10 @@
   color: #a15c00;
 }
 
+.creation-agent-event.is-cancelled .creation-agent-event__icon {
+  color: #b42318;
+}
+
 /* 成功、警告、失败的动作行不再用图标方块，改成不同颜色的小圆点标记结果 */
 .creation-agent-event__icon.is-dot {
   border: 0;
@@ -835,6 +854,10 @@
 
 .creation-agent-event__dot.is-warning {
   background: #d99a00;
+}
+
+.creation-agent-event__dot.is-cancelled {
+  background: #d05a4e;
 }
 
 .creation-agent-event > span:last-child {

@@ -176,6 +176,7 @@ describe('IntegrationPanel', () => {
     fireEvent.click(screen.getByRole('tab', { name: /浏览器/ }))
 
     expect(await screen.findByRole('heading', { name: '浏览器集成' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '查看浏览器集成教程（在浏览器中打开）' })).toBeInTheDocument()
     expect(screen.getByText('MemoryBread Chrome 扩展程序')).toBeInTheDocument()
     expect(screen.getByText('未安装')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '在 Chrome 中加载 MemoryBread' })).toBeInTheDocument()
