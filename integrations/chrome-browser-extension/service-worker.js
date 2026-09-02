@@ -4,11 +4,16 @@ const POLL_INTERVAL_MS = 800
 const HEARTBEAT_INTERVAL_MS = 5000
 const PREVIEW_INTERVAL_MS = 900
 const MAX_PREVIEW_BASE64_LENGTH = 900000
+const JOB_TIMEOUT_GRACE_MS = 1000
+const MIN_JOB_TIMEOUT_MS = 250
+const MAX_JOB_TIMEOUT_MS = 76000
+const CHROME_OPERATION_TIMEOUT_MS = 4000
 let nativePort = null
 let pollTimer = null
 let heartbeatTimer = null
 let reconnectTimer = null
 let busy = false
+const activeJobTabs = new Map()
 
 function connectNative() {
   clearTimeout(reconnectTimer)
@@ -29,6 +34,10 @@ function connectNative() {
   port.onDisconnect.addListener(() => {
     if (nativePort !== port) return
     nativePort = null
+    // Core/Native Host 重启会使旧 job 永远无法回传。连接断开时
+    // 必须同时释放 busy，否则重连后只会继续发心跳而永久不 poll。
+    busy = false
+    for (const jobId of activeJobTabs.keys()) void closeActiveJobTab(jobId)
     clearInterval(pollTimer)
     pollTimer = null
     clearInterval(heartbeatTimer)
@@ -75,10 +84,33 @@ async function handleNativeResponse(message) {
   if (!message?.job || busy) return
   busy = true
   try {
-    const result = await executeJob(message.job)
+    const job = message.job
+    const timeoutMs = Math.max(
+      MIN_JOB_TIMEOUT_MS,
+      Math.min(MAX_JOB_TIMEOUT_MS, Number(job.deadline_ms || Date.now()) - Date.now() + JOB_TIMEOUT_GRACE_MS),
+    )
+    let result
+    try {
+      result = await withTimeout(
+        executeJob(job),
+        timeoutMs,
+        () => jobError('JOB_EXECUTION_TIMEOUT', '后台页面读取超过任务截止时间'),
+      )
+    } catch (error) {
+      void closeActiveJobTab(job.browser_job_id)
+      result = {
+        browser_job_id: job.browser_job_id,
+        status: 'failed',
+        error_code: error?.code || 'EXTENSION_SCRAPE_FAILED',
+        error_message: String(error?.message || error || 'Chrome 扩展读取失败'),
+      }
+    }
     nativePort?.postMessage({type: 'result', extension_version: EXTENSION_VERSION, result})
   } finally {
     busy = false
+    // setInterval 可能在 MV3 Service Worker 休眠/恢复期间丢拍。
+    // 每个任务结束后主动 poll，避免心跳在线但任务队列无人领取。
+    poll()
   }
 }
 
@@ -93,6 +125,7 @@ async function executeJob(job) {
     const tab = await chrome.tabs.create({url: job.url, active: false, pinned: false})
     tabId = tab.id
     if (tabId == null) throw jobError('BACKGROUND_TAB_BLOCKED', '无法创建后台标签')
+    activeJobTabs.set(job.browser_job_id, tabId)
     preview = await startLivePreview(job, tabId)
     preview.setStage('loading')
     await waitForTab(tabId, Math.min(30000, Math.max(1000, job.deadline_ms - Date.now())))
@@ -112,11 +145,28 @@ async function executeJob(job) {
       error_message: String(error?.message || error || 'Chrome 扩展读取失败'),
     }
   } finally {
-    if (preview) await preview.stop()
-    if (tabId != null) {
-      try { await chrome.tabs.remove(tabId) } catch {}
+    if (preview) {
+      try {
+        await withTimeout(preview.stop(), CHROME_OPERATION_TIMEOUT_MS, () => jobError('PREVIEW_STOP_TIMEOUT', '预览停止超时'))
+      } catch {}
+    }
+    if (tabId != null && activeJobTabs.get(job.browser_job_id) === tabId) {
+      await closeActiveJobTab(job.browser_job_id)
     }
   }
+}
+
+async function closeActiveJobTab(jobId) {
+  const tabId = activeJobTabs.get(jobId)
+  if (tabId == null) return
+  activeJobTabs.delete(jobId)
+  try {
+    await withTimeout(
+      chrome.tabs.remove(tabId),
+      CHROME_OPERATION_TIMEOUT_MS,
+      () => jobError('TAB_CLOSE_TIMEOUT', '后台标签关闭超时'),
+    )
+  } catch {}
 }
 
 async function startLivePreview(job, tabId) {
@@ -209,6 +259,22 @@ function jobError(code, message) {
   const error = new Error(message)
   error.code = code
   return error
+}
+
+function withTimeout(promise, timeoutMs, makeError) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(makeError()), Math.max(0, timeoutMs))
+    Promise.resolve(promise).then(
+      value => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      error => {
+        clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
 }
 
 chrome.runtime.onInstalled.addListener(connectNative)

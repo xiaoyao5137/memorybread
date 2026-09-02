@@ -1055,6 +1055,35 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.creation-history__lifecycle {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.creation-history__lifecycle.is-running {
+  color: #8a4b16;
+  background: #fff3e5;
+}
+
+.creation-history__lifecycle.is-failed {
+  color: #b42318;
+  background: #fef3f2;
+}
+
+.creation-history__lifecycle.is-cancelled {
+  color: #475467;
+  background: #f2f4f7;
 }
 
 .creation-history__meta {

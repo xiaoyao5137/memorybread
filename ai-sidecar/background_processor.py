@@ -68,9 +68,15 @@ _CAPTURE_PRIORITY_RESUME_THRESHOLD = 100
 _NO_PROGRESS_BAKE_SKIP_THRESHOLD = 3
 _NO_PROGRESS_BAKE_BACKOFF_BASE_SECS = 15
 _NO_PROGRESS_BAKE_MAX_BACKOFF_SECS = 15 * 60
-# 电池模式原本 30 分钟才调度 1 条 bake；当两条队列都高压时，时间线提炼本身
-# 已经持续占用同一个模型槽，因此改为轮转不会增加并发，只会重新分配既有算力。
-_BATTERY_BACKLOG_BAKE_INTERVAL_SECS = 2 * 60
+# 失败片段不能永久占据 ORDER BY ts 的队首。重试状态按 capture 持久化，
+# 同一批次连续失败后改为确定性单条处理，不冒险混写时间线。
+_TIMELINE_GROUP_SPLIT_AFTER_FAILURES = 2
+_TIMELINE_RETRY_BASE_SECS = 60
+_TIMELINE_RETRY_MAX_SECS = 15 * 60
+# 电池模式仍保持单模型槽；双队列高压时只增大有界工作片并缩短
+# 续批间隔，减少模型空闲窗口，不提高物理并发度。
+_BATTERY_BACKLOG_BAKE_INTERVAL_SECS = 30
+_BATTERY_BACKLOG_BAKE_LIMIT = 3
 _SUBSTANTIVE_DOCUMENT_MIN_CHARS = 200
 _ARTIFACT_VECTOR_CHECK_INTERVAL_SECS = 5 * 60
 _VECTOR_CONSISTENCY_AUDIT_INTERVAL_SECS = 24 * 60 * 60
@@ -257,6 +263,10 @@ class BackgroundProcessor:
         self._last_bake_no_progress_count = 0
         self._bake_trigger_watch = False
         self._bake_yield_to_capture = False
+        self._timeline_retry_state_path = (
+            Path(self.db_path).parent / "state" / "timeline-extraction-retries.json"
+        )
+        self._timeline_retry_state = self._load_timeline_retry_state()
 
         # 懒加载 workers
         self._embed_worker = None
@@ -429,6 +439,55 @@ class BackgroundProcessor:
             self._cached_identity = current_identity
         return self._knowledge_extractor
 
+    def _load_timeline_retry_state(self) -> dict:
+        try:
+            payload = json.loads(self._timeline_retry_state_path.read_text())
+            if not isinstance(payload, dict):
+                return {}
+            return {
+                int(capture_id): state
+                for capture_id, state in payload.items()
+                if isinstance(state, dict)
+            }
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def _save_timeline_retry_state(self) -> None:
+        try:
+            self._timeline_retry_state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._timeline_retry_state_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._timeline_retry_state, ensure_ascii=False))
+            tmp.replace(self._timeline_retry_state_path)
+        except OSError as exc:
+            logger.warning("保存时间线提炼重试状态失败: %s", exc)
+
+    def _record_timeline_extraction_failure(self, capture_ids: list[int]) -> int:
+        now_ms = int(time.time() * 1000)
+        max_failures = 0
+        for capture_id in capture_ids:
+            state = self._timeline_retry_state.get(int(capture_id), {})
+            failure_count = int(state.get("failure_count") or 0) + 1
+            retry_secs = min(
+                _TIMELINE_RETRY_BASE_SECS * (2 ** max(0, failure_count - 1)),
+                _TIMELINE_RETRY_MAX_SECS,
+            )
+            self._timeline_retry_state[int(capture_id)] = {
+                "failure_count": failure_count,
+                "next_retry_at_ms": now_ms + retry_secs * 1000,
+                "updated_at_ms": now_ms,
+            }
+            max_failures = max(max_failures, failure_count)
+        self._save_timeline_retry_state()
+        return max_failures
+
+    def _clear_timeline_extraction_failures(self, capture_ids: list[int]) -> None:
+        changed = False
+        for capture_id in capture_ids:
+            if self._timeline_retry_state.pop(int(capture_id), None) is not None:
+                changed = True
+        if changed:
+            self._save_timeline_retry_state()
+
     def _get_unprocessed_captures(self, conn: sqlite3.Connection, limit: int):
         """获取未处理的采集记录（按时间升序，用于分组）"""
         cursor = conn.cursor()
@@ -442,6 +501,19 @@ class BackgroundProcessor:
         win_not_like = " AND ".join(
             f"LOWER(COALESCE(c.win_title, '')) NOT LIKE '%{k}%'" for k in win_kws
         )
+        now_ms = int(time.time() * 1000)
+        cooling_ids = [
+            int(capture_id)
+            for capture_id, state in self._timeline_retry_state.items()
+            if int(state.get("next_retry_at_ms") or 0) > now_ms
+        ]
+        cooldown_sql = ""
+        params = []
+        if cooling_ids:
+            placeholders = ",".join("?" for _ in cooling_ids)
+            cooldown_sql = f" AND c.id NOT IN ({placeholders})"
+            params.extend(cooling_ids)
+        params.append(limit)
         cursor.execute(f"""
             SELECT c.id, c.ts, c.app_name, c.win_title,
                    c.ocr_text, c.ax_text, c.input_text, c.audio_text, c.url,
@@ -455,9 +527,10 @@ class BackgroundProcessor:
               AND c.is_sensitive = 0
               AND ({app_not_like})
               AND ({win_not_like})
+              {cooldown_sql}
             ORDER BY c.ts ASC
             LIMIT ?
-        """, (limit,))
+        """, params)
         rows = cursor.fetchall()
         return [
             {
@@ -537,6 +610,8 @@ class BackgroundProcessor:
     def _scheduled_bake_limit(profile, pending_capture_count: int) -> int:
         limit = max(1, int(profile.bake_limit))
         if int(pending_capture_count) >= _CAPTURE_BACKLOG_PRESSURE_THRESHOLD:
+            if profile.mode == "battery":
+                return min(_BATTERY_BACKLOG_BAKE_LIMIT, _DUAL_BACKLOG_BAKE_LIMIT)
             return min(limit, _DUAL_BACKLOG_BAKE_LIMIT)
         return limit
 
@@ -1108,6 +1183,7 @@ class BackgroundProcessor:
             processed = 0
             merge_into = batch.get('merge_first_group_into')
             for i, group in enumerate(groups_to_process):
+                handled = False
                 # 第一组且有跨批合并信号时，直接追加到已有 timeline
                 # —— 但需先过文档边界守卫：不能把不同文档/非文档内容并进文档 timeline，
                 #    也不能把文档内容并进非文档 timeline，否则"一份文档独占 timeline"被破坏。
@@ -1122,6 +1198,7 @@ class BackgroundProcessor:
                         group,
                         merge_timeline_id=merge_into,
                     ):
+                        handled = True
                         processed += 1
                         logger.info(
                             "🔀 跨批提炼并合并: %d 条 captures → timeline_id=%d",
@@ -1131,11 +1208,14 @@ class BackgroundProcessor:
                     else:
                         # 指定时间线可能已被删除；退化为正常提炼。
                         if await self._process_capture_group(group):
+                            handled = True
                             processed += 1
                 else:
                     if await self._process_capture_group(group):
+                        handled = True
                         processed += 1
-                asyncio.create_task(self._process_vectorization_batch(group))
+                if handled:
+                    asyncio.create_task(self._process_vectorization_batch(group))
                 await asyncio.sleep(0.5)
         finally:
             await asyncio.to_thread(self._release_process_file_lock, process_lock_fd)
@@ -2170,10 +2250,26 @@ class BackgroundProcessor:
                 )
             except QueueEvictedError as ee:
                 logger.warning(f"extract_merged 被队列淘汰: {ee}")
+                self._record_timeline_extraction_failure(capture_ids)
                 return False
 
             if not knowledge:
                 logger.warning(f"片段提炼未产出 knowledge ({len(group)} 条 captures)")
+                failure_count = self._record_timeline_extraction_failure(capture_ids)
+                if (
+                    len(group) > 1
+                    and failure_count >= _TIMELINE_GROUP_SPLIT_AFTER_FAILURES
+                ):
+                    logger.warning(
+                        "片段连续失败 %s 次，确定性拆成单条重试: ids=%s",
+                        failure_count,
+                        capture_ids,
+                    )
+                    handled_all = True
+                    for capture in group:
+                        if not await self._process_capture_group([capture]):
+                            handled_all = False
+                    return handled_all
                 return False
 
             if knowledge.get('_split_required'):
@@ -2197,6 +2293,8 @@ class BackgroundProcessor:
                 for subgroup in subgroups:
                     if not await self._process_capture_group(subgroup):
                         handled_all = False
+                if handled_all:
+                    self._clear_timeline_extraction_failures(capture_ids)
                 return handled_all
 
             if knowledge.get('_discarded'):
@@ -2205,6 +2303,7 @@ class BackgroundProcessor:
                 self._consume_discarded_captures(
                     capture_ids, knowledge.get('discard_reason', 'unknown')
                 )
+                self._clear_timeline_extraction_failures(capture_ids)
                 return True
 
             discarded_ids = knowledge.get('_discarded_capture_ids') or []
@@ -2213,6 +2312,9 @@ class BackgroundProcessor:
                 # 并从本提炼组剔除，不写入时间线成员（防无关采集混入）。
                 self._consume_discarded_captures(
                     [int(i) for i in discarded_ids], 'merged_group_low_value'
+                )
+                self._clear_timeline_extraction_failures(
+                    [int(i) for i in discarded_ids]
                 )
                 discarded_set = set(int(i) for i in discarded_ids)
                 group = [c for c in group if c['id'] not in discarded_set]
@@ -2312,6 +2414,7 @@ class BackgroundProcessor:
                 logger.info(
                     f"🔀 片段已合并到已有时间线: {len(group)} captures → timeline_id={similar_id} (重复)"
                 )
+                self._clear_timeline_extraction_failures(capture_ids)
                 return True
 
             timeline_id = self._save_knowledge(conn, knowledge)
@@ -2325,10 +2428,13 @@ class BackgroundProcessor:
                 f"✅ 片段提炼完成: {len(group)} captures → timeline_id={timeline_id}, "
                 f"时长={knowledge.get('duration_minutes')}分钟"
             )
+            self._clear_timeline_extraction_failures(capture_ids)
             return True
 
         except Exception as e:
             logger.error(f"片段提炼异常: {e}")
+            if 'capture_ids' in locals():
+                self._record_timeline_extraction_failure(capture_ids)
             return False
 
     def _current_embedding_model_name(self) -> Optional[str]:

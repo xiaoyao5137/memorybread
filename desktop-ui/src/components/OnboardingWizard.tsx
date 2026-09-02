@@ -10,6 +10,8 @@ import {
   type InitializationStatus,
 } from '../utils/initialization'
 import { useConfirmDialog } from './useConfirmDialog'
+import { getAppMetadata } from '../utils/appMetadata'
+import { reportCustomerLogs } from '../utils/customerLogReport'
 import './OnboardingWizard.css'
 
 const STATUS_POLL_MS = 1_000
@@ -93,6 +95,7 @@ function notifyInitializationComplete() {
 const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }) => {
   const {
     adminApiBaseUrl,
+    apiBaseUrl,
     authToken,
     serviceEnvironment,
     setHasCompletedSetup,
@@ -228,7 +231,7 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
   const report = async () => {
     const confirmed = await confirmDestructive({
       title: '确认上报诊断信息？',
-      description: '将上报应用版本、系统版本、硬件档位、失败阶段和稳定错误码。不会上报截图、知识内容、提示词、回答、文件路径或密钥。',
+      description: '将上报应用与系统版本、硬件档位、失败阶段、稳定错误码，以及固定白名单服务日志的脱敏尾部。日志会限量并移除凭据、联系方式、外部网址和文件路径；不会上报截图、数据库、知识内容、提示词或回答。',
       confirmLabel: '确认上报',
       danger: false,
     })
@@ -237,6 +240,8 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
     setActionError('')
     try {
       const bundle = await fetchInitializationReport()
+      const metadata = await getAppMetadata()
+      bundle.client_version = metadata.version
       const runId = String(bundle.run_id || status?.run_id || Date.now())
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
@@ -251,7 +256,24 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
       })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(data?.error?.message || '诊断上报失败')
-      setReportId(data?.data?.report_id || '已接收')
+      const initializationReportId = String(data?.data?.report_id || '')
+      if (!initializationReportId) throw new Error('诊断上报回执无效')
+      setReportId(initializationReportId)
+      try {
+        const logReceipt = await reportCustomerLogs({
+          adminApiBaseUrl,
+          localApiBaseUrl: apiBaseUrl,
+          authToken,
+          metadata,
+          installationId: String(bundle.installation_id || ''),
+          initializationReportId,
+          description: `初始化失败 ${String(bundle.error_code || 'INITIALIZATION_FAILED')}`,
+        })
+        setReportId(`${initializationReportId.slice(0, 8)} · 日志 ${logReceipt.log_id.slice(0, 8)}`)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '日志包上传失败'
+        throw new Error(`结构化诊断已接收（${initializationReportId.slice(0, 8)}），但服务日志未上传：${message}`)
+      }
     } catch (error) {
       setActionError(error instanceof Error ? error.message : '诊断上报失败')
     } finally {
@@ -287,6 +309,7 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
   }
 
   const running = status?.state === 'running'
+  const repairing = running && ['waiting', 'running'].includes(status?.recovery?.status || '')
   const failed = status?.state === 'failed' || status?.state === 'interrupted'
   const sandboxFinished = status?.test_mode_enabled && ['completed', 'failed'].includes(status.state)
   const showPreparationGuide = !failed && !connectionError && status?.state !== 'completed'
@@ -319,7 +342,11 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
               <small>首次使用准备</small>
             </span>
           </div>
-          {running && <span className="background-note">可以最小化，初始化会在后台继续</span>}
+          {running && (
+            <span className="background-note">
+              {repairing ? '检测到异常，正在后台自动修复' : '可以最小化，初始化会在后台继续'}
+            </span>
+          )}
         </header>
 
         <div className="initialization-body">
@@ -327,7 +354,7 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
             <p className="initialization-eyebrow">ONE-CLICK LOCAL SETUP</p>
             <h1 id="initialization-title">
               {running
-                ? '面包烘焙中'
+                ? (repairing ? '正在自动修复' : '面包烘焙中')
                 : failed
                   ? '有一项准备没有完成'
                   : status?.state === 'completed'
@@ -406,6 +433,11 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
                   </button>
                 )}
               </div>
+            )}
+            {failed && status?.recovery?.status === 'exhausted' && (
+              <p className="initialization-error-code">
+                已自动修复 {status.recovery.attempt} 次，问题仍然存在，现可手动重试或上报诊断。
+              </p>
             )}
             {failed && status?.error_code && (
               <p className="initialization-error-code">

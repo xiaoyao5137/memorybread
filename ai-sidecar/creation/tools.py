@@ -23,6 +23,10 @@ OPTIONAL_CREATION_TOOL_IDS = (
     MERMAID_DIAGRAM_TOOL_ID,
     GITHUB_SEARCH_TOOL_ID,
 )
+DEFAULT_CREATION_TOOL_IDS = (
+    *REQUIRED_CREATION_TOOL_IDS,
+    MERMAID_DIAGRAM_TOOL_ID,
+)
 KNOWN_CREATION_TOOL_IDS = (
     *REQUIRED_CREATION_TOOL_IDS,
     *OPTIONAL_CREATION_TOOL_IDS,
@@ -397,16 +401,30 @@ def build_plantuml_context(text: str) -> dict[str, str]:
     }
 
 
-def build_mermaid_context(text: str) -> dict[str, str]:
+def build_mermaid_context(
+    text: str,
+    diagram_spec: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """生成 Mermaid 写作约束。
+
+    diagram_spec 来自章节 Visual Plan 时优先使用结构化图类型和章节范围；旧调用
+    仍按查询文本推断单张通用图，保持协议兼容。
+    """
+    spec = diagram_spec if isinstance(diagram_spec, dict) else {}
     lowered = text.lower()
-    if "时序" in text or "sequence" in lowered:
+    requested_type = str(spec.get("diagram_type") or "").strip().lower()
+    if requested_type == "sequence" or (
+        not requested_type and ("时序" in text or "sequence" in lowered)
+    ):
         diagram_type = "sequence"
         starter = (
             "sequenceDiagram\n"
             "    用户->>系统: 发起请求\n"
             "    系统-->>用户: 返回结果"
         )
-    elif "状态" in text or "state" in lowered:
+    elif requested_type == "state" or (
+        not requested_type and ("状态" in text or "state" in lowered)
+    ):
         diagram_type = "state"
         starter = (
             "stateDiagram-v2\n"
@@ -414,6 +432,17 @@ def build_mermaid_context(text: str) -> dict[str, str]:
             "    处理中 --> 已完成\n"
             "    已完成 --> [*]"
         )
+    elif requested_type in {"flowchart_lr", "class", "er", "journey", "gantt", "mindmap"}:
+        diagram_type = requested_type
+        starters = {
+            "flowchart_lr": "flowchart LR\n    A[对象 A] --> B[对象 B]",
+            "class": "classDiagram\n    class 核心对象",
+            "er": "erDiagram\n    核心对象 ||--o{ 关联对象 : 关联",
+            "journey": "journey\n    title 关键旅程\n    section 阶段\n      执行动作: 3: 角色",
+            "gantt": "gantt\n    title 实施阶段\n    section 阶段\n    关键动作 :a1, 2026-01-01, 1d",
+            "mindmap": "mindmap\n  root((核心主题))\n    分支",
+        }
+        starter = starters[diagram_type]
     elif "部署" in text or "架构" in text or "deployment" in lowered:
         diagram_type = "flowchart_lr"
         starter = (
@@ -422,20 +451,35 @@ def build_mermaid_context(text: str) -> dict[str, str]:
             "    核心服务 --> 数据存储"
         )
     else:
-        diagram_type = "flowchart"
+        diagram_type = requested_type or "flowchart"
         starter = (
             "flowchart TD\n"
             "    A[接收输入] --> B[执行处理]\n"
             "    B --> C[输出结果]"
         )
+    section_title = str(spec.get("section_title") or "").strip()
+    source_points = [
+        str(item).strip()
+        for item in (spec.get("source_points") or [])
+        if str(item).strip()
+    ][:16]
     return {
+        "diagram_id": str(spec.get("id") or "").strip(),
+        "section_title": section_title,
         "diagram_type": diagram_type,
         "language": "mermaid",
         "starter": starter,
+        "required": bool(spec.get("required", False)),
+        "purpose": str(spec.get("purpose") or "").strip(),
+        "reason": str(spec.get("reason") or "").strip(),
+        "source_points": source_points,
+        "placement": str(spec.get("placement") or "after_intro"),
+        "max_nodes": max(2, min(int(spec.get("max_nodes") or 12), 24)),
         "instruction": (
-            "在正文最适合的位置输出一段 ```mermaid 代码块；"
-            "基于正文真实对象替换示例节点，保持图中术语与正文一致，"
-            "只绘制已经说明的边界和关系。"
+            (f"在「{section_title}」章节" if section_title else "在正文最适合的位置")
+            + "输出一段 ```mermaid 代码块；"
+            "只使用 source_points 和正文已有事实生成节点、动作、状态与连线，"
+            "保持图中术语与正文一致，不得把 starter 中的示例对象写入成稿。"
         ),
     }
 

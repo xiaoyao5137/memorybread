@@ -1,0 +1,76 @@
+{
+  "schema_version": "memorybread.temporal-stage-a-acceptance.v1",
+  "generated_at": "2026-08-29T13:38:15.435641+00:00",
+  "automated_gates": [
+    {
+      "name": "语料规模",
+      "actual": 360,
+      "passed": true,
+      "requirement": ">= 300"
+    },
+    {
+      "name": "来源覆盖",
+      "actual": 6,
+      "passed": true,
+      "requirement": "六类来源均覆盖"
+    },
+    {
+      "name": "确定性门禁误纳率",
+      "actual": "0.00%",
+      "passed": true,
+      "requirement": "<= 1%"
+    },
+    {
+      "name": "确定性门禁保留率",
+      "actual": "100.00%",
+      "passed": true,
+      "requirement": ">= 90%"
+    },
+    {
+      "name": "端到端误纳率",
+      "actual": "0.00%",
+      "passed": true,
+      "requirement": "<= 1%"
+    },
+    {
+      "name": "端到端保留率",
+      "actual": "20.83%",
+      "passed": false,
+      "requirement": ">= 90%"
+    },
+    {
+      "name": "引用回查率",
+      "actual": "100.00%",
+      "passed": true,
+      "requirement": "100%"
+    },
+    {
+      "name": "日期角色准确率",
+      "actual": "63.33%",
+      "passed": false,
+      "requirement": ">= 98%"
+    },
+    {
+      "name": "状态不增强率",
+      "actual": "96.67%",
+      "passed": false,
+      "requirement": ">= 99%"
+    },
+    {
+      "name": "模型传输/协议错误",
+      "actual": 0,
+      "passed": true,
+      "requirement": "0"
+    }
+  ],
+  "automated_gates_passed": false,
+  "human_double_annotation": {
+    "name": "独立人工双标",
+    "actual": "未执行",
+    "passed": false,
+    "requirement": "关键集双人独立标注，Cohen's kappa >= 0.80"
+  },
+  "stage_b_entry_approved": false,
+  "post_acceptance_decision": "abandoned",
+  "further_execution_authorized": false
+}

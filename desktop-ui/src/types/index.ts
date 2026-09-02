@@ -760,6 +760,15 @@ export interface MonitorOverview {
     last_extraction_at_ms: number | null
     extractor_status: 'running' | 'waiting' | 'idle' | 'stalled' | 'paused'
   }
+  operation_flow: {
+    period_audited_count: number
+    eligible_count: number
+    needs_enrichment_count: number
+    rejected_count: number
+    eligible_rate: number
+    pending_replay_count: number
+    zero_eligible_alert: boolean
+  }
   rag_sessions: {
     today_count:    number
     period_count:   number

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from model_manager import ModelManager, ModelType, AVAILABLE_MODELS as MANAGER_MODELS, MODEL_ID_ALIASES
 from model_registry import AVAILABLE_MODELS, get_recommendations, get_model, list_models as registry_list
 from initialization_manager import InitializationFailure, InitializationManager
+from diagnostic_logs import list_diagnostic_logs, read_diagnostic_log
 import psutil
 import logging
 import dataclasses
@@ -1193,6 +1194,25 @@ def initialization_report_bundle():
     })
 
 
+@app.route('/api/debug/log-files', methods=['GET'])
+def diagnostic_log_files():
+    """Expose only bounded runtime log metadata when Core Engine is unavailable."""
+    return jsonify({'items': list_diagnostic_logs()})
+
+
+@app.route('/api/debug/log-files/<key>', methods=['GET'])
+def diagnostic_log_content(key):
+    """Return the bounded tail of one fixed-whitelist runtime log."""
+    content = read_diagnostic_log(key)
+    if content is None:
+        return jsonify({
+            'status': 'error',
+            'error_code': 'DIAGNOSTIC_LOG_NOT_FOUND',
+            'message': '诊断日志不存在',
+        }), 404
+    return jsonify(content)
+
+
 @app.route('/api/initialization/test-mode', methods=['POST'])
 def initialization_test_mode_enable():
     try:
@@ -2258,4 +2278,8 @@ if __name__ == '__main__':
 
     _idle_diary_backfill_worker.start()
 
-    app.run(host='0.0.0.0', port=7071, debug=False, threaded=True)
+    # Match the desktop client's loopback-only contract. On macOS an
+    # INADDR_ANY listener can otherwise coexist with an older packaged helper
+    # bound to 127.0.0.1, making requests nondeterministically hit either
+    # service version.
+    app.run(host='127.0.0.1', port=7071, debug=False, threaded=True)

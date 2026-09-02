@@ -67,6 +67,7 @@ describe('cloud device and snapshot API', () => {
       method: 'POST',
       headers: {
         'X-MemoryBread-Environment': 'production',
+        'X-MemoryBread-Client': 'desktop',
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -102,6 +103,7 @@ describe('cloud device and snapshot API', () => {
       method: 'POST',
       headers: {
         'X-MemoryBread-Environment': 'production',
+        'X-MemoryBread-Client': 'desktop',
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ email: 'xiaomai@example.com' }),
@@ -170,6 +172,7 @@ describe('cloud device and snapshot API', () => {
         method: 'POST',
         headers: {
           'X-MemoryBread-Environment': 'production',
+          'X-MemoryBread-Client': 'desktop',
           Authorization: 'Bearer mbs_token',
           'Content-Type': 'application/json',
         },
@@ -216,6 +219,7 @@ describe('cloud device and snapshot API', () => {
         method: 'POST',
         headers: {
           'X-MemoryBread-Environment': 'production',
+          'X-MemoryBread-Client': 'desktop',
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ channel: 'phone', identifier: '13800138000' }),
@@ -258,6 +262,7 @@ describe('cloud device and snapshot API', () => {
       method: 'PUT',
       headers: {
         'X-MemoryBread-Environment': 'production',
+        'X-MemoryBread-Client': 'desktop',
         Authorization: 'Bearer mbs_token',
         'Content-Type': 'application/json',
       },
@@ -299,6 +304,7 @@ describe('cloud device and snapshot API', () => {
       method: 'POST',
       headers: {
         'X-MemoryBread-Environment': 'production',
+        'X-MemoryBread-Client': 'desktop',
         Authorization: 'Bearer mbs_token',
         'Content-Type': 'application/json',
       },
@@ -338,6 +344,7 @@ describe('cloud device and snapshot API', () => {
       method: 'POST',
       headers: {
         'X-MemoryBread-Environment': 'production',
+        'X-MemoryBread-Client': 'desktop',
         Authorization: 'Bearer mbs_token',
         'Content-Type': 'application/json',
       },
@@ -356,12 +363,14 @@ describe('cloud device and snapshot API', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(1, 'http://127.0.0.1:8080/v1/devices', {
       headers: {
         'X-MemoryBread-Environment': 'production',
+        'X-MemoryBread-Client': 'desktop',
         Authorization: 'Bearer mbs_token',
       },
     })
     expect(fetchMock).toHaveBeenNthCalledWith(2, 'http://127.0.0.1:8080/v1/snapshots', {
       headers: {
         'X-MemoryBread-Environment': 'production',
+        'X-MemoryBread-Client': 'desktop',
         Authorization: 'Bearer mbs_token',
       },
     })
@@ -377,6 +386,7 @@ describe('cloud device and snapshot API', () => {
     expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:18080/v1/devices', {
       headers: {
         'X-MemoryBread-Environment': 'staging',
+        'X-MemoryBread-Client': 'desktop',
         Authorization: 'Bearer mbs_token',
       },
     })
@@ -430,6 +440,7 @@ describe('cloud device and snapshot API', () => {
       {
         headers: {
           'X-MemoryBread-Environment': 'production',
+          'X-MemoryBread-Client': 'desktop',
           Authorization: 'Bearer mbs_token',
         },
       },
@@ -441,6 +452,7 @@ describe('cloud device and snapshot API', () => {
         method: 'PUT',
         headers: {
           'X-MemoryBread-Environment': 'production',
+          'X-MemoryBread-Client': 'desktop',
           Authorization: 'Bearer mbs_token',
         },
       },
@@ -452,6 +464,7 @@ describe('cloud device and snapshot API', () => {
         method: 'PUT',
         headers: {
           'X-MemoryBread-Environment': 'production',
+          'X-MemoryBread-Client': 'desktop',
           Authorization: 'Bearer mbs_token',
         },
       },

@@ -235,7 +235,16 @@ const buildManualFloatingAssistQuery = (instruction: string, ocrText?: string) =
   ].filter(Boolean).join('\n')
 }
 
-const SystemFloatingAssist: React.FC = () => {
+const isAbortError = (error: unknown, signal?: AbortSignal) =>
+  signal?.aborted === true || (error instanceof DOMException && error.name === 'AbortError')
+
+interface SystemFloatingAssistProps {
+  developmentMode?: boolean
+}
+
+const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
+  developmentMode = import.meta.env.DEV,
+}) => {
   const debugParams = useMemo(() => new URLSearchParams(window.location.search), [])
   const debugPreviewEnabled = window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost'
   const debugPhaseValue = debugParams.get('debugPhase')
@@ -360,6 +369,53 @@ const SystemFloatingAssist: React.FC = () => {
       durationMs: 30_000,
     }
     startProgress(status.progress, Math.max(status.progress, plan.target), plan.durationMs)
+  }
+
+  const runFloatingAssistQuery = async (
+    query: string,
+    metadata: Record<string, unknown>,
+    signal: AbortSignal,
+    callbacks: RagStreamCallbacks,
+  ) => {
+    const runLocalQuery = () => runRagQueryStream(
+      apiBaseUrl,
+      creationModelConfigs,
+      query,
+      RAG_REFERENCE_LIMIT,
+      metadata,
+      false,
+      signal,
+      callbacks,
+    )
+
+    if (activeModelId !== REMOTE_CREATION_MODEL_ID || !currentUser?.id) {
+      return runLocalQuery()
+    }
+
+    try {
+      return await runGatewayRagQueryStream(
+        apiBaseUrl,
+        gatewayApiBaseUrl,
+        query,
+        currentUser.id,
+        signal,
+        { source: 'floating_assist', metadata },
+        callbacks,
+      )
+    } catch (cloudError) {
+      if (isAbortError(cloudError, signal)) throw cloudError
+      callbacks.onStatus?.({
+        stage: 'local_fallback',
+        message: '云端咨询暂时不可用，正在切换本地能力',
+        progress: 58,
+      })
+      try {
+        return await runLocalQuery()
+      } catch (localError) {
+        if (isAbortError(localError, signal)) throw localError
+        throw new Error('云端咨询失败，本地备用能力也未完成，请稍后重试')
+      }
+    }
   }
 
   const waitForPaint = () => new Promise<void>((resolve) => {
@@ -779,7 +835,10 @@ const SystemFloatingAssist: React.FC = () => {
       setPhase('capturing')
       startProgress(12, 34, 9000)
       await waitForPaint()
-      const ocr = preparedOcr ?? await invoke<FloatingAssistOcrResult>('capture_screen_ocr_for_floating_assist')
+      const ocr = preparedOcr ?? await invoke<FloatingAssistOcrResult>(
+        'capture_screen_ocr_for_floating_assist',
+        { hideFloatingWindow: false },
+      )
       const rawText = ocr.text.trim()
       const detectedSnippets = options.automatic ? options.detection?.snippets.filter(Boolean) ?? [] : []
       const text = detectedSnippets.length > 0 ? detectedSnippets.join('\n') : rawText
@@ -836,21 +895,12 @@ const SystemFloatingAssist: React.FC = () => {
           setProgress(current => Math.min(94, Math.max(58, current + 1)))
         },
       }
-      const result = activeModelId === REMOTE_CREATION_MODEL_ID && currentUser?.id
-        ? await runGatewayRagQueryStream(apiBaseUrl, gatewayApiBaseUrl, queryWithAttachments, currentUser.id, controller.signal, {
-          source: 'floating_assist',
-          metadata,
-        }, streamCallbacks)
-        : await runRagQueryStream(
-          apiBaseUrl,
-          creationModelConfigs,
-          queryWithAttachments,
-          RAG_REFERENCE_LIMIT,
-          metadata,
-          remoteModelAllowed,
-          controller.signal,
-          streamCallbacks,
-        )
+      const result = await runFloatingAssistQuery(
+        queryWithAttachments,
+        metadata,
+        controller.signal,
+        streamCallbacks,
+      )
       setReferences(result.contexts ?? [])
       setOutputTruncated(Boolean(result.output_truncated))
       setInferenceElapsedMs(result.inference_elapsed_ms ?? result.elapsed_ms ?? null)
@@ -1098,21 +1148,12 @@ const SystemFloatingAssist: React.FC = () => {
           setProgress(current => Math.min(94, Math.max(58, current + 1)))
         },
       }
-      const result = activeModelId === REMOTE_CREATION_MODEL_ID && currentUser?.id
-        ? await runGatewayRagQueryStream(apiBaseUrl, gatewayApiBaseUrl, queryWithAttachments, currentUser.id, controller.signal, {
-          source: 'floating_assist',
-          metadata,
-        }, streamCallbacks)
-        : await runRagQueryStream(
-          apiBaseUrl,
-          creationModelConfigs,
-          queryWithAttachments,
-          RAG_REFERENCE_LIMIT,
-          metadata,
-          remoteModelAllowed,
-          controller.signal,
-          streamCallbacks,
-        )
+      const result = await runFloatingAssistQuery(
+        queryWithAttachments,
+        metadata,
+        controller.signal,
+        streamCallbacks,
+      )
       setReferences(result.contexts ?? [])
       setOutputTruncated(Boolean(result.output_truncated))
       setInferenceElapsedMs(result.inference_elapsed_ms ?? result.elapsed_ms ?? null)
@@ -1355,7 +1396,7 @@ const SystemFloatingAssist: React.FC = () => {
     >
       <div className="system-floating-assist__dock">
         <button
-          className={`system-floating-assist__ball system-floating-assist__ball--${phase}${nativeHovering ? ' system-floating-assist__ball--native-hover' : ''}${ambientAnimating ? ' system-floating-assist__ball--ambient-active' : ''}`}
+          className={`system-floating-assist__ball system-floating-assist__ball--${phase}${nativeHovering ? ' system-floating-assist__ball--native-hover' : ''}${ambientAnimating ? ' system-floating-assist__ball--ambient-active' : ''}${developmentMode ? ' system-floating-assist__ball--development' : ''}`}
           type="button"
           onClick={handleBallClick}
           onContextMenu={handleBallContextMenu}
@@ -1371,6 +1412,9 @@ const SystemFloatingAssist: React.FC = () => {
         >
           {autoTaskConfig.enabled && (
             <span className="system-floating-assist__auto-mark" aria-hidden="true">auto</span>
+          )}
+          {developmentMode && (
+            <span className="system-floating-assist__development-mark">开发模式</span>
           )}
           <span className="system-floating-assist__mascot system-floating-assist__bread-person" aria-hidden="true">
             <span className="system-floating-assist__bread-shadow" />

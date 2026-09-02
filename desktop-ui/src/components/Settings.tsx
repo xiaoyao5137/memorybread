@@ -853,7 +853,8 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
 
           <div className="settings-v2__diagnostic-privacy">
             <strong>隐私说明</strong>
-            <p>仅包含运行日志、客户端版本和系统类型；上传前会隐藏用户目录、邮箱、手机号、Token 与密钥。</p>
+            <p>仅收集固定白名单服务日志的限量尾部、客户端版本和系统类型；核心服务异常时会从备用本地服务读取同一日志目录。</p>
+            <p>上传前会隐藏用户目录、绝对路径、主机名、邮箱、手机号、外部网址、Token 与密钥。</p>
             <p>不会上传截图、采集记录、数据库、记忆、Prompt、回答或其他个人文件。服务端会记录来源 IP，用于排查与防止滥用，日志保留 30 天。</p>
           </div>
           <label className="settings-v2__label" htmlFor="customer-log-description">问题描述（选填）</label>

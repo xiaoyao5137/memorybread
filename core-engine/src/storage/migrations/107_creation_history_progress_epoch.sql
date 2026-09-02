@@ -1,0 +1,2 @@
+-- Column creation is handled idempotently by StorageManager because SQLite does not support
+-- ALTER TABLE ... ADD COLUMN IF NOT EXISTS. Keep the migration file as the governed marker.

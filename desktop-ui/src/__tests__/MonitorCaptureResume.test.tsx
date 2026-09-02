@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { PipelineBacklogAlert } from '../components/MonitorPanel'
+import { BakeQueueCard, PipelineBacklogAlert } from '../components/MonitorPanel'
 
 const defaultProps = {
   capturePending: 2,
@@ -67,5 +67,35 @@ describe('MonitorPanel 采集暂停提示', () => {
     )
 
     expect(screen.getByText(/队列仍有可执行候选，但最近 5 批有 4 批未取得进展/)).toBeInTheDocument()
+  })
+})
+
+describe('MonitorPanel 烘焙队列分层', () => {
+  it('分别展示新任务、历史回放、重试和终态失败', () => {
+    render(
+      <BakeQueueCard
+        pending={21}
+        oldestPendingAtMs={null}
+        runningCount={1}
+        staleRunCount={0}
+        retryExhaustedCount={4}
+        freshPendingCount={12}
+        operationReplayCount={7}
+        retryReadyCount={2}
+        retryDelayedCount={0}
+        noProgressCount={0}
+        nextRetryAtMs={null}
+        stalled={false}
+        paused={false}
+        drainRatePerHour={10}
+        etaMs={7_200_000}
+      />,
+    )
+
+    const card = screen.getByText('烘焙等待队列').closest('.monitor-stat-card')
+    expect(card).toHaveTextContent('新任务 12')
+    expect(card).toHaveTextContent('历史回放 7')
+    expect(card).toHaveTextContent('可重试 2')
+    expect(card).toHaveTextContent('需处理 4')
   })
 })

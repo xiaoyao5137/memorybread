@@ -260,6 +260,8 @@ describe('Bake 详情展示优化', () => {
     expect(createDocumentButton.type).toBe('button')
     expect(primaryActions).not.toBeNull()
     expect(separatedActionRow).not.toBeNull()
+    expect(separatedActionRow?.parentElement).toHaveClass('bake-list-toolbar__repository')
+    expect(separatedActionRow?.parentElement).not.toHaveClass('bake-list-toolbar__repository-row--asset-filters')
     expect(primaryActions).toContainElement(clearButton)
     expect(primaryActions).toContainElement(searchButton)
     expect(screen.getByText('关键词').closest('.bake-list-toolbar__repository-row--search')).not.toContainElement(searchButton)
@@ -426,6 +428,9 @@ describe('Bake 详情展示优化', () => {
       />,
     )
 
+    const knowledgeActionRow = screen.getByRole('button', { name: '搜索' }).closest('.bake-list-toolbar__repository-actions--secondary')
+    expect(knowledgeActionRow?.parentElement).toHaveClass('bake-list-toolbar__repository')
+    expect(knowledgeActionRow?.parentElement).not.toHaveClass('bake-list-toolbar__repository-row--asset-filters')
     fireEvent.click(screen.getByRole('button', { name: '查看知识「本地优先知识」详情' }))
     expect(within(screen.getByRole('dialog', { name: '本地优先知识' })).getByRole('button', { name: '删除' })).toBeInTheDocument()
     expect(screen.getAllByText('本地优先知识').length).toBeGreaterThan(0)
@@ -509,6 +514,9 @@ describe('Bake 详情展示优化', () => {
     expect(within(operationTable).getByRole('columnheader', { name: '适用场景' })).toBeInTheDocument()
     expect(within(operationTable).getByRole('columnheader', { name: '操作环节概述' })).toBeInTheDocument()
     expect(within(operationTable).queryByRole('columnheader', { name: '步骤' })).not.toBeInTheDocument()
+    const operationActionRow = screen.getByRole('button', { name: '搜索' }).closest('.bake-list-toolbar__repository-actions--secondary')
+    expect(operationActionRow?.parentElement).toHaveClass('bake-list-toolbar__repository')
+    expect(operationActionRow?.parentElement).not.toHaveClass('bake-list-toolbar__repository-row--asset-filters')
 
     fireEvent.click(screen.getByRole('button', { name: '查看操作：服务无法启动' }))
     expect(within(screen.getByRole('dialog', { name: '服务无法启动' })).getByRole('button', { name: '删除' })).toBeInTheDocument()

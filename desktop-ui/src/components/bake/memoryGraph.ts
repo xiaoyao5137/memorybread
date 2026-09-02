@@ -552,6 +552,64 @@ const seededUnit = (seed: string, axis: string) => {
   return (numeric % 10_000) / 10_000
 }
 
+const layoutNodeRadius = (nodeId: string, focusNodeId?: string | null) => (
+  nodeId === focusNodeId ? 30 : 20
+)
+
+const resolveNodeCollisions = (
+  nodes: MemoryGraphNode[],
+  positions: Record<string, MemoryGraphPosition>,
+  width: number,
+  height: number,
+  focusNodeId?: string | null,
+) => {
+  // 力导布局的弹簧会把高密度关系簇拉到一起。最终增加确定性的硬碰撞约束，
+  // 同时把聚焦环纳入半径，避免聚焦后的局部平移重新造成节点压盖。
+  const minX = 58
+  const maxX = width - 58
+  const minY = 42
+  const maxY = height - 56
+  for (let iteration = 0; iteration < 120; iteration += 1) {
+    let collisionCount = 0
+    for (let left = 0; left < nodes.length; left += 1) {
+      for (let right = left + 1; right < nodes.length; right += 1) {
+        const leftNode = nodes[left]
+        const rightNode = nodes[right]
+        const a = positions[leftNode.id]
+        const b = positions[rightNode.id]
+        let dx = a.x - b.x
+        let dy = a.y - b.y
+        let distance = Math.sqrt(dx * dx + dy * dy)
+        const minimumDistance = layoutNodeRadius(leftNode.id, focusNodeId)
+          + layoutNodeRadius(rightNode.id, focusNodeId) + 8
+        if (distance >= minimumDistance) continue
+
+        if (distance < 0.001) {
+          const angle = seededUnit(leftNode.id, rightNode.id) * Math.PI * 2
+          dx = Math.cos(angle)
+          dy = Math.sin(angle)
+          distance = 1
+        }
+        const correction = (minimumDistance - distance) / 2
+        const unitX = dx / distance
+        const unitY = dy / distance
+        a.x += unitX * correction
+        a.y += unitY * correction
+        b.x -= unitX * correction
+        b.y -= unitY * correction
+        collisionCount += 1
+      }
+    }
+
+    nodes.forEach(node => {
+      const position = positions[node.id]
+      position.x = Math.min(maxX, Math.max(minX, position.x))
+      position.y = Math.min(maxY, Math.max(minY, position.y))
+    })
+    if (collisionCount === 0) break
+  }
+}
+
 export const createMemoryGraphLayout = (
   nodes: MemoryGraphNode[],
   edges: MemoryGraphEdge[],
@@ -650,6 +708,8 @@ export const createMemoryGraphLayout = (
       position.y += dy * influence
     })
   }
+
+  resolveNodeCollisions(nodes, positions, width, height, options.focusNodeId)
 
   // 收敛后统一夹取，确保所有节点与标签留在画布可见区内。
   nodes.forEach(node => {

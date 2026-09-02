@@ -11,12 +11,14 @@ export interface ModelSelectOption {
 }
 
 interface ModelSelectProps {
+  className?: string
   label?: string
   value: string
   options: readonly ModelSelectOption[]
   disabled?: boolean
   remoteAllowed: boolean
   onChange: (modelId: string) => void
+  renderIcon?: (option: ModelSelectOption) => React.ReactNode
   title?: string
 }
 
@@ -24,12 +26,14 @@ const getDisabledReason = (option: ModelSelectOption, remoteAllowed: boolean) =>
   option.remote && !remoteAllowed ? '登录且有可用 Credit 后可选' : ''
 
 const ModelSelect: React.FC<ModelSelectProps> = ({
+  className,
   label,
   value,
   options,
   disabled = false,
   remoteAllowed,
   onChange,
+  renderIcon,
   title,
 }) => {
   const [open, setOpen] = useState(false)
@@ -42,11 +46,25 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
 
   const toggleOpen = () => {
     if (!open && rootRef.current) {
-      // 展开前根据剩余空间决定向上还是向下弹出，避免列表被视口底部截断
+      // 同时考虑视口和可滚动祖先的可见边界，避免分栏改为上下布局后菜单被面板裁切。
       const rect = rootRef.current.getBoundingClientRect()
       const estimatedMenuHeight = Math.min(options.length, 4) * 54 + 16
-      const spaceBelow = window.innerHeight - rect.bottom
-      setDropUpward(spaceBelow < estimatedMenuHeight && rect.top > spaceBelow)
+      let visibleTop = 0
+      let visibleBottom = window.innerHeight
+      let ancestor = rootRef.current.parentElement
+      while (ancestor) {
+        const style = window.getComputedStyle(ancestor)
+        const clipsVertically = /(auto|scroll|hidden|clip)/.test(`${style.overflow} ${style.overflowY}`)
+        if (clipsVertically) {
+          const ancestorRect = ancestor.getBoundingClientRect()
+          visibleTop = Math.max(visibleTop, ancestorRect.top)
+          visibleBottom = Math.min(visibleBottom, ancestorRect.bottom)
+        }
+        ancestor = ancestor.parentElement
+      }
+      const spaceBelow = visibleBottom - rect.bottom
+      const spaceAbove = rect.top - visibleTop
+      setDropUpward(spaceBelow < estimatedMenuHeight && spaceAbove > spaceBelow)
     }
     setOpen(!open)
   }
@@ -75,9 +93,13 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
     setOpen(false)
   }
 
+  const optionIcon = (option: ModelSelectOption) => (
+    renderIcon?.(option) || (option.remote ? <Cloud size={16} /> : <HardDrive size={16} />)
+  )
+
   return (
     <div
-      className={`model-select${open && dropUpward ? ' model-select--drop-upward' : ''}`}
+      className={`model-select${className ? ` ${className}` : ''}${open && dropUpward ? ' model-select--drop-upward' : ''}`}
       ref={rootRef}
     >
       {label && <span className="model-select__label">{label}</span>}
@@ -92,7 +114,7 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
         onClick={toggleOpen}
       >
         <span className="model-select__icon" aria-hidden="true">
-          {activeOption?.remote ? <Cloud size={15} /> : <HardDrive size={15} />}
+          {activeOption && optionIcon(activeOption)}
         </span>
         <span className="model-select__value">{activeOption?.name || '选择模型'}</span>
         <ChevronDown className="model-select__chevron" size={16} aria-hidden="true" />
@@ -115,7 +137,7 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
                 onClick={() => handleChoose(option)}
               >
                 <span className="model-select__option-icon" aria-hidden="true">
-                  {option.remote ? <Cloud size={16} /> : <HardDrive size={16} />}
+                  {optionIcon(option)}
                 </span>
                 <span className="model-select__option-copy">
                   <span className="model-select__option-name">{option.name}</span>

@@ -78,6 +78,28 @@ const reportSource: DataSource = {
   },
 }
 
+const qconSource: DataSource = {
+  ...gpuSource,
+  id: 25,
+  title: 'QCon上海2026大会时间',
+  latest_snapshot: {
+    ...gpuSource.latest_snapshot!,
+    id: 250,
+    source_id: 25,
+    structured_data: {
+      extraction_version: 'data-memory.v16',
+      title: 'QCon上海2026大会时间',
+      summary: '',
+      metric_rows: [{
+        dimension: 'QCon上海2026_全球软件开发大会暨智能软件开发生态展_InfoQ技术大会',
+        metric: '会议日期范围',
+        value: '10月22日-10月24日',
+        note: '',
+      }],
+    },
+  },
+}
+
 const renderDataTab = (overrides: Partial<React.ComponentProps<typeof BakeDataTab>> = {}) => {
   const props: React.ComponentProps<typeof BakeDataTab> = {
     items: [gpuSource],
@@ -113,6 +135,9 @@ describe('BakeDataTab', () => {
     expect(within(screen.getByRole('table', { name: '数据表格' })).getByRole('columnheader', { name: '创建时间' })).toBeInTheDocument()
     expect(screen.getByText('GPU 利用率对比')).toBeInTheDocument()
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    const dataActionRow = screen.getByRole('button', { name: '搜索' }).closest('.bake-list-toolbar__repository-actions--secondary')
+    expect(dataActionRow?.parentElement).toHaveClass('bake-list-toolbar__repository')
+    expect(dataActionRow?.parentElement).not.toHaveClass('bake-list-toolbar__repository-row--asset-filters')
     fireEvent.click(screen.getByRole('button', { name: '查看数据：GPU 利用率对比' }))
     const drawer = screen.getByRole('dialog', { name: 'GPU 利用率对比' })
     expect(within(drawer).getByText(/数据 #22 · 工作记录 · 近期数据 · 数据时间/)).toBeInTheDocument()
@@ -174,6 +199,16 @@ describe('BakeDataTab', () => {
     })
 
     expect(screen.getAllByText(/本周订单 1200/).length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('摘要缺失时使用完整事实句降级，不展示 SEO 标题拼接串', () => {
+    renderDataTab({ items: [qconSource], selectedId: 25 })
+
+    expect(screen.getByText('QCon上海2026大会时间为10月22日-10月24日。')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '查看数据：QCon上海2026大会时间' }))
+    const drawer = screen.getByRole('dialog', { name: 'QCon上海2026大会时间' })
+    expect(within(drawer).getByText('QCon上海2026大会时间为10月22日-10月24日。')).toBeInTheDocument()
+    expect(within(drawer).queryByText(/全球软件开发大会暨智能软件开发生态展.*会议日期范围 10月22日/)).not.toBeInTheDocument()
   })
 
   it('网页来源的数据记录并展示来源网址', () => {

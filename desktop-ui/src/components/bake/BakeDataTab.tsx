@@ -74,6 +74,38 @@ const fallbackDataTitle = (rows: DataMetricRow[]) => {
   return `${metrics.slice(0, 2).join('与')}指标`
 }
 
+const cleanSummaryLabel = (value: string) => value.replace(/_/g, ' ').replace(/\s+/g, ' ').trim()
+
+const noisySummaryLabel = (value: string) => (
+  value.length > 60 || value.includes('_') || /https?:\/\//i.test(value)
+)
+
+const titleExpressesMetric = (title: string, metric: string) => {
+  const normalizedTitle = title.replace(/\s+/g, '').toLowerCase()
+  const normalizedMetric = metric.replace(/\s+/g, '').toLowerCase()
+  if (normalizedMetric && normalizedTitle.includes(normalizedMetric)) return true
+  const temporalMarkers = ['日期', '时间', '日程', '周期', '时段']
+  return temporalMarkers.some(marker => metric.includes(marker))
+    && temporalMarkers.some(marker => title.includes(marker))
+}
+
+const fallbackDataSummary = (title: string, rows: DataMetricRow[]) => {
+  const displayTitle = cleanSummaryLabel(title) || '这组数据'
+  if (rows.length === 0) return '这条数据尚未形成可理解的摘要'
+  if (rows.length === 1) {
+    const row = rows[0]
+    const dimension = row.dimension.trim()
+    const subject = dimension && !noisySummaryLabel(dimension)
+      ? cleanSummaryLabel(dimension)
+      : displayTitle
+    return subject === displayTitle && titleExpressesMetric(displayTitle, row.metric)
+      ? `${displayTitle}为${row.value}。`
+      : `${subject}的${row.metric}为${row.value}。`
+  }
+  const keyValues = rows.slice(0, 3).map(row => `${row.metric}为${row.value}`).join('；')
+  return `这组数据汇总“${displayTitle}”，共${rows.length}行指标。关键数据包括：${keyValues}。`
+}
+
 const presentSnapshot = (snapshot: DataSnapshot): DataPresentation => {
   const structured = snapshot.structured_data ?? {}
   const rows = Array.isArray(structured.metric_rows)
@@ -91,9 +123,10 @@ const presentSnapshot = (snapshot: DataSnapshot): DataPresentation => {
         }]
       })
     : []
+  const title = normalizeText(structured.title) || fallbackDataTitle(rows)
   return {
-    title: normalizeText(structured.title) || fallbackDataTitle(rows),
-    summary: normalizeText(structured.summary) || '这条数据尚未形成可理解的摘要',
+    title,
+    summary: normalizeText(structured.summary) || fallbackDataSummary(title, rows),
     rows,
   }
 }
@@ -375,12 +408,12 @@ const BakeDataTab: React.FC<{
               <span className="bake-filter-label">结束时间</span>
               <input className="bake-input" type="date" value={draftTo} onChange={(event) => onDraftToChange?.(event.target.value)} />
             </label>
-            <div className="bake-list-toolbar__repository-actions bake-list-toolbar__repository-actions--secondary">
-              <div className="bake-list-toolbar__repository-primary-actions">
-                <BakeButton compact type="button" onClick={onClearSearch}>清空</BakeButton>
-                <BakeButton compact primary type="submit">搜索</BakeButton>
-                {onCreate && <BakeButton compact primary type="button" onClick={() => setShowCreateDialog(true)}>新建</BakeButton>}
-              </div>
+          </div>
+          <div className="bake-list-toolbar__repository-actions bake-list-toolbar__repository-actions--secondary">
+            <div className="bake-list-toolbar__repository-primary-actions">
+              <BakeButton compact type="button" onClick={onClearSearch}>清空</BakeButton>
+              <BakeButton compact primary type="submit">搜索</BakeButton>
+              {onCreate && <BakeButton compact primary type="button" onClick={() => setShowCreateDialog(true)}>新建</BakeButton>}
             </div>
           </div>
         </div>

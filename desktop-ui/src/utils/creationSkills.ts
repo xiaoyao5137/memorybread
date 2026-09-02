@@ -1813,9 +1813,8 @@ async function requestExecutionSkillRoute(
   }
 }
 
-// 提交后的 Loop 执行时技能解析：显式 @ 优先；否则完全由模型依据 Skill
-// 自描述决策。模型输出不可恢复或服务不可用时安全降级为不挂载 Skill，
-// 不再根据主题词重合度猜测模板，避免错误模板取得严格工作流控制权。
+// 提交后的 Loop 执行时技能解析：显式 @ 是用户直接选择；除此之外只接受
+// Sidecar 思考模式模型的路由结果。模型或服务不可用时空召回，不用规则猜测。
 export async function resolveExecutionSkills(options: {
   apiBaseUrl: string
   prompt: string
@@ -1833,7 +1832,7 @@ export async function resolveExecutionSkills(options: {
       return { matches: routed.matches, source: 'model', reasoning: routed.reasoning }
     }
   } catch {
-    // Skill 路由不可用不应阻断普通创作，也不能猜测并强制套用模板。
+    // Skill 路由失败不阻断普通创作，也不通过前端规则补选 Skill。
   }
   return { matches: [], source: 'unavailable', reasoning: '' }
 }

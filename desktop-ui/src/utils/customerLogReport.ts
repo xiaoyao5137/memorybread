@@ -6,6 +6,8 @@ import type { AppMetadata } from './appMetadata'
 const INSTALLATION_ID_KEY = 'memory-bread_customer-log-installation-id'
 const MAX_ARCHIVE_BYTES = 10 * 1024 * 1024
 const MAX_LOG_FILES = 8
+const DEFAULT_CORE_API = 'http://127.0.0.1:7070'
+const DEFAULT_SIDECAR_API = 'http://127.0.0.1:7071'
 
 interface DebugLogFilesResponse {
   items: DebugLogFile[]
@@ -52,11 +54,15 @@ export const getCustomerLogInstallationId = (): string => {
 export const scrubDiagnosticLog = (content: string): string => content
   .replace(/\b(?:sk|ak)-[A-Za-z0-9_-]{12,}\b/gi, '[REDACTED_TOKEN]')
   .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [REDACTED]')
-  .replace(/\b(api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\b\s*[:=]\s*([^\s,;]+)/gi, '$1=[REDACTED]')
+  .replace(/\b(api[_-]?key|token|access[_-]?token|refresh[_-]?token|password|secret)\b\s*[:=]\s*([^\s,;]+)/gi, '$1=[REDACTED]')
   .replace(/[A-Z]:\\Users\\[^\\\s]+/gi, '[USER_HOME]')
   .replace(/\/Users\/[^/\s]+/g, '[USER_HOME]')
   .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, '[REDACTED_EMAIL]')
   .replace(/\b1[3-9]\d{9}\b/g, '[REDACTED_PHONE]')
+  .replace(/\b(hostname|computer[_-]?name|device[_-]?name)\b\s*[:=]\s*([^\s,;]+)/gi, '$1=[REDACTED]')
+  .replace(/([?&](?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|password|secret)=)[^&\s"']+/gi, '$1[REDACTED]')
+  .replace(/https?:\/\/(?!127\.0\.0\.1(?::\d+)?(?:\/|\b)|localhost(?::\d+)?(?:\/|\b))[^\s"']+/gi, '[REDACTED_URL]')
+  .replace(/(^|[\s"'=(])\/(?:Users|Volumes|private|tmp|var|opt|Applications|Library|System)\/[^\s"',;)]+/gm, '$1[REDACTED_PATH]')
 
 const readApiError = async (response: Response, fallback: string): Promise<Error> => {
   const payload = await response.json().catch(() => null)
@@ -79,14 +85,17 @@ const normalizedArchitecture = (architecture: string): string => {
   return navigator.platform.toLowerCase().includes('arm') ? 'aarch64' : 'x86_64'
 }
 
-const collectArchive = async (localApiBaseUrl: string, metadata: AppMetadata): Promise<Uint8Array> => {
-  const response = await fetch(`${localApiBaseUrl}/api/debug/log-files`)
+const collectArchiveFromSource = async (
+  localApiBaseUrl: string,
+  metadata: AppMetadata,
+): Promise<Uint8Array> => {
+  const source = localApiBaseUrl.replace(/\/+$/, '')
+  const response = await fetch(`${source}/api/debug/log-files`)
   if (!response.ok) throw new Error('无法读取本机诊断日志')
   const payload = await response.json() as DebugLogFilesResponse
   const files = Array.isArray(payload.items) ? payload.items : []
   const available = files.filter((file) => file.exists).slice(0, MAX_LOG_FILES)
   if (available.length === 0) throw new Error('当前没有可上报的诊断日志')
-
   const archiveFiles: Record<string, Uint8Array> = {}
   const manifest = {
     schema_version: 'customer-log.v1',
@@ -94,6 +103,7 @@ const collectArchive = async (localApiBaseUrl: string, metadata: AppMetadata): P
     client_version: metadata.version,
     platform: metadata.platform,
     architecture: normalizedArchitecture(metadata.architecture),
+    diagnostic_source: source === DEFAULT_SIDECAR_API ? 'sidecar-fallback' : 'core',
     privacy: {
       scrubbed: true,
       excluded: ['screenshots', 'database', 'captures', 'memories', 'prompts', 'answers'],
@@ -101,7 +111,7 @@ const collectArchive = async (localApiBaseUrl: string, metadata: AppMetadata): P
     logs: [] as Array<{ key: string; label: string; truncated: boolean; original_size_bytes: number }>,
   }
   for (const [index, file] of available.entries()) {
-    const logResponse = await fetch(`${localApiBaseUrl}/api/debug/log-files/${encodeURIComponent(file.key)}`)
+    const logResponse = await fetch(`${source}/api/debug/log-files/${encodeURIComponent(file.key)}`)
     if (!logResponse.ok) continue
     const log = await logResponse.json() as DebugLogContent
     archiveFiles[safeFileName(file.key, index)] = strToU8(scrubDiagnosticLog(log.content))
@@ -119,32 +129,60 @@ const collectArchive = async (localApiBaseUrl: string, metadata: AppMetadata): P
   return archive
 }
 
+const collectArchive = async (
+  localApiBaseUrls: string[],
+  metadata: AppMetadata,
+): Promise<Uint8Array> => {
+  let lastError: unknown = null
+  for (const source of [...new Set(localApiBaseUrls.map((value) => value.replace(/\/+$/, '')).filter(Boolean))]) {
+    try {
+      return await collectArchiveFromSource(source, metadata)
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('当前没有可上报的诊断日志')
+}
+
 export const reportCustomerLogs = async ({
   adminApiBaseUrl,
   localApiBaseUrl,
+  localApiBaseUrls,
   authToken,
   metadata,
   description,
+  installationId,
+  initializationReportId,
 }: {
   adminApiBaseUrl: string
-  localApiBaseUrl: string
+  localApiBaseUrl?: string
+  localApiBaseUrls?: string[]
   authToken?: string | null
   metadata: AppMetadata
   description?: string
+  installationId?: string
+  initializationReportId?: string
 }): Promise<CustomerLogReceipt> => {
-  const archive = await collectArchive(localApiBaseUrl.replace(/\/+$/, ''), metadata)
+  const archive = await collectArchive(
+    localApiBaseUrls || [localApiBaseUrl || DEFAULT_CORE_API, DEFAULT_SIDECAR_API],
+    metadata,
+  )
   const checksum = await sha256Hex(archive)
-  const installationId = getCustomerLogInstallationId()
+  const resolvedInstallationId = installationId || getCustomerLogInstallationId()
   const fileName = `memorybread-diagnostics-${new Date().toISOString().slice(0, 10)}.zip`
+  const safeDescription = description?.trim()
+    ? scrubDiagnosticLog(description.trim()).slice(0, 500)
+    : null
   const common = {
-    installation_id: installationId,
+    installation_id: resolvedInstallationId,
     file_name: fileName,
     size_bytes: archive.byteLength,
     checksum_sha256: checksum,
     client_version: metadata.version,
     platform: metadata.platform,
     architecture: normalizedArchitecture(metadata.architecture),
-    description: description?.trim() || null,
+    description: safeDescription,
+    initialization_report_id: initializationReportId || null,
   }
   const headers: Record<string, string> = {
     ...serviceEnvironmentHeaders(),

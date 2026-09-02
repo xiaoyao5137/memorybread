@@ -1,8 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
-import { AtSign, Bot, Check, ChevronDown, ChevronRight, CloudOff, CloudUpload, Copy, ExternalLink, Eye, FileCode2, FileText, FolderOpen, Globe2, Image, Library, Loader2, Maximize2, MessageSquarePlus, Minimize2, PackageCheck, PackagePlus, Paperclip, Pencil, Plus, Search, Send, Sparkles, Square, Store, Trash2, Upload, Wrench, X } from 'lucide-react'
+import { AtSign, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, CloudOff, CloudUpload, Copy, ExternalLink, Eye, FileCode2, FileText, FolderOpen, Globe2, Image, Library, Lightbulb, Loader2, Maximize2, MessageSquarePlus, Minimize2, PackageCheck, PackagePlus, Paperclip, Pencil, Plus, Search, Send, Sparkles, Square, Store, Trash2, Upload, Wrench, X, Zap } from 'lucide-react'
 import { serviceEnvironmentHeaders, useAppStore } from '../store/useAppStore'
-import type { CreationAgentEvent, CreationChatMessage, CreationDataReferenceItem, CreationReferenceItem, CreationReferencePreview } from '../store/useAppStore'
+import type {
+  CreationAgentEvent,
+  CreationBrainstormState,
+  CreationChatMessage,
+  CreationDataReferenceItem,
+  CreationMode,
+  CreationReferenceItem,
+  CreationReferencePreview,
+} from '../store/useAppStore'
 import { fetchWithLocalhostFallback } from '../hooks/useApi'
 import { useImeCompositionGuard } from '../hooks/useImeCompositionGuard'
 import { MentionHighlightTextarea } from './MentionHighlightField'
@@ -12,6 +20,7 @@ import { createOptionalCloudRequestSignal, optionalCloudIsReachable } from '../u
 import { CREATION_MODEL_DEFS, LOCAL_CREATION_MODEL_ID, REMOTE_CREATION_MODEL_ID, canUseRemoteCreationModel, getEffectiveCreationModelId, getModelDisplayName } from '../utils/modelSelection'
 import { buildAttachmentMetadata, buildAttachmentPrompt, filesToAttachments, formatAttachmentSize, type UserAttachment } from '../utils/attachments'
 import { toLocalApiError, toUserFacingError } from '../utils/userFacingError'
+import { consumeGatewayChatStream, fetchGatewayChat, readGatewayChatError } from '../utils/gatewayChatStream'
 import {
   buildCreationSkillInstruction,
   categoryPathFor,
@@ -48,6 +57,19 @@ import CreationSkillDetail, {
   type CreationSkillDetailData,
 } from './CreationSkillDetail'
 import CreationToolsPanel from './CreationToolsPanel'
+import CreationSelectionToolbar from './creation-selection/CreationSelectionToolbar'
+import CreationInlineBrainstormCard from './creation-selection/CreationInlineBrainstormCard'
+import {
+  inlineEditActionLabel,
+  resolveCreationSelection,
+  sha256Hex,
+  verifyInlineEditResponse,
+  type CreationInlineEditAction,
+  type CreationInlineEditCapabilities,
+  type CreationSelectionSnapshot,
+  type InlineEditResponse,
+} from './creation-selection/creationInlineEdit'
+import { CreationDiagramCode, CreationDiagramPre } from './CreationDiagram'
 import { HistoryPagination, HistorySearch } from './HistoryBrowserControls'
 import TutorialLink, { TUTORIAL_URLS } from './TutorialLink'
 import {
@@ -65,12 +87,27 @@ import './CreationPanel.css'
 
 interface CreationPanelProps {
   className?: string
+  active?: boolean
 }
 
 type ReferenceItem = CreationReferenceItem
 type ReferencePreview = CreationReferencePreview
 type BottomTab = 'reference' | 'data' | 'config'
 type FullscreenPanel = 'document' | 'reference' | 'data' | null
+
+const CREATION_MODE_OPTIONS = [
+  {
+    id: 'direct',
+    name: '直出模式',
+    description: '直接规划并生成完整内容，适合方向明确的需求',
+  },
+  {
+    id: 'brainstorm',
+    name: '脑暴模式',
+    description: '逐步确认方向与细节，形成创作简报后再生成',
+  },
+] as const
+
 type ReferenceGroup<T> = {
   id: string
   title: string
@@ -101,6 +138,11 @@ interface CreationHistoryItem {
   evidence: CreationEvidenceItem[]
   /** 记录来源：creation 手动创作（默认）/ scheduled_task 定时任务执行 */
   sourceKind: 'creation' | 'scheduled_task'
+  lifecycleStatus: 'running' | 'completed' | 'failed' | 'cancelled'
+  creationMode: CreationMode
+  creationBrief: CreationBrainstormState | null
+  brainstormRevision: number | null
+  progressEpoch: number
 }
 interface CreationEvidenceItem {
   id: string
@@ -110,6 +152,22 @@ interface CreationEvidenceItem {
   image_url: string
   validation_status: string
   validation?: Record<string, unknown>
+}
+
+interface InlineBrainstormSession {
+  sessionId: string
+  rootRequest: string
+  anchorMessageId: string
+  selection: CreationSelectionSnapshot
+  state: CreationBrainstormState | null
+  loading: boolean
+  error: string
+  selectedOptionIds: string[]
+  customSelected: boolean
+  customAnswer: string
+  continuationDirectionId: string
+  customDirection: string
+  applied: boolean
 }
 interface BrowserPreviewItem {
   id: string
@@ -133,8 +191,8 @@ interface BrowserLiveJob {
   preview_revision: number
 }
 type MarkdownBlock =
-  | { type: 'markdown'; content: string; startLine: number; endLine: number }
-  | { type: 'table'; headers: string[]; alignments: Array<'left' | 'center' | 'right'>; rows: string[][]; startLine: number; endLine: number }
+  | { type: 'markdown'; content: string; startLine: number; endLine: number; startOffset: number; endOffset: number }
+  | { type: 'table'; headers: string[]; alignments: Array<'left' | 'center' | 'right'>; rows: string[][]; startLine: number; endLine: number; startOffset: number; endOffset: number }
 interface DocumentChange {
   changeType: 'added' | 'modified' | 'deleted'
   sectionTitle: string
@@ -146,6 +204,7 @@ interface AgentPhaseResult {
   events: CreationAgentEvent[]
   continuation: Record<string, unknown> | null
   modelMessages: Array<{ role: string; content: string }> | null
+  modelRequestId: string | null
   completed: boolean
   pausedForConfirmation: boolean
   document: string
@@ -158,6 +217,32 @@ const HISTORY_PAGE_SIZE = 20
 const SKILL_MARKET_PAGE_SIZE = 18
 const MAX_CONVERSATION_MESSAGES = 60
 const BROWSER_CRAWLER_PREFERENCE_KEY = 'memory-bread_creation_browser_crawler_enabled'
+const INLINE_EDIT_NODE_KINDS = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'blockquote']
+const CONTINUE_DOCUMENT_FROM_BRAINSTORM_PROMPT = '请基于最新脑暴结论继续完善当前文档，将新增决定落实到相关章节，并保持其他已确认内容一致。'
+
+const inlineEditUserInstruction = (
+  action: CreationInlineEditAction,
+  selectedText: string,
+  customPrompt = '',
+) => {
+  const requirement = {
+    brainstorm: '按本轮已确认的局部脑暴结论改写所选内容，不超出事实与选区边界',
+    polish: '改善所选内容的措辞、语气和连贯性，不新增事实',
+    expand: '基于已有上下文扩充所选内容，补充解释、过渡和事实支持',
+    elaborate: '细化所选内容，补齐对象、条件、步骤、边界、风险或验收维度',
+  }[action]
+  const normalizedSelection = selectedText.trim().replace(/\s+/g, ' ')
+  const excerpt = normalizedSelection.length > 600
+    ? `${normalizedSelection.slice(0, 600)}…`
+    : normalizedSelection
+  return [
+    `${inlineEditActionLabel(action)}要求：${requirement}`,
+    excerpt ? `选取内容：${excerpt}` : '',
+    customPrompt.trim()
+      ? `${action === 'brainstorm' ? '已确认脑暴结论' : '补充要求'}：${customPrompt.trim()}`
+      : '',
+  ].filter(Boolean).join('\n')
+}
 
 const intentOperationForRun = (
   events: CreationAgentEvent[],
@@ -203,6 +288,11 @@ const formatCreationMessageTimestamp = (createdAt: number, now = Date.now()) => 
   return { label, full, iso: date.toISOString() }
 }
 
+const stripInternalCreationMarkers = (content: string) => content.replace(
+  /\\?<!--\s*\/?memorybread:data-risks(?::[a-f0-9]+)?\s*-->/gi,
+  '',
+)
+
 const sanitizeGeneratedContent = (content: string) =>
   content.replace(/<a\s+(?:id|name)=["'][^"']+["']\s*>\s*<\/a>/gi, '')
 
@@ -243,6 +333,42 @@ const groupAgentEventsByRun = (events: CreationAgentEvent[]) => {
   })
 
   return groups
+}
+
+const closeInterruptedHistoricalRuns = (
+  events: CreationAgentEvent[],
+  fallbackSessionId: string,
+) => {
+  const restored = [...events]
+  groupAgentEventsByRun(events).forEach(({ runId, events: runEvents }) => {
+    if (runEvents.some(isRunTerminalEvent)) return
+    const hasUnfinishedLifecycle = runEvents.some(event => (
+      ['running', 'waiting'].includes(event.status)
+      || ['run.started', 'run.paused', 'phase.started', 'thinking.started'].includes(event.type)
+    ))
+    if (!hasUnfinishedLifecycle) return
+
+    const now = Date.now()
+    const latestGoal = [...runEvents].reverse().find(event => event.goal)?.goal
+    restored.push({
+      schema_version: 'creation.agent.v1',
+      event_id: `history-interrupted-${runId}-${now}`,
+      session_id: runEvents[runEvents.length - 1]?.session_id || fallbackSessionId,
+      run_id: runId,
+      sequence: Math.max(0, ...runEvents.map(event => Number(event.sequence) || 0)) + 1,
+      timestamp: now,
+      type: 'run.failed',
+      status: 'failed',
+      actor: { kind: 'agent', id: 'creation_main_agent', name: '创作 Agent' },
+      summary: '该历史记录未包含完成事件，已按中断状态展示',
+      goal: latestGoal
+        ? { ...latestGoal, status: 'failed', outcome: '本轮创作未完成' }
+        : undefined,
+      environment_patch: {},
+      data: { error_code: 'HISTORICAL_RUN_INTERRUPTED', retryable: true },
+    })
+  })
+  return restored
 }
 
 const isLegacyMainAgentControlStart = (event: CreationAgentEvent) => (
@@ -620,6 +746,17 @@ const formatInferenceLatency = (latencyMs?: number | null) => {
   return `${(latencyMs / 1000).toFixed(latencyMs < 10_000 ? 1 : 0)} 秒`
 }
 
+const normalizeOptionalNumber = (value: unknown): number | undefined => {
+  if (value == null || value === '') return undefined
+  const numeric = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(numeric) ? numeric : undefined
+}
+
+const normalizeStringList = (value: unknown): string[] | undefined => {
+  if (!Array.isArray(value)) return undefined
+  return value.map(item => String(item))
+}
+
 const normalizeReferenceItems = (value: unknown): CreationReferenceItem[] => {
   if (!Array.isArray(value)) return []
   return value.flatMap((item): CreationReferenceItem[] => {
@@ -640,6 +777,23 @@ const normalizeReferenceItems = (value: unknown): CreationReferenceItem[] => {
       freshness_score: Number(source.freshness_score || 0),
       usage_count: Number(source.usage_count || 0),
       reason: String(source.reason || ''),
+      retrieval_tier: source.retrieval_tier != null ? String(source.retrieval_tier) : undefined,
+      retrieval_paths: normalizeStringList(source.retrieval_paths),
+      matched_keywords: normalizeStringList(source.matched_keywords),
+      matched_entities: normalizeStringList(source.matched_entities),
+      lexical_score: normalizeOptionalNumber(source.lexical_score),
+      semantic_score: normalizeOptionalNumber(source.semantic_score),
+      entity_score: normalizeOptionalNumber(source.entity_score),
+      retrieval_mode: source.retrieval_mode != null ? String(source.retrieval_mode) : undefined,
+      primary_target: source.primary_target != null ? String(source.primary_target) : undefined,
+      matched_components: normalizeStringList(source.matched_components),
+      matched_relations: normalizeStringList(source.matched_relations),
+      relation_score: normalizeOptionalNumber(source.relation_score),
+      intent_mode: source.intent_mode != null ? String(source.intent_mode) : undefined,
+      matched_concepts: normalizeStringList(source.matched_concepts),
+      primary_target_score: normalizeOptionalNumber(source.primary_target_score),
+      coverage: normalizeOptionalNumber(source.coverage),
+      relation_coverage: normalizeOptionalNumber(source.relation_coverage),
       summary: String(source.summary || ''),
       source_url: source.source_url ? String(source.source_url) : undefined,
       source_type: source.source_type != null ? String(source.source_type) : undefined,
@@ -750,6 +904,27 @@ const normalizeDataReferences = (value: unknown): CreationDataReferenceItem[] =>
   })
 }
 
+interface RejectedDataSource {
+  source_id: number
+  title: string
+  url: string
+}
+
+const normalizeRejectedDataSources = (value: unknown): RejectedDataSource[] => {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item): RejectedDataSource[] => {
+    if (!item || typeof item !== 'object') return []
+    const source = item as Record<string, unknown>
+    const sourceId = Number(source.source_id)
+    if (!Number.isFinite(sourceId) || sourceId <= 0) return []
+    return [{
+      source_id: sourceId,
+      title: String(source.title || `数据来源 #${sourceId}`),
+      url: String(source.url || ''),
+    }]
+  })
+}
+
 const isDataReferenceEvent = (event: CreationAgentEvent) => (
   event.type === 'tool.completed'
   && ['data_search', 'webpage_scrape'].includes(event.actor?.id || '')
@@ -834,13 +1009,34 @@ const mapDataSearchResults = (value: unknown): CreationDataReferenceItem[] => {
   return normalizeDataReferences((value as { results?: unknown }).results)
 }
 
+const normalizeBrainstormState = (value: CreationBrainstormState | null): CreationBrainstormState | null => {
+  if (!value) return null
+  const answeredCount = Math.max(0, Number(value.answered_count) || 0)
+  return {
+    ...value,
+    depth: Math.max(0, Number(value.depth) || answeredCount),
+    can_continue_brainstorm: value.can_continue_brainstorm === true,
+    readiness_reason: String(value.readiness_reason || ''),
+    continuation_directions: Array.isArray(value.continuation_directions)
+      ? value.continuation_directions
+      : [],
+    open_flags: Array.isArray(value.open_flags) ? value.open_flags : [],
+    invalidated_question_ids: Array.isArray(value.invalidated_question_ids)
+      ? value.invalidated_question_ids
+      : [],
+    history: Array.isArray(value.history) ? value.history : [],
+    decisions: Array.isArray(value.decisions) ? value.decisions : [],
+  }
+}
+
 const mapCreationHistory = (histories: any[]): CreationHistoryItem[] => histories.map((h: any) => {
   const fullContent = sanitizeGeneratedContent(h.generated_content)
+  const previewContent = stripInternalCreationMarkers(fullContent)
   const rootRequest = String(h.root_request || '')
   let references: CreationReferenceItem[] = []
   try {
     const parsed = typeof h.references_json === 'string' ? JSON.parse(h.references_json || '[]') : h.references_json
-    references = Array.isArray(parsed) ? parsed : []
+    references = normalizeReferenceItems(parsed)
   } catch {
     references = []
   }
@@ -850,7 +1046,7 @@ const mapCreationHistory = (histories: any[]): CreationHistoryItem[] => historie
     id: Number(h.id),
     prompt: rootRequest || h.prompt,
     timestamp: new Date(h.updated_at ?? h.created_at).toLocaleString('zh-CN'),
-    preview: fullContent.slice(0, 100) + (fullContent.length > 100 ? '...' : ''),
+    preview: previewContent.slice(0, 100) + (previewContent.length > 100 ? '...' : ''),
     fullContent,
     docType: h.doc_type || '',
     audience: h.audience || '',
@@ -868,6 +1064,17 @@ const mapCreationHistory = (histories: any[]): CreationHistoryItem[] => historie
     latencyMs: normalizeLatencyMs(h.latency_ms),
     evidence: parseHistoryJson<CreationEvidenceItem[]>(h.evidence_json, []),
     sourceKind: h.source_kind === 'scheduled_task' ? 'scheduled_task' : 'creation',
+    lifecycleStatus: ['running', 'failed', 'cancelled'].includes(String(h.lifecycle_status))
+      ? h.lifecycle_status
+      : 'completed',
+    creationMode: h.creation_mode === 'brainstorm' ? 'brainstorm' : 'direct',
+    creationBrief: normalizeBrainstormState(
+      parseHistoryJson<CreationBrainstormState | null>(h.creation_brief_json, null),
+    ),
+    brainstormRevision: Number.isFinite(Number(h.brainstorm_revision))
+      ? Number(h.brainstorm_revision)
+      : null,
+    progressEpoch: Math.max(0, Number(h.progress_epoch) || 0),
   }
 })
 
@@ -918,6 +1125,12 @@ const tableAlignments = (separatorLine: string): Array<'left' | 'center' | 'righ
 
 const parseMarkdownBlocks = (content: string): MarkdownBlock[] => {
   const lines = content.split('\n')
+  const lineStarts: number[] = []
+  let absoluteOffset = 0
+  lines.forEach((line) => {
+    lineStarts.push(absoluteOffset)
+    absoluteOffset += line.length + 1
+  })
   const blocks: MarkdownBlock[] = []
   let markdownBuffer: string[] = []
   let markdownBufferStart = 0
@@ -930,11 +1143,15 @@ const parseMarkdownBlocks = (content: string): MarkdownBlock[] => {
     while (last > first && !markdownBuffer[last - 1].trim()) last -= 1
     const markdown = markdownBuffer.slice(first, last).join('\n')
     if (markdown) {
+      const startIndex = markdownBufferStart + first
+      const endIndex = markdownBufferStart + last - 1
       blocks.push({
         type: 'markdown',
         content: markdown,
-        startLine: markdownBufferStart + first + 1,
-        endLine: markdownBufferStart + last,
+        startLine: startIndex + 1,
+        endLine: endIndex + 1,
+        startOffset: lineStarts[startIndex],
+        endOffset: lineStarts[endIndex] + lines[endIndex].length,
       })
     }
     markdownBuffer = []
@@ -961,6 +1178,8 @@ const parseMarkdownBlocks = (content: string): MarkdownBlock[] => {
         rows,
         startLine: tableStart + 1,
         endLine: index,
+        startOffset: lineStarts[tableStart],
+        endOffset: lineStarts[index - 1] + lines[index - 1].length,
       })
       continue
     }
@@ -1046,12 +1265,68 @@ const documentChangesFromPatch = (
   })
 }
 
-const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
+const selectionTouchesElement = (selection: Selection | null, element: HTMLElement | null) => {
+  if (!selection || !element || selection.isCollapsed || selection.rangeCount === 0) return false
+  return Boolean(
+    (selection.anchorNode && element.contains(selection.anchorNode))
+    || (selection.focusNode && element.contains(selection.focusNode)),
+  )
+}
+
+const useSelectionStableContent = (
+  source: string,
+  containerRef: React.RefObject<HTMLElement>,
+) => {
+  const latestSourceRef = useRef(source)
+  const selectionLockedRef = useRef(false)
+  const [renderedContent, setRenderedContent] = useState(source)
+
+  useEffect(() => {
+    latestSourceRef.current = source
+    if (!selectionLockedRef.current) setRenderedContent(source)
+  }, [source])
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+
+    const handleSelectStart = () => {
+      selectionLockedRef.current = true
+    }
+    const handleSelectionChange = () => {
+      if (selectionTouchesElement(window.getSelection(), container)) {
+        selectionLockedRef.current = true
+        return
+      }
+      if (!selectionLockedRef.current) return
+      selectionLockedRef.current = false
+      setRenderedContent(latestSourceRef.current)
+    }
+
+    container.addEventListener('selectstart', handleSelectStart)
+    document.addEventListener('selectionchange', handleSelectionChange)
+    return () => {
+      container.removeEventListener('selectstart', handleSelectStart)
+      document.removeEventListener('selectionchange', handleSelectionChange)
+    }
+  }, [containerRef])
+
+  const syncRenderedContent = useCallback((nextSource: string) => {
+    latestSourceRef.current = nextSource
+    selectionLockedRef.current = false
+    setRenderedContent(nextSource)
+  }, [])
+
+  return { renderedContent, selectionLockedRef, syncRenderedContent }
+}
+
+const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = true }) => {
   const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
   const adminApiBaseUrl = useAppStore((s) => s.adminApiBaseUrl)
   const gatewayApiBaseUrl = useAppStore((s) => s.gatewayApiBaseUrl)
   const authToken = useAppStore((s) => s.authToken)
   const currentUser = useAppStore((s) => s.currentUser)
+  const localNickname = useAppStore((s) => s.localNickname)
   const cloudBalance = useAppStore((s) => s.cloudBalance)
   const setCloudBalance = useAppStore((s) => s.setCloudBalance)
   const draft = useAppStore((s) => s.creationDraft)
@@ -1061,7 +1336,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const creationHistoryOpenTarget = useAppStore((s) => s.creationHistoryOpenTarget)
   const setCreationHistoryOpenTarget = useAppStore((s) => s.setCreationHistoryOpenTarget)
   const setCreationModelConfig = useAppStore((s) => s.setCreationModelConfig)
-  const userDisplayName = currentUser ? getUserDisplayName(currentUser) : '用户'
+  const userDisplayName = getUserDisplayName(currentUser, localNickname)
 
   const {
     prompt,
@@ -1082,6 +1357,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     rootRequest,
     conversation,
     agentEvents,
+    creationMode,
+    brainstormState,
   } = draft
 
   const setPrompt = (v: string) => setCreationDraft({ prompt: v })
@@ -1108,12 +1385,24 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const setRootRequest = (v: string) => setCreationDraft({ rootRequest: v.slice(0, 12000) })
   const setConversation = (v: CreationChatMessage[]) => setCreationDraft({ conversation: retainConversationContext(v) })
   const setAgentEvents = (v: CreationAgentEvent[]) => setCreationDraft({ agentEvents: v.slice(-240) })
+  const setCreationMode = (v: CreationMode) => setCreationDraft({ creationMode: v })
+  const setBrainstormState = (v: CreationBrainstormState | null) => setCreationDraft({ brainstormState: v })
 
   const [dataSourcesById, setDataSourcesById] = useState<Record<number, DataSource>>({})
   const [dataReferencesLoading, setDataReferencesLoading] = useState(false)
   const [dataReferencesError, setDataReferencesError] = useState('')
   const [legacyDataReferencesRecovered, setLegacyDataReferencesRecovered] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
+  const [isBrainstormLoading, setIsBrainstormLoading] = useState(false)
+  const [brainstormError, setBrainstormError] = useState<string | null>(null)
+  const [brainstormSelectedOptions, setBrainstormSelectedOptions] = useState<string[]>([])
+  const [brainstormCustomAnswerSelected, setBrainstormCustomAnswerSelected] = useState(false)
+  const [brainstormCustomAnswer, setBrainstormCustomAnswer] = useState('')
+  const [brainstormHistoryIndex, setBrainstormHistoryIndex] = useState<number | null>(null)
+  const [brainstormContinuationOpen, setBrainstormContinuationOpen] = useState(false)
+  const [brainstormContinuationDirectionId, setBrainstormContinuationDirectionId] = useState('')
+  const [brainstormCustomDirection, setBrainstormCustomDirection] = useState('')
+  const [anchoredBrainstormState, setAnchoredBrainstormState] = useState<CreationBrainstormState | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [copySuccess, setCopySuccess] = useState(false)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
@@ -1127,6 +1416,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     setActiveBottomTab(prev => prev === tab ? null : tab)
   const [creationTools, setCreationTools] = useState(loadCreationTools)
   const [creationHistory, setCreationHistory] = useState<CreationHistoryItem[]>([])
+  const [activeHistoryId, setActiveHistoryId] = useState<number | null>(null)
   const [historyTotal, setHistoryTotal] = useState(0)
   const [historyPage, setHistoryPage] = useState(1)
   const [historySearch, setHistorySearch] = useState('')
@@ -1145,6 +1435,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const [currentDocumentSource, setCurrentDocumentSource] = useState<CreationSkillSource | null>(null)
   const [localSkills, setLocalSkills] = useState<LocalCreationSkill[]>([])
   const [skillsLoading, setSkillsLoading] = useState(false)
+  const [skillsLoaded, setSkillsLoaded] = useState(false)
   const [skillsError, setSkillsError] = useState('')
   const [publishingSkillId, setPublishingSkillId] = useState<number | null>(null)
   const [skillLibraryView, setSkillLibraryView] = useState<'mine' | 'market'>('mine')
@@ -1168,6 +1459,19 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const [uploadingSkillPackage, setUploadingSkillPackage] = useState(false)
   const [skillUploadMenuOpen, setSkillUploadMenuOpen] = useState(false)
   const [currentDocumentSkills, setCurrentDocumentSkills] = useState<LocalCreationSkill[]>([])
+  const [inlineCapabilities, setInlineCapabilities] = useState<CreationInlineEditCapabilities | null>(null)
+  const [inlineSelection, setInlineSelection] = useState<CreationSelectionSnapshot | null>(null)
+  const [inlinePromptOpen, setInlinePromptOpen] = useState(false)
+  const [inlineCustomPrompt, setInlineCustomPrompt] = useState('')
+  const [inlineRunningAction, setInlineRunningAction] = useState<CreationInlineEditAction | null>(null)
+  const [inlineError, setInlineError] = useState('')
+  const [inlineBrainstorm, setInlineBrainstorm] = useState<InlineBrainstormSession | null>(null)
+  const [inlineUndo, setInlineUndo] = useState<{
+    requestId: string
+    sessionId: string
+    historyId: number
+    resultHash: string
+  } | null>(null)
   const turnMatchedSkillsRef = useRef<MatchedCreationSkill[] | null>(null)
   const [skillPickerOpen, setSkillPickerOpen] = useState(false)
   const [skillQuery, setSkillQuery] = useState('')
@@ -1179,6 +1483,11 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   } | null>(null)
   const [workspaceSplit, setWorkspaceSplit] = useState(60)
   const contentRef = useRef<HTMLDivElement>(null)
+  const {
+    renderedContent: selectionStableContent,
+    selectionLockedRef: documentSelectionLockedRef,
+    syncRenderedContent: syncSelectionStableContent,
+  } = useSelectionStableContent(generatedContent, contentRef)
   const bottomPanelRef = useRef<HTMLDivElement>(null)
   const referencePanelRef = useRef<HTMLDivElement>(null)
   const dataPanelRef = useRef<HTMLDivElement>(null)
@@ -1187,11 +1496,27 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     groupId?: string
   } | null>(null)
   const chatTimelineRef = useRef<HTMLDivElement>(null)
+  const brainstormContinuationRef = useRef<HTMLDivElement>(null)
   const workspaceRef = useRef<HTMLElement>(null)
   const workspaceResizeCleanupRef = useRef<(() => void) | null>(null)
   const fullscreenTriggerRef = useRef<HTMLButtonElement | null>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const brainstormAbortRef = useRef<AbortController | null>(null)
+  const inlineAbortRef = useRef<AbortController | null>(null)
+  const inlineBrainstormAbortRef = useRef<AbortController | null>(null)
+  const inlineRequestIdRef = useRef<string | null>(null)
+  const inlineViewportAnchorRef = useRef<{
+    sourceOffset: number
+    scrollTop: number
+    viewportOffset: number | null
+  } | null>(null)
+  const inlineTimelineViewportRef = useRef<{ scrollTop: number } | null>(null)
+  const inlineSelectionEpochRef = useRef(0)
+  const inlineToolbarInteractionRef = useRef(false)
+  const activeHistoryIdRef = useRef<number | null>(null)
+  const activeHistoryEpochRef = useRef<number | null>(null)
+  const startupRecoveryAttemptedRef = useRef(false)
   const legacyDataRecoveryRef = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
@@ -1217,6 +1542,122 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   )
   const memorySearchEnabled = enabledToolIds.includes('memory_search')
   const internetSearchEnabled = enabledToolIds.includes('internet_search')
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const loadInlineCapabilities = async () => {
+      if (!activeHistoryId || !generatedContent.trim() || isGenerating) {
+        setInlineCapabilities(null)
+        setInlineSelection(null)
+        return
+      }
+      const localBaseHash = await sha256Hex(generatedContent)
+      if (controller.signal.aborted) return
+      const unavailableCapabilities = (reason: string): CreationInlineEditCapabilities => ({
+        schema_version: 'creation.inline-edit.v1',
+        enabled: false,
+        actions: [],
+        max_selection_bytes: 12000,
+        max_custom_prompt_bytes: 2000,
+        supported_node_kinds: INLINE_EDIT_NODE_KINDS,
+        history_id: activeHistoryId,
+        revision_no: 0,
+        base_document_hash: localBaseHash,
+        disabled_reason: reason,
+      })
+      try {
+        const response = await fetchWithLocalhostFallback(
+          `${apiBaseUrl}/api/creation/inline-edit/capabilities?history_id=${activeHistoryId}`,
+          { signal: controller.signal },
+        )
+        if (response.status === 404) {
+          setInlineCapabilities(unavailableCapabilities('选区编辑服务未启动，请重启客户端后再试'))
+          return
+        }
+        if (!response.ok) throw new Error(`inline capabilities ${response.status}`)
+        const capabilities = await response.json() as CreationInlineEditCapabilities
+        if (
+          capabilities.schema_version !== 'creation.inline-edit.v1'
+          || capabilities.history_id !== activeHistoryId
+          || capabilities.base_document_hash !== localBaseHash
+        ) {
+          setInlineCapabilities(unavailableCapabilities('文档版本已变化，请等待保存完成后重新划选'))
+          return
+        }
+        setInlineCapabilities(capabilities)
+      } catch (capabilitiesError) {
+        if (!controller.signal.aborted) {
+          console.warn('加载选区编辑能力失败:', capabilitiesError)
+          setInlineCapabilities(unavailableCapabilities('选区编辑服务暂不可用，请稍后重试'))
+        }
+      }
+    }
+    void loadInlineCapabilities()
+    return () => controller.abort()
+  }, [activeHistoryId, apiBaseUrl, generatedContent, isGenerating])
+
+  useEffect(() => {
+    const updateSelection = () => {
+      const activeElement = document.activeElement
+      const toolbarOwnsFocus = activeElement instanceof Element
+        && Boolean(activeElement.closest('.creation-selection-toolbar'))
+      if (inlinePromptOpen || inlineToolbarInteractionRef.current || toolbarOwnsFocus) return
+      const requestEpoch = inlineSelectionEpochRef.current + 1
+      inlineSelectionEpochRef.current = requestEpoch
+      const capabilities = inlineCapabilities
+      const container = contentRef.current
+      if (
+        !capabilities
+        || !container
+        || isGenerating
+        || inlineRunningAction
+        || selectionStableContent !== generatedContent
+        || capabilities.revision_no == null
+        || !capabilities.base_document_hash
+      ) {
+        setInlineSelection(null)
+        return
+      }
+      void resolveCreationSelection({
+        selection: window.getSelection(),
+        container,
+        originalSource: generatedContent,
+        baseRevisionNo: capabilities.revision_no,
+        baseDocumentHash: capabilities.base_document_hash,
+        maxSelectionBytes: capabilities.max_selection_bytes,
+        supportedNodeKinds: capabilities.supported_node_kinds,
+      }).then((snapshot) => {
+        if (inlineSelectionEpochRef.current !== requestEpoch) return
+        setInlineSelection(snapshot)
+        if (snapshot) setInlineError('')
+      })
+    }
+    // WKWebView can emit `selectionchange` before the mouse/touch selection has
+    // reached its final range. Re-read the selection when the gesture ends so
+    // desktop users do not lose the toolbar because an intermediate collapsed
+    // range won the async epoch race. `keyup` covers Shift+Arrow selections.
+    const updateSettledSelection = (event: Event) => {
+      const target = event.target
+      if (target instanceof Element && target.closest('.creation-selection-toolbar')) return
+      window.requestAnimationFrame(updateSelection)
+    }
+    document.addEventListener('selectionchange', updateSelection)
+    document.addEventListener('pointerup', updateSettledSelection, true)
+    document.addEventListener('mouseup', updateSettledSelection, true)
+    document.addEventListener('keyup', updateSettledSelection, true)
+    contentRef.current?.addEventListener('scroll', updateSelection, { passive: true })
+    window.addEventListener('resize', updateSelection)
+    if (inlineCapabilities) updateSelection()
+    return () => {
+      inlineSelectionEpochRef.current += 1
+      document.removeEventListener('selectionchange', updateSelection)
+      document.removeEventListener('pointerup', updateSettledSelection, true)
+      document.removeEventListener('mouseup', updateSettledSelection, true)
+      document.removeEventListener('keyup', updateSettledSelection, true)
+      contentRef.current?.removeEventListener('scroll', updateSelection)
+      window.removeEventListener('resize', updateSelection)
+    }
+  }, [generatedContent, inlineCapabilities, inlinePromptOpen, inlineRunningAction, isGenerating, selectionStableContent])
 
   useEffect(() => {
     let cancelled = false
@@ -1510,7 +1951,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     }
   }, [activeBottomTab, agentEvents, bottomNavigationRevision, dataReferences])
 
-  const handleOpenReferenceSource = (item: ReferenceItem) => {
+  const handleOpenReferenceSource = useCallback((item: ReferenceItem) => {
     const sourceType = String(item.source_type || 'document')
     const sourceId = Number(item.source_id ?? item.id)
     if (!Number.isFinite(sourceId) || sourceId <= 0) {
@@ -1537,7 +1978,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
         dataSourceId: internalType === 'data' ? sourceId : undefined,
       },
     }))
-  }
+  }, [])
 
   useEffect(() => {
     const sourceIds = [...new Set(dataReferences.map(item => item.source_id))]
@@ -1608,12 +2049,39 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   }
 
   const handleRestoreHistory = (item: typeof creationHistory[0]) => {
+    inlineAbortRef.current?.abort()
+    inlineBrainstormAbortRef.current?.abort()
+    setInlineUndo(null)
+    setInlineSelection(null)
+    setInlineBrainstorm(null)
+    setInlinePromptOpen(false)
+    setInlineError('')
+    activeHistoryIdRef.current = item.id
+    setActiveHistoryId(item.id)
+    activeHistoryEpochRef.current = item.progressEpoch
     legacyDataRecoveryRef.current += 1
     setPrompt('')
+    setCreationMode(item.creationMode)
+    setBrainstormState(item.creationBrief)
+    setAnchoredBrainstormState(
+      item.creationMode === 'brainstorm' && item.fullContent.trim()
+        ? item.creationBrief
+        : null,
+    )
     setGeneratedContent(item.fullContent)
     setSessionId(item.sessionId || `history-${item.id}`)
     const restoredConversation: CreationChatMessage[] = item.conversation.length
-      ? item.conversation
+      ? item.conversation.filter((message, index, messages) => {
+        // 旧版终态保存可能在原始用户消息之后再补一条 server-user-* 副本。
+        // 历史恢复时只隐藏这类确定的服务端重复项，避免同一需求在时间线末尾
+        // 再出现一次并让脑暴锚点看起来像被移动；用户主动重复发送的内容保留。
+        if (message.role !== 'user' || !message.id.startsWith('server-user-')) return true
+        const content = message.content.trim()
+        if (!content) return true
+        return !messages.slice(0, index).some(previous => (
+          previous.role === 'user' && previous.content.trim() === content
+        ))
+      })
       : [{
         id: `history-user-${item.id}`,
         role: 'user',
@@ -1626,7 +2094,15 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       || restoredConversation.find(message => message.role === 'user')?.content
       || item.prompt,
     )
-    const restoredEvents = [...item.agentEvents]
+    // 历史记录不会重连旧的 SSE / 模型请求。旧版若在暂停后失败，
+    // 可能只持久化了 running / waiting 事件；恢复时必须按中断收口，
+    // 否则这条旧记录的深度思考与呼吸灯会永久闪烁。
+    const restoredEvents = item.lifecycleStatus === 'running'
+      ? [...item.agentEvents]
+      : closeInterruptedHistoricalRuns(
+        item.agentEvents,
+        item.sessionId || `history-${item.id}`,
+      )
     if (
       item.documentPatch
       && !restoredEvents.some(event => event.type === 'document.patch.applied')
@@ -1674,6 +2150,12 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       content: item.fullContent,
       docType: item.docType || docType,
     })
+    if (item.creationMode === 'brainstorm' && item.sessionId) {
+      // 历史记录中的 creation_brief 是生成文档时的锚点快照，继续脑暴后的
+      // 实时 revision 保存在独立会话表。恢复记录时静默同步实时状态，既能
+      // 立即展示后续方向，也避免用户先撞一次版本冲突才看到最新进度。
+      void restoreBrainstormSession(item.sessionId, item.rootRequest || item.prompt, true)
+    }
     if (contentRef.current) {
       setTimeout(() => contentRef.current?.scrollTo?.({ top: 0, behavior: 'smooth' }), 100)
     }
@@ -1711,6 +2193,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
 
   const loadLocalSkills = useCallback(async () => {
     setSkillsLoading(true)
+    setSkillsLoaded(false)
     setSkillsError('')
     try {
       setLocalSkills(await listLocalCreationSkills(apiBaseUrl))
@@ -1719,6 +2202,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       setSkillsError(toLocalApiError(err, '技能加载失败'))
     } finally {
       setSkillsLoading(false)
+      setSkillsLoaded(true)
     }
   }, [apiBaseUrl])
 
@@ -2033,8 +2517,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     const attachmentPrompt = buildAttachmentPrompt(attachments)
     return attachmentPrompt ? `${message.trim()}\n\n${attachmentPrompt}` : message.trim()
   }
-  const promptWithAttachments = () => {
-    const basePrompt = messageWithAttachments()
+  const promptWithAttachments = (message = prompt) => {
+    const basePrompt = messageWithAttachments(message)
     return `${basePrompt}${buildCreationSkillInstruction(effectiveMatchedSkills())}`
   }
 
@@ -2158,7 +2642,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     }
   }
 
-  const buildGatewayMessages = (references: CreationReferenceItem[]) => {
+  const buildGatewayMessages = (references: CreationReferenceItem[], message = prompt) => {
     const systemPrompt = [
       '你是 MemoryBread 的咨询创作助手。',
       '请用专业、结构化的中文输出 Markdown 文档。',
@@ -2181,66 +2665,457 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     ].join('\n')
     return [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: `${options}\n\n创作需求：\n${promptWithAttachments()}${referenceText}` },
+      { role: 'user', content: `${options}\n\n创作需求：\n${promptWithAttachments(message)}${referenceText}` },
     ]
   }
 
-  const postGatewayCreation = async (references: CreationReferenceItem[], signal?: AbortSignal) => {
-    const response = await fetch(`${gatewayApiBaseUrl.replace(/\/+$/, '')}/v1/gateway/chat`, {
+  const postGatewayCreation = async (
+    references: CreationReferenceItem[],
+    message: string,
+    signal?: AbortSignal,
+  ) => {
+    const response = await fetchGatewayChat(`${gatewayApiBaseUrl.replace(/\/+$/, '')}/v1/gateway/chat`, {
       method: 'POST',
-      headers: { ...serviceEnvironmentHeaders(), 'Content-Type': 'application/json' },
+      headers: {
+        ...serviceEnvironmentHeaders(),
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+      },
       signal,
       body: JSON.stringify({
         request_id: `creation-${Date.now()}-${Math.random().toString(16).slice(2)}`,
         user_id: currentUser?.id || null,
         brand_model_id: 'mbcd-plus-v1',
         caller: 'creation',
-        messages: buildGatewayMessages(references),
-        stream: false,
+        messages: buildGatewayMessages(references, message),
+        stream: true,
         privacy: { content_logging: false, client_scrubbed: true },
         limits: { max_output_tokens: 8192, max_credit: '100.0000' },
       }),
     })
     if (!response.ok) {
-      throw new Error(await readApiErrorMessage(response, `生成失败: ${response.status}`))
+      throw await readGatewayChatError(response, '云端模型服务暂时不可用，请稍后重试')
     }
-    return response.json()
+    return consumeGatewayChatStream(response)
   }
 
   const postGatewayAgentCall = async (
     messages: Array<{ role: string; content: string }>,
+    requestId: string | null,
     signal?: AbortSignal,
   ) => {
-    const response = await fetch(`${gatewayApiBaseUrl.replace(/\/+$/, '')}/v1/gateway/chat`, {
+    const stableRequestId = String(requestId || '').trim().slice(0, 255)
+    const response = await fetchGatewayChat(`${gatewayApiBaseUrl.replace(/\/+$/, '')}/v1/gateway/chat`, {
       method: 'POST',
-      headers: { ...serviceEnvironmentHeaders(), 'Content-Type': 'application/json' },
+      headers: {
+        ...serviceEnvironmentHeaders(),
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+      },
       signal,
       body: JSON.stringify({
-        request_id: `creation-agent-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        // 沿用 sidecar model.request 的稳定 ID，使暂停、恢复与 Gateway
+        // 调用能按同一业务请求追踪，也为结算幂等提供确定键。
+        request_id: stableRequestId
+          || `creation-agent-${Date.now()}-${Math.random().toString(16).slice(2)}`,
         user_id: currentUser?.id || null,
         brand_model_id: 'mbcd-plus-v1',
         caller: 'creation',
         messages,
-        stream: false,
+        stream: true,
         privacy: { content_logging: false, client_scrubbed: true },
         limits: { max_output_tokens: 8192, max_credit: '100.0000' },
       }),
     })
     if (!response.ok) {
-      throw new Error(await readApiErrorMessage(response, `Agent 推理失败: ${response.status}`))
+      throw await readGatewayChatError(response, '云端模型服务暂时不可用，请稍后重试')
     }
-    const data = await response.json()
-    const content = sanitizeGeneratedContent(String(data.content || ''))
+    const data = await consumeGatewayChatStream(response)
+    const content = sanitizeGeneratedContent(data.content)
     if (!content.trim()) throw new Error('品牌模型没有返回 Agent 结果')
     return content
   }
 
-  const postLocalCreation = async (signal?: AbortSignal) => {
+  const inlineEditEvent = (
+    requestId: string,
+    type: string,
+    summary: string,
+    data: Record<string, unknown>,
+  ): CreationAgentEvent => ({
+    schema_version: 'creation.inline-edit.v1',
+    event_id: `${type}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    session_id: sessionId || 'current',
+    run_id: requestId,
+    sequence: 1,
+    timestamp: Date.now(),
+    type,
+    status: 'completed',
+    actor: { kind: 'agent', id: 'inline_edit_agent', name: '选区编辑' },
+    summary,
+    environment_patch: {},
+    data,
+  })
+
+  const runInlineEdit = async (
+    action: CreationInlineEditAction,
+    snapshotOverride?: CreationSelectionSnapshot,
+    customPromptOverride = '',
+  ) => {
+    const snapshot = snapshotOverride || inlineSelection
+    const capabilities = inlineCapabilities
+    const historyId = activeHistoryIdRef.current
+    const activeSessionId = sessionId
+    const currentDocument = generatedContent
+    if (
+      !snapshot
+      || !capabilities?.enabled
+      || !historyId
+      || !activeSessionId
+      || inlineRunningAction
+      || isGenerating
+    ) return
+    const actionPrompt = action === 'brainstorm' ? customPromptOverride : action === 'polish' ? inlineCustomPrompt : ''
+    if (new TextEncoder().encode(actionPrompt).length > capabilities.max_custom_prompt_bytes) {
+      setInlineError(`${action === 'brainstorm' ? '脑暴结论' : '自定义润色要求'}过长，请精简后重试`)
+      return
+    }
+
+    const documentViewport = contentRef.current
+    const selectedBlock = documentViewport
+      ? [...documentViewport.querySelectorAll<HTMLElement>('[data-md-start][data-md-end]')].find((element) => {
+        const start = Number(element.dataset.mdStart)
+        const end = Number(element.dataset.mdEnd)
+        return Number.isFinite(start) && Number.isFinite(end)
+          && start <= snapshot.startOffset && snapshot.startOffset < end
+      })
+      : null
+    const selectedBlockRect = selectedBlock?.getBoundingClientRect()
+    const documentViewportRect = documentViewport?.getBoundingClientRect()
+    const viewportAnchor = documentViewport
+      ? {
+        sourceOffset: snapshot.startOffset,
+        scrollTop: documentViewport.scrollTop,
+        viewportOffset: selectedBlockRect && documentViewportRect
+          ? selectedBlockRect.top - documentViewportRect.top
+          : null,
+      }
+      : null
+
+    const controller = new AbortController()
+    inlineAbortRef.current = controller
+    const requestId = `inline-${Date.now()}-${globalThis.crypto.randomUUID?.() || Math.random().toString(16).slice(2)}`
+    inlineRequestIdRef.current = requestId
+    setInlineRunningAction(action)
+    setInlineError('')
+    setInlineUndo(null)
+    const instruction = inlineEditUserInstruction(
+      action,
+      snapshot.selectedText,
+      actionPrompt,
+    )
+    const requestedAt = Date.now()
+    inlineTimelineViewportRef.current = { scrollTop: chatTimelineRef.current?.scrollTop ?? 0 }
+    setConversation([
+      ...useAppStore.getState().creationDraft.conversation,
+      {
+        id: `inline-user-${requestedAt}`,
+        role: 'user',
+        content: instruction,
+        createdAt: requestedAt,
+        runId: requestId,
+      },
+    ])
+    let committedResult: InlineEditResponse | null = null
+    const basePayload: Record<string, unknown> = {
+      schema_version: 'creation.inline-edit.v1',
+      request_id: requestId,
+      session_id: activeSessionId,
+      history_id: historyId,
+      root_request: rootRequest,
+      current_document: currentDocument,
+      action,
+      custom_prompt: actionPrompt,
+      model_mode: useGatewayCreation && currentUser?.id ? 'external' : 'local',
+      selection: {
+        base_revision_no: snapshot.baseRevisionNo,
+        base_document_hash: snapshot.baseDocumentHash,
+        start_byte: snapshot.startByte,
+        end_byte: snapshot.endByte,
+        selected_markdown: snapshot.selectedMarkdown,
+        selected_markdown_hash: snapshot.selectedMarkdownHash,
+        selected_text: snapshot.selectedText,
+        start_line: snapshot.startLine,
+        end_line: snapshot.endLine,
+      },
+    }
+    try {
+      let payload = basePayload
+      let result: InlineEditResponse | null = null
+      for (let phase = 0; phase < 2; phase += 1) {
+        const response = await fetchWithLocalhostFallback(`${apiBaseUrl}/api/creation/inline-edit/run`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify(payload),
+        })
+        if (!response.ok) {
+          throw new Error(await readApiErrorMessage(response, `选区${inlineEditActionLabel(action)}失败`))
+        }
+        result = await response.json() as InlineEditResponse
+        if (result.status !== 'paused') break
+        const messages = result.model_request?.messages
+        if (!Array.isArray(messages) || !messages.length) throw new Error('选区编辑缺少模型请求内容')
+        const modelResult = await postGatewayAgentCall(
+          messages,
+          result.model_request?.request_id || requestId,
+          controller.signal,
+        )
+        payload = {
+          ...basePayload,
+          resume_state: result.resume_state,
+          model_result: modelResult,
+        }
+      }
+      if (!result) throw new Error('选区编辑没有返回结果')
+      committedResult = result.status === 'committed' ? result : null
+      if (result.status === 'cancelled') {
+        const completedAt = Date.now()
+        setConversation([
+          ...useAppStore.getState().creationDraft.conversation,
+          {
+            id: `inline-assistant-${completedAt}`,
+            role: 'assistant',
+            content: `本次${inlineEditActionLabel(action)}已取消，文档未修改。`,
+            createdAt: completedAt,
+            runId: requestId,
+          },
+        ])
+        return
+      }
+      if (result.status === 'no_change') {
+        if (action === 'brainstorm') {
+          setInlineBrainstorm(current => current ? { ...current, applied: true } : current)
+        }
+        setInlineError('所选内容已经符合要求，未产生修改')
+        const completedAt = Date.now()
+        setConversation([
+          ...useAppStore.getState().creationDraft.conversation,
+          {
+            id: `inline-assistant-${completedAt}`,
+            role: 'assistant',
+            content: `所选内容已经符合${inlineEditActionLabel(action)}要求，未产生修改。`,
+            createdAt: completedAt,
+            runId: requestId,
+          },
+        ])
+        return
+      }
+      if (!await verifyInlineEditResponse(snapshot, currentDocument, result)) {
+        throw new Error('修改结果校验失败，原文未在本地应用，请重新划选')
+      }
+      const nextContent = result.content as string
+      const patch = result.patch as Record<string, unknown>
+      const now = Date.now()
+      const nextConversation: CreationChatMessage[] = [
+        ...useAppStore.getState().creationDraft.conversation,
+        {
+          id: `inline-assistant-${now}`,
+          role: 'assistant',
+          content: `已完成${inlineEditActionLabel(action)}。`,
+          createdAt: now + 1,
+          runId: requestId,
+        },
+      ]
+      const state = useAppStore.getState().creationDraft
+      const patchEvent = inlineEditEvent(
+        requestId,
+        'document.patch.applied',
+        `已完成${inlineEditActionLabel(action)}`,
+        { content: nextContent, patch, operation: patch.operation },
+      )
+      const completedEvent = {
+        ...inlineEditEvent(requestId, 'run.completed', `选区${inlineEditActionLabel(action)}完成`, {
+          document: nextContent,
+        }),
+        sequence: 2,
+      }
+      // Re-rendering the replaced Markdown removes the browser selection. Keep
+      // the operated block at the same visual position instead of letting the
+      // general streaming auto-scroll move the document to its end.
+      inlineViewportAnchorRef.current = viewportAnchor
+      inlineTimelineViewportRef.current = { scrollTop: chatTimelineRef.current?.scrollTop ?? 0 }
+      window.getSelection()?.removeAllRanges()
+      syncSelectionStableContent(nextContent)
+      setGeneratedContent(nextContent)
+      setConversation(nextConversation)
+      setAgentEvents([...state.agentEvents, patchEvent, completedEvent])
+      if (action === 'brainstorm') {
+        setInlineBrainstorm(current => current ? { ...current, applied: true } : current)
+      }
+      setInlineCapabilities(prev => prev ? {
+        ...prev,
+        revision_no: result?.revision_no ?? prev.revision_no,
+        base_document_hash: String(patch.result_hash || ''),
+      } : prev)
+      setInlineUndo({
+        requestId,
+        sessionId: activeSessionId,
+        historyId,
+        resultHash: String(patch.result_hash || ''),
+      })
+      setInlineSelection(null)
+      setInlinePromptOpen(false)
+      setInlineCustomPrompt('')
+      if (historyPage === 1) void loadCreationHistory()
+    } catch (inlineEditError) {
+      if (!controller.signal.aborted) {
+        // 外部模型调用可能在 Core 已把请求持久化为 paused 后失败。主动收口
+        // 该运行，避免残留的活动请求把同一创作会话后续所有选区操作挡住。
+        if (!committedResult) {
+          try {
+            await fetchWithLocalhostFallback(`${apiBaseUrl}/api/creation/inline-edit/cancel`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ request_id: requestId, session_id: activeSessionId }),
+            })
+          } catch (cancelError) {
+            console.warn('清理失败的选区编辑运行失败:', cancelError)
+          }
+        }
+        // Core 在返回 committed 前已经原子更新了历史记录。若 WebView 在
+        // 响应校验或本地状态同步时失败，不能让界面继续停在旧版本并表现成
+        // “没有反应”；以同一 history/session 的持久化结果做一次只读恢复。
+        let restored = false
+        if (committedResult?.revision_no != null && committedResult.patch) {
+          try {
+            const response = await fetchWithLocalhostFallback(
+              `${apiBaseUrl}/api/creation/history/${historyId}`,
+              { signal: controller.signal },
+            )
+            if (response.ok) {
+              const [item] = mapCreationHistory([await response.json()])
+              const expectedHash = String(committedResult.patch.result_hash || '')
+              const persistedHash = item ? await sha256Hex(item.fullContent) : ''
+              if (
+                item
+                && item.id === historyId
+                && item.sessionId === activeSessionId
+                && item.revisionNo === committedResult.revision_no
+                && Boolean(expectedHash)
+                && persistedHash === expectedHash
+              ) {
+                inlineViewportAnchorRef.current = viewportAnchor
+                inlineTimelineViewportRef.current = { scrollTop: chatTimelineRef.current?.scrollTop ?? 0 }
+                handleRestoreHistory(item)
+                setInlineUndo({
+                  requestId,
+                  sessionId: activeSessionId,
+                  historyId,
+                  resultHash: expectedHash,
+                })
+                restored = true
+                if (historyPage === 1) void loadCreationHistory()
+              }
+            }
+          } catch (recoveryError) {
+            if (!controller.signal.aborted) console.warn('恢复已提交的选区编辑失败:', recoveryError)
+          }
+        }
+        if (!restored) {
+          const failureMessage = toUserFacingError(inlineEditError, `选区${inlineEditActionLabel(action)}失败`)
+          setInlineError(failureMessage)
+          const completedAt = Date.now()
+          setConversation([
+            ...useAppStore.getState().creationDraft.conversation,
+            {
+              id: `inline-assistant-${completedAt}`,
+              role: 'assistant',
+              content: `${failureMessage}，文档未修改。`,
+              createdAt: completedAt,
+              runId: requestId,
+            },
+          ])
+        }
+      }
+    } finally {
+      if (inlineAbortRef.current === controller) inlineAbortRef.current = null
+      if (inlineRequestIdRef.current === requestId) inlineRequestIdRef.current = null
+      setInlineRunningAction(null)
+    }
+  }
+
+  const cancelInlineEdit = async () => {
+    const controller = inlineAbortRef.current
+    const activeSessionId = sessionId
+    if (!controller || !activeSessionId) return
+    const runningRequestId = inlineRequestIdRef.current
+    if (runningRequestId) {
+      try {
+        const response = await fetchWithLocalhostFallback(`${apiBaseUrl}/api/creation/inline-edit/cancel`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ request_id: runningRequestId, session_id: activeSessionId }),
+        })
+        if (!response.ok) setInlineError(await readApiErrorMessage(response, '修改正在提交，请稍后同步文档'))
+      } catch (cancelError) {
+        setInlineError(toUserFacingError(cancelError, '中止选区编辑失败'))
+      }
+    }
+    controller.abort()
+  }
+
+  const undoInlineEdit = async () => {
+    const undo = inlineUndo
+    if (!undo || inlineRunningAction || isGenerating) return
+    setInlineError('')
+    try {
+      const response = await fetchWithLocalhostFallback(`${apiBaseUrl}/api/creation/inline-edit/undo`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          request_id: undo.requestId,
+          session_id: undo.sessionId,
+          history_id: undo.historyId,
+          expected_result_hash: undo.resultHash,
+        }),
+      })
+      if (!response.ok) throw new Error(await readApiErrorMessage(response, '撤销失败'))
+      const result = await response.json() as InlineEditResponse
+      if (!result.content || !result.patch) throw new Error('撤销结果无效')
+      const state = useAppStore.getState().creationDraft
+      setGeneratedContent(result.content)
+      setConversation([...state.conversation, {
+        id: `inline-undo-${Date.now()}`,
+        role: 'user',
+        content: '撤销本次选区修改',
+        createdAt: Date.now(),
+        runId: undo.requestId,
+      }])
+      setAgentEvents([...state.agentEvents, inlineEditEvent(
+        undo.requestId,
+        'document.patch.applied',
+        '已撤销本次选区修改',
+        { content: result.content, patch: result.patch },
+      )])
+      setInlineCapabilities(prev => prev ? {
+        ...prev,
+        revision_no: result.revision_no ?? prev.revision_no,
+        base_document_hash: String((result.patch as Record<string, unknown>).result_hash || ''),
+      } : prev)
+      setInlineUndo(null)
+      setInlineSelection(null)
+      if (historyPage === 1) void loadCreationHistory()
+    } catch (undoError) {
+      setInlineError(toUserFacingError(undoError, '撤销失败'))
+    }
+  }
+
+  const postLocalCreation = async (message: string, signal?: AbortSignal) => {
     const response = await fetch(`${apiBaseUrl}/api/creation/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal,
-      body: JSON.stringify(buildPayload()),
+      body: JSON.stringify(buildPayload(message)),
     })
 
     if (!response.ok) {
@@ -2334,6 +3209,17 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     })
   }
 
+  const selectedBrainstormSkillPayload = () => selectedSkillPayload().map(skill => ({
+    id: skill.id,
+    title: skill.title,
+    summary: skill.summary,
+    workflowRole: skill.workflowRole,
+    skillDescription: skill.skillDescription,
+    executionSteps: skill.executionSteps,
+    writingDesign: skill.writingDesign,
+    voiceStyle: skill.voiceStyle,
+  }))
+
   const buildAgentPayload = (
     message: string,
     chat: CreationChatMessage[],
@@ -2353,10 +3239,12 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       current_document: liveDraft.generatedContent,
       // “用户中止”需要留在可见对话里，但不是下一轮交给模型的创作指令。
       conversation: chat
-        .filter(item => item.kind !== 'user_abort')
+        .filter(item => !['user_abort', 'session_end'].includes(item.kind || ''))
         .map(item => ({ role: item.role, content: item.content })),
       selected_skills: selectedSkillPayload(),
       model_mode: useGatewayCreation && currentUser?.id ? 'external' : 'local',
+      creation_mode: liveDraft.creationMode,
+      creation_brief: liveDraft.brainstormState,
       ...extras,
     }
   }
@@ -2420,6 +3308,12 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       return {
         ...base,
         summary: '创作 Agent 执行失败（详细错误未写入轨迹）',
+        // 只保留品牌中立的稳定错误码与重试语义，既不持久化供应商详情，
+        // 也避免下一次排障只能看到笼统失败文案。
+        data: {
+          error_code: event.data?.error_code,
+          retryable: event.data?.retryable,
+        },
       }
     }
     if (event.type === 'agent.failed') {
@@ -2480,15 +3374,27 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       const dataSources = isDataReferenceEvent(event)
         ? normalizeDataReferences(event.environment_patch?.data_sources)
         : []
+      const rejectedSources = event.actor?.id === 'webpage_scrape'
+        ? normalizeRejectedDataSources(
+          event.data?.rejected_sources || event.environment_patch?.rejected_sources,
+        )
+        : []
       // memory_search 额外保留查询与召回明细，便于事后追溯"某条知识为何没进成稿"
       const isMemorySearch = event.actor?.id === 'memory_search'
       const memoryReferences = isMemorySearch
         ? normalizeReferenceItems(event.environment_patch?.references)
         : []
+      const retrievalPlan = isMemorySearch
+        ? event.data?.retrieval_plan ?? event.environment_patch?.retrieval_plan
+        : undefined
+      const entityContext = isMemorySearch
+        ? event.data?.entity_context ?? event.environment_patch?.entity_context
+        : undefined
       return {
         ...base,
         environment_patch: {
           ...(dataSources.length > 0 ? { data_sources: dataSources } : {}),
+          ...(rejectedSources.length > 0 ? { rejected_sources: rejectedSources } : {}),
           ...(memoryReferences.length > 0 ? { references: memoryReferences } : {}),
         },
         data: {
@@ -2496,12 +3402,15 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
           refresh_required_count: event.data?.refresh_required_count,
           diagram_type: event.data?.diagram_type,
           error_code: event.data?.error_code,
+          ...(rejectedSources.length > 0 ? { rejected_sources: rejectedSources } : {}),
           ...(isMemorySearch ? {
             result_limit: event.data?.result_limit,
             source_counts: event.data?.source_counts,
             reference_ids: event.data?.reference_ids,
             query: event.data?.query,
             keywords: event.data?.keywords,
+            retrieval_plan: retrievalPlan,
+            entity_context: entityContext,
             skill_step_id: event.data?.skill_step_id,
             skill_step_title: event.data?.skill_step_title,
           } : {}),
@@ -2639,6 +3548,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
           .filter((item: any) => item && typeof item.content === 'string')
           .map((item: any) => ({ role: String(item.role || 'user'), content: item.content }))
         : null
+      phase.modelRequestId = String(event.data?.request_id || '').trim() || null
     }
     if (event.type === 'run.paused') {
       const continuation = event.data?.continuation
@@ -2706,6 +3616,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       events: [],
       continuation: null,
       modelMessages: null,
+      modelRequestId: null,
       completed: false,
       pausedForConfirmation: false,
       document: '',
@@ -2748,8 +3659,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     return readAgentPhase(response)
   }
 
-  const postReferencePreview = async (signal?: AbortSignal) => {
-    const payload = buildPayload()
+  const postReferencePreview = async (message: string, signal?: AbortSignal) => {
+    const payload = buildPayload(message)
     const response = await fetch(`${apiBaseUrl}/api/creation/references`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2788,12 +3699,613 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     }
   }
 
+  const startCreationHistory = async (
+    userMessage: string,
+    chat: CreationChatMessage[],
+    activeSessionId: string,
+  ) => {
+    try {
+      const state = useAppStore.getState().creationDraft
+      const response = await fetchWithLocalhostFallback(`${apiBaseUrl}/api/creation/history/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: userMessage,
+          session_id: activeSessionId,
+          generated_content: state.generatedContent,
+          doc_type: docType || null,
+          audience: audience || null,
+          root_request: state.rootRequest || userMessage,
+          conversation: chat,
+          model: useGatewayCreation && currentUser?.id
+            ? REMOTE_CREATION_MODEL_ID
+            : LOCAL_CREATION_MODEL_ID,
+          creation_mode: state.creationMode,
+          creation_brief: state.brainstormState,
+          brainstorm_revision: state.brainstormState?.revision ?? null,
+        }),
+      })
+      if (!response.ok) return
+      const saved = await response.json() as { id?: number; progress_epoch?: number }
+      const historyId = Number(saved.id)
+      if (!Number.isSafeInteger(historyId)) return
+      activeHistoryIdRef.current = historyId
+      setActiveHistoryId(historyId)
+      const progressEpoch = Number(saved.progress_epoch)
+      activeHistoryEpochRef.current = Number.isSafeInteger(progressEpoch)
+        ? progressEpoch
+        : null
+      setCurrentDocumentSource({
+        kind: 'creation_history',
+        id: String(historyId),
+        title: state.rootRequest || userMessage,
+        content: state.generatedContent,
+        docType,
+      })
+      if (historyPage === 1) void loadCreationHistory()
+      else setHistoryPage(1)
+    } catch (startErr) {
+      // 历史记录不可用不阻断创作主链路；完成保存仍会再次尝试落库。
+      console.warn('建立进行中创作记录失败:', startErr)
+    }
+  }
+
+  const postBrainstormTurn = async (payload: Record<string, unknown>) => {
+    const controller = new AbortController()
+    brainstormAbortRef.current?.abort()
+    brainstormAbortRef.current = controller
+    try {
+      const response = await fetchWithLocalhostFallback(`${apiBaseUrl}/api/creation/brainstorm/turn`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        // 每一轮都携带当前执行 Skill。Core 只在旧会话缺少 Skill 上下文时
+        // 补写，因此恢复或继续历史脑暴也能获得章节覆盖图。
+        body: JSON.stringify({
+          selected_skills: selectedBrainstormSkillPayload(),
+          ...payload,
+        }),
+      })
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { code?: string; message?: string }
+        const failure = new Error(body.message || '脑暴进度更新失败') as Error & { code?: string }
+        failure.code = body.code
+        throw failure
+      }
+      const body = await response.json() as CreationBrainstormState
+      const normalized = normalizeBrainstormState(body)
+      if (!normalized) throw new Error('脑暴状态为空')
+      // 脑暴请求成功说明用户的重试已经恢复。正式生成与脑暴使用两个独立
+      // 错误状态，若只清理卡片错误，之前的通用“生成失败”仍会残留在输入框
+      // 下方，与新问题同时出现。
+      setError(null)
+      setBrainstormError(null)
+      return normalized
+    } finally {
+      if (brainstormAbortRef.current === controller) brainstormAbortRef.current = null
+    }
+  }
+
+  const restoreBrainstormSession = async (
+    targetSessionId: string,
+    request: string,
+    silent = false,
+  ): Promise<CreationBrainstormState | null> => {
+    setIsBrainstormLoading(true)
+    setBrainstormError(null)
+    try {
+      const next = await postBrainstormTurn({
+        session_id: targetSessionId,
+        root_request: request,
+        action: 'start',
+        selected_skills: selectedBrainstormSkillPayload(),
+      })
+      setBrainstormState(next)
+      setBrainstormHistoryIndex(null)
+      return next
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return null
+      if (!silent) setBrainstormError(toUserFacingError(err, '脑暴进度恢复失败'))
+      return null
+    } finally {
+      setIsBrainstormLoading(false)
+    }
+  }
+
+  const beginBrainstorm = async (userMessage: string) => {
+    const message = userMessage.trim()
+    if (!message) return
+    setIsBrainstormLoading(true)
+    setBrainstormError(null)
+    const storedSessionId = useAppStore.getState().creationDraft.sessionId
+    const activeSessionId = storedSessionId || createCreationSessionId()
+    if (!storedSessionId) setSessionId(activeSessionId)
+    const liveConversation = useAppStore.getState().creationDraft.conversation
+    const existing = liveConversation.find(item => item.role === 'user' && item.content === message)
+    const userEntry: CreationChatMessage = existing || {
+      id: `user-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      role: 'user',
+      content: message,
+      createdAt: Date.now(),
+    }
+    const chat = existing ? liveConversation : [...liveConversation, userEntry]
+    if (!existing) setConversation(chat)
+    setRootRequest(messageWithAttachments(message))
+    try {
+      // 脑暴与正式生成必须共享同一套提交后 Skill 路由结果。此前脑暴先启动，
+      // 导致非显式 @ 的 Skill 只在成稿阶段才出现，章节结构无法指导前置问题。
+      const skillResolution = await resolveExecutionSkills({
+        apiBaseUrl,
+        prompt: messageWithAttachments(message),
+        skills: installedSkills,
+      })
+      turnMatchedSkillsRef.current = skillResolution.matches
+      await startCreationHistory(message, chat, activeSessionId)
+      if (useAppStore.getState().creationDraft.conversation.some(item => item.kind === 'session_end')) {
+        await persistCreationProgress('cancelled')
+        return
+      }
+      const next = await postBrainstormTurn({
+        session_id: activeSessionId,
+        root_request: messageWithAttachments(message),
+        action: 'start',
+        selected_skills: selectedBrainstormSkillPayload(),
+      })
+      setBrainstormState(next)
+      setBrainstormHistoryIndex(null)
+      setPrompt('')
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return
+      const code = (err as Error & { code?: string }).code
+      if (code === 'BRAINSTORM_SESSION_NOT_FOUND') {
+        setBrainstormState(null)
+      }
+      setBrainstormError(toUserFacingError(err, '脑暴启动失败，请重试'))
+    } finally {
+      setIsBrainstormLoading(false)
+    }
+  }
+
+  const submitBrainstormAnswer = async () => {
+    const state = useAppStore.getState().creationDraft.brainstormState
+    const historyTurn = brainstormHistoryIndex === null
+      ? null
+      : state?.history?.[brainstormHistoryIndex]
+    const question = historyTurn?.question || state?.current_question
+    if (!state || !question) return
+    const usesCustomAnswer = question.allow_custom && brainstormCustomAnswerSelected
+    setIsBrainstormLoading(true)
+    setBrainstormError(null)
+    try {
+      const next = await postBrainstormTurn({
+        session_id: state.session_id,
+        root_request: rootRequest,
+        action: historyTurn ? 'revise_answer' : 'answer',
+        revision: state.revision,
+        question_id: question.id,
+        answer: {
+          selected_option_ids: usesCustomAnswer ? [] : brainstormSelectedOptions,
+          custom_text: usesCustomAnswer ? brainstormCustomAnswer.trim() : '',
+        },
+      })
+      setBrainstormState(next)
+      setBrainstormHistoryIndex(null)
+      setBrainstormSelectedOptions([])
+      setBrainstormCustomAnswerSelected(false)
+      setBrainstormCustomAnswer('')
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return
+      const code = (err as Error & { code?: string }).code
+      if (code === 'BRAINSTORM_REVISION_CONFLICT' || code === 'BRAINSTORM_QUESTION_STALE') {
+        await restoreBrainstormSession(state.session_id, rootRequest)
+      } else {
+        setBrainstormError(toUserFacingError(err, '答案未保存，请重试'))
+      }
+    } finally {
+      setIsBrainstormLoading(false)
+    }
+  }
+
+  const finishBrainstorm = async () => {
+    const state = useAppStore.getState().creationDraft.brainstormState
+    if (!state) return
+    setIsBrainstormLoading(true)
+    setBrainstormError(null)
+    try {
+      const next = await postBrainstormTurn({
+        session_id: state.session_id,
+        root_request: rootRequest,
+        action: 'finish',
+        revision: state.revision,
+        accept_assumptions: true,
+      })
+      setBrainstormState(next)
+      setBrainstormHistoryIndex(null)
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return
+      setBrainstormError(toUserFacingError(err, '简报收敛失败，请重试'))
+    } finally {
+      setIsBrainstormLoading(false)
+    }
+  }
+
+  const continueBrainstorm = async () => {
+    const state = useAppStore.getState().creationDraft.brainstormState
+    if (!state || !brainstormContinuationDirectionId) return
+    const customDirection = brainstormCustomDirection.trim()
+    if (brainstormContinuationDirectionId === '__custom__' && !customDirection) return
+    setIsBrainstormLoading(true)
+    setBrainstormError(null)
+    // 正式生成时的脑暴卡片属于历史过程。继续脑暴只更新末尾的新回合，
+    // 不应把已经展示在原位置的卡片改写成新问题。
+    setAnchoredBrainstormState(current => current || state)
+    try {
+      const next = await postBrainstormTurn({
+        session_id: state.session_id,
+        root_request: rootRequest,
+        action: 'continue_brainstorm',
+        revision: state.revision,
+        continuation_direction_id: brainstormContinuationDirectionId,
+        focus_hint: brainstormContinuationDirectionId === '__custom__' ? customDirection : '',
+      })
+      setBrainstormState(next)
+      setBrainstormHistoryIndex(null)
+      setBrainstormSelectedOptions([])
+      setBrainstormCustomAnswerSelected(false)
+      setBrainstormCustomAnswer('')
+      setBrainstormContinuationOpen(false)
+      setBrainstormContinuationDirectionId('')
+      setBrainstormCustomDirection('')
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return
+      const code = (err as Error & { code?: string }).code
+      if (code === 'BRAINSTORM_REVISION_CONFLICT' || code === 'BRAINSTORM_QUESTION_STALE') {
+        // 历史记录中的脑暴快照可能落后于服务端实时会话。尤其是上一次继续
+        // 请求已在服务端成功、但客户端在响应返回前断开时，再次点击会携带
+        // 旧 revision。此时静默恢复即可：若服务端已经进入下一题，最新对话
+        // 区域会直接展示该题，不再要求用户手动刷新或重复提交方向。
+        const refreshed = await restoreBrainstormSession(state.session_id, rootRequest)
+        if (refreshed) {
+          setBrainstormContinuationOpen(false)
+          setBrainstormContinuationDirectionId('')
+          setBrainstormCustomDirection('')
+        }
+      } else {
+        setBrainstormError(toUserFacingError(err, '继续脑暴失败，请重试'))
+      }
+    } finally {
+      setIsBrainstormLoading(false)
+    }
+  }
+
+  const skipBrainstormQuestion = async () => {
+    const state = useAppStore.getState().creationDraft.brainstormState
+    const question = state?.current_question
+    if (!state || !question) return
+    setIsBrainstormLoading(true)
+    setBrainstormError(null)
+    try {
+      const next = await postBrainstormTurn({
+        session_id: state.session_id,
+        root_request: rootRequest,
+        action: 'skip',
+        revision: state.revision,
+        question_id: question.id,
+      })
+      setBrainstormState(next)
+      setBrainstormHistoryIndex(null)
+      setBrainstormSelectedOptions([])
+      setBrainstormCustomAnswerSelected(false)
+      setBrainstormCustomAnswer('')
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return
+      setBrainstormError(toUserFacingError(err, '当前问题跳过失败，请重试'))
+    } finally {
+      setIsBrainstormLoading(false)
+    }
+  }
+
+  const inlineBrainstormRootRequest = (snapshot: CreationSelectionSnapshot) => [
+    '请针对创作文档的局部选区进行脑暴。先帮助用户比较可行方向，通过选项逐步收敛；不要直接输出完整文档。',
+    rootRequest.trim() ? `整篇文档目标：${rootRequest.trim()}` : '',
+    `所选内容：\n${snapshot.selectedMarkdown}`,
+    '最终目标：形成一组可安全写回当前选区的明确结论，保持选区外内容不变，不编造事实。',
+  ].filter(Boolean).join('\n\n')
+
+  const updateInlineBrainstormState = (next: CreationBrainstormState) => {
+    const recommended = next.current_question?.options.find(option => option.recommended)
+    const continuation = next.continuation_directions.find(direction => direction.recommended)
+      || next.continuation_directions[0]
+    setInlineBrainstorm(current => current ? {
+      ...current,
+      state: next,
+      loading: false,
+      error: '',
+      selectedOptionIds: recommended ? [recommended.id] : [],
+      customSelected: false,
+      customAnswer: '',
+      continuationDirectionId: continuation?.id || '',
+      customDirection: '',
+    } : current)
+  }
+
+  const postInlineBrainstormTurn = async (
+    active: InlineBrainstormSession,
+    payload: Record<string, unknown>,
+  ) => {
+    const controller = new AbortController()
+    inlineBrainstormAbortRef.current?.abort()
+    inlineBrainstormAbortRef.current = controller
+    setInlineBrainstorm(current => current ? { ...current, loading: true, error: '' } : current)
+    try {
+      const response = await fetchWithLocalhostFallback(`${apiBaseUrl}/api/creation/brainstorm/turn`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          selected_skills: selectedBrainstormSkillPayload(),
+          session_id: active.sessionId,
+          root_request: active.rootRequest,
+          ...payload,
+        }),
+      })
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { message?: string }
+        throw new Error(body.message || '局部脑暴更新失败')
+      }
+      const normalized = normalizeBrainstormState(await response.json() as CreationBrainstormState)
+      if (!normalized) throw new Error('局部脑暴状态为空')
+      updateInlineBrainstormState(normalized)
+      return normalized
+    } catch (brainstormError) {
+      if (!(brainstormError instanceof DOMException && brainstormError.name === 'AbortError')) {
+        setInlineBrainstorm(current => current ? {
+          ...current,
+          loading: false,
+          error: toUserFacingError(brainstormError, '局部脑暴失败，请重试'),
+        } : current)
+      }
+      return null
+    } finally {
+      if (inlineBrainstormAbortRef.current === controller) inlineBrainstormAbortRef.current = null
+    }
+  }
+
+  const beginInlineBrainstorm = async () => {
+    const snapshot = inlineSelection
+    if (!snapshot || !inlineCapabilities?.enabled || inlineRunningAction || isGenerating) return
+    const now = Date.now()
+    const messageId = `inline-brainstorm-user-${now}`
+    const brainstormSessionId = `inline-brainstorm-${sessionId || 'current'}-${globalThis.crypto.randomUUID?.() || Math.random().toString(16).slice(2)}`
+    const request = inlineBrainstormRootRequest(snapshot)
+    const active: InlineBrainstormSession = {
+      sessionId: brainstormSessionId,
+      rootRequest: request,
+      anchorMessageId: messageId,
+      selection: snapshot,
+      state: null,
+      loading: true,
+      error: '',
+      selectedOptionIds: [],
+      customSelected: false,
+      customAnswer: '',
+      continuationDirectionId: '',
+      customDirection: '',
+      applied: false,
+    }
+    const excerpt = snapshot.selectedText.trim().replace(/\s+/g, ' ')
+    const displayExcerpt = excerpt.length > 600 ? `${excerpt.slice(0, 600)}…` : excerpt
+    setConversation([
+      ...useAppStore.getState().creationDraft.conversation,
+      {
+        id: messageId,
+        role: 'user',
+        content: `脑暴要求：围绕所选内容探索可替换或补强的方向，先给出选项，确认后再修改文档\n选取内容：${displayExcerpt}`,
+        createdAt: now,
+        runId: brainstormSessionId,
+      },
+    ])
+    setInlineBrainstorm(active)
+    setInlineSelection(null)
+    setInlinePromptOpen(false)
+    setInlineCustomPrompt('')
+    setInlineError('')
+    window.getSelection()?.removeAllRanges()
+    await postInlineBrainstormTurn(active, { action: 'start' })
+  }
+
+  const submitInlineBrainstormAnswer = async () => {
+    const active = inlineBrainstorm
+    const question = active?.state?.current_question
+    if (!active || !question) return
+    await postInlineBrainstormTurn(active, {
+      action: 'answer',
+      revision: active.state!.revision,
+      question_id: question.id,
+      answer: {
+        selected_option_ids: active.customSelected ? [] : active.selectedOptionIds,
+        custom_text: active.customSelected ? active.customAnswer.trim() : '',
+      },
+    })
+  }
+
+  const skipInlineBrainstormQuestion = async () => {
+    const active = inlineBrainstorm
+    const question = active?.state?.current_question
+    if (!active || !question) return
+    await postInlineBrainstormTurn(active, {
+      action: 'skip',
+      revision: active.state!.revision,
+      question_id: question.id,
+    })
+  }
+
+  const continueInlineBrainstorm = async () => {
+    const active = inlineBrainstorm
+    if (!active?.state || !active.continuationDirectionId) return
+    await postInlineBrainstormTurn(active, {
+      action: 'continue_brainstorm',
+      revision: active.state.revision,
+      continuation_direction_id: active.continuationDirectionId,
+      focus_hint: active.continuationDirectionId === '__custom__' ? active.customDirection.trim() : '',
+    })
+  }
+
+  const applyInlineBrainstorm = async () => {
+    const active = inlineBrainstorm
+    if (!active?.state || active.state.phase !== 'ready' || active.applied) return
+    const conclusions = active.state.decisions
+      .map(decision => `${decision.dimension}：${decision.summary}`)
+      .join('\n')
+    if (!conclusions.trim()) {
+      setInlineBrainstorm(current => current ? { ...current, error: '还没有可应用的脑暴结论' } : current)
+      return
+    }
+    if (new TextEncoder().encode(conclusions).length > (inlineCapabilities?.max_custom_prompt_bytes || 0)) {
+      setInlineBrainstorm(current => current ? {
+        ...current,
+        error: '本轮脑暴结论过长，请继续收敛为更少、更明确的方向后再应用',
+      } : current)
+      return
+    }
+    await runInlineEdit('brainstorm', active.selection, conclusions)
+  }
+
+  const retryInlineBrainstorm = async () => {
+    const active = inlineBrainstorm
+    if (!active) return
+    if (!active.state) {
+      await postInlineBrainstormTurn(active, { action: 'start' })
+    } else if (active.state.current_question) {
+      await submitInlineBrainstormAnswer()
+    } else if (active.state.phase === 'ready') {
+      await continueInlineBrainstorm()
+    }
+  }
+
+  const reopenBrainstormDecision = (questionId: string) => {
+    const state = useAppStore.getState().creationDraft.brainstormState
+    if (!state) return
+    setBrainstormError(null)
+    const index = (state.history || []).findIndex(item => item.question.id === questionId)
+    if (index >= 0) setBrainstormHistoryIndex(index)
+  }
+
+  const persistTerminalProgressFallback = async (
+    historyId: number | null,
+    lifecycleStatus: 'completed' | 'failed' | 'cancelled',
+    latencyMs?: number | null,
+  ) => {
+    const state = useAppStore.getState().creationDraft
+    const references = state.referencePreview?.references || []
+    const latestRunId = [...state.agentEvents].reverse().find(item => item.run_id)?.run_id
+    const latestGoal = [...state.agentEvents].reverse().find(item => item.goal)?.goal || null
+    const latestDocumentEvent = [...state.agentEvents].reverse().find(item => (
+      ['document.patch.applied', 'document.replaced'].includes(item.type)
+      && (!latestRunId || item.run_id === latestRunId)
+    ))
+    const documentPatch = latestDocumentEvent?.type === 'document.patch.applied'
+      ? latestDocumentEvent.data?.patch
+      : null
+    const prompt = activeUserMessageRef.current || state.rootRequest || '继续创作'
+    const response = await fetchWithLocalhostFallback(`${apiBaseUrl}/api/creation/history`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt,
+        generated_content: sanitizeGeneratedContent(state.generatedContent),
+        doc_type: docType || null,
+        audience: audience || null,
+        reference_count: references.length,
+        references,
+        model: useGatewayCreation && currentUser?.id
+          ? REMOTE_CREATION_MODEL_ID
+          : LOCAL_CREATION_MODEL_ID,
+        latency_ms: latencyMs ?? null,
+        session_id: state.sessionId,
+        history_id: historyId,
+        root_request: state.rootRequest || prompt,
+        conversation: state.conversation,
+        agent_trace: state.agentEvents.map(toStoredAgentEvent),
+        goal: latestGoal,
+        edit_operation: intentOperationForRun(state.agentEvents, latestRunId)
+          || (state.generatedContent.trim() ? 'rewrite_document' : 'create_document'),
+        document_patch: documentPatch || null,
+        evidence: [],
+        lifecycle_status: lifecycleStatus,
+        creation_mode: state.creationMode,
+        creation_brief: state.brainstormState,
+        brainstorm_revision: state.brainstormState?.revision ?? null,
+      }),
+    })
+    if (!response.ok) {
+      throw new Error(`创作终态兜底保存失败: ${response.status}`)
+    }
+    const saved = await response.json() as { id?: number }
+    const savedId = Number(saved.id)
+    if (Number.isSafeInteger(savedId)) {
+      activeHistoryIdRef.current = savedId
+      setActiveHistoryId(savedId)
+    }
+  }
+
+  const persistCreationProgress = async (
+    lifecycleStatus: 'running' | 'completed' | 'failed' | 'cancelled',
+    latencyMs?: number | null,
+  ) => {
+    const historyId = activeHistoryIdRef.current
+    if (!historyId) {
+      if (lifecycleStatus !== 'running') {
+        try {
+          await persistTerminalProgressFallback(null, lifecycleStatus, latencyMs)
+          if (historyPage === 1) void loadCreationHistory()
+        } catch (fallbackErr) {
+          console.warn('创作终态兜底保存失败:', fallbackErr)
+        }
+      }
+      return
+    }
+    const state = useAppStore.getState().creationDraft
+    try {
+      const response = await fetchWithLocalhostFallback(
+        `${apiBaseUrl}/api/creation/history/${historyId}/progress`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            lifecycle_status: lifecycleStatus,
+            progress_epoch: activeHistoryEpochRef.current,
+            generated_content: state.generatedContent,
+            conversation: state.conversation,
+            agent_trace: state.agentEvents.map(toStoredAgentEvent),
+            latency_ms: latencyMs ?? null,
+          }),
+        },
+      )
+      if (!response.ok) {
+        throw new Error(`创作进度保存失败: ${response.status}`)
+      }
+      if (historyPage === 1) void loadCreationHistory()
+    } catch (progressErr) {
+      console.warn('保存创作进度失败:', progressErr)
+      if (lifecycleStatus !== 'running') {
+        try {
+          await persistTerminalProgressFallback(historyId, lifecycleStatus, latencyMs)
+          if (historyPage === 1) void loadCreationHistory()
+        } catch (fallbackErr) {
+          console.warn('创作终态兜底保存失败:', fallbackErr)
+        }
+      }
+    }
+  }
+
   const persistCreationResult = async (
     userMessage: string,
     content: string,
     chat: CreationChatMessage[],
     usedModelId: string,
     latencyMs: number | null,
+    lifecycleStatus: 'completed' | 'failed' = 'completed',
   ) => {
     const state = useAppStore.getState().creationDraft
     const references = state.referencePreview?.references || []
@@ -2851,10 +4363,16 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
           edit_operation: editOperation,
           document_patch: documentPatch || null,
           evidence: Array.isArray(evidence) ? evidence : [],
+          lifecycle_status: lifecycleStatus,
+          creation_mode: state.creationMode,
+          creation_brief: state.brainstormState,
+          brainstorm_revision: state.brainstormState?.revision ?? null,
         }),
       })
       if (saveResponse.ok) {
         const saved = await saveResponse.json()
+        activeHistoryIdRef.current = Number(saved.id) || activeHistoryIdRef.current
+        setActiveHistoryId(activeHistoryIdRef.current)
         const savedTitle = state.rootRequest || userMessage
         setCurrentDocumentSource({
           kind: 'creation_history',
@@ -2863,11 +4381,14 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
           content: sanitizeGeneratedContent(content),
           docType,
         })
+      } else {
+        await persistCreationProgress(lifecycleStatus, latencyMs)
       }
       if (historyPage === 1) void loadCreationHistory()
       else setHistoryPage(1)
     } catch (saveErr) {
       console.error('保存创作记录失败:', saveErr)
+      await persistCreationProgress(lifecycleStatus, latencyMs)
     }
   }
 
@@ -2924,7 +4445,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     let referencesForHistory: CreationReferenceItem[] = []
     if (memorySearchEnabled) {
       try {
-        const refResponse = await postReferencePreview(controller.signal)
+        const refResponse = await postReferencePreview(userMessage, controller.signal)
         if (refResponse.ok) {
           const refData = await refResponse.json()
           setReferencePreview(refData)
@@ -2938,11 +4459,11 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     let usedModelId = activeCreationModelId
     let content = ''
     if (useGatewayCreation && currentUser?.id) {
-      const data = await postGatewayCreation(referencesForHistory, controller.signal)
+      const data = await postGatewayCreation(referencesForHistory, userMessage, controller.signal)
       content = sanitizeGeneratedContent(String(data.content || ''))
     } else {
       usedModelId = LOCAL_CREATION_MODEL_ID
-      content = await postLocalCreation(controller.signal)
+      content = await postLocalCreation(userMessage, controller.signal)
     }
     if (!content.trim()) throw new Error('生成结束但没有返回内容')
     setGeneratedContent(content)
@@ -2961,8 +4482,11 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     confirmed?: boolean
     appendUser?: boolean
   }) => {
+    if (inlineRunningAction) return
     const message = userMessage.trim()
     if (!message) return
+    setInlineUndo(null)
+    setInlineSelection(null)
     const storedSessionId = useAppStore.getState().creationDraft.sessionId
     const activeSessionId = storedSessionId || createCreationSessionId()
     if (!storedSessionId) setSessionId(activeSessionId)
@@ -3002,19 +4526,28 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     abortRef.current = controller
     startTimer()
     const startedAt = Date.now()
-
-    // 执行时自动解析技能：显式 @ 优先；否则由 sidecar 模型路由依据 Skill 自描述
-    // 决策，模型不可用或降级时退回词级证据 + 意图门控的确定性匹配，避免明明
-    // 命中的技能在执行前被静默丢掉。
-    const skillResolution = await resolveExecutionSkills({
-      apiBaseUrl,
-      prompt: messageWithAttachments(message),
-      skills: installedSkills,
-      signal: controller.signal,
-    })
-    turnMatchedSkillsRef.current = skillResolution.matches
+    await startCreationHistory(message, chat, activeSessionId)
+    if (controller.signal.aborted) {
+      await persistCreationProgress('cancelled', Date.now() - startedAt)
+      if (abortRef.current === controller) abortRef.current = null
+      setIsGenerating(false)
+      stopTimer()
+      return
+    }
 
     try {
+      // 执行时自动解析技能：显式 @ 优先；否则由 sidecar 模型路由依据 Skill 自描述
+      // 决策，模型不可用或降级时退回词级证据 + 意图门控的确定性匹配，避免明明
+      // 命中的技能在执行前被静默丢掉。解析也必须纳入统一失败收口，
+      // 否则解析异常会跳过 finally，使页面一直保留生成态。
+      const skillResolution = await resolveExecutionSkills({
+        apiBaseUrl,
+        prompt: messageWithAttachments(message),
+        skills: installedSkills,
+        signal: controller.signal,
+      })
+      turnMatchedSkillsRef.current = skillResolution.matches
+
       let payload = buildAgentPayload(message, chat, {
         session_id: activeSessionId,
         confirmed,
@@ -3024,10 +4557,15 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
         const phase = await postAgentPhase(payload, controller.signal)
         if (phase.sessionId) setSessionId(phase.sessionId)
         finalRunId = phase.runId || finalRunId
+        await persistCreationProgress('running', Date.now() - startedAt)
         if (phase.pausedForConfirmation) return
         if (phase.modelMessages) {
           if (!phase.continuation) throw new Error('创作 Agent 缺少恢复状态')
-          const modelResult = await postGatewayAgentCall(phase.modelMessages, controller.signal)
+          const modelResult = await postGatewayAgentCall(
+            phase.modelMessages,
+            phase.modelRequestId,
+            controller.signal,
+          )
           payload = buildAgentPayload(message, chat, {
             session_id: phase.sessionId,
             run_id: phase.runId,
@@ -3064,6 +4602,54 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
         // 点击中止时已经把行为写入对话与执行轨迹，这里只结束异步流程。
         return
       }
+      // SSE 之后还可能在网关模型调用、恢复请求等环节失败。这些异常
+      // 不会由 sidecar 再发 run.failed，因此前端要为当前用户消息关联的 run
+      // 补齐幂等终态，避免阶段、深度思考和呼吸灯永久停在运行中。
+      const failedState = useAppStore.getState().creationDraft
+      const failedUserEntry = failedState.conversation.find(item => item.id === userEntry.id)
+      const failedRunIds = new Set([
+        ...(failedUserEntry?.runIds || []),
+        ...(failedUserEntry?.runId ? [failedUserEntry.runId] : []),
+      ])
+      const failedRunId = [...failedState.agentEvents]
+        .reverse()
+        .find(item => failedRunIds.has(item.run_id))
+        ?.run_id
+      const failedRunEvents = failedRunId
+        ? failedState.agentEvents.filter(item => item.run_id === failedRunId)
+        : []
+      if (failedRunId && !failedRunEvents.some(isRunTerminalEvent)) {
+        const now = Date.now()
+        const latestGoal = [...failedRunEvents].reverse().find(item => item.goal)?.goal
+        const failureCode = String(
+          (err as Error & { code?: string; errorCode?: string }).errorCode
+          || (err as Error & { code?: string }).code
+          || 'CLIENT_EXECUTION_FAILED',
+        )
+        setAgentEvents([...failedState.agentEvents, {
+          schema_version: 'creation.agent.v1',
+          event_id: `client-failed-${now}`,
+          session_id: failedState.sessionId || activeSessionId,
+          run_id: failedRunId,
+          sequence: Math.max(0, ...failedRunEvents.map(event => Number(event.sequence) || 0)) + 1,
+          timestamp: now,
+          type: 'run.failed',
+          status: 'failed',
+          actor: { kind: 'agent', id: 'creation_main_agent', name: '创作 Agent' },
+          summary: '生成失败，本轮创作已停止',
+          goal: latestGoal
+            ? { ...latestGoal, status: 'failed', outcome: '生成失败，本轮创作已停止' }
+            : undefined,
+          environment_patch: {},
+          data: {
+            error_code: failureCode,
+            retryable: Boolean((err as Error & { retryable?: boolean }).retryable),
+          },
+        }])
+      }
+      await persistCreationProgress('failed', Date.now() - startedAt)
+      if (!controller.signal.aborted) controller.abort()
+      setPendingConfirmation(null)
       // 保全部分成果：中断时若已组装出文档（如模型连接在后续步骤被掐断），
       // 先把已生成部分落库，避免中断前完成的章节随失败一起丢失。
       const partialDocument = sanitizeGeneratedContent(
@@ -3076,7 +4662,14 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
             : LOCAL_CREATION_MODEL_ID
           const latencyMs = Date.now() - startedAt
           const currentConversation = useAppStore.getState().creationDraft.conversation
-          await persistCreationResult(message, partialDocument, currentConversation, usedModelId, latencyMs)
+          await persistCreationResult(
+            message,
+            partialDocument,
+            currentConversation,
+            usedModelId,
+            latencyMs,
+            'failed',
+          )
           setError('创作中断，已保存已生成部分，可重试继续')
           return
         } catch (persistErr) {
@@ -3092,11 +4685,77 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   }
 
   const handleGenerate = async () => {
-    await runAgentTurn({ userMessage: prompt })
+    if (inlineRunningAction) return
+    if (useAppStore.getState().creationDraft.conversation.some(item => item.kind === 'session_end')) return
+    if (creationMode === 'brainstorm') {
+      if (!brainstormState) {
+        await beginBrainstorm(prompt)
+        return
+      }
+      if (brainstormState.phase === 'ready') {
+        const liveDraft = useAppStore.getState().creationDraft
+        const hasGeneratedDocument = Boolean(liveDraft.generatedContent.trim())
+        setAnchoredBrainstormState(current => current || brainstormState)
+        await runAgentTurn({
+          userMessage: hasGeneratedDocument
+            ? CONTINUE_DOCUMENT_FROM_BRAINSTORM_PROMPT
+            : rootRequest || prompt,
+          appendUser: hasGeneratedDocument,
+        })
+      }
+      return
+    }
+    const userMessage = prompt
+    if (generatedContent.trim()) setPrompt('')
+    await runAgentTurn({ userMessage })
   }
 
+  // 创作 Loop 运行在桌面页面进程内。应用重启后，数据库里的 running 记录仍在，
+  // 但旧 SSE / 模型请求已经不存在；启动时自动认领最近一条手动创作记录，沿用
+  // 同一会话、对话和已生成文档重新拉起。先把旧 run 按中断收口，避免恢复后旧的
+  // 阶段和新 run 同时显示为“进行中”。定时任务由独立 executor 恢复，不在这里抢占。
+  useEffect(() => {
+    if (
+      startupRecoveryAttemptedRef.current
+      || historyLoading
+      || !skillsLoaded
+      || skillsLoading
+      || isGenerating
+    ) return
+
+    startupRecoveryAttemptedRef.current = true
+    const interrupted = creationHistory.find(item => (
+      item.sourceKind === 'creation'
+      && item.creationMode === 'direct'
+      && item.lifecycleStatus === 'running'
+      && Boolean(item.sessionId)
+      && !terminalEventForLatestRun(item.agentEvents)
+    ))
+    if (!interrupted) return
+
+    const recoveryMessage = [...interrupted.conversation]
+      .reverse()
+      .find(item => item.role === 'user' && item.kind !== 'user_abort')
+      ?.content
+      .trim() || interrupted.prompt.trim()
+    if (!recoveryMessage) return
+
+    handleRestoreHistory({
+      ...interrupted,
+      agentEvents: closeInterruptedHistoricalRuns(
+        interrupted.agentEvents,
+        interrupted.sessionId || `history-${interrupted.id}`,
+      ),
+    })
+    setTopTab('creation')
+    void runAgentTurn({ userMessage: recoveryMessage, appendUser: false })
+  }, [creationHistory, historyLoading, isGenerating, skillsLoaded, skillsLoading])
+
   const handleConfirmContinue = async () => {
-    if (!pendingConfirmation) return
+    if (
+      !pendingConfirmation
+      || useAppStore.getState().creationDraft.conversation.some(item => item.kind === 'session_end')
+    ) return
     const message = pendingConfirmation.userMessage
     setPendingConfirmation(null)
     await runAgentTurn({ userMessage: message, confirmed: true, appendUser: false })
@@ -3165,6 +4824,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     }
 
     controller.abort()
+    void persistCreationProgress('cancelled', elapsedSeconds * 1000)
     setIsGenerating(false)
     stopTimer()
     setError(null)
@@ -3179,12 +4839,107 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     || conversation.length
     || agentEvents.length
     || attachments.length
-    || pendingConfirmation,
+    || pendingConfirmation
+    || brainstormState,
   )
+  const sessionTerminated = conversation.some(item => item.kind === 'session_end')
+
+  const handleTerminateSession = () => {
+    if (!hasActiveSession || sessionTerminated) return
+
+    if (abortRef.current && !abortRef.current.signal.aborted) abortRef.current.abort()
+    brainstormAbortRef.current?.abort()
+    inlineBrainstormAbortRef.current?.abort()
+    setInlineBrainstorm(current => current ? {
+      ...current,
+      loading: false,
+      error: '当前会话已终止，局部脑暴未再继续',
+    } : current)
+
+    const state = useAppStore.getState().creationDraft
+    const now = Date.now()
+    const latestRunId = [...state.agentEvents].reverse().find(event => event.run_id)?.run_id
+    const latestRunEvents = latestRunId
+      ? state.agentEvents.filter(event => event.run_id === latestRunId)
+      : []
+    const nextEvents = [...state.agentEvents]
+    if (latestRunId && !latestRunEvents.some(isRunTerminalEvent)) {
+      const latestGoal = [...latestRunEvents].reverse().find(event => event.goal)?.goal
+      nextEvents.push({
+        schema_version: 'creation.agent.v1',
+        event_id: `session-terminated-${now}`,
+        session_id: state.sessionId || 'current',
+        run_id: latestRunId,
+        sequence: Math.max(0, ...latestRunEvents.map(event => Number(event.sequence) || 0)) + 1,
+        timestamp: now,
+        type: 'run.cancelled',
+        status: 'cancelled',
+        actor: { kind: 'user', id: 'current_user', name: userDisplayName },
+        summary: '用户已终止当前会话',
+        goal: latestGoal ? { ...latestGoal, status: 'cancelled' } : undefined,
+        environment_patch: {},
+        data: { reason: 'session_terminated' },
+      })
+      setAgentEvents(nextEvents)
+    }
+
+    setConversation([...state.conversation, {
+      id: `session-end-${now}`,
+      role: 'user',
+      kind: 'session_end',
+      content: '终止了当前会话',
+      createdAt: now,
+      runId: latestRunId,
+    }])
+
+    const activeBrainstorm = state.brainstormState
+    if (activeBrainstorm) {
+      setBrainstormState({
+        ...activeBrainstorm,
+        phase: 'abandoned',
+        current_question: null,
+        can_continue_brainstorm: false,
+        continuation_directions: [],
+        readiness_reason: '当前会话已由用户终止',
+      })
+      if (activeBrainstorm.phase !== 'abandoned') {
+        void postBrainstormTurn({
+          session_id: activeBrainstorm.session_id,
+          root_request: rootRequest,
+          action: 'abandon',
+          revision: activeBrainstorm.revision,
+        }).catch(() => {
+          // 本地终止立即生效；服务端状态同步失败不应重新打开会话。
+        })
+      }
+    }
+
+    setPendingConfirmation(null)
+    setIsBrainstormLoading(false)
+    setBrainstormHistoryIndex(null)
+    setBrainstormSelectedOptions([])
+    setBrainstormCustomAnswerSelected(false)
+    setBrainstormCustomAnswer('')
+    setBrainstormContinuationOpen(false)
+    setBrainstormError(null)
+    setIsGenerating(false)
+    stopTimer()
+    setError(null)
+    void persistCreationProgress('cancelled', elapsedSeconds * 1000)
+  }
 
   const handleNewConversation = () => {
-    if (isGenerating || !hasActiveSession) return
+    if ((!sessionTerminated && (isGenerating || isBrainstormLoading || pendingConfirmation)) || !hasActiveSession) return
 
+    brainstormAbortRef.current?.abort()
+    inlineAbortRef.current?.abort()
+    inlineBrainstormAbortRef.current?.abort()
+    setInlineUndo(null)
+    setInlineSelection(null)
+    setInlineBrainstorm(null)
+    setInlinePromptOpen(false)
+    setInlineCustomPrompt('')
+    setInlineError('')
     activeUserMessageRef.current = ''
     activeUserEntryRef.current = null
     legacyDataRecoveryRef.current += 1
@@ -3201,7 +4956,18 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
       rootRequest: '',
       conversation: [],
       agentEvents: [],
+      creationMode: 'direct',
+      brainstormState: null,
     })
+    setBrainstormSelectedOptions([])
+    setBrainstormCustomAnswerSelected(false)
+    setBrainstormCustomAnswer('')
+    setBrainstormHistoryIndex(null)
+    setBrainstormContinuationOpen(false)
+    setBrainstormContinuationDirectionId('')
+    setBrainstormCustomDirection('')
+    setAnchoredBrainstormState(null)
+    setBrainstormError(null)
     setAttachments([])
     setAttachmentError(null)
     setCurrentDocumentSource(null)
@@ -3216,25 +4982,78 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     setElapsedSeconds(0)
     setActiveBottomTab(null)
     activeUserMessageRef.current = ''
+    activeHistoryIdRef.current = null
+    setActiveHistoryId(null)
+    activeHistoryEpochRef.current = null
     if (contentRef.current) contentRef.current.scrollTop = 0
     window.requestAnimationFrame(() => promptInputRef.current?.focus())
   }
 
   const handleCopy = async () => {
-    await navigator.clipboard.writeText(generatedContent)
+    await navigator.clipboard.writeText(stripInternalCreationMarkers(generatedContent))
     setCopySuccess(true)
     setTimeout(() => setCopySuccess(false), 2000)
   }
 
   useEffect(() => {
-    if (contentRef.current) contentRef.current.scrollTop = contentRef.current.scrollHeight
-  }, [generatedContent])
+    const container = contentRef.current
+    if (documentSelectionLockedRef.current || !container) return
+
+    const inlineAnchor = inlineViewportAnchorRef.current
+    if (inlineAnchor) {
+      const blocks = [...container.querySelectorAll<HTMLElement>('[data-md-start][data-md-end]')]
+      const target = blocks.find((element) => {
+        const start = Number(element.dataset.mdStart)
+        const end = Number(element.dataset.mdEnd)
+        return Number.isFinite(start) && Number.isFinite(end)
+          && start <= inlineAnchor.sourceOffset && inlineAnchor.sourceOffset < end
+      })
+      if (target && inlineAnchor.viewportOffset != null) {
+        const targetOffset = target.getBoundingClientRect().top - container.getBoundingClientRect().top
+        container.scrollTop += targetOffset - inlineAnchor.viewportOffset
+      } else {
+        container.scrollTop = inlineAnchor.scrollTop
+      }
+      inlineViewportAnchorRef.current = null
+      return
+    }
+
+    container.scrollTop = container.scrollHeight
+  }, [selectionStableContent, documentSelectionLockedRef])
 
   useEffect(() => {
-    if (chatTimelineRef.current) {
-      chatTimelineRef.current.scrollTop = chatTimelineRef.current.scrollHeight
+    const timeline = chatTimelineRef.current
+    if (!timeline) return
+    const inlineViewport = inlineTimelineViewportRef.current
+    if (inlineViewport) {
+      timeline.scrollTop = inlineViewport.scrollTop
+      inlineTimelineViewportRef.current = null
+      return
     }
-  }, [agentEvents, conversation, pendingConfirmation])
+    timeline.scrollTop = timeline.scrollHeight
+  }, [agentEvents, brainstormError, brainstormState, conversation, pendingConfirmation])
+
+  useEffect(() => {
+    if (!brainstormContinuationOpen) return undefined
+
+    // 方向卡片由折叠态变为完整选项列表后，高度会在当前滚动位置下方增长。
+    // 等连续两帧完成布局再定位到卡片顶部，避免用户只看到标题，而选项被
+    // 底部输入区挡在视口之外。
+    let innerFrame = 0
+    const outerFrame = window.requestAnimationFrame(() => {
+      innerFrame = window.requestAnimationFrame(() => {
+        brainstormContinuationRef.current?.scrollIntoView?.({
+          behavior: 'smooth',
+          block: 'start',
+        })
+      })
+    })
+
+    return () => {
+      window.cancelAnimationFrame(outerFrame)
+      if (innerFrame) window.cancelAnimationFrame(innerFrame)
+    }
+  }, [brainstormContinuationOpen])
 
   const totalWeight = contentWeight + qualityWeight + completenessWeight + usageWeight + formatWeight + freshnessWeight
   const generationProgress = isGenerating
@@ -3272,16 +5091,35 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
   const latestPatchTargets = Array.isArray(latestDocumentPatch?.target_sections)
     ? latestDocumentPatch.target_sections.map(item => String(item)).filter(Boolean)
     : []
-  const latestPatchChanges = documentChangesFromPatch(latestDocumentPatch, generatedContent)
+  const latestPatchChanges = useMemo(
+    () => documentChangesFromPatch(latestDocumentPatch, selectionStableContent),
+    [latestDocumentPatch, selectionStableContent],
+  )
   const latestPatchChangeCount = Math.max(
     latestPatchChanges.length,
     Number(latestDocumentPatch?.change_count) || 0,
   )
-  const latestUserInstruction = [...conversation]
+  // Brainstorm drafts created by older clients may already have a persisted brief
+  // but no conversation snapshot. Keep the root request visible as the first user
+  // turn so the question card never replaces the instruction it is clarifying.
+  const conversationForTimeline = useMemo(() => {
+    if (
+      !brainstormState
+      || !rootRequest.trim()
+      || conversation.some(message => message.role === 'user')
+    ) return conversation
+    return [{
+      id: `brainstorm-root-request-${sessionId || brainstormState.session_id}`,
+      role: 'user' as const,
+      content: rootRequest,
+      createdAt: 0,
+    }, ...conversation]
+  }, [brainstormState, conversation, rootRequest, sessionId])
+  const latestUserInstruction = [...conversationForTimeline]
     .reverse()
     .find(message => message.role === 'user')
     ?.content
-  const creationTimeline = buildCreationTimeline(conversation, agentEvents)
+  const creationTimeline = buildCreationTimeline(conversationForTimeline, agentEvents)
   const currentAgentTraceKey = [...creationTimeline]
     .reverse()
     .find(item => (
@@ -3295,32 +5133,110 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
     referencePreview?.references || [],
   )
   const dataReferenceGroups = dataGroupsFromEvents(agentEvents, dataReferences)
+  const brainstormHistory = brainstormState?.history || []
+  const brainstormHistoryTurn = brainstormHistoryIndex === null
+    ? null
+    : brainstormHistory[brainstormHistoryIndex] || null
+  const brainstormQuestion = brainstormHistoryTurn?.question || brainstormState?.current_question || null
+  const brainstormWhyNow = brainstormQuestion?.why_now || ''
+  const shouldShowBrainstormWhyNow = Boolean(brainstormWhyNow)
+    && !/\b(?:next_question_goal|dimension_id|required_coverage|force_continue|focus_hint)\b/i.test(brainstormWhyNow)
+  const brainstormPageIndex = brainstormHistoryIndex ?? brainstormHistory.length
+  const brainstormPageCount = brainstormHistory.length + (brainstormState?.current_question ? 1 : 0)
+  const brainstormIsReviewingHistory = Boolean(brainstormHistoryTurn)
+  const brainstormHistoryAnswerForEditing = useMemo(() => {
+    if (!brainstormHistoryTurn) {
+      return { usesCustomAnswer: false, selectedOptionIds: [] as string[], customText: '' }
+    }
+    const usesCustomAnswer = brainstormHistoryTurn.question.allow_custom
+      && Boolean(brainstormHistoryTurn.answer.custom_text.trim())
+    if (!usesCustomAnswer) {
+      return {
+        usesCustomAnswer: false,
+        selectedOptionIds: brainstormHistoryTurn.answer.selected_option_ids,
+        customText: brainstormHistoryTurn.answer.custom_text,
+      }
+    }
+    const selectedLabels = brainstormHistoryTurn.answer.selected_option_ids.map(id => (
+      brainstormHistoryTurn.question.options.find(option => option.id === id)?.label || id
+    ))
+    return {
+      usesCustomAnswer: true,
+      selectedOptionIds: [] as string[],
+      customText: [...selectedLabels, brainstormHistoryTurn.answer.custom_text.trim()]
+        .filter(Boolean)
+        .join('；'),
+    }
+  }, [
+    brainstormHistoryTurn?.answer.custom_text,
+    brainstormHistoryTurn?.answer.selected_option_ids,
+    brainstormHistoryTurn?.question.allow_custom,
+    brainstormHistoryTurn?.question.id,
+    brainstormHistoryTurn?.question.options,
+  ])
+  const brainstormUsesCustomAnswer = Boolean(
+    brainstormQuestion?.allow_custom && brainstormCustomAnswerSelected,
+  )
+  const brainstormSubmittedOptionIds = brainstormUsesCustomAnswer ? [] : brainstormSelectedOptions
+  const brainstormSubmittedCustomAnswer = brainstormUsesCustomAnswer ? brainstormCustomAnswer.trim() : ''
+  const brainstormHistoryAnswerChanged = Boolean(brainstormHistoryTurn && (
+    brainstormSubmittedCustomAnswer !== brainstormHistoryAnswerForEditing.customText.trim()
+    || brainstormSubmittedOptionIds.length !== brainstormHistoryAnswerForEditing.selectedOptionIds.length
+    || brainstormSubmittedOptionIds.some(id => !brainstormHistoryAnswerForEditing.selectedOptionIds.includes(id))
+  ))
+  const brainstormAnswerValid = Boolean(brainstormQuestion && (
+    brainstormUsesCustomAnswer
+      ? brainstormCustomAnswer.trim()
+      : brainstormSelectedOptions.length
+  ))
 
-  const handleReferenceClick = (refId: string) => {
+  useEffect(() => {
+    if (brainstormHistoryTurn) {
+      setBrainstormSelectedOptions(brainstormHistoryAnswerForEditing.selectedOptionIds)
+      setBrainstormCustomAnswerSelected(brainstormHistoryAnswerForEditing.usesCustomAnswer)
+      setBrainstormCustomAnswer(brainstormHistoryAnswerForEditing.customText)
+      return
+    }
+    setBrainstormSelectedOptions([])
+    setBrainstormCustomAnswerSelected(false)
+    setBrainstormCustomAnswer('')
+  }, [
+    brainstormHistoryAnswerForEditing,
+    brainstormHistoryTurn,
+    brainstormState?.current_question?.id,
+  ])
+
+  useEffect(() => {
+    if (brainstormState?.phase === 'ready') return
+    setBrainstormContinuationOpen(false)
+    setBrainstormContinuationDirectionId('')
+    setBrainstormCustomDirection('')
+  }, [brainstormState?.phase, brainstormState?.revision])
+
+  const handleReferenceClick = useCallback((refId: string) => {
     const normalizedId = Number(refId)
     if (!Number.isFinite(normalizedId) || normalizedId <= 0) return
     const reference = referencePreview?.references.find(item => item.id === normalizedId)
     if (reference) handleOpenReferenceSource(reference)
-  }
+  }, [handleOpenReferenceSource, referencePreview])
 
-  const headingId = (node: any) =>
+  const headingId = useCallback((node: any) => (
     node.children.map((c: any) => c.value || '').join('').toLowerCase().replace(/\s+/g, '-')
+  ), [])
 
-  const markdownComponents = {
+  const markdownComponents = useMemo(() => ({
     h1: ({ node, children, ...props }: any) => <h1 id={headingId(node)} style={{ fontSize: 26, lineHeight: 1.25, margin: '0 0 18px' }} {...props}>{children}</h1>,
     h2: ({ node, children, ...props }: any) => <h2 id={headingId(node)} style={{ fontSize: 20, lineHeight: 1.35, margin: '24px 0 12px' }} {...props}>{children}</h2>,
-    h3: ({ node, children, ...props }: any) => <h3 id={headingId(node)} style={{ fontSize: 16, lineHeight: 1.45, margin: '18px 0 9px' }} {...props}>{children}</h3>,
+    h3: ({ node, children, ...props }: any) => <h3 id={headingId(node)} style={{ color: 'var(--mb-text-primary)', fontSize: 16, fontWeight: 650, lineHeight: 1.45, margin: '20px 0 9px' }} {...props}>{children}</h3>,
     p: ({ node, ...props }: any) => <p style={{ margin: '9px 0', lineHeight: 1.75 }} {...props} />,
     li: ({ node, ...props }: any) => <li style={{ margin: '6px 0', lineHeight: 1.65 }} {...props} />,
-    code: ({ node, ...props }: any) => <code style={{ background: 'var(--mb-bg-inset)', padding: '2px 5px', borderRadius: 4 }} {...props} />,
+    pre: CreationDiagramPre,
+    code: CreationDiagramCode,
     strong: ({ node, ...props }: any) => (
       <strong
         style={{
-          color: 'var(--mb-brand-strong)',
-          fontWeight: 750,
-          textDecoration: 'underline',
-          textDecorationColor: '#e4b48e',
-          textUnderlineOffset: 3,
+          color: 'var(--mb-brand-text)',
+          fontWeight: 650,
         }}
         {...props}
       />
@@ -3377,10 +5293,160 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
         />
       )
     },
+  }), [apiBaseUrl, handleReferenceClick, headingId])
+
+  const hasBrainstormTimelineTurn = creationMode === 'brainstorm'
+    && Boolean(brainstormState || brainstormError || isBrainstormLoading)
+  const brainstormGenerationStarted = creationMode === 'brainstorm' && agentEvents.length > 0
+  const brainstormCardState = brainstormGenerationStarted && anchoredBrainstormState
+    ? anchoredBrainstormState
+    : brainstormState
+  // 正式生成后的继续脑暴属于新的对话回合，不能塞回已经锚定的旧脑暴卡片。
+  // 服务端在答案提交后会把 current_question 移入 history；若这里只渲染当前
+  // 问题，刚完成的问答会在 phase 回到 ready 时瞬间消失。
+  const brainstormContinuationTurns = brainstormGenerationStarted && anchoredBrainstormState
+    ? brainstormHistory.slice(anchoredBrainstormState.history?.length || 0)
+    : []
+
+  useEffect(() => {
+    if (
+      !brainstormGenerationStarted
+      || brainstormState?.phase !== 'ready'
+      || !brainstormState.can_continue_brainstorm
+      || brainstormContinuationTurns.length === 0
+    ) return
+
+    // 继续脑暴的一题完成后，服务端可能再次收敛到 ready。直接展开下一批
+    // 推荐方向，让用户明确看到既可以继续探索，也可以把新增结论写回文档。
+    const recommended = brainstormState.continuation_directions.find(direction => direction.recommended)
+      || brainstormState.continuation_directions[0]
+    setBrainstormContinuationDirectionId(recommended?.id || '')
+    setBrainstormContinuationOpen(true)
+  }, [
+    brainstormGenerationStarted,
+    brainstormState?.can_continue_brainstorm,
+    brainstormState?.revision,
+    brainstormContinuationTurns.length,
+  ])
+  const normalizedBrainstormRootRequest = rootRequest.trim()
+  const brainstormAnchorMessageId = hasBrainstormTimelineTurn
+    ? conversationForTimeline.find((message) => {
+      if (message.role !== 'user') return false
+      const content = message.content.trim()
+      if (!content || !normalizedBrainstormRootRequest) return false
+      return content === normalizedBrainstormRootRequest
+        || normalizedBrainstormRootRequest.startsWith(`${content}\n`)
+    })?.id || conversationForTimeline.find(message => message.role === 'user')?.id
+    : undefined
+  const brainstormAnchorIndex = brainstormAnchorMessageId
+    ? creationTimeline.findIndex(item => (
+      item.kind === 'message' && item.message.id === brainstormAnchorMessageId
+    ))
+    : -1
+  const timelineBeforeBrainstorm = brainstormAnchorIndex >= 0
+    ? creationTimeline.slice(0, brainstormAnchorIndex + 1)
+    : creationTimeline
+  const timelineAfterBrainstorm = brainstormAnchorIndex >= 0
+    ? creationTimeline.slice(brainstormAnchorIndex + 1)
+    : []
+  const renderCreationTimelineItem = (item: CreationTimelineItem) => {
+    if (item.kind === 'trace') {
+      return (
+        <AgentExecutionTrace
+          key={item.key}
+          events={item.events}
+          onOpenReferences={openBottomTab}
+          browserLiveJob={browserCrawlerEnabled && item.key === currentAgentTraceKey
+            ? browserLiveJobs[0]
+            : undefined}
+          apiBaseUrl={apiBaseUrl}
+        />
+      )
+    }
+
+    const timestamp = formatCreationMessageTimestamp(item.message.createdAt)
+    const messageArticle = (
+      <article
+        className={`creation-chat-message is-${item.message.role}${['user_abort', 'session_end'].includes(item.message.kind || '') ? ' is-abort' : ''}`}
+        aria-label={item.message.kind === 'session_end'
+          ? '会话终止消息'
+          : item.message.kind === 'user_abort'
+            ? '用户中止消息'
+            : item.message.role === 'user' ? '用户消息' : 'Agent 消息'}
+      >
+        <div className="creation-chat-message__meta">
+          <span>{item.message.role === 'user' ? userDisplayName : '创作 Agent'}</span>
+          {['user_abort', 'session_end'].includes(item.message.kind || '') && (
+            <span className="creation-chat-message__end-badge">
+              {item.message.kind === 'session_end' ? '会话已终止' : '已结束'}
+            </span>
+          )}
+          {timestamp && (
+            <time
+              dateTime={timestamp.iso}
+              title={`发送于 ${timestamp.full}`}
+              aria-label={`发送时间：${timestamp.full}`}
+            >
+              {timestamp.label}
+            </time>
+          )}
+        </div>
+        <p>{item.message.content}</p>
+      </article>
+    )
+    if (item.message.id !== inlineBrainstorm?.anchorMessageId) return React.cloneElement(messageArticle, { key: item.key })
+    return (
+      <React.Fragment key={item.key}>
+        {messageArticle}
+        <CreationInlineBrainstormCard
+          state={inlineBrainstorm.state}
+          loading={inlineBrainstorm.loading}
+          applying={inlineRunningAction === 'brainstorm'}
+          applied={inlineBrainstorm.applied}
+          error={inlineBrainstorm.error}
+          selectedOptionIds={inlineBrainstorm.selectedOptionIds}
+          customSelected={inlineBrainstorm.customSelected}
+          customAnswer={inlineBrainstorm.customAnswer}
+          continuationDirectionId={inlineBrainstorm.continuationDirectionId}
+          customDirection={inlineBrainstorm.customDirection}
+          onOptionToggle={(optionId, singleChoice) => setInlineBrainstorm(current => current ? {
+            ...current,
+            selectedOptionIds: singleChoice
+              ? [optionId]
+              : current.selectedOptionIds.includes(optionId)
+                ? current.selectedOptionIds.filter(id => id !== optionId)
+                : [...current.selectedOptionIds, optionId],
+            customSelected: false,
+            customAnswer: '',
+          } : current)}
+          onCustomSelectedChange={selected => setInlineBrainstorm(current => current ? {
+            ...current,
+            customSelected: selected,
+            selectedOptionIds: selected ? [] : current.selectedOptionIds,
+          } : current)}
+          onCustomAnswerChange={value => setInlineBrainstorm(current => current ? { ...current, customAnswer: value } : current)}
+          onSubmitAnswer={() => void submitInlineBrainstormAnswer()}
+          onSkip={() => void skipInlineBrainstormQuestion()}
+          onContinuationDirectionChange={directionId => setInlineBrainstorm(current => current ? {
+            ...current,
+            continuationDirectionId: directionId,
+          } : current)}
+          onCustomDirectionChange={value => setInlineBrainstorm(current => current ? { ...current, customDirection: value } : current)}
+          onContinue={() => void continueInlineBrainstorm()}
+          onApply={() => void applyInlineBrainstorm()}
+          onRetry={() => void retryInlineBrainstorm()}
+        />
+      </React.Fragment>
+    )
   }
 
   return (
-    <div className={`creation-panel ${className}`.trim()} style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--mb-bg-page)', color: 'var(--mb-text-primary)' }}>
+    <div
+      className={`creation-panel ${className}`.trim()}
+      data-active={active ? 'true' : 'false'}
+      aria-hidden={!active}
+      style={{ height: '100vh', display: active ? 'flex' : 'none', flexDirection: 'column', background: 'var(--mb-bg-page)', color: 'var(--mb-text-primary)' }}
+    >
 
       {/* 顶部 Tab 栏 */}
       <div className="creation-top-tabs" style={{ display: 'flex', borderBottom: '1px solid var(--mb-border-strong)', background: 'var(--mb-bg-card)', padding: '0 22px', flexShrink: 0 }}>
@@ -3438,9 +5504,27 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                     <button
                       type="button"
                       className="creation-history__item"
-                      onClick={() => { handleRestoreHistory(item); setTopTab('creation') }}
+                      onClick={() => {
+                        const isLiveRun = item.lifecycleStatus === 'running'
+                          && activeHistoryIdRef.current === item.id
+                        if (!isLiveRun) handleRestoreHistory(item)
+                        setTopTab('creation')
+                      }}
                     >
-                      <span className="creation-history__title">{item.prompt}</span>
+                      <span className="creation-history__title">
+                        {item.prompt}
+                        {item.lifecycleStatus === 'running' && (
+                          <span className="creation-history__lifecycle is-running">
+                            <Loader2 className="spin" size={12} /> 进行中
+                          </span>
+                        )}
+                        {item.lifecycleStatus === 'failed' && (
+                          <span className="creation-history__lifecycle is-failed">失败</span>
+                        )}
+                        {item.lifecycleStatus === 'cancelled' && (
+                          <span className="creation-history__lifecycle is-cancelled">已中止</span>
+                        )}
+                      </span>
                       <span className="creation-history__meta">
                         {item.sourceKind === 'scheduled_task' && (
                           <span style={{
@@ -3450,7 +5534,11 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                         )}
                         完整会话 · {item.timestamp} · 模型：{getModelDisplayName(item.model)} · 推理耗时：{formatInferenceLatency(item.latencyMs)}
                       </span>
-                      <span className="creation-history__preview">{item.preview}</span>
+                      <span className="creation-history__preview">
+                        {item.preview || (item.lifecycleStatus === 'running'
+                          ? '创作正在后台持续进行，点击查看实时进度。'
+                          : '本次创作暂无正文内容。')}
+                      </span>
                     </button>
                   </article>
                 ))}
@@ -3806,93 +5894,730 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
               <div>
                 <Bot size={18} />
                 <strong>创作 Agent</strong>
-                {generatedContent && <span>继续对话优化当前文档</span>}
+                {sessionTerminated
+                  ? <span>会话已终止，已有内容仍可查看</span>
+                  : generatedContent && <span>继续对话优化当前文档</span>}
               </div>
               <div className="creation-chat-header__actions">
                 {sessionId && <code>{sessionId.slice(-8)}</code>}
                 <button
                   type="button"
+                  className="creation-terminate-session-button"
+                  onClick={handleTerminateSession}
+                  disabled={!hasActiveSession || sessionTerminated}
+                  aria-label="终止当前会话"
+                  title={sessionTerminated ? '当前会话已终止' : '停止当前会话并保留已有内容'}
+                >
+                  <Square size={13} fill="currentColor" />
+                  {sessionTerminated ? '已终止' : '终止会话'}
+                </button>
+                <button
+                  type="button"
                   className="creation-new-session-button"
                   onClick={handleNewConversation}
-                  disabled={isGenerating || !hasActiveSession}
+                  disabled={(!sessionTerminated && (isGenerating || isBrainstormLoading || Boolean(pendingConfirmation))) || !hasActiveSession}
                   aria-label="开启新会话"
-                  title={isGenerating ? '创作完成或中止后可开启新会话' : '清空当前内容并开启新会话'}
+                  title={isGenerating || isBrainstormLoading || pendingConfirmation
+                    ? '当前创作结束或中止后可开启新会话'
+                    : '清空当前内容并开启新会话'}
                 >
                   <MessageSquarePlus size={15} />
                   新会话
                 </button>
               </div>
             </header>
-            {(conversation.length > 0 || agentEvents.length > 0) && (
-              <div className="creation-chat-timeline" ref={chatTimelineRef} aria-live="polite">
-                {creationTimeline.map((item) => {
-                  if (item.kind === 'trace') {
-                    return (
-                      <AgentExecutionTrace
-                        key={item.key}
-                        events={item.events}
-                        onOpenReferences={openBottomTab}
-                        browserLiveJob={browserCrawlerEnabled && item.key === currentAgentTraceKey
-                          ? browserLiveJobs[0]
-                          : undefined}
-                        apiBaseUrl={apiBaseUrl}
-                      />
-                    )
-                  }
-
-                  const timestamp = formatCreationMessageTimestamp(item.message.createdAt)
-                  return (
-                    <article
-                      key={item.key}
-                      className={`creation-chat-message is-${item.message.role}${item.message.kind === 'user_abort' ? ' is-abort' : ''}`}
-                      aria-label={item.message.kind === 'user_abort'
-                        ? '用户中止消息'
-                        : item.message.role === 'user' ? '用户消息' : 'Agent 消息'}
-                    >
-                      <div className="creation-chat-message__meta">
-                        <span>{item.message.role === 'user' ? userDisplayName : '创作 Agent'}</span>
-                        {item.message.kind === 'user_abort' && (
-                          <span className="creation-chat-message__end-badge">已结束</span>
-                        )}
-                        {timestamp && (
-                          <time
-                            dateTime={timestamp.iso}
-                            title={`发送于 ${timestamp.full}`}
-                            aria-label={`发送时间：${timestamp.full}`}
+            {(
+              conversationForTimeline.length > 0
+              || agentEvents.length > 0
+              || Boolean(pendingConfirmation)
+              || (creationMode === 'brainstorm' && Boolean(brainstormState || brainstormError || isBrainstormLoading))
+            ) && (
+              <div
+                className="creation-chat-timeline"
+                ref={chatTimelineRef}
+                aria-live="polite"
+              >
+                {timelineBeforeBrainstorm.map(renderCreationTimelineItem)}
+            {creationMode === 'brainstorm' && isBrainstormLoading && !brainstormState && (
+              <article className="creation-brainstorm-turn" aria-label="Agent 正在思考">
+                <div className="creation-chat-message__meta">
+                  <span>创作 Agent</span>
+                  <span className="creation-brainstorm-turn__step">脑暴步骤</span>
+                </div>
+                <section
+                  className="creation-brainstorm-card creation-brainstorm-card--loading"
+                  role="status"
+                  aria-label="正在准备第一条脑暴问题"
+                >
+                  <span className="creation-brainstorm-card__loading-icon" aria-hidden="true">
+                    <Loader2 size={19} className="spin" />
+                  </span>
+                  <div className="creation-brainstorm-card__loading-copy">
+                    <span className="creation-brainstorm-card__eyebrow">正在准备第一条脑暴问题</span>
+                    <strong>正在梳理你的创作目标</strong>
+                    <p>创作 Agent 正在理解你的要求，找出最值得先确认的关键方向。</p>
+                  </div>
+                </section>
+              </article>
+            )}
+            {creationMode === 'brainstorm' && brainstormError && !brainstormState && (
+              <div className="creation-brainstorm-card__error" role="alert">{brainstormError}</div>
+            )}
+            {creationMode === 'brainstorm' && brainstormState && (
+              <article className="creation-brainstorm-turn" aria-label="Agent 消息">
+                <div className="creation-chat-message__meta">
+                  <span>创作 Agent</span>
+                  <span className="creation-brainstorm-turn__step">脑暴步骤</span>
+                </div>
+                <section className="creation-brainstorm-card" aria-live="polite">
+                <header>
+                  <div>
+                    <span className="creation-brainstorm-card__eyebrow">
+                      {brainstormCardState?.phase === 'abandoned'
+                        ? '会话已终止'
+                        : brainstormCardState?.phase === 'ready' && !brainstormIsReviewingHistory
+                        ? '创作简报已就绪'
+                        : `${brainstormQuestion?.dimension || '需求梳理'} · ${brainstormIsReviewingHistory ? '回看已答问题' : `第 ${(brainstormCardState?.depth || 0) + 1} 轮模型追问`}`}
+                    </span>
+                    <strong>
+                      {brainstormCardState?.phase === 'abandoned'
+                        ? '本次脑暴已停止'
+                        : brainstormCardState?.phase === 'ready' && !brainstormIsReviewingHistory
+                        ? '关键方向已经收敛，可以开始生成'
+                        : brainstormQuestion?.prompt}
+                    </strong>
+                  </div>
+                  <div className="creation-brainstorm-card__header-actions">
+                    <div className="creation-brainstorm-pagination" aria-label="脑暴问题导航">
+                      <button
+                        type="button"
+                        aria-label="上一题"
+                        title="上一题"
+                        onClick={() => setBrainstormHistoryIndex(Math.max(0, brainstormPageIndex - 1))}
+                        disabled={sessionTerminated || isBrainstormLoading || brainstormPageIndex <= 0}
+                      >
+                        <ChevronLeft size={14} aria-hidden />
+                      </button>
+                      <span aria-live="polite">
+                        {brainstormIsReviewingHistory || brainstormCardState?.current_question
+                          ? `第 ${brainstormPageIndex + 1} / ${Math.max(1, brainstormPageCount)} 题`
+                          : `${brainstormHistory.length} 题已完成`}
+                      </span>
+                      <button
+                        type="button"
+                        aria-label="下一题"
+                        title="下一题"
+                        onClick={() => {
+                          const nextIndex = brainstormPageIndex + 1
+                          setBrainstormHistoryIndex(nextIndex < brainstormHistory.length ? nextIndex : null)
+                        }}
+                        disabled={sessionTerminated || isBrainstormLoading || brainstormHistoryIndex === null}
+                      >
+                        <ChevronRight size={14} aria-hidden />
+                      </button>
+                    </div>
+                    {isBrainstormLoading && <Loader2 size={17} className="spin" aria-label="正在整理回答" />}
+                  </div>
+                </header>
+                {(brainstormCardState?.decisions || []).length > 0 && (
+                  <div className="creation-brainstorm-decisions" aria-label="已确认决定">
+                    {brainstormCardState?.decisions.map(decision => (
+                      <div key={decision.question_id}>
+                        <span>
+                          <small>{decision.source === 'agent_assumption' ? '合理假设' : '已确认'} · {decision.dimension}</small>
+                          <strong>{decision.summary}</strong>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => reopenBrainstormDecision(decision.question_id)}
+                          disabled={sessionTerminated || isBrainstormLoading || isGenerating}
+                        >
+                          修改
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {brainstormCardState?.phase === 'abandoned' ? (
+                  <div className="creation-brainstorm-ended" role="status">
+                    <Square size={14} fill="currentColor" aria-hidden />
+                    <span>脑暴会话已终止，已确认的决定和简报仍保留在当前记录中。</span>
+                  </div>
+                ) : brainstormCardState?.phase === 'ready' && !brainstormIsReviewingHistory ? (
+                  <div className="creation-brainstorm-ready">
+                    <p>
+                      已确认 {brainstormCardState.answered_count} 项决定
+                      {brainstormCardState.open_flags.length
+                        ? `，其余 ${brainstormCardState.open_flags.length} 项将作为开放假设保留。`
+                        : '，没有会改变整体方向的开放项。'}
+                    </p>
+                    {brainstormCardState.readiness_reason && (
+                      <small>{brainstormCardState.readiness_reason}</small>
+                    )}
+                    {brainstormContinuationOpen && brainstormState.can_continue_brainstorm && !brainstormGenerationStarted && (
+                      <div
+                        ref={brainstormContinuationRef}
+                        className="creation-brainstorm-continuation"
+                      >
+                        <div className="creation-brainstorm-continuation__heading">
+                          <strong>选择继续脑暴的方向</strong>
+                          <small>以下方向由模型根据当前简报推荐，不影响已经确认的决定。</small>
+                        </div>
+                        <div
+                          className="creation-brainstorm-options creation-brainstorm-options--continuation"
+                          role="radiogroup"
+                          aria-label="继续脑暴方向"
+                        >
+                          {brainstormState.continuation_directions.map(direction => {
+                            const selected = brainstormContinuationDirectionId === direction.id
+                            return (
+                              <button
+                                key={direction.id}
+                                type="button"
+                                role="radio"
+                                aria-checked={selected}
+                                className={selected ? 'is-selected' : ''}
+                                onClick={() => setBrainstormContinuationDirectionId(direction.id)}
+                                disabled={isBrainstormLoading || isGenerating}
+                              >
+                                <span className="creation-brainstorm-options__mark" aria-hidden>
+                                  {selected ? <Check size={13} /> : null}
+                                </span>
+                                <span>
+                                  <strong>
+                                    {direction.label}
+                                    {direction.recommended && <small>推荐</small>}
+                                  </strong>
+                                  <small>{direction.description}</small>
+                                </span>
+                              </button>
+                            )
+                          })}
+                          <button
+                            type="button"
+                            role="radio"
+                            aria-checked={brainstormContinuationDirectionId === '__custom__'}
+                            className={brainstormContinuationDirectionId === '__custom__' ? 'is-selected' : ''}
+                            onClick={() => setBrainstormContinuationDirectionId('__custom__')}
+                            disabled={isBrainstormLoading || isGenerating}
                           >
-                            {timestamp.label}
-                          </time>
+                            <span className="creation-brainstorm-options__mark" aria-hidden>
+                              {brainstormContinuationDirectionId === '__custom__' ? <Check size={13} /> : null}
+                            </span>
+                            <span>
+                              <strong>自定义脑暴方向</strong>
+                              <small>输入你希望继续探索、挑战或补强的内容。</small>
+                            </span>
+                          </button>
+                        </div>
+                        {brainstormContinuationDirectionId === '__custom__' && (
+                          <label className="creation-brainstorm-custom">
+                            <span>脑暴方向</span>
+                            <textarea
+                              value={brainstormCustomDirection}
+                              onChange={event => setBrainstormCustomDirection(event.target.value)}
+                              placeholder="例如：从真实用户迁移成本的角度继续脑暴"
+                              disabled={isBrainstormLoading || isGenerating}
+                              maxLength={500}
+                              rows={2}
+                            />
+                          </label>
+                        )}
+                        <div className="creation-brainstorm-continuation__actions">
+                          <button
+                            type="button"
+                            className="is-secondary"
+                            onClick={() => {
+                              setBrainstormContinuationOpen(false)
+                              setBrainstormContinuationDirectionId('')
+                              setBrainstormCustomDirection('')
+                            }}
+                            disabled={isBrainstormLoading || isGenerating}
+                          >
+                            取消
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void continueBrainstorm()}
+                            disabled={isBrainstormLoading || isGenerating || !brainstormContinuationDirectionId || (
+                              brainstormContinuationDirectionId === '__custom__' && !brainstormCustomDirection.trim()
+                            )}
+                          >
+                            <Lightbulb size={15} /> 按此方向继续
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    <div className="creation-brainstorm-ready__actions">
+                      {brainstormState.can_continue_brainstorm && !brainstormContinuationOpen && !brainstormGenerationStarted && (
+                        <button
+                          type="button"
+                          className="is-secondary"
+                          onClick={() => {
+                            const recommended = brainstormState.continuation_directions.find(direction => direction.recommended)
+                              || brainstormState.continuation_directions[0]
+                            setBrainstormContinuationDirectionId(recommended?.id || '')
+                            setBrainstormContinuationOpen(true)
+                          }}
+                          disabled={isGenerating || isBrainstormLoading}
+                        >
+                          <Lightbulb size={15} /> 继续脑暴
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => void handleGenerate()}
+                        disabled={isGenerating || isBrainstormLoading || brainstormGenerationStarted}
+                      >
+                        <Sparkles size={15} /> 按此生成
+                      </button>
+                    </div>
+                  </div>
+                ) : brainstormQuestion ? (
+                  <>
+                    {shouldShowBrainstormWhyNow && (
+                      <p className="creation-brainstorm-card__why">{brainstormWhyNow}</p>
+                    )}
+                    {(brainstormQuestion.options.length > 0 || brainstormQuestion.allow_custom) && (
+                      <div
+                        className="creation-brainstorm-options"
+                        role={brainstormQuestion.type === 'multi_choice' ? 'group' : 'radiogroup'}
+                        aria-label="答案选项"
+                      >
+                        {brainstormQuestion.options.map(option => {
+                          const selected = brainstormSelectedOptions.includes(option.id)
+                          return (
+                            <button
+                              key={option.id}
+                              type="button"
+                              role={brainstormQuestion.type === 'multi_choice' ? 'checkbox' : 'radio'}
+                              aria-checked={selected}
+                              className={selected ? 'is-selected' : ''}
+                              onClick={() => {
+                                setBrainstormCustomAnswerSelected(false)
+                                if (brainstormQuestion.type === 'multi_choice') {
+                                  setBrainstormSelectedOptions(current => current.includes(option.id)
+                                    ? current.filter(id => id !== option.id)
+                                    : [...current, option.id])
+                                } else {
+                                  setBrainstormSelectedOptions([option.id])
+                                }
+                              }}
+                              disabled={isBrainstormLoading}
+                            >
+                              <span className="creation-brainstorm-options__mark" aria-hidden>
+                                {selected ? <Check size={13} /> : null}
+                              </span>
+                              <span>
+                                <strong>
+                                  {option.label}
+                                  {option.recommended && <small>推荐</small>}
+                                </strong>
+                                <small>{option.description}</small>
+                              </span>
+                            </button>
+                          )
+                        })}
+                        {brainstormQuestion.allow_custom && (
+                          <button
+                            type="button"
+                            role={brainstormQuestion.type === 'multi_choice' ? 'checkbox' : 'radio'}
+                            aria-checked={brainstormCustomAnswerSelected}
+                            className={brainstormCustomAnswerSelected ? 'is-selected' : ''}
+                            onClick={() => {
+                              setBrainstormSelectedOptions([])
+                              setBrainstormCustomAnswerSelected(true)
+                            }}
+                            disabled={isBrainstormLoading}
+                          >
+                            <span className="creation-brainstorm-options__mark" aria-hidden>
+                              {brainstormCustomAnswerSelected ? <Check size={13} /> : null}
+                            </span>
+                            <span>
+                              <strong>自定义答案</strong>
+                              <small>选择后输入具体内容，不与以上选项同时选择。</small>
+                            </span>
+                          </button>
                         )}
                       </div>
-                      <p>{item.message.content}</p>
-                    </article>
-                  )
-                })}
-              </div>
+                    )}
+                    {brainstormUsesCustomAnswer && (
+                      <label className="creation-brainstorm-custom">
+                        <span>具体内容</span>
+                        <textarea
+                          value={brainstormCustomAnswer}
+                          onChange={event => setBrainstormCustomAnswer(event.target.value)}
+                          placeholder={brainstormQuestion.answer_template}
+                          disabled={isBrainstormLoading}
+                          rows={3}
+                        />
+                      </label>
+                    )}
+                    <footer>
+                      {brainstormIsReviewingHistory ? (
+                        <button
+                          type="button"
+                          className="is-secondary"
+                          onClick={() => setBrainstormHistoryIndex(null)}
+                          disabled={isBrainstormLoading}
+                        >
+                          {brainstormState.current_question ? '返回当前问题' : '返回最新进度'}
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            className="is-secondary"
+                            onClick={() => void skipBrainstormQuestion()}
+                            disabled={isBrainstormLoading}
+                          >
+                            跳过此题
+                          </button>
+                          <button
+                            type="button"
+                            className="is-secondary"
+                            onClick={() => void finishBrainstorm()}
+                            disabled={isBrainstormLoading}
+                          >
+                            基于当前简报生成
+                          </button>
+                        </>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => void submitBrainstormAnswer()}
+                        disabled={!brainstormAnswerValid || isBrainstormLoading || (brainstormIsReviewingHistory && !brainstormHistoryAnswerChanged)}
+                      >
+                        {brainstormIsReviewingHistory ? '保存修改' : '确认并继续'} <ChevronRight size={15} />
+                      </button>
+                    </footer>
+                  </>
+                ) : null}
+                {(brainstormCardState?.invalidated_question_ids.length || 0) > 0 && (
+                  <div className="creation-brainstorm-card__notice" role="status">
+                    上游决定已变化，{brainstormCardState?.invalidated_question_ids.length} 项后续结论需要重新确认。
+                  </div>
+                )}
+                {brainstormError && !brainstormGenerationStarted && (
+                  <div className="creation-brainstorm-card__error" role="alert">{brainstormError}</div>
+                )}
+                </section>
+              </article>
             )}
-            {pendingConfirmation && (
-              <div className="creation-confirmation" role="group" aria-label="Agent 请求确认">
-                <div>
-                  <Bot size={17} />
-                  <span>
-                    <strong>需要你确认</strong>
-                    {pendingConfirmation.question}
-                  </span>
-                </div>
-                <div>
-                  <button type="button" onClick={() => void handleConfirmContinue()} disabled={isGenerating}>
-                    <Check size={15} /> 按当前信息继续
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setPendingConfirmation(null)
-                      window.requestAnimationFrame(() => promptInputRef.current?.focus())
-                    }}
+                {timelineAfterBrainstorm.map(renderCreationTimelineItem)}
+                {creationMode === 'brainstorm'
+                  && brainstormGenerationStarted
+                  && brainstormState
+                  && (
+                    (brainstormState.phase === 'ready' && brainstormState.can_continue_brainstorm)
+                    || (brainstormState.phase === 'exploring' && Boolean(brainstormState.current_question))
+                    || brainstormContinuationTurns.length > 0
+                  ) && (
+                  <div
+                    className="creation-brainstorm-latest-control"
+                    role="group"
+                    aria-label="最新脑暴操作"
                   >
-                    补充要求
-                  </button>
-                </div>
+                    <div
+                      className="creation-brainstorm-latest-action"
+                      aria-live="polite"
+                    >
+                      {brainstormContinuationTurns.length > 0 && (
+                        <div
+                          className="creation-brainstorm-latest-history"
+                          aria-label="已完成的继续脑暴"
+                        >
+                          {brainstormContinuationTurns.map(turn => {
+                            const selectedLabels = turn.answer.selected_option_ids.map(optionId => (
+                              turn.question.options.find(option => option.id === optionId)?.label || optionId
+                            ))
+                            const answerSummary = [...selectedLabels, turn.answer.custom_text.trim()]
+                              .filter(Boolean)
+                              .join('；')
+                            return (
+                              <div
+                                key={turn.question.id}
+                                className="creation-brainstorm-latest-history__turn"
+                              >
+                                <strong>{turn.question.prompt}</strong>
+                                <span><Check size={13} aria-hidden /> {answerSummary || '已跳过此题'}</span>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                      {brainstormState.phase === 'exploring' && brainstormState.current_question ? (
+                        <div
+                          ref={brainstormContinuationRef}
+                          className="creation-brainstorm-continuation"
+                        >
+                          <div className="creation-brainstorm-continuation__heading">
+                            <strong>{brainstormState.current_question.prompt}</strong>
+                            {brainstormState.current_question.why_now && (
+                              <small>{brainstormState.current_question.why_now}</small>
+                            )}
+                          </div>
+                          <div
+                            className="creation-brainstorm-options"
+                            role={brainstormState.current_question.type === 'multi_choice' ? 'group' : 'radiogroup'}
+                            aria-label="答案选项"
+                          >
+                            {brainstormState.current_question.options.map(option => {
+                              const selected = brainstormSelectedOptions.includes(option.id)
+                              return (
+                                <button
+                                  key={option.id}
+                                  type="button"
+                                  role={brainstormState.current_question?.type === 'multi_choice' ? 'checkbox' : 'radio'}
+                                  aria-checked={selected}
+                                  className={selected ? 'is-selected' : ''}
+                                  onClick={() => {
+                                    setBrainstormCustomAnswerSelected(false)
+                                    if (brainstormState.current_question?.type === 'multi_choice') {
+                                      setBrainstormSelectedOptions(current => current.includes(option.id)
+                                        ? current.filter(id => id !== option.id)
+                                        : [...current, option.id])
+                                    } else {
+                                      setBrainstormSelectedOptions([option.id])
+                                    }
+                                  }}
+                                  disabled={isBrainstormLoading}
+                                >
+                                  <span className="creation-brainstorm-options__mark" aria-hidden>
+                                    {selected ? <Check size={13} /> : null}
+                                  </span>
+                                  <span>
+                                    <strong>
+                                      {option.label}
+                                      {option.recommended && <small>推荐</small>}
+                                    </strong>
+                                    <small>{option.description}</small>
+                                  </span>
+                                </button>
+                              )
+                            })}
+                            {brainstormState.current_question.allow_custom && (
+                              <button
+                                type="button"
+                                role={brainstormState.current_question.type === 'multi_choice' ? 'checkbox' : 'radio'}
+                                aria-checked={brainstormCustomAnswerSelected}
+                                className={brainstormCustomAnswerSelected ? 'is-selected' : ''}
+                                onClick={() => {
+                                  setBrainstormSelectedOptions([])
+                                  setBrainstormCustomAnswerSelected(true)
+                                }}
+                                disabled={isBrainstormLoading}
+                              >
+                                <span className="creation-brainstorm-options__mark" aria-hidden>
+                                  {brainstormCustomAnswerSelected ? <Check size={13} /> : null}
+                                </span>
+                                <span>
+                                  <strong>自定义答案</strong>
+                                  <small>输入你希望继续深入的具体内容。</small>
+                                </span>
+                              </button>
+                            )}
+                          </div>
+                          {brainstormCustomAnswerSelected && (
+                            <label className="creation-brainstorm-custom">
+                              <span>具体内容</span>
+                              <textarea
+                                value={brainstormCustomAnswer}
+                                onChange={event => setBrainstormCustomAnswer(event.target.value)}
+                                placeholder={brainstormState.current_question.answer_template}
+                                disabled={isBrainstormLoading}
+                                rows={3}
+                              />
+                            </label>
+                          )}
+                          <div className="creation-brainstorm-continuation__actions">
+                            <button
+                              type="button"
+                              className="is-secondary"
+                              onClick={() => void skipBrainstormQuestion()}
+                              disabled={isBrainstormLoading}
+                            >
+                              跳过此题
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void submitBrainstormAnswer()}
+                              disabled={!brainstormAnswerValid || isBrainstormLoading}
+                            >
+                              {isBrainstormLoading
+                                ? <Loader2 size={15} className="spin" />
+                                : <ChevronRight size={15} />}
+                              确认并继续
+                            </button>
+                          </div>
+                        </div>
+                      ) : brainstormContinuationOpen ? (
+                        <div
+                          ref={brainstormContinuationRef}
+                          className="creation-brainstorm-continuation"
+                        >
+                          <div className="creation-brainstorm-continuation__heading">
+                            <strong>选择继续脑暴的方向</strong>
+                            <small>以下方向由模型根据当前简报推荐，不影响已经确认的决定。</small>
+                          </div>
+                          <div
+                            className="creation-brainstorm-options creation-brainstorm-options--continuation"
+                            role="radiogroup"
+                            aria-label="继续脑暴方向"
+                          >
+                            {brainstormState.continuation_directions.map(direction => {
+                              const selected = brainstormContinuationDirectionId === direction.id
+                              return (
+                                <button
+                                  key={direction.id}
+                                  type="button"
+                                  role="radio"
+                                  aria-checked={selected}
+                                  className={selected ? 'is-selected' : ''}
+                                  onClick={() => setBrainstormContinuationDirectionId(direction.id)}
+                                  disabled={isBrainstormLoading || isGenerating}
+                                >
+                                  <span className="creation-brainstorm-options__mark" aria-hidden>
+                                    {selected ? <Check size={13} /> : null}
+                                  </span>
+                                  <span>
+                                    <strong>
+                                      {direction.label}
+                                      {direction.recommended && <small>推荐</small>}
+                                    </strong>
+                                    <small>{direction.description}</small>
+                                  </span>
+                                </button>
+                              )
+                            })}
+                            <button
+                              type="button"
+                              role="radio"
+                              aria-checked={brainstormContinuationDirectionId === '__custom__'}
+                              className={brainstormContinuationDirectionId === '__custom__' ? 'is-selected' : ''}
+                              onClick={() => setBrainstormContinuationDirectionId('__custom__')}
+                              disabled={isBrainstormLoading || isGenerating}
+                            >
+                              <span className="creation-brainstorm-options__mark" aria-hidden>
+                                {brainstormContinuationDirectionId === '__custom__' ? <Check size={13} /> : null}
+                              </span>
+                              <span>
+                                <strong>自定义脑暴方向</strong>
+                                <small>输入你希望继续探索、挑战或补强的内容。</small>
+                              </span>
+                            </button>
+                          </div>
+                          {brainstormContinuationDirectionId === '__custom__' && (
+                            <label className="creation-brainstorm-custom">
+                              <span>脑暴方向</span>
+                              <textarea
+                                value={brainstormCustomDirection}
+                                onChange={event => setBrainstormCustomDirection(event.target.value)}
+                                placeholder="例如：从真实用户迁移成本的角度继续脑暴"
+                                disabled={isBrainstormLoading || isGenerating}
+                                maxLength={500}
+                                rows={2}
+                              />
+                            </label>
+                          )}
+                          <div className="creation-brainstorm-continuation__actions">
+                            <button
+                              type="button"
+                              className="is-secondary"
+                              onClick={() => {
+                                setBrainstormContinuationOpen(false)
+                                setBrainstormContinuationDirectionId('')
+                                setBrainstormCustomDirection('')
+                              }}
+                              disabled={isBrainstormLoading || isGenerating}
+                            >
+                              取消
+                            </button>
+                            <button
+                              type="button"
+                              className="is-secondary"
+                              onClick={() => void handleGenerate()}
+                              disabled={isGenerating || isBrainstormLoading}
+                            >
+                              {isGenerating
+                                ? <Loader2 size={15} className="spin" />
+                                : <Sparkles size={15} />}
+                              继续生成文档内容
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void continueBrainstorm()}
+                              disabled={isBrainstormLoading || isGenerating || !brainstormContinuationDirectionId || (
+                                brainstormContinuationDirectionId === '__custom__' && !brainstormCustomDirection.trim()
+                              )}
+                            >
+                              {isBrainstormLoading
+                                ? <Loader2 size={15} className="spin" />
+                                : <Lightbulb size={15} />}
+                              按此方向继续
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="creation-brainstorm-ready__actions">
+                          {brainstormState.can_continue_brainstorm && (
+                            <button
+                              type="button"
+                              className="is-secondary"
+                              onClick={() => {
+                                const recommended = brainstormState.continuation_directions.find(direction => direction.recommended)
+                                  || brainstormState.continuation_directions[0]
+                                setBrainstormContinuationDirectionId(recommended?.id || '')
+                                setBrainstormContinuationOpen(true)
+                              }}
+                              disabled={isGenerating || isBrainstormLoading}
+                            >
+                              <Lightbulb size={15} /> 继续脑暴
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => void handleGenerate()}
+                            disabled={isGenerating || isBrainstormLoading}
+                          >
+                            {isGenerating
+                              ? <Loader2 size={15} className="spin" />
+                              : <Sparkles size={15} />}
+                            继续生成文档内容
+                          </button>
+                        </div>
+                      )}
+                      {brainstormError && (
+                        <div className="creation-brainstorm-card__error" role="alert">{brainstormError}</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {pendingConfirmation && (
+                  <div className="creation-confirmation" role="group" aria-label="Agent 请求确认">
+                    <div>
+                      <Bot size={17} />
+                      <span>
+                        <strong>需要你确认</strong>
+                        {pendingConfirmation.question}
+                      </span>
+                    </div>
+                    <div>
+                      <button type="button" onClick={() => void handleConfirmContinue()} disabled={isGenerating}>
+                        <Check size={15} /> 按当前信息继续
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPendingConfirmation(null)
+                          window.requestAnimationFrame(() => promptInputRef.current?.focus())
+                        }}
+                      >
+                        补充要求
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
             <div className="creation-prompt-skill-shell" ref={promptSkillShellRef}>
@@ -3941,7 +6666,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                     && !promptImeGuard.isImeEvent(event)
                   ) {
                     event.preventDefault()
-                    if (prompt.trim() && !isGenerating) void handleGenerate()
+                    if (prompt.trim() && !isGenerating && !isBrainstormLoading) void handleGenerate()
                   }
                 }}
                 onPaste={(event) => {
@@ -3955,7 +6680,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                   ? '继续告诉 Agent 如何修改当前文档。Enter 发送，Shift+Enter 换行；输入 @ 可选择技能。'
                   : `${defaultPrompt}\n输入 @ 可选择已安装的技能。`}
                 style={{ ...inputStyle, minHeight: conversation.length ? 82 : 112, resize: 'vertical', lineHeight: 1.6 }}
-                disabled={isGenerating}
+                disabled={isGenerating || isBrainstormLoading || Boolean(brainstormState) || sessionTerminated}
                 aria-expanded={skillPickerOpen}
                 aria-controls="creation-skill-picker"
                 aria-activedescendant={skillPickerOpen && skillPickerItems.length
@@ -4120,6 +6845,18 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                   onChange={handleSelectModel}
                   title="选择创作生成模型"
                 />
+                <ModelSelect
+                  className="creation-mode-select"
+                  value={creationMode}
+                  options={CREATION_MODE_OPTIONS}
+                  disabled={isGenerating || isBrainstormLoading || Boolean(brainstormState)}
+                  remoteAllowed
+                  onChange={(mode) => setCreationMode(mode as CreationMode)}
+                  renderIcon={(option) => option.id === 'brainstorm'
+                    ? <Lightbulb size={16} />
+                    : <Zap size={16} />}
+                  title="选择创作模式"
+                />
                 {activeCreationModelId === REMOTE_CREATION_MODEL_ID && cloudBalance && (
                   <span style={{ color: 'var(--mb-text-secondary)', fontSize: 12 }}>
                     Credit {cloudBalance.available}
@@ -4127,9 +6864,36 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                 )}
               </div>
               <div className="creation-action-buttons">
-                <button onClick={isGenerating ? handleStopGenerate : handleGenerate} disabled={!isGenerating && !prompt.trim()} style={isGenerating ? dangerButtonStyle : primaryButtonStyle}>
-                  {isGenerating ? <Loader2 size={16} className="spin" /> : generatedContent ? <Send size={16} /> : <Sparkles size={16} />}
-                  {isGenerating ? '中止' : generatedContent ? '发送' : '开始创作'}
+                <button
+                  onClick={isGenerating ? handleStopGenerate : handleGenerate}
+                  disabled={!isGenerating && (
+                    Boolean(inlineRunningAction)
+                    ||
+                    sessionTerminated
+                    ||
+                    isBrainstormLoading
+                    || (creationMode === 'brainstorm'
+                      ? brainstormState ? brainstormState.phase !== 'ready' : !prompt.trim()
+                      : !prompt.trim())
+                  )}
+                  style={isGenerating ? dangerButtonStyle : primaryButtonStyle}
+                >
+                  {isGenerating || isBrainstormLoading
+                    ? <Loader2 size={16} className="spin" />
+                    : generatedContent ? <Send size={16} /> : <Sparkles size={16} />}
+                  {isGenerating
+                    ? '中止'
+                    : creationMode === 'brainstorm'
+                      ? isBrainstormLoading
+                        ? '正在梳理'
+                        : brainstormState?.phase === 'ready'
+                          ? generatedContent
+                            ? '继续生成文档内容'
+                            : '按此生成'
+                          : brainstormState
+                            ? '请回答上方问题'
+                            : '开始梳理'
+                      : generatedContent ? '发送' : '开始创作'}
                 </button>
               </div>
             </div>
@@ -4160,7 +6924,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
             <div className="creation-document-card" style={{ height: '100%', border: '1px solid var(--mb-border-strong)', borderRadius: 8, background: 'var(--mb-bg-card)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
               <div className="creation-document-header" style={{ height: 48, padding: '0 16px', borderBottom: '1px solid var(--mb-border-strong)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
                 <span style={{ fontSize: 14, fontWeight: 650 }}>
-                  创作文档
+                  {!generatedContent && brainstormState ? '创作简报' : '创作文档'}
                   {latestDocumentPatch && (
                     <small className="creation-document-patch-badge">
                       本轮改动 {latestPatchChangeCount || latestPatchTargets.length} 处
@@ -4178,6 +6942,14 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                       <Square size={14} />
                       中止
                     </button>
+                  )}
+                  {inlineUndo && !isGenerating && !inlineRunningAction && (
+                    <button type="button" onClick={() => void undoInlineEdit()} style={compactButtonStyle}>
+                      撤销选区修改
+                    </button>
+                  )}
+                  {inlineError && !inlineSelection && (
+                    <span className="creation-inline-edit-status is-error" role="alert">{inlineError}</span>
                   )}
                   <button
                     type="button"
@@ -4230,13 +7002,26 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                   </div>
                 </div>
               )}
-              <div ref={contentRef} style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
-                {generatedContent ? (
+              <div ref={contentRef} className="creation-document-content" style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
+                {selectionStableContent ? (
                   <MarkdownContent
-                    content={generatedContent}
+                    content={selectionStableContent}
                     components={markdownComponents}
                     changes={latestPatchChanges}
                   />
+                ) : brainstormState?.brief_markdown ? (
+                  <div className="creation-brainstorm-brief">
+                    <div className="creation-brainstorm-brief__status">
+                      <span>{brainstormState.answered_count} 项已确认</span>
+                      <span>{brainstormState.open_flags.length} 项待决定</span>
+                      <span>版本 {brainstormState.revision}</span>
+                    </div>
+                    <MarkdownContent
+                      content={brainstormState.brief_markdown}
+                      components={markdownComponents}
+                      changes={[]}
+                    />
+                  </div>
                 ) : isGenerating ? (
                   <div style={{ height: '100%', display: 'grid', placeItems: 'center', color: 'var(--mb-text-secondary)', fontSize: 14, gap: 12 }}>
                     <Loader2 size={28} className="spin" color="#a45d22" />
@@ -4256,6 +7041,39 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '' }) => {
                   </div>
                 )}
               </div>
+              <CreationSelectionToolbar
+                snapshot={inlineSelection}
+                actions={inlineCapabilities?.actions || []}
+                customPrompt={inlineCustomPrompt}
+                maxCustomPromptBytes={inlineCapabilities?.max_custom_prompt_bytes || 0}
+                promptOpen={inlinePromptOpen}
+                runningAction={inlineRunningAction}
+                error={inlineError || (
+                  inlineCapabilities && !inlineCapabilities.enabled
+                    ? inlineCapabilities.disabled_reason || '当前文档暂不支持选区编辑'
+                    : ''
+                )}
+                onInteractionStart={() => {
+                  inlineToolbarInteractionRef.current = true
+                }}
+                onInteractionEnd={() => {
+                  window.requestAnimationFrame(() => {
+                    inlineToolbarInteractionRef.current = false
+                  })
+                }}
+                onCustomPromptChange={setInlineCustomPrompt}
+                onPromptOpenChange={setInlinePromptOpen}
+                onRun={action => void runInlineEdit(action)}
+                onBrainstorm={() => void beginInlineBrainstorm()}
+                onCancel={() => void cancelInlineEdit()}
+                onClose={() => {
+                  setInlineSelection(null)
+                  setInlinePromptOpen(false)
+                  setInlineCustomPrompt('')
+                  setInlineError('')
+                  window.getSelection()?.removeAllRanges()
+                }}
+              />
             </div>
           </section>
 
@@ -5239,6 +8057,17 @@ const agentEventDetails = (event: CreationAgentEvent) => {
   if (event.actor?.kind === 'tool' && Number.isFinite(Number(data.result_count))) {
     details.push({ label: '结果', value: `${Number(data.result_count)} 条` })
   }
+  const rejectedSources = normalizeRejectedDataSources(
+    data.rejected_sources || event.environment_patch?.rejected_sources,
+  )
+  if (rejectedSources.length) {
+    details.push({
+      label: '未采用来源',
+      value: rejectedSources
+        .map(source => `${source.title} · ${source.url || '地址暂缺'}`)
+        .join('\n'),
+    })
+  }
   if (event.actor?.kind === 'tool' && data.diagram_type) {
     details.push({ label: '图类型', value: String(data.diagram_type) })
   }
@@ -5340,14 +8169,19 @@ const changeOverlappingLines = (
 const markdownComponentsWithChanges = (
   components: any,
   blockStartLine: number,
+  blockStartOffset: number,
   changes: DocumentChange[],
 ) => {
   const decorated = { ...components }
-  ;['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li', 'blockquote', 'pre'].forEach((tag) => {
+  // Keep fenced-code renderers stable. Recreating the `pre` component on every
+  // document tick remounts Mermaid diagrams and makes them visibly flash.
+  ;['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li', 'blockquote'].forEach((tag) => {
     const Original = components[tag]
     decorated[tag] = ({ node, className, ...props }: any) => {
       const localStart = Number(node?.position?.start?.line)
       const localEnd = Number(node?.position?.end?.line)
+      const localStartOffset = Number(node?.position?.start?.offset)
+      const localEndOffset = Number(node?.position?.end?.offset)
       const globalStart = blockStartLine + (Number.isFinite(localStart) ? localStart - 1 : 0)
       const globalEnd = blockStartLine + (Number.isFinite(localEnd) ? localEnd - 1 : 0)
       const change = changeOverlappingLines(changes, globalStart, globalEnd)
@@ -5359,6 +8193,13 @@ const markdownComponentsWithChanges = (
       const resolvedProps = {
         ...props,
         className: resolvedClassName || undefined,
+        ...(Number.isFinite(localStartOffset) && Number.isFinite(localEndOffset)
+          ? {
+            'data-md-start': blockStartOffset + localStartOffset,
+            'data-md-end': blockStartOffset + localEndOffset,
+            'data-md-kind': tag,
+          }
+          : {}),
         ...(change
           ? {
             'data-change-type': change.changeType,
@@ -5375,7 +8216,7 @@ const markdownComponentsWithChanges = (
   return decorated
 }
 
-const MarkdownContent = ({
+const MarkdownContent = React.memo(({
   content,
   components,
   changes = [],
@@ -5391,12 +8232,17 @@ const MarkdownContent = ({
 
   return (
     <>
-      {parseMarkdownBlocks(content).map((block, index) => {
+      {parseMarkdownBlocks(stripInternalCreationMarkers(content)).map((block, index) => {
         if (block.type === 'markdown') {
           return (
             <ReactMarkdown
               key={`markdown-${index}`}
-              components={markdownComponentsWithChanges(components, block.startLine, changes)}
+              components={markdownComponentsWithChanges(
+                components,
+                block.startLine,
+                block.startOffset,
+                changes,
+              )}
             >
               {block.content}
             </ReactMarkdown>
@@ -5462,7 +8308,7 @@ const MarkdownContent = ({
       })}
     </>
   )
-}
+})
 
 const Toggle = ({ label, checked, onChange, icon }: { label: string; checked: boolean; onChange: (value: boolean) => void; icon?: React.ReactNode }) => (
   <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, fontSize: 14, color: 'var(--mb-text-primary)' }}>

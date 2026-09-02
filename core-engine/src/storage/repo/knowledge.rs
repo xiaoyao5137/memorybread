@@ -17,6 +17,13 @@ use crate::storage::{
     StorageManager,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BakeCandidateLane {
+    Fresh,
+    Retry,
+    OperationReplay,
+}
+
 fn primary_source_capture_id(source_capture_ids: Option<&str>) -> i64 {
     source_capture_ids
         .and_then(|value| serde_json::from_str::<Vec<serde_json::Value>>(value).ok())
@@ -1014,7 +1021,12 @@ impl StorageManager {
         limit: usize,
         max_failures: i64,
     ) -> Result<Vec<BakeMemorySourceRecord>, StorageError> {
-        self.list_bake_memory_candidates_by_lane(since_ts_ms, limit, max_failures, false)
+        self.list_bake_memory_candidates_by_lane(
+            since_ts_ms,
+            limit,
+            max_failures,
+            BakeCandidateLane::Fresh,
+        )
     }
 
     /// 重试候选独立于 watermark，并且只有到达持久化调度时间且尚无任何产物时
@@ -1024,7 +1036,22 @@ impl StorageManager {
         limit: usize,
         max_failures: i64,
     ) -> Result<Vec<BakeMemorySourceRecord>, StorageError> {
-        self.list_bake_memory_candidates_by_lane(0, limit, max_failures, true)
+        self.list_bake_memory_candidates_by_lane(0, limit, max_failures, BakeCandidateLane::Retry)
+    }
+
+    /// 操作证据规则升级后的历史回放候选。它只读取本地队列，不触发模型；调用方
+    /// 必须把它纳入既有 bake 批次上限，以替换 fresh 配额而不是追加调用。
+    pub fn list_bake_memory_operation_replay_candidates(
+        &self,
+        limit: usize,
+        max_failures: i64,
+    ) -> Result<Vec<BakeMemorySourceRecord>, StorageError> {
+        self.list_bake_memory_candidates_by_lane(
+            0,
+            limit,
+            max_failures,
+            BakeCandidateLane::OperationReplay,
+        )
     }
 
     fn list_bake_memory_candidates_by_lane(
@@ -1032,19 +1059,41 @@ impl StorageManager {
         since_ts_ms: i64,
         limit: usize,
         max_failures: i64,
-        retry_lane: bool,
+        lane: BakeCandidateLane,
     ) -> Result<Vec<BakeMemorySourceRecord>, StorageError> {
-        let lane_predicate = if retry_lane {
-            r#"
+        let (lane_predicate, lane_order) = match lane {
+            BakeCandidateLane::Retry => (
+                r#"
                 COALESCE(r.failure_count, 0) > 0
                 AND r.failure_count < ?3
                 AND COALESCE(r.next_retry_at_ms, 0) <= ?4
                 AND NOT EXISTS (SELECT 1 FROM bake_knowledge bk WHERE bk.timeline_id = k.id)
                 AND NOT EXISTS (SELECT 1 FROM bake_sops bs WHERE bs.timeline_id = k.id)
                 AND CAST(k.id AS TEXT) NOT IN (SELECT tid FROM produced_doc_timelines)
-            "#
-        } else {
-            r#"
+            "#,
+                "",
+            ),
+            BakeCandidateLane::OperationReplay => (
+                r#"
+                COALESCE(r.failure_count, 0) < ?3
+                AND ?4 >= 0
+                AND EXISTS (
+                    SELECT 1 FROM operation_replay_queue oq
+                    WHERE oq.timeline_id = k.id
+                      AND (
+                          oq.status = 'pending'
+                          OR (
+                              oq.status = 'claimed'
+                              AND COALESCE(oq.claimed_at_ms, 0) <= (?4 - 1800000)
+                          )
+                      )
+                )
+                AND NOT EXISTS (SELECT 1 FROM bake_sops bs WHERE bs.timeline_id = k.id)
+            "#,
+                "COALESCE((SELECT oq.priority FROM operation_replay_queue oq WHERE oq.timeline_id = k.id), 0) DESC,",
+            ),
+            BakeCandidateLane::Fresh => (
+                r#"
                 COALESCE(r.failure_count, 0) = 0
                 AND ?3 > 0
                 AND ?4 >= 0
@@ -1062,7 +1111,9 @@ impl StorageManager {
                           )
                     )
                 )
-            "#
+            "#,
+                "",
+            ),
         };
         self.with_conn(|conn| {
             // 文档成员展开物化为连接级临时表：捆绑 SQLite 会把只引用一次的
@@ -1090,9 +1141,10 @@ impl StorageManager {
                  LEFT JOIN bake_retry_state r ON r.timeline_id = k.id
                  WHERE k.category NOT IN ('bake_article', 'bake_knowledge', 'bake_sop', 'legacy_bake_candidate')
                    AND ({lane_predicate})
-                 ORDER BY MAX(k.updated_at_ms, COALESCE((SELECT MAX(c2.ts) FROM captures c2 WHERE c2.timeline_id = k.id), 0)) ASC, k.id ASC
+                 ORDER BY {lane_order} MAX(k.updated_at_ms, COALESCE((SELECT MAX(c2.ts) FROM captures c2 WHERE c2.timeline_id = k.id), 0)) ASC, k.id ASC
                  LIMIT ?2",
-                produced_doc_timelines_cte = PRODUCED_DOC_TIMELINES_CTE
+                produced_doc_timelines_cte = PRODUCED_DOC_TIMELINES_CTE,
+                lane_order = lane_order,
             );
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map(
@@ -1527,10 +1579,13 @@ fn annotate_and_compact_action_trace(
             .as_ref()
             .and_then(|item| build_action_state_delta(item, &record));
         let state_changed = state_delta.is_some();
-        let has_input = record
-            .input_text
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty());
+        // KeyPause 是经过隐私收敛后的“发生过键盘活动”信号。采集层明确不会保存
+        // 原始按键文本，因此不能再用 input_text 是否非空作为动作成立条件。
+        let has_input_activity = record.event_type == "key_pause"
+            || record
+                .input_text
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
         let has_focus = record.ax_focused_role.is_some() || record.ax_focused_id.is_some();
         let is_interactive_focus = record
             .ax_focused_role
@@ -1544,11 +1599,14 @@ fn annotate_and_compact_action_trace(
         let is_agent_report = is_agent_report_surface(&record);
         let (evidence_kind, evidence_role, evidence_reason) = match record.event_type.as_str() {
             "browser_navigation" | "app_switch" => ("navigation", "context", "navigation_only"),
-            "key_pause" if has_input => ("input", "action", "explicit_input"),
-            "manual" if has_input => ("input", "action", "explicit_input"),
+            "key_pause" => ("input_activity", "action", "keyboard_activity"),
+            "manual" if has_input_activity => ("input_activity", "action", "manual_input_activity"),
             "mouse_click" if is_interactive_focus => {
                 ("interaction", "action", "focused_control_click")
             }
+            // 部分应用和浏览器不会暴露 focused AX element；鼠标监听本身仍是可靠的
+            // 非敏感动作信号。目标控件缺失只降低证据强度，不应把点击降为被动上下文。
+            "mouse_click" => ("interaction", "action", "pointer_click"),
             "manual" if has_focus => ("interaction", "action", "focused_control_interaction"),
             _ if state_changed && is_agent_report => ("context", "context", "agent_report_surface"),
             "auto" if state_changed && has_attributable_action => {
@@ -3322,6 +3380,46 @@ mod tests {
     }
 
     #[test]
+    fn operation_replay_lane_selects_pending_and_stale_claimed_candidates() {
+        let mgr = make_mgr();
+        let timeline_id = mgr
+            .insert_timeline_entry(&sample_entry(&mgr, "coding"))
+            .unwrap();
+        mgr.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO operation_replay_queue
+                 (timeline_id, reason, status, priority, queued_at_ms)
+                 VALUES (?1, 'test', 'pending', 100, ?2)",
+                params![timeline_id, current_ts_ms()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let pending = mgr
+            .list_bake_memory_operation_replay_candidates(10, 3)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].timeline.id, timeline_id);
+
+        mgr.with_conn(|conn| {
+            conn.execute(
+                "UPDATE operation_replay_queue
+                 SET status = 'claimed', claimed_at_ms = ?2
+                 WHERE timeline_id = ?1",
+                params![timeline_id, current_ts_ms() - 31 * 60 * 1000],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let recovered = mgr
+            .list_bake_memory_operation_replay_candidates(10, 3)
+            .unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].timeline.id, timeline_id);
+    }
+
+    #[test]
     fn test_set_knowledge_verified() {
         let mgr = make_mgr();
         let id = mgr
@@ -3597,7 +3695,7 @@ mod tests {
         );
         assert_eq!(
             candidate.action_trace[1].evidence_kind.as_deref(),
-            Some("input")
+            Some("input_activity")
         );
         assert!(candidate
             .action_trace
@@ -3647,6 +3745,87 @@ mod tests {
         assert_eq!(compacted[0].capture_id, 3);
         assert_eq!(compacted[0].evidence_kind.as_deref(), Some("context"));
         assert!(!compacted[0].operation_evidence);
+    }
+
+    #[test]
+    fn action_trace_treats_privacy_safe_keyboard_activity_as_action_without_text() {
+        let records = vec![
+            BakeActionTraceRecord {
+                capture_id: 1,
+                ts: 1_700_000_000_000,
+                event_type: "key_pause".to_string(),
+                app_name: Some("Editor".to_string()),
+                win_title: Some("draft.md".to_string()),
+                url: None,
+                webpage_title: None,
+                visible_text: Some("修改前".to_string()),
+                input_text: None,
+                audio_text: None,
+                ax_focused_role: None,
+                ax_focused_id: None,
+                state_delta: None,
+                evidence_kind: None,
+                evidence_role: None,
+                evidence_reason: None,
+                operation_evidence: false,
+            },
+            BakeActionTraceRecord {
+                capture_id: 2,
+                ts: 1_700_000_001_000,
+                event_type: "auto".to_string(),
+                app_name: Some("Editor".to_string()),
+                win_title: Some("draft.md".to_string()),
+                url: None,
+                webpage_title: None,
+                visible_text: Some("修改后".to_string()),
+                input_text: None,
+                audio_text: None,
+                ax_focused_role: None,
+                ax_focused_id: None,
+                state_delta: None,
+                evidence_kind: None,
+                evidence_role: None,
+                evidence_reason: None,
+                operation_evidence: false,
+            },
+        ];
+
+        let trace = annotate_and_compact_action_trace(records);
+
+        assert_eq!(trace[0].evidence_role.as_deref(), Some("action"));
+        assert_eq!(
+            trace[0].evidence_reason.as_deref(),
+            Some("keyboard_activity")
+        );
+        assert_eq!(trace[1].evidence_role.as_deref(), Some("result"));
+    }
+
+    #[test]
+    fn action_trace_treats_click_without_ax_focus_as_lower_confidence_action() {
+        let record = BakeActionTraceRecord {
+            capture_id: 1,
+            ts: 1_700_000_000_000,
+            event_type: "mouse_click".to_string(),
+            app_name: Some("Unlisted App".to_string()),
+            win_title: Some("Workspace".to_string()),
+            url: None,
+            webpage_title: None,
+            visible_text: Some("保存".to_string()),
+            input_text: None,
+            audio_text: None,
+            ax_focused_role: None,
+            ax_focused_id: None,
+            state_delta: None,
+            evidence_kind: None,
+            evidence_role: None,
+            evidence_reason: None,
+            operation_evidence: false,
+        };
+
+        let trace = annotate_and_compact_action_trace(vec![record]);
+
+        assert_eq!(trace[0].evidence_role.as_deref(), Some("action"));
+        assert_eq!(trace[0].evidence_reason.as_deref(), Some("pointer_click"));
     }
 
     #[test]

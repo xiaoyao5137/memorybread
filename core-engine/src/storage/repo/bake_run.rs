@@ -235,6 +235,79 @@ pub fn load_bake_production_events(
 }
 
 impl StorageManager {
+    pub fn count_pending_operation_replays(&self, max_failures: i64) -> Result<i64, StorageError> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*)
+                 FROM operation_replay_queue oq
+                 JOIN timelines t ON t.id = oq.timeline_id
+                 LEFT JOIN bake_retry_state r ON r.timeline_id = t.id
+                 WHERE (
+                       oq.status = 'pending'
+                       OR (
+                           oq.status = 'claimed'
+                           AND COALESCE(oq.claimed_at_ms, 0) <= ?1
+                       )
+                 )
+                   AND t.category NOT IN (
+                       'bake_article', 'bake_knowledge', 'bake_sop', 'legacy_bake_candidate'
+                   )
+                   AND COALESCE(r.failure_count, 0) < ?2
+                   AND NOT EXISTS (
+                       SELECT 1 FROM bake_sops bs WHERE bs.timeline_id = t.id
+                   )",
+                params![current_ts_ms().saturating_sub(30 * 60 * 1000), max_failures],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::from)
+        })
+    }
+
+    pub fn claim_operation_replay(
+        &self,
+        timeline_id: i64,
+        run_id: i64,
+    ) -> Result<bool, StorageError> {
+        self.with_conn(|conn| {
+            let affected = conn.execute(
+                "UPDATE operation_replay_queue
+                 SET status = 'claimed', claimed_at_ms = ?3, last_run_id = ?2
+                 WHERE timeline_id = ?1
+                   AND (
+                       status = 'pending'
+                       OR (status = 'claimed' AND COALESCE(claimed_at_ms, 0) <= ?4)
+                   )",
+                params![
+                    timeline_id,
+                    run_id,
+                    current_ts_ms(),
+                    current_ts_ms().saturating_sub(30 * 60 * 1000)
+                ],
+            )?;
+            Ok(affected > 0)
+        })
+    }
+
+    pub fn finish_operation_replay(
+        &self,
+        timeline_id: i64,
+        status: &str,
+    ) -> Result<(), StorageError> {
+        debug_assert!(matches!(status, "completed" | "discarded" | "pending"));
+        self.with_conn(|conn| {
+            let now = current_ts_ms();
+            conn.execute(
+                "UPDATE operation_replay_queue
+                 SET status = ?2,
+                     completed_at_ms = CASE WHEN ?2 IN ('completed', 'discarded') THEN ?3 ELSE NULL END,
+                     claimed_at_ms = CASE WHEN ?2 = 'pending' THEN NULL ELSE claimed_at_ms END
+                 WHERE timeline_id = ?1",
+                params![timeline_id, status, now],
+            )?;
+            Ok(())
+        })
+    }
+
     /// 写入候选的确定性预检状态。审计表只保存计数、分类和原因码，不保存候选正文。
     pub fn upsert_bake_candidate_audit(
         &self,
@@ -245,14 +318,15 @@ impl StorageManager {
             conn.execute(
                 "INSERT INTO bake_candidate_audits (
                     run_id, timeline_id, lane, source_capture_count,
-                    effective_capture_count, sop_eligible, sop_eligibility_reason,
+                    effective_capture_count, sop_eligible, sop_eligibility_state, sop_eligibility_reason,
                     sop_evidence_mode, persist_status, persist_reason, created_at_ms, updated_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
                  ON CONFLICT(run_id, timeline_id) DO UPDATE SET
                     lane = excluded.lane,
                     source_capture_count = excluded.source_capture_count,
                     effective_capture_count = excluded.effective_capture_count,
                     sop_eligible = excluded.sop_eligible,
+                    sop_eligibility_state = excluded.sop_eligibility_state,
                     sop_eligibility_reason = excluded.sop_eligibility_reason,
                     sop_evidence_mode = excluded.sop_evidence_mode,
                     persist_status = excluded.persist_status,
@@ -265,6 +339,7 @@ impl StorageManager {
                     audit.source_capture_count,
                     audit.effective_capture_count,
                     audit.sop_eligible,
+                    audit.sop_eligibility_state,
                     audit.sop_eligibility_reason,
                     audit.sop_evidence_mode,
                     audit.persist_status,
@@ -344,7 +419,7 @@ impl StorageManager {
         self.with_conn(|conn| {
             conn.query_row(
                 "SELECT id, run_id, timeline_id, lane, source_capture_count,
-                        effective_capture_count, sop_eligible, sop_eligibility_reason,
+                        effective_capture_count, sop_eligible, sop_eligibility_state, sop_eligibility_reason,
                         sop_evidence_mode, primary_type, classification_reason, sop_model_accepted,
                         sop_model_reason, sop_payload_valid, persist_status, persist_reason,
                         created_at_ms, updated_at_ms
@@ -1049,6 +1124,7 @@ impl StorageManager {
                         watermark_updated_at_ms: row.get(1)?,
                         fresh_count,
                         metadata_refresh_count: 0,
+                        operation_replay_count: 0,
                         retry_ready_count,
                         retry_delayed_count,
                         dead_letter_count,
@@ -1108,9 +1184,37 @@ impl StorageManager {
                     |row| row.get(0),
                 )
                 .unwrap_or(0);
+            status.operation_replay_count = conn
+                .query_row(
+                    "SELECT COUNT(*)
+                     FROM operation_replay_queue oq
+                     JOIN timelines t ON t.id = oq.timeline_id
+                     LEFT JOIN bake_retry_state r ON r.timeline_id = t.id
+                     WHERE (
+                           oq.status = 'pending'
+                           OR (
+                               oq.status = 'claimed'
+                               AND COALESCE(oq.claimed_at_ms, 0) <= ?1
+                           )
+                     )
+                       AND t.category NOT IN (
+                           'bake_article', 'bake_knowledge', 'bake_sop', 'legacy_bake_candidate'
+                       )
+                       AND COALESCE(r.failure_count, 0) < ?2
+                       AND NOT EXISTS (
+                           SELECT 1 FROM bake_sops bs WHERE bs.timeline_id = t.id
+                       )",
+                    params![now.saturating_sub(30 * 60 * 1000), max_failures],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
             status.actionable_count = status
                 .actionable_count
-                .saturating_add(status.metadata_refresh_count);
+                .saturating_add(status.metadata_refresh_count)
+                .saturating_add(status.operation_replay_count);
+            status.pending_count = status
+                .pending_count
+                .saturating_add(status.operation_replay_count);
 
             // 只读取最近 5 条并计算“从最新一条开始连续”的 no_op 次数。
             // completed 空产物批次可能只是跳过低价值候选并推进了 watermark，
@@ -1297,17 +1401,18 @@ fn row_to_bake_candidate_audit(
         source_capture_count: row.get(4)?,
         effective_capture_count: row.get(5)?,
         sop_eligible: row.get::<_, i64>(6)? != 0,
-        sop_eligibility_reason: row.get(7)?,
-        sop_evidence_mode: row.get(8)?,
-        primary_type: row.get(9)?,
-        classification_reason: row.get(10)?,
-        sop_model_accepted: row.get::<_, Option<i64>>(11)?.map(|value| value != 0),
-        sop_model_reason: row.get(12)?,
-        sop_payload_valid: row.get::<_, Option<i64>>(13)?.map(|value| value != 0),
-        persist_status: row.get(14)?,
-        persist_reason: row.get(15)?,
-        created_at_ms: row.get(16)?,
-        updated_at_ms: row.get(17)?,
+        sop_eligibility_state: row.get(7)?,
+        sop_eligibility_reason: row.get(8)?,
+        sop_evidence_mode: row.get(9)?,
+        primary_type: row.get(10)?,
+        classification_reason: row.get(11)?,
+        sop_model_accepted: row.get::<_, Option<i64>>(12)?.map(|value| value != 0),
+        sop_model_reason: row.get(13)?,
+        sop_payload_valid: row.get::<_, Option<i64>>(14)?.map(|value| value != 0),
+        persist_status: row.get(15)?,
+        persist_reason: row.get(16)?,
+        created_at_ms: row.get(17)?,
+        updated_at_ms: row.get(18)?,
     })
 }
 
@@ -1374,6 +1479,7 @@ mod tests {
             source_capture_count: 3,
             effective_capture_count: 3,
             sop_eligible: true,
+            sop_eligibility_state: "eligible".to_string(),
             sop_eligibility_reason: Some("eligible_operation_evidence".to_string()),
             sop_evidence_mode: Some("direct_interaction".to_string()),
             persist_status: "queued".to_string(),
@@ -1412,6 +1518,50 @@ mod tests {
         assert_eq!(funnel.model_accepted_count, 1);
         assert_eq!(funnel.payload_valid_count, 1);
         assert_eq!(funnel.persisted_count, 1);
+    }
+
+    #[test]
+    fn operation_replay_queue_claim_and_finish_are_explicit_and_local() {
+        let mgr = make_mgr();
+        let run_id = mgr
+            .insert_bake_run(&NewBakeRun {
+                trigger_reason: "test".to_string(),
+                status: "running".to_string(),
+                started_at: 1_710_000_000_000,
+            })
+            .unwrap();
+        mgr.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO captures
+                 (id, ts, event_type, is_sensitive, pii_scrubbed)
+                 VALUES (42, 1710000000000, 'key_pause', 0, 0)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO timelines
+                 (id, capture_id, summary, category, history_view, is_self_generated,
+                  created_at_ms, updated_at_ms)
+                 VALUES (42, 42, 'test', 'coding', 0, 0, 1710000000000, 1710000000000)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO operation_replay_queue
+                 (timeline_id, reason, status, priority, queued_at_ms)
+                 VALUES (42, 'test', 'pending', 10, 1710000000000)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(mgr.count_pending_operation_replays(3).unwrap(), 1);
+        assert!(mgr.claim_operation_replay(42, run_id).unwrap());
+        assert_eq!(mgr.count_pending_operation_replays(3).unwrap(), 0);
+        mgr.finish_operation_replay(42, "pending").unwrap();
+        assert_eq!(mgr.count_pending_operation_replays(3).unwrap(), 1);
+        assert!(mgr.claim_operation_replay(42, run_id).unwrap());
+        mgr.finish_operation_replay(42, "completed").unwrap();
+        assert_eq!(mgr.count_pending_operation_replays(3).unwrap(), 0);
     }
 
     #[test]

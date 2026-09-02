@@ -7,12 +7,14 @@ use serde::Serialize;
 #[derive(Serialize)]
 pub struct HealthResponse {
     pub status: &'static str,
+    pub service: &'static str,
     pub version: &'static str,
 }
 
 pub async fn health_handler() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
+        service: "memory-bread-core",
         version: env!("CARGO_PKG_VERSION"),
     })
 }
@@ -25,6 +27,7 @@ mod tests {
     async fn test_health_returns_ok() {
         let Json(resp) = health_handler().await;
         assert_eq!(resp.status, "ok");
+        assert_eq!(resp.service, "memory-bread-core");
         assert!(!resp.version.is_empty());
     }
 }

@@ -94,6 +94,94 @@ def test_failure_exposes_stable_code_and_privacy_safe_report(monkeypatch, tmp_pa
     assert "prompt" not in report
 
 
+def test_transient_stage_failure_is_repaired_before_user_action(monkeypatch, tmp_path):
+    manager = InitializationManager(base_dir=tmp_path)
+    _stub_successful_stages(monkeypatch, manager)
+    attempts = {"count": 0}
+
+    def transient_model_failure(_mode, _state):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise InitializationFailure("MODEL_DOWNLOAD_FAILED", "temporary network failure")
+        return False, "capture model recovered"
+
+    monkeypatch.setattr(manager, "_stage_capture_model", transient_model_failure)
+
+    manager.start("normal")
+    finished = _wait_for_terminal(manager)
+
+    assert finished["state"] == "completed"
+    assert attempts["count"] == 2
+    assert finished["recovery"]["status"] == "succeeded"
+    assert finished["recovery"]["action"] == "resume_capture_model"
+
+
+def test_database_stage_requests_owned_core_restart_and_recovers(monkeypatch, tmp_path):
+    manager = InitializationManager(base_dir=tmp_path)
+    monkeypatch.setenv("MEMORY_BREAD_PACKAGED", "1")
+    monkeypatch.setattr(manager, "_core_healthy", lambda: False)
+    monkeypatch.setattr(manager, "_wait_for_core_health", lambda _timeout: False)
+    monkeypatch.setattr(manager, "_validate_database", lambda _path: None)
+
+    def acknowledge_repair(request_path, _timeout):
+        assert request_path.is_file()
+        request_path.unlink()
+        return True
+
+    monkeypatch.setattr(manager, "_wait_for_backend_repair", acknowledge_repair)
+    state = manager._new_state("normal")
+    manager._save_state(state)
+
+    skipped, detail = manager._stage_database("normal", state)
+    recovered = manager.get_status()["recovery"]
+
+    assert skipped is False
+    assert "迁移与读写检查通过" in detail
+    assert recovered["status"] == "succeeded"
+    assert recovered["action"] == "restart_core_service"
+
+
+def test_database_repair_does_not_delete_existing_data_on_failure(monkeypatch, tmp_path):
+    manager = InitializationManager(base_dir=tmp_path)
+    database = manager._database_path("normal")
+    database.parent.mkdir(parents=True, exist_ok=True)
+    database.write_bytes(b"existing-user-data")
+    monkeypatch.setattr(manager, "_core_healthy", lambda: True)
+    monkeypatch.setattr(manager, "_wait_for_backend_repair", lambda *_args: False)
+
+    with pytest.raises(InitializationFailure) as caught:
+        manager._stage_database("normal", manager._new_state("normal"))
+
+    assert caught.value.code == "DATABASE_INITIALIZATION_FAILED"
+    assert database.read_bytes() == b"existing-user-data"
+
+
+def test_unknown_process_on_core_port_is_not_terminated(monkeypatch, tmp_path):
+    manager = InitializationManager(base_dir=tmp_path)
+    state = manager._new_state("normal")
+    manager._save_state(state)
+    monkeypatch.setattr(manager, "_core_healthy", lambda: False)
+    monkeypatch.setattr(manager, "_wait_for_core_health", lambda _timeout: False)
+    monkeypatch.setattr(manager, "_request_core_repair_and_wait", lambda *_args: False)
+    monkeypatch.setattr(manager, "_port_in_use", lambda port: port == 7070)
+
+    with pytest.raises(InitializationFailure) as caught:
+        manager._ensure_normal_core_ready(state)
+
+    assert caught.value.code == "CORE_PORT_CONFLICT"
+
+
+def test_core_health_requires_the_expected_service_identity(monkeypatch, tmp_path):
+    manager = InitializationManager(base_dir=tmp_path)
+    monkeypatch.setattr(
+        manager,
+        "_http_json",
+        lambda *_args, **_kwargs: {"status": "ok", "version": "1.0"},
+    )
+
+    assert manager._core_healthy() is False
+
+
 def _CAPTURE_INTERNAL_NAME_FOR_TEST() -> str:
     # 测试只确认端侧脱敏，不把内部名称写入断言输出。
     return "qwen3.5:4b"

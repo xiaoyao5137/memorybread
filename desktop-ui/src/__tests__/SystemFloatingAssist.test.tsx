@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import SystemFloatingAssist from '../components/SystemFloatingAssist'
 import { useAppStore } from '../store/useAppStore'
-import { runRagQueryStream } from '../hooks/useApi'
+import { runGatewayRagQueryStream, runRagQueryStream } from '../hooks/useApi'
 import {
   FLOATING_ASSIST_AUTO_TASK_KEY,
   FLOATING_ASSIST_ENABLED_KEY,
@@ -44,6 +44,7 @@ vi.mock('../utils/breadcrumbApi', () => ({
 
 const mockedInvoke = vi.mocked(invoke)
 const mockedListen = vi.mocked(listen)
+const mockedRunGatewayRagQueryStream = vi.mocked(runGatewayRagQueryStream)
 const mockedRunRagQueryStream = vi.mocked(runRagQueryStream)
 const assistButton = () => screen.getByRole('button', { name: /^单击：/ })
 const AUTO_TASK_SCAN_INITIAL_DELAY_MS = 10_000
@@ -178,6 +179,12 @@ beforeEach(() => {
     contexts: [],
     output_truncated: false,
   } as any)
+  mockedRunGatewayRagQueryStream.mockReset()
+  mockedRunGatewayRagQueryStream.mockResolvedValue({
+    answer: '云端咨询输出',
+    contexts: [],
+    output_truncated: false,
+  } as any)
   cloudMocks.fetchBreadcrumbProfile.mockReset()
   cloudMocks.fetchBreadcrumbProfile.mockResolvedValue({ breadcrumbs: [], equipped: {} })
   cloudMocks.fetchBillingBalance.mockReset()
@@ -192,6 +199,18 @@ afterEach(() => {
 })
 
 describe('SystemFloatingAssist', () => {
+  it('只在开发模式显示悬浮球开发标识', () => {
+    const { rerender } = render(<SystemFloatingAssist developmentMode />)
+
+    expect(screen.getByText('开发模式')).toBeInTheDocument()
+    expect(assistButton()).toHaveClass('system-floating-assist__ball--development')
+
+    rerender(<SystemFloatingAssist developmentMode={false} />)
+
+    expect(screen.queryByText('开发模式')).not.toBeInTheDocument()
+    expect(assistButton()).not.toHaveClass('system-floating-assist__ball--development')
+  })
+
   it('离线启动时直接显示本地悬浮助手并读取本机面包屑', () => {
     useAppStore.getState().setAuthSession({
       access_token: 'mbs_offline_floating_token',
@@ -375,6 +394,61 @@ describe('SystemFloatingAssist', () => {
       await flushMicrotasks()
     })
     expect(captureOcrCalls()).toHaveLength(1)
+    expect(captureOcrCalls()[0]).toEqual([
+      'capture_screen_ocr_for_floating_assist',
+      { hideFloatingWindow: false },
+    ])
+  })
+
+  it('云端屏幕咨询失败时自动切换本地能力并交付答案', async () => {
+    const balance = {
+      available: '100.0000',
+      reserved: '0.0000',
+      currency: 'CREDIT',
+      as_of: '2026-08-29T00:00:00Z',
+    }
+    useAppStore.getState().setAuthSession({
+      access_token: 'floating-cloud-token',
+      expires_at: '2099-01-01T00:00:00Z',
+      user: {
+        id: '00000000-0000-0000-0000-000000000001',
+        nickname: '测试用户',
+        status: 'active',
+        roles: ['user'],
+        locale: 'zh-CN',
+        timezone: 'Asia/Shanghai',
+        created_at: '2026-01-01T00:00:00Z',
+      },
+    })
+    useAppStore.getState().setCloudBalance(balance)
+    useAppStore.getState().setCreationModelConfig('mbcd-plus-v1', { enabled: true })
+    cloudMocks.fetchBillingBalance.mockResolvedValue(balance)
+    mockedRunGatewayRagQueryStream.mockRejectedValue(new TypeError('Failed to fetch'))
+    mockedRunRagQueryStream.mockResolvedValue({
+      answer: '本地备用题解',
+      contexts: [],
+      model: 'mbcd-std-v1',
+    } as any)
+    window.localStorage.setItem(INTERACTION_SETTINGS_KEY, JSON.stringify({
+      ...readInteractionSettings(),
+      floatingBall: {
+        singleClick: 'none',
+        doubleClick: 'recognize_screen_task',
+      },
+    }))
+
+    render(<SystemFloatingAssist />)
+    fireEvent.doubleClick(assistButton())
+    await act(async () => {
+      await flushMicrotasks()
+      vi.advanceTimersByTime(900)
+      await flushMicrotasks()
+    })
+
+    expect(mockedRunGatewayRagQueryStream).toHaveBeenCalledTimes(1)
+    expect(mockedRunRagQueryStream).toHaveBeenCalledTimes(1)
+    expect(mockedRunRagQueryStream.mock.calls[0]?.[5]).toBe(false)
+    expect(screen.getByText('本地备用题解')).toBeInTheDocument()
   })
 
   it('默认显示 5 条参考资料并支持展开和收起更多资料', async () => {

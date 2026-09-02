@@ -44,6 +44,7 @@ describe('创作 Tool 配置', () => {
       'memory_search',
       'data_search',
       'webpage_scrape',
+      'mermaid_diagram',
     ])
   })
 
@@ -91,16 +92,20 @@ describe('创作 Tool 配置', () => {
     })
   })
 
-  it('Mermaid 画图工具默认未安装，可独立安装并开启', () => {
+  it('Mermaid 画图工具默认启用，但仍可由用户关闭', () => {
     let tools = loadCreationTools()
     expect(tools.find(tool => tool.id === 'mermaid_diagram')).toMatchObject({
-      installed: false,
+      installed: true,
+      enabled: true,
+    })
+    expect(enabledCreationToolIds(tools)).toContain('mermaid_diagram')
+
+    tools = setCreationToolEnabled(tools, 'mermaid_diagram', false)
+    expect(enabledCreationToolIds(tools)).not.toContain('mermaid_diagram')
+    saveCreationTools(tools)
+    expect(loadCreationTools().find(tool => tool.id === 'mermaid_diagram')).toMatchObject({
+      installed: true,
       enabled: false,
     })
-    expect(enabledCreationToolIds(tools)).not.toContain('mermaid_diagram')
-
-    tools = setCreationToolInstalled(tools, 'mermaid_diagram', true)
-    tools = setCreationToolEnabled(tools, 'mermaid_diagram', true)
-    expect(enabledCreationToolIds(tools)).toContain('mermaid_diagram')
   })
 })

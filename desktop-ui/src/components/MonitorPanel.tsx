@@ -109,6 +109,15 @@ const EMPTY_OVERVIEW: MonitorOverview = {
     last_extraction_at_ms: null,
     extractor_status: 'idle',
   },
+  operation_flow: {
+    period_audited_count: 0,
+    eligible_count: 0,
+    needs_enrichment_count: 0,
+    rejected_count: 0,
+    eligible_rate: 0,
+    pending_replay_count: 0,
+    zero_eligible_alert: false,
+  },
   rag_sessions: {
     today_count: 0,
     period_count: 0,
@@ -796,13 +805,14 @@ const ExtractionQueueCard: React.FC<{
   )
 }
 
-const BakeQueueCard: React.FC<{
+export const BakeQueueCard: React.FC<{
   pending: number
   oldestPendingAtMs: number | null | undefined
   runningCount: number
   staleRunCount: number
   retryExhaustedCount: number
   freshPendingCount: number
+  operationReplayCount: number
   retryReadyCount: number
   retryDelayedCount: number
   noProgressCount: number
@@ -818,6 +828,7 @@ const BakeQueueCard: React.FC<{
   staleRunCount,
   retryExhaustedCount,
   freshPendingCount,
+  operationReplayCount,
   retryReadyCount,
   retryDelayedCount,
   noProgressCount,
@@ -848,6 +859,7 @@ const BakeQueueCard: React.FC<{
     : `当前无待烘焙内容 · 运行 ${runningCount}`
   const retryParts = [
     freshPendingCount > 0 ? `新任务 ${freshPendingCount}` : '',
+    operationReplayCount > 0 ? `历史回放 ${operationReplayCount}` : '',
     retryReadyCount > 0 ? `可重试 ${retryReadyCount}` : '',
     retryDelayedCount > 0 ? `退避中 ${retryDelayedCount}` : '',
     retryExhaustedCount > 0 ? `需处理 ${retryExhaustedCount}` : '',
@@ -858,7 +870,7 @@ const BakeQueueCard: React.FC<{
   return (
     <div
       className="monitor-stat-card"
-      title="当前库存：位于烘焙水位之后、尚未生成知识、文档或操作手册的高价值候选；实质文档不依赖 importance 才能进入统计。"
+      title="当前库存按新任务、历史回放和重试分层展示；终态失败不计入等待总数。"
       style={{ background: `${color}10`, borderColor: `${color}20` }}
     >
       <div className="monitor-stat-card__label">烘焙等待队列</div>
@@ -1294,6 +1306,10 @@ const OverviewContent: React.FC<{
     ...(data?.task_executions ?? {}),
     recent: data?.task_executions?.recent ?? [],
   }
+  const operation_flow = {
+    ...EMPTY_OVERVIEW.operation_flow,
+    ...(data?.operation_flow ?? {}),
+  }
   const serviceHealth = liveData?.service_health ?? data?.service_health ?? EMPTY_OVERVIEW.service_health
   const tokenTrendSeries = token_usage.trend_by_model.length > 0
     ? token_usage.trend_by_model.map((item, index) => ({
@@ -1356,6 +1372,20 @@ const OverviewContent: React.FC<{
         upstreamFailures={knowledge_flow.bake_upstream_failure_count ?? 0}
         otherFailures={knowledge_flow.bake_other_failure_count}
       />
+      {operation_flow.zero_eligible_alert && (
+        <div style={{
+          ...cardStyle,
+          borderColor: 'rgba(255, 59, 48, 0.35)',
+          background: 'rgba(255, 59, 48, 0.08)',
+          color: 'var(--mb-text-primary)',
+          marginBottom: 14,
+        }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#FF3B30' }}>操作记忆准入连续为 0</div>
+          <div style={{ marginTop: 5, fontSize: 12, color: 'var(--mb-text-secondary)' }}>
+            当前范围已审计 {fmt(operation_flow.period_audited_count)} 条候选，请检查动作证据、结果归因和 OCR 回填。
+          </div>
+        </div>
+      )}
       <div className="monitor-metric-grid">
         <StatCard label="Token 用量" value={fmt(token_usage.total_period)}
           sub={`今日 ${fmt(token_usage.total_today)}`} color="#007AFF" />
@@ -1373,6 +1403,12 @@ const OverviewContent: React.FC<{
           sub={`近 6 小时跳过/降级 ${fmt(skippedAttemptCount)} 次`} color={captureBlackoutExceeded ? '#FF3B30' : '#34C759'} />
         <StatCard label="知识提炼" value={fmt(knowledge_flow.period_count)}
           sub={`今日 ${fmt(knowledge_flow.today_count)}`} color="#BF5AF2" />
+        <StatCard label="操作候选准入率" value={`${(operation_flow.eligible_rate * 100).toFixed(0)}%`}
+          sub={`准入 ${fmt(operation_flow.eligible_count)}/${fmt(operation_flow.period_audited_count)}`} color="#30B0C7" />
+        <StatCard label="操作证据待补齐" value={fmt(operation_flow.needs_enrichment_count)}
+          sub={`已拒绝 ${fmt(operation_flow.rejected_count)}`} color="#FF9500" />
+        <StatCard label="操作历史回放" value={fmt(operation_flow.pending_replay_count)}
+          sub="占用既有烘焙配额，不追加模型调用" color="#5E5CE6" />
         <ExtractionQueueCard
           pending={knowledge_flow.pending_extraction_count}
           status={knowledge_flow.extractor_status}
@@ -1388,6 +1424,7 @@ const OverviewContent: React.FC<{
           staleRunCount={knowledge_flow.stale_bake_run_count}
           retryExhaustedCount={knowledge_flow.bake_retry_exhausted_count}
           freshPendingCount={knowledge_flow.bake_fresh_pending_count ?? 0}
+          operationReplayCount={operation_flow.pending_replay_count ?? 0}
           retryReadyCount={knowledge_flow.bake_retry_ready_count ?? 0}
           retryDelayedCount={knowledge_flow.bake_retry_delayed_count ?? 0}
           noProgressCount={knowledge_flow.bake_recent_no_progress_count ?? 0}

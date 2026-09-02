@@ -88,6 +88,52 @@ async fn spawn_bake_sidecar(responses: Vec<String>) -> String {
     format!("http://{}", addr)
 }
 
+async fn spawn_capturing_sidecar(response: String) -> (String, Arc<Mutex<Vec<u8>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    tokio::spawn({
+        let captured = Arc::clone(&captured);
+        async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let Ok(size) = stream.read(&mut buffer).await else {
+                    break;
+                };
+                if size == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..size]);
+                let Some(header_end) = request.windows(4).position(|item| item == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            captured.lock().await.extend_from_slice(&request);
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    (format!("http://{}", addr), captured)
+}
+
 fn make_bake_response(
     knowledge: serde_json::Value,
     template: serde_json::Value,
@@ -121,6 +167,65 @@ fn make_bake_error_response(status_line: &str, body: &str) -> String {
     )
 }
 
+fn make_json_response(value: serde_json::Value) -> String {
+    let body = value.to_string();
+    format!(
+        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
+fn dynamic_question(id: &str, dimension: &str, prompt: &str) -> serde_json::Value {
+    serde_json::json!({
+        "status": "question",
+        "readiness_reason": "仍有会影响当前分支的关键细节需要确认",
+        "open_flags": [prompt],
+        "question": {
+            "id": id,
+            "dimension_id": format!("test_{id}"),
+            "dimension": dimension,
+            "type": "single_choice",
+            "prompt": prompt,
+            "why_now": "这个选择会改变后续方案结构与落地边界。",
+            "required": true,
+            "allow_custom": true,
+            "options": [
+                {
+                    "id": "recommended",
+                    "label": "推荐方向",
+                    "description": "更利于先形成可验证闭环。",
+                    "recommended": true
+                },
+                {
+                    "id": "alternative",
+                    "label": "备选方向",
+                    "description": "覆盖更广，但需要承担额外投入。",
+                    "recommended": false
+                }
+            ],
+            "answer_template": "补充你的实际情况。"
+        }
+    })
+}
+
+async fn make_brainstorm_test_router(
+    responses: Vec<serde_json::Value>,
+) -> (axum::Router, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("test.db");
+    let sm = StorageManager::open(&db).unwrap();
+    let creation_sidecar_url =
+        spawn_bake_sidecar(responses.into_iter().map(make_json_response).collect()).await;
+    let state = AppState::with_service_urls(
+        sm,
+        "http://127.0.0.1:7071".to_string(),
+        creation_sidecar_url,
+        vec![],
+    );
+    (memory_bread_core::api::create_router(state), tmp)
+}
+
 fn make_bake_state(sm: StorageManager, sidecar_url: String) -> Arc<AppState> {
     let state = AppState::with_config(sm, sidecar_url, vec![]);
     state
@@ -144,6 +249,21 @@ async fn oneshot(router: axum::Router, req: Request<Body>) -> (StatusCode, Strin
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let body = String::from_utf8_lossy(&bytes).to_string();
     (status, body)
+}
+
+async fn brainstorm_turn(
+    router: axum::Router,
+    payload: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/creation/brainstorm/turn")
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+    let (status, body) = oneshot(router, req).await;
+    let json = serde_json::from_str(&body).unwrap_or_else(|_| serde_json::json!({ "body": body }));
+    (status, json)
 }
 
 async fn set_favorite(
@@ -215,6 +335,538 @@ async fn bake_artifact_audits_api_returns_branch_decisions_without_candidate_con
     assert_eq!(json["items"][0]["persist_status"], "false_negative");
     assert_eq!(json["items"][0]["deterministic_eligible"], true);
     assert!(!body.contains("candidate_content"));
+}
+
+#[tokio::test]
+async fn creation_brainstorm_turn_persists_each_answer_and_advances_one_question() {
+    let (router, _tmp) = make_brainstorm_test_router(vec![
+        dynamic_question(
+            "q_deployment",
+            "部署方向",
+            "这套知识库更适合采用哪种部署边界？",
+        ),
+        dynamic_question(
+            "q_private_infra",
+            "私有化部署下钻",
+            "选择私有化后，首先要适配哪一种基础设施？",
+        ),
+        dynamic_question(
+            "q_revised_followup",
+            "方向调整下钻",
+            "调整方向后，下一步优先确认什么？",
+        ),
+    ])
+    .await;
+    let (start_status, start) = brainstorm_turn(
+        router.clone(),
+        serde_json::json!({
+            "session_id": "session-brainstorm-1",
+            "root_request": "设计企业知识库方案",
+            "action": "start"
+        }),
+    )
+    .await;
+    assert_eq!(start_status, StatusCode::OK, "start: {start}");
+    assert_eq!(start["revision"], 0);
+    assert_eq!(start["current_question"]["id"], "q_deployment");
+    assert_eq!(start["current_question"]["options"][0]["recommended"], true);
+    assert!(start.get("total_questions").is_none());
+
+    let (answer_status, answer) = brainstorm_turn(
+        router.clone(),
+        serde_json::json!({
+            "session_id": "session-brainstorm-1",
+            "root_request": "设计企业知识库方案",
+            "action": "answer",
+            "revision": 0,
+            "question_id": "q_deployment",
+            "answer": { "selected_option_ids": ["recommended"], "custom_text": "" }
+        }),
+    )
+    .await;
+    assert_eq!(answer_status, StatusCode::OK, "answer: {answer}");
+    assert_eq!(answer["revision"], 1);
+    assert_eq!(answer["answered_count"], 1);
+    assert_eq!(answer["current_question"]["id"], "q_private_infra");
+    assert_eq!(answer["history"][0]["question"]["id"], "q_deployment");
+    assert_eq!(
+        answer["history"][0]["answer"]["selected_option_ids"],
+        serde_json::json!(["recommended"])
+    );
+    assert_eq!(answer["history"][0]["answer"]["custom_text"], "");
+    assert!(answer["brief_markdown"]
+        .as_str()
+        .unwrap()
+        .contains("推荐方向"));
+
+    let (restore_status, restored) = brainstorm_turn(
+        router.clone(),
+        serde_json::json!({
+            "session_id": "session-brainstorm-1",
+            "root_request": "设计企业知识库方案",
+            "action": "start"
+        }),
+    )
+    .await;
+    assert_eq!(restore_status, StatusCode::OK);
+    assert_eq!(restored["revision"], 1);
+    assert_eq!(restored["current_question"]["id"], "q_private_infra");
+    assert_eq!(restored["history"][0]["question"]["id"], "q_deployment");
+
+    let (revise_status, revised) = brainstorm_turn(
+        router,
+        serde_json::json!({
+            "session_id": "session-brainstorm-1",
+            "root_request": "设计企业知识库方案",
+            "action": "revise_answer",
+            "revision": 1,
+            "question_id": "q_deployment",
+            "answer": { "selected_option_ids": [], "custom_text": "先走混合部署" }
+        }),
+    )
+    .await;
+    assert_eq!(revise_status, StatusCode::OK, "revise: {revised}");
+    assert_eq!(revised["revision"], 2);
+    assert_eq!(
+        revised["history"][0]["answer"]["selected_option_ids"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        revised["history"][0]["answer"]["custom_text"],
+        "先走混合部署"
+    );
+    assert_eq!(revised["current_question"]["id"], "q_revised_followup");
+}
+
+#[tokio::test]
+async fn creation_brainstorm_rejects_combined_option_and_custom_answers() {
+    let (router, _tmp) = make_brainstorm_test_router(vec![dynamic_question(
+        "q_exclusive_answer",
+        "答案方式",
+        "请选择预设答案或自定义答案？",
+    )])
+    .await;
+    let (start_status, _) = brainstorm_turn(
+        router.clone(),
+        serde_json::json!({
+            "session_id": "session-brainstorm-exclusive-answer",
+            "root_request": "设计企业知识库方案",
+            "action": "start"
+        }),
+    )
+    .await;
+    assert_eq!(start_status, StatusCode::OK);
+
+    let (answer_status, answer) = brainstorm_turn(
+        router.clone(),
+        serde_json::json!({
+            "session_id": "session-brainstorm-exclusive-answer",
+            "root_request": "设计企业知识库方案",
+            "action": "answer",
+            "revision": 0,
+            "question_id": "q_exclusive_answer",
+            "answer": {
+                "selected_option_ids": ["recommended"],
+                "custom_text": "同时提交的自定义答案"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(answer_status, StatusCode::BAD_REQUEST);
+    assert_eq!(answer["code"], "BRAINSTORM_INVALID_ANSWER");
+
+    let (restore_status, restored) = brainstorm_turn(
+        router,
+        serde_json::json!({
+            "session_id": "session-brainstorm-exclusive-answer",
+            "root_request": "设计企业知识库方案",
+            "action": "start"
+        }),
+    )
+    .await;
+    assert_eq!(restore_status, StatusCode::OK);
+    assert_eq!(restored["revision"], 0);
+    assert_eq!(restored["answered_count"], 0);
+    assert_eq!(restored["current_question"]["id"], "q_exclusive_answer");
+}
+
+#[tokio::test]
+async fn creation_brainstorm_persists_and_forwards_selected_skill_context() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("test.db");
+    let sm = StorageManager::open(&db).unwrap();
+    let response = make_json_response(dynamic_question(
+        "q_business_outcome",
+        "业务目标与预期决策",
+        "广告诊断首先要推动什么业务动作？",
+    ));
+    let (creation_sidecar_url, captured) = spawn_capturing_sidecar(response).await;
+    let state = AppState::with_service_urls(
+        sm,
+        "http://127.0.0.1:7071".to_string(),
+        creation_sidecar_url,
+        vec![],
+    );
+    let router = memory_bread_core::api::create_router(state);
+
+    let (status, body) = brainstorm_turn(
+        router,
+        serde_json::json!({
+            "session_id": "session-brainstorm-skill",
+            "root_request": "设计广告诊断接口方案",
+            "action": "start",
+            "selected_skills": [{
+                "id": "microservice-solution",
+                "title": "微服务模块技术方案文档",
+                "summary": "覆盖业务流程、数据所有权、RACI 和上线验收"
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "start: {body}");
+
+    let request = String::from_utf8(captured.lock().await.clone()).unwrap();
+    let request_body = request.split("\r\n\r\n").nth(1).unwrap();
+    let payload: serde_json::Value = serde_json::from_str(request_body).unwrap();
+    assert_eq!(
+        payload["selected_skills"][0]["title"],
+        "微服务模块技术方案文档"
+    );
+    assert_eq!(payload["selected_skills"][0]["id"], "microservice-solution");
+}
+
+#[tokio::test]
+async fn creation_brainstorm_hydrates_skill_context_for_legacy_session_on_next_turn() {
+    let (router, tmp) = make_brainstorm_test_router(vec![
+        dynamic_question("q_legacy", "背景", "先确认哪项背景？"),
+        dynamic_question("q_architecture", "总体方案与能力架构", "采用哪种能力架构？"),
+    ])
+    .await;
+    let (_, started) = brainstorm_turn(
+        router.clone(),
+        serde_json::json!({
+            "session_id": "session-brainstorm-legacy-skill",
+            "root_request": "设计原创剧本生成方案",
+            "action": "start"
+        }),
+    )
+    .await;
+    let (status, answered) = brainstorm_turn(
+        router,
+        serde_json::json!({
+            "session_id": "session-brainstorm-legacy-skill",
+            "root_request": "设计原创剧本生成方案",
+            "action": "answer",
+            "revision": started["revision"],
+            "question_id": "q_legacy",
+            "selected_skills": [{
+                "id": "product-solution",
+                "title": "产品技术方案模板",
+                "executionSteps": [{
+                    "id": "architecture",
+                    "title": "总体方案与系统边界"
+                }]
+            }],
+            "answer": { "selected_option_ids": ["recommended"], "custom_text": "" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "answer: {answered}");
+
+    let storage = StorageManager::open(&tmp.path().join("test.db")).unwrap();
+    let state_json: String = storage
+        .with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT state_json FROM creation_brainstorm_sessions WHERE session_id = ?1",
+                ["session-brainstorm-legacy-skill"],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    let stored: serde_json::Value = serde_json::from_str(&state_json).unwrap();
+    assert_eq!(stored["selected_skills"][0]["id"], "product-solution");
+    assert_eq!(
+        stored["selected_skills"][0]["executionSteps"][0]["title"],
+        "总体方案与系统边界"
+    );
+}
+
+#[tokio::test]
+async fn creation_brainstorm_rejects_stale_revision_and_requires_explicit_assumptions() {
+    let (router, _tmp) = make_brainstorm_test_router(vec![
+        dynamic_question("q_direction", "方向选择", "更倾向哪一种整体方案方向？"),
+        dynamic_question(
+            "q_direction_detail",
+            "方向下钻",
+            "这个方向先解决哪一个子问题？",
+        ),
+    ])
+    .await;
+    let (_, _) = brainstorm_turn(
+        router.clone(),
+        serde_json::json!({
+            "session_id": "session-brainstorm-2",
+            "root_request": "设计产品方案",
+            "action": "start"
+        }),
+    )
+    .await;
+    let (_, _) = brainstorm_turn(
+        router.clone(),
+        serde_json::json!({
+            "session_id": "session-brainstorm-2",
+            "root_request": "设计产品方案",
+            "action": "answer",
+            "revision": 0,
+            "question_id": "q_direction",
+            "answer": { "selected_option_ids": ["recommended"], "custom_text": "" }
+        }),
+    )
+    .await;
+
+    let (conflict_status, conflict) = brainstorm_turn(
+        router.clone(),
+        serde_json::json!({
+            "session_id": "session-brainstorm-2",
+            "root_request": "设计产品方案",
+            "action": "answer",
+            "revision": 0,
+            "question_id": "q_direction_detail",
+            "answer": { "selected_option_ids": ["recommended"], "custom_text": "" }
+        }),
+    )
+    .await;
+    assert_eq!(conflict_status, StatusCode::CONFLICT);
+    assert_eq!(conflict["code"], "BRAINSTORM_REVISION_CONFLICT");
+
+    let (not_ready_status, not_ready) = brainstorm_turn(
+        router.clone(),
+        serde_json::json!({
+            "session_id": "session-brainstorm-2",
+            "root_request": "设计产品方案",
+            "action": "finish",
+            "revision": 1,
+            "accept_assumptions": false
+        }),
+    )
+    .await;
+    assert_eq!(not_ready_status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(not_ready["code"], "BRAINSTORM_NOT_READY");
+
+    let (ready_status, ready) = brainstorm_turn(
+        router,
+        serde_json::json!({
+            "session_id": "session-brainstorm-2",
+            "root_request": "设计产品方案",
+            "action": "finish",
+            "revision": 1,
+            "accept_assumptions": true
+        }),
+    )
+    .await;
+    assert_eq!(ready_status, StatusCode::OK);
+    assert_eq!(ready["phase"], "ready");
+    assert!(ready["open_flags"].as_array().unwrap().len() > 0);
+}
+
+#[tokio::test]
+async fn creation_brainstorm_reopen_invalidates_downstream_and_skip_records_assumption() {
+    let (router, _tmp) = make_brainstorm_test_router(vec![
+        dynamic_question("q_platform", "平台方向", "平台优先服务哪类场景？"),
+        dynamic_question("q_scene", "场景下钻", "这个场景首先覆盖哪类用户？"),
+        dynamic_question("q_user", "用户下钻", "这类用户最关键的任务是什么？"),
+        dynamic_question("q_after_skip", "假设后续", "基于当前假设还要确认什么？"),
+    ])
+    .await;
+    let (_, _) = brainstorm_turn(
+        router.clone(),
+        serde_json::json!({
+            "session_id": "session-brainstorm-3",
+            "root_request": "设计企业知识库方案",
+            "action": "start"
+        }),
+    )
+    .await;
+    let (_, first) = brainstorm_turn(
+        router.clone(),
+        serde_json::json!({
+            "session_id": "session-brainstorm-3",
+            "root_request": "设计企业知识库方案",
+            "action": "answer",
+            "revision": 0,
+            "question_id": "q_platform",
+            "answer": { "selected_option_ids": ["recommended"], "custom_text": "" }
+        }),
+    )
+    .await;
+    assert_eq!(first["revision"], 1);
+    let (_, second) = brainstorm_turn(
+        router.clone(),
+        serde_json::json!({
+            "session_id": "session-brainstorm-3",
+            "root_request": "设计企业知识库方案",
+            "action": "answer",
+            "revision": 1,
+            "question_id": "q_scene",
+            "answer": { "selected_option_ids": ["recommended"], "custom_text": "" }
+        }),
+    )
+    .await;
+    assert_eq!(second["answered_count"], 2);
+
+    let (reopen_status, reopened) = brainstorm_turn(
+        router.clone(),
+        serde_json::json!({
+            "session_id": "session-brainstorm-3",
+            "root_request": "设计企业知识库方案",
+            "action": "reopen",
+            "revision": 2,
+            "question_id": "q_platform"
+        }),
+    )
+    .await;
+    assert_eq!(reopen_status, StatusCode::OK, "reopen: {reopened}");
+    assert_eq!(reopened["revision"], 3);
+    assert_eq!(reopened["answered_count"], 0);
+    assert_eq!(reopened["current_question"]["id"], "q_platform");
+    assert_eq!(
+        reopened["invalidated_question_ids"],
+        serde_json::json!(["q_platform", "q_scene", "q_user"])
+    );
+
+    let (skip_status, skipped) = brainstorm_turn(
+        router,
+        serde_json::json!({
+            "session_id": "session-brainstorm-3",
+            "root_request": "设计企业知识库方案",
+            "action": "skip",
+            "revision": 3,
+            "question_id": "q_platform"
+        }),
+    )
+    .await;
+    assert_eq!(skip_status, StatusCode::OK, "skip: {skipped}");
+    assert_eq!(skipped["current_question"]["id"], "q_after_skip");
+    assert_eq!(skipped["decisions"][0]["source"], "agent_assumption");
+    assert!(skipped["brief_markdown"]
+        .as_str()
+        .unwrap()
+        .contains("合理假设"));
+}
+
+#[tokio::test]
+async fn creation_brainstorm_can_continue_in_a_model_recommended_direction_after_convergence() {
+    let ready = serde_json::json!({
+        "status": "ready",
+        "readiness_reason": "当前信息已足以形成方案主线",
+        "open_flags": ["仍可细化实施责任"],
+        "continuation_directions": [
+            {
+                "id": "implementation_ownership",
+                "label": "细化实施责任",
+                "description": "明确首个验证闭环的责任人和协作边界。",
+                "recommended": true
+            },
+            {
+                "id": "failure_scenarios",
+                "label": "挑战失败场景",
+                "description": "补充最可能推翻当前方案的风险。",
+                "recommended": false
+            }
+        ],
+        "question": null
+    });
+    let (router, _tmp) = make_brainstorm_test_router(vec![
+        dynamic_question("q_main", "核心方向", "最优先验证哪条核心路径？"),
+        ready,
+        dynamic_question("q_deeper", "实施责任下钻", "谁应负责第一个验证闭环？"),
+    ])
+    .await;
+    let (_, started) = brainstorm_turn(
+        router.clone(),
+        serde_json::json!({
+            "session_id": "session-brainstorm-deepen",
+            "root_request": "设计新产品验证方案",
+            "action": "start"
+        }),
+    )
+    .await;
+    let (_, ready_state) = brainstorm_turn(
+        router.clone(),
+        serde_json::json!({
+            "session_id": "session-brainstorm-deepen",
+            "root_request": "设计新产品验证方案",
+            "action": "answer",
+            "revision": started["revision"],
+            "question_id": "q_main",
+            "answer": { "selected_option_ids": ["recommended"], "custom_text": "" }
+        }),
+    )
+    .await;
+    assert_eq!(ready_state["phase"], "ready");
+    assert_eq!(ready_state["depth"], 1);
+    assert_eq!(ready_state["can_continue_brainstorm"], true);
+    assert_eq!(
+        ready_state["continuation_directions"][0]["id"],
+        "implementation_ownership"
+    );
+
+    let (continue_status, continued) = brainstorm_turn(
+        router,
+        serde_json::json!({
+            "session_id": "session-brainstorm-deepen",
+            "root_request": "设计新产品验证方案",
+            "action": "continue_brainstorm",
+            "revision": ready_state["revision"],
+            "continuation_direction_id": "implementation_ownership"
+        }),
+    )
+    .await;
+    assert_eq!(continue_status, StatusCode::OK, "continued: {continued}");
+    assert_eq!(continued["phase"], "exploring");
+    assert_eq!(continued["current_question"]["id"], "q_deeper");
+    assert_eq!(continued["depth"], 1);
+    assert_eq!(continued["continuation_directions"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn creation_brainstorm_model_can_mark_a_complete_request_ready_on_start() {
+    let ready = serde_json::json!({
+        "status": "ready",
+        "readiness_reason": "原始需求已经包含目标、边界和验收标准",
+        "open_flags": [],
+        "continuation_directions": [
+            {
+                "id": "challenge_assumptions",
+                "label": "挑战关键假设",
+                "description": "检查完整需求中仍可能失效的前提。",
+                "recommended": true
+            },
+            {
+                "id": "alternative_path",
+                "label": "探索替代路径",
+                "description": "比较另一个不会改变当前简报的实现方向。",
+                "recommended": false
+            }
+        ],
+        "question": null
+    });
+    let (router, _tmp) = make_brainstorm_test_router(vec![ready]).await;
+
+    let (status, state) = brainstorm_turn(
+        router,
+        serde_json::json!({
+            "session_id": "session-brainstorm-ready-on-start",
+            "root_request": "设计方案，目标、范围和验收标准均已明确",
+            "action": "start"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "state: {state}");
+    assert_eq!(state["phase"], "ready");
+    assert!(state["current_question"].is_null());
+    assert_eq!(state["can_continue_brainstorm"], true);
 }
 
 fn seed_capture(sm: &StorageManager) -> i64 {
@@ -399,7 +1051,7 @@ fn seed_artifact_ready_timeline(sm: &StorageManager, summary: &str, overview: &s
             overview: Some(overview.to_string()),
             details: Some(serde_json::json!({"source": "integration_test"}).to_string()),
             entities: r#"["周报","流程"]"#.to_string(),
-            category: "meeting".to_string(),
+            category: "document".to_string(),
             importance: 4,
             occurrence_count: Some(3),
             observed_at: Some(1_710_000_002_000),
@@ -832,6 +1484,107 @@ async fn test_bake_run_records_trigger_actionable_count() {
 }
 
 #[tokio::test]
+async fn test_bake_replay_existing_documents_do_not_starve_fresh_or_stall_queue() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("replay-document-starvation.db");
+    let sm = StorageManager::open(&db).unwrap();
+    let old_base = 1_710_000_000_000_i64;
+
+    // 复现线上形态：回放队首是一批已经拥有 document、但尚未终态收敛的历史
+    // timeline。修复前它们会在元数据刷新分支耗尽全部额度且永久保持 pending。
+    for offset in 0..10_i64 {
+        let timeline_id = seed_knowledge_entry(
+            &sm,
+            "meeting",
+            &format!("历史回放候选 {offset}"),
+            "已有文档的单帧历史操作",
+            serde_json::json!({}),
+        );
+        let candidate_ts = old_base + offset;
+        sm.with_conn(|conn| {
+            conn.execute(
+                "UPDATE timelines SET updated_at_ms = ?2 WHERE id = ?1",
+                rusqlite::params![timeline_id, candidate_ts],
+            )?;
+            conn.execute(
+                "INSERT INTO bake_documents
+                 (title, source_memory_ids, source_capture_ids, source_episode_ids,
+                  created_at, updated_at)
+                 VALUES (?1, ?2, '[]', ?2, ?3, ?3)",
+                rusqlite::params![
+                    format!("历史文档 {offset}"),
+                    serde_json::json!([timeline_id.to_string()]).to_string(),
+                    candidate_ts
+                ],
+            )?;
+            conn.execute(
+                "INSERT INTO operation_replay_queue
+                 (timeline_id, reason, status, priority, queued_at_ms)
+                 VALUES (?1, 'starvation_regression', 'pending', 20, ?2)",
+                rusqlite::params![timeline_id, candidate_ts],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    let fresh_timeline_id = seed_artifact_ready_timeline(
+        &sm,
+        "剧情类 Meta Prompt 文档阅读",
+        "具备结构化标题、文档 URL 与实质正文",
+    );
+    sm.with_conn(|conn| {
+        conn.execute(
+            "UPDATE timelines SET updated_at_ms = ?2 WHERE id = ?1",
+            rusqlite::params![fresh_timeline_id, old_base + 100_000],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    sm.upsert_bake_watermark("unified", old_base + 50_000)
+        .unwrap();
+
+    let sidecar_url = spawn_bake_sidecar(vec![make_bake_response(
+        bake_rejected("not_a_knowledge"),
+        bake_template_artifact("剧情类 Meta Prompt 文档", Some("candidate")),
+        bake_rejected("not_a_sop"),
+    )])
+    .await;
+    let service = BakeService::new(sm.clone(), sidecar_url);
+
+    let first = service
+        .run_bake_pipeline("starvation_regression", 10)
+        .await
+        .expect("回放队列不能阻止 fresh 文档进入同一批次");
+    assert_eq!(first.document_created_count, 1);
+    assert!(sm
+        .find_bake_document_by_source_memory_id(fresh_timeline_id)
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        sm.count_pending_operation_replays(3).unwrap(),
+        5,
+        "首轮只能占一半实际额度，且已处理回放必须终态收敛"
+    );
+
+    // fresh 已完成后只剩 replay：队列预检仍必须允许下一轮运行，并把余下项
+    // 全部收敛；该轮候选均不具备 SOP 证据，因此不会访问 sidecar。
+    let queue = sm.get_bake_queue_status(3).unwrap();
+    assert_eq!(queue.fresh_count, 0);
+    assert_eq!(queue.operation_replay_count, 5);
+    assert!(queue.actionable_count >= 5);
+
+    let router = memory_bread_core::api::create_router(make_bake_state(
+        sm.clone(),
+        "http://127.0.0.1:9".to_string(),
+    ));
+    let (status, second, body) = run_bake(router, &sm, "starvation_regression").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(second["status"], "completed");
+    assert_eq!(sm.count_pending_operation_replays(3).unwrap(), 0);
+}
+
+#[tokio::test]
 async fn test_bake_style_config_roundtrip() {
     let (router, _tmp) = make_test_router().await;
 
@@ -1137,6 +1890,111 @@ async fn test_bake_documents_search_matches_summary_tags_sections_and_content() 
     let id_json: serde_json::Value = serde_json::from_str(&id_body).unwrap();
     assert_eq!(id_json["total"], 1);
     assert_eq!(id_json["items"][0]["id"], document_id);
+}
+
+#[tokio::test]
+async fn test_creation_history_restart_preserves_existing_session_content() {
+    let (router, _tmp) = make_test_router().await;
+
+    let first_start = Request::builder()
+        .method(Method::POST)
+        .uri("/api/creation/history/start")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r##"{
+                "prompt":"生成项目周报",
+                "session_id":"history-restore-session",
+                "generated_content":"# 已生成的周报",
+                "root_request":"生成项目周报",
+                "conversation":[
+                    {"id":"user-1","role":"user","content":"生成项目周报"},
+                    {"id":"assistant-1","role":"assistant","content":"已生成首版"},
+                    {"id":"user-2","role":"user","content":"补充成本优化内容"}
+                ]
+            }"##,
+        ))
+        .unwrap();
+    let (first_status, first_body) = oneshot(router.clone(), first_start).await;
+    assert_eq!(first_status, StatusCode::OK, "body: {first_body}");
+    let history_id = serde_json::from_str::<serde_json::Value>(&first_body).unwrap()["id"]
+        .as_i64()
+        .unwrap();
+
+    // 模拟应用退出后只带末尾一轮的恢复请求。服务端必须把它合并到既有快照，
+    // 不能让短快照覆盖此前的对话和文档。
+    let restart = Request::builder()
+        .method(Method::POST)
+        .uri("/api/creation/history/start")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{
+                "prompt":"继续优化",
+                "session_id":"history-restore-session",
+                "generated_content":"",
+                "root_request":"生成项目周报",
+                "conversation":[
+                    {"id":"user-3","role":"user","content":"继续优化"}
+                ]
+            }"#,
+        ))
+        .unwrap();
+    let (restart_status, restart_body) = oneshot(router.clone(), restart).await;
+    assert_eq!(restart_status, StatusCode::OK, "body: {restart_body}");
+    let progress_epoch = serde_json::from_str::<serde_json::Value>(&restart_body).unwrap()
+        ["progress_epoch"]
+        .as_i64()
+        .unwrap();
+
+    for (content, event_id) in [("检查格式", "run-2-start"), ("补充结论", "run-2-done")] {
+        let progress = Request::builder()
+            .method(Method::PATCH)
+            .uri(format!("/api/creation/history/{history_id}/progress"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "lifecycle_status": "running",
+                    "progress_epoch": progress_epoch,
+                    "conversation": [{
+                        "id": format!("user-{event_id}"),
+                        "role": "user",
+                        "content": content
+                    }],
+                    "agent_trace": [{
+                        "event_id": event_id,
+                        "type": if event_id.ends_with("done") { "run.completed" } else { "run.started" }
+                    }]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let (progress_status, progress_body) = oneshot(router.clone(), progress).await;
+        assert_eq!(
+            progress_status,
+            StatusCode::NO_CONTENT,
+            "body: {progress_body}"
+        );
+    }
+
+    let get = Request::builder()
+        .uri(format!("/api/creation/history/{history_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let (get_status, get_body) = oneshot(router, get).await;
+    assert_eq!(get_status, StatusCode::OK, "body: {get_body}");
+    let history: serde_json::Value = serde_json::from_str(&get_body).unwrap();
+    let conversation: Vec<serde_json::Value> =
+        serde_json::from_str(history["conversation_json"].as_str().unwrap()).unwrap();
+    let trace: Vec<serde_json::Value> =
+        serde_json::from_str(history["agent_trace_json"].as_str().unwrap()).unwrap();
+
+    assert_eq!(history["generated_content"], "# 已生成的周报");
+    assert_eq!(conversation.len(), 6);
+    assert_eq!(conversation[0]["content"], "生成项目周报");
+    assert_eq!(conversation[3]["content"], "继续优化");
+    assert_eq!(conversation[5]["content"], "补充结论");
+    assert_eq!(trace.len(), 2);
+    assert_eq!(trace[0]["event_id"], "run-2-start");
+    assert_eq!(trace[1]["event_id"], "run-2-done");
 }
 
 #[tokio::test]
@@ -1630,7 +2488,7 @@ async fn test_bake_pipeline_chain_from_memory_to_knowledge_template_and_sop() {
     let (run_status, run_json, run_body) = run_bake(router.clone(), &sm, "manual_debug").await;
     assert_eq!(run_status, StatusCode::OK, "body: {run_body}");
     assert_eq!(run_json["knowledge_created_count"], 1);
-    assert_eq!(run_json["document_created_count"], 1);
+    assert_eq!(run_json["document_created_count"], 1, "body: {run_body}");
     assert_eq!(run_json["sop_created_count"], 1, "body: {run_body}");
 
     let knowledge_req = Request::builder()

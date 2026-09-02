@@ -7,12 +7,151 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>记忆面包</title>
     <style>
+      html,
+      body,
+      #root {
+        width: 100%;
+        height: 100%;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      .memorybread-bootstrap {
+        width: 100%;
+        height: 100%;
+        display: grid;
+        place-items: center;
+        background: #f5f5f7;
+        color: #172033;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
+      }
+
+      .memorybread-bootstrap__content {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 20px 24px;
+      }
+
+      .memorybread-bootstrap__icon {
+        width: 48px;
+        height: 48px;
+        object-fit: contain;
+      }
+
+      .memorybread-bootstrap__copy {
+        display: grid;
+        gap: 5px;
+      }
+
+      .memorybread-bootstrap__copy strong {
+        font-size: 15px;
+        font-weight: 650;
+      }
+
+      .memorybread-bootstrap__copy span {
+        color: #667085;
+        font-size: 13px;
+      }
+
+      .memorybread-bootstrap--error .memorybread-bootstrap__content {
+        width: min(460px, calc(100% - 48px));
+        align-items: stretch;
+        flex-direction: column;
+        border: 1px solid rgba(15, 23, 42, 0.09);
+        border-radius: 14px;
+        background: #fff;
+        box-shadow: 0 16px 44px rgba(15, 23, 42, 0.08);
+      }
+
+      .memorybread-bootstrap--error h1 {
+        margin: 0;
+        font-size: 18px;
+      }
+
+      .memorybread-bootstrap--error p,
+      .memorybread-bootstrap--error details {
+        margin: 0;
+        color: #667085;
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .memorybread-bootstrap--error summary {
+        cursor: pointer;
+      }
+
+      .memorybread-bootstrap--error pre {
+        max-height: 160px;
+        margin: 8px 0 0;
+        padding: 10px;
+        overflow: auto;
+        border-radius: 8px;
+        background: #f2f4f7;
+        color: #475467;
+        font-size: 11px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .memorybread-bootstrap--error button {
+        min-height: 38px;
+        padding: 0 16px;
+        border: 0;
+        border-radius: 9px;
+        background: #0f766e;
+        color: #fff;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 650;
+        cursor: pointer;
+      }
+
+      .memorybread-bootstrap--error button:focus-visible {
+        outline: 3px solid rgba(15, 118, 110, 0.24);
+        outline-offset: 2px;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .memorybread-bootstrap {
+          background: #111315;
+          color: #f3f4f6;
+        }
+
+        .memorybread-bootstrap__copy span,
+        .memorybread-bootstrap--error p,
+        .memorybread-bootstrap--error details {
+          color: #9ca3af;
+        }
+
+        .memorybread-bootstrap--error .memorybread-bootstrap__content {
+          border-color: rgba(255, 255, 255, 0.1);
+          background: #1c1c1e;
+          box-shadow: 0 16px 44px rgba(0, 0, 0, 0.36);
+        }
+
+        .memorybread-bootstrap--error pre {
+          background: #29292c;
+          color: #d1d5db;
+        }
+      }
+
       html.floating-assist-html,
       html.floating-assist-html body,
       html.floating-assist-html #root {
         background: transparent !important;
         background-color: transparent !important;
         overflow: hidden;
+      }
+
+      html.floating-assist-html .memorybread-bootstrap {
+        background: transparent;
+      }
+
+      html.floating-assist-html .memorybread-bootstrap__content {
+        display: none;
       }
     </style>
     <script>
@@ -23,7 +162,26 @@
     </script>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <main
+        class="memorybread-bootstrap"
+        data-bootstrap-state="loading"
+        role="status"
+        aria-live="polite"
+      >
+        <div class="memorybread-bootstrap__content">
+          <img
+            class="memorybread-bootstrap__icon"
+            src="/brand/memorybread-bread-mark.png"
+            alt=""
+          />
+          <span class="memorybread-bootstrap__copy">
+            <strong>记忆面包正在启动</strong>
+            <span>正在加载界面资源…</span>
+          </span>
+        </div>
+      </main>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

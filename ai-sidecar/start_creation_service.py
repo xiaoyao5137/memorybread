@@ -19,7 +19,11 @@ if __name__ == "__main__":
     print("📝 端点: POST /creation/generate")
     exit_code = 0
     try:
-        uvicorn.run(app, host="0.0.0.0", port=8001, log_level="info")
+        # Keep the local creation contract on the exact loopback address used
+        # by Core. Binding 0.0.0.0 can coexist with a packaged helper bound to
+        # 127.0.0.1 on macOS, causing requests to be routed to two different
+        # service versions on the same port.
+        uvicorn.run(app, host="127.0.0.1", port=8001, log_level="info")
     except SystemExit as exc:
         exit_code = int(exc.code) if isinstance(exc.code, int) else 1
     except BaseException:

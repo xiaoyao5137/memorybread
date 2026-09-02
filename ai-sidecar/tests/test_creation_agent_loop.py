@@ -38,7 +38,13 @@ class FakeCreationService:
         self.scrape_kwargs = {}
         self.routing_decision = None
 
-    def analyze_requirement(self, message, options, entity_focus_text=""):
+    def analyze_requirement(
+        self,
+        message,
+        options,
+        entity_focus_text="",
+        retrieval_context_terms=None,
+    ):
         return {
             "topic": message,
             "doc_type": options.doc_type or "架构设计方案",
@@ -56,7 +62,11 @@ class FakeCreationService:
         return []
 
     async def refresh_recalled_documents(
-        self, references, query, require_latest=False
+        self,
+        references,
+        query,
+        require_latest=False,
+        browser_extension_enabled=True,
     ):
         return {"attempted": 0, "updated": 0, "no_change": 0, "skipped": 0, "failed": 0}
 
@@ -162,6 +172,152 @@ def test_creation_tool_result_limits_have_compatible_defaults_and_bounds():
     bounded = CreationOptions(max_references=99, data_search_limit=0)
     assert bounded.max_references == 30
     assert bounded.data_search_limit == 1
+
+
+def test_multi_target_quality_gate_requires_each_target_and_facet():
+    contract = {
+        "targets": ["场景甲", "场景乙", "场景丙"],
+        "facets": ["用了哪些模型", "占比多少", "成本情况如何"],
+    }
+    incomplete = """# 盘点
+
+## 场景甲
+模型 A，占比 60%，成本 1 元。
+
+## 场景乙
+模型 B，成本 2 元。
+"""
+    complete = incomplete + """
+
+## 场景丙
+模型与占比、成本均为现有证据未覆盖。
+
+## 场景乙补充
+模型占比为现有证据未覆盖。
+"""
+
+    failed = CreationAgentLoop._multi_target_coverage_result(incomplete, contract)
+    passed = CreationAgentLoop._multi_target_coverage_result(complete, contract)
+
+    assert failed["passed"] is False
+    assert failed["gaps"] == [
+        {
+            "target": "场景乙",
+            "missing_facets": ["占比多少"],
+            "reason": "facet_missing",
+        },
+        {
+            "target": "场景丙",
+            "missing_facets": contract["facets"],
+            "reason": "target_missing",
+        },
+    ]
+    assert passed["passed"] is True
+
+
+def test_brainstorm_brief_is_preserved_as_structured_harness_context():
+    loop = CreationAgentLoop(FakeCreationService())
+    brief = {
+        "revision": 4,
+        "brief_markdown": "# 创作简报\n\n## 目标与决策\n- **已确认：** 推动批准或立项",
+        "open_flags": ["补充目标指标基线"],
+        "decisions": [
+            {
+                "dimension_id": "business_outcome",
+                "dimension": "目标与决策",
+                "summary": "推动批准或立项",
+                "source": "user",
+            },
+            {
+                "dimension_id": "success_criteria",
+                "dimension": "成功标准",
+                "summary": "指标基线待补，先给出定标方法",
+                "source": "agent_assumption",
+            },
+        ],
+        # 非契约内部字段即使被带入，也不得泄露到模型上下文。
+        "creation_model": "internal-provider-model",
+    }
+    state = loop._new_state(
+        user_message="设计数据治理平台建设方案",
+        root_request="设计数据治理平台建设方案",
+        current_document="",
+        conversation=[],
+        selected_skills=[],
+        options=CreationOptions(),
+        model_mode="local",
+        session_id="session-brainstorm",
+        run_id="run-brainstorm",
+        creation_mode="brainstorm",
+        creation_brief=brief,
+    )
+
+    assert state.creation_mode == "brainstorm"
+    assert state.environment["creation_mode"] == "brainstorm"
+    assert state.environment["creation_brief"] == brief
+    context_query = state.environment["context_query"]
+    assert "脑暴创作上下文" in context_query
+    assert "已确认决策" in context_query
+    assert "推动批准或立项" in context_query
+    assert "合理假设" in context_query
+    assert "指标基线待补，先给出定标方法" in context_query
+    assert "开放事项" in context_query
+    assert "补充目标指标基线" in context_query
+    assert "# 创作简报" in context_query
+    assert "internal-provider-model" not in context_query
+    # 生成 Agent 保留完整脑暴上下文，召回解析只看原始主题和
+    # 用户已确认事实，避免开放问题或控制文字劫持实体。
+    assert state.environment["retrieval_query"] == "设计数据治理平台建设方案"
+    assert state.environment["requirement"]["topic"] == state.environment[
+        "retrieval_query"
+    ]
+    assert state.environment["retrieval_context_terms"] == ["推动批准或立项"]
+    assert "指标基线待补" not in json.dumps(
+        state.environment["requirement"], ensure_ascii=False
+    )
+
+    prompt_environment = loop._prompt_environment(state)
+    assert "推动批准或立项" in prompt_environment
+    assert "指标基线待补，先给出定标方法" in prompt_environment
+    assert "补充目标指标基线" in prompt_environment
+    assert "# 创作简报" in prompt_environment
+    assert "internal-provider-model" not in prompt_environment
+    restored = type(state).restore(state.serializable())
+    assert restored.creation_mode == "brainstorm"
+    assert restored.environment["creation_brief"]["revision"] == 4
+
+
+@pytest.mark.asyncio
+async def test_brainstorm_brief_enters_external_routing_model_prompt():
+    brief = {
+        "brief_markdown": "# 创作简报\n\n用于管理层立项决策。",
+        "open_flags": ["预算上限待确认"],
+        "decisions": [
+            {
+                "dimension": "一期范围",
+                "summary": "先覆盖三个核心数据域",
+                "source": "user",
+            }
+        ],
+    }
+    events = await collect_events(
+        CreationAgentLoop(FakeCreationService()).run(
+            user_message="设计数据治理平台建设方案",
+            current_document="",
+            conversation=[],
+            selected_skills=[],
+            options=CreationOptions(enable_rag=False),
+            model_mode="external",
+            creation_mode="brainstorm",
+            creation_brief=brief,
+        )
+    )
+
+    request = next(event for event in events if event["type"] == "model.request")
+    messages = "\n".join(item["content"] for item in request["data"]["messages"])
+    assert "先覆盖三个核心数据域" in messages
+    assert "预算上限待确认" in messages
+    assert "用于管理层立项决策" in messages
 
 
 @pytest.mark.asyncio
@@ -303,6 +459,11 @@ def test_fallback_routing_decision_respects_enabled_tools():
     )
     assert "mermaid_diagram" in enabled["tools"]
     assert "plantuml_diagram" not in enabled["tools"]
+
+
+def test_mermaid_is_default_but_explicit_empty_tool_list_keeps_it_disabled():
+    assert "mermaid_diagram" in CreationOptions().enabled_tools
+    assert "mermaid_diagram" not in CreationOptions(enabled_tools=()).enabled_tools
 
 
 def test_model_routing_decision_overrides_keyword_heuristics():
@@ -825,11 +986,13 @@ def test_requested_dashboard_metrics_allow_partial_success_and_filter_wrong_peri
         {"verified_claims": claims},
         required,
         {"start": "2026-08-10", "end": "2026-08-16"},
+        fallback_policy="strict",
     )
     incomplete = CreationService._apply_required_metric_coverage(
         {"verified_claims": claims[:-1]},
         required,
         {"start": "2026-08-10", "end": "2026-08-16"},
+        fallback_policy="strict",
     )
     wrong_period_claims = [
         {**claim, "statistical_period": "2026-08-03 至 2026-08-09"}
@@ -839,6 +1002,7 @@ def test_requested_dashboard_metrics_allow_partial_success_and_filter_wrong_peri
         {"verified_claims": wrong_period_claims},
         required,
         {"start": "2026-08-10", "end": "2026-08-16"},
+        fallback_policy="strict",
     )
 
     assert required == [
@@ -858,6 +1022,154 @@ def test_requested_dashboard_metrics_allow_partial_success_and_filter_wrong_peri
     assert wrong_period["reason"] == "requested_metrics_period_mismatch"
     assert wrong_period["verified_claims"] == []
 
+    # 截图 OCR 未补充有效指标时，再次覆盖校验仍应报告周期不符。
+    rechecked = CreationService._apply_required_metric_coverage(
+        wrong_period,
+        required,
+        {"start": "2026-08-10", "end": "2026-08-16"},
+        fallback_policy="strict",
+    )
+    assert rechecked["reason"] == "requested_metrics_period_mismatch"
+    assert rechecked["period_mismatch_metrics"] == required
+    assert rechecked["missing_requested_metrics"] == []
+    assert rechecked["requirements_satisfied"] is False
+    assert rechecked["verified_claims"] == []
+
+    corrected = CreationService._apply_required_metric_coverage(
+        {**wrong_period, "verified_claims": claims[:1]},
+        required,
+        {"start": "2026-08-10", "end": "2026-08-16"},
+        fallback_policy="strict",
+    )
+    assert corrected["reason"] == "requested_metrics_partial"
+    assert corrected["period_mismatch_metrics"] == required[1:]
+    assert corrected["verified_claims"][0]["value"] == claims[0]["value"]
+
+
+def qualified_metric_fixture():
+    expected = {"start": "2026-08-17", "end": "2026-08-23"}
+    claims = [
+        {"claim_type": "metric", "label": label, "value": value,
+         "statement": f"{label} 2026-08-26 至 2026-08-26 {value}",
+         "statistical_period": "2026-08-26 至 2026-08-26"}
+        for label, value in (("专有环境输入Token", "100亿"), ("共享环境输出Token", "0"))
+    ]
+    validation = CreationService._apply_required_metric_coverage(
+        {"verified_claims": claims}, [claim["label"] for claim in claims], expected,
+    )
+    return expected, claims, validation
+
+
+def test_period_fallback_retains_original_values_and_requires_risk_disclosure():
+    expected, claims, validation = qualified_metric_fixture()
+    assert CreationService._validation_is_verified(validation)
+    assert validation["data_usage_status"] == "qualified"
+    assert validation["exact_metric_coverage"] == 0
+    assert validation["required_metric_coverage"] == 1
+    assert validation["missing_requested_metrics"] == []
+    assert [claim["value"] for claim in validation["verified_claims"]] == ["100亿", "0"]
+    assert all(risk["kind"] == "period_mismatch" and risk["expected_period"] == expected for risk in validation["data_risks"])
+    rechecked = CreationService._validation_with_ocr_output(
+        validation, {}, SimpleNamespace(text="", confidence=0),
+        [claim["label"] for claim in claims], expected, strategy="full_image",
+    )
+    assert rechecked["data_risks"] == validation["data_risks"]
+    assert rechecked["reason"] == "requested_metrics_qualified"
+
+
+def test_exact_period_candidate_wins_over_earlier_fallback_and_nearest_fallback_wins():
+    expected, claims, _ = qualified_metric_fixture()
+    exact = {**claims[0], "value": "80亿", "statistical_period": "2026-08-17 至 2026-08-23"}
+    distant = {**claims[1], "value": "90", "statistical_period": "2025-01-01"}
+    validation = CreationService._apply_required_metric_coverage(
+        {"verified_claims": [*claims, distant, exact]}, [claim["label"] for claim in claims], expected,
+    )
+    assert [claim["value"] for claim in validation["verified_claims"]] == ["80亿", "0"]
+    assert validation["exact_matched_requested_metrics"] == [claims[0]["label"]]
+    assert [risk["label"] for risk in validation["data_risks"]] == [claims[1]["label"]]
+
+
+def test_unknown_period_is_disclosed_and_strict_policy_can_disable_fallback(monkeypatch):
+    expected, claims, _ = qualified_metric_fixture()
+    claims[0]["statistical_period"] = ""
+    validation = CreationService._apply_required_metric_coverage(
+        {"verified_claims": claims}, [claim["label"] for claim in claims], expected,
+    )
+    assert validation["data_risks"][0]["kind"] == "period_unverified"
+    monkeypatch.setenv("MEMORYBREAD_CREATION_DATA_FALLBACK_POLICY", "strict")
+    strict = CreationService._apply_required_metric_coverage(
+        {"verified_claims": claims}, [claim["label"] for claim in claims], expected,
+    )
+    assert not CreationService._validation_is_verified(strict)
+    assert strict["verified_claims"] == []
+
+
+def test_requested_card_after_large_detail_table_keeps_validation_budget():
+    requested = "共享环境输出Token"
+    payload = {
+        "content_text": "\n".join([*(f"项目{i}成本\n2026-08-26\n{i + 100}" for i in range(180)), f"{requested}\n2026-08-26\n19亿"]),
+        "structured_data": {"requested_metrics": [requested]},
+    }
+    validation = CreationService._apply_required_metric_coverage(
+        CreationService._compare_scrape_programmatic_channels(payload), [requested],
+        {"start": "2026-08-17", "end": "2026-08-23"},
+    )
+    assert validation["matched_requested_metrics"] == [requested]
+    assert validation["verified_claims"][0]["value"] == "19亿"
+    assert validation["data_usage_status"] == "qualified"
+
+
+def test_fallback_does_not_bypass_unverified_view_or_invent_absent_values():
+    _, _, validation = qualified_metric_fixture()
+    rejected = CreationService._enforce_interaction_validation(
+        validation, {"structured_data": {"interaction_result": {"view_status": "unverified"}}},
+    )
+    assert not CreationService._validation_is_verified(rejected)
+    empty = CreationService._apply_required_metric_coverage(
+        {"verified_claims": []}, ["输入Token"], {},
+    )
+    assert empty["data_usage_status"] == "unavailable"
+    assert empty["data_risks"] == []
+
+
+def test_qualified_data_survives_merge_prompt_and_final_risk_guard():
+    _, _, validation = qualified_metric_fixture()
+    evidence = {"validation_status": "verified", "validation": validation}
+    payload = {"content_text": "原始页面", "structured_data": {}, "url": "https://bi.example/report", "title": "容量看板", "collected_at": 123}
+    results = CreationService._merge_scrape_results(
+        [{"source_id": 21, "source_kind": "report_url"}], {21: payload}, {21: evidence}, {21},
+    )
+    results[0]["target_section"] = "用量"
+    CreationAgentLoop._enforce_report_evidence_policy(results)
+    compact = CreationAgentLoop._prompt_data_results(results)
+    assert compact[0]["can_use"] is True
+    assert compact[0]["risk_disclosure_required"] is True
+    assert len(compact[0]["structured_data"]["verified_claims"]) == 2
+    assert "period_mismatch" in str(compact)
+    reference = {"source_url": payload["url"], "content": "旧文档的当前数值 999"}
+    CreationAgentLoop._apply_data_freshness_to_references(
+        SimpleNamespace(environment={"references": [reference]}), results,
+    )
+    assert reference["data_use_policy"] == "qualified_snapshot_available"
+    assert reference["content"] == ""
+    # 模型即使省略了所有数值/备注，确定性输出也必须保留可供用户核验的值。
+    original = "## 用量\n\n说明。\n\n## 后续\n\n行动。"
+    rendered, audit = CreationAgentLoop._apply_data_risk_disclosures(original, results)
+    assert "100亿" in rendered and "| 0 |" in rendered
+    assert "2026-08-26" in rendered and "2026-08-17" in rendered
+    assert "https://bi.example/report" in rendered
+    assert rendered.index("数据风险说明") < rendered.index("## 后续")
+    assert audit[0]["risk_count"] == 2
+    again, _ = CreationAgentLoop._apply_data_risk_disclosures(rendered, results)
+    assert again == rendered
+    preserved, _ = CreationAgentLoop._apply_data_risk_disclosures(rendered, [])
+    assert preserved == rendered
+    results[0]["data_risks"] = []
+    results[0]["creation_evidence"]["validation"] = {"data_risks": []}
+    resolved, audit = CreationAgentLoop._apply_data_risk_disclosures(rendered, results)
+    assert "数据风险说明" not in resolved
+    assert audit[0]["status"] == "resolved"
+
 
 def test_requested_metrics_strip_task_prefix_and_ignore_interaction_clause():
     query = (
@@ -869,6 +1181,126 @@ def test_requested_metrics_strip_task_prefix_and_ignore_interaction_clause():
     requested = CreationService._extract_requested_metrics(query)
 
     assert requested == ["专有环境输入Token", "共享环境输出Token"]
+
+
+@pytest.mark.asyncio
+async def test_full_creation_loop_discloses_qualified_values_even_when_writer_omits_them():
+    _, _, validation = qualified_metric_fixture()
+    evidence = {"validation_status": "verified", "validation": validation}
+    payload = {"content_text": "来源事实", "structured_data": {}, "title": "容量看板", "url": "https://bi.example/report"}
+    source = {"source_id": 21, "source_kind": "report_url", "title": "容量看板", "source_url": payload["url"], "refresh_required": True, "can_use": False}
+    refreshed = CreationService._merge_scrape_results([source], {21: payload}, {21: evidence}, {21})
+    service = FakeCreationService()
+    service.routing_decision = {"tools": ["data_search"], "agents": []}
+    service.data_results = [source]
+    service.scrape_outcome = {"scrapes": [{"source_id": 21, "status": "completed", "evidence": evidence}], "refreshed_data": refreshed}
+    events = await collect_events(CreationAgentLoop(service).run(
+        user_message="生成本周容量看板用量章节", current_document="", conversation=[],
+        selected_skills=[{"id": "usage-risk", "title": "用量", "executionSteps": [
+            {"id": "usage", "title": "用量", "objective": "获取容量看板的专有环境输入Token、共享环境输出Token并写表格", "output": "指标表", "tools": ["data_search"], "agents": [], "skills": []},
+        ]}], options=CreationOptions(doc_type="周报"),
+    ))
+    assert events[-1]["type"] == "run.completed"
+    assert any(event["type"] == "document.data_risks.applied" for event in events)
+    document = events[-1]["data"]["document"]
+    assert "100亿" in document and "| 0 |" in document
+    assert "数据风险说明" in document and "2026-08-26" in document
+
+
+def test_generic_page_interaction_plan_normalizes_tab_period_and_collection():
+    query = (
+        "获取模型运营看板里第二个tab下的独立部署输入Tokens、"
+        "公共部署输出Tokens"
+    )
+    requested = CreationService._extract_requested_metrics(query)
+
+    plan = CreationService._build_page_interaction_plan(
+        query,
+        requested,
+        {"start": "2026-08-17", "end": "2026-08-23"},
+    )
+
+    assert plan["schema_version"] == "memorybread.page-interaction-plan.v1"
+    assert plan["safety_mode"] == "read_only"
+    assert [step["action"] for step in plan["steps"]] == [
+        "activate",
+        "set_date_range",
+        "scroll_collect",
+        "collect",
+    ]
+    assert plan["steps"][0]["target"] == {
+        "role_hints": ["tab", "navigation_item"],
+        "labels": [],
+        "ordinal": 2,
+    }
+    assert plan["steps"][0]["postconditions"] == [
+        {"kind": "data_stable", "minimum_stable_passes": 2}
+    ]
+    assert plan["steps"][1]["value"] == {
+        "start": "2026-08-17",
+        "end": "2026-08-23",
+    }
+
+
+def test_generic_page_interaction_plan_supports_named_controls_without_site_rules():
+    plan = CreationService._build_page_interaction_plan(
+        "进入成本导航，在区域下拉框选择华东，展开高级筛选面板，点击查询按钮",
+        ["调用量"],
+        {},
+    )
+
+    actions = [step["action"] for step in plan["steps"]]
+    assert actions == [
+        "activate",
+        "expand",
+        "select_option",
+        "activate",
+        "scroll_collect",
+        "collect",
+    ]
+    assert plan["steps"][0]["target"] == {
+        "role_hints": ["navigation_item"],
+        "labels": ["成本"],
+    }
+    assert plan["steps"][2]["target"] == {
+        "role_hints": ["combobox"],
+        "labels": ["区域"],
+    }
+    assert plan["steps"][2]["value"] == "华东"
+
+
+def test_unverified_interaction_view_isolates_incidental_page_claims():
+    validation = {
+        "verified_claims": [
+            {
+                "claim_type": "metric",
+                "label": "当前页汇总成本",
+                "value": "100",
+            }
+        ],
+        "requirements_satisfied": True,
+    }
+    payload = {
+        "structured_data": {
+            "interaction_result": {
+                "status": "failed",
+                "view_status": "unverified",
+                "steps": [
+                    {
+                        "status": "failed",
+                        "error_code": "INTERACTION_TARGET_NOT_FOUND",
+                    }
+                ],
+            }
+        }
+    }
+
+    guarded = CreationService._enforce_interaction_validation(validation, payload)
+
+    assert guarded["verified_claims"] == []
+    assert guarded["incidental_claims"][0]["value"] == "100"
+    assert guarded["requirements_satisfied"] is False
+    assert guarded["reason"] == "interaction_view_unverified"
 
 
 def test_requested_metrics_ignore_root_skill_invocation_before_step_objective():
@@ -923,7 +1355,8 @@ def test_unmatched_metric_preferences_retain_cross_checked_page_values():
     assert available["requirements_satisfied"] is True
     assert available["requested_metric_policy"] == "preference"
     assert available["available_values_retained"] is True
-    assert available["reason"] == "requested_metrics_unmatched"
+    assert available["reason"] == "requested_metrics_qualified"
+    assert available["data_risks"][0]["kind"] == "semantic_match_unverified"
     assert [claim["value"] for claim in available["verified_claims"]] == ["102"]
     assert available["unrequested_verified_claim_count"] == 1
 
@@ -1132,6 +1565,86 @@ def test_prompt_data_results_prioritize_each_verified_report_with_bounded_claims
     assert len(results[1]["structured_data"]["verified_claims"]) == 6
 
 
+def test_verified_report_policy_preserves_generic_relations_and_coverage():
+    results = [{
+        "source_id": 41,
+        "source_kind": "report_url",
+        "can_use": True,
+        "content_excerpt": "完整页面正文",
+        "structured_data": {
+            "tables": [
+                [["对象", "度量"], ["甲", "10"], ["乙", "20"]],
+            ],
+            "pagination": {
+                "dataset_complete": True,
+                "captured_rows": 2,
+                "total_rows": 2,
+            },
+            "completeness": {"status": "complete"},
+        },
+        "creation_evidence": {
+            "validation_status": "verified",
+            "validation": {
+                "reason": "requested_metrics_partial",
+                "primary_channel": "dom",
+                "verified_claims": [{
+                    "label": "度量",
+                    "value": "20",
+                    "statement": "乙 20",
+                }],
+            },
+        },
+    }]
+
+    CreationAgentLoop._enforce_report_evidence_policy(results)
+
+    structured = results[0]["structured_data"]
+    assert structured["tables"][0][2] == ["乙", "20"]
+    assert structured["pagination"]["dataset_complete"] is True
+    assert structured["verified_claims"][0]["statement"] == "乙 20"
+
+
+def test_query_quality_gate_requires_every_verified_result_row_in_document():
+    result = {
+        "shape": "table",
+        "validation": {"status": "verified"},
+        "provenance": {"relation_id": "source_41.table_0"},
+        "rows": [
+            {
+                "row_id": "row-1",
+                "cells": {
+                    "name": {"raw": "甲项目", "normalized": "甲项目"},
+                    "value": {"raw": "20.0万元", "normalized": "20.0"},
+                },
+            },
+            {
+                "row_id": "row-2",
+                "cells": {
+                    "name": {"raw": "乙项目", "normalized": "乙项目"},
+                    "value": {"raw": "10.0万元", "normalized": "10.0"},
+                },
+            },
+        ],
+    }
+    incomplete = "| 对象 | 度量 |\n| --- | --- |\n| 甲项目 | 20.0万元 |"
+    complete = incomplete + "\n| 乙项目 | 10.0万元 |"
+
+    gaps = CreationAgentLoop._data_query_result_gaps(incomplete, [result])
+    assert gaps[0]["expected_rows"] == 2
+    assert gaps[0]["missing_rows"] == 1
+    assert CreationAgentLoop._data_query_result_gaps(complete, [result]) == []
+
+
+def test_query_quality_gate_ignores_incomplete_coverage_results():
+    result = {
+        "shape": "table",
+        "validation": {"status": "insufficient_coverage"},
+        "rows": [{"row_id": "row-1", "cells": {"value": {"raw": "10"}}}],
+    }
+
+    assert CreationAgentLoop._data_query_result_gaps("", [result]) == []
+
+
 def test_placeholder_guard_recognizes_bracketed_metric_placeholders():
     document = (
         "| 指标 | 数值 |\n"
@@ -1193,6 +1706,36 @@ def test_refresh_selection_prefers_strong_source_identity_without_business_keywo
     )
 
     assert [item["source_id"] for item in selected] == [1]
+
+
+def test_refresh_selection_prefers_longest_explicit_report_title_from_query():
+    selected = CreationService._select_refreshable_report_sources(
+        [
+            {
+                "source_id": 214,
+                "title": "LangBridge模型中心运营看板 - KwaiBI | 可视化",
+                "source_kind": "report_url",
+                "source_url": "https://bi.example.com/dashboard/preview?id=214",
+                "refresh_required": True,
+                "refresh_policy": "on_demand",
+                "identity_relevance_score": 0.84,
+                "relevance_score": 0.84,
+            },
+            {
+                "source_id": 15190,
+                "title": "LangBridge",
+                "source_kind": "report_url",
+                "source_url": "https://models.example.com/model-market",
+                "refresh_required": True,
+                "refresh_policy": "on_demand",
+                "identity_relevance_score": 0.84,
+                "relevance_score": 0.84,
+            },
+        ],
+        "获取LangBridge模型中心运营看板的本周Token数据",
+    )
+
+    assert [item["source_id"] for item in selected] == [214]
 
 
 @pytest.mark.asyncio
@@ -1294,6 +1837,39 @@ async def test_screenshot_off_retries_silent_block_with_one_foreground_refresh(
 
 
 @pytest.mark.asyncio
+async def test_qualified_values_survive_failed_attempt_to_get_exact_period(monkeypatch):
+    _, _, validation = qualified_metric_fixture()
+    requests = []
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, json):
+            requests.append(json)
+            if len(requests) == 1:
+                return httpx.Response(200, json={"title": "容量看板", "url": url, "content_text": "100亿", "structured_data": {}, "collected_at": 123})
+            return httpx.Response(503, json={"error": "SCRAPE_FAILED"})
+
+    monkeypatch.setattr("creation.service.httpx.AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setattr("creation.service.REPORT_REFRESH_FOREGROUND_RETRY_DELAY_SECONDS", 0)
+    service = CreationService(model="test", enable_vector_recall=False)
+    async def validate(*_args, **_kwargs):
+        return {"validation_status": "verified", "validation": validation}
+    monkeypatch.setattr(service, "_validate_scrape_evidence", validate)
+    outcome = await service.scrape_data_context(
+        [{"source_id": 21, "source_kind": "report_url", "source_url": "https://bi.example/report", "refresh_required": True}],
+        "获取本周专有环境输入Token与共享环境输出Token", {}, browser_extension_enabled=False,
+    )
+    assert len(requests) == 3
+    assert outcome["scrapes"][0]["collection_attempt"] == "qualified_snapshot_fallback"
+    assert outcome["refreshed_data"][0]["can_use"] is True
+    assert outcome["refreshed_data"][0]["data_risks"] == validation["data_risks"]
+
+
+@pytest.mark.asyncio
 async def test_browser_extension_failure_never_escalates_to_foreground(monkeypatch):
     requests = []
 
@@ -1347,6 +1923,199 @@ async def test_browser_extension_failure_never_escalates_to_foreground(monkeypat
     assert requests[0]["focus_policy"] == "never"
     assert outcome["scrapes"][0]["status"] == "failed"
     assert outcome["scrapes"][0]["collection_attempt"] == "extension_background"
+
+
+@pytest.mark.asyncio
+async def test_browser_extension_postcondition_failure_revalidates_current_view(
+    monkeypatch,
+):
+    requests = []
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+            self.is_success = 200 <= status_code < 300
+
+        def json(self):
+            return self._payload
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, json):
+            requests.append(dict(json))
+            if len(requests) == 1:
+                return FakeResponse(
+                    422,
+                    {
+                        "error": "INTERACTION_POSTCONDITION_FAILED",
+                        "message": "日期控件未确认目标范围",
+                    },
+                )
+            return FakeResponse(
+                200,
+                {
+                    "collector": "chrome_attach",
+                    "browser": "chrome",
+                    "interaction_mode": "background_tab",
+                    "focus_policy": "never",
+                    "focus_takeover_count": 0,
+                    "collected_at": 1_776_000_000_000,
+                    "title": "Token 看板",
+                    "url": "https://bi.example.com/token-report",
+                    "content_text": "输入Token 100亿\n输出Token 20亿\n2026-08-10 至 2026-08-13",
+                    "structured_data": {},
+                },
+            )
+
+    monkeypatch.setattr(
+        "creation.service.httpx.AsyncClient",
+        lambda **_kwargs: FakeAsyncClient(),
+    )
+    service = CreationService(model="test", enable_vector_recall=False)
+
+    async def validate(*_args, **kwargs):
+        assert kwargs["expected_period"] == {
+            "start": "2026-08-10",
+            "end": "2026-08-13",
+            "display": "2026-08-10 至 2026-08-13",
+        }
+        return {
+            "validation_status": "verified",
+            "validation": {
+                "reason": "requested_metrics_verified",
+                "verified_claims": [{"label": "输入Token", "value": "100亿"}],
+            },
+        }
+
+    monkeypatch.setattr(service, "_validate_scrape_evidence", validate)
+    outcome = await service.scrape_data_context(
+        [
+            {
+                "source_id": 214,
+                "source_kind": "report_url",
+                "source_url": "https://bi.example.com/token-report",
+                "title": "Token 看板",
+                "refresh_required": True,
+                "refresh_policy": "on_demand",
+                "can_use": False,
+            }
+        ],
+        "读取第二个 tab 的本周输入Token和输出Token",
+        {
+            "time_context": {
+                "has_relative_time": True,
+                "period_start": "2026-08-10",
+                "period_end": "2026-08-16",
+                "current_date": "2026-08-13",
+                "display": "2026年第33周（2026-08-10 至 2026-08-16）",
+            }
+        },
+        browser_extension_enabled=True,
+    )
+
+    assert len(requests) == 2
+    assert requests[0]["expected_period_end"] == "2026-08-13"
+    assert requests[0]["interaction_plan"] is not None
+    assert requests[1]["expected_period_start"] is None
+    assert requests[1]["expected_period_end"] is None
+    assert requests[1]["interaction_plan"] is None
+    assert requests[1]["allow_foreground_refresh"] is False
+    assert outcome["scrapes"][0]["status"] == "completed"
+    assert outcome["scrapes"][0]["collection_attempt"] == "extension_current_view"
+
+
+@pytest.mark.asyncio
+async def test_browser_extension_metric_rejection_revalidates_current_view(monkeypatch):
+    requests = []
+
+    class FakeResponse:
+        status_code = 200
+        is_success = True
+
+        @staticmethod
+        def json():
+            return {
+                "collector": "chrome_attach",
+                "browser": "chrome",
+                "interaction_mode": "background_tab",
+                "focus_policy": "never",
+                "focus_takeover_count": 0,
+                "collected_at": 1_776_000_000_000,
+                "title": "GPU 看板",
+                "url": "https://bi.example.com/gpu-report",
+                "content_text": "GPU 数据看板",
+                "structured_data": {},
+            }
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, json):
+            requests.append(dict(json))
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "creation.service.httpx.AsyncClient",
+        lambda **_kwargs: FakeAsyncClient(),
+    )
+    service = CreationService(model="test", enable_vector_recall=False)
+    validations = iter(
+        [
+            {
+                "validation_status": "rejected",
+                "validation": {
+                    "reason": "requested_metrics_unavailable",
+                    "verified_claims": [],
+                },
+            },
+            {
+                "validation_status": "verified",
+                "validation": {
+                    "reason": "requested_metrics_verified",
+                    "verified_claims": [
+                        {"label": "GPU 利用率", "value": "72%"}
+                    ],
+                },
+            },
+        ]
+    )
+
+    async def validate(*_args, **_kwargs):
+        return next(validations)
+
+    monkeypatch.setattr(service, "_validate_scrape_evidence", validate)
+    outcome = await service.scrape_data_context(
+        [
+            {
+                "source_id": 1582,
+                "source_kind": "report_url",
+                "source_url": "https://bi.example.com/gpu-report",
+                "title": "GPU 看板",
+                "refresh_required": True,
+                "refresh_policy": "on_demand",
+                "can_use": False,
+            }
+        ],
+        "获取最新 GPU 利用率",
+        {},
+        browser_extension_enabled=True,
+    )
+
+    assert len(requests) == 2
+    assert requests[0]["interaction_plan"] is not None
+    assert requests[1]["interaction_plan"] is None
+    assert outcome["scrapes"][0]["status"] == "completed"
+    assert outcome["scrapes"][0]["collection_attempt"] == "extension_current_view"
 
 
 def test_evidence_validation_also_supports_document_style_pages():
@@ -1624,6 +2393,44 @@ def test_canvas_requested_metrics_accept_repeated_ocr_units_and_exclude_other_ca
     assert "8,000" not in {claim["value"] for claim in covered["verified_claims"]}
 
 
+def test_canvas_falls_back_to_cross_checked_dom_cards_when_requested_series_absent():
+    requested = ["独立部署输入Token", "公共部署输出Token"]
+    payload = {
+        "title": "模型运营看板",
+        "url": "https://bi.example.com/dashboard",
+        "collected_at": 1770000000000,
+        "content_text": "Token总量\n公共部署模型Token计费成本总计",
+        "structured_data": {
+            "dom_content_text": "Token总量\n公共部署模型Token计费成本总计",
+            "requested_metrics": requested,
+        },
+        "evidence": {
+            "page_title": "模型运营看板",
+            "source_url": "https://bi.example.com/dashboard",
+            "captured_at": 1770000000000,
+        },
+    }
+
+    validation = CreationService._compare_scrape_with_ocr(
+        payload,
+        "Token总量\n31,423.24亿\n公共部署模型Token计费成本总计\n171,538.18",
+    )
+    covered = CreationService._apply_required_metric_coverage(
+        validation,
+        requested,
+        {"start": "2026-08-17", "end": "2026-08-23"},
+    )
+
+    assert covered["requirements_satisfied"] is True
+    assert covered["available_values_retained"] is True
+    assert covered["reason"] == "requested_metrics_qualified"
+    assert covered["risk_disclosure_required"] is True
+    assert {claim["value"] for claim in covered["verified_claims"]} == {
+        "31,423.24亿",
+        "171,538.18",
+    }
+
+
 def test_ocr_metric_value_cleanup_keeps_numeric_tail_safety():
     assert CreationService._normalize_ocr_metric_value_line("32.07亿 亿旦") == "32.07亿"
     assert CreationService._normalize_ocr_metric_value_line("39.11亿亿") == "39.11亿"
@@ -1835,6 +2642,60 @@ async def test_structured_dom_data_is_usable_without_retained_screenshot():
     assert "image_url" not in result
 
 
+@pytest.mark.asyncio
+async def test_transient_browser_preview_is_ocr_validated_without_retaining_evidence():
+    class FakeResponse:
+        is_success = True
+        content = b"temporary-preview"
+
+    class FakeClient:
+        def __init__(self):
+            self.requested_urls = []
+
+        async def get(self, url):
+            self.requested_urls.append(url)
+            return FakeResponse()
+
+        async def post(self, _url, json):
+            raise AssertionError("transient preview must not persist evidence metadata")
+
+    class FakeOcrOutput:
+        text = "Token总量\n31,423.24亿"
+        confidence = 0.96
+        boxes = []
+
+    class FakeOcrEngine:
+        def process(self, _path):
+            return FakeOcrOutput()
+
+    service = CreationService(model="test", enable_vector_recall=False)
+    service._ocr_engine = FakeOcrEngine()
+    client = FakeClient()
+    payload = {
+        "title": "模型中心运营看板",
+        "url": "https://bi.example.com/dashboard",
+        "collected_at": 1770000000000,
+        "content_text": "Token总量",
+        "structured_data": {
+            "dom_content_text": "Token总量",
+            "extraction": {"primary": "dom", "fallback": "dom"},
+        },
+        "evidence": None,
+        "transient_preview_url": "/api/browser-integration/jobs/job-1/preview",
+    }
+
+    result = await service._validate_scrape_evidence(
+        client, payload, require_metric=True
+    )
+
+    assert result["validation_status"] == "verified"
+    assert result["evidence_kind"] == "transient_preview_ocr"
+    assert result["validation"]["verified_claims"][0]["value"] == "31,423.24亿"
+    assert client.requested_urls == [
+        f"{service.core_engine_base_url}/api/browser-integration/jobs/job-1/preview"
+    ]
+
+
 def test_refreshed_browser_payload_is_merged_without_second_top_k_search():
     evidence = {
         "id": "evidence-live",
@@ -1958,11 +2819,17 @@ def test_refresh_attempt_decision_only_continues_on_transient_errors():
     # 静默读取被焦点门禁拦截时照常升级到前台，瞬态错误也进入前台。
     assert decision("silent", "FOCUS_POLICY_BLOCKED") is True
     assert decision("silent", "SCRAPE_HTTP_502") is True
+    assert decision("silent", "SCRAPE_PAGE_ERROR") is True
     assert decision("silent", "SCRAPE_NOT_FOUND") is False
     # 前台降级遇瞬态错误再给一次机会，持久性错误不重试。
     assert decision("foreground_fallback", "SCRAPE_OUTPUT_UNPARSEABLE") is True
     assert decision("foreground_fallback", "SCRAPE_TIMEOUT") is True
     assert decision("foreground_fallback", "SCRAPE_AUTH_REQUIRED") is False
+    assert decision(
+        "extension_background", "INTERACTION_POSTCONDITION_FAILED"
+    ) is True
+    assert decision("extension_background", "SCRAPE_PAGE_ERROR") is True
+    assert decision("extension_background", "BROWSER_EXTENSION_UNAVAILABLE") is False
     # 最后一次前台重试是终点，任何错误都不再续命。
     assert decision("foreground_retry", "SCRAPE_FAILED") is False
     assert decision("evidence_capture", "SCRAPE_FAILED") is False
@@ -2057,6 +2924,52 @@ def test_failed_refresh_falls_back_to_period_matched_snapshot(tmp_path):
     assert merged[0]["provenance"]["fallback"] is True
 
 
+def test_failed_refresh_skips_poisoned_error_snapshot(tmp_path):
+    db_path = _snapshot_db(
+        tmp_path,
+        7,
+        1787155000000,
+        1787100000000,
+        1787700000000,
+        content_text="在用项目数 102\n总卡数 1803.59",
+    )
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO data_snapshots (source_id, collected_at, observed_at,"
+        " period_start_at, period_end_at, content_text, structured_data, collector)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            7,
+            1787156000000,
+            1787156000000,
+            1787100000000,
+            1787700000000,
+            "GPU 项目用量管理\n网络错误",
+            json.dumps({"page_state": {"terminal_error_marker_count": 1}}),
+            "chrome_attach",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    merged = CreationService._merge_scrape_results(
+        [_failed_refresh_report_item(7)],
+        {},
+        {},
+        {7},
+        db_path=db_path,
+        time_context={
+            "has_relative_time": True,
+            "period_start_ms": 1787000000000,
+            "period_end_ms": 1787600000000,
+        },
+    )
+
+    assert merged[0]["can_use"] is True
+    assert merged[0]["content_excerpt"] == "在用项目数 102\n总卡数 1803.59"
+    assert merged[0]["stale_fallback"]["snapshot_collected_at"] == 1787155000000
+
+
 def test_failed_refresh_rejects_period_mismatched_snapshot(tmp_path):
     # 快照周期与要求周期不重叠时绝不降级，避免旧周期数据冒充本周数据。
     db_path = _snapshot_db(tmp_path, 7, 1786000000000, 1785900000000, 1786500000000)
@@ -2074,6 +2987,115 @@ def test_failed_refresh_rejects_period_mismatched_snapshot(tmp_path):
     )
     assert merged[0]["can_use"] is False
     assert merged[0]["unavailable_reason"] == "refresh_failed"
+
+
+def test_failed_refresh_rejects_snapshot_with_out_of_period_metric_facts(tmp_path):
+    # 快照周标签即使与目标周重叠，指标自身明确标注为上周时仍不得降级。
+    db_path = _snapshot_db(
+        tmp_path,
+        7,
+        1787155000000,
+        1787100000000,
+        1787700000000,
+        content_text="2026-08-15日输入Tokens为822.21亿",
+        structured_data={
+            "metric_rows": [
+                {
+                    "metric": "输入Tokens",
+                    "value": "822.21亿",
+                    "statement": "2026-08-15日输入Tokens为822.21亿。",
+                }
+            ]
+        },
+    )
+    merged = CreationService._merge_scrape_results(
+        [_failed_refresh_report_item(7)],
+        {},
+        {},
+        {7},
+        db_path=db_path,
+        time_context={
+            "has_relative_time": True,
+            "period_start_ms": int(datetime(2026, 8, 17).timestamp() * 1000),
+            "period_end_ms": int(datetime(2026, 8, 23, 23, 59).timestamp() * 1000),
+        },
+    )
+    assert merged[0]["can_use"] is False
+    assert merged[0]["unavailable_reason"] == "refresh_failed"
+
+
+def test_requested_period_policy_removes_out_of_period_work_memory_values():
+    start_ms = int(datetime(2026, 8, 17).timestamp() * 1000)
+    end_ms = int(datetime(2026, 8, 23, 23, 59).timestamp() * 1000)
+    results = [
+        {
+            "source_id": 6333,
+            "source_kind": "work_memory",
+            "can_use": True,
+            "content_excerpt": "2026-08-15日输入Tokens为822.21亿。",
+            "structured_data": {
+                "period": {"start_at": start_ms, "end_at": end_ms},
+                "metric_rows": [
+                    {
+                        "metric": "输入Tokens",
+                        "value": "822.21亿",
+                        "statement": "2026-08-15日输入Tokens为822.21亿。",
+                    }
+                ],
+            },
+            "provenance": {"period": {"start_at": start_ms, "end_at": end_ms}},
+        }
+    ]
+
+    filtered = CreationService._apply_requested_period_policy(
+        results,
+        {
+            "has_relative_time": True,
+            "period_start_ms": start_ms,
+            "period_end_ms": end_ms,
+        },
+    )
+
+    assert filtered[0]["can_use"] is False
+    assert filtered[0]["period_match"] is False
+    assert filtered[0]["unavailable_reason"] == "metric_period_mismatch"
+    assert filtered[0]["content_excerpt"] is None
+    assert filtered[0]["structured_data"] is None
+
+
+def test_requested_period_policy_keeps_only_in_period_metric_facts():
+    start_ms = int(datetime(2026, 8, 17).timestamp() * 1000)
+    end_ms = int(datetime(2026, 8, 23, 23, 59).timestamp() * 1000)
+    results = [
+        {
+            "source_id": 8,
+            "source_kind": "work_memory",
+            "can_use": True,
+            "content_excerpt": "旧值 10，新值 20",
+            "structured_data": {
+                "period": {"start_at": start_ms, "end_at": end_ms},
+                "metric_rows": [
+                    {"value": "10", "statement": "2026-08-15日指标为10。"},
+                    {"value": "20", "statement": "2026-08-20日指标为20。"},
+                ],
+            },
+        }
+    ]
+
+    filtered = CreationService._apply_requested_period_policy(
+        results,
+        {
+            "has_relative_time": True,
+            "period_start_ms": start_ms,
+            "period_end_ms": end_ms,
+        },
+    )
+
+    assert filtered[0]["can_use"] is True
+    assert filtered[0]["content_excerpt"] == "2026-08-20日指标为20。"
+    assert [
+        row["value"] for row in filtered[0]["structured_data"]["metric_rows"]
+    ] == ["20"]
 
 
 def test_failed_refresh_falls_back_to_recent_snapshot_without_time_requirement(tmp_path):
@@ -2705,9 +3727,15 @@ def test_quality_feedback_routes_specialists_and_dependencies_in_stable_order():
         / "creation-tools.schema.json"
     )
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
-    quality_branch = contract["$defs"]["harness_decision_event"]["properties"][
+    decision_branches = contract["$defs"]["harness_decision_event"]["properties"][
         "data"
-    ]["oneOf"][1]
+    ]["oneOf"]
+    quality_branch = next(
+        branch
+        for branch in decision_branches
+        if branch.get("properties", {}).get("trigger", {}).get("const")
+        == "quality_review_agent"
+    )
     assert set(quality_branch["required"]) <= set(decision)
     assert decision["trigger"] == quality_branch["properties"]["trigger"]["const"]
     allowed_scheduled = set(
@@ -2761,6 +3789,120 @@ def test_inline_placeholder_mention_does_not_flag_detail_incomplete():
 
     assert criteria["detail_complete"] is True
     assert not any(item["code"] == "detail_incomplete" for item in issues)
+
+
+def test_action_structure_requirements_detect_missing_and_short_subsections():
+    loop = CreationAgentLoop(FakeCreationService())
+    state = loop._new_state(
+        user_message="生成技术架构设计文档",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        selected_skills=[],
+        options=CreationOptions(enabled_tools=()),
+        model_mode="local",
+        session_id="session-component-detail-missing",
+        run_id="run-component-detail-missing",
+    )
+    state.environment["skill_structure_requirements"] = {
+        "minimum_subsections": 3,
+        "minimum_subsection_chars": 80,
+        "source_text": "至少 3 个子章节，每个子章节正文不少于 80 字。",
+    }
+    document = """# 技术架构方案
+
+## 方案设计
+
+### 整体架构
+
+```plantuml
+@startuml
+[接入网关] as Gateway
+[路由控制器] as Router
+[执行引擎] as Engine
+[状态存储] as Store
+Gateway --> Router
+Router --> Engine
+Engine --> Store
+@enduml
+```
+
+仅展示总体关系。
+
+## 实施计划
+
+先完成接口联调，再进行小流量验证和回退演练。实施过程记录版本、负责人和验收结果，确保变更可以复核。
+"""
+
+    criteria, issues = loop._inspect_document_quality(state, document)
+
+    assert criteria["subsection_requirements_satisfied"] is False
+    issue = next(
+        item
+        for item in issues
+        if item["code"] == "subsection_requirements_incomplete"
+    )
+    assert issue["agent_id"] == "detail_polish_agent"
+    assert issue["evidence"]["subsection_count"] == 1
+    assert issue["evidence"]["qualified_subsection_count"] == 0
+
+
+def test_action_structure_requirements_accept_qualified_subsections():
+    loop = CreationAgentLoop(FakeCreationService())
+    state = loop._new_state(
+        user_message="生成技术架构设计文档",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        selected_skills=[],
+        options=CreationOptions(enabled_tools=()),
+        model_mode="local",
+        session_id="session-component-detail-covered",
+        run_id="run-component-detail-covered",
+    )
+    state.environment["skill_structure_requirements"] = {
+        "minimum_subsections": 2,
+        "minimum_subsection_chars": 30,
+        "source_text": "至少 2 个子章节，每个子章节正文不少于 30 字。",
+    }
+    document = """# 技术架构方案
+
+## 方案设计
+
+### 整体架构
+
+```mermaid
+flowchart LR
+  A[接入网关] --> B[路由控制器]
+  B --> C[执行引擎]
+  C --> D[状态存储]
+```
+
+总体链路按接入、决策、执行和持久化四类职责组织，各层只通过稳定接口交互。
+
+### 接入与路由控制
+
+接入网关负责认证、限流和请求规范化，输出稳定请求信封。路由控制器只消费规范化字段，根据能力、负载和健康状态选择执行目标；路由失败时回到默认目标，并记录决策原因用于验证。
+
+### 执行与状态管理
+
+执行引擎负责运行受控任务并输出状态事件，不直接修改路由规则。状态存储按请求标识保存幂等结果、阶段状态和审计依据；执行超时后可以依据最后一个稳定状态恢复或回退，并通过成功率和恢复时长验收。
+
+## 实施计划
+
+按接口、灰度、观测和回退四个阶段实施，每个阶段完成后核对责任人、验收证据及继续扩量条件。
+"""
+
+    criteria, issues = loop._inspect_document_quality(state, document)
+
+    assert criteria["subsection_requirements_satisfied"] is True
+    assert not any(
+        item["code"] == "subsection_requirements_incomplete" for item in issues
+    )
+
+    state.environment["skill_structure_requirements"]["minimum_subsections"] = 4
+    stricter_criteria, _ = loop._inspect_document_quality(state, document)
+    assert stricter_criteria["subsection_requirements_satisfied"] is False
 
 
 def test_quality_replan_does_not_rerun_polisher_for_same_unresolved_issue():
@@ -2825,7 +3967,13 @@ def test_quality_replan_does_not_rerun_polisher_for_same_unresolved_issue():
 @pytest.mark.asyncio
 async def test_unresolvable_detail_issue_converges_after_one_polish_attempt():
     class StubbornPlaceholderService(FakeCreationService):
-        def analyze_requirement(self, message, options, entity_focus_text=""):
+        def analyze_requirement(
+            self,
+            message,
+            options,
+            entity_focus_text="",
+            retrieval_context_terms=None,
+        ):
             requirement = super().analyze_requirement(
                 message, options, entity_focus_text
             )
@@ -2887,7 +4035,13 @@ async def test_unresolvable_detail_issue_converges_after_one_polish_attempt():
 @pytest.mark.asyncio
 async def test_polish_step_streams_progress_instead_of_full_document():
     class StubbornPlaceholderService(FakeCreationService):
-        def analyze_requirement(self, message, options, entity_focus_text=""):
+        def analyze_requirement(
+            self,
+            message,
+            options,
+            entity_focus_text="",
+            retrieval_context_terms=None,
+        ):
             requirement = super().analyze_requirement(
                 message, options, entity_focus_text
             )
@@ -2950,7 +4104,7 @@ async def test_polish_step_streams_progress_instead_of_full_document():
 
 
 @pytest.mark.asyncio
-async def test_selected_skill_does_not_activate_undeclared_quality_agents():
+async def test_selected_skill_quality_gate_does_not_activate_unrelated_agents():
     loop = CreationAgentLoop(FakeCreationService())
     state = loop._new_state(
         user_message="把复盘写得自然一些",
@@ -2988,9 +4142,205 @@ async def test_selected_skill_does_not_activate_undeclared_quality_agents():
         status="completed",
     )
 
-    assert decision is None
-    assert "quality_review_agent" not in [step["id"] for step in state.plan]
+    assert decision["reason_code"] == "quality_gate_passed"
+    assert [step["id"] for step in state.plan].count("quality_review_agent") == 1
     assert "anti_ai_style_agent" not in [step["id"] for step in state.plan]
+
+
+def test_selected_skill_quality_gate_routes_only_declared_generic_checks():
+    loop = CreationAgentLoop(FakeCreationService())
+    state = loop._new_state(
+        user_message="使用已选 Skill 整理文档",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        selected_skills=[{
+            "id": "selected-format-skill",
+            "title": "已选格式 Skill",
+            "executionSteps": [],
+        }],
+        options=CreationOptions(enabled_tools=()),
+        model_mode="local",
+        session_id="session-selected-emphasis-quality",
+        run_id="run-selected-emphasis-quality",
+    )
+    resolve_planned(loop, state)
+    state.cursor = len(state.plan)
+    state.environment["quality_issues"] = [
+        {
+            "code": "ai_style_signals",
+            "severity": "soft",
+            "agent_id": "anti_ai_style_agent",
+            "required_capabilities": [],
+        },
+        {
+            "code": "emphasis_needs_polish",
+            "severity": "soft",
+            "agent_id": "typography_polish_agent",
+            "required_capabilities": [],
+        },
+    ]
+
+    decision = loop._replan_after_feedback(
+        state,
+        {"id": "quality_review_agent"},
+        status="completed",
+    )
+
+    assert decision["scheduled"] == [
+        "typography_polish_agent",
+        "quality_review_agent",
+    ]
+    assert state.plan[-1]["quality_issue_codes"] == [
+        "data_query_result_incomplete",
+        "emphasis_needs_polish",
+        "unsupported_page_absence_claim",
+        "subsection_requirements_incomplete",
+    ]
+    assert "anti_ai_style_agent" not in [step["id"] for step in state.plan]
+
+
+def test_emphasis_quality_allows_plain_text_and_rejects_over_formatting():
+    loop = CreationAgentLoop(FakeCreationService())
+    state = loop._new_state(
+        user_message="整理一份通用说明文档",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        selected_skills=[],
+        options=CreationOptions(enabled_tools=()),
+        model_mode="local",
+        session_id="session-emphasis-quality",
+        run_id="run-emphasis-quality",
+    )
+    plain_document = "# 说明\n\n## 背景\n\n" + ("这是一段无需额外强调的完整说明。" * 45)
+    criteria, issues = loop._inspect_document_quality(state, plain_document)
+    assert criteria["emphasis_selective"] is True
+    assert "emphasis_needs_polish" not in {item["code"] for item in issues}
+
+    heavy_document = (
+        "# 说明\n\n## 背景\n\n"
+        + ("**这是一段被过度加粗的完整说明内容**，其余内容保持普通文本。" * 35)
+    )
+    criteria, issues = loop._inspect_document_quality(state, heavy_document)
+    emphasis_issue = next(
+        item for item in issues if item["code"] == "emphasis_needs_polish"
+    )
+    assert criteria["emphasis_selective"] is False
+    assert emphasis_issue["agent_id"] == "typography_polish_agent"
+    assert emphasis_issue["evidence"]["bold_character_ratio"] > 0.12
+
+
+def test_quality_gate_rejects_page_absence_claim_after_interaction_failure():
+    loop = CreationAgentLoop(FakeCreationService())
+    state = loop._new_state(
+        user_message="生成数据周报",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        selected_skills=[],
+        options=CreationOptions(enabled_tools=()),
+        model_mode="local",
+        session_id="session-page-absence-quality",
+        run_id="run-page-absence-quality",
+    )
+    state.environment["webpage_scrapes"] = [
+        {
+            "source_id": 9,
+            "status": "failed",
+            "error_code": "INTERACTION_TARGET_NOT_FOUND",
+        }
+    ]
+    for absence_claim in (
+        "看板未展示输入输出 Token 字段。",
+        "报表页面未显示 GPU 利用率。",
+        "报表页面未提供项目成本字段。",
+        "报表无法提供目标周期的数据。",
+    ):
+        document = (
+            "# 周报\n\n## 数据\n\n"
+            + absence_claim * 20
+            + "\n\n## 结论\n\n本周数据统计完成。"
+        )
+
+        criteria, issues = loop._inspect_document_quality(state, document)
+
+        assert criteria["page_absence_claim_supported"] is False
+        assert any(
+            item["code"] == "unsupported_page_absence_claim" for item in issues
+        )
+
+
+def test_emphasis_quality_requires_short_labels_for_narrative_fragments():
+    loop = CreationAgentLoop(FakeCreationService())
+    state = loop._new_state(
+        user_message="整理一份通用进展文档",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        selected_skills=[],
+        options=CreationOptions(enabled_tools=()),
+        model_mode="local",
+        session_id="session-fragment-label-quality",
+        run_id="run-fragment-label-quality",
+    )
+    context = "\n\n" + ("补充背景说明，确保质量检查适用于完整文档。" * 35)
+    unlabeled = (
+        "# 进展\n\n## 当前事项\n\n"
+        "- 第一项工作已经完成方案评审，下一步进入小范围验证。\n"
+        "- 第二项工作已经完成性能测试，下一步补充观测指标。"
+        + context
+    )
+    criteria, issues = loop._inspect_document_quality(state, unlabeled)
+    emphasis_issue = next(
+        item for item in issues if item["code"] == "emphasis_needs_polish"
+    )
+    assert criteria["emphasis_selective"] is False
+    assert emphasis_issue["evidence"]["narrative_fragment_count"] == 2
+    assert emphasis_issue["evidence"]["missing_label_count"] == 2
+
+    labeled = (
+        "# 进展\n\n## 当前事项\n\n"
+        "- **方案评审：** 已完成方案评审，下一步进入小范围验证。\n"
+        "- **性能测试：** 已完成性能测试，下一步补充观测指标。"
+        + context
+    )
+    criteria, issues = loop._inspect_document_quality(state, labeled)
+    assert criteria["emphasis_selective"] is True
+    assert "emphasis_needs_polish" not in {item["code"] for item in issues}
+
+
+def test_document_unify_restores_strict_skill_section_headings_by_order():
+    loop = CreationAgentLoop(FakeCreationService())
+    state = loop._new_state(
+        user_message="生成文档",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        selected_skills=[],
+        options=CreationOptions(enabled_tools=()),
+        model_mode="local",
+        session_id="session-heading-restore",
+        run_id="run-heading-restore",
+    )
+    state.environment["strict_skill_ids"] = ["skill-weekly"]
+    state.environment["applied_skills"] = [
+        {
+            "id": "skill-weekly",
+            "execution_steps": [
+                {"title": "本周进展"},
+                {"title": "后续计划"},
+            ],
+        }
+    ]
+    restored, count = loop._restore_strict_skill_section_headings(
+        state,
+        "# 周报\n\n## 进展概览\n\n正文\n\n## 下一步\n\n正文",
+    )
+    assert count == 2
+    assert "## 本周进展" in restored
+    assert "## 后续计划" in restored
+    assert "## 进展概览" not in restored
 
 
 def test_quality_review_detects_observable_ai_style_signals():
@@ -3278,7 +4628,7 @@ async def test_webpage_scrape_defaults_to_silent_structured_collection():
         if event["type"] == "tool.completed"
         and event["actor"]["id"] == "webpage_scrape"
     )
-    assert "静默结构化取数" in completed["summary"]
+    assert "全程在后台读取" not in completed["summary"]
     assert completed["data"]["sources"][0]["focus_takeover_count"] == 0
 
 
@@ -3397,7 +4747,7 @@ async def test_webpage_scrape_reports_focus_gate_instead_of_structure_rejection(
         and event["actor"]["id"] == "webpage_scrape"
     )
     assert completed["status"] == "warning"
-    assert "焦点硬门禁中止" in completed["summary"]
+    assert "需要前台操作" in completed["summary"]
     assert "结构校验" not in completed["summary"]
 
 
@@ -3450,7 +4800,131 @@ async def test_webpage_scrape_without_verified_metrics_emits_warning_status():
         and event["actor"]["id"] == "webpage_scrape"
     )
     assert completed["status"] == "warning"
-    assert "没有指标通过页面结构校验" in completed["summary"]
+    assert "暂未取得与任务指标一致的即时数据" in completed["summary"]
+    assert "页面结构校验" not in completed["summary"]
+    assert completed["data"]["rejected_sources"] == [
+        {
+            "source_id": 12,
+            "title": "Token 数据报表",
+            "url": "https://bi.example.com/token-report",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_webpage_scrape_partial_success_lists_rejected_source_details():
+    service = FakeCreationService()
+    reports = [
+        {
+            "source_id": source_id,
+            "source_kind": "report_url",
+            "source_url": f"https://bi.example.com/token-report/{source_id}",
+            "title": title,
+            "refresh_required": True,
+            "can_use": False,
+        }
+        for source_id, title in ((31, "Token 周报"), (32, "Token 月报"))
+    ]
+    service.data_results = reports
+    service.scrape_outcome = {
+        "scrapes": [
+            {"source_id": 31, "status": "completed", "title": "Token 周报"},
+            {
+                "source_id": 32,
+                "status": "rejected",
+                "title": "Token 月报",
+                "validation_reason": "no_verified_metric",
+            },
+        ],
+        "refreshed_data": [
+            {**reports[0], "can_use": True, "refresh_required": False},
+            {
+                **reports[1],
+                "freshness_class": "unverified",
+                "evidence_status": "rejected",
+                "unavailable_reason": "validation_failed",
+            },
+        ],
+    }
+
+    events = await collect_events(
+        CreationAgentLoop(service).run(
+            user_message="生成本周 Token 数据摘要",
+            current_document="",
+            conversation=[],
+            selected_skills=[],
+            options=CreationOptions(enabled_tools=()),
+        )
+    )
+
+    completed = next(
+        event
+        for event in events
+        if event["type"] == "tool.completed"
+        and event["actor"]["id"] == "webpage_scrape"
+    )
+    assert "1 个来源暂未取得目标指标，未采用" in completed["summary"]
+    assert "全程在后台读取" not in completed["summary"]
+    assert completed["data"]["rejected_sources"] == [
+        {
+            "source_id": 32,
+            "title": "Token 月报",
+            "url": "https://bi.example.com/token-report/32",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_webpage_scrape_partial_success_explains_period_mismatch_readably():
+    service = FakeCreationService()
+    reports = [
+        {
+            "source_id": source_id,
+            "source_kind": "report_url",
+            "source_url": f"https://bi.example.com/report/{source_id}",
+            "title": f"报表 {source_id}",
+            "refresh_required": True,
+            "can_use": False,
+        }
+        for source_id in (21, 22)
+    ]
+    service.data_results = reports
+    service.scrape_outcome = {
+        "scrapes": [
+            {"source_id": 21, "status": "completed", "title": "报表 21"},
+            {
+                "source_id": 22,
+                "status": "failed",
+                "title": "报表 22",
+                "error_code": "SCRAPE_PERIOD_MISMATCH",
+            },
+        ],
+        "refreshed_data": [
+            {**reports[0], "can_use": True, "refresh_required": False},
+            {**reports[1], "can_use": False, "unavailable_reason": "refresh_failed"},
+        ],
+    }
+
+    events = await collect_events(
+        CreationAgentLoop(service).run(
+            user_message="生成上周经营周报",
+            current_document="",
+            conversation=[],
+            selected_skills=[],
+            options=CreationOptions(enabled_tools=()),
+        )
+    )
+
+    completed = next(
+        event
+        for event in events
+        if event["type"] == "tool.completed"
+        and event["actor"]["id"] == "webpage_scrape"
+    )
+    assert completed["status"] == "warning"
+    assert "采用其中 1 个来源" in completed["summary"]
+    assert "展示周期与任务周期不一致" in completed["summary"]
+    assert "页面结构校验" not in completed["summary"]
 
 
 @pytest.mark.asyncio
@@ -3495,8 +4969,102 @@ async def test_webpage_scrape_empty_body_reports_collection_failure_not_validati
         and event["actor"]["id"] == "webpage_scrape"
     )
     assert completed["status"] == "warning"
-    assert "后台页面未提取到正文" in completed["summary"]
+    assert "暂未展示可读取的数据" in completed["summary"]
     assert "结构校验" not in completed["summary"]
+
+
+@pytest.mark.asyncio
+async def test_webpage_scrape_storage_failure_reports_collection_failure_not_validation():
+    service = FakeCreationService()
+    report = {
+        "source_id": 14,
+        "source_kind": "report_url",
+        "source_url": "https://bi.example.com/gpu-report",
+        "title": "GPU 数据报表",
+        "refresh_required": True,
+        "can_use": False,
+    }
+    service.data_results = [report]
+    service.scrape_outcome = {
+        "scrapes": [{
+            "source_id": 14,
+            "status": "failed",
+            "error_code": "SCRAPE_FAILED",
+            "collection_attempt": "extension_background",
+        }],
+        "refreshed_data": [{
+            **report,
+            "can_use": False,
+            "unavailable_reason": "refresh_failed",
+        }],
+    }
+
+    events = await collect_events(
+        CreationAgentLoop(service).run(
+            user_message="生成本周 GPU 成本周报",
+            current_document="",
+            conversation=[],
+            selected_skills=[],
+            options=CreationOptions(enabled_tools=()),
+        )
+    )
+
+    completed = next(
+        event
+        for event in events
+        if event["type"] == "tool.completed"
+        and event["actor"]["id"] == "webpage_scrape"
+    )
+    assert completed["status"] == "warning"
+    assert "本次未完成刷新" in completed["summary"]
+    assert "结构校验" not in completed["summary"]
+
+
+@pytest.mark.asyncio
+async def test_webpage_scrape_unresponsive_extension_reports_task_claim_failure():
+    service = FakeCreationService()
+    report = {
+        "source_id": 15,
+        "source_kind": "report_url",
+        "source_url": "https://bi.example.com/gpu-report",
+        "title": "GPU 数据报表",
+        "refresh_required": True,
+        "can_use": False,
+    }
+    service.data_results = [report]
+    service.scrape_outcome = {
+        "scrapes": [{
+            "source_id": 15,
+            "status": "failed",
+            "error_code": "BROWSER_EXTENSION_UNRESPONSIVE",
+            "collection_attempt": "extension_background",
+        }],
+        "refreshed_data": [{
+            **report,
+            "can_use": False,
+            "unavailable_reason": "refresh_failed",
+        }],
+    }
+
+    events = await collect_events(
+        CreationAgentLoop(service).run(
+            user_message="生成本周 GPU 成本周报",
+            current_document="",
+            conversation=[],
+            selected_skills=[],
+            options=CreationOptions(enabled_tools=()),
+        )
+    )
+
+    completed = next(
+        event
+        for event in events
+        if event["type"] == "tool.completed"
+        and event["actor"]["id"] == "webpage_scrape"
+    )
+    assert completed["status"] == "warning"
+    assert "暂未开始后台读取" in completed["summary"]
+    assert "后台页面读取超时" not in completed["summary"]
 
 
 def test_primary_skill_workflow_drives_agent_tool_order_and_step_context():
@@ -3540,7 +5108,10 @@ def test_primary_skill_workflow_drives_agent_tool_order_and_step_context():
                     {
                         "id": "design-entry",
                         "title": "设计进入方案",
-                        "objective": "把约束与结论转成进入路径。",
+                        "objective": (
+                            "把约束与结论转成进入路径，至少形成 3 个子章节，"
+                            "每个子章节正文不少于 80 字。"
+                        ),
                         "output": "方案结构与关键取舍",
                         "agents": [
                             "solution_design_agent",
@@ -3573,6 +5144,13 @@ def test_primary_skill_workflow_drives_agent_tool_order_and_step_context():
         "quality_review_agent",
         "market-entry-skill:design-entry",
         "document_unify_polisher",
+        "quality_review_agent",
+    ]
+    assert skill_plan[-1]["quality_issue_codes"] == [
+        "data_query_result_incomplete",
+        "emphasis_needs_polish",
+        "unsupported_page_absence_claim",
+        "subsection_requirements_incomplete",
     ]
     assert "chapter_design_agent" not in [step["id"] for step in skill_plan]
     research_step = next(
@@ -3586,6 +5164,18 @@ def test_primary_skill_workflow_drives_agent_tool_order_and_step_context():
     assert "带来源的行业事实" in prompt
     assert "evidence-brief" in prompt
     assert "github_search" not in [step["id"] for step in skill_plan]
+    design_step = next(
+        step for step in skill_plan if step["id"] == "solution_design_agent"
+    )
+    assert design_step["skill_step_structure_requirements"] == {
+        "minimum_subsections": 3,
+        "minimum_subsection_chars": 80,
+        "source_text": "把约束与结论转成进入路径，至少形成 3 个子章节，每个子章节正文不少于 80 字。",
+    }
+    system, prompt = loop._model_prompts(state, design_step)
+    assert "至少 3 个三级或更深子章节" in system
+    assert "每个子章节正文不少于 80 字" in system
+    assert "'minimum_subsections': 3" in prompt
 
 
 def test_skill_step_prompt_consumes_harness_tool_result_without_meta_evidence():
@@ -4158,9 +5748,16 @@ def test_selected_skill_without_structured_steps_still_never_adds_hidden_agents(
         "creation_main_agent",
         "imported-skill",
         "creation_main_agent",
+        "quality_review_agent",
     ]
-    assert plan[-1]["action"] == "skill_step"
-    assert plan[-1]["skill_step_id"] == "execute-skill"
+    assert plan[-1]["quality_issue_codes"] == [
+        "data_query_result_incomplete",
+        "emphasis_needs_polish",
+        "unsupported_page_absence_claim",
+        "subsection_requirements_incomplete",
+    ]
+    assert plan[-2]["action"] == "skill_step"
+    assert plan[-2]["skill_step_id"] == "execute-skill"
 
 
 def test_explicit_skill_mention_drops_legacy_automatic_template_expansion():
@@ -4260,15 +5857,22 @@ def test_explicit_skill_mention_drops_legacy_automatic_template_expansion():
         for step in plan
         if step.get("action") == "skill_step"
     ] == ["meeting", "aigc", "gpu", "token"]
-    # 四个独立推理步骤后追加一次全文整合润色，共 11 个计划步骤。
-    assert len(plan) == 11
-    assert plan[-1]["id"] == "document_unify_polisher"
-    unify_system, _ = loop._model_prompts(state, plan[-1])
+    # 四个独立推理步骤后先整合全文，再执行通用数据完整性与强调检查。
+    assert len(plan) == 12
+    assert plan[-2]["id"] == "document_unify_polisher"
+    assert plan[-1]["id"] == "quality_review_agent"
+    assert plan[-1]["quality_issue_codes"] == [
+        "data_query_result_incomplete",
+        "emphasis_needs_polish",
+        "unsupported_page_absence_claim",
+        "subsection_requirements_incomplete",
+    ]
+    unify_system, _ = loop._model_prompts(state, plan[-2])
     assert "只处理全文结构、术语和表达一致性" in unify_system
     assert "只处理质检分派给你的问题" not in unify_system
     assert "保持 Skill 声明的二级章节标题、数量与顺序不变" in unify_system
     assert "最多两级的父子列表" in unify_system
-    assert "只对关键结论、关键数字、风险和行动项加粗" in unify_system
+    assert "只对关键判断、关键数字、风险和行动项的最短完整词组加粗" in unify_system
     assert "不得虚构归属" in unify_system
     assert {step["id"] for step in plan}.isdisjoint(
         {
@@ -4361,16 +5965,16 @@ async def test_reference_a889436d_four_step_workflow_order_and_output_structure(
             current_step = ""
             if "【当前 Skill 执行步骤】" in prompt and "步骤：" in prompt:
                 current_step = prompt.split("步骤：", 1)[1].splitlines()[0].strip()
-            if current_step == "本周大模型性能成本优化周会会议纪要":
-                return "\n".join(
-                    f"- 会议事项 {index}：已核对本周成本优化动作、业务影响、责任边界与验证结果。"
-                    for index in range(1, 6)
-                )
-            if current_step == "AIGC进度总结":
-                return "\n".join(
-                    f"- AIGC 项目 {index}：本周完成阶段性交付、性能验证与应用场景复核，并记录下一里程碑。"
-                    for index in range(1, 11)
-                )
+                if current_step == "本周大模型性能成本优化周会会议纪要":
+                    return "\n".join(
+                        f"- **会议事项 {index}：** 已核对本周成本优化动作、业务影响、责任边界与验证结果。"
+                        for index in range(1, 6)
+                    )
+                if current_step == "AIGC进度总结":
+                    return "\n".join(
+                        f"- **AIGC 项目 {index}：** 本周完成阶段性交付、性能验证与应用场景复核，并记录下一里程碑。"
+                        for index in range(1, 11)
+                    )
             if current_step == "GPU算力数据":
                 return (
                     "| 项目 | 业务线 | 卡数(X40) | 年化收益(万元) | 年化成本(万元) | ROI |\n"
@@ -4524,10 +6128,16 @@ async def test_reference_a889436d_four_step_workflow_order_and_output_structure(
     }.isdisjoint({
         "chapter_design_agent",
         "document_writer_agent",
-        "quality_review_agent",
         "data_analysis_agent",
         "webpage_scrape",
     })
+    assert plan[-1]["id"] == "quality_review_agent"
+    assert plan[-1]["quality_issue_codes"] == [
+        "data_query_result_incomplete",
+        "emphasis_needs_polish",
+        "unsupported_page_absence_claim",
+        "subsection_requirements_incomplete",
+    ]
     data_tool_step = next(step for step in plan if step["id"] == "data_search")
     assert data_tool_step["skill_step_id"] == "build-metrics-table"
     assert data_tool_step["name"] == "GPU算力数据 · 数据检索 Tool"
@@ -4547,7 +6157,7 @@ async def test_reference_a889436d_four_step_workflow_order_and_output_structure(
     # 但不能再回到错误版本的 119 个事件和三套模板长链。
     assert len(events) <= 90
     # 顶层阶段：四个 Skill 步骤按顺序形成四个阶段，phase 事件成对包裹；
-    # 最后追加一次独立的全文整合润色阶段。
+    # 最后追加全文整合润色，以及不改变业务结构的强调质量检查。
     phase_started = [event for event in events if event["type"] == "phase.started"]
     phase_completed = [
         event for event in events if event["type"] == "phase.completed"
@@ -4558,13 +6168,17 @@ async def test_reference_a889436d_four_step_workflow_order_and_output_structure(
         "GPU算力数据",
         "Token数据",
         "全文整合润色",
+        "质量审校",
     ]
     assert all(
         event["data"]["phase_kind"] == "skill_step"
-        for event in phase_started[:-1]
+        for event in phase_started[:-2]
     )
-    assert phase_started[-1]["data"]["phase_kind"] == "plan_step"
-    assert len(phase_started) == len(phase_completed) == 5
+    assert all(
+        event["data"]["phase_kind"] == "plan_step"
+        for event in phase_started[-2:]
+    )
+    assert len(phase_started) == len(phase_completed) == 6
     # 阶段内的工具摘要要表达调用目的，而不只是结果数量。
     memory_summaries = [
         event["summary"]
@@ -5585,6 +7199,11 @@ def _make_reference_document(source_type, source_id, *, final_weight=0.8):
         reason="与本周进展相关",
         source_type=source_type,
         source_id=source_id,
+        retrieval_mode="relational",
+        primary_target="AIGC 共建项目",
+        matched_components=("AIGC 共建项目", "Agent"),
+        matched_relations=("结合",),
+        relation_score=1.0,
     )
 
 
@@ -5592,6 +7211,24 @@ def _make_reference_document(source_type, source_id, *, final_weight=0.8):
 async def test_memory_search_event_keeps_recall_trace_fields():
     service = FakeCreationService()
     service.routing_decision = {"tools": ["memory_search"], "agents": []}
+    retrieval_plan = {
+        "mode": "relational",
+        "primary_target": "AIGC 共建项目",
+        "components": ["AIGC 共建项目", "Agent"],
+        "relations": ["结合"],
+        "hard_entity_gate": False,
+    }
+    service.analyze_requirement = lambda *args, **kwargs: {
+        "topic": "AIGC 共建项目与 Agent 结合方案",
+        "doc_type": "周报",
+        "audience": "研发团队",
+        "keywords": ["AIGC 共建项目", "Agent"],
+        "style": "专业清晰",
+        "entity_context": {"primary_entities": []},
+        "retrieval_plan": retrieval_plan,
+        "needs_latest": False,
+        "needs_images": False,
+    }
     recalled = [
         _make_reference_document("knowledge", 2275),
         _make_reference_document("document", 582, final_weight=0.6),
@@ -5621,6 +7258,9 @@ async def test_memory_search_event_keeps_recall_trace_fields():
     assert data["result_count"] == 2
     assert data["query"]
     assert isinstance(data["keywords"], list)
+    assert data["retrieval_plan"] == retrieval_plan
+    assert data["entity_context"] == {"primary_entities": []}
+    assert data["retrieval_diagnostics"] == {}
     assert "skill_step_id" in data and "skill_step_title" in data
 
     patch_references = memory_events[0]["environment_patch"]["references"]
@@ -5630,6 +7270,12 @@ async def test_memory_search_event_keeps_recall_trace_fields():
         "document",
     ]
     assert all("skill_step_title" in ref for ref in patch_references)
+    assert all(ref["retrieval_mode"] == "relational" for ref in patch_references)
+    assert all(ref["primary_target"] == "AIGC 共建项目" for ref in patch_references)
+    assert all(ref["matched_components"] == ["AIGC 共建项目", "Agent"] for ref in patch_references)
+    assert all(ref["matched_relations"] == ["结合"] for ref in patch_references)
+    assert all(ref["relation_score"] == 1.0 for ref in patch_references)
+    assert all(ref["selection_reasons"] == [] for ref in patch_references)
 
 
 def _strict_diagram_state(loop, step_tools):
@@ -5661,6 +7307,126 @@ def _strict_diagram_state(loop, step_tools):
         session_id="session-strict-diagram",
         run_id="run-strict-diagram",
     )
+
+
+def _generic_visual_plan():
+    return {
+        "schema_version": "creation.visual-plan.v1",
+        "policy": "auto",
+        "max_diagrams": 4,
+        "diagrams": [
+            {
+                "id": "relationship-overview",
+                "section_title": "关系总览",
+                "purpose": "解释对象之间的调用关系",
+                "diagram_type": "flowchart_lr",
+                "required": True,
+                "reason": "多个对象和方向用连续文字不易理解",
+                "source_points": ["对象甲调用对象乙", "对象乙返回结果"],
+                "placement": "after_intro",
+                "max_nodes": 12,
+            },
+            {
+                "id": "lifecycle",
+                "section_title": "生命周期",
+                "purpose": "解释状态变化和回退",
+                "diagram_type": "state",
+                "required": True,
+                "reason": "存在状态变化和异常回退",
+                "source_points": ["待处理进入处理中", "处理中可以完成或失败"],
+                "placement": "after_intro",
+                "max_nodes": 10,
+            },
+        ],
+    }
+
+
+def test_chapter_visual_plan_schedules_section_scoped_mermaid_steps():
+    loop = CreationAgentLoop(FakeCreationService())
+    state = loop._new_state(
+        user_message="解释多个对象之间的关系、状态变化和异常回退",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        selected_skills=[],
+        options=CreationOptions(enabled_tools=("mermaid_diagram",)),
+        model_mode="local",
+        session_id="session-generic-visual-plan",
+        run_id="run-generic-visual-plan",
+    )
+    resolve_planned(loop, state, decision={"tools": [], "agents": []})
+    state.environment["visual_plan"] = _generic_visual_plan()
+    chapter_index = next(
+        index
+        for index, step in enumerate(state.plan)
+        if step["id"] == "chapter_design_agent"
+    )
+    state.cursor = chapter_index + 1
+
+    decision = loop._replan_after_feedback(
+        state,
+        {"id": "chapter_design_agent"},
+        status="completed",
+    )
+
+    assert decision["reason_code"] == "visual_plan_ready"
+    assert decision["scheduled"] == ["mermaid_diagram", "mermaid_diagram"]
+    inserted = state.plan[state.cursor : state.cursor + 2]
+    assert [item["diagram_spec"]["section_title"] for item in inserted] == [
+        "关系总览",
+        "生命周期",
+    ]
+    assert inserted[0]["schedule_key"] != inserted[1]["schedule_key"]
+
+
+def test_visual_plan_quality_gate_checks_each_target_section_and_type():
+    loop = CreationAgentLoop(FakeCreationService())
+    state = loop._new_state(
+        user_message="解释多个对象之间的关系和状态变化",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        selected_skills=[],
+        options=CreationOptions(enabled_tools=("mermaid_diagram",)),
+        model_mode="local",
+        session_id="session-generic-visual-quality",
+        run_id="run-generic-visual-quality",
+    )
+    state.environment["visual_plan"] = _generic_visual_plan()
+    document = """# 通用说明
+
+## 关系总览
+
+对象之间存在方向明确的调用关系。
+
+```mermaid
+flowchart LR
+    A[对象甲] --> B[对象乙]
+```
+
+## 生命周期
+
+对象会在多个状态之间变化。
+"""
+
+    criteria, issues = loop._inspect_document_quality(state, document)
+
+    visual_issue = next(
+        item for item in issues if item["code"] == "planned_diagram_missing"
+    )
+    assert criteria["planned_diagrams_covered"] is False
+    assert visual_issue["required_capabilities"] == [
+        "mermaid_diagram",
+        "skill:image_style",
+    ]
+    assert visual_issue["evidence"]["missing_diagrams"] == [
+        {
+            "diagram_id": "lifecycle",
+            "section_title": "生命周期",
+            "expected_type": "state",
+            "reason": "diagram_missing",
+        }
+    ]
 
 
 def test_strict_skill_workflow_appends_enabled_routed_diagram_tool():

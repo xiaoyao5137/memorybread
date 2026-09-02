@@ -214,8 +214,31 @@ class IpcServer:
                     # 无法解析就无法知道 req.id，只能断开连接
                     break
 
-                # 分派给业务处理函数
-                resp = await self._safe_dispatch(req)
+                # 客户端在等待结果期间可能因本地超时而断开。旧实现仍会把已经
+                # 没有调用方的 OCR 任务留在单线程队列中执行，自动扫描连续超时
+                # 后会形成分钟级积压。并行监听连接 EOF，断开时立即取消仍在等待
+                # 的业务协程；已经进入系统 OCR 调用的线程无法强停，但不会再让
+                # 后续尚未开始的请求继续堆积。
+                dispatch_task = asyncio.create_task(self._safe_dispatch(req))
+                disconnect_task = asyncio.create_task(reader.read(1))
+                done, _pending = await asyncio.wait(
+                    {dispatch_task, disconnect_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if dispatch_task not in done:
+                    extra_data = disconnect_task.result()
+                    dispatch_task.cancel()
+                    await asyncio.gather(dispatch_task, return_exceptions=True)
+                    if extra_data:
+                        logger.warning("请求完成前收到额外 IPC 数据，关闭连接: %s", peer)
+                    else:
+                        logger.debug("客户端断开，已取消未完成请求 %s", req.id)
+                    break
+
+                disconnect_task.cancel()
+                await asyncio.gather(disconnect_task, return_exceptions=True)
+                resp = dispatch_task.result()
                 try:
                     await FrameCodec.write_frame(writer, resp)
                 except (ConnectionResetError, BrokenPipeError) as e:

@@ -270,12 +270,12 @@ const BakeSopTab: React.FC<{
                   onChange={(event) => onDraftToChange(event.target.value)}
                 />
               </label>
-              <div className="bake-list-toolbar__repository-actions bake-list-toolbar__repository-actions--secondary">
-                <div className="bake-list-toolbar__repository-primary-actions">
-                  <BakeButton compact type="button" onClick={onClearFilters}>清空</BakeButton>
-                  <BakeButton compact primary type="submit">搜索</BakeButton>
-                  {onCreateSop && <BakeButton compact primary type="button" onClick={() => setShowCreateDialog(true)}>新建</BakeButton>}
-                </div>
+            </div>
+            <div className="bake-list-toolbar__repository-actions bake-list-toolbar__repository-actions--secondary">
+              <div className="bake-list-toolbar__repository-primary-actions">
+                <BakeButton compact type="button" onClick={onClearFilters}>清空</BakeButton>
+                <BakeButton compact primary type="submit">搜索</BakeButton>
+                {onCreateSop && <BakeButton compact primary type="button" onClick={() => setShowCreateDialog(true)}>新建</BakeButton>}
               </div>
             </div>
           </div>

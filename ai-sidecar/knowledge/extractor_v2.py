@@ -5244,7 +5244,7 @@ class KnowledgeExtractorV2:
         from knowledge.fragment_grouper import text_density_score, DENSE_TEXT_THRESHOLD
 
         entries: List[Dict[str, Any]] = []
-        seen_bodies = set()
+        body_entry_indexes: Dict[str, int] = {}
         for c in captures:
             text = (
                 c.get('ax_text')
@@ -5256,10 +5256,6 @@ class KnowledgeExtractorV2:
             sanitized_text = _sanitize_capture_text(text)
             if not sanitized_text.strip():
                 continue
-            # 正文完全相同的重复采集（连续同屏）去重，只保留首次出现
-            if sanitized_text in seen_bodies:
-                continue
-            seen_bodies.add(sanitized_text)
             ts_str = datetime.fromtimestamp(c['ts'] / 1000).strftime('%H:%M:%S')
             app = c.get('app_name', '')
             title = c.get('window_title', '')
@@ -5274,6 +5270,12 @@ class KnowledgeExtractorV2:
             header = f"[采集ID:{c['id']} 时间:{ts_str}] {app} - {title}"
             if page_meta:
                 header += "（" + "，".join(page_meta) + "）"
+            # 正文完全相同时只保留一份 body，但不能丢掉重复采集的
+            # ID 与元数据，否则模型无法对采集 ID 全集做完整分区。
+            existing_index = body_entry_indexes.get(sanitized_text)
+            if existing_index is not None:
+                entries[existing_index]['headers'].append(header)
+                continue
             density = text_density_score(sanitized_text)
             quota = (
                 MERGE_BLOCK_QUOTA_DENSE
@@ -5281,18 +5283,25 @@ class KnowledgeExtractorV2:
                 else MERGE_BLOCK_QUOTA_DEFAULT
             )
             entries.append({
-                'header': header,
+                'headers': [header],
                 'body': _truncate_preserving_metrics(sanitized_text, quota),
                 'density': density,
             })
+            body_entry_indexes[sanitized_text] = len(entries) - 1
 
         if not entries:
             return ''
 
         sep_len = len(MERGE_BLOCK_SEPARATOR)
 
+        def entry_header(entry: Dict[str, Any]) -> str:
+            return "\n".join(entry['headers'])
+
         def joined_len() -> int:
-            return sum(len(e['header']) + 1 + len(e['body']) for e in entries) + sep_len * (len(entries) - 1)
+            content_len = sum(
+                len(entry_header(e)) + 1 + len(e['body']) for e in entries
+            )
+            return content_len + sep_len * (len(entries) - 1)
 
         # 阶段2：总长超限 → 优先剔除明确 UI 噪声行与连续短字孤立行
         if joined_len() > MERGE_TOTAL_MAX_CHARS:
@@ -5301,7 +5310,9 @@ class KnowledgeExtractorV2:
 
         # 阶段3：仍超限 → 按密度加权等比缩减（密集正文保留更多，保底 500 字），
         # 避免低密度块压到 500 后仍超限、密集块被尾部硬切整块丢失。
-        overhead = sum(len(e['header']) + 1 for e in entries) + sep_len * (len(entries) - 1)
+        overhead = sum(
+            len(entry_header(e)) + 1 for e in entries
+        ) + sep_len * (len(entries) - 1)
         body_budget = MERGE_TOTAL_MAX_CHARS - overhead
         total_body_len = sum(len(e['body']) for e in entries)
         if body_budget > 0 and total_body_len > body_budget:
@@ -5315,7 +5326,11 @@ class KnowledgeExtractorV2:
                 if len(e['body']) > cap:
                     e['body'] = _truncate_preserving_metrics(e['body'], cap)
 
-        blocks = [f"{e['header']}\n{e['body']}" for e in entries if e['body'].strip()]
+        blocks = [
+            f"{entry_header(e)}\n{e['body']}"
+            for e in entries
+            if e['body'].strip()
+        ]
         if not blocks:
             return ''
         merged_text = MERGE_BLOCK_SEPARATOR.join(blocks)

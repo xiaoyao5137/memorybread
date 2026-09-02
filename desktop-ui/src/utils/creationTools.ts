@@ -84,10 +84,10 @@ export const CREATION_TOOL_DEFINITIONS: readonly CreationToolDefinition[] = [
   {
     id: 'mermaid_diagram',
     name: 'Mermaid 画图',
-    summary: '在流程、时序和状态类任务中生成可被 Markdown 直接渲染的 Mermaid 图示代码。',
-    capability: '按需调用 · 输出代码图示',
+    summary: '按章节内容识别复杂关系，并生成可被 Markdown 直接渲染的 Mermaid 图示代码。',
+    capability: '默认启用 · 章节级按需调用',
     required: false,
-    official: false,
+    official: true,
   },
   {
     id: 'github_search',
@@ -140,11 +140,14 @@ export const normalizeCreationTools = (value: unknown): CreationToolState[] => {
         ...(resultLimit == null ? {} : { resultLimit }),
       }
     }
-    const installed = stored?.installed === true
+    const defaultEnabled = definition.id === 'mermaid_diagram'
+    const installed = stored
+      ? stored.installed === true
+      : defaultEnabled
     return {
       id: definition.id,
       installed,
-      enabled: installed && stored?.enabled === true,
+      enabled: installed && (stored ? stored.enabled === true : defaultEnabled),
       ...(resultLimit == null ? {} : { resultLimit }),
     }
   })

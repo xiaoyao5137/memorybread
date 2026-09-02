@@ -213,12 +213,12 @@ const BakeKnowledgeTab: React.FC<{
               <span className="bake-filter-label">结束时间</span>
               <input className="bake-input" type="date" value={draftTo} onChange={(event) => onDraftToChange(event.target.value)} />
             </label>
-            <div className="bake-list-toolbar__repository-actions bake-list-toolbar__repository-actions--secondary">
-              <div className="bake-list-toolbar__repository-primary-actions">
-                <BakeButton compact type="button" onClick={onClearFilters}>清空</BakeButton>
-                <BakeButton compact primary type="submit">搜索</BakeButton>
-                {onCreateKnowledge && <BakeButton compact primary type="button" onClick={() => setShowCreateDialog(true)}>新建</BakeButton>}
-              </div>
+          </div>
+          <div className="bake-list-toolbar__repository-actions bake-list-toolbar__repository-actions--secondary">
+            <div className="bake-list-toolbar__repository-primary-actions">
+              <BakeButton compact type="button" onClick={onClearFilters}>清空</BakeButton>
+              <BakeButton compact primary type="submit">搜索</BakeButton>
+              {onCreateKnowledge && <BakeButton compact primary type="button" onClick={() => setShowCreateDialog(true)}>新建</BakeButton>}
             </div>
           </div>
         </div>

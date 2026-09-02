@@ -151,6 +151,7 @@ export async function fetchSoftwareUpdate(
   const response = await fetch(`${adminApiBaseUrl}/v1/software-updates/check?${query}`, {
     headers: {
       ...serviceEnvironmentHeaders(),
+      'X-MemoryBread-Client': 'desktop',
       'X-MemoryBread-Update-Cohort': getSoftwareUpdateCohort(),
     },
     ...(signal ? { signal } : {}),

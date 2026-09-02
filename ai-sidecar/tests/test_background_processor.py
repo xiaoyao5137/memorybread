@@ -119,6 +119,31 @@ def test_pending_capture_query_includes_input_and_audio_text(tmp_path) -> None:
     assert captures[1]["audio_text"] == "会议音频转写"
 
 
+def test_failed_oldest_capture_enters_persistent_cooldown(tmp_path) -> None:
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.executemany(
+        """
+        INSERT INTO captures (
+            id, ts, app_name, win_title, ocr_text, ax_text,
+            input_text, audio_text, timeline_id
+        ) VALUES (?, ?, 'Code', '工作窗口', '正文', '', '', '', NULL)
+        """,
+        [(1, 1000), (2, 2000), (3, 3000)],
+    )
+    conn.commit()
+
+    processor = BackgroundProcessor(db_path=db_path)
+    processor._record_timeline_extraction_failure([1])
+    restarted = BackgroundProcessor(db_path=db_path)
+    captures = restarted._get_unprocessed_captures(conn, limit=10)
+    conn.close()
+
+    assert [capture["id"] for capture in captures] == [2, 3]
+    assert restarted._timeline_retry_state[1]["failure_count"] == 1
+
+
 def test_fragment_grouper_uses_input_and_audio_text() -> None:
     grouper = FragmentGrouper()
 
@@ -1046,13 +1071,13 @@ def test_dual_backlog_uses_bounded_work_quanta(tmp_path) -> None:
 
     assert processor._capture_group_quantum(135, 224) == 6
     assert processor._scheduled_bake_limit(charging_profile, 135) == 6
-    assert processor._scheduled_bake_limit(battery_profile, 135) == 1
+    assert processor._scheduled_bake_limit(battery_profile, 135) == 3
     assert processor._bake_burst_run_limit(135, 224) == 1
     assert processor._scheduled_bake_interval_secs(
         battery_profile,
         135,
         224,
-    ) == 120.0
+    ) == 30.0
 
     assert processor._capture_group_quantum(19, 224) is None
     assert processor._capture_group_quantum(135, 19) is None
@@ -1099,6 +1124,47 @@ def test_capture_batch_stops_at_semantic_group_quantum(tmp_path, monkeypatch) ->
 
     assert processed_ids == [1, 2, 3]
     assert result["processed_count"] == 3
+
+
+def test_failed_capture_group_is_not_vectorized(tmp_path, monkeypatch) -> None:
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    vectorized = []
+
+    monkeypatch.setattr(
+        processor,
+        "_process_batch_sync",
+        lambda *args: {
+            "groups_to_process": [[{"id": 1}]],
+            "fetched_count": 1,
+            "merge_first_group_into": None,
+        },
+    )
+    monkeypatch.setattr(
+        "model_registry_global.check_memory_pressure",
+        lambda: "normal",
+    )
+    monkeypatch.setattr(processor, "_acquire_process_file_lock", lambda: 7)
+    monkeypatch.setattr(processor, "_release_process_file_lock", lambda fd: None)
+
+    async def _fail_group(*args, **kwargs):
+        return False
+
+    async def _record_vectorization(group):
+        vectorized.append(group)
+
+    async def _no_sleep(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(processor, "_process_capture_group", _fail_group)
+    monkeypatch.setattr(processor, "_process_vectorization_batch", _record_vectorization)
+    monkeypatch.setattr("background_processor.asyncio.sleep", _no_sleep)
+
+    result = asyncio.run(processor._run_batch(trigger_bake=False))
+
+    assert result["processed_count"] == 0
+    assert vectorized == []
 
 
 def test_periodic_bake_check_uses_core_queue_status_as_single_source(tmp_path, monkeypatch) -> None:

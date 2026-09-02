@@ -26,7 +26,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     api::{error::ApiError, state::AppState},
-    browser_extension::{BrowserExtensionError, BrowserExtensionJob},
+    browser_extension::{
+        BrowserExtensionBroker, BrowserExtensionError, BrowserExtensionJob, PageInteractionPlan,
+    },
     storage::{
         repo::creation_evidence::NewCreationEvidenceAsset, CreationEvidenceAssetView,
         DataExtractionSummary, DataSearchResult, DataSourceRecord, DiscoveredSourceOutcome,
@@ -46,6 +48,11 @@ const BROWSER_SCROLL_READY_POLL_ATTEMPTS: usize = 30;
 // 对先渲染壳层、再请求指标的 BI 页面偏短；Sidecar 的单来源预算为 140 秒，
 // 这里给扩展 75 秒，同时仍早于上游超时收敛。
 const BROWSER_EXTENSION_REFRESH_TIMEOUT_SECONDS: u64 = 75;
+// 浏览器任务的页面执行截止时间必须早于 Core 等待结果的截止时间。
+// MV3 Service Worker 在正文采集结束后还需要停止预览、关闭后台标签并通过
+// Native Messaging 回传结果；两者共用同一 deadline 时，高负载下会出现
+// “页面已经采到数据，但 Core 先判 BROWSER_EXTENSION_TIMEOUT”的竞态。
+const BROWSER_EXTENSION_RESULT_HEADROOM_SECONDS: u64 = 10;
 // 单次浏览器脚本执行的硬超时；客户端刷新超时为 140s，这里必须更早收敛。
 const BROWSER_SCRIPT_TIMEOUT_SECONDS: u64 = 120;
 // 抽取结果无法解析属于瞬态故障（页面仍在流式渲染、AppleScript 结果被截断），
@@ -240,6 +247,9 @@ pub struct RefreshDataSourceRequest {
     pub expected_period_start: Option<String>,
     #[serde(default)]
     pub expected_period_end: Option<String>,
+    /// 结构化的只读页面交互计划。存在时优先于 objective 中的兼容解析。
+    #[serde(default)]
+    pub interaction_plan: Option<PageInteractionPlan>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -252,12 +262,17 @@ pub struct WebpageScrapeResponse {
     pub focus_policy: String,
     pub focus_takeover_count: usize,
     pub collected_at: i64,
+    pub observed_at: i64,
     pub title: String,
     pub url: String,
     pub content_text: String,
     pub structured_data: Value,
     pub content_hash: String,
     pub evidence: Option<CreationEvidenceAssetView>,
+    /// 浏览器扩展为本次任务保留的短期预览。它只用于紧随采集发生的
+    /// OCR 校验，不进入快照或证据资产存储。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transient_preview_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -325,6 +340,7 @@ pub(crate) struct ScrapeResult {
     pub(crate) content_text: String,
     pub(crate) structured_data: Value,
     screenshot: Option<BrowserScreenshot>,
+    transient_preview_url: Option<String>,
 }
 
 #[derive(Debug)]
@@ -452,19 +468,44 @@ fn manual_data_payload(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| {
-            rows.iter()
-                .take(4)
-                .map(|row| {
-                    format!(
-                        "{} {}",
-                        row.get("metric")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default(),
-                        row.get("value").and_then(Value::as_str).unwrap_or_default(),
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("，")
+            if rows.len() == 1 {
+                let row = &rows[0];
+                let object = row
+                    .get("dimension")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(title.as_str());
+                format!(
+                    "{}的{}为{}。",
+                    object,
+                    row.get("metric")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    row.get("value").and_then(Value::as_str).unwrap_or_default(),
+                )
+            } else {
+                let key_values = rows
+                    .iter()
+                    .take(3)
+                    .map(|row| {
+                        format!(
+                            "{}为{}",
+                            row.get("metric")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default(),
+                            row.get("value").and_then(Value::as_str).unwrap_or_default(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("；");
+                format!(
+                    "这组数据汇总“{}”，共{}行指标。关键数据包括：{}。",
+                    title,
+                    rows.len(),
+                    key_values
+                )
+            }
         });
     let content_text = std::iter::once(summary.clone())
         .chain(rows.iter().map(|row| {
@@ -485,6 +526,8 @@ fn manual_data_payload(
     let structured = json!({
         "extraction_version": "data-memory.v16",
         "content_render_version": "manual.v1",
+        "summary_render_version": "data-summary.v2",
+        "summary_origin": "user",
         "semantic_origin": "manual",
         "semantic_subject": title.clone(),
         "semantic_identity": format!("manual:{}", title),
@@ -706,6 +749,155 @@ fn structured_table_content_text(structured_data: &Value) -> Option<String> {
     (!text.trim().is_empty()).then(|| text.chars().take(MAX_SCRAPED_CHARS).collect())
 }
 
+/// 通过 Chrome 扩展在后台标签页读取网页。调用方开启网页爬虫后应统一
+/// 使用这条零焦点通道；扩展不可用时返回稳定错误，由上层保留历史快照，
+/// 不得再自动降级为会打开浏览器窗口的 Apple Events 通道。
+pub(crate) async fn scrape_browser_extension_async(
+    broker: &BrowserExtensionBroker,
+    url: String,
+    objective: Option<String>,
+    requested_metrics: Vec<String>,
+    expected_period_start: Option<String>,
+    expected_period_end: Option<String>,
+    interaction_plan: Option<PageInteractionPlan>,
+) -> Result<ScrapeResult, DataToolError> {
+    let timeout = Duration::from_secs(BROWSER_EXTENSION_REFRESH_TIMEOUT_SECONDS);
+    let execution_timeout = browser_extension_execution_timeout(timeout);
+    let validation_period_start = expected_period_start.clone();
+    let validation_period_end = expected_period_end.clone();
+    let job = BrowserExtensionJob::new(
+        url,
+        objective,
+        requested_metrics,
+        expected_period_start,
+        expected_period_end,
+        execution_timeout,
+    )
+    .with_interaction_plan(interaction_plan);
+    let extension = broker.submit(job, timeout).await.map_err(|error| {
+        let (code, message) = match error {
+            BrowserExtensionError::Unavailable => {
+                ("BROWSER_EXTENSION_UNAVAILABLE", "后台读取服务暂未连接")
+            }
+            BrowserExtensionError::Unresponsive => (
+                "BROWSER_EXTENSION_UNRESPONSIVE",
+                "后台读取服务暂未开始该页面任务",
+            ),
+            BrowserExtensionError::Timeout => (
+                "BROWSER_EXTENSION_TIMEOUT",
+                "页面在等待时间内未完成后台读取",
+            ),
+            BrowserExtensionError::Failed(_, _) => {
+                ("BROWSER_EXTENSION_FAILED", "该页面本次未完成后台读取")
+            }
+            BrowserExtensionError::Internal => {
+                ("BROWSER_EXTENSION_INTERNAL", "后台读取服务通信暂未完成")
+            }
+        };
+        DataToolError::new(StatusCode::SERVICE_UNAVAILABLE, code, message)
+    })?;
+    let transient_preview_url = Some(format!(
+        "/api/browser-integration/jobs/{}/preview",
+        extension.browser_job_id
+    ));
+    let mut structured_data = extension.structured_data;
+    if let Some(object) = structured_data.as_object_mut() {
+        object.insert("completeness".to_string(), extension.completeness);
+    } else {
+        structured_data = json!({
+            "content": structured_data,
+            "completeness": extension.completeness,
+        });
+    }
+    ensure_page_interaction_succeeded(&structured_data)?;
+    if let (Some(period_start), Some(period_end)) = (
+        validation_period_start.as_deref(),
+        validation_period_end.as_deref(),
+    ) {
+        ensure_expected_period_visible(
+            &extension.content_text,
+            Some(&structured_data),
+            period_start,
+            period_end,
+        )?;
+    }
+    Ok(ScrapeResult {
+        // data_snapshots 的持久化契约使用 chrome_attach 表示带登录态的
+        // Chrome 会话采集；浏览器扩展只是该通道的零焦点实现方式。
+        // 这里必须在进入存储层前归一化，避免把响应层的 transport 名称
+        // 写入 collector CHECK 约束并被误报为 SCRAPE_FAILED。
+        collector: "chrome_attach",
+        browser: Some("chrome"),
+        interaction_mode: "background_tab",
+        focus_takeover_count: 0,
+        title: extension.title,
+        url: extension.url,
+        content_text: extension.content_text,
+        structured_data,
+        screenshot: None,
+        transient_preview_url,
+    })
+}
+
+fn browser_extension_execution_timeout(wait_timeout: Duration) -> Duration {
+    let headroom = Duration::from_secs(BROWSER_EXTENSION_RESULT_HEADROOM_SECONDS);
+    wait_timeout
+        .checked_sub(headroom)
+        .filter(|value| !value.is_zero())
+        .unwrap_or(wait_timeout)
+}
+
+fn ensure_page_interaction_succeeded(structured_data: &Value) -> Result<(), DataToolError> {
+    let Some(result) = structured_data.get("interaction_result") else {
+        return Ok(());
+    };
+    if result.get("status").and_then(Value::as_str) != Some("failed") {
+        return Ok(());
+    }
+    let error = result
+        .get("steps")
+        .and_then(Value::as_array)
+        .and_then(|steps| {
+            steps.iter().find_map(|step| {
+                (step.get("status").and_then(Value::as_str) == Some("failed"))
+                    .then(|| step.get("error_code").and_then(Value::as_str))
+                    .flatten()
+            })
+        })
+        .unwrap_or("INTERACTION_POSTCONDITION_FAILED");
+    let (code, message) = match error {
+        "INTERACTION_ACTION_BLOCKED" => (
+            "INTERACTION_ACTION_BLOCKED",
+            "目标控件可能产生写入或外部副作用，本轮未执行",
+        ),
+        "INTERACTION_TARGET_NOT_FOUND" => (
+            "INTERACTION_TARGET_NOT_FOUND",
+            "本次未定位到目标页面控件，未采集目标视图数据",
+        ),
+        "INTERACTION_TARGET_AMBIGUOUS" => (
+            "INTERACTION_TARGET_AMBIGUOUS",
+            "页面存在多个相似控件且无法安全区分，本轮未执行",
+        ),
+        "INTERACTION_PAGE_UNSTABLE" => (
+            "INTERACTION_PAGE_UNSTABLE",
+            "页面在交互时间预算内未达到稳定状态",
+        ),
+        "INTERACTION_PLAN_INVALID" => (
+            "INTERACTION_PLAN_INVALID",
+            "页面交互计划格式无效或包含非只读动作",
+        ),
+        _ => (
+            "INTERACTION_POSTCONDITION_FAILED",
+            "页面操作后未验证目标状态，本轮未采集目标视图数据",
+        ),
+    };
+    Err(DataToolError::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        code,
+        message,
+    ))
+}
+
 pub async fn refresh_data_source(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
@@ -738,6 +930,15 @@ pub async fn refresh_data_source(
             "BAD_REQUEST",
             "Chrome 扩展执行偏好无效",
         ));
+    }
+    if let Some(plan) = body.interaction_plan.as_ref() {
+        plan.validate().map_err(|code| {
+            DataToolError::new(
+                StatusCode::BAD_REQUEST,
+                code,
+                "页面交互计划格式无效或包含非只读动作",
+            )
+        })?;
     }
     let capture_visual_evidence = body.capture_evidence && body.retain_screenshot;
     let use_foreground_browser = capture_visual_evidence || body.allow_foreground_refresh;
@@ -798,8 +999,8 @@ pub async fn refresh_data_source(
     // 扩展。默认控制开启后，扩展失败必须返回稳定错误并让创作使用历史快照，
     // 不能再静默降级到会抢占焦点的 Apple Events 浏览器窗口。
     let extension_result = if extension_preference == "auto" && !capture_visual_evidence {
-        let timeout = Duration::from_secs(BROWSER_EXTENSION_REFRESH_TIMEOUT_SECONDS);
-        let job = BrowserExtensionJob::new(
+        match scrape_browser_extension_async(
+            &state.browser_extension,
             url.clone(),
             body.objective.clone(),
             if body.requested_metrics.is_empty() {
@@ -809,57 +1010,18 @@ pub async fn refresh_data_source(
             },
             body.expected_period_start.clone(),
             body.expected_period_end.clone(),
-            timeout,
-        );
-        match state.browser_extension.submit(job, timeout).await {
-            Ok(extension) => {
-                let mut structured_data = extension.structured_data;
-                if let Some(object) = structured_data.as_object_mut() {
-                    object.insert("completeness".to_string(), extension.completeness);
-                } else {
-                    structured_data = json!({
-                        "content": structured_data,
-                        "completeness": extension.completeness,
-                    });
-                }
-                Some(ScrapeResult {
-                    collector: "chrome_extension",
-                    browser: Some("chrome"),
-                    interaction_mode: "background_tab",
-                    focus_takeover_count: 0,
-                    title: extension.title,
-                    url: extension.url,
-                    content_text: extension.content_text,
-                    structured_data,
-                    screenshot: None,
-                })
-            }
+            body.interaction_plan.clone(),
+        )
+        .await
+        {
+            Ok(result) => Some(result),
             Err(error) => {
-                let detail = format!("{error:?}");
-                let (code, message) = match error {
-                    BrowserExtensionError::Unavailable => {
-                        ("BROWSER_EXTENSION_UNAVAILABLE", "Chrome 扩展当前未连接")
-                    }
-                    BrowserExtensionError::Timeout => {
-                        ("BROWSER_EXTENSION_TIMEOUT", "Chrome 后台页面读取超时")
-                    }
-                    BrowserExtensionError::Failed(_, _) => {
-                        ("BROWSER_EXTENSION_FAILED", "Chrome 扩展未能读取该页面")
-                    }
-                    BrowserExtensionError::Internal => {
-                        ("BROWSER_EXTENSION_INTERNAL", "Chrome 扩展通信异常")
-                    }
-                };
                 tracing::info!(
                     source_id = id,
-                    reason = detail,
+                    reason = error.code(),
                     "Chrome 扩展采集未完成，保留历史快照且不打开前台浏览器"
                 );
-                return Err(DataToolError::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    code,
-                    message,
-                ));
+                return Err(error);
             }
         }
     } else {
@@ -881,6 +1043,7 @@ pub async fn refresh_data_source(
             body.objective.clone(),
             body.expected_period_start.clone(),
             body.expected_period_end.clone(),
+            body.interaction_plan.clone(),
             BROWSER_DATA_READY_POLL_ATTEMPTS,
             true,
         )
@@ -933,6 +1096,19 @@ pub async fn refresh_data_source(
             "页面已不存在，本次未生成数据快照",
         ));
     }
+    if looks_like_failed_report(&result.content_text, &result.structured_data) {
+        cleanup_pending_evidence(evidence_capture.as_ref());
+        let storage = state.storage.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            storage.mark_data_source_error(id, "SCRAPE_PAGE_ERROR")
+        })
+        .await;
+        return Err(DataToolError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SCRAPE_PAGE_ERROR",
+            "报表页面返回了临时错误，本次未生成数据快照",
+        ));
+    }
     if result.content_text.trim().is_empty() {
         if let Some(table_text) = structured_table_content_text(&result.structured_data) {
             result.content_text = table_text;
@@ -947,29 +1123,53 @@ pub async fn refresh_data_source(
     }
 
     let collected_at = now_ms();
+    let observed_at = verified_snapshot_observed_at(
+        &result.content_text,
+        &result.structured_data,
+        body.expected_period_start.as_deref(),
+        body.expected_period_end.as_deref(),
+    )
+    .unwrap_or(collected_at);
     let content_hash = format!(
         "{:x}",
         Sha256::digest(format!("{}\n{}", result.content_text, result.structured_data).as_bytes())
     );
     let storage = state.storage.clone();
-    let collector = result.collector.to_string();
+    let collector = result.collector;
     let title = result.title.clone();
     let content = result.content_text.clone();
     let structured = result.structured_data.clone();
     let snapshot_result = tokio::task::spawn_blocking(move || {
-        storage.save_data_snapshot(
+        storage.save_data_snapshot_with_observed_at(
             id,
-            &collector,
+            collector,
             Some(&title),
             &content,
             &structured,
             collected_at,
+            observed_at,
         )
     })
     .await;
     let snapshot = match snapshot_result {
         Ok(Ok(snapshot)) => snapshot,
-        _ => {
+        Ok(Err(error)) => {
+            tracing::error!(
+                source_id = id,
+                collector,
+                error = %error,
+                "网页采集结果写入数据快照失败"
+            );
+            cleanup_pending_evidence(evidence_capture.as_ref());
+            return Err(internal_scrape_error());
+        }
+        Err(error) => {
+            tracing::error!(
+                source_id = id,
+                collector,
+                error = %error,
+                "网页采集结果持久化任务异常结束"
+            );
             cleanup_pending_evidence(evidence_capture.as_ref());
             return Err(internal_scrape_error());
         }
@@ -1019,12 +1219,14 @@ pub async fn refresh_data_source(
         focus_policy,
         focus_takeover_count: result.focus_takeover_count,
         collected_at,
+        observed_at,
         title: result.title,
         url: result.url,
         content_text: result.content_text,
         structured_data: result.structured_data,
         content_hash,
         evidence,
+        transient_preview_url: result.transient_preview_url,
     }))
 }
 
@@ -1134,6 +1336,7 @@ pub(crate) async fn scrape_browser_async(
     objective: Option<String>,
     expected_period_start: Option<String>,
     expected_period_end: Option<String>,
+    interaction_plan: Option<PageInteractionPlan>,
     readiness_poll_attempts: usize,
     collect_structured_segments: bool,
 ) -> Result<ScrapeResult, DataToolError> {
@@ -1147,6 +1350,7 @@ pub(crate) async fn scrape_browser_async(
             objective.as_deref(),
             expected_period_start.as_deref(),
             expected_period_end.as_deref(),
+            interaction_plan.as_ref(),
             readiness_poll_attempts,
             collect_structured_segments,
         )
@@ -1164,6 +1368,7 @@ fn scrape_with_browser(
     objective: Option<&str>,
     expected_period_start: Option<&str>,
     expected_period_end: Option<&str>,
+    interaction_plan: Option<&PageInteractionPlan>,
     readiness_poll_attempts: usize,
     collect_structured_segments: bool,
 ) -> Result<ScrapeResult, DataToolError> {
@@ -1178,6 +1383,7 @@ fn scrape_with_browser(
             objective,
             expected_period_start,
             expected_period_end,
+            interaction_plan,
             readiness_poll_attempts,
             collect_structured_segments,
         );
@@ -1204,6 +1410,7 @@ fn scrape_with_browser(
             objective.unwrap_or_default(),
             expected_period_start.unwrap_or_default(),
             expected_period_end.unwrap_or_default(),
+            interaction_plan,
         );
         let evidence_path_string = evidence_path.map(|path| path.to_string_lossy().into_owned());
         let (output, accessibility_text) = if let Some(preview_token) = preview_token {
@@ -1468,6 +1675,7 @@ fn scrape_with_browser(
             content_text: clip_text(content_text, MAX_SCRAPED_CHARS),
             structured_data,
             screenshot,
+            transient_preview_url: None,
         })
     }
 }
@@ -3758,12 +3966,15 @@ fn browser_interaction_javascript(
     objective: &str,
     expected_period_start: &str,
     expected_period_end: &str,
+    interaction_plan: Option<&PageInteractionPlan>,
 ) -> String {
     let objective_json = serde_json::to_string(objective).unwrap_or_else(|_| "\"\"".to_string());
     let start_json =
         serde_json::to_string(expected_period_start).unwrap_or_else(|_| "\"\"".to_string());
     let end_json =
         serde_json::to_string(expected_period_end).unwrap_or_else(|_| "\"\"".to_string());
+    let interaction_plan_json =
+        serde_json::to_string(&interaction_plan).unwrap_or_else(|_| "null".to_string());
     let tab_index = requested_tab_index(objective)
         .map(|index| index as i32)
         .unwrap_or(-1_i32);
@@ -3772,6 +3983,7 @@ fn browser_interaction_javascript(
             var objective={objective};
             var expectedStart={expected_start};
             var expectedEnd={expected_end};
+            var interactionPlan={interaction_plan};
             var clean=function(v){{return String(v||'').replace(/\s+/g,' ').trim();}};
             var visible=function(node){{
                 if(!node||!node.getBoundingClientRect)return false;
@@ -3784,14 +3996,34 @@ fn browser_interaction_javascript(
             state.pollCount=Number(state.pollCount||0)+1;
             var interactionPending=false;
             var tabIndex={tab_index};
+            var plannedStep=interactionPlan&&Array.isArray(interactionPlan.steps)?interactionPlan.steps.find(function(step){{return step&&(/^(?:activate|expand)$/).test(clean(step.action));}}):null;
+            var plannedTarget=plannedStep&&plannedStep.target?plannedStep.target:null;
+            if(plannedTarget&&Number(plannedTarget.ordinal)>0)tabIndex=Number(plannedTarget.ordinal)-1;
+            if(plannedTarget&&tabIndex<0)tabIndex=0;
             if(tabIndex>=0){{
-                var tabs=Array.prototype.slice.call(document.querySelectorAll('[role="tab"],[class*="tab"],[class*="Tab"]'))
+                var normalizeLabel=function(value){{return clean(value).toLowerCase().replace(/tokens?/g,'token').replace(/[^a-z0-9\u3400-\u9fff]+/g,'');}};
+                var plannedLabels=plannedTarget&&Array.isArray(plannedTarget.labels)?plannedTarget.labels.map(normalizeLabel).filter(Boolean):[];
+                var plannedRoles=plannedTarget&&Array.isArray(plannedTarget.role_hints)?plannedTarget.role_hints.map(function(value){{return clean(value).toLowerCase();}}):[];
+                var nodeRole=function(node){{
+                    var tag=clean(node.tagName).toLowerCase(),role=clean(node.getAttribute&&node.getAttribute('role')).toLowerCase();
+                    var evidence=(role+' '+clean(node.className)+' '+clean(node.getAttribute&&node.getAttribute('aria-current'))).toLowerCase();
+                    if(tag==='button')return 'button';if(tag==='select'||/combobox|select/.test(evidence))return 'combobox';if(tag==='input')return 'input';
+                    if(/tab/.test(evidence))return 'tab';if(/menu|nav|sidebar/.test(evidence)||clean(node.getAttribute&&node.getAttribute('aria-current')))return 'navigation_item';
+                    return tag==='a'?'link':'interactive';
+                }};
+                var tabs=Array.prototype.slice.call(document.querySelectorAll('[role="tab"],[role="menuitem"],[role="button"],button,a,[aria-current],[class*="tab" i],[class*="menu" i],[class*="nav" i],[class*="sidebar" i]'))
                     .filter(function(node){{
                         if(!visible(node))return false;
                         var label=clean(node.innerText||node.textContent);
                         if(!label||label.length>60)return false;
                         var role=clean(node.getAttribute('role')).toLowerCase();
                         var className=clean(node.className).toLowerCase();
+                        if(plannedTarget){{
+                            var normalized=normalizeLabel(label),semanticRole=nodeRole(node);
+                            var labelMatch=!plannedLabels.length||plannedLabels.some(function(expected){{return normalized===expected||normalized.indexOf(expected)>=0||expected.indexOf(normalized)>=0;}});
+                            var roleMatch=!plannedRoles.length||plannedRoles.indexOf(semanticRole)>=0;
+                            return labelMatch&&roleMatch;
+                        }}
                         return role==='tab'||/(?:^|\s)[^\s]*(?:tabs?__item|tab-item|tab_item|tab__wrapper)(?:\s|$)/i.test(className);
                     }});
                 var groups=[];
@@ -3939,6 +4171,7 @@ fn browser_interaction_javascript(
         objective = objective_json,
         expected_start = start_json,
         expected_end = end_json,
+        interaction_plan = interaction_plan_json,
         tab_index = tab_index,
     )
 }
@@ -4043,6 +4276,7 @@ async fn scrape_http(url: &str) -> Result<ScrapeResult, DataToolError> {
         content_text,
         structured_data: json!({"extraction": "html_text"}),
         screenshot: None,
+        transient_preview_url: None,
     })
 }
 
@@ -4224,6 +4458,38 @@ pub(crate) fn looks_like_terminal_page(title: &str, url: &str, content: &str) ->
     .any(|marker| evidence.contains(marker))
 }
 
+fn looks_like_failed_report(content: &str, structured_data: &Value) -> bool {
+    if structured_data
+        .pointer("/page_state/terminal_error_marker_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0
+    {
+        return true;
+    }
+    content.lines().any(|line| {
+        let normalized = line.trim().to_lowercase();
+        matches!(
+            normalized.as_str(),
+            "网络错误"
+                | "网络异常"
+                | "请求失败"
+                | "请求错误"
+                | "系统异常"
+                | "服务异常"
+                | "加载失败"
+                | "加载异常"
+                | "failed to load"
+                | "network error"
+        ) || ((normalized.starts_with("获取")
+            || normalized.starts_with("读取")
+            || normalized.starts_with("查询")
+            || normalized.starts_with("刷新"))
+            && normalized.ends_with("失败")
+            && normalized.chars().count() <= 48)
+    })
+}
+
 fn clip_text(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.trim().to_string();
@@ -4245,6 +4511,27 @@ fn ensure_expected_period_visible(
     let (Some(expected_start), Some(expected_end)) = (expected_start, expected_end) else {
         return Err(period_mismatch_error());
     };
+
+    // 浏览器交互层已经操作并复核日期控件时，该控件是页面统计周期的
+    // 一等证据。正文还可能同时出现图表单日、同比基期、发布日期等其他
+    // 日期，不能再把整页所有日期混成一个周期并据此误拒绝。
+    if interaction_confirms_expected_period(
+        structured_data,
+        expected_period_start,
+        expected_period_end,
+    ) {
+        return Ok(());
+    }
+    if interaction_reports_unconfirmed_period(structured_data) {
+        return Err(period_mismatch_error());
+    }
+
+    // 没有日期筛选器的实时总览以本次采集时点为时效证据。正文中的发布
+    // 日期、版本日期等不代表页面统计周期；具体指标若自带统计日期，后续
+    // 指标级证据校验仍会逐条约束。
+    if interaction_reports_missing_period_control(structured_data) {
+        return Ok(());
+    }
     let page_dates = extract_calendar_dates(page_text);
     if !page_dates.is_empty()
         && page_dates
@@ -4254,13 +4541,6 @@ fn ensure_expected_period_visible(
         return Ok(());
     }
 
-    // 有些实时总览是“采集时点快照”，页面没有日期筛选器，也不展示
-    // 统计日期。浏览器交互层明确确认控件不存在、且正文没有任何可解析
-    // 日期时，使用本次 collected_at 作为时效证据；这不同于筛选器存在但
-    // 切换失败，后者仍会被拒绝。
-    if page_dates.is_empty() && interaction_reports_missing_period_control(structured_data) {
-        return Ok(());
-    }
     Err(period_mismatch_error())
 }
 
@@ -4312,12 +4592,97 @@ fn interaction_reports_missing_period_control(structured_data: Option<&Value>) -
         .unwrap_or(false)
 }
 
+fn interaction_confirms_expected_period(
+    structured_data: Option<&Value>,
+    expected_period_start: &str,
+    expected_period_end: &str,
+) -> bool {
+    let Some(interaction) = structured_data.and_then(|value| value.get("interaction")) else {
+        return false;
+    };
+    let expected_matches = interaction
+        .get("expected_period")
+        .map(|period| {
+            period.get("start").and_then(Value::as_str) == Some(expected_period_start)
+                && period.get("end").and_then(Value::as_str) == Some(expected_period_end)
+        })
+        .unwrap_or(true);
+    if !expected_matches {
+        return false;
+    }
+    if interaction
+        .get("period_verified")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    interaction
+        .get("actions")
+        .and_then(Value::as_array)
+        .map(|actions| {
+            actions.iter().any(|action| {
+                matches!(
+                    action.get("kind").and_then(Value::as_str),
+                    Some("period_current" | "period_range" | "period")
+                ) && action.get("start").and_then(Value::as_str) == Some(expected_period_start)
+                    && action.get("end").and_then(Value::as_str) == Some(expected_period_end)
+            }) && !actions.iter().any(|action| {
+                action.get("kind").and_then(Value::as_str) == Some("period_unconfirmed")
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn interaction_reports_unconfirmed_period(structured_data: Option<&Value>) -> bool {
+    structured_data
+        .and_then(|value| value.get("interaction"))
+        .and_then(|value| value.get("actions"))
+        .and_then(Value::as_array)
+        .map(|actions| {
+            actions.iter().any(|action| {
+                action.get("kind").and_then(Value::as_str) == Some("period_unconfirmed")
+            })
+        })
+        .unwrap_or(false)
+}
+
 fn period_mismatch_error() -> DataToolError {
     DataToolError::new(
         StatusCode::UNPROCESSABLE_ENTITY,
         "SCRAPE_PERIOD_MISMATCH",
-        "网页筛选区间未切换到本次任务要求，已拒绝错误周期的数据",
+        "页面当前展示的统计周期与本次任务不一致，本轮未采用该页数值",
     )
+}
+
+fn verified_snapshot_observed_at(
+    page_text: &str,
+    structured_data: &Value,
+    expected_period_start: Option<&str>,
+    expected_period_end: Option<&str>,
+) -> Option<i64> {
+    let expected_start = parse_calendar_date(expected_period_start?)?;
+    let expected_end = parse_calendar_date(expected_period_end?)?;
+    let page_dates = extract_calendar_dates(page_text);
+    let observed_date = if !page_dates.is_empty()
+        && page_dates
+            .iter()
+            .all(|date| *date >= expected_start && *date <= expected_end)
+    {
+        page_dates.into_iter().max()?
+    } else if structured_data
+        .get("interaction")
+        .and_then(|value| value.get("period_verified"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        expected_end
+    } else {
+        return None;
+    };
+    observed_date
+        .and_hms_opt(12, 0, 0)
+        .map(|value| value.and_utc().timestamp_millis())
 }
 
 fn internal_scrape_error() -> DataToolError {
@@ -4382,6 +4747,91 @@ fn validate_focus_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_extension_execution_leaves_time_to_return_the_result() {
+        let wait_timeout = Duration::from_secs(BROWSER_EXTENSION_REFRESH_TIMEOUT_SECONDS);
+
+        let execution_timeout = browser_extension_execution_timeout(wait_timeout);
+
+        assert_eq!(execution_timeout, Duration::from_secs(65));
+        assert_eq!(wait_timeout - execution_timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn manual_data_payload_keeps_user_summary_origin_and_uses_readable_fallback() {
+        let (_, _, structured) = manual_data_payload(CreateOrUpdateDataRequest {
+            title: "QCon上海2026大会时间".to_string(),
+            summary: None,
+            rows: vec![DataMetricInput {
+                dimension: None,
+                metric: "会议日期范围".to_string(),
+                value: "10月22日-10月24日".to_string(),
+                note: None,
+            }],
+        })
+        .unwrap();
+
+        assert_eq!(structured["summary_origin"], "user");
+        assert_eq!(structured["summary_render_version"], "data-summary.v2");
+        assert_eq!(
+            structured["summary"],
+            "QCon上海2026大会时间的会议日期范围为10月22日-10月24日。"
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_extension_result_uses_persistable_chrome_collector() {
+        let broker = BrowserExtensionBroker::new();
+        broker.heartbeat(Some("0.2.1".to_string()));
+        let (collector, transient_preview_url) = {
+            let broker_for_scrape = broker.clone();
+            let scrape = tokio::spawn(async move {
+                scrape_browser_extension_async(
+                    &broker_for_scrape,
+                    "https://example.com/report".to_string(),
+                    Some("读取 GPU 指标".to_string()),
+                    vec!["GPU 使用率".to_string()],
+                    None,
+                    None,
+                    None,
+                )
+                .await
+            });
+            tokio::task::yield_now().await;
+            let job = broker
+                .poll(Some("0.2.1".to_string()))
+                .expect("extension job queued");
+            assert!(
+                broker.complete(crate::browser_extension::BrowserExtensionResult {
+                    browser_job_id: job.browser_job_id,
+                    status: "complete".to_string(),
+                    title: "GPU 看板".to_string(),
+                    url: "https://example.com/report".to_string(),
+                    content_text: "GPU 使用率 73%".to_string(),
+                    structured_data: json!({"tables": [["GPU 使用率", "73%"]]}),
+                    completeness: json!({"status": "complete"}),
+                    error_code: None,
+                    error_message: None,
+                })
+            );
+            let result = scrape
+                .await
+                .expect("scrape task joined")
+                .expect("extension scrape completed");
+            (result.collector, result.transient_preview_url)
+        };
+
+        assert_eq!(collector, "chrome_attach");
+        assert!(transient_preview_url
+            .as_deref()
+            .map(|url| url.starts_with("/api/browser-integration/jobs/"))
+            .unwrap_or(false));
+        assert!(transient_preview_url
+            .as_deref()
+            .map(|url| url.ends_with("/preview"))
+            .unwrap_or(false));
+    }
 
     #[test]
     fn structured_tables_supply_text_when_extension_body_is_empty() {
@@ -4466,6 +4916,22 @@ mod tests {
     }
 
     #[test]
+    fn failed_report_detection_rejects_business_error_shells() {
+        assert!(looks_like_failed_report(
+            "GPU 使用情况一览\n数据时效：T-2\n获取日期列表失败",
+            &serde_json::json!({"page_state": {"terminal_error_marker_count": 1}}),
+        ));
+        assert!(looks_like_failed_report(
+            "GPU 项目用量管理\n网络错误",
+            &serde_json::json!({}),
+        ));
+        assert!(!looks_like_failed_report(
+            "服务质量周报\n网络错误率\n0.02%\n请求失败数\n3",
+            &serde_json::json!({"page_state": {"terminal_error_marker_count": 0}}),
+        ));
+    }
+
+    #[test]
     fn browser_candidates_prefer_the_source_browser_and_allow_explicit_choice() {
         let automatic = browser_candidates(Some("auto"), Some("Microsoft Edge"));
         assert_eq!(automatic.first().map(|item| item.id), Some("edge"));
@@ -4482,7 +4948,7 @@ mod tests {
     fn silent_browser_scripts_only_attach_existing_matching_tabs() {
         let javascript = browser_extraction_javascript();
         let readiness_javascript = browser_readiness_javascript();
-        let interaction_javascript = browser_interaction_javascript("", "", "");
+        let interaction_javascript = browser_interaction_javascript("", "", "", None);
         let chromium = build_chromium_scrape_script(
             BROWSER_ADAPTERS[0],
             "https://example.com",
@@ -4507,7 +4973,7 @@ mod tests {
             assert!(!script.contains("active tab index"));
             assert!(!script.contains("current tab of target_window"));
             assert!(!script.contains("frontmost"));
-            assert!(!script.contains("activate"));
+            assert!(!script.contains("\n                activate\n"));
             assert!(!script.contains("interaction_ready"));
         }
         assert!(chromium.contains("stable_read_count"));
@@ -4526,7 +4992,7 @@ mod tests {
     fn evidence_scripts_keep_the_window_hidden_until_one_foreground_lease() {
         let javascript = browser_extraction_javascript();
         let readiness_javascript = browser_readiness_javascript();
-        let interaction_javascript = browser_interaction_javascript("", "", "");
+        let interaction_javascript = browser_interaction_javascript("", "", "", None);
         let preview_id = "2d870d80-e2a2-4424-a732-069e174f2796";
         let chromium_start = build_background_browser_start_script(
             BROWSER_ADAPTERS[0],
@@ -4605,7 +5071,7 @@ mod tests {
             assert!(!script.contains("previous_front_app"));
             assert!(!script.contains("frontmost of first application process"));
             assert!(!script.contains("original_front_window"));
-            assert!(!script.contains("activate"));
+            assert!(!script.contains("\n                activate\n"));
         }
         assert!(chromium_start.contains("visible:false"));
         assert!(chromium_start.contains("MemoryBread Preview"));
@@ -4617,7 +5083,7 @@ mod tests {
             assert!(script.contains("FOCUS_POLICY_BLOCKED"));
             assert!(!script.contains("front window"));
             assert!(!script.contains("screencapture"));
-            assert!(!script.contains("activate"));
+            assert!(!script.contains("\n                activate\n"));
         }
         assert!(!chromium_hidden_extract.contains("FOCUS_POLICY_BLOCKED"));
         assert!(!chromium_hidden_extract.contains("frontmost of first application process"));
@@ -4817,6 +5283,7 @@ mod tests {
             "从第二个tab获取本周独立部署、公共部署和商业模型输入输出 Token",
             "2026-08-10",
             "2026-08-16",
+            None,
         );
         assert!(script.contains("var tabIndex=1"));
         assert!(script.contains("2026-08-10"));
@@ -4826,12 +5293,52 @@ mod tests {
         assert!(script.contains("period_wait"));
         assert!(script.contains("kind:'apply'"));
         assert!(script.contains("period_control_missing"));
-        assert!(script.contains("[class*=\"tab\"]"));
+        assert!(script.contains("[class*=\"tab\" i]"));
         assert!(script.contains("return pending?0:1"));
         assert!(
             script.find("kind:'period'").unwrap() < script.find("period_shortcut").unwrap(),
             "应优先写入契约给出的精确日期，页面快捷项仅作后备"
         );
+    }
+
+    #[test]
+    fn foreground_interaction_consumes_the_same_generic_plan_contract() {
+        let plan: PageInteractionPlan = serde_json::from_value(json!({
+            "schema_version": "memorybread.page-interaction-plan.v1",
+            "safety_mode": "read_only",
+            "steps": [{
+                "id": "target-view",
+                "action": "activate",
+                "target": {
+                    "role_hints": ["tab", "navigation_item"],
+                    "labels": ["用量统计"]
+                }
+            }]
+        }))
+        .unwrap();
+        let script = browser_interaction_javascript("", "", "", Some(&plan));
+        assert!(script.contains("memorybread.page-interaction-plan.v1"));
+        assert!(script.contains("用量统计"));
+        assert!(script.contains("plannedTarget"));
+        assert!(script.contains("navigation_item"));
+        assert!(script.contains("[class*=\"nav\" i]"));
+    }
+
+    #[test]
+    fn failed_structured_interaction_is_rejected_before_snapshot_persistence() {
+        let structured = json!({
+            "interaction_result": {
+                "status": "failed",
+                "view_status": "unverified",
+                "steps": [{
+                    "id": "target-view",
+                    "status": "failed",
+                    "error_code": "INTERACTION_TARGET_AMBIGUOUS"
+                }]
+            }
+        });
+        let error = ensure_page_interaction_succeeded(&structured).unwrap_err();
+        assert_eq!(error.code(), "INTERACTION_TARGET_AMBIGUOUS");
     }
 
     #[test]
@@ -4844,8 +5351,12 @@ mod tests {
 
     #[test]
     fn explicit_period_contract_is_applied_without_prompt_keywords_and_rejects_mismatch() {
-        let script =
-            browser_interaction_javascript("读取第二个 tab 的指标", "2026-08-10", "2026-08-16");
+        let script = browser_interaction_javascript(
+            "读取第二个 tab 的指标",
+            "2026-08-10",
+            "2026-08-16",
+            None,
+        );
         assert!(script.contains("if(!interactionPending&&expectedStart&&expectedEnd)"));
         assert!(ensure_expected_period_visible(
             "日期\n2026/08/10\n至\n2026年08月16日",
@@ -4876,6 +5387,64 @@ mod tests {
     }
 
     #[test]
+    fn confirmed_period_control_ignores_unrelated_dates_elsewhere_on_page() {
+        let structured = json!({
+            "interaction": {
+                "expected_period": {"start": "2026-08-17", "end": "2026-08-23"},
+                "period_verified": true,
+                "actions": [{
+                    "kind": "period_range",
+                    "start": "2026-08-17",
+                    "end": "2026-08-23"
+                }]
+            }
+        });
+        assert!(ensure_expected_period_visible(
+            "筛选日期 2026-08-17 至 2026-08-23\n同比基期 2026-08-10\n发布日期 2025-12-01",
+            Some(&structured),
+            "2026-08-17",
+            "2026-08-23",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn missing_period_control_treats_page_dates_as_non_statistical_metadata() {
+        let structured = json!({
+            "interaction": {
+                "actions": [{"kind": "period_control_missing"}]
+            }
+        });
+        assert!(ensure_expected_period_visible(
+            "实时资源总览\n模型发布日期 2026-07-01\n在用实例 12",
+            Some(&structured),
+            "2026-08-17",
+            "2026-08-23",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn explicitly_unconfirmed_period_is_rejected() {
+        let structured = json!({
+            "interaction": {
+                "actions": [{
+                    "kind": "period_unconfirmed",
+                    "start": "2026-08-17",
+                    "end": "2026-08-23"
+                }]
+            }
+        });
+        assert!(ensure_expected_period_visible(
+            "日期 2026-08-20",
+            Some(&structured),
+            "2026-08-17",
+            "2026-08-23",
+        )
+        .is_err());
+    }
+
+    #[test]
     fn expected_period_accepts_undated_live_snapshot_without_period_control() {
         let structured = json!({
             "interaction": {
@@ -4900,6 +5469,35 @@ mod tests {
             "2026-08-16",
         )
         .is_err());
+    }
+
+    #[test]
+    fn verified_period_drives_snapshot_observed_time_but_undated_live_view_does_not() {
+        let verified = json!({"interaction": {"period_verified": true}});
+        assert_eq!(
+            verified_snapshot_observed_at(
+                "统计日期 2026-08-20",
+                &verified,
+                Some("2026-08-17"),
+                Some("2026-08-23"),
+            ),
+            Some(1_787_227_200_000),
+        );
+        let undated = json!({
+            "interaction": {
+                "period_verified": false,
+                "actions": [{"kind": "period_control_missing"}]
+            }
+        });
+        assert_eq!(
+            verified_snapshot_observed_at(
+                "当前项目数 20",
+                &undated,
+                Some("2026-08-17"),
+                Some("2026-08-23"),
+            ),
+            None,
+        );
     }
 
     #[test]
@@ -5023,6 +5621,7 @@ mod tests {
             Some("Google Chrome"),
             Some("2d870d80-e2a2-4424-a732-069e174f2796"),
             Some(&evidence_path),
+            None,
             None,
             None,
             None,

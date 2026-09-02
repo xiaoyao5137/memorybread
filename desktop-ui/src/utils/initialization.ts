@@ -41,6 +41,15 @@ export interface InitializationStatus {
   can_retry: boolean
   can_report: boolean
   test_mode_enabled: boolean
+  recovery?: {
+    status: 'waiting' | 'running' | 'succeeded' | 'exhausted' | string
+    action: string
+    attempt: number
+    max_attempts: number
+    error_code?: string | null
+    started_at?: string | null
+    finished_at?: string | null
+  } | null
   sandbox_isolation?: {
     enforced: boolean
     cold_start: boolean
@@ -107,11 +116,21 @@ export async function fetchRuntimeReadiness(): Promise<boolean> {
       fetch(`${SIDECAR}/health`),
     ])
     if (!coreResponse.ok || !sidecarResponse.ok) return false
+    const core = await coreResponse.json().catch(() => ({})) as {
+      status?: string
+      service?: string
+      version?: string
+    }
     const sidecar = await sidecarResponse.json().catch(() => ({})) as {
       status?: string
-      pipeline_ready?: boolean
     }
-    return sidecar.status === 'ok' && sidecar.pipeline_ready === true
+    // pipeline_ready 只表示咨询管线是否完成预热。预热可能因模型加载较慢、
+    // 资源竞争或能力暂不可用而长期为 false，但时间线、设置等本地功能仍可用，
+    // 因此启动门禁只核验两个本地服务本身，不让可选 AI 能力遮住整个应用。
+    return core.status === 'ok'
+      && core.service === 'memory-bread-core'
+      && Boolean(core.version)
+      && sidecar.status === 'ok'
   } catch {
     return false
   }

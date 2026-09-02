@@ -11,12 +11,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::ipc::IpcClient;
@@ -317,6 +317,68 @@ const CAPTURE_MAX_RECENT_PER_SCENE: usize = 8;
 const OCR_BACKFILL_MAX_PENDING: usize = 4;
 const OCR_BACKFILL_EVENT_HISTORY_LIMIT: usize = 50_000;
 
+#[derive(Debug, Clone)]
+struct OcrBackfillJob {
+    capture_id: i64,
+    screenshot_rel_path: String,
+    app_name: Option<String>,
+    win_title: Option<String>,
+    replace_ax_text: bool,
+    action_priority: bool,
+}
+
+#[derive(Debug, Default)]
+struct OcrBackfillQueue {
+    order: VecDeque<String>,
+    jobs: HashMap<String, OcrBackfillJob>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OcrQueueDecision {
+    Enqueued,
+    Replaced,
+    EvictedAndEnqueued,
+    Rejected,
+}
+
+fn enqueue_ocr_job(
+    queue: &mut OcrBackfillQueue,
+    scene_key: String,
+    job: OcrBackfillJob,
+) -> OcrQueueDecision {
+    if queue.jobs.contains_key(&scene_key) {
+        queue.jobs.insert(scene_key, job);
+        return OcrQueueDecision::Replaced;
+    }
+    let mut evicted = false;
+    if queue.jobs.len() >= OCR_BACKFILL_MAX_PENDING {
+        let evict_key = if job.action_priority {
+            queue.order.iter().find_map(|key| {
+                queue
+                    .jobs
+                    .get(key)
+                    .is_some_and(|pending| !pending.action_priority)
+                    .then(|| key.clone())
+            })
+        } else {
+            None
+        };
+        let Some(evict_key) = evict_key else {
+            return OcrQueueDecision::Rejected;
+        };
+        queue.order.retain(|key| key != &evict_key);
+        queue.jobs.remove(&evict_key);
+        evicted = true;
+    }
+    queue.order.push_back(scene_key.clone());
+    queue.jobs.insert(scene_key, job);
+    if evicted {
+        OcrQueueDecision::EvictedAndEnqueued
+    } else {
+        OcrQueueDecision::Enqueued
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OcrBackfillOutcome {
     Success,
@@ -357,6 +419,7 @@ pub struct OcrBackfillMetricsSnapshot {
     pub empty_total: u64,
     pub skipped_offline_total: u64,
     pub skipped_backpressure_total: u64,
+    pub coalesced_total: u64,
     pub queued_count: usize,
     pub in_progress_count: usize,
     pub backlog_count: usize,
@@ -391,6 +454,7 @@ struct OcrBackfillMetrics {
     empty_total: AtomicU64,
     skipped_offline_total: AtomicU64,
     skipped_backpressure_total: AtomicU64,
+    coalesced_total: AtomicU64,
     queued_count: AtomicUsize,
     in_progress_count: AtomicUsize,
     last_submitted_at_ms: AtomicI64,
@@ -409,6 +473,7 @@ impl OcrBackfillMetrics {
             empty_total: AtomicU64::new(0),
             skipped_offline_total: AtomicU64::new(0),
             skipped_backpressure_total: AtomicU64::new(0),
+            coalesced_total: AtomicU64::new(0),
             queued_count: AtomicUsize::new(0),
             in_progress_count: AtomicUsize::new(0),
             last_submitted_at_ms: AtomicI64::new(0),
@@ -420,6 +485,11 @@ impl OcrBackfillMetrics {
     fn record_submitted(&self, ts_ms: i64) {
         self.submitted_total.fetch_add(1, Ordering::Relaxed);
         self.queued_count.fetch_add(1, Ordering::Relaxed);
+        self.last_submitted_at_ms.store(ts_ms, Ordering::Relaxed);
+    }
+
+    fn record_coalesced(&self, ts_ms: i64) {
+        self.coalesced_total.fetch_add(1, Ordering::Relaxed);
         self.last_submitted_at_ms.store(ts_ms, Ordering::Relaxed);
     }
 
@@ -614,6 +684,7 @@ impl OcrBackfillMetrics {
             empty_total: self.empty_total.load(Ordering::Relaxed),
             skipped_offline_total: self.skipped_offline_total.load(Ordering::Relaxed),
             skipped_backpressure_total: self.skipped_backpressure_total.load(Ordering::Relaxed),
+            coalesced_total: self.coalesced_total.load(Ordering::Relaxed),
             queued_count,
             in_progress_count,
             backlog_count: queued_count + in_progress_count,
@@ -660,8 +731,8 @@ pub struct CaptureEngine {
     last_context: Mutex<Option<CachedContext>>,
     recent_captures: Mutex<HashMap<CaptureSceneKey, VecDeque<RecentCaptureFingerprint>>>,
     visual_probes: Mutex<HashMap<String, VisualFingerprint>>,
-    ocr_backfill_permits: Arc<Semaphore>,
-    ocr_backfill_queue_slots: Arc<Semaphore>,
+    ocr_backfill_queue: Arc<Mutex<OcrBackfillQueue>>,
+    ocr_backfill_worker_running: Arc<AtomicBool>,
 }
 
 impl CaptureEngine {
@@ -685,8 +756,8 @@ impl CaptureEngine {
             last_context: Mutex::new(None),
             recent_captures: Mutex::new(HashMap::new()),
             visual_probes: Mutex::new(HashMap::new()),
-            ocr_backfill_permits: Arc::new(Semaphore::new(1)),
-            ocr_backfill_queue_slots: Arc::new(Semaphore::new(OCR_BACKFILL_MAX_PENDING)),
+            ocr_backfill_queue: Arc::new(Mutex::new(OcrBackfillQueue::default())),
+            ocr_backfill_worker_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -714,8 +785,8 @@ impl CaptureEngine {
             last_context: Mutex::new(None),
             recent_captures: Mutex::new(HashMap::new()),
             visual_probes: Mutex::new(HashMap::new()),
-            ocr_backfill_permits: Arc::new(Semaphore::new(1)),
-            ocr_backfill_queue_slots: Arc::new(Semaphore::new(OCR_BACKFILL_MAX_PENDING)),
+            ocr_backfill_queue: Arc::new(Mutex::new(OcrBackfillQueue::default())),
+            ocr_backfill_worker_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1283,6 +1354,12 @@ impl CaptureEngine {
                         merged.app_name.clone(),
                         merged.win_title.clone(),
                         use_ocr_as_primary_text,
+                        matches!(
+                            event,
+                            CaptureEvent::MouseClick { .. }
+                                | CaptureEvent::KeyPause
+                                | CaptureEvent::Manual
+                        ),
                     );
                 }
             }
@@ -1629,6 +1706,7 @@ impl CaptureEngine {
         app_name: Option<String>,
         win_title: Option<String>,
         replace_ax_text: bool,
+        action_priority: bool,
     ) -> bool {
         let submitted_at_ms = current_ts_ms();
         let Some(ipc_client) = self.ipc_client.clone() else {
@@ -1637,110 +1715,79 @@ impl CaptureEngine {
                 .record_skipped_without_queue(OcrBackfillOutcome::SkippedOffline, submitted_at_ms);
             return false;
         };
-
-        let Ok(queue_slot) = self.ocr_backfill_queue_slots.clone().try_acquire_owned() else {
-            warn!(
-                capture_id,
-                max_pending = OCR_BACKFILL_MAX_PENDING,
-                "跳过 OCR 后台补写：队列已满，保留截图等待后续兜底"
-            );
-            ocr_metrics().record_skipped_without_queue(
-                OcrBackfillOutcome::SkippedBackpressure,
-                submitted_at_ms,
-            );
-            return false;
+        let scene_key = format!(
+            "{}\u{1f}{}",
+            app_name
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_lowercase(),
+            win_title
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_lowercase()
+        );
+        let job = OcrBackfillJob {
+            capture_id,
+            screenshot_rel_path,
+            app_name,
+            win_title,
+            replace_ax_text,
+            action_priority,
         };
-
+        let mut queue = match self.ocr_backfill_queue.lock() {
+            Ok(queue) => queue,
+            Err(_) => {
+                ocr_metrics()
+                    .record_skipped_without_queue(OcrBackfillOutcome::Failed, submitted_at_ms);
+                return false;
+            }
+        };
+        match enqueue_ocr_job(&mut queue, scene_key, job) {
+            OcrQueueDecision::Replaced => {
+                ocr_metrics().record_coalesced(submitted_at_ms);
+                return true;
+            }
+            OcrQueueDecision::EvictedAndEnqueued => {
+                ocr_metrics().record_aborted_before_start(
+                    OcrBackfillOutcome::SkippedBackpressure,
+                    submitted_at_ms,
+                );
+            }
+            OcrQueueDecision::Rejected => {
+                warn!(
+                    capture_id,
+                    max_pending = OCR_BACKFILL_MAX_PENDING,
+                    "跳过 OCR 后台补写：合并队列已满"
+                );
+                ocr_metrics().record_skipped_without_queue(
+                    OcrBackfillOutcome::SkippedBackpressure,
+                    submitted_at_ms,
+                );
+                return false;
+            }
+            OcrQueueDecision::Enqueued => {}
+        }
+        drop(queue);
         ocr_metrics().record_submitted(submitted_at_ms);
+
         let storage = self.storage.clone();
         let captures_dir = self.config.captures_dir.clone();
-        let permits = self.ocr_backfill_permits.clone();
-
-        tokio::spawn(async move {
-            let _queue_slot = queue_slot;
-            let Ok(_permit) = permits.acquire_owned().await else {
-                warn!(capture_id, "OCR 后台补写获取限流许可失败");
-                ocr_metrics()
-                    .record_aborted_before_start(OcrBackfillOutcome::Failed, current_ts_ms());
-                return;
-            };
-            ocr_metrics().record_started();
-
-            if !ipc_client.ping().await {
-                debug!(capture_id, app = ?app_name, "跳过 OCR 后台补写：sidecar_offline");
-                ocr_metrics().record_completed(
-                    OcrBackfillOutcome::SkippedOffline,
-                    current_ts_ms(),
-                    0,
-                );
-                return;
-            }
-
-            let screenshot_path = captures_dir.join(&screenshot_rel_path);
-            let path_for_ocr = screenshot_path.to_string_lossy().to_string();
-            let started_at_ms = current_ts_ms();
-            debug!(
-                capture_id,
-                path = %screenshot_rel_path,
-                app = ?app_name,
-                win_title = ?win_title,
-                "OCR 后台补写开始"
-            );
-
-            match run_ocr_backfill(ipc_client, path_for_ocr).await {
-                Ok(Some((text, confidence))) => {
-                    let completed_at_ms = current_ts_ms();
-                    let (filtered_text, pii_scrubbed) = filter_ocr_text_for_update(&storage, text);
-                    let update_result = if replace_ax_text {
-                        storage.replace_ax_text_with_ocr(capture_id, &filtered_text, confidence)
-                    } else {
-                        storage.update_ocr_text(capture_id, &filtered_text, confidence)
-                    };
-                    if let Err(error) = update_result {
-                        warn!(capture_id, %error, "OCR 后台补写失败：数据库更新失败");
-                        ocr_metrics().record_completed(
-                            OcrBackfillOutcome::Failed,
-                            completed_at_ms,
-                            completed_at_ms.saturating_sub(started_at_ms),
-                        );
-                        return;
-                    }
-                    if pii_scrubbed {
-                        let _ = storage.mark_pii_scrubbed(capture_id);
-                    }
-                    ocr_metrics().record_completed(
-                        OcrBackfillOutcome::Success,
-                        completed_at_ms,
-                        completed_at_ms.saturating_sub(started_at_ms),
-                    );
-                    debug!(
-                        capture_id,
-                        text_len = filtered_text.chars().count(),
-                        pii_scrubbed,
-                        replace_ax_text,
-                        "OCR 后台补写完成"
-                    );
-                }
-                Ok(None) => {
-                    debug!(capture_id, "OCR 后台补写返回空文本");
-                    let completed_at_ms = current_ts_ms();
-                    ocr_metrics().record_completed(
-                        OcrBackfillOutcome::Empty,
-                        completed_at_ms,
-                        completed_at_ms.saturating_sub(started_at_ms),
-                    );
-                }
-                Err(error) => {
-                    warn!(capture_id, %error, "OCR 后台补写失败");
-                    let completed_at_ms = current_ts_ms();
-                    ocr_metrics().record_completed(
-                        classify_ocr_backfill_error(&error),
-                        completed_at_ms,
-                        completed_at_ms.saturating_sub(started_at_ms),
-                    );
-                }
-            }
-        });
+        let queue = self.ocr_backfill_queue.clone();
+        let worker_running = self.ocr_backfill_worker_running.clone();
+        if worker_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            tokio::spawn(drain_ocr_backfill_queue(
+                ipc_client,
+                storage,
+                captures_dir,
+                queue,
+                worker_running,
+            ));
+        }
         true
     }
 
@@ -1864,6 +1911,109 @@ fn replace_with_hard_link(existing: &std::path::Path, target: &std::path::Path) 
 fn delete_screenshot_file(path: &std::path::Path) {
     if let Err(err) = std::fs::remove_file(path) {
         warn!(path = ?path, "删除去重截图失败: {}", err);
+    }
+}
+
+async fn drain_ocr_backfill_queue(
+    ipc_client: IpcClient,
+    storage: StorageManager,
+    captures_dir: PathBuf,
+    queue: Arc<Mutex<OcrBackfillQueue>>,
+    worker_running: Arc<AtomicBool>,
+) {
+    loop {
+        let job = queue.lock().ok().and_then(|mut pending| {
+            let key = pending.order.pop_front()?;
+            pending.jobs.remove(&key)
+        });
+        let Some(job) = job else {
+            worker_running.store(false, Ordering::Release);
+            let has_more = queue
+                .lock()
+                .map(|pending| !pending.jobs.is_empty())
+                .unwrap_or(false);
+            if has_more
+                && worker_running
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            {
+                continue;
+            }
+            return;
+        };
+
+        ocr_metrics().record_started();
+        if !ipc_client.ping().await {
+            debug!(capture_id = job.capture_id, app = ?job.app_name, "跳过 OCR 后台补写：sidecar_offline");
+            ocr_metrics().record_completed(OcrBackfillOutcome::SkippedOffline, current_ts_ms(), 0);
+            continue;
+        }
+
+        let screenshot_path = captures_dir.join(&job.screenshot_rel_path);
+        let path_for_ocr = screenshot_path.to_string_lossy().to_string();
+        let started_at_ms = current_ts_ms();
+        debug!(
+            capture_id = job.capture_id,
+            path = %job.screenshot_rel_path,
+            app = ?job.app_name,
+            win_title = ?job.win_title,
+            action_priority = job.action_priority,
+            "OCR 后台补写开始"
+        );
+
+        match run_ocr_backfill(ipc_client.clone(), path_for_ocr).await {
+            Ok(Some((text, confidence))) => {
+                let completed_at_ms = current_ts_ms();
+                let (filtered_text, pii_scrubbed) = filter_ocr_text_for_update(&storage, text);
+                let update_result = if job.replace_ax_text {
+                    storage.replace_ax_text_with_ocr(job.capture_id, &filtered_text, confidence)
+                } else {
+                    storage.update_ocr_text(job.capture_id, &filtered_text, confidence)
+                };
+                if let Err(error) = update_result {
+                    warn!(capture_id = job.capture_id, %error, "OCR 后台补写失败：数据库更新失败");
+                    ocr_metrics().record_completed(
+                        OcrBackfillOutcome::Failed,
+                        completed_at_ms,
+                        completed_at_ms.saturating_sub(started_at_ms),
+                    );
+                    continue;
+                }
+                if pii_scrubbed {
+                    let _ = storage.mark_pii_scrubbed(job.capture_id);
+                }
+                ocr_metrics().record_completed(
+                    OcrBackfillOutcome::Success,
+                    completed_at_ms,
+                    completed_at_ms.saturating_sub(started_at_ms),
+                );
+                debug!(
+                    capture_id = job.capture_id,
+                    text_len = filtered_text.chars().count(),
+                    pii_scrubbed,
+                    replace_ax_text = job.replace_ax_text,
+                    "OCR 后台补写完成"
+                );
+            }
+            Ok(None) => {
+                debug!(capture_id = job.capture_id, "OCR 后台补写返回空文本");
+                let completed_at_ms = current_ts_ms();
+                ocr_metrics().record_completed(
+                    OcrBackfillOutcome::Empty,
+                    completed_at_ms,
+                    completed_at_ms.saturating_sub(started_at_ms),
+                );
+            }
+            Err(error) => {
+                warn!(capture_id = job.capture_id, %error, "OCR 后台补写失败");
+                let completed_at_ms = current_ts_ms();
+                ocr_metrics().record_completed(
+                    classify_ocr_backfill_error(&error),
+                    completed_at_ms,
+                    completed_at_ms.saturating_sub(started_at_ms),
+                );
+            }
+        }
     }
 }
 
@@ -2748,6 +2898,62 @@ mod tests {
         assert_eq!(snapshot.skipped_backpressure_total, 1);
         assert_eq!(snapshot.period_skipped_backpressure, 1);
         assert_eq!(snapshot.recent[0].status, "skipped_backpressure");
+    }
+
+    fn ocr_job(capture_id: i64, action_priority: bool) -> OcrBackfillJob {
+        OcrBackfillJob {
+            capture_id,
+            screenshot_rel_path: format!("screenshots/{capture_id}.webp"),
+            app_name: Some("Editor".to_string()),
+            win_title: Some("Workspace".to_string()),
+            replace_ax_text: false,
+            action_priority,
+        }
+    }
+
+    #[test]
+    fn test_ocr_queue_latest_scene_replaces_without_adding_a_model_job() {
+        let mut queue = OcrBackfillQueue::default();
+        assert_eq!(
+            enqueue_ocr_job(
+                &mut queue,
+                "editor\u{1f}workspace".to_string(),
+                ocr_job(1, false)
+            ),
+            OcrQueueDecision::Enqueued
+        );
+        assert_eq!(
+            enqueue_ocr_job(
+                &mut queue,
+                "editor\u{1f}workspace".to_string(),
+                ocr_job(2, true)
+            ),
+            OcrQueueDecision::Replaced
+        );
+        assert_eq!(queue.jobs.len(), 1);
+        assert_eq!(queue.jobs["editor\u{1f}workspace"].capture_id, 2);
+    }
+
+    #[test]
+    fn test_ocr_queue_reserves_capacity_by_evicting_passive_for_action() {
+        let mut queue = OcrBackfillQueue::default();
+        for index in 0..OCR_BACKFILL_MAX_PENDING {
+            assert_eq!(
+                enqueue_ocr_job(
+                    &mut queue,
+                    format!("scene-{index}"),
+                    ocr_job(index as i64, false),
+                ),
+                OcrQueueDecision::Enqueued
+            );
+        }
+
+        assert_eq!(
+            enqueue_ocr_job(&mut queue, "action-scene".to_string(), ocr_job(99, true)),
+            OcrQueueDecision::EvictedAndEnqueued
+        );
+        assert_eq!(queue.jobs.len(), OCR_BACKFILL_MAX_PENDING);
+        assert!(queue.jobs.contains_key("action-scene"));
     }
 
     #[cfg(unix)]

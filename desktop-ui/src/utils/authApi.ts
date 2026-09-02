@@ -13,6 +13,11 @@ import type {
 } from '../types'
 import { serviceEnvironmentHeaders } from '../store/useAppStore'
 
+const desktopServiceHeaders = (environment?: ServiceEnvironment): Record<string, string> => ({
+  ...serviceEnvironmentHeaders(environment),
+  'X-MemoryBread-Client': 'desktop',
+})
+
 function normalizeAuthFetchError(error: unknown, adminApiBaseUrl: string): Error {
   if (error instanceof TypeError) {
     return new Error(`账户服务暂时无法连接，请稍后重试或检查账户连接地址：${adminApiBaseUrl}`)
@@ -73,7 +78,7 @@ export async function authenticateWithPassword(
 ): Promise<AuthSession> {
   const response = await fetch(`${adminApiBaseUrl}/v1/auth/${mode}`, {
     method: 'POST',
-    headers: { ...serviceEnvironmentHeaders(), 'Content-Type': 'application/json' },
+    headers: { ...desktopServiceHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify({
       email,
       password,
@@ -100,7 +105,7 @@ export async function sendEmailVerificationCode(
 ): Promise<{ challenge_id: string; retry_after_seconds: number; expires_in_seconds: number }> {
   const response = await fetch(`${adminApiBaseUrl}/v1/auth/email/send-code`, {
     method: 'POST',
-    headers: { ...serviceEnvironmentHeaders(), 'Content-Type': 'application/json' },
+    headers: { ...desktopServiceHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ email }),
   }).catch((error) => {
     throw normalizeAuthFetchError(error, adminApiBaseUrl)
@@ -121,7 +126,7 @@ export async function sendPasswordResetCode(
 ): Promise<{ challenge_id: string; retry_after_seconds: number; expires_in_seconds: number }> {
   const response = await fetch(`${adminApiBaseUrl}/v1/auth/password-reset/send-code`, {
     method: 'POST',
-    headers: { ...serviceEnvironmentHeaders(), 'Content-Type': 'application/json' },
+    headers: { ...desktopServiceHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ channel, identifier }),
   }).catch((error) => {
     throw normalizeAuthFetchError(error, adminApiBaseUrl)
@@ -145,7 +150,7 @@ export async function confirmPasswordReset(
 ): Promise<{ ok: boolean }> {
   const response = await fetch(`${adminApiBaseUrl}/v1/auth/password-reset/confirm`, {
     method: 'POST',
-    headers: { ...serviceEnvironmentHeaders(), 'Content-Type': 'application/json' },
+    headers: { ...desktopServiceHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
   }).catch((error) => {
     throw normalizeAuthFetchError(error, adminApiBaseUrl)
@@ -163,7 +168,7 @@ export async function sendPhoneVerificationCode(
 ): Promise<{ retry_after_seconds: number; expires_in_seconds: number }> {
   const response = await fetch(`${adminApiBaseUrl}/v1/auth/phone/send-code`, {
     method: 'POST',
-    headers: { ...serviceEnvironmentHeaders(), 'Content-Type': 'application/json' },
+    headers: { ...desktopServiceHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ phone }),
   }).catch((error) => {
     throw normalizeAuthFetchError(error, adminApiBaseUrl)
@@ -185,7 +190,7 @@ export async function authenticateWithPhoneCode(
 ): Promise<AuthSession> {
   const response = await fetch(`${adminApiBaseUrl}/v1/auth/phone/verify`, {
     method: 'POST',
-    headers: { ...serviceEnvironmentHeaders(), 'Content-Type': 'application/json' },
+    headers: { ...desktopServiceHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify({
       phone,
       code,
@@ -220,7 +225,7 @@ export async function sendAccountContactVerificationCode(
   const response = await fetch(`${adminApiBaseUrl}/v1/auth/bind/${channel}/send-code`, {
     method: 'POST',
     headers: {
-      ...serviceEnvironmentHeaders(),
+      ...desktopServiceHeaders(),
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
@@ -252,7 +257,7 @@ export async function bindAccountContact(
   const response = await fetch(`${adminApiBaseUrl}/v1/auth/bind/${channel}`, {
     method: 'POST',
     headers: {
-      ...serviceEnvironmentHeaders(),
+      ...desktopServiceHeaders(),
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
@@ -276,7 +281,7 @@ export async function updateUserProfile(
   const response = await fetch(`${adminApiBaseUrl}/v1/auth/profile`, {
     method: 'PUT',
     headers: {
-      ...serviceEnvironmentHeaders(),
+      ...desktopServiceHeaders(),
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
@@ -303,7 +308,7 @@ export async function fetchCurrentUser(
   signal?: AbortSignal,
 ): Promise<CloudUser> {
   const response = await fetch(`${adminApiBaseUrl}/v1/auth/me`, {
-    headers: { ...serviceEnvironmentHeaders(), Authorization: `Bearer ${token}` },
+    headers: { ...desktopServiceHeaders(), Authorization: `Bearer ${token}` },
     ...(signal ? { signal } : {}),
   }).catch((error) => {
     throw normalizeAuthFetchError(error, adminApiBaseUrl)
@@ -321,7 +326,7 @@ export async function fetchBillingBalance(
   signal?: AbortSignal,
 ): Promise<CloudBalance> {
   const response = await fetch(`${adminApiBaseUrl}/v1/billing/balance`, {
-    headers: { ...serviceEnvironmentHeaders(), Authorization: `Bearer ${token}` },
+    headers: { ...desktopServiceHeaders(), Authorization: `Bearer ${token}` },
     ...(signal ? { signal } : {}),
   }).catch((error) => {
     throw normalizeAuthFetchError(error, adminApiBaseUrl)
@@ -344,7 +349,7 @@ export async function fetchConsoleSummary(
   signal?: AbortSignal,
 ): Promise<CloudConsoleSummary> {
   const response = await fetch(`${adminApiBaseUrl}/v1/console/summary`, {
-    headers: { ...serviceEnvironmentHeaders(), Authorization: `Bearer ${token}` },
+    headers: { ...desktopServiceHeaders(), Authorization: `Bearer ${token}` },
     ...(signal ? { signal } : {}),
   }).catch((error) => {
     throw normalizeAuthFetchError(error, adminApiBaseUrl)
@@ -359,7 +364,7 @@ export async function fetchConsoleSummary(
 export async function logoutSession(adminApiBaseUrl: string, token: string): Promise<void> {
   await fetch(`${adminApiBaseUrl}/v1/auth/logout`, {
     method: 'POST',
-    headers: { ...serviceEnvironmentHeaders(), Authorization: `Bearer ${token}` },
+    headers: { ...desktopServiceHeaders(), Authorization: `Bearer ${token}` },
   }).catch(() => undefined)
 }
 
@@ -373,7 +378,7 @@ export async function upsertCloudDevice(
   const response = await fetch(`${adminApiBaseUrl}/v1/devices`, {
     method: 'POST',
     headers: {
-      ...serviceEnvironmentHeaders(environment),
+      ...desktopServiceHeaders(environment),
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
@@ -394,7 +399,7 @@ export async function fetchCloudDevices(
   token: string,
 ): Promise<CloudDevice[]> {
   const response = await fetch(`${adminApiBaseUrl}/v1/devices`, {
-    headers: { ...serviceEnvironmentHeaders(), Authorization: `Bearer ${token}` },
+    headers: { ...desktopServiceHeaders(), Authorization: `Bearer ${token}` },
   }).catch((error) => {
     throw normalizeAuthFetchError(error, adminApiBaseUrl)
   })
@@ -413,7 +418,7 @@ export async function completeCloudSnapshotUpload(
   const response = await fetch(`${adminApiBaseUrl}/v1/snapshots`, {
     method: 'POST',
     headers: {
-      ...serviceEnvironmentHeaders(),
+      ...desktopServiceHeaders(),
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
@@ -433,7 +438,7 @@ export async function fetchCloudSnapshots(
   token: string,
 ): Promise<CloudSnapshot[]> {
   const response = await fetch(`${adminApiBaseUrl}/v1/snapshots`, {
-    headers: { ...serviceEnvironmentHeaders(), Authorization: `Bearer ${token}` },
+    headers: { ...desktopServiceHeaders(), Authorization: `Bearer ${token}` },
   }).catch((error) => {
     throw normalizeAuthFetchError(error, adminApiBaseUrl)
   })
@@ -455,7 +460,7 @@ export async function fetchCloudMessages(
   })
   if (options.unreadOnly) search.set('unread_only', 'true')
   const response = await fetch(`${adminApiBaseUrl}/v1/messages?${search}`, {
-    headers: { ...serviceEnvironmentHeaders(), Authorization: `Bearer ${token}` },
+    headers: { ...desktopServiceHeaders(), Authorization: `Bearer ${token}` },
   }).catch((error) => {
     throw normalizeAuthFetchError(error, adminApiBaseUrl)
   })
@@ -480,7 +485,7 @@ export async function markCloudMessageRead(
 ): Promise<CloudMessage> {
   const response = await fetch(`${adminApiBaseUrl}/v1/messages/${encodeURIComponent(messageId)}/read`, {
     method: 'PUT',
-    headers: { ...serviceEnvironmentHeaders(), Authorization: `Bearer ${token}` },
+    headers: { ...desktopServiceHeaders(), Authorization: `Bearer ${token}` },
   }).catch((error) => {
     throw normalizeAuthFetchError(error, adminApiBaseUrl)
   })
@@ -497,7 +502,7 @@ export async function markAllCloudMessagesRead(
 ): Promise<{ updated_count: number; read_at: string }> {
   const response = await fetch(`${adminApiBaseUrl}/v1/messages/read-all`, {
     method: 'PUT',
-    headers: { ...serviceEnvironmentHeaders(), Authorization: `Bearer ${token}` },
+    headers: { ...desktopServiceHeaders(), Authorization: `Bearer ${token}` },
   }).catch((error) => {
     throw normalizeAuthFetchError(error, adminApiBaseUrl)
   })

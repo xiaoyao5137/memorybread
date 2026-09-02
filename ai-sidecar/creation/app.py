@@ -20,8 +20,15 @@ import httpx
 from inference_queue import LANE_P0_CREATION, Priority, get_global_queue
 
 from .agent_loop import CreationAgentLoop
+from .brainstorm import BrainstormCoordinator, BrainstormGenerationError
+from .inline_edit import (
+    InlineEditValidationError,
+    build_inline_edit_prompts,
+    generate_local_replacement,
+    validate_replacement,
+)
 from .service import CloudModelRequestError, CreationOptions, CreationService
-from .tools import REQUIRED_CREATION_TOOL_IDS
+from .tools import DEFAULT_CREATION_TOOL_IDS
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -40,6 +47,7 @@ app.add_middleware(
 )
 creation_service = CreationService()
 creation_agent_loop = CreationAgentLoop(creation_service)
+brainstorm_coordinator = BrainstormCoordinator(creation_service)
 
 
 def _creation_failure_details(exc: Exception) -> tuple[str, str, bool]:
@@ -85,7 +93,7 @@ class GenerateRequest(BaseModel):
     enable_image_generation: bool = False
     browser_extension_enabled: bool = True
     enabled_tools: list[str] = Field(
-        default_factory=lambda: list(REQUIRED_CREATION_TOOL_IDS)
+        default_factory=lambda: list(DEFAULT_CREATION_TOOL_IDS)
     )
     content_weight: float = 0.45
     quality_weight: float = 0.15
@@ -139,6 +147,91 @@ class AgentRunRequest(GenerateRequest):
     confirmed: bool = False
     resume_state: Optional[dict[str, Any]] = None
     model_result: Optional[str] = None
+    creation_mode: str = "direct"
+    creation_brief: Optional[dict[str, Any]] = None
+
+
+class InlineEditConstraints(BaseModel):
+    schema_version: str = "creation.inline-edit.constraints.v1"
+    allowed_facts: list[str] = Field(default_factory=list)
+    source_ids: list[str] = Field(default_factory=list)
+    skill_invariants: list[str] = Field(default_factory=list)
+
+
+class InlineEditRequest(BaseModel):
+    schema_version: str
+    request_id: str
+    action: str
+    selected_markdown: str
+    section_context: str = ""
+    custom_prompt: str = ""
+    model_mode: str = "local"
+    context_constraints: InlineEditConstraints = Field(
+        default_factory=InlineEditConstraints
+    )
+    resume_state: Optional[dict[str, Any]] = None
+    model_result: Optional[str] = None
+
+
+class BrainstormNextRequest(BaseModel):
+    root_request: str
+    decisions: list[dict[str, Any]] = Field(default_factory=list)
+    brief_markdown: str = ""
+    selected_skills: list[dict[str, Any]] = Field(default_factory=list)
+    force_continue: bool = False
+    focus_hint: str = ""
+    creation_model: Optional[str] = None
+    creation_api_key: Optional[str] = None
+    creation_base_url: Optional[str] = None
+
+
+@app.post("/creation/brainstorm/next")
+async def next_brainstorm_step(request: BrainstormNextRequest):
+    """根据完整选择路径动态生成一个下一问题，或判断当前已收敛。"""
+    if not request.root_request.strip():
+        raise HTTPException(status_code=400, detail="root_request 不能为空")
+
+    def run_brainstorm() -> dict[str, Any]:
+        return asyncio.run(
+            brainstorm_coordinator.next_step(
+                root_request=request.root_request,
+                decisions=request.decisions,
+                brief_markdown=request.brief_markdown,
+                selected_skills=request.selected_skills,
+                force_continue=request.force_continue,
+                focus_hint=request.focus_hint,
+                creation_model=request.creation_model,
+                creation_api_key=request.creation_api_key,
+                creation_base_url=request.creation_base_url,
+            )
+        )
+
+    future = get_global_queue().submit(
+        Priority.P0,
+        run_brainstorm,
+        lane=LANE_P0_CREATION,
+    )
+    try:
+        return await asyncio.to_thread(future.result)
+    except BrainstormGenerationError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "BRAINSTORM_MODEL_OUTPUT_INVALID",
+                "message": str(exc),
+            },
+        ) from exc
+    except Exception as exc:
+        logger.exception("Dynamic brainstorm generation failed")
+        error_code, message, retryable = _creation_failure_details(exc)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": error_code,
+                "message": message,
+                "retryable": retryable,
+            },
+        ) from exc
 
 
 @app.post("/creation/generate")
@@ -208,6 +301,11 @@ async def run_creation_agent(request: AgentRunRequest):
     """执行可观察、可暂停和可恢复的目标驱动创作循环。"""
     if request.model_mode not in {"local", "external"}:
         raise HTTPException(status_code=400, detail="model_mode 只支持 local 或 external")
+    if request.creation_mode not in {"direct", "brainstorm"}:
+        raise HTTPException(
+            status_code=400,
+            detail="creation_mode 只支持 direct 或 brainstorm",
+        )
     options = _options_from_request(request)
     resume_state = request.resume_state or {}
     resolved_session_id = (
@@ -247,6 +345,8 @@ async def run_creation_agent(request: AgentRunRequest):
                     creation_model=request.creation_model,
                     creation_api_key=request.creation_api_key,
                     creation_base_url=request.creation_base_url,
+                    creation_mode=request.creation_mode,
+                    creation_brief=request.creation_brief,
                 ):
                     if cancelled.is_set():
                         break
@@ -344,6 +444,124 @@ async def run_creation_agent(request: AgentRunRequest):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+@app.post("/creation/inline-edit/run")
+async def run_creation_inline_edit(request: InlineEditRequest):
+    """只生成选区 replacement；完整文档拼接和持久化由 Core 负责。"""
+    if request.schema_version != "creation.inline-edit.v1":
+        raise HTTPException(status_code=400, detail="不支持的选区编辑协议版本")
+    if request.action not in {"brainstorm", "polish", "expand", "elaborate"}:
+        raise HTTPException(status_code=400, detail="不支持的选区编辑动作")
+    if request.model_mode not in {"local", "external"}:
+        raise HTTPException(status_code=400, detail="model_mode 只支持 local 或 external")
+    if request.action not in {"brainstorm", "polish"} and request.custom_prompt.strip():
+        raise HTTPException(status_code=400, detail="自定义要求只支持脑暴写回或润色动作")
+
+    constraints = request.context_constraints.model_dump()
+    system_prompt, user_prompt = build_inline_edit_prompts(
+        action=request.action,
+        selected_markdown=request.selected_markdown,
+        section_context=request.section_context,
+        custom_prompt=request.custom_prompt,
+        context_constraints=constraints,
+    )
+
+    if request.model_mode == "external" and request.model_result is None:
+        return {
+            "schema_version": "creation.inline-edit.v1",
+            "request_id": request.request_id,
+            "status": "paused",
+            "model_request": {
+                "request_id": f"inline-model-{request.request_id}",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            },
+            "resume_state": {
+                "schema_version": "creation.inline-edit.v1",
+                "request_id": request.request_id,
+                "action": request.action,
+                "selected_markdown": request.selected_markdown,
+            },
+        }
+
+    if request.model_mode == "external":
+        resume_state = request.resume_state or {}
+        if (
+            resume_state.get("schema_version") != "creation.inline-edit.v1"
+            or resume_state.get("request_id") != request.request_id
+            or resume_state.get("action") != request.action
+            or resume_state.get("selected_markdown") != request.selected_markdown
+        ):
+            raise HTTPException(status_code=409, detail="选区编辑恢复状态不匹配")
+        try:
+            allowed_facts = list(constraints.get("allowed_facts") or [])
+            if request.action == "brainstorm" and request.custom_prompt.strip():
+                allowed_facts.append(request.custom_prompt.strip())
+            replacement = validate_replacement(
+                request.action,
+                request.selected_markdown,
+                request.model_result or "",
+                allowed_facts,
+            )
+        except InlineEditValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    else:
+        def run_local() -> str:
+            return asyncio.run(
+                generate_local_replacement(
+                    creation_service,
+                    action=request.action,
+                    selected_markdown=request.selected_markdown,
+                    section_context=request.section_context,
+                    custom_prompt=request.custom_prompt,
+                    context_constraints=constraints,
+                )
+            )
+
+        future = get_global_queue().submit(
+            Priority.P0,
+            run_local,
+            lane=LANE_P0_CREATION,
+        )
+        try:
+            replacement = await asyncio.to_thread(future.result)
+        except InlineEditValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Creation inline edit failed")
+            error_code, message, retryable = _creation_failure_details(exc)
+            raise HTTPException(
+                status_code=503 if retryable else 500,
+                detail={
+                    "code": error_code,
+                    "message": message,
+                    "retryable": retryable,
+                },
+            ) from exc
+
+    return {
+        "schema_version": "creation.inline-edit.v1",
+        "request_id": request.request_id,
+        "status": "candidate",
+        "replacement_markdown": replacement,
+    }
+
+
+@app.get("/creation/inline-edit/capabilities")
+async def creation_inline_edit_capabilities():
+    return {
+        "schema_version": "creation.inline-edit.v1",
+        "enabled": True,
+        "actions": ["brainstorm", "polish", "expand", "elaborate"],
+        "max_selection_bytes": 12000,
+        "max_custom_prompt_bytes": 2000,
+        "supported_node_kinds": [
+            "p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote"
+        ],
+    }
+
+
 @app.post("/creation/references")
 async def preview_references(request: ReferenceRequest):
     """预览本次创作会优先使用的参考资料及权重。"""
@@ -379,6 +597,12 @@ async def preview_references(request: ReferenceRequest):
                     "lexical_score": round(ref.lexical_score, 4),
                     "semantic_score": round(ref.semantic_score, 4),
                     "entity_score": round(ref.entity_score, 4),
+                    "retrieval_mode": ref.retrieval_mode,
+                    "primary_target": ref.primary_target,
+                    "matched_components": list(ref.matched_components),
+                    "matched_relations": list(ref.matched_relations),
+                    "relation_score": round(ref.relation_score, 4),
+                    "selection_reasons": list(ref.selection_reasons),
                     "reason": ref.reason,
                     "summary": ref.summary,
                     "source_url": ref.source_url,
@@ -487,8 +711,9 @@ def _options_from_request(request) -> CreationOptions:
             getattr(request, "browser_extension_enabled", True)
         ),
         enabled_tools=tuple(
-            getattr(request, "enabled_tools", REQUIRED_CREATION_TOOL_IDS)
-            or REQUIRED_CREATION_TOOL_IDS
+            DEFAULT_CREATION_TOOL_IDS
+            if getattr(request, "enabled_tools", None) is None
+            else getattr(request, "enabled_tools")
         ),
         content_weight=float(getattr(request, "content_weight", 0.45)),
         quality_weight=float(getattr(request, "quality_weight", 0.15)),

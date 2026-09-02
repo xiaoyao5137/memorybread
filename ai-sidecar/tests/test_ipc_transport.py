@@ -2,19 +2,29 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import os
 import socket
+import struct
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
-from memory_bread_ipc import IpcResponse, IpcServer
-from memory_bread_ipc import transport
+from memory_bread_ipc import IpcResponse, IpcServer, transport
 
 
 async def _unused_dispatch(req):
     return IpcResponse.make_error(req.id, "UNUSED", "unused", 0)
+
+
+def _request_frame(request_id: str) -> bytes:
+    payload = json.dumps({
+        "id": request_id,
+        "ts": 1,
+        "task": {"type": "ping"},
+    }).encode("utf-8")
+    return struct.pack(">I", len(payload)) + payload
 
 
 async def _wait_for_path(path) -> None:
@@ -96,3 +106,33 @@ async def test_ipc_server_replaces_stale_socket(monkeypatch):
     server.stop()
     await asyncio.wait_for(task, timeout=1)
     assert not socket_path.exists()
+
+
+@pytest.mark.skipif(transport.platform.system() == "Windows", reason="Unix socket only")
+async def test_ipc_server_cancels_dispatch_when_client_disconnects(monkeypatch):
+    socket_path = _short_socket_path("cancel")
+    monkeypatch.setattr(transport, "UNIX_SOCKET_PATH", str(socket_path))
+    dispatch_started = asyncio.Event()
+    dispatch_cancelled = asyncio.Event()
+
+    async def waiting_dispatch(_req):
+        dispatch_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            dispatch_cancelled.set()
+
+    server = IpcServer(dispatch_fn=waiting_dispatch)
+    server_task = asyncio.create_task(server.serve())
+    await _wait_for_server(server)
+
+    _reader, writer = await asyncio.open_unix_connection(str(socket_path))
+    writer.write(_request_frame("cancel-me"))
+    await writer.drain()
+    await asyncio.wait_for(dispatch_started.wait(), timeout=1)
+    writer.close()
+    await writer.wait_closed()
+
+    await asyncio.wait_for(dispatch_cancelled.wait(), timeout=1)
+    server.stop()
+    await asyncio.wait_for(server_task, timeout=1)

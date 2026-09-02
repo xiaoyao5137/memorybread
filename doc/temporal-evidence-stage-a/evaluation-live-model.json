@@ -1,0 +1,2713 @@
+{
+  "schema_version": "memorybread.temporal-evidence-stage-a.v1",
+  "contract_version": "temporal-claim-v1",
+  "rule_version": "temporal-gate-v1",
+  "generated_at": "2026-08-29T06:09:24.686706+00:00",
+  "model_label": "local_stage_a_model",
+  "selected_count": 120,
+  "evaluated_split": "holdout",
+  "batch_size": 8,
+  "elapsed_seconds": 857.489,
+  "usage": {
+    "prompt_eval_count": 11634,
+    "eval_count": 19304,
+    "total_duration_ns": 857389289960,
+    "successful_calls": 15
+  },
+  "transport_errors": [],
+  "metrics": {
+    "total": 120,
+    "correct": 62,
+    "accuracy": 0.516667,
+    "false_admissions": 0,
+    "predicted_eligible": 5,
+    "false_admission_rate": 0.0,
+    "noneligible_leak_rate": 0.0,
+    "expected_eligible": 24,
+    "retained_eligible": 5,
+    "retention_rate": 0.208333,
+    "unresolved_or_missing": 58,
+    "abstention_rate": 0.483333,
+    "per_source": {
+      "chat": {
+        "total": 60,
+        "correct": 20,
+        "expected_eligible": 12,
+        "retained": 3,
+        "accuracy": 0.333333,
+        "retention": 0.25
+      },
+      "data_snapshot": {
+        "total": 60,
+        "correct": 42,
+        "expected_eligible": 12,
+        "retained": 2,
+        "accuracy": 0.7,
+        "retention": 0.166667
+      }
+    },
+    "per_family": {
+      "actual_metric_outside_period": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": null
+      },
+      "blocked_status_change_in_period": {
+        "total": 12,
+        "correct": 3,
+        "expected_eligible": 12,
+        "retained": 3,
+        "accuracy": 0.25,
+        "retention": 0.25
+      },
+      "conflicting_event_dates": {
+        "total": 12,
+        "correct": 5,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.416667,
+        "retention": null
+      },
+      "current_completed_status_without_change_date": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "historical_decision_outside_period": {
+        "total": 12,
+        "correct": 10,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.833333,
+        "retention": null
+      },
+      "mixed_document_target_is_historical": {
+        "total": 12,
+        "correct": 2,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.166667,
+        "retention": null
+      },
+      "planned_deadline_in_period": {
+        "total": 12,
+        "correct": 10,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.833333,
+        "retention": null
+      },
+      "revision_date_distracts_historical_event": {
+        "total": 12,
+        "correct": 6,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.5,
+        "retention": null
+      },
+      "revision_date_only_for_target": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "status_semantic_enhancement": {
+        "total": 12,
+        "correct": 2,
+        "expected_eligible": 12,
+        "retained": 2,
+        "accuracy": 0.166667,
+        "retention": 0.166667
+      }
+    },
+    "failures": [
+      {
+        "id": "mixed_document_target_is_historical_01",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "conflicting_event_dates_01",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "unresolved"
+      },
+      {
+        "id": "blocked_status_change_in_period_01",
+        "source_type": "chat",
+        "scenario_family": "blocked_status_change_in_period",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "status_semantic_enhancement_01",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "actual_metric_outside_period_01",
+        "source_type": "chat",
+        "scenario_family": "actual_metric_outside_period",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "revision_date_distracts_historical_event_02",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_distracts_historical_event",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "mixed_document_target_is_historical_02",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "status_semantic_enhancement_02",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "actual_metric_outside_period_02",
+        "source_type": "chat",
+        "scenario_family": "actual_metric_outside_period",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "conflicting_event_dates_03",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "unresolved"
+      },
+      {
+        "id": "blocked_status_change_in_period_03",
+        "source_type": "chat",
+        "scenario_family": "blocked_status_change_in_period",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "status_semantic_enhancement_03",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "actual_metric_outside_period_03",
+        "source_type": "chat",
+        "scenario_family": "actual_metric_outside_period",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "revision_date_distracts_historical_event_04",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_distracts_historical_event",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "mixed_document_target_is_historical_04",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "blocked_status_change_in_period_04",
+        "source_type": "chat",
+        "scenario_family": "blocked_status_change_in_period",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "status_semantic_enhancement_04",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "actual_metric_outside_period_04",
+        "source_type": "chat",
+        "scenario_family": "actual_metric_outside_period",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "historical_decision_outside_period_04",
+        "source_type": "data_snapshot",
+        "scenario_family": "historical_decision_outside_period",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "mixed_document_target_is_historical_05",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "conflicting_event_dates_05",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "unresolved"
+      },
+      {
+        "id": "blocked_status_change_in_period_05",
+        "source_type": "chat",
+        "scenario_family": "blocked_status_change_in_period",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "status_semantic_enhancement_05",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "actual_metric_outside_period_05",
+        "source_type": "chat",
+        "scenario_family": "actual_metric_outside_period",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "planned_deadline_in_period_06",
+        "source_type": "chat",
+        "scenario_family": "planned_deadline_in_period",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "revision_date_distracts_historical_event_06",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_distracts_historical_event",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "mixed_document_target_is_historical_06",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "conflicting_event_dates_06",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "unresolved"
+      },
+      {
+        "id": "actual_metric_outside_period_06",
+        "source_type": "chat",
+        "scenario_family": "actual_metric_outside_period",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "mixed_document_target_is_historical_07",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "conflicting_event_dates_07",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "unresolved"
+      },
+      {
+        "id": "blocked_status_change_in_period_07",
+        "source_type": "chat",
+        "scenario_family": "blocked_status_change_in_period",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "status_semantic_enhancement_07",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "actual_metric_outside_period_07",
+        "source_type": "chat",
+        "scenario_family": "actual_metric_outside_period",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "revision_date_distracts_historical_event_08",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_distracts_historical_event",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "mixed_document_target_is_historical_08",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "blocked_status_change_in_period_08",
+        "source_type": "chat",
+        "scenario_family": "blocked_status_change_in_period",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "status_semantic_enhancement_08",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "actual_metric_outside_period_08",
+        "source_type": "chat",
+        "scenario_family": "actual_metric_outside_period",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "historical_decision_outside_period_08",
+        "source_type": "data_snapshot",
+        "scenario_family": "historical_decision_outside_period",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "mixed_document_target_is_historical_09",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "conflicting_event_dates_09",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "unresolved"
+      },
+      {
+        "id": "blocked_status_change_in_period_09",
+        "source_type": "chat",
+        "scenario_family": "blocked_status_change_in_period",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "status_semantic_enhancement_09",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "actual_metric_outside_period_09",
+        "source_type": "chat",
+        "scenario_family": "actual_metric_outside_period",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "planned_deadline_in_period_10",
+        "source_type": "chat",
+        "scenario_family": "planned_deadline_in_period",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "revision_date_distracts_historical_event_10",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_distracts_historical_event",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "mixed_document_target_is_historical_10",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "conflicting_event_dates_10",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "unresolved"
+      },
+      {
+        "id": "actual_metric_outside_period_10",
+        "source_type": "chat",
+        "scenario_family": "actual_metric_outside_period",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "blocked_status_change_in_period_11",
+        "source_type": "chat",
+        "scenario_family": "blocked_status_change_in_period",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "status_semantic_enhancement_11",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "actual_metric_outside_period_11",
+        "source_type": "chat",
+        "scenario_family": "actual_metric_outside_period",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "revision_date_distracts_historical_event_12",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_distracts_historical_event",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "mixed_document_target_is_historical_12",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "blocked_status_change_in_period_12",
+        "source_type": "chat",
+        "scenario_family": "blocked_status_change_in_period",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "status_semantic_enhancement_12",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "eligible",
+        "actual": "unresolved"
+      },
+      {
+        "id": "actual_metric_outside_period_12",
+        "source_type": "chat",
+        "scenario_family": "actual_metric_outside_period",
+        "expected": "background_only",
+        "actual": "unresolved"
+      }
+    ]
+  },
+  "extraction_metrics": {
+    "total": 120,
+    "candidate_count": 120,
+    "candidate_coverage": 1.0,
+    "grounded_quote_rate": 1.0,
+    "validator_pass_rate": 0.666667,
+    "event_date_exact_rate": 0.458333,
+    "date_role_exact_rate": 0.633333,
+    "modality_exact_rate": 0.85,
+    "status_non_enhancement_rate": 0.966667
+  },
+  "predictions": {
+    "planned_deadline_in_period_01": {
+      "id": "planned_deadline_in_period_01",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "planned_deadline_in_period_01",
+        "claim_text": "示例项目 01 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "evidence_quote": "示例项目 01 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "claim_kind": "goal",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "deadline",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "revision_date_distracts_historical_event_01": {
+      "id": "revision_date_distracts_historical_event_01",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "revision_date_distracts_historical_event_01",
+        "claim_text": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 01 已完成接口验收。",
+        "evidence_quote": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 01 已完成接口验收。",
+        "claim_kind": "historical_reference",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "revision",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "mixed_document_target_is_historical_01": {
+      "id": "mixed_document_target_is_historical_01",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "mixed_document_target_is_historical_01",
+        "claim_text": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 01 已完成接口验收。",
+        "evidence_quote": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 01 已完成接口验收。",
+        "claim_kind": "metric",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "completion",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "current_completed_status_without_change_date_01": {
+      "id": "current_completed_status_without_change_date_01",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "current_completed_status_without_change_date_01",
+        "claim_text": "示例项目 01 当前状态为已完成，但资料没有说明完成日期。",
+        "evidence_quote": "示例项目 01 当前状态为已完成，但资料没有说明完成日期。",
+        "claim_kind": "current_status",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "conflicting_event_dates_01": {
+      "id": "conflicting_event_dates_01",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "conflicting_event_dates_01",
+        "claim_text": "记录甲称 2026-08-20 示例项目 01 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "evidence_quote": "记录甲称 2026-08-20 示例项目 01 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "claim_kind": "metric",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "completion",
+        "time_basis": "explicit_text",
+        "has_conflict": true
+      }
+    },
+    "revision_date_only_for_target_01": {
+      "id": "revision_date_only_for_target_01",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "revision_date_only_for_target_01",
+        "claim_text": "修订日期：2026-08-20。示例项目 01 的年度目标是降低处理耗时。",
+        "evidence_quote": "修订日期：2026-08-20。示例项目 01 的年度目标是降低处理耗时。",
+        "claim_kind": "goal",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "revision",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "blocked_status_change_in_period_01": {
+      "id": "blocked_status_change_in_period_01",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "blocked_status_change_in_period_01",
+        "claim_text": "2026-08-21，示例项目 01 因外部依赖进入阻塞状态。",
+        "evidence_quote": "2026-08-21，示例项目 01 因外部依赖进入阻塞状态。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "blocked",
+        "event_date": null,
+        "date_role": "status_change",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "status_semantic_enhancement_01": {
+      "id": "status_semantic_enhancement_01",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "status_semantic_enhancement_01",
+        "claim_text": "2026-08-20，示例项目 01 正在推进接口设计。",
+        "evidence_quote": "2026-08-20，示例项目 01 正在推进接口设计。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "in_progress",
+        "event_date": null,
+        "date_role": "completion",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "actual_metric_outside_period_01": {
+      "id": "actual_metric_outside_period_01",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "actual_metric_outside_period_01",
+        "claim_text": "统计周期 2026-02-06，示例项目 01 当日处理量为 120 万次。",
+        "evidence_quote": "统计周期 2026-02-06，示例项目 01 当日处理量为 120 万次。",
+        "claim_kind": "metric",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "statistical_period",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "historical_decision_outside_period_01": {
+      "id": "historical_decision_outside_period_01",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "historical_decision_outside_period_01",
+        "claim_text": "2026-02-05，团队决定 示例项目 01 采用新的缓存策略。",
+        "evidence_quote": "2026-02-05，团队决定 示例项目 01 采用新的缓存策略。",
+        "claim_kind": "decision",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "historical_reference",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "planned_deadline_in_period_02": {
+      "id": "planned_deadline_in_period_02",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "planned_deadline_in_period_02",
+        "claim_text": "示例项目 02 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "evidence_quote": "示例项目 02 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "claim_kind": "goal_horizon",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "deadline",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "revision_date_distracts_historical_event_02": {
+      "id": "revision_date_distracts_historical_event_02",
+      "decision": "unresolved",
+      "reason": "event_time_unknown",
+      "candidate": {
+        "id": "revision_date_distracts_historical_event_02",
+        "claim_text": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 02 已完成接口验收。",
+        "evidence_quote": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 02 已完成接口验收。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "mixed_document_target_is_historical_02": {
+      "id": "mixed_document_target_is_historical_02",
+      "decision": "unresolved",
+      "reason": "event_time_unknown",
+      "candidate": {
+        "id": "mixed_document_target_is_historical_02",
+        "claim_text": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 02 已完成接口验收。",
+        "evidence_quote": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 02 已完成接口验收。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "current_completed_status_without_change_date_02": {
+      "id": "current_completed_status_without_change_date_02",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "current_completed_status_without_change_date_02",
+        "claim_text": "示例项目 02 当前状态为已完成，但资料没有说明完成日期。",
+        "evidence_quote": "示例项目 02 当前状态为已完成，但资料没有说明完成日期。",
+        "claim_kind": "current_status",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "conflicting_event_dates_02": {
+      "id": "conflicting_event_dates_02",
+      "decision": "conflict",
+      "reason": "unresolved_source_conflict",
+      "candidate": {
+        "id": "conflicting_event_dates_02",
+        "claim_text": "记录甲称 2026-08-20 示例项目 02 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "evidence_quote": "记录甲称 2026-08-20 示例项目 02 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": true
+      }
+    },
+    "revision_date_only_for_target_02": {
+      "id": "revision_date_only_for_target_02",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "revision_date_only_for_target_02",
+        "claim_text": "修订日期：2026-08-20。示例项目 02 的年度目标是降低处理耗时。",
+        "evidence_quote": "修订日期：2026-08-20。示例项目 02 的年度目标是降低处理耗时。",
+        "claim_kind": "goal_horizon",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "revision",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "blocked_status_change_in_period_02": {
+      "id": "blocked_status_change_in_period_02",
+      "decision": "eligible",
+      "reason": "actual_event_matches_requested_period",
+      "candidate": {
+        "id": "blocked_status_change_in_period_02",
+        "claim_text": "示例项目 02 因外部依赖进入阻塞状态。",
+        "evidence_quote": "2026-08-21，示例项目 02 因外部依赖进入阻塞状态。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "blocked",
+        "event_date": "2026-08-21",
+        "date_role": "completion",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "status_semantic_enhancement_02": {
+      "id": "status_semantic_enhancement_02",
+      "decision": "unresolved",
+      "reason": "event_time_unknown",
+      "candidate": {
+        "id": "status_semantic_enhancement_02",
+        "claim_text": "示例项目 02 正在推进接口设计。",
+        "evidence_quote": "2026-08-20，示例项目 02 正在推进接口设计。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "in_progress",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "actual_metric_outside_period_02": {
+      "id": "actual_metric_outside_period_02",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "actual_metric_outside_period_02",
+        "claim_text": "示例项目 02 当日处理量为 121 万次。",
+        "evidence_quote": "统计周期 2026-02-06，示例项目 02 当日处理量为 121 万次。",
+        "claim_kind": "metric",
+        "modality": "actual",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "statistical_period",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "historical_decision_outside_period_02": {
+      "id": "historical_decision_outside_period_02",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "historical_decision_outside_period_02",
+        "claim_text": "团队决定示例项目 02 采用新的缓存策略。",
+        "evidence_quote": "2026-02-05，团队决定 示例项目 02 采用新的缓存策略。",
+        "claim_kind": "decision",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "historical_reference",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "planned_deadline_in_period_03": {
+      "id": "planned_deadline_in_period_03",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "planned_deadline_in_period_03",
+        "claim_text": "示例项目 03 计划于 2026-08-22 完成接口验收。",
+        "evidence_quote": "示例项目 03 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "claim_kind": "goal",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "deadline",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "revision_date_distracts_historical_event_03": {
+      "id": "revision_date_distracts_historical_event_03",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "revision_date_distracts_historical_event_03",
+        "claim_text": "示例项目 03 已完成接口验收。",
+        "evidence_quote": "历史回顾：2026-02-06，示例项目 03 已完成接口验收。",
+        "claim_kind": "current_status",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "historical_reference",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "mixed_document_target_is_historical_03": {
+      "id": "mixed_document_target_is_historical_03",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "mixed_document_target_is_historical_03",
+        "claim_text": "示例项目 03 已完成接口验收。",
+        "evidence_quote": "2025-12-01，示例项目 03 已完成接口验收。",
+        "claim_kind": "current_status",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "historical_reference",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "current_completed_status_without_change_date_03": {
+      "id": "current_completed_status_without_change_date_03",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "current_completed_status_without_change_date_03",
+        "claim_text": "示例项目 03 当前状态为已完成。",
+        "evidence_quote": "示例项目 03 当前状态为已完成，但资料没有说明完成日期。",
+        "claim_kind": "current_status",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "conflicting_event_dates_03": {
+      "id": "conflicting_event_dates_03",
+      "decision": "unresolved",
+      "reason": "invalid_status",
+      "failures": [
+        "invalid_status"
+      ],
+      "candidate": {
+        "id": "conflicting_event_dates_03",
+        "claim_text": "记录甲称 2026-08-20 示例项目 03 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "evidence_quote": "记录甲称 2026-08-20 示例项目 03 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "conflicting",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": true
+      }
+    },
+    "revision_date_only_for_target_03": {
+      "id": "revision_date_only_for_target_03",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "revision_date_only_for_target_03",
+        "claim_text": "修订日期：2026-08-20。示例项目 03 的年度目标是降低处理耗时。",
+        "evidence_quote": "修订日期：2026-08-20。示例项目 03 的年度目标是降低处理耗时。",
+        "claim_kind": "goal",
+        "modality": "target",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "revision",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "blocked_status_change_in_period_03": {
+      "id": "blocked_status_change_in_period_03",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "blocked_status_change_in_period_03",
+        "claim_text": "2026-08-21，示例项目 03 因外部依赖进入阻塞状态。",
+        "evidence_quote": "2026-08-21，示例项目 03 因外部依赖进入阻塞状态。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "blocked",
+        "event_date": null,
+        "date_role": "status_change",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "status_semantic_enhancement_03": {
+      "id": "status_semantic_enhancement_03",
+      "decision": "unresolved",
+      "reason": "event_time_unknown",
+      "candidate": {
+        "id": "status_semantic_enhancement_03",
+        "claim_text": "2026-08-20，示例项目 03 正在推进接口设计。",
+        "evidence_quote": "2026-08-20，示例项目 03 正在推进接口设计。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "in_progress",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "actual_metric_outside_period_03": {
+      "id": "actual_metric_outside_period_03",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "actual_metric_outside_period_03",
+        "claim_text": "统计周期 2026-02-06，示例项目 03 当日处理量为 122 万次。",
+        "evidence_quote": "统计周期 2026-02-06，示例项目 03 当日处理量为 122 万次。",
+        "claim_kind": "metric",
+        "modality": "actual",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "statistical_period",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "historical_decision_outside_period_03": {
+      "id": "historical_decision_outside_period_03",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "historical_decision_outside_period_03",
+        "claim_text": "2026-02-05，团队决定 示例项目 03 采用新的缓存策略。",
+        "evidence_quote": "2026-02-05，团队决定 示例项目 03 采用新的缓存策略。",
+        "claim_kind": "decision",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "historical_reference",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "planned_deadline_in_period_04": {
+      "id": "planned_deadline_in_period_04",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "planned_deadline_in_period_04",
+        "claim_text": "示例项目 04 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "evidence_quote": "示例项目 04 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "claim_kind": "goal",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "deadline",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "revision_date_distracts_historical_event_04": {
+      "id": "revision_date_distracts_historical_event_04",
+      "decision": "unresolved",
+      "reason": "event_time_unknown",
+      "candidate": {
+        "id": "revision_date_distracts_historical_event_04",
+        "claim_text": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 04 已完成接口验收。",
+        "evidence_quote": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 04 已完成接口验收。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "historical_reference",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "mixed_document_target_is_historical_04": {
+      "id": "mixed_document_target_is_historical_04",
+      "decision": "unresolved",
+      "reason": "event_time_unknown",
+      "candidate": {
+        "id": "mixed_document_target_is_historical_04",
+        "claim_text": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 04 已完成接口验收。",
+        "evidence_quote": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 04 已完成接口验收。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "current_completed_status_without_change_date_04": {
+      "id": "current_completed_status_without_change_date_04",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "current_completed_status_without_change_date_04",
+        "claim_text": "示例项目 04 当前状态为已完成，但资料没有说明完成日期。",
+        "evidence_quote": "示例项目 04 当前状态为已完成，但资料没有说明完成日期。",
+        "claim_kind": "current_status",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "conflicting_event_dates_04": {
+      "id": "conflicting_event_dates_04",
+      "decision": "conflict",
+      "reason": "unresolved_source_conflict",
+      "candidate": {
+        "id": "conflicting_event_dates_04",
+        "claim_text": "记录甲称 2026-08-20 示例项目 04 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "evidence_quote": "记录甲称 2026-08-20 示例项目 04 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": true
+      }
+    },
+    "revision_date_only_for_target_04": {
+      "id": "revision_date_only_for_target_04",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "revision_date_only_for_target_04",
+        "claim_text": "修订日期：2026-08-20。示例项目 04 的年度目标是降低处理耗时。",
+        "evidence_quote": "修订日期：2026-08-20。示例项目 04 的年度目标是降低处理耗时。",
+        "claim_kind": "goal",
+        "modality": "target",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "revision",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "blocked_status_change_in_period_04": {
+      "id": "blocked_status_change_in_period_04",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "blocked_status_change_in_period_04",
+        "claim_text": "2026-08-21，示例项目 04 因外部依赖进入阻塞状态。",
+        "evidence_quote": "2026-08-21，示例项目 04 因外部依赖进入阻塞状态。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "blocked",
+        "event_date": null,
+        "date_role": "status_change",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "status_semantic_enhancement_04": {
+      "id": "status_semantic_enhancement_04",
+      "decision": "unresolved",
+      "reason": "event_time_unknown",
+      "candidate": {
+        "id": "status_semantic_enhancement_04",
+        "claim_text": "2026-08-20，示例项目 04 正在推进接口设计。",
+        "evidence_quote": "2026-08-20，示例项目 04 正在推进接口设计。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "in_progress",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "actual_metric_outside_period_04": {
+      "id": "actual_metric_outside_period_04",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "actual_metric_outside_period_04",
+        "claim_text": "统计周期 2026-02-06，示例项目 04 当日处理量为 123 万次。",
+        "evidence_quote": "统计周期 2026-02-06，示例项目 04 当日处理量为 123 万次。",
+        "claim_kind": "metric",
+        "modality": "actual",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "statistical_period",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "historical_decision_outside_period_04": {
+      "id": "historical_decision_outside_period_04",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "historical_decision_outside_period_04",
+        "claim_text": "2026-02-05，团队决定 示例项目 04 采用新的缓存策略。",
+        "evidence_quote": "2026-02-05，团队决定 示例项目 04 采用新的缓存策略。",
+        "claim_kind": "decision",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "event",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "planned_deadline_in_period_05": {
+      "id": "planned_deadline_in_period_05",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "planned_deadline_in_period_05",
+        "claim_text": "示例项目 05 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "evidence_quote": "示例项目 05 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "claim_kind": "goal",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "deadline",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "revision_date_distracts_historical_event_05": {
+      "id": "revision_date_distracts_historical_event_05",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "revision_date_distracts_historical_event_05",
+        "claim_text": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 05 已完成接口验收。",
+        "evidence_quote": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 05 已完成接口验收。",
+        "claim_kind": "historical_reference",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "revision",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "mixed_document_target_is_historical_05": {
+      "id": "mixed_document_target_is_historical_05",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "mixed_document_target_is_historical_05",
+        "claim_text": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 05 已完成接口验收。",
+        "evidence_quote": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 05 已完成接口验收。",
+        "claim_kind": "historical_reference",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "completion",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "current_completed_status_without_change_date_05": {
+      "id": "current_completed_status_without_change_date_05",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "current_completed_status_without_change_date_05",
+        "claim_text": "示例项目 05 当前状态为已完成，但资料没有说明完成日期。",
+        "evidence_quote": "示例项目 05 当前状态为已完成，但资料没有说明完成日期。",
+        "claim_kind": "current_status",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "conflicting_event_dates_05": {
+      "id": "conflicting_event_dates_05",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "conflicting_event_dates_05",
+        "claim_text": "记录甲称 2026-08-20 示例项目 05 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "evidence_quote": "记录甲称 2026-08-20 示例项目 05 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "claim_kind": "metric",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "completion",
+        "time_basis": "explicit_text",
+        "has_conflict": true
+      }
+    },
+    "revision_date_only_for_target_05": {
+      "id": "revision_date_only_for_target_05",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "revision_date_only_for_target_05",
+        "claim_text": "修订日期：2026-08-20。示例项目 05 的年度目标是降低处理耗时。",
+        "evidence_quote": "修订日期：2026-08-20。示例项目 05 的年度目标是降低处理耗时。",
+        "claim_kind": "goal",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "revision",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "blocked_status_change_in_period_05": {
+      "id": "blocked_status_change_in_period_05",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "blocked_status_change_in_period_05",
+        "claim_text": "2026-08-21，示例项目 05 因外部依赖进入阻塞状态。",
+        "evidence_quote": "2026-08-21，示例项目 05 因外部依赖进入阻塞状态。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "blocked",
+        "event_date": null,
+        "date_role": "status_change",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "status_semantic_enhancement_05": {
+      "id": "status_semantic_enhancement_05",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "status_semantic_enhancement_05",
+        "claim_text": "2026-08-20，示例项目 05 正在推进接口设计。",
+        "evidence_quote": "2026-08-20，示例项目 05 正在推进接口设计。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "in_progress",
+        "event_date": null,
+        "date_role": "completion",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "actual_metric_outside_period_05": {
+      "id": "actual_metric_outside_period_05",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "actual_metric_outside_period_05",
+        "claim_text": "统计周期 2026-02-06，示例项目 05 当日处理量为 124 万次。",
+        "evidence_quote": "统计周期 2026-02-06，示例项目 05 当日处理量为 124 万次。",
+        "claim_kind": "metric",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "statistical_period",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "historical_decision_outside_period_05": {
+      "id": "historical_decision_outside_period_05",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "historical_decision_outside_period_05",
+        "claim_text": "2026-02-05，团队决定 示例项目 05 采用新的缓存策略。",
+        "evidence_quote": "2026-02-05，团队决定 示例项目 05 采用新的缓存策略。",
+        "claim_kind": "decision",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "historical_reference",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "planned_deadline_in_period_06": {
+      "id": "planned_deadline_in_period_06",
+      "decision": "unresolved",
+      "reason": "status_stronger_than_evidence",
+      "failures": [
+        "status_stronger_than_evidence"
+      ],
+      "candidate": {
+        "id": "planned_deadline_in_period_06",
+        "claim_text": "示例项目 06 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "evidence_quote": "示例项目 06 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "claim_kind": "goal",
+        "modality": "planned",
+        "status": "in_progress",
+        "event_date": null,
+        "date_role": "deadline",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "revision_date_distracts_historical_event_06": {
+      "id": "revision_date_distracts_historical_event_06",
+      "decision": "unresolved",
+      "reason": "event_time_unknown",
+      "candidate": {
+        "id": "revision_date_distracts_historical_event_06",
+        "claim_text": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 06 已完成接口验收。",
+        "evidence_quote": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 06 已完成接口验收。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "revision",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "mixed_document_target_is_historical_06": {
+      "id": "mixed_document_target_is_historical_06",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "mixed_document_target_is_historical_06",
+        "claim_text": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 06 已完成接口验收。",
+        "evidence_quote": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 06 已完成接口验收。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "completion",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "current_completed_status_without_change_date_06": {
+      "id": "current_completed_status_without_change_date_06",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "current_completed_status_without_change_date_06",
+        "claim_text": "示例项目 06 当前状态为已完成，但资料没有说明完成日期。",
+        "evidence_quote": "示例项目 06 当前状态为已完成，但资料没有说明完成日期。",
+        "claim_kind": "current_status",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "conflicting_event_dates_06": {
+      "id": "conflicting_event_dates_06",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "conflicting_event_dates_06",
+        "claim_text": "记录甲称 2026-08-20 示例项目 06 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "evidence_quote": "记录甲称 2026-08-20 示例项目 06 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "completion",
+        "time_basis": "explicit_text",
+        "has_conflict": true
+      }
+    },
+    "revision_date_only_for_target_06": {
+      "id": "revision_date_only_for_target_06",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "revision_date_only_for_target_06",
+        "claim_text": "修订日期：2026-08-20。示例项目 06 的年度目标是降低处理耗时。",
+        "evidence_quote": "修订日期：2026-08-20。示例项目 06 的年度目标是降低处理耗时。",
+        "claim_kind": "goal",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "revision",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "blocked_status_change_in_period_06": {
+      "id": "blocked_status_change_in_period_06",
+      "decision": "eligible",
+      "reason": "actual_event_matches_requested_period",
+      "candidate": {
+        "id": "blocked_status_change_in_period_06",
+        "claim_text": "2026-08-21，示例项目 06 因外部依赖进入阻塞状态。",
+        "evidence_quote": "2026-08-21，示例项目 06 因外部依赖进入阻塞状态。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "blocked",
+        "event_date": "2026-08-21",
+        "date_role": "completion",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "status_semantic_enhancement_06": {
+      "id": "status_semantic_enhancement_06",
+      "decision": "eligible",
+      "reason": "actual_event_matches_requested_period",
+      "candidate": {
+        "id": "status_semantic_enhancement_06",
+        "claim_text": "2026-08-20，示例项目 06 正在推进接口设计。",
+        "evidence_quote": "2026-08-20，示例项目 06 正在推进接口设计。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "in_progress",
+        "event_date": "2026-08-20",
+        "date_role": "event",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "actual_metric_outside_period_06": {
+      "id": "actual_metric_outside_period_06",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "actual_metric_outside_period_06",
+        "claim_text": "统计周期 2026-02-06，示例项目 06 当日处理量为 125 万次。",
+        "evidence_quote": "统计周期 2026-02-06，示例项目 06 当日处理量为 125 万次。",
+        "claim_kind": "metric",
+        "modality": "actual",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "statistical_period",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "historical_decision_outside_period_06": {
+      "id": "historical_decision_outside_period_06",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "historical_decision_outside_period_06",
+        "claim_text": "2026-02-05，团队决定 示例项目 06 采用新的缓存策略。",
+        "evidence_quote": "2026-02-05，团队决定 示例项目 06 采用新的缓存策略。",
+        "claim_kind": "decision",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": "2026-02-05",
+        "date_role": "event",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "planned_deadline_in_period_07": {
+      "id": "planned_deadline_in_period_07",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "planned_deadline_in_period_07",
+        "claim_text": "示例项目 07 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "evidence_quote": "示例项目 07 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "claim_kind": "goal",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "deadline",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "revision_date_distracts_historical_event_07": {
+      "id": "revision_date_distracts_historical_event_07",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "revision_date_distracts_historical_event_07",
+        "claim_text": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 07 已完成接口验收。",
+        "evidence_quote": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 07 已完成接口验收。",
+        "claim_kind": "historical_reference",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "revision",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "mixed_document_target_is_historical_07": {
+      "id": "mixed_document_target_is_historical_07",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "mixed_document_target_is_historical_07",
+        "claim_text": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 07 已完成接口验收。",
+        "evidence_quote": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 07 已完成接口验收。",
+        "claim_kind": "historical_reference",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "completion",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "current_completed_status_without_change_date_07": {
+      "id": "current_completed_status_without_change_date_07",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "current_completed_status_without_change_date_07",
+        "claim_text": "示例项目 07 当前状态为已完成，但资料没有说明完成日期。",
+        "evidence_quote": "示例项目 07 当前状态为已完成，但资料没有说明完成日期。",
+        "claim_kind": "current_status",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "conflicting_event_dates_07": {
+      "id": "conflicting_event_dates_07",
+      "decision": "unresolved",
+      "reason": "invalid_status",
+      "failures": [
+        "invalid_status"
+      ],
+      "candidate": {
+        "id": "conflicting_event_dates_07",
+        "claim_text": "记录甲称 2026-08-20 示例项目 07 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "evidence_quote": "记录甲称 2026-08-20 示例项目 07 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "conflicting",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": true
+      }
+    },
+    "revision_date_only_for_target_07": {
+      "id": "revision_date_only_for_target_07",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "revision_date_only_for_target_07",
+        "claim_text": "修订日期：2026-08-20。示例项目 07 的年度目标是降低处理耗时。",
+        "evidence_quote": "修订日期：2026-08-20。示例项目 07 的年度目标是降低处理耗时。",
+        "claim_kind": "goal",
+        "modality": "target",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "revision",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "blocked_status_change_in_period_07": {
+      "id": "blocked_status_change_in_period_07",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "blocked_status_change_in_period_07",
+        "claim_text": "2026-08-21，示例项目 07 因外部依赖进入阻塞状态。",
+        "evidence_quote": "2026-08-21，示例项目 07 因外部依赖进入阻塞状态。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "blocked",
+        "event_date": null,
+        "date_role": "status_change",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "status_semantic_enhancement_07": {
+      "id": "status_semantic_enhancement_07",
+      "decision": "unresolved",
+      "reason": "event_time_unknown",
+      "candidate": {
+        "id": "status_semantic_enhancement_07",
+        "claim_text": "2026-08-20，示例项目 07 正在推进接口设计。",
+        "evidence_quote": "2026-08-20，示例项目 07 正在推进接口设计。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "in_progress",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "actual_metric_outside_period_07": {
+      "id": "actual_metric_outside_period_07",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "actual_metric_outside_period_07",
+        "claim_text": "统计周期 2026-02-06，示例项目 07 当日处理量为 126 万次。",
+        "evidence_quote": "统计周期 2026-02-06，示例项目 07 当日处理量为 126 万次。",
+        "claim_kind": "metric",
+        "modality": "actual",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "statistical_period",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "historical_decision_outside_period_07": {
+      "id": "historical_decision_outside_period_07",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "historical_decision_outside_period_07",
+        "claim_text": "2026-02-05，团队决定 示例项目 07 采用新的缓存策略。",
+        "evidence_quote": "2026-02-05，团队决定 示例项目 07 采用新的缓存策略。",
+        "claim_kind": "decision",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "historical_reference",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "planned_deadline_in_period_08": {
+      "id": "planned_deadline_in_period_08",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "planned_deadline_in_period_08",
+        "claim_text": "示例项目 08 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "evidence_quote": "示例项目 08 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "claim_kind": "goal",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "deadline",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "revision_date_distracts_historical_event_08": {
+      "id": "revision_date_distracts_historical_event_08",
+      "decision": "unresolved",
+      "reason": "event_time_unknown",
+      "candidate": {
+        "id": "revision_date_distracts_historical_event_08",
+        "claim_text": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 08 已完成接口验收。",
+        "evidence_quote": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 08 已完成接口验收。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "historical_reference",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "mixed_document_target_is_historical_08": {
+      "id": "mixed_document_target_is_historical_08",
+      "decision": "unresolved",
+      "reason": "event_time_unknown",
+      "candidate": {
+        "id": "mixed_document_target_is_historical_08",
+        "claim_text": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 08 已完成接口验收。",
+        "evidence_quote": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 08 已完成接口验收。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "current_completed_status_without_change_date_08": {
+      "id": "current_completed_status_without_change_date_08",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "current_completed_status_without_change_date_08",
+        "claim_text": "示例项目 08 当前状态为已完成，但资料没有说明完成日期。",
+        "evidence_quote": "示例项目 08 当前状态为已完成，但资料没有说明完成日期。",
+        "claim_kind": "current_status",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "conflicting_event_dates_08": {
+      "id": "conflicting_event_dates_08",
+      "decision": "conflict",
+      "reason": "unresolved_source_conflict",
+      "candidate": {
+        "id": "conflicting_event_dates_08",
+        "claim_text": "记录甲称 2026-08-20 示例项目 08 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "evidence_quote": "记录甲称 2026-08-20 示例项目 08 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": true
+      }
+    },
+    "revision_date_only_for_target_08": {
+      "id": "revision_date_only_for_target_08",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "revision_date_only_for_target_08",
+        "claim_text": "修订日期：2026-08-20。示例项目 08 的年度目标是降低处理耗时。",
+        "evidence_quote": "修订日期：2026-08-20。示例项目 08 的年度目标是降低处理耗时。",
+        "claim_kind": "goal",
+        "modality": "target",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "revision",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "blocked_status_change_in_period_08": {
+      "id": "blocked_status_change_in_period_08",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "blocked_status_change_in_period_08",
+        "claim_text": "2026-08-21，示例项目 08 因外部依赖进入阻塞状态。",
+        "evidence_quote": "2026-08-21，示例项目 08 因外部依赖进入阻塞状态。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "blocked",
+        "event_date": null,
+        "date_role": "status_change",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "status_semantic_enhancement_08": {
+      "id": "status_semantic_enhancement_08",
+      "decision": "unresolved",
+      "reason": "event_time_unknown",
+      "candidate": {
+        "id": "status_semantic_enhancement_08",
+        "claim_text": "2026-08-20，示例项目 08 正在推进接口设计。",
+        "evidence_quote": "2026-08-20，示例项目 08 正在推进接口设计。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "in_progress",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "actual_metric_outside_period_08": {
+      "id": "actual_metric_outside_period_08",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "actual_metric_outside_period_08",
+        "claim_text": "统计周期 2026-02-06，示例项目 08 当日处理量为 127 万次。",
+        "evidence_quote": "统计周期 2026-02-06，示例项目 08 当日处理量为 127 万次。",
+        "claim_kind": "metric",
+        "modality": "actual",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "statistical_period",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "historical_decision_outside_period_08": {
+      "id": "historical_decision_outside_period_08",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "historical_decision_outside_period_08",
+        "claim_text": "2026-02-05，团队决定 示例项目 08 采用新的缓存策略。",
+        "evidence_quote": "2026-02-05，团队决定 示例项目 08 采用新的缓存策略。",
+        "claim_kind": "decision",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "event",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "planned_deadline_in_period_09": {
+      "id": "planned_deadline_in_period_09",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "planned_deadline_in_period_09",
+        "claim_text": "示例项目 09 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "evidence_quote": "示例项目 09 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "claim_kind": "goal",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "deadline",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "revision_date_distracts_historical_event_09": {
+      "id": "revision_date_distracts_historical_event_09",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "revision_date_distracts_historical_event_09",
+        "claim_text": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 09 已完成接口验收。",
+        "evidence_quote": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 09 已完成接口验收。",
+        "claim_kind": "historical_reference",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "revision",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "mixed_document_target_is_historical_09": {
+      "id": "mixed_document_target_is_historical_09",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "mixed_document_target_is_historical_09",
+        "claim_text": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 09 已完成接口验收。",
+        "evidence_quote": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 09 已完成接口验收。",
+        "claim_kind": "historical_reference",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "completion",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "current_completed_status_without_change_date_09": {
+      "id": "current_completed_status_without_change_date_09",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "current_completed_status_without_change_date_09",
+        "claim_text": "示例项目 09 当前状态为已完成，但资料没有说明完成日期。",
+        "evidence_quote": "示例项目 09 当前状态为已完成，但资料没有说明完成日期。",
+        "claim_kind": "current_status",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "conflicting_event_dates_09": {
+      "id": "conflicting_event_dates_09",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "conflicting_event_dates_09",
+        "claim_text": "记录甲称 2026-08-20 示例项目 09 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "evidence_quote": "记录甲称 2026-08-20 示例项目 09 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "completion",
+        "time_basis": "explicit_text",
+        "has_conflict": true
+      }
+    },
+    "revision_date_only_for_target_09": {
+      "id": "revision_date_only_for_target_09",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "revision_date_only_for_target_09",
+        "claim_text": "修订日期：2026-08-20。示例项目 09 的年度目标是降低处理耗时。",
+        "evidence_quote": "修订日期：2026-08-20。示例项目 09 的年度目标是降低处理耗时。",
+        "claim_kind": "goal",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "revision",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "blocked_status_change_in_period_09": {
+      "id": "blocked_status_change_in_period_09",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "blocked_status_change_in_period_09",
+        "claim_text": "2026-08-21，示例项目 09 因外部依赖进入阻塞状态。",
+        "evidence_quote": "2026-08-21，示例项目 09 因外部依赖进入阻塞状态。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "blocked",
+        "event_date": null,
+        "date_role": "status_change",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "status_semantic_enhancement_09": {
+      "id": "status_semantic_enhancement_09",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "status_semantic_enhancement_09",
+        "claim_text": "2026-08-20，示例项目 09 正在推进接口设计。",
+        "evidence_quote": "2026-08-20，示例项目 09 正在推进接口设计。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "in_progress",
+        "event_date": null,
+        "date_role": "event",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "actual_metric_outside_period_09": {
+      "id": "actual_metric_outside_period_09",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "actual_metric_outside_period_09",
+        "claim_text": "统计周期 2026-02-06，示例项目 09 当日处理量为 128 万次。",
+        "evidence_quote": "统计周期 2026-02-06，示例项目 09 当日处理量为 128 万次。",
+        "claim_kind": "metric",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "statistical_period",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "historical_decision_outside_period_09": {
+      "id": "historical_decision_outside_period_09",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "historical_decision_outside_period_09",
+        "claim_text": "2026-02-05，团队决定 示例项目 09 采用新的缓存策略。",
+        "evidence_quote": "2026-02-05，团队决定 示例项目 09 采用新的缓存策略。",
+        "claim_kind": "decision",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "historical_reference",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "planned_deadline_in_period_10": {
+      "id": "planned_deadline_in_period_10",
+      "decision": "unresolved",
+      "reason": "status_stronger_than_evidence",
+      "failures": [
+        "status_stronger_than_evidence"
+      ],
+      "candidate": {
+        "id": "planned_deadline_in_period_10",
+        "claim_text": "示例项目 10 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "evidence_quote": "示例项目 10 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "claim_kind": "goal",
+        "modality": "planned",
+        "status": "in_progress",
+        "event_date": null,
+        "date_role": "deadline",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "revision_date_distracts_historical_event_10": {
+      "id": "revision_date_distracts_historical_event_10",
+      "decision": "unresolved",
+      "reason": "event_time_unknown",
+      "candidate": {
+        "id": "revision_date_distracts_historical_event_10",
+        "claim_text": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 10 已完成接口验收。",
+        "evidence_quote": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 10 已完成接口验收。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "revision",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "mixed_document_target_is_historical_10": {
+      "id": "mixed_document_target_is_historical_10",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "mixed_document_target_is_historical_10",
+        "claim_text": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 10 已完成接口验收。",
+        "evidence_quote": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 10 已完成接口验收。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "completion",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "current_completed_status_without_change_date_10": {
+      "id": "current_completed_status_without_change_date_10",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "current_completed_status_without_change_date_10",
+        "claim_text": "示例项目 10 当前状态为已完成，但资料没有说明完成日期。",
+        "evidence_quote": "示例项目 10 当前状态为已完成，但资料没有说明完成日期。",
+        "claim_kind": "current_status",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "conflicting_event_dates_10": {
+      "id": "conflicting_event_dates_10",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "conflicting_event_dates_10",
+        "claim_text": "记录甲称 2026-08-20 示例项目 10 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "evidence_quote": "记录甲称 2026-08-20 示例项目 10 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "completion",
+        "time_basis": "explicit_text",
+        "has_conflict": true
+      }
+    },
+    "revision_date_only_for_target_10": {
+      "id": "revision_date_only_for_target_10",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "revision_date_only_for_target_10",
+        "claim_text": "修订日期：2026-08-20。示例项目 10 的年度目标是降低处理耗时。",
+        "evidence_quote": "修订日期：2026-08-20。示例项目 10 的年度目标是降低处理耗时。",
+        "claim_kind": "goal",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "revision",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "blocked_status_change_in_period_10": {
+      "id": "blocked_status_change_in_period_10",
+      "decision": "eligible",
+      "reason": "actual_event_matches_requested_period",
+      "candidate": {
+        "id": "blocked_status_change_in_period_10",
+        "claim_text": "2026-08-21，示例项目 10 因外部依赖进入阻塞状态。",
+        "evidence_quote": "2026-08-21，示例项目 10 因外部依赖进入阻塞状态。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "blocked",
+        "event_date": "2026-08-21",
+        "date_role": "completion",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "status_semantic_enhancement_10": {
+      "id": "status_semantic_enhancement_10",
+      "decision": "eligible",
+      "reason": "actual_event_matches_requested_period",
+      "candidate": {
+        "id": "status_semantic_enhancement_10",
+        "claim_text": "2026-08-20，示例项目 10 正在推进接口设计。",
+        "evidence_quote": "2026-08-20，示例项目 10 正在推进接口设计。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "in_progress",
+        "event_date": "2026-08-20",
+        "date_role": "event",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "actual_metric_outside_period_10": {
+      "id": "actual_metric_outside_period_10",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "actual_metric_outside_period_10",
+        "claim_text": "统计周期 2026-02-06，示例项目 10 当日处理量为 129 万次。",
+        "evidence_quote": "统计周期 2026-02-06，示例项目 10 当日处理量为 129 万次。",
+        "claim_kind": "metric",
+        "modality": "actual",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "statistical_period",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "historical_decision_outside_period_10": {
+      "id": "historical_decision_outside_period_10",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "historical_decision_outside_period_10",
+        "claim_text": "2026-02-05，团队决定 示例项目 10 采用新的缓存策略。",
+        "evidence_quote": "2026-02-05，团队决定 示例项目 10 采用新的缓存策略。",
+        "claim_kind": "decision",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": "2026-02-05",
+        "date_role": "event",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "planned_deadline_in_period_11": {
+      "id": "planned_deadline_in_period_11",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "planned_deadline_in_period_11",
+        "claim_text": "示例项目 11 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "evidence_quote": "示例项目 11 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "claim_kind": "goal",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "deadline",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "revision_date_distracts_historical_event_11": {
+      "id": "revision_date_distracts_historical_event_11",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "revision_date_distracts_historical_event_11",
+        "claim_text": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 11 已完成接口验收。",
+        "evidence_quote": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 11 已完成接口验收。",
+        "claim_kind": "current_status",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "mixed_document_target_is_historical_11": {
+      "id": "mixed_document_target_is_historical_11",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "mixed_document_target_is_historical_11",
+        "claim_text": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 11 已完成接口验收。",
+        "evidence_quote": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 11 已完成接口验收。",
+        "claim_kind": "current_status",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "current_completed_status_without_change_date_11": {
+      "id": "current_completed_status_without_change_date_11",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "current_completed_status_without_change_date_11",
+        "claim_text": "示例项目 11 当前状态为已完成，但资料没有说明完成日期。",
+        "evidence_quote": "示例项目 11 当前状态为已完成，但资料没有说明完成日期。",
+        "claim_kind": "current_status",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "conflicting_event_dates_11": {
+      "id": "conflicting_event_dates_11",
+      "decision": "conflict",
+      "reason": "unresolved_source_conflict",
+      "candidate": {
+        "id": "conflicting_event_dates_11",
+        "claim_text": "记录甲称 2026-08-20 示例项目 11 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "evidence_quote": "记录甲称 2026-08-20 示例项目 11 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "conflict",
+        "has_conflict": true
+      }
+    },
+    "revision_date_only_for_target_11": {
+      "id": "revision_date_only_for_target_11",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "revision_date_only_for_target_11",
+        "claim_text": "修订日期：2026-08-20。示例项目 11 的年度目标是降低处理耗时。",
+        "evidence_quote": "修订日期：2026-08-20。示例项目 11 的年度目标是降低处理耗时。",
+        "claim_kind": "goal",
+        "modality": "target",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "revision",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "blocked_status_change_in_period_11": {
+      "id": "blocked_status_change_in_period_11",
+      "decision": "unresolved",
+      "reason": "event_time_unknown",
+      "candidate": {
+        "id": "blocked_status_change_in_period_11",
+        "claim_text": "2026-08-21，示例项目 11 因外部依赖进入阻塞状态。",
+        "evidence_quote": "2026-08-21，示例项目 11 因外部依赖进入阻塞状态。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "blocked",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "status_semantic_enhancement_11": {
+      "id": "status_semantic_enhancement_11",
+      "decision": "unresolved",
+      "reason": "event_time_unknown",
+      "candidate": {
+        "id": "status_semantic_enhancement_11",
+        "claim_text": "2026-08-20，示例项目 11 正在推进接口设计。",
+        "evidence_quote": "2026-08-20，示例项目 11 正在推进接口设计。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "in_progress",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "actual_metric_outside_period_11": {
+      "id": "actual_metric_outside_period_11",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "actual_metric_outside_period_11",
+        "claim_text": "统计周期 2026-02-06，示例项目 11 当日处理量为 130 万次。",
+        "evidence_quote": "统计周期 2026-02-06，示例项目 11 当日处理量为 130 万次。",
+        "claim_kind": "metric",
+        "modality": "actual",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "statistical_period",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "historical_decision_outside_period_11": {
+      "id": "historical_decision_outside_period_11",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "historical_decision_outside_period_11",
+        "claim_text": "2026-02-05，团队决定 示例项目 11 采用新的缓存策略。",
+        "evidence_quote": "2026-02-05，团队决定 示例项目 11 采用新的缓存策略。",
+        "claim_kind": "decision",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "historical_reference",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "planned_deadline_in_period_12": {
+      "id": "planned_deadline_in_period_12",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "planned_deadline_in_period_12",
+        "claim_text": "示例项目 12 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "evidence_quote": "示例项目 12 计划于 2026-08-22 完成接口验收，目前尚未开始。",
+        "claim_kind": "goal",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "deadline",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "revision_date_distracts_historical_event_12": {
+      "id": "revision_date_distracts_historical_event_12",
+      "decision": "unresolved",
+      "reason": "event_time_unknown",
+      "candidate": {
+        "id": "revision_date_distracts_historical_event_12",
+        "claim_text": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 12 已完成接口验收。",
+        "evidence_quote": "文档修订日期：2026-08-20。历史回顾：2026-02-06，示例项目 12 已完成接口验收。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "mixed_document_target_is_historical_12": {
+      "id": "mixed_document_target_is_historical_12",
+      "decision": "unresolved",
+      "reason": "event_time_unknown",
+      "candidate": {
+        "id": "mixed_document_target_is_historical_12",
+        "claim_text": "另一事项完成评审；示例项目 12 已完成接口验收。",
+        "evidence_quote": "2026-08-19，另一事项完成评审。2025-12-01，示例项目 12 已完成接口验收。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "current_completed_status_without_change_date_12": {
+      "id": "current_completed_status_without_change_date_12",
+      "decision": "background_only",
+      "reason": "claim_kind_not_period_progress",
+      "candidate": {
+        "id": "current_completed_status_without_change_date_12",
+        "claim_text": "示例项目 12 当前状态为已完成。",
+        "evidence_quote": "示例项目 12 当前状态为已完成，但资料没有说明完成日期。",
+        "claim_kind": "status",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "conflicting_event_dates_12": {
+      "id": "conflicting_event_dates_12",
+      "decision": "conflict",
+      "reason": "unresolved_source_conflict",
+      "candidate": {
+        "id": "conflicting_event_dates_12",
+        "claim_text": "记录甲称示例项目 12 完成验收；记录乙称该事项在才完成。",
+        "evidence_quote": "记录甲称 2026-08-20 示例项目 12 完成验收；记录乙称该事项在 2026-08-25 才完成。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "completed",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": true
+      }
+    },
+    "revision_date_only_for_target_12": {
+      "id": "revision_date_only_for_target_12",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "revision_date_only_for_target_12",
+        "claim_text": "示例项目 12 的年度目标是降低处理耗时。",
+        "evidence_quote": "修订日期：2026-08-20。示例项目 12 的年度目标是降低处理耗时。",
+        "claim_kind": "goal",
+        "modality": "target",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "revision",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "blocked_status_change_in_period_12": {
+      "id": "blocked_status_change_in_period_12",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "blocked_status_change_in_period_12",
+        "claim_text": "示例项目 12 因外部依赖进入阻塞状态。",
+        "evidence_quote": "2026-08-21，示例项目 12 因外部依赖进入阻塞状态。",
+        "claim_kind": "status_change",
+        "modality": "actual",
+        "status": "blocked",
+        "event_date": null,
+        "date_role": "status_change",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "status_semantic_enhancement_12": {
+      "id": "status_semantic_enhancement_12",
+      "decision": "unresolved",
+      "reason": "event_time_unknown",
+      "candidate": {
+        "id": "status_semantic_enhancement_12",
+        "claim_text": "示例项目 12 正在推进接口设计。",
+        "evidence_quote": "2026-08-20，示例项目 12 正在推进接口设计。",
+        "claim_kind": "progress_event",
+        "modality": "actual",
+        "status": "in_progress",
+        "event_date": null,
+        "date_role": "unknown",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "actual_metric_outside_period_12": {
+      "id": "actual_metric_outside_period_12",
+      "decision": "unresolved",
+      "reason": "event_role_without_date",
+      "failures": [
+        "event_role_without_date"
+      ],
+      "candidate": {
+        "id": "actual_metric_outside_period_12",
+        "claim_text": "示例项目 12 当日处理量为 131 万次。",
+        "evidence_quote": "统计周期 2026-02-06，示例项目 12 当日处理量为 131 万次。",
+        "claim_kind": "metric",
+        "modality": "actual",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "statistical_period",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    },
+    "historical_decision_outside_period_12": {
+      "id": "historical_decision_outside_period_12",
+      "decision": "background_only",
+      "reason": "non_actual_claim_not_period_progress",
+      "candidate": {
+        "id": "historical_decision_outside_period_12",
+        "claim_text": "团队决定示例项目 12 采用新的缓存策略。",
+        "evidence_quote": "2026-02-05，团队决定 示例项目 12 采用新的缓存策略。",
+        "claim_kind": "decision",
+        "modality": "planned",
+        "status": "unknown",
+        "event_date": null,
+        "date_role": "historical_reference",
+        "time_basis": "explicit_text",
+        "has_conflict": false
+      }
+    }
+  }
+}

@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://memorybread.local/schemas/creation-inline-edit.schema.json",
+  "title": "MemoryBread Creation Inline Edit",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/capabilities" },
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/response" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "action": {
+      "type": "string",
+      "enum": ["brainstorm", "polish", "expand", "elaborate"]
+    },
+    "operation": {
+      "type": "string",
+      "enum": [
+        "brainstorm_selection",
+        "polish_selection",
+        "expand_selection",
+        "elaborate_selection",
+        "undo_inline_edit"
+      ]
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_revision_no",
+        "base_document_hash",
+        "start_byte",
+        "end_byte",
+        "selected_markdown",
+        "selected_markdown_hash",
+        "selected_text",
+        "start_line",
+        "end_line"
+      ],
+      "properties": {
+        "base_revision_no": { "type": "integer", "minimum": 1 },
+        "base_document_hash": { "$ref": "#/$defs/hash" },
+        "start_byte": { "type": "integer", "minimum": 0 },
+        "end_byte": { "type": "integer", "minimum": 1 },
+        "selected_markdown": { "type": "string", "minLength": 1 },
+        "selected_markdown_hash": { "$ref": "#/$defs/hash" },
+        "selected_text": { "type": "string", "minLength": 1 },
+        "start_line": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "contextConstraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "allowed_facts", "source_ids", "skill_invariants"],
+      "properties": {
+        "schema_version": { "const": "creation.inline-edit.constraints.v1" },
+        "allowed_facts": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 1000 },
+          "maxItems": 40
+        },
+        "source_ids": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 200 },
+          "maxItems": 40
+        },
+        "skill_invariants": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 500 },
+          "maxItems": 40
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "request_id",
+        "session_id",
+        "history_id",
+        "root_request",
+        "current_document",
+        "action",
+        "selection",
+        "model_mode"
+      ],
+      "properties": {
+        "schema_version": { "const": "creation.inline-edit.v1" },
+        "request_id": { "type": "string", "minLength": 8, "maxLength": 128 },
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "history_id": { "type": "integer", "minimum": 1 },
+        "root_request": { "type": "string", "maxLength": 12000 },
+        "current_document": { "type": "string", "minLength": 1, "maxLength": 500000 },
+        "action": { "$ref": "#/$defs/action" },
+        "custom_prompt": { "type": "string", "maxLength": 2000 },
+        "selection": { "$ref": "#/$defs/selection" },
+        "model_mode": { "type": "string", "enum": ["local", "external"] },
+        "resume_state": { "type": ["object", "null"] },
+        "model_result": { "type": ["string", "null"], "maxLength": 60000 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "action": { "enum": ["brainstorm", "polish"] } } },
+          "then": {},
+          "else": {
+            "properties": { "custom_prompt": { "maxLength": 0 } }
+          }
+        }
+      ]
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "enabled",
+        "actions",
+        "max_selection_bytes",
+        "max_custom_prompt_bytes",
+        "supported_node_kinds"
+      ],
+      "properties": {
+        "schema_version": { "const": "creation.inline-edit.v1" },
+        "enabled": { "type": "boolean" },
+        "actions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/action" },
+          "uniqueItems": true
+        },
+        "max_selection_bytes": { "type": "integer", "minimum": 1 },
+        "max_custom_prompt_bytes": { "type": "integer", "minimum": 1 },
+        "supported_node_kinds": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote"] },
+          "uniqueItems": true
+        },
+        "history_id": { "type": ["integer", "null"] },
+        "revision_no": { "type": ["integer", "null"] },
+        "base_document_hash": { "oneOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "disabled_reason": { "type": ["string", "null"] }
+      }
+    },
+    "patch": {
+      "type": "object",
+      "required": [
+        "operation",
+        "base_hash",
+        "result_hash",
+        "prefix_hash",
+        "suffix_hash",
+        "selection",
+        "replacement",
+        "preserved_untouched",
+        "changes",
+        "change_count",
+        "summary"
+      ],
+      "properties": {
+        "operation": { "$ref": "#/$defs/operation" },
+        "base_hash": { "$ref": "#/$defs/hash" },
+        "result_hash": { "$ref": "#/$defs/hash" },
+        "prefix_hash": { "$ref": "#/$defs/hash" },
+        "suffix_hash": { "$ref": "#/$defs/hash" },
+        "preserved_untouched": { "const": true },
+        "selection": { "type": "object" },
+        "replacement": { "type": "object" },
+        "changes": { "type": "array" },
+        "change_count": { "type": "integer", "minimum": 1 },
+        "summary": { "type": "string", "minLength": 1 }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "request_id", "status"],
+      "properties": {
+        "schema_version": { "const": "creation.inline-edit.v1" },
+        "request_id": { "type": "string" },
+        "status": { "type": "string", "enum": ["paused", "committed", "cancelled", "no_change"] },
+        "operation_fingerprint": { "$ref": "#/$defs/hash" },
+        "content": { "type": "string" },
+        "replacement_markdown": { "type": "string" },
+        "revision_no": { "type": "integer", "minimum": 1 },
+        "patch": { "$ref": "#/$defs/patch" },
+        "model_request": { "type": "object" },
+        "resume_state": { "type": "object" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["error"],
+      "properties": {
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "retryable"],
+          "properties": {
+            "code": { "type": "string", "pattern": "^CREATION_[A-Z0-9_]+$" },
+            "message": { "type": "string" },
+            "retryable": { "type": "boolean" },
+            "request_id": { "type": ["string", "null"] }
+          }
+        }
+      }
+    }
+  }
+}

@@ -284,6 +284,49 @@ describe('memoryGraph', () => {
     expect(second).toEqual(first)
   })
 
+  it('高密度关系簇中的节点和聚焦环不会互相重叠', () => {
+    const denseAssets = assets({
+      knowledge: [],
+      documents: [],
+      operations: [],
+      data: Array.from({ length: 17 }, (_, index) => data({
+        id: 15_251 + index,
+        title: `数据记忆 ${index + 1}`,
+        tags: ['AIGC', 'GMV', 'FL2VA'],
+        latest_snapshot: {
+          ...data().latest_snapshot!,
+          id: 70 + index,
+          source_id: 15_251 + index,
+          source_capture_ids: [44 + index],
+          source_timeline_ids: [404 + index],
+        },
+      })),
+    })
+    const graph = buildMemoryGraph(denseAssets)
+    const focusNodeId = 'data:15251'
+    const first = createMemoryGraphLayout(graph.nodes, graph.edges, {
+      width: 480,
+      height: 380,
+      focusNodeId,
+    })
+    const second = createMemoryGraphLayout(graph.nodes, graph.edges, {
+      width: 480,
+      height: 380,
+      focusNodeId,
+    })
+
+    expect(second).toEqual(first)
+    graph.nodes.forEach((node, left) => {
+      graph.nodes.slice(left + 1).forEach(other => {
+        const dx = first[node.id].x - first[other.id].x
+        const dy = first[node.id].y - first[other.id].y
+        const distance = Math.sqrt(dx * dx + dy * dy)
+        const minimumDistance = node.id === focusNodeId || other.id === focusNodeId ? 55 : 45
+        expect(distance).toBeGreaterThanOrEqual(minimumDistance)
+      })
+    })
+  })
+
   it('总览切片优先保留出现次数更高的知识', () => {
     const graph = buildMemoryGraph(assets({
       knowledge: [
@@ -349,8 +392,9 @@ describe('BakeMemoryGraph', () => {
   it('支持节点打开、展示创建时间和全屏退出', () => {
     const onOpenNode = vi.fn()
     const createdAtMs = new Date(2026, 7, 1, 10, 30).getTime()
+    const longTitle = '针对官网演示数据及客户端发布项目制定质量验收标准与交付计划'
     render(<BakeMemoryGraph
-      assets={assets({ knowledge: [knowledge({ createdAtMs })] })}
+      assets={assets({ knowledge: [knowledge({ createdAtMs, summary: longTitle })] })}
       focusNodeId="knowledge:k1"
       onOpenNode={onOpenNode}
     />)
@@ -362,11 +406,12 @@ describe('BakeMemoryGraph', () => {
     expect(screen.queryByText('按来源、引用与提炼语义连接知识、文档、操作和数据')).not.toBeInTheDocument()
     const createdTime = screen.getByText(/创建于 2026\/08\/01 10:30/)
     expect(createdTime).toHaveAttribute('dateTime', new Date(createdAtMs).toISOString())
+    expect(screen.getByText(longTitle)).toHaveClass('bake-memory-graph__inspector-title')
 
     fireEvent.click(screen.getByRole('button', { name: '打开内容' }))
     expect(onOpenNode).toHaveBeenCalledWith(expect.objectContaining({ id: 'knowledge:k1' }))
 
-    const knowledgeNode = screen.getByRole('button', { name: /知识：GPU 利用率口径/ })
+    const knowledgeNode = screen.getByRole('button', { name: new RegExp(`知识：${longTitle}`) })
     fireEvent.doubleClick(knowledgeNode)
     expect(onOpenNode).toHaveBeenCalledTimes(2)
 

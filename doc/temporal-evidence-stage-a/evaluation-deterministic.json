@@ -1,0 +1,2188 @@
+{
+  "schema_version": "memorybread.temporal-evidence-stage-a.v1",
+  "contract_version": "temporal-claim-v1",
+  "rule_version": "temporal-gate-v1",
+  "generated_at": "2026-08-29T06:10:47.677965+00:00",
+  "corpus": {
+    "valid": true,
+    "errors": [],
+    "total": 360,
+    "source_counts": {
+      "chat": 60,
+      "data_snapshot": 60,
+      "document": 60,
+      "meeting": 60,
+      "timeline": 60,
+      "work_memory": 60
+    },
+    "scenario_family_counts": {
+      "actual_metric_in_period_for_metric_section": 12,
+      "actual_metric_outside_period": 12,
+      "annual_forecast_without_event": 12,
+      "blocked_status_change_in_period": 12,
+      "cancelled_status_change_in_period": 12,
+      "conflicting_event_dates": 12,
+      "cumulative_metric_not_period_progress": 12,
+      "current_completed_status_without_change_date": 12,
+      "deadline_in_period_still_pending": 12,
+      "decision_made_in_period": 12,
+      "explicit_completed_in_period": 12,
+      "explicit_completed_outside_period": 12,
+      "hallucinated_quote": 12,
+      "historical_claim_for_background_task": 12,
+      "historical_decision_outside_period": 12,
+      "meeting_context_inherited_completion": 12,
+      "meeting_date_with_prior_completion": 12,
+      "mixed_document_target_is_historical": 12,
+      "observation_time_only": 12,
+      "old_document_contains_new_event": 12,
+      "planned_deadline_in_period": 12,
+      "publication_date_not_event_date": 12,
+      "relative_previous_month_with_anchor": 12,
+      "relative_this_week_with_meeting_anchor": 12,
+      "relative_time_without_anchor": 12,
+      "revision_date_distracts_historical_event": 12,
+      "revision_date_only_for_target": 12,
+      "status_semantic_enhancement": 12,
+      "target_horizon_in_period": 12,
+      "target_metric_for_metric_section": 12
+    },
+    "split_counts": {
+      "development": 240,
+      "holdout": 120
+    },
+    "expected_decision_counts": {
+      "background_only": 204,
+      "conflict": 12,
+      "eligible": 108,
+      "unresolved": 36
+    }
+  },
+  "baseline": {
+    "total": 360,
+    "correct": 144,
+    "accuracy": 0.4,
+    "false_admissions": 156,
+    "predicted_eligible": 252,
+    "false_admission_rate": 0.619048,
+    "noneligible_leak_rate": 0.619048,
+    "expected_eligible": 108,
+    "retained_eligible": 96,
+    "retention_rate": 0.888889,
+    "unresolved_or_missing": 60,
+    "abstention_rate": 0.166667,
+    "per_source": {
+      "chat": {
+        "total": 60,
+        "correct": 24,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 0.4,
+        "retention": 1.0
+      },
+      "data_snapshot": {
+        "total": 60,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.2,
+        "retention": null
+      },
+      "document": {
+        "total": 60,
+        "correct": 24,
+        "expected_eligible": 36,
+        "retained": 24,
+        "accuracy": 0.4,
+        "retention": 0.666667
+      },
+      "meeting": {
+        "total": 60,
+        "correct": 36,
+        "expected_eligible": 24,
+        "retained": 24,
+        "accuracy": 0.6,
+        "retention": 1.0
+      },
+      "timeline": {
+        "total": 60,
+        "correct": 24,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 0.4,
+        "retention": 1.0
+      },
+      "work_memory": {
+        "total": 60,
+        "correct": 24,
+        "expected_eligible": 24,
+        "retained": 24,
+        "accuracy": 0.4,
+        "retention": 1.0
+      }
+    },
+    "per_family": {
+      "actual_metric_in_period_for_metric_section": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "actual_metric_outside_period": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "annual_forecast_without_event": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": null
+      },
+      "blocked_status_change_in_period": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "cancelled_status_change_in_period": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "conflicting_event_dates": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": null
+      },
+      "cumulative_metric_not_period_progress": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": null
+      },
+      "current_completed_status_without_change_date": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": null
+      },
+      "deadline_in_period_still_pending": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": null
+      },
+      "decision_made_in_period": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "explicit_completed_in_period": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "explicit_completed_outside_period": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "hallucinated_quote": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": null
+      },
+      "historical_claim_for_background_task": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 12,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": 0.0
+      },
+      "historical_decision_outside_period": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "meeting_context_inherited_completion": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "meeting_date_with_prior_completion": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": null
+      },
+      "mixed_document_target_is_historical": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": null
+      },
+      "observation_time_only": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": null
+      },
+      "old_document_contains_new_event": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "planned_deadline_in_period": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": null
+      },
+      "publication_date_not_event_date": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": null
+      },
+      "relative_previous_month_with_anchor": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": null
+      },
+      "relative_this_week_with_meeting_anchor": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "relative_time_without_anchor": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "revision_date_distracts_historical_event": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": null
+      },
+      "revision_date_only_for_target": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": null
+      },
+      "status_semantic_enhancement": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": null
+      },
+      "target_horizon_in_period": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": null
+      },
+      "target_metric_for_metric_section": {
+        "total": 12,
+        "correct": 0,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 0.0,
+        "retention": null
+      }
+    },
+    "failures": [
+      {
+        "id": "planned_deadline_in_period_01",
+        "source_type": "chat",
+        "scenario_family": "planned_deadline_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "target_horizon_in_period_01",
+        "source_type": "timeline",
+        "scenario_family": "target_horizon_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "observation_time_only_01",
+        "source_type": "work_memory",
+        "scenario_family": "observation_time_only",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "revision_date_distracts_historical_event_01",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_distracts_historical_event",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "meeting_date_with_prior_completion_01",
+        "source_type": "document",
+        "scenario_family": "meeting_date_with_prior_completion",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "mixed_document_target_is_historical_01",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "annual_forecast_without_event_01",
+        "source_type": "work_memory",
+        "scenario_family": "annual_forecast_without_event",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "current_completed_status_without_change_date_01",
+        "source_type": "data_snapshot",
+        "scenario_family": "current_completed_status_without_change_date",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "relative_previous_month_with_anchor_01",
+        "source_type": "meeting",
+        "scenario_family": "relative_previous_month_with_anchor",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "conflicting_event_dates_01",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "eligible"
+      },
+      {
+        "id": "cumulative_metric_not_period_progress_01",
+        "source_type": "timeline",
+        "scenario_family": "cumulative_metric_not_period_progress",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "revision_date_only_for_target_01",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_only_for_target",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "deadline_in_period_still_pending_01",
+        "source_type": "document",
+        "scenario_family": "deadline_in_period_still_pending",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "hallucinated_quote_01",
+        "source_type": "work_memory",
+        "scenario_family": "hallucinated_quote",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "status_semantic_enhancement_01",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "historical_claim_for_background_task_01",
+        "source_type": "document",
+        "scenario_family": "historical_claim_for_background_task",
+        "expected": "eligible",
+        "actual": "background_only"
+      },
+      {
+        "id": "target_metric_for_metric_section_01",
+        "source_type": "meeting",
+        "scenario_family": "target_metric_for_metric_section",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "publication_date_not_event_date_01",
+        "source_type": "timeline",
+        "scenario_family": "publication_date_not_event_date",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "planned_deadline_in_period_02",
+        "source_type": "chat",
+        "scenario_family": "planned_deadline_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "target_horizon_in_period_02",
+        "source_type": "timeline",
+        "scenario_family": "target_horizon_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "observation_time_only_02",
+        "source_type": "work_memory",
+        "scenario_family": "observation_time_only",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "revision_date_distracts_historical_event_02",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_distracts_historical_event",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "meeting_date_with_prior_completion_02",
+        "source_type": "document",
+        "scenario_family": "meeting_date_with_prior_completion",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "mixed_document_target_is_historical_02",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "annual_forecast_without_event_02",
+        "source_type": "work_memory",
+        "scenario_family": "annual_forecast_without_event",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "current_completed_status_without_change_date_02",
+        "source_type": "data_snapshot",
+        "scenario_family": "current_completed_status_without_change_date",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "relative_previous_month_with_anchor_02",
+        "source_type": "meeting",
+        "scenario_family": "relative_previous_month_with_anchor",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "conflicting_event_dates_02",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "eligible"
+      },
+      {
+        "id": "cumulative_metric_not_period_progress_02",
+        "source_type": "timeline",
+        "scenario_family": "cumulative_metric_not_period_progress",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "revision_date_only_for_target_02",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_only_for_target",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "deadline_in_period_still_pending_02",
+        "source_type": "document",
+        "scenario_family": "deadline_in_period_still_pending",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "hallucinated_quote_02",
+        "source_type": "work_memory",
+        "scenario_family": "hallucinated_quote",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "status_semantic_enhancement_02",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "historical_claim_for_background_task_02",
+        "source_type": "document",
+        "scenario_family": "historical_claim_for_background_task",
+        "expected": "eligible",
+        "actual": "background_only"
+      },
+      {
+        "id": "target_metric_for_metric_section_02",
+        "source_type": "meeting",
+        "scenario_family": "target_metric_for_metric_section",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "publication_date_not_event_date_02",
+        "source_type": "timeline",
+        "scenario_family": "publication_date_not_event_date",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "planned_deadline_in_period_03",
+        "source_type": "chat",
+        "scenario_family": "planned_deadline_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "target_horizon_in_period_03",
+        "source_type": "timeline",
+        "scenario_family": "target_horizon_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "observation_time_only_03",
+        "source_type": "work_memory",
+        "scenario_family": "observation_time_only",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "revision_date_distracts_historical_event_03",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_distracts_historical_event",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "meeting_date_with_prior_completion_03",
+        "source_type": "document",
+        "scenario_family": "meeting_date_with_prior_completion",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "mixed_document_target_is_historical_03",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "annual_forecast_without_event_03",
+        "source_type": "work_memory",
+        "scenario_family": "annual_forecast_without_event",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "current_completed_status_without_change_date_03",
+        "source_type": "data_snapshot",
+        "scenario_family": "current_completed_status_without_change_date",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "relative_previous_month_with_anchor_03",
+        "source_type": "meeting",
+        "scenario_family": "relative_previous_month_with_anchor",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "conflicting_event_dates_03",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "eligible"
+      },
+      {
+        "id": "cumulative_metric_not_period_progress_03",
+        "source_type": "timeline",
+        "scenario_family": "cumulative_metric_not_period_progress",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "revision_date_only_for_target_03",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_only_for_target",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "deadline_in_period_still_pending_03",
+        "source_type": "document",
+        "scenario_family": "deadline_in_period_still_pending",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "hallucinated_quote_03",
+        "source_type": "work_memory",
+        "scenario_family": "hallucinated_quote",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "status_semantic_enhancement_03",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "historical_claim_for_background_task_03",
+        "source_type": "document",
+        "scenario_family": "historical_claim_for_background_task",
+        "expected": "eligible",
+        "actual": "background_only"
+      },
+      {
+        "id": "target_metric_for_metric_section_03",
+        "source_type": "meeting",
+        "scenario_family": "target_metric_for_metric_section",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "publication_date_not_event_date_03",
+        "source_type": "timeline",
+        "scenario_family": "publication_date_not_event_date",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "planned_deadline_in_period_04",
+        "source_type": "chat",
+        "scenario_family": "planned_deadline_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "target_horizon_in_period_04",
+        "source_type": "timeline",
+        "scenario_family": "target_horizon_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "observation_time_only_04",
+        "source_type": "work_memory",
+        "scenario_family": "observation_time_only",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "revision_date_distracts_historical_event_04",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_distracts_historical_event",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "meeting_date_with_prior_completion_04",
+        "source_type": "document",
+        "scenario_family": "meeting_date_with_prior_completion",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "mixed_document_target_is_historical_04",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "annual_forecast_without_event_04",
+        "source_type": "work_memory",
+        "scenario_family": "annual_forecast_without_event",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "current_completed_status_without_change_date_04",
+        "source_type": "data_snapshot",
+        "scenario_family": "current_completed_status_without_change_date",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "relative_previous_month_with_anchor_04",
+        "source_type": "meeting",
+        "scenario_family": "relative_previous_month_with_anchor",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "conflicting_event_dates_04",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "eligible"
+      },
+      {
+        "id": "cumulative_metric_not_period_progress_04",
+        "source_type": "timeline",
+        "scenario_family": "cumulative_metric_not_period_progress",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "revision_date_only_for_target_04",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_only_for_target",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "deadline_in_period_still_pending_04",
+        "source_type": "document",
+        "scenario_family": "deadline_in_period_still_pending",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "hallucinated_quote_04",
+        "source_type": "work_memory",
+        "scenario_family": "hallucinated_quote",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "status_semantic_enhancement_04",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "historical_claim_for_background_task_04",
+        "source_type": "document",
+        "scenario_family": "historical_claim_for_background_task",
+        "expected": "eligible",
+        "actual": "background_only"
+      },
+      {
+        "id": "target_metric_for_metric_section_04",
+        "source_type": "meeting",
+        "scenario_family": "target_metric_for_metric_section",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "publication_date_not_event_date_04",
+        "source_type": "timeline",
+        "scenario_family": "publication_date_not_event_date",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "planned_deadline_in_period_05",
+        "source_type": "chat",
+        "scenario_family": "planned_deadline_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "target_horizon_in_period_05",
+        "source_type": "timeline",
+        "scenario_family": "target_horizon_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "observation_time_only_05",
+        "source_type": "work_memory",
+        "scenario_family": "observation_time_only",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "revision_date_distracts_historical_event_05",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_distracts_historical_event",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "meeting_date_with_prior_completion_05",
+        "source_type": "document",
+        "scenario_family": "meeting_date_with_prior_completion",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "mixed_document_target_is_historical_05",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "annual_forecast_without_event_05",
+        "source_type": "work_memory",
+        "scenario_family": "annual_forecast_without_event",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "current_completed_status_without_change_date_05",
+        "source_type": "data_snapshot",
+        "scenario_family": "current_completed_status_without_change_date",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "relative_previous_month_with_anchor_05",
+        "source_type": "meeting",
+        "scenario_family": "relative_previous_month_with_anchor",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "conflicting_event_dates_05",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "eligible"
+      },
+      {
+        "id": "cumulative_metric_not_period_progress_05",
+        "source_type": "timeline",
+        "scenario_family": "cumulative_metric_not_period_progress",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "revision_date_only_for_target_05",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_only_for_target",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "deadline_in_period_still_pending_05",
+        "source_type": "document",
+        "scenario_family": "deadline_in_period_still_pending",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "hallucinated_quote_05",
+        "source_type": "work_memory",
+        "scenario_family": "hallucinated_quote",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "status_semantic_enhancement_05",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "historical_claim_for_background_task_05",
+        "source_type": "document",
+        "scenario_family": "historical_claim_for_background_task",
+        "expected": "eligible",
+        "actual": "background_only"
+      },
+      {
+        "id": "target_metric_for_metric_section_05",
+        "source_type": "meeting",
+        "scenario_family": "target_metric_for_metric_section",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "publication_date_not_event_date_05",
+        "source_type": "timeline",
+        "scenario_family": "publication_date_not_event_date",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "planned_deadline_in_period_06",
+        "source_type": "chat",
+        "scenario_family": "planned_deadline_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "target_horizon_in_period_06",
+        "source_type": "timeline",
+        "scenario_family": "target_horizon_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "observation_time_only_06",
+        "source_type": "work_memory",
+        "scenario_family": "observation_time_only",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "revision_date_distracts_historical_event_06",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_distracts_historical_event",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "meeting_date_with_prior_completion_06",
+        "source_type": "document",
+        "scenario_family": "meeting_date_with_prior_completion",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "mixed_document_target_is_historical_06",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "annual_forecast_without_event_06",
+        "source_type": "work_memory",
+        "scenario_family": "annual_forecast_without_event",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "current_completed_status_without_change_date_06",
+        "source_type": "data_snapshot",
+        "scenario_family": "current_completed_status_without_change_date",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "relative_previous_month_with_anchor_06",
+        "source_type": "meeting",
+        "scenario_family": "relative_previous_month_with_anchor",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "conflicting_event_dates_06",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "eligible"
+      },
+      {
+        "id": "cumulative_metric_not_period_progress_06",
+        "source_type": "timeline",
+        "scenario_family": "cumulative_metric_not_period_progress",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "revision_date_only_for_target_06",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_only_for_target",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "deadline_in_period_still_pending_06",
+        "source_type": "document",
+        "scenario_family": "deadline_in_period_still_pending",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "hallucinated_quote_06",
+        "source_type": "work_memory",
+        "scenario_family": "hallucinated_quote",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "status_semantic_enhancement_06",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "historical_claim_for_background_task_06",
+        "source_type": "document",
+        "scenario_family": "historical_claim_for_background_task",
+        "expected": "eligible",
+        "actual": "background_only"
+      },
+      {
+        "id": "target_metric_for_metric_section_06",
+        "source_type": "meeting",
+        "scenario_family": "target_metric_for_metric_section",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "publication_date_not_event_date_06",
+        "source_type": "timeline",
+        "scenario_family": "publication_date_not_event_date",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "planned_deadline_in_period_07",
+        "source_type": "chat",
+        "scenario_family": "planned_deadline_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "target_horizon_in_period_07",
+        "source_type": "timeline",
+        "scenario_family": "target_horizon_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "observation_time_only_07",
+        "source_type": "work_memory",
+        "scenario_family": "observation_time_only",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "revision_date_distracts_historical_event_07",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_distracts_historical_event",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "meeting_date_with_prior_completion_07",
+        "source_type": "document",
+        "scenario_family": "meeting_date_with_prior_completion",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "mixed_document_target_is_historical_07",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "annual_forecast_without_event_07",
+        "source_type": "work_memory",
+        "scenario_family": "annual_forecast_without_event",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "current_completed_status_without_change_date_07",
+        "source_type": "data_snapshot",
+        "scenario_family": "current_completed_status_without_change_date",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "relative_previous_month_with_anchor_07",
+        "source_type": "meeting",
+        "scenario_family": "relative_previous_month_with_anchor",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "conflicting_event_dates_07",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "eligible"
+      },
+      {
+        "id": "cumulative_metric_not_period_progress_07",
+        "source_type": "timeline",
+        "scenario_family": "cumulative_metric_not_period_progress",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "revision_date_only_for_target_07",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_only_for_target",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "deadline_in_period_still_pending_07",
+        "source_type": "document",
+        "scenario_family": "deadline_in_period_still_pending",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "hallucinated_quote_07",
+        "source_type": "work_memory",
+        "scenario_family": "hallucinated_quote",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "status_semantic_enhancement_07",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "historical_claim_for_background_task_07",
+        "source_type": "document",
+        "scenario_family": "historical_claim_for_background_task",
+        "expected": "eligible",
+        "actual": "background_only"
+      },
+      {
+        "id": "target_metric_for_metric_section_07",
+        "source_type": "meeting",
+        "scenario_family": "target_metric_for_metric_section",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "publication_date_not_event_date_07",
+        "source_type": "timeline",
+        "scenario_family": "publication_date_not_event_date",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "planned_deadline_in_period_08",
+        "source_type": "chat",
+        "scenario_family": "planned_deadline_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "target_horizon_in_period_08",
+        "source_type": "timeline",
+        "scenario_family": "target_horizon_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "observation_time_only_08",
+        "source_type": "work_memory",
+        "scenario_family": "observation_time_only",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "revision_date_distracts_historical_event_08",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_distracts_historical_event",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "meeting_date_with_prior_completion_08",
+        "source_type": "document",
+        "scenario_family": "meeting_date_with_prior_completion",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "mixed_document_target_is_historical_08",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "annual_forecast_without_event_08",
+        "source_type": "work_memory",
+        "scenario_family": "annual_forecast_without_event",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "current_completed_status_without_change_date_08",
+        "source_type": "data_snapshot",
+        "scenario_family": "current_completed_status_without_change_date",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "relative_previous_month_with_anchor_08",
+        "source_type": "meeting",
+        "scenario_family": "relative_previous_month_with_anchor",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "conflicting_event_dates_08",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "eligible"
+      },
+      {
+        "id": "cumulative_metric_not_period_progress_08",
+        "source_type": "timeline",
+        "scenario_family": "cumulative_metric_not_period_progress",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "revision_date_only_for_target_08",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_only_for_target",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "deadline_in_period_still_pending_08",
+        "source_type": "document",
+        "scenario_family": "deadline_in_period_still_pending",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "hallucinated_quote_08",
+        "source_type": "work_memory",
+        "scenario_family": "hallucinated_quote",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "status_semantic_enhancement_08",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "historical_claim_for_background_task_08",
+        "source_type": "document",
+        "scenario_family": "historical_claim_for_background_task",
+        "expected": "eligible",
+        "actual": "background_only"
+      },
+      {
+        "id": "target_metric_for_metric_section_08",
+        "source_type": "meeting",
+        "scenario_family": "target_metric_for_metric_section",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "publication_date_not_event_date_08",
+        "source_type": "timeline",
+        "scenario_family": "publication_date_not_event_date",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "planned_deadline_in_period_09",
+        "source_type": "chat",
+        "scenario_family": "planned_deadline_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "target_horizon_in_period_09",
+        "source_type": "timeline",
+        "scenario_family": "target_horizon_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "observation_time_only_09",
+        "source_type": "work_memory",
+        "scenario_family": "observation_time_only",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "revision_date_distracts_historical_event_09",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_distracts_historical_event",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "meeting_date_with_prior_completion_09",
+        "source_type": "document",
+        "scenario_family": "meeting_date_with_prior_completion",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "mixed_document_target_is_historical_09",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "annual_forecast_without_event_09",
+        "source_type": "work_memory",
+        "scenario_family": "annual_forecast_without_event",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "current_completed_status_without_change_date_09",
+        "source_type": "data_snapshot",
+        "scenario_family": "current_completed_status_without_change_date",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "relative_previous_month_with_anchor_09",
+        "source_type": "meeting",
+        "scenario_family": "relative_previous_month_with_anchor",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "conflicting_event_dates_09",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "eligible"
+      },
+      {
+        "id": "cumulative_metric_not_period_progress_09",
+        "source_type": "timeline",
+        "scenario_family": "cumulative_metric_not_period_progress",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "revision_date_only_for_target_09",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_only_for_target",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "deadline_in_period_still_pending_09",
+        "source_type": "document",
+        "scenario_family": "deadline_in_period_still_pending",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "hallucinated_quote_09",
+        "source_type": "work_memory",
+        "scenario_family": "hallucinated_quote",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "status_semantic_enhancement_09",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "historical_claim_for_background_task_09",
+        "source_type": "document",
+        "scenario_family": "historical_claim_for_background_task",
+        "expected": "eligible",
+        "actual": "background_only"
+      },
+      {
+        "id": "target_metric_for_metric_section_09",
+        "source_type": "meeting",
+        "scenario_family": "target_metric_for_metric_section",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "publication_date_not_event_date_09",
+        "source_type": "timeline",
+        "scenario_family": "publication_date_not_event_date",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "planned_deadline_in_period_10",
+        "source_type": "chat",
+        "scenario_family": "planned_deadline_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "target_horizon_in_period_10",
+        "source_type": "timeline",
+        "scenario_family": "target_horizon_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "observation_time_only_10",
+        "source_type": "work_memory",
+        "scenario_family": "observation_time_only",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "revision_date_distracts_historical_event_10",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_distracts_historical_event",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "meeting_date_with_prior_completion_10",
+        "source_type": "document",
+        "scenario_family": "meeting_date_with_prior_completion",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "mixed_document_target_is_historical_10",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "annual_forecast_without_event_10",
+        "source_type": "work_memory",
+        "scenario_family": "annual_forecast_without_event",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "current_completed_status_without_change_date_10",
+        "source_type": "data_snapshot",
+        "scenario_family": "current_completed_status_without_change_date",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "relative_previous_month_with_anchor_10",
+        "source_type": "meeting",
+        "scenario_family": "relative_previous_month_with_anchor",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "conflicting_event_dates_10",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "eligible"
+      },
+      {
+        "id": "cumulative_metric_not_period_progress_10",
+        "source_type": "timeline",
+        "scenario_family": "cumulative_metric_not_period_progress",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "revision_date_only_for_target_10",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_only_for_target",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "deadline_in_period_still_pending_10",
+        "source_type": "document",
+        "scenario_family": "deadline_in_period_still_pending",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "hallucinated_quote_10",
+        "source_type": "work_memory",
+        "scenario_family": "hallucinated_quote",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "status_semantic_enhancement_10",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "historical_claim_for_background_task_10",
+        "source_type": "document",
+        "scenario_family": "historical_claim_for_background_task",
+        "expected": "eligible",
+        "actual": "background_only"
+      },
+      {
+        "id": "target_metric_for_metric_section_10",
+        "source_type": "meeting",
+        "scenario_family": "target_metric_for_metric_section",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "publication_date_not_event_date_10",
+        "source_type": "timeline",
+        "scenario_family": "publication_date_not_event_date",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "planned_deadline_in_period_11",
+        "source_type": "chat",
+        "scenario_family": "planned_deadline_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "target_horizon_in_period_11",
+        "source_type": "timeline",
+        "scenario_family": "target_horizon_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "observation_time_only_11",
+        "source_type": "work_memory",
+        "scenario_family": "observation_time_only",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "revision_date_distracts_historical_event_11",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_distracts_historical_event",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "meeting_date_with_prior_completion_11",
+        "source_type": "document",
+        "scenario_family": "meeting_date_with_prior_completion",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "mixed_document_target_is_historical_11",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "annual_forecast_without_event_11",
+        "source_type": "work_memory",
+        "scenario_family": "annual_forecast_without_event",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "current_completed_status_without_change_date_11",
+        "source_type": "data_snapshot",
+        "scenario_family": "current_completed_status_without_change_date",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "relative_previous_month_with_anchor_11",
+        "source_type": "meeting",
+        "scenario_family": "relative_previous_month_with_anchor",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "conflicting_event_dates_11",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "eligible"
+      },
+      {
+        "id": "cumulative_metric_not_period_progress_11",
+        "source_type": "timeline",
+        "scenario_family": "cumulative_metric_not_period_progress",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "revision_date_only_for_target_11",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_only_for_target",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "deadline_in_period_still_pending_11",
+        "source_type": "document",
+        "scenario_family": "deadline_in_period_still_pending",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "hallucinated_quote_11",
+        "source_type": "work_memory",
+        "scenario_family": "hallucinated_quote",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "status_semantic_enhancement_11",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "historical_claim_for_background_task_11",
+        "source_type": "document",
+        "scenario_family": "historical_claim_for_background_task",
+        "expected": "eligible",
+        "actual": "background_only"
+      },
+      {
+        "id": "target_metric_for_metric_section_11",
+        "source_type": "meeting",
+        "scenario_family": "target_metric_for_metric_section",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "publication_date_not_event_date_11",
+        "source_type": "timeline",
+        "scenario_family": "publication_date_not_event_date",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "planned_deadline_in_period_12",
+        "source_type": "chat",
+        "scenario_family": "planned_deadline_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "target_horizon_in_period_12",
+        "source_type": "timeline",
+        "scenario_family": "target_horizon_in_period",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "observation_time_only_12",
+        "source_type": "work_memory",
+        "scenario_family": "observation_time_only",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "revision_date_distracts_historical_event_12",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_distracts_historical_event",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "meeting_date_with_prior_completion_12",
+        "source_type": "document",
+        "scenario_family": "meeting_date_with_prior_completion",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "mixed_document_target_is_historical_12",
+        "source_type": "chat",
+        "scenario_family": "mixed_document_target_is_historical",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "annual_forecast_without_event_12",
+        "source_type": "work_memory",
+        "scenario_family": "annual_forecast_without_event",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "current_completed_status_without_change_date_12",
+        "source_type": "data_snapshot",
+        "scenario_family": "current_completed_status_without_change_date",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "relative_previous_month_with_anchor_12",
+        "source_type": "meeting",
+        "scenario_family": "relative_previous_month_with_anchor",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "conflicting_event_dates_12",
+        "source_type": "chat",
+        "scenario_family": "conflicting_event_dates",
+        "expected": "conflict",
+        "actual": "eligible"
+      },
+      {
+        "id": "cumulative_metric_not_period_progress_12",
+        "source_type": "timeline",
+        "scenario_family": "cumulative_metric_not_period_progress",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "revision_date_only_for_target_12",
+        "source_type": "data_snapshot",
+        "scenario_family": "revision_date_only_for_target",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "deadline_in_period_still_pending_12",
+        "source_type": "document",
+        "scenario_family": "deadline_in_period_still_pending",
+        "expected": "background_only",
+        "actual": "eligible"
+      },
+      {
+        "id": "hallucinated_quote_12",
+        "source_type": "work_memory",
+        "scenario_family": "hallucinated_quote",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "status_semantic_enhancement_12",
+        "source_type": "data_snapshot",
+        "scenario_family": "status_semantic_enhancement",
+        "expected": "unresolved",
+        "actual": "eligible"
+      },
+      {
+        "id": "historical_claim_for_background_task_12",
+        "source_type": "document",
+        "scenario_family": "historical_claim_for_background_task",
+        "expected": "eligible",
+        "actual": "background_only"
+      },
+      {
+        "id": "target_metric_for_metric_section_12",
+        "source_type": "meeting",
+        "scenario_family": "target_metric_for_metric_section",
+        "expected": "background_only",
+        "actual": "unresolved"
+      },
+      {
+        "id": "publication_date_not_event_date_12",
+        "source_type": "timeline",
+        "scenario_family": "publication_date_not_event_date",
+        "expected": "background_only",
+        "actual": "eligible"
+      }
+    ]
+  },
+  "prototype": {
+    "total": 360,
+    "correct": 360,
+    "accuracy": 1.0,
+    "false_admissions": 0,
+    "predicted_eligible": 108,
+    "false_admission_rate": 0.0,
+    "noneligible_leak_rate": 0.0,
+    "expected_eligible": 108,
+    "retained_eligible": 108,
+    "retention_rate": 1.0,
+    "unresolved_or_missing": 36,
+    "abstention_rate": 0.1,
+    "per_source": {
+      "chat": {
+        "total": 60,
+        "correct": 60,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "data_snapshot": {
+        "total": 60,
+        "correct": 60,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "document": {
+        "total": 60,
+        "correct": 60,
+        "expected_eligible": 36,
+        "retained": 36,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "meeting": {
+        "total": 60,
+        "correct": 60,
+        "expected_eligible": 24,
+        "retained": 24,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "timeline": {
+        "total": 60,
+        "correct": 60,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "work_memory": {
+        "total": 60,
+        "correct": 60,
+        "expected_eligible": 24,
+        "retained": 24,
+        "accuracy": 1.0,
+        "retention": 1.0
+      }
+    },
+    "per_family": {
+      "actual_metric_in_period_for_metric_section": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "actual_metric_outside_period": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "annual_forecast_without_event": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "blocked_status_change_in_period": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "cancelled_status_change_in_period": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "conflicting_event_dates": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "cumulative_metric_not_period_progress": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "current_completed_status_without_change_date": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "deadline_in_period_still_pending": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "decision_made_in_period": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "explicit_completed_in_period": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "explicit_completed_outside_period": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "hallucinated_quote": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "historical_claim_for_background_task": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "historical_decision_outside_period": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "meeting_context_inherited_completion": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "meeting_date_with_prior_completion": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "mixed_document_target_is_historical": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "observation_time_only": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "old_document_contains_new_event": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "planned_deadline_in_period": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "publication_date_not_event_date": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "relative_previous_month_with_anchor": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "relative_this_week_with_meeting_anchor": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 12,
+        "retained": 12,
+        "accuracy": 1.0,
+        "retention": 1.0
+      },
+      "relative_time_without_anchor": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "revision_date_distracts_historical_event": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "revision_date_only_for_target": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "status_semantic_enhancement": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "target_horizon_in_period": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      },
+      "target_metric_for_metric_section": {
+        "total": 12,
+        "correct": 12,
+        "expected_eligible": 0,
+        "retained": 0,
+        "accuracy": 1.0,
+        "retention": null
+      }
+    },
+    "failures": []
+  }
+}

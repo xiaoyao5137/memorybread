@@ -48,6 +48,7 @@ from .tools import (
     normalize_creation_tool_ids,
     validate_routing_decision,
 )
+from .visual_plan import parse_chapter_design_result
 
 SCHEMA_VERSION = "creation.agent.v1"
 logger = logging.getLogger(__name__)
@@ -63,6 +64,11 @@ MAX_PROMPT_SKILL_CHARS = 18000
 MAX_PROMPT_COMPLETED_STEPS_CHARS = 9000
 MAX_PROMPT_SCRAPE_CHARS = 5000
 MAX_SKILL_INSTRUCTION_CHARS = 12000
+MAX_BRAINSTORM_CONTEXT_CHARS = 16000
+MAX_BRAINSTORM_CONTEXT_DECISIONS = 24
+MAX_BRAINSTORM_DECISION_DIMENSION_CHARS = 80
+MAX_BRAINSTORM_DECISION_SUMMARY_CHARS = 320
+MAX_BRAINSTORM_OPEN_FLAG_CHARS = 300
 
 
 def _step_failure_details(exc: BaseException) -> tuple[str, str]:
@@ -125,6 +131,27 @@ QUALITY_AGENT_ORDER = (
     "anti_ai_style_agent",
     "typography_polish_agent",
 )
+EMPHASIS_QUALITY_ISSUE_CODE = "emphasis_needs_polish"
+EMPHASIS_QUALITY_CRITERION = "emphasis_selective"
+DATA_QUERY_QUALITY_ISSUE_CODE = "data_query_result_incomplete"
+DATA_QUERY_QUALITY_CRITERION = "data_query_results_complete"
+PAGE_ABSENCE_QUALITY_ISSUE_CODE = "unsupported_page_absence_claim"
+PAGE_ABSENCE_QUALITY_CRITERION = "page_absence_claim_supported"
+VISUAL_PLAN_QUALITY_ISSUE_CODE = "planned_diagram_missing"
+VISUAL_PLAN_QUALITY_CRITERION = "planned_diagrams_covered"
+SUBSECTION_REQUIREMENTS_QUALITY_ISSUE_CODE = "subsection_requirements_incomplete"
+SUBSECTION_REQUIREMENTS_QUALITY_CRITERION = "subsection_requirements_satisfied"
+MULTI_TARGET_COVERAGE_ISSUE_CODE = "multi_target_coverage_incomplete"
+MULTI_TARGET_COVERAGE_CRITERION = "multi_target_coverage_satisfied"
+MAX_EMPHASIS_CHARACTER_RATIO = 0.18
+MAX_EMPHASIS_SPAN_CHARS = 32
+MIN_NARRATIVE_FRAGMENT_CHARS = 18
+STRICT_SKILL_QUALITY_ISSUE_CODES = (
+    DATA_QUERY_QUALITY_ISSUE_CODE,
+    EMPHASIS_QUALITY_ISSUE_CODE,
+    PAGE_ABSENCE_QUALITY_ISSUE_CODE,
+    SUBSECTION_REQUIREMENTS_QUALITY_ISSUE_CODE,
+)
 THINKING_STAGE_LABELS = {
     "intent": "理解本轮要求",
     "routing": "决定执行链路",
@@ -142,6 +169,11 @@ HARNESS_REASON_TEXTS = {
     "refresh_feedback_ready": "即时采集完成，可以继续分析最新数据",
     "refresh_failed_without_snapshot": "即时刷新失败，也没有可用历史快照，继续基于其他资料创作",
     "refresh_returned_no_analyzable_data": "页面已刷新，但没有提取到可分析数据，保留当前计划",
+    "visual_plan_ready": "章节蓝图识别出适合图示表达的关系，按章节准备 Mermaid 约束",
+    "visual_plan_empty": "章节内容不需要额外图示，继续完成正文",
+    "explicit_visual_request": "用户明确要求 Mermaid 图示，按原始请求准备画图约束",
+    "visual_tool_disabled": "章节存在图示建议，但 Mermaid Tool 当前未启用",
+    "chapter_design_failed": "章节设计未完成，不追加自动配图步骤",
     "quality_review_failed": "质量检查未完成，暂不追加优化动作",
     "quality_gate_passed": "质量要求已满足，可以结束本轮创作",
     "quality_cycle_budget_exhausted": "已达到自动优化上限，剩余问题保留给用户复核",
@@ -211,6 +243,7 @@ class LoopState:
     run_id: str
     mode: str
     model_mode: str
+    creation_mode: str
     user_message: str
     root_request: str
     current_document: str
@@ -236,6 +269,7 @@ class LoopState:
         data = dict(value)
         data.setdefault("root_request", data.get("user_message", ""))
         data.setdefault("quality_cycles", 0)
+        data.setdefault("creation_mode", "direct")
         data["goal"] = GoalState(**data["goal"])
         return cls(**data)
 
@@ -264,6 +298,8 @@ class CreationAgentLoop:
         creation_model: Optional[str] = None,
         creation_api_key: Optional[str] = None,
         creation_base_url: Optional[str] = None,
+        creation_mode: str = "direct",
+        creation_brief: Optional[dict[str, Any]] = None,
     ) -> AsyncIterator[dict[str, Any]]:
         if resume_state:
             state = LoopState.restore(resume_state)
@@ -298,6 +334,8 @@ class CreationAgentLoop:
                 model_mode=model_mode,
                 session_id=session_id,
                 run_id=run_id,
+                creation_mode=creation_mode,
+                creation_brief=creation_brief,
             )
             yield self._event(state, "run.started", "创作 Agent 已接管目标")
             yield self._event(
@@ -613,6 +651,20 @@ class CreationAgentLoop:
                 status="completed",
                 data={"content": document, "evidence": applied_evidence},
             )
+        document, data_risk_audit = self._apply_data_risk_disclosures(
+            document, list(state.environment.get("data_results") or [])
+        )
+        if data_risk_audit:
+            state.environment["document"] = document
+            state.current_document = document
+            state.environment["data_risk_audit"] = data_risk_audit
+            if any(item.get("risk_count") for item in data_risk_audit):
+                quality_warnings.append("文档使用了带风险标注的参考数据，请核对实际周期和口径")
+            yield self._event(
+                state, "document.data_risks.applied",
+                "已在数据下方保留参考值、实际周期、来源与风险说明",
+                status="completed", data={"content": document, "audit": data_risk_audit},
+            )
         state.goal.status = "complete"
         state.goal.remaining_steps = []
         state.goal.outcome = (
@@ -669,6 +721,8 @@ class CreationAgentLoop:
         model_mode: str,
         session_id: Optional[str],
         run_id: Optional[str],
+        creation_mode: str = "direct",
+        creation_brief: Optional[dict[str, Any]] = None,
     ) -> LoopState:
         message = user_message.strip()
         normalized_conversation = self._normalize_conversation(conversation)
@@ -706,6 +760,7 @@ class CreationAgentLoop:
             run_id=run_id or f"run-{uuid4()}",
             mode=mode,
             model_mode=model_mode,
+            creation_mode=creation_mode,
             user_message=message,
             root_request=resolved_root_request,
             current_document=current_document,
@@ -719,9 +774,27 @@ class CreationAgentLoop:
             if mode == "revision" and resolved_root_request != message
             else message
         )
-        requirement = self.service.analyze_requirement(context_query, options)
+        retrieval_query = context_query
+        retrieval_context_terms: list[str] = []
+        if creation_mode == "brainstorm" and creation_brief:
+            state.environment["creation_brief"] = creation_brief
+            state.environment["creation_mode"] = "brainstorm"
+            retrieval_context_terms = self._brainstorm_retrieval_context_terms(
+                creation_brief
+            )
+            creation_brief_context = self._brainstorm_prompt_context(creation_brief)
+            if creation_brief_context:
+                state.environment["creation_brief_context"] = creation_brief_context
+                context_query = "\n\n".join((context_query, creation_brief_context))
+        requirement = self.service.analyze_requirement(
+            retrieval_query,
+            options,
+            retrieval_context_terms=retrieval_context_terms,
+        )
         state.environment["requirement"] = requirement
         state.environment["context_query"] = context_query
+        state.environment["retrieval_query"] = retrieval_query
+        state.environment["retrieval_context_terms"] = retrieval_context_terms
         edit_intent = asdict(intent)
         edit_intent["target_sections"] = list(intent.target_sections)
         state.environment["edit_intent"] = edit_intent
@@ -730,6 +803,98 @@ class CreationAgentLoop:
         state.plan = self._build_plan(state)
         state.goal.remaining_steps = [item["name"] for item in state.plan]
         return state
+
+    @staticmethod
+    def _brainstorm_prompt_context(creation_brief: Any) -> str:
+        """把 Core 保存的脑暴状态收敛为可直接给 Agent 消费的有界上下文。
+
+        这里只白名单透传已确认决策、合理假设、开放事项和简报；
+        session_id、模型或其他内部字段不得进入模型提示。
+        """
+        if not isinstance(creation_brief, dict):
+            return ""
+
+        confirmed_decisions: list[str] = []
+        assumptions: list[str] = []
+        raw_decisions = creation_brief.get("decisions")
+        if isinstance(raw_decisions, list):
+            for raw in raw_decisions[-MAX_BRAINSTORM_CONTEXT_DECISIONS:]:
+                if not isinstance(raw, dict):
+                    continue
+                dimension = re.sub(
+                    r"\s+", " ", str(raw.get("dimension") or "").strip()
+                )[:MAX_BRAINSTORM_DECISION_DIMENSION_CHARS]
+                summary = re.sub(
+                    r"\s+", " ", str(raw.get("summary") or "").strip()
+                )[:MAX_BRAINSTORM_DECISION_SUMMARY_CHARS]
+                if not summary:
+                    continue
+                line = f"- {dimension}：{summary}" if dimension else f"- {summary}"
+                if str(raw.get("source") or "").strip() == "agent_assumption":
+                    assumptions.append(line)
+                else:
+                    confirmed_decisions.append(line)
+
+        open_flags = []
+        raw_open_flags = creation_brief.get("open_flags")
+        if isinstance(raw_open_flags, list):
+            for raw in raw_open_flags[:8]:
+                value = re.sub(r"\s+", " ", str(raw or "").strip())[
+                    :MAX_BRAINSTORM_OPEN_FLAG_CHARS
+                ]
+                if value:
+                    open_flags.append(f"- {value}")
+
+        blocks = [
+            "脑暴创作上下文：已确认决策必须遵守；合理假设不得改写为用户已确认事实；"
+            "开放事项不得擅自定论，必要时在文档中明确标注待补充。"
+        ]
+        if confirmed_decisions:
+            blocks.append("已确认决策：\n" + "\n".join(confirmed_decisions))
+        if assumptions:
+            blocks.append("合理假设：\n" + "\n".join(assumptions))
+        if open_flags:
+            blocks.append("开放事项：\n" + "\n".join(open_flags))
+
+        brief_markdown = str(creation_brief.get("brief_markdown") or "").strip()
+        if brief_markdown:
+            prefix = "\n\n".join(blocks)
+            remaining = MAX_BRAINSTORM_CONTEXT_CHARS - len(prefix) - len(
+                "\n\n当前创作简报：\n"
+            )
+            if remaining > 0:
+                blocks.append("当前创作简报：\n" + brief_markdown[:remaining])
+
+        if len(blocks) == 1:
+            return ""
+        return "\n\n".join(blocks)[:MAX_BRAINSTORM_CONTEXT_CHARS]
+
+    @staticmethod
+    def _brainstorm_retrieval_context_terms(creation_brief: Any) -> list[str]:
+        """只提取用户已确认的业务事实，作为低权重检索辅助词。
+
+        推理假设、开放问题、简报模板和“必须遵守”等控制文字
+        不得进入召回规划，避免它们被误识别为业务实体。
+        """
+        if not isinstance(creation_brief, dict):
+            return []
+        selected: list[str] = []
+        raw_decisions = creation_brief.get("decisions")
+        if not isinstance(raw_decisions, list):
+            return selected
+        for raw in raw_decisions[-MAX_BRAINSTORM_CONTEXT_DECISIONS:]:
+            if not isinstance(raw, dict):
+                continue
+            if str(raw.get("source") or "").strip() == "agent_assumption":
+                continue
+            summary = re.sub(
+                r"\s+", " ", str(raw.get("summary") or "").strip()
+            )[:MAX_BRAINSTORM_DECISION_SUMMARY_CHARS]
+            if summary and summary not in selected:
+                selected.append(summary)
+            if len(selected) >= 8:
+                break
+        return selected
 
     @staticmethod
     def _resolve_root_request(
@@ -1024,12 +1189,32 @@ class CreationAgentLoop:
                         "schedule_key": "skill_polish:final",
                     }
                 )
+            # Skill 仍然独占业务结构和内容规则；最后只追加与具体任务无关的
+            # Markdown 强调检查，避免通用渲染问题绕过质量门禁。
+            quality_review_step = self._agent_plan_step("quality_review_agent")
+            if quality_review_step:
+                plan.append(
+                    {
+                        **quality_review_step,
+                        "quality_issue_codes": list(
+                            STRICT_SKILL_QUALITY_ISSUE_CODES
+                        ),
+                        "schedule_key": "strict_skill:emphasis_review",
+                    }
+                )
         else:
             if MEMORY_SEARCH_TOOL_ID in enabled_tools:
                 plan.append(self._tool_plan_step(MEMORY_SEARCH_TOOL_ID))
             for tool_id in routed_tools:
                 if tool_id == DATA_SEARCH_TOOL_ID:
                     # data_search 统一插入到 memory_search 之后，见下方。
+                    continue
+                if (
+                    state.mode == "initial"
+                    and tool_id == MERMAID_DIAGRAM_TOOL_ID
+                ):
+                    # 初稿的 Mermaid 图示要等章节设计产出 Visual Plan 后再按
+                    # 章节调度；修订模式没有章节设计步骤，继续沿用即时路由。
                     continue
                 tool_step = self._tool_plan_step(tool_id)
                 if tool_step:
@@ -1073,9 +1258,9 @@ class CreationAgentLoop:
                 data_search_step or self._tool_plan_step(DATA_SEARCH_TOOL_ID),
             )
 
-        # 明确选择 Skill 时，execution_steps 是唯一的初始执行契约。只有步骤中
-        # 声明的 Agent/Tool 能进入初始计划；data_search 命中实时报表后所需的
-        # 受控网页采集依赖由反馈阶段补齐，结果仍由主创作 Agent 按步骤组装。
+        # 明确选择 Skill 时，execution_steps 是唯一的业务执行契约。除通用的
+        # Markdown 强调质量门禁外，只有步骤声明的 Agent/Tool 能进入初始计划；
+        # data_search 命中实时报表后所需的受控网页采集依赖由反馈阶段补齐。
         if strict_skill_workflow:
             return plan
 
@@ -1167,15 +1352,87 @@ class CreationAgentLoop:
         strict_skill_workflow = bool(
             state.environment.get("strict_skill_workflow")
         )
-        # 明确 Skill 不追加通用写作、分析或质检能力；但 data_search 只是数据
-        # 探针，命中报表 URL 后必须允许 Harness 追加其受控采集依赖。否则步骤
-        # 明确要求“最新数据”时只会返回 refresh_required，浏览器实际上从未打开。
+        # 明确 Skill 不追加会改变业务内容的通用写作或分析能力；但允许通用的
+        # Markdown 强调检查，以及 data_search 命中报表后的受控采集依赖。
         if strict_skill_workflow and step_id not in {
             DATA_SEARCH_TOOL_ID,
             WEBPAGE_SCRAPE_TOOL_ID,
             "data_query_planner",
+            "quality_review_agent",
         }:
             return None
+        if step_id == "chapter_design_agent":
+            visual_plan = state.environment.get("visual_plan")
+            diagrams = (
+                visual_plan.get("diagrams", [])
+                if isinstance(visual_plan, dict)
+                else []
+            )
+            enabled_tools = set(
+                normalize_creation_tool_ids(state.options.get("enabled_tools"))
+            )
+            routed_tools = set(
+                (state.environment.get("routing_decision") or {}).get("tools", [])
+            )
+            explicit_mermaid_request = (
+                MERMAID_DIAGRAM_TOOL_ID in routed_tools and not diagrams
+            )
+            candidates: list[Optional[dict[str, Any]]] = []
+            if status == "completed" and MERMAID_DIAGRAM_TOOL_ID in enabled_tools:
+                for spec in diagrams:
+                    if not isinstance(spec, dict):
+                        continue
+                    diagram_step = self._tool_plan_step(MERMAID_DIAGRAM_TOOL_ID)
+                    if not diagram_step:
+                        continue
+                    diagram_id = str(spec.get("id") or len(candidates) + 1)
+                    section_title = str(spec.get("section_title") or "").strip()
+                    candidates.append(
+                        {
+                            **diagram_step,
+                            "name": (
+                                f"{section_title} · Mermaid 画图 Tool"
+                                if section_title
+                                else diagram_step["name"]
+                            ),
+                            "diagram_spec": spec,
+                            "schedule_key": f"mermaid_visual_plan:{diagram_id}",
+                        }
+                    )
+                if explicit_mermaid_request:
+                    fallback_step = self._tool_plan_step(MERMAID_DIAGRAM_TOOL_ID)
+                    if fallback_step:
+                        candidates.append(
+                            {
+                                **fallback_step,
+                                "schedule_key": "mermaid_visual_plan:explicit_request",
+                            }
+                        )
+            inserted = self._insert_harness_steps(state, candidates)
+            if status != "completed":
+                reason_code = "chapter_design_failed"
+            elif (
+                (diagrams or explicit_mermaid_request)
+                and MERMAID_DIAGRAM_TOOL_ID not in enabled_tools
+            ):
+                reason_code = "visual_tool_disabled"
+            elif diagrams:
+                reason_code = "visual_plan_ready"
+            elif explicit_mermaid_request:
+                reason_code = "explicit_visual_request"
+            else:
+                reason_code = "visual_plan_empty"
+            decision = {
+                "trigger": step_id,
+                "trigger_status": status,
+                "reason_code": reason_code,
+                "diagram_count": len(diagrams) or int(explicit_mermaid_request),
+                "scheduled": [str(item.get("id") or "") for item in inserted],
+                "error_code": error_code,
+            }
+            state.environment.setdefault("harness_decisions", []).append(decision)
+            self._update_goal(state)
+            return decision
         if step_id == "quality_review_agent":
             return self._replan_quality_issues(state, status=status)
         if step_id == "data_query_planner":
@@ -1314,6 +1571,13 @@ class CreationAgentLoop:
             for item in state.environment.get("quality_issues", [])
             if isinstance(item, dict)
         ]
+        if state.environment.get("strict_skill_workflow"):
+            allowed_codes = set(STRICT_SKILL_QUALITY_ISSUE_CODES)
+            issues = [
+                item
+                for item in issues
+                if str(item.get("code") or "") in allowed_codes
+            ]
         # 对应 Agent 已经针对同一问题做过一轮修复、质检仍然报同样问题时，
         # 说明它不在自动修复的可控范围内，不能再次调度同一 Agent 重写全文，
         # 否则质检循环会一直反复更新文档。
@@ -1418,6 +1682,10 @@ class CreationAgentLoop:
                 state.environment["quality_cycle"] = cycle
                 review = self._quality_cycle_step("quality_review_agent", cycle)
                 if review:
+                    if state.environment.get("strict_skill_workflow"):
+                        review["quality_issue_codes"] = list(
+                            STRICT_SKILL_QUALITY_ISSUE_CODES
+                        )
                     candidates.append(review)
             elif reason_code == "quality_issues_detected":
                 # 所有可调度对象都已完成过或不可调度，本轮没有新增步骤，
@@ -1788,6 +2056,63 @@ class CreationAgentLoop:
             data=decision,
         )
 
+    @staticmethod
+    def _structure_requirements_from_action(action: Any) -> dict[str, Any]:
+        """从执行动作的自然语言中提取可确定校验的章节数量与字数要求。"""
+        text = str(action or "").strip()
+        count_patterns = (
+            r"(?:至少|最少|不少于)(?:形成|包含|设置|展开|设计|输出)?\s*"
+            r"(\d+)\s*个?\s*(?:(?:三级|四级|三级或四级|三四级)\s*)?"
+            r"(?:子章节|细节章节|详细章节)",
+            r"(?:子章节|细节章节|详细章节)(?:数量)?\s*(?:至少|最少|不少于)\s*"
+            r"(\d+)\s*个?",
+        )
+        length_patterns = (
+            r"每(?:个|一)?\s*(?:(?:三级|四级|三级或四级|三四级)\s*)?"
+            r"(?:子章节|细节章节|详细章节|章节|节)(?:的)?(?:正文|内容)?\s*"
+            r"(?:不少于|至少|最少)\s*(\d+)\s*(?:字|字符)",
+            r"每(?:节|章)(?:正文|内容)?\s*(?:不少于|至少|最少)\s*"
+            r"(\d+)\s*(?:字|字符)",
+        )
+
+        def largest(patterns: tuple[str, ...], upper: int) -> Optional[int]:
+            values: list[int] = []
+            for pattern in patterns:
+                values.extend(int(item) for item in re.findall(pattern, text))
+            values = [item for item in values if 1 <= item <= upper]
+            return max(values) if values else None
+
+        return {
+            "minimum_subsections": largest(count_patterns, 30),
+            "minimum_subsection_chars": largest(length_patterns, 5000),
+            "source_text": text[:500],
+        }
+
+    @classmethod
+    def _skill_structure_requirements(cls, skill: Any) -> dict[str, Any]:
+        merged: dict[str, Any] = {
+            "minimum_subsections": None,
+            "minimum_subsection_chars": None,
+            "source_text": "",
+        }
+        if not isinstance(skill, dict):
+            return merged
+        sources: list[str] = []
+        for raw_step in skill.get("execution_steps", []) or []:
+            if not isinstance(raw_step, dict):
+                continue
+            current = cls._structure_requirements_from_action(
+                raw_step.get("objective")
+            )
+            for key in ("minimum_subsections", "minimum_subsection_chars"):
+                value = current.get(key)
+                if value is not None:
+                    merged[key] = max(int(merged[key] or 0), int(value))
+            if current["minimum_subsections"] or current["minimum_subsection_chars"]:
+                sources.append(current["source_text"])
+        merged["source_text"] = "\n".join(sources)[:1500]
+        return merged
+
     def _plan_skill_workflow(
         self,
         workflow: list[dict[str, Any]],
@@ -1812,6 +2137,11 @@ class CreationAgentLoop:
                 "skill_step_objective": str(raw_step.get("objective") or ""),
                 "skill_step_output": str(raw_step.get("output") or ""),
                 "skill_step_skills": step_skills,
+                "skill_step_structure_requirements": (
+                    self._structure_requirements_from_action(
+                        raw_step.get("objective")
+                    )
+                ),
                 # 旧 Skill 没有该字段时默认静默取数。截图必须由 Skill
                 # 明确开启，不能把历史缺省值解释为前台操作授权。
                 "skill_step_retain_webpage_screenshot": bool(
@@ -2256,22 +2586,35 @@ class CreationAgentLoop:
                 query,
                 options,
                 entity_focus_text=focus_text,
+                retrieval_context_terms=list(
+                    state.environment.get("retrieval_context_terms") or []
+                ),
             )
             references = self.service.retrieve_references(
                 query,
                 requirement,
                 options,
             )
+            requested_time_context = requirement.get("time_context", {})
             # 创作消费召回结果前先对命中文档做浏览器即时刷新，把最新正文
             # 回写进召回对象；任何失败都静默降级，不中断创作主链路。
             document_refresh_stats = await self.service.refresh_recalled_documents(
                 references,
                 query,
                 require_latest=bool(requirement.get("needs_latest")),
+                browser_extension_enabled=bool(
+                    state.options.get("browser_extension_enabled", True)
+                ),
             )
             batch_references = [
                 {
-                    **self._reference_to_state(item),
+                    **self._reference_to_state(
+                        item,
+                        period_evidence=CreationService.reference_period_evidence(
+                            item,
+                            requested_time_context,
+                        ),
+                    ),
                     "retrieval_query": query,
                     "skill_step_id": step.get("skill_step_id"),
                     "skill_step_title": step.get("skill_step_title"),
@@ -2306,9 +2649,19 @@ class CreationAgentLoop:
                     "lexical_score": round(item.lexical_score, 4),
                     "semantic_score": round(item.semantic_score, 4),
                     "entity_score": round(item.entity_score, 4),
+                    "retrieval_mode": item.retrieval_mode,
+                    "primary_target": item.primary_target,
+                    "matched_components": list(item.matched_components),
+                    "matched_relations": list(item.matched_relations),
+                    "relation_score": round(item.relation_score, 4),
+                    "selection_reasons": list(item.selection_reasons),
                     "summary": self.service._clip(item.summary, 600),
                     "source_url": item.source_url,
                     "observed_at": item.observed_at,
+                    "period_evidence": CreationService.reference_period_evidence(
+                        item,
+                        requested_time_context,
+                    ),
                     "refresh_status": item.refresh_status,
                     "refresh_completeness": item.refresh_completeness,
                     "refresh_collected_at": item.refresh_collected_at,
@@ -2342,6 +2695,10 @@ class CreationAgentLoop:
                     "query": query,
                     "keywords": requirement.get("keywords", []),
                     "entity_context": requirement.get("entity_context", {}),
+                    "retrieval_plan": requirement.get("retrieval_plan", {}),
+                    "retrieval_diagnostics": requirement.get(
+                        "retrieval_diagnostics", {}
+                    ),
                     "time_context": requirement.get("time_context", {}),
                     "document_refresh": document_refresh_stats,
                 }
@@ -2368,6 +2725,10 @@ class CreationAgentLoop:
                     "query": query,
                     "keywords": requirement.get("keywords", []),
                     "entity_context": requirement.get("entity_context", {}),
+                    "retrieval_plan": requirement.get("retrieval_plan", {}),
+                    "retrieval_diagnostics": requirement.get(
+                        "retrieval_diagnostics", {}
+                    ),
                     "document_refresh": document_refresh_stats,
                     "skill_step_id": step.get("skill_step_id"),
                     "skill_step_title": step.get("skill_step_title"),
@@ -2559,6 +2920,9 @@ class CreationAgentLoop:
             )
             scrapes = list(outcome.get("scrapes") or [])
             refreshed = list(outcome.get("refreshed_data") or [])
+            for item in refreshed:
+                if step.get("skill_step_title"):
+                    item["target_section"] = step["skill_step_title"]
             self._enforce_report_evidence_policy(refreshed)
             state.environment["webpage_scrapes"] = [
                 *list(state.environment.get("webpage_scrapes") or []),
@@ -2614,6 +2978,29 @@ class CreationAgentLoop:
                 for item in scrapes
                 if item.get("error_code") == "BROWSER_EXTENSION_TIMEOUT"
             )
+            extension_unresponsive_count = sum(
+                1
+                for item in scrapes
+                if item.get("error_code") == "BROWSER_EXTENSION_UNRESPONSIVE"
+            )
+            collection_failure_count = sum(
+                1 for item in scrapes if item.get("status") == "failed"
+            )
+            period_mismatch_count = sum(
+                1
+                for item in scrapes
+                if item.get("error_code") == "SCRAPE_PERIOD_MISMATCH"
+                or item.get("validation_reason")
+                == "requested_metrics_period_mismatch"
+            )
+            validation_rejected_count = sum(
+                1
+                for item in scrapes
+                if item.get("status") == "rejected"
+                and item.get("error_code") != "SCRAPE_PERIOD_MISMATCH"
+                and item.get("validation_reason")
+                != "requested_metrics_period_mismatch"
+            )
             stale_fallback_count = sum(
                 1
                 for item in refreshed
@@ -2640,6 +3027,34 @@ class CreationAgentLoop:
                 for item in scrapes
                 if isinstance(item, dict)
             ]
+            refreshed_by_source_id = {
+                item.get("source_id"): item
+                for item in refreshed
+                if isinstance(item, dict) and item.get("source_id") is not None
+            }
+            rejected_sources = []
+            for item in scrapes:
+                if (
+                    not isinstance(item, dict)
+                    or item.get("status") != "rejected"
+                    or item.get("error_code") == "SCRAPE_PERIOD_MISMATCH"
+                    or item.get("validation_reason")
+                    == "requested_metrics_period_mismatch"
+                ):
+                    continue
+                source_id = item.get("source_id")
+                refreshed_item = refreshed_by_source_id.get(source_id, {})
+                rejected_sources.append(
+                    {
+                        "source_id": source_id,
+                        "title": item.get("title")
+                        or refreshed_item.get("title")
+                        or f"数据来源 #{source_id}",
+                        "url": item.get("url")
+                        or refreshed_item.get("source_url")
+                        or "",
+                    }
+                )
             state.environment.setdefault("tool_results", []).append(
                 {
                     "tool_id": WEBPAGE_SCRAPE_TOOL_ID,
@@ -2660,10 +3075,31 @@ class CreationAgentLoop:
                         "使用一次性浏览器会话完成即时取数，未保留截图"
                     )
                 else:
-                    evidence_suffix = "，全程使用静默结构化取数"
+                    evidence_suffix = ""
+                details = []
+                qualified_count = sum(1 for item in refreshed if item.get("can_use") is True and item.get("risk_disclosure_required"))
+                if qualified_count:
+                    details.append(f"{qualified_count} 个来源使用参考数据，文档将标注实际周期与使用风险")
+                if period_mismatch_count:
+                    details.append(
+                        f"{period_mismatch_count} 个来源展示周期与任务周期不一致，未采用"
+                    )
+                if validation_rejected_count:
+                    details.append(
+                        f"{validation_rejected_count} 个来源暂未取得目标指标，未采用"
+                    )
+                other_failure_count = max(
+                    0,
+                    collection_failure_count - period_mismatch_count,
+                )
+                if other_failure_count:
+                    details.append(
+                        f"{other_failure_count} 个来源本次未完成刷新，保留原有数据状态"
+                    )
+                detail_suffix = f"；{'；'.join(details)}" if details else ""
                 summary = (
-                    f"浏览器访问 {len(scrapes)} 个报表，"
-                    f"{completed_count} 个来源通过页面结构校验{evidence_suffix}"
+                    f"已读取 {len(scrapes)} 个报表，采用其中 {completed_count} 个来源"
+                    f"{detail_suffix}{evidence_suffix}"
                 )
             elif stale_fallback_count:
                 failure_details = []
@@ -2673,7 +3109,7 @@ class CreationAgentLoop:
                     )
                 if extension_timeout_count:
                     failure_details.append(
-                        f"{extension_timeout_count} 个后台页面读取超时"
+                        f"{extension_timeout_count} 个来源在等待时间内未完成读取"
                     )
                 detail = "、".join(failure_details) or "后台即时读取未完成"
                 summary = (
@@ -2683,28 +3119,43 @@ class CreationAgentLoop:
                 )
             elif focus_blocked_count:
                 summary = (
-                    f"即时刷新 {len(scrapes)} 个报表时，{focus_blocked_count} 个来源"
-                    "被焦点硬门禁中止；未重新抢占浏览器，也未采用未验证数值"
+                    f"本次读取的 {len(scrapes)} 个报表中，{focus_blocked_count} 个来源"
+                    "需要前台操作；为避免打断当前操作，本轮未采用这些页面数值"
+                )
+            elif period_mismatch_count:
+                summary = (
+                    f"已读取 {len(scrapes)} 个报表，其中 {period_mismatch_count} 个来源"
+                    "展示周期与任务周期不一致；本轮未采用这些页面数值"
                 )
             elif loading_timeout_count:
                 summary = (
-                    f"浏览器访问 {len(scrapes)} 个报表，其中 {loading_timeout_count} 个"
-                    "达到等待上限后仍在加载；本轮不把未完成渲染的数值当作当前事实"
+                    f"已读取 {len(scrapes)} 个报表，其中 {loading_timeout_count} 个来源"
+                    "在等待时间内尚未加载完成；本轮未采用这些页面数值"
                 )
             elif empty_scrape_count:
                 summary = (
-                    f"浏览器访问 {len(scrapes)} 个报表，其中 {empty_scrape_count} 个"
-                    "后台页面未提取到正文；本轮没有可验证的即时数值"
+                    f"已读取 {len(scrapes)} 个报表，其中 {empty_scrape_count} 个来源"
+                    "暂未展示可读取的数据；本轮未采用这些页面数值"
                 )
             elif extension_timeout_count:
                 summary = (
-                    f"浏览器访问 {len(scrapes)} 个报表，其中 {extension_timeout_count} 个"
-                    "后台页面读取超时；本轮没有可验证的即时数值"
+                    f"已读取 {len(scrapes)} 个报表，其中 {extension_timeout_count} 个来源"
+                    "在等待时间内未完成读取；本轮保留原有数据状态"
+                )
+            elif extension_unresponsive_count:
+                summary = (
+                    f"已读取 {len(scrapes)} 个报表，其中 {extension_unresponsive_count} 个来源"
+                    "暂未开始后台读取；本轮保留原有数据状态"
+                )
+            elif collection_failure_count:
+                summary = (
+                    f"已读取 {len(scrapes)} 个报表，其中 {collection_failure_count} 个来源"
+                    "本次未完成刷新；本轮保留原有数据状态"
                 )
             elif scrapes:
                 summary = (
-                    f"浏览器访问 {len(scrapes)} 个报表，但没有指标通过页面结构校验，"
-                    "本轮不采用这些页面的数值"
+                    f"已读取 {len(scrapes)} 个报表，但暂未取得与任务指标一致的即时数据；"
+                    "本轮未采用这些页面数值"
                 )
             else:
                 summary = "没有可实时刷新的报表 URL，保留可用工作记忆及其采集时间"
@@ -2726,6 +3177,7 @@ class CreationAgentLoop:
                     "scraped_source_count": completed_count,
                     "failed_source_count": failed_count,
                     "sources": scrape_summaries,
+                    "rejected_sources": rejected_sources,
                     "data_sources": [
                         {
                             "source_id": item.get("source_id"),
@@ -2758,6 +3210,7 @@ class CreationAgentLoop:
                     "result_count": completed_count,
                     "failed_count": failed_count,
                     "sources": scrape_summaries,
+                    "rejected_sources": rejected_sources,
                 },
             )
             if previews:
@@ -2869,14 +3322,31 @@ class CreationAgentLoop:
 
         if action == MERMAID_DIAGRAM_TOOL_ID:
             diagram_context = build_mermaid_context(
-                self._step_context_query(state, step)
+                self._step_context_query(state, step),
+                step.get("diagram_spec"),
             )
             state.environment["mermaid_diagram"] = diagram_context
+            prepared_diagrams = state.environment.setdefault(
+                "mermaid_diagrams", []
+            )
+            diagram_id = str(diagram_context.get("diagram_id") or "").strip()
+            prepared_diagrams[:] = [
+                item
+                for item in prepared_diagrams
+                if not (
+                    isinstance(item, dict)
+                    and diagram_id
+                    and str(item.get("diagram_id") or "") == diagram_id
+                )
+            ]
+            prepared_diagrams.append(diagram_context)
             state.environment.setdefault("tool_results", []).append(
                 {
                     "tool_id": MERMAID_DIAGRAM_TOOL_ID,
                     "status": "completed",
                     "diagram_type": diagram_context["diagram_type"],
+                    "diagram_id": diagram_context.get("diagram_id"),
+                    "section_title": diagram_context.get("section_title"),
                     "skill_step_id": step.get("skill_step_id"),
                 }
             )
@@ -2891,15 +3361,54 @@ class CreationAgentLoop:
                     "mermaid_diagram": {
                         "diagram_type": diagram_context["diagram_type"],
                         "language": diagram_context["language"],
+                        "diagram_id": diagram_context.get("diagram_id"),
+                        "section_title": diagram_context.get("section_title"),
                     }
                 },
-                data={"diagram_type": diagram_context["diagram_type"]},
+                data={
+                    "diagram_type": diagram_context["diagram_type"],
+                    "diagram_id": diagram_context.get("diagram_id"),
+                    "section_title": diagram_context.get("section_title"),
+                },
             )
             return
 
         if action == "apply_skill":
             skill = step["skill"]
             state.environment.setdefault("applied_skills", []).append(skill)
+            structure_requirements = self._skill_structure_requirements(skill)
+            if (
+                structure_requirements.get("minimum_subsections")
+                or structure_requirements.get("minimum_subsection_chars")
+            ):
+                existing = state.environment.get("skill_structure_requirements")
+                if not isinstance(existing, dict):
+                    existing = {}
+                state.environment["skill_structure_requirements"] = {
+                    "minimum_subsections": max(
+                        int(existing.get("minimum_subsections") or 0),
+                        int(structure_requirements.get("minimum_subsections") or 0),
+                    ) or None,
+                    "minimum_subsection_chars": max(
+                        int(existing.get("minimum_subsection_chars") or 0),
+                        int(
+                            structure_requirements.get(
+                                "minimum_subsection_chars"
+                            )
+                            or 0
+                        ),
+                    ) or None,
+                    "source_text": "\n".join(
+                        item
+                        for item in (
+                            str(existing.get("source_text") or "").strip(),
+                            str(
+                                structure_requirements.get("source_text") or ""
+                            ).strip(),
+                        )
+                        if item
+                    )[:1500],
+                }
             self._update_goal(state)
             yield self._event(
                 state,
@@ -3199,6 +3708,40 @@ class CreationAgentLoop:
         if action == "review":
             document = str(state.environment.get("document") or "")
             criteria, issues = self._inspect_document_quality(state, document)
+            requested_issue_codes = {
+                str(item)
+                for item in (step.get("quality_issue_codes") or [])
+                if str(item)
+            }
+            if requested_issue_codes:
+                issues = [
+                    item
+                    for item in issues
+                    if str(item.get("code") or "") in requested_issue_codes
+                ]
+                requested_criteria = {
+                    criterion
+                    for code, criterion in (
+                        (
+                            DATA_QUERY_QUALITY_ISSUE_CODE,
+                            DATA_QUERY_QUALITY_CRITERION,
+                        ),
+                        (
+                            EMPHASIS_QUALITY_ISSUE_CODE,
+                            EMPHASIS_QUALITY_CRITERION,
+                        ),
+                        (
+                            SUBSECTION_REQUIREMENTS_QUALITY_ISSUE_CODE,
+                            SUBSECTION_REQUIREMENTS_QUALITY_CRITERION,
+                        ),
+                    )
+                    if code in requested_issue_codes
+                }
+                criteria = {
+                    key: value
+                    for key, value in criteria.items()
+                    if key in requested_criteria
+                }
             report = {
                 **criteria,
                 "passed": not issues and all(criteria.values()),
@@ -3252,6 +3795,56 @@ class CreationAgentLoop:
                 },
             )
 
+    @classmethod
+    def _subsection_requirement_result(
+        cls,
+        document: str,
+        requirements: dict[str, Any],
+    ) -> dict[str, Any]:
+        minimum_count = int(requirements.get("minimum_subsections") or 0)
+        minimum_chars = int(requirements.get("minimum_subsection_chars") or 0)
+        headings = list(re.finditer(r"(?m)^(#{3,6})\s+(.+?)\s*$", document))
+        sections: list[dict[str, Any]] = []
+        for index, heading in enumerate(headings):
+            end = (
+                headings[index + 1].start()
+                if index + 1 < len(headings)
+                else len(document)
+            )
+            body = document[heading.end():end]
+            prose = cls._prose_for_quality(body).strip()
+            char_count = len(re.sub(r"\s+", "", prose))
+            sections.append(
+                {
+                    "title": re.sub(r"\s+#+\s*$", "", heading.group(2)).strip(),
+                    "char_count": char_count,
+                }
+            )
+        qualified = [
+            item
+            for item in sections
+            if not minimum_chars or int(item["char_count"]) >= minimum_chars
+        ]
+        count_satisfied = not minimum_count or len(qualified) >= minimum_count
+        length_satisfied = (
+            not minimum_chars
+            or (bool(sections) and len(qualified) == len(sections))
+        )
+        passed = count_satisfied and length_satisfied
+        return {
+            "passed": passed,
+            "subsection_count": len(sections),
+            "qualified_subsection_count": len(qualified),
+            "minimum_subsections": minimum_count,
+            "minimum_subsection_chars": minimum_chars,
+            "short_subsections": [
+                item for item in sections
+                if minimum_chars and int(item["char_count"]) < minimum_chars
+            ][:12],
+            "subsections": [item["title"] for item in sections[:20]],
+            "source_text": str(requirements.get("source_text") or "")[:500],
+        }
+
     def _inspect_document_quality(
         self,
         state: LoopState,
@@ -3269,6 +3862,56 @@ class CreationAgentLoop:
             "addresses_goal": bool(state.user_message.strip()),
         }
         issues: list[dict[str, Any]] = []
+
+        coverage_contract = state.environment.get("requirement", {}).get(
+            "coverage_contract"
+        )
+        if isinstance(coverage_contract, dict):
+            coverage_result = self._multi_target_coverage_result(
+                document,
+                coverage_contract,
+            )
+            criteria[MULTI_TARGET_COVERAGE_CRITERION] = bool(
+                coverage_result["passed"]
+            )
+            if not coverage_result["passed"]:
+                issues.append(
+                    self._quality_issue(
+                        code=MULTI_TARGET_COVERAGE_ISSUE_CODE,
+                        severity="hard",
+                        agent_id="document_writer_agent",
+                        summary="多目标请求没有逐对象、逐维度完整回答",
+                        evidence=coverage_result,
+                    )
+                )
+
+        structure_requirements = state.environment.get(
+            "skill_structure_requirements"
+        )
+        if isinstance(structure_requirements, dict) and (
+            structure_requirements.get("minimum_subsections")
+            or structure_requirements.get("minimum_subsection_chars")
+        ):
+            subsection_result = self._subsection_requirement_result(
+                document,
+                structure_requirements,
+            )
+            criteria[SUBSECTION_REQUIREMENTS_QUALITY_CRITERION] = bool(
+                subsection_result["passed"]
+            )
+            if not subsection_result["passed"]:
+                issues.append(
+                    self._quality_issue(
+                        code=SUBSECTION_REQUIREMENTS_QUALITY_ISSUE_CODE,
+                        severity="soft",
+                        agent_id="detail_polish_agent",
+                        summary=(
+                            "正文没有满足执行动作声明的最少子章节数或每节最少字数"
+                        ),
+                        evidence=subsection_result,
+                        required_capabilities=["skill:writing_design"],
+                    )
+                )
 
         if state.mode == "revision":
             base_document = str(
@@ -3402,43 +4045,152 @@ class CreationAgentLoop:
                 )
             )
 
+        query_result_gaps = self._data_query_result_gaps(
+            document,
+            state.environment.get("data_query_results", []),
+        )
+        criteria[DATA_QUERY_QUALITY_CRITERION] = not query_result_gaps
+        if query_result_gaps:
+            issues.append(
+                self._quality_issue(
+                    code=DATA_QUERY_QUALITY_ISSUE_CODE,
+                    severity="soft",
+                    agent_id="table_polish_agent",
+                    summary=(
+                        "确定性数据查询已返回完整行结果，但成稿没有逐行保留"
+                    ),
+                    evidence={"results": query_result_gaps[:8]},
+                    required_capabilities=["skill:table_style"],
+                )
+            )
+
+        incomplete_scrapes = [
+            item
+            for item in state.environment.get("webpage_scrapes", [])
+            if isinstance(item, dict)
+            and str(item.get("status") or "") in {"failed", "rejected"}
+        ]
+        page_absence_claims = re.findall(
+            r"[^。！？\n]{0,80}(?:看板|报表|页面)[^。！？\n]{0,40}"
+            r"(?:未展示|未显示|未提供|没有展示|没有显示|没有提供|"
+            r"无法提供|不存在|不包含)[^。！？\n]{0,80}",
+            document,
+            re.IGNORECASE,
+        )
+        unsupported_page_absence = bool(
+            incomplete_scrapes and page_absence_claims
+        )
+        criteria[PAGE_ABSENCE_QUALITY_CRITERION] = not unsupported_page_absence
+        if unsupported_page_absence:
+            issues.append(
+                self._quality_issue(
+                    code=PAGE_ABSENCE_QUALITY_ISSUE_CODE,
+                    severity="hard",
+                    agent_id="detail_polish_agent",
+                    summary=(
+                        "页面交互或采集未完成，不能据此断言看板不存在相关字段"
+                    ),
+                    evidence={
+                        "claims": page_absence_claims[:4],
+                        "failed_source_count": len(incomplete_scrapes),
+                    },
+                    required_capabilities=[],
+                )
+            )
+
         bold_spans = re.findall(r"\*\*([^*\n]{1,120})\*\*", document)
         bold_chars = sum(len(item) for item in bold_spans)
         prose_chars = max(1, len(re.sub(r"\s+", "", prose)))
         emphasis_ratio = bold_chars / prose_chars
-        emphasis_needs_polish = len(document.strip()) >= 600 and (
-            not bold_spans or emphasis_ratio > 0.18
+        fragment_metrics = self._narrative_fragment_label_metrics(document)
+        selective_emphasis_ratio = max(
+            0,
+            bold_chars - fragment_metrics["labeled_fragment_bold_chars"],
+        ) / prose_chars
+        overlong_bold_spans = [
+            item for item in bold_spans if len(item) > MAX_EMPHASIS_SPAN_CHARS
+        ]
+        emphasis_needs_polish = (
+            len(document.strip()) >= 600
+            and (
+                selective_emphasis_ratio > MAX_EMPHASIS_CHARACTER_RATIO
+                or bool(overlong_bold_spans)
+                or fragment_metrics["missing_label_count"] > 0
+            )
         )
         criteria["emphasis_selective"] = not emphasis_needs_polish
         if emphasis_needs_polish:
             issues.append(
                 self._quality_issue(
-                    code="emphasis_needs_polish",
+                    code=EMPHASIS_QUALITY_ISSUE_CODE,
                     severity="soft",
                     agent_id="typography_polish_agent",
-                    summary="重点结论、风险和行动项缺少克制且一致的视觉强调",
+                    summary="重点过多、过长，或并列叙事片段缺少简短的小标题",
                     evidence={
                         "bold_span_count": len(bold_spans),
                         "bold_character_ratio": round(emphasis_ratio, 4),
+                        "selective_emphasis_character_ratio": round(
+                            selective_emphasis_ratio, 4
+                        ),
+                        "overlong_bold_span_count": len(overlong_bold_spans),
+                        **fragment_metrics,
                     },
                     required_capabilities=["skill:typography_style"],
                 )
             )
 
-        has_diagram = bool(
-            re.search(r"```\s*(?:plantuml|mermaid)\b", document, re.IGNORECASE)
+        visual_plan = state.environment.get("visual_plan")
+        planned_diagram_gaps = self._planned_diagram_gaps(document, visual_plan)
+        planned_diagrams = (
+            visual_plan.get("diagrams", [])
+            if isinstance(visual_plan, dict)
+            else []
         )
-        visual_expected = bool(
-            state.environment.get("requirement", {}).get("needs_images")
-        ) or any(
-            marker in context
-            for marker in ("架构", "流程", "时序", "链路", "模块关系", "状态机")
-        )
-        visual_needs_polish = (
-            len(document.strip()) >= 500 and visual_expected and not has_diagram
-        )
-        criteria["visual_explains_relationships"] = not visual_needs_polish
-        if visual_needs_polish:
+        if planned_diagrams:
+            criteria[VISUAL_PLAN_QUALITY_CRITERION] = not planned_diagram_gaps
+            criteria["visual_explains_relationships"] = not planned_diagram_gaps
+        else:
+            has_diagram = bool(
+                re.search(
+                    r"```\s*(?:plantuml|mermaid)\b",
+                    document,
+                    re.IGNORECASE,
+                )
+            )
+            visual_expected = bool(
+                state.environment.get("requirement", {}).get("needs_images")
+            ) or any(
+                marker in context
+                for marker in (
+                    "架构",
+                    "流程",
+                    "时序",
+                    "链路",
+                    "模块关系",
+                    "状态机",
+                )
+            )
+            visual_needs_polish = (
+                len(document.strip()) >= 500
+                and visual_expected
+                and not has_diagram
+            )
+            criteria["visual_explains_relationships"] = not visual_needs_polish
+        if planned_diagram_gaps:
+            issues.append(
+                self._quality_issue(
+                    code=VISUAL_PLAN_QUALITY_ISSUE_CODE,
+                    severity="soft",
+                    agent_id="image_polish_agent",
+                    summary="章节 Visual Plan 中的图示缺失、位置错误或类型不一致",
+                    evidence={"missing_diagrams": planned_diagram_gaps[:8]},
+                    required_capabilities=[
+                        MERMAID_DIAGRAM_TOOL_ID,
+                        "skill:image_style",
+                    ],
+                )
+            )
+        elif not planned_diagrams and visual_needs_polish:
             issues.append(
                 self._quality_issue(
                     code="visual_needs_polish",
@@ -3455,6 +4207,163 @@ class CreationAgentLoop:
             )
 
         return criteria, issues
+
+    @staticmethod
+    def _coverage_terms(value: object) -> list[str]:
+        text = re.sub(r"\s+", "", str(value or ""))
+        text = re.sub(
+            r"(?:分别|使用了?|用了?|哪些|什么|多少|情况|如何|是否|有何)",
+            "",
+            text,
+        )
+        terms = [
+            item
+            for item in re.split(r"[/／、，,；;和及与]", text)
+            if len(item) >= 2
+        ]
+        return list(dict.fromkeys([text, *terms])) if text else []
+
+    @classmethod
+    def _multi_target_coverage_result(
+        cls,
+        document: str,
+        contract: dict[str, Any],
+    ) -> dict[str, Any]:
+        """确定性检查每个枚举目标附近是否覆盖了每个提问维度。"""
+        targets = [
+            str(item).strip()
+            for item in contract.get("targets", [])
+            if str(item).strip()
+        ]
+        facets = [
+            str(item).strip()
+            for item in contract.get("facets", [])
+            if str(item).strip()
+        ]
+        heading_matches = list(re.finditer(r"(?m)^#{2,3}\s+.+$", document))
+        sections = []
+        for index, heading in enumerate(heading_matches):
+            end = (
+                heading_matches[index + 1].start()
+                if index + 1 < len(heading_matches)
+                else len(document)
+            )
+            sections.append(document[heading.start():end])
+        if not sections:
+            sections = [document]
+
+        gaps = []
+        for target in targets:
+            target_terms = cls._coverage_terms(target)
+            matched_sections = [
+                section
+                for section in sections
+                if any(
+                    term in re.sub(r"\s+", "", section)
+                    for term in target_terms
+                )
+            ]
+            if not matched_sections:
+                gaps.append(
+                    {
+                        "target": target,
+                        "missing_facets": facets,
+                        "reason": "target_missing",
+                    }
+                )
+                continue
+            scope = "\n".join(matched_sections)
+            missing_facets = []
+            for facet in facets:
+                facet_terms = cls._coverage_terms(facet)
+                if facet_terms and not any(term in scope for term in facet_terms):
+                    missing_facets.append(facet)
+            if missing_facets:
+                gaps.append(
+                    {
+                        "target": target,
+                        "missing_facets": missing_facets,
+                        "reason": "facet_missing",
+                    }
+                )
+        return {
+            "passed": not gaps,
+            "target_count": len(targets),
+            "facet_count": len(facets),
+            "gaps": gaps[:16],
+        }
+
+    @classmethod
+    def _data_query_result_gaps(
+        cls,
+        document: str,
+        query_results: Any,
+    ) -> list[dict[str, Any]]:
+        """检查确定性表格结果是否以完整行进入成稿。
+
+        这里只消费 QueryPlan/QueryResult 契约，不识别报表、字段或维度名称。
+        非完整覆盖结果不能被当作全局集合，因此不要求 Writer 强行写入。
+        """
+        normalized_document = cls._normalize_query_quality_text(document)
+        gaps: list[dict[str, Any]] = []
+        for result in list(query_results or []):
+            if not isinstance(result, dict) or result.get("shape") != "table":
+                continue
+            validation = result.get("validation") or {}
+            if validation.get("status") != "verified":
+                continue
+            rows = [
+                row
+                for row in (result.get("rows") or [])
+                if isinstance(row, dict)
+            ]
+            if not rows:
+                continue
+            missing_row_ids: list[str] = []
+            for row in rows:
+                cells = row.get("cells") or {}
+                cell_variants: list[list[str]] = []
+                for cell in cells.values() if isinstance(cells, dict) else []:
+                    if not isinstance(cell, dict):
+                        continue
+                    variants: list[str] = []
+                    for value in (cell.get("raw"), cell.get("normalized")):
+                        normalized = cls._normalize_query_quality_text(value)
+                        if len(normalized) >= 2 and normalized not in variants:
+                            variants.append(normalized)
+                    if variants:
+                        cell_variants.append(variants)
+                # 一个稳定身份值和一个度量值同时出现，才能证明整行而不是
+                # 偶然重复的单元格进入了文档；只有一列时则退化为该列命中。
+                required_hits = 1 if len(cell_variants) <= 1 else 2
+                hit_count = sum(
+                    1
+                    for variants in cell_variants
+                    if any(value in normalized_document for value in variants)
+                )
+                if hit_count < required_hits:
+                    missing_row_ids.append(str(row.get("row_id") or ""))
+            if missing_row_ids:
+                gaps.append(
+                    {
+                        "skill_step_id": result.get("skill_step_id"),
+                        "relation_id": (result.get("provenance") or {}).get(
+                            "relation_id"
+                        ),
+                        "expected_rows": len(rows),
+                        "missing_rows": len(missing_row_ids),
+                        "missing_row_ids": missing_row_ids[:20],
+                    }
+                )
+        return gaps
+
+    @staticmethod
+    def _normalize_query_quality_text(value: Any) -> str:
+        return re.sub(
+            r"[^0-9a-z\u3400-\u9fff]+",
+            "",
+            str(value or "").casefold(),
+        )
 
     @staticmethod
     def _placeholder_count(document: str) -> int:
@@ -3583,6 +4492,85 @@ class CreationAgentLoop:
         prose = re.sub(r"(?m)^\s*\|.*\|\s*$", "", prose)
         prose = re.sub(r"(?m)^#{1,6}\s+", "", prose)
         return prose
+
+    @staticmethod
+    def _narrative_fragment_label_metrics(document: str) -> dict[str, int]:
+        """Check structure, not business vocabulary, for scannable list fragments."""
+        bullet_pattern = re.compile(r"^(\s{0,3})[-+*]\s+(.+?)\s*$")
+        label_pattern = re.compile(
+            r"^(?:\[[ xX]\]\s+)?\*\*([^*\n]{1,32})\*\*(.*)$"
+        )
+        groups: list[list[str]] = []
+        current: list[str] = []
+        for line in document.splitlines():
+            match = bullet_pattern.match(line)
+            if match:
+                current.append(match.group(2).strip())
+                continue
+            if not line.strip() and current:
+                continue
+            if current:
+                groups.append(current)
+                current = []
+        if current:
+            groups.append(current)
+
+        eligible_items = [
+            item
+            for group in groups
+            if len(group) >= 2
+            for item in group
+            if len(re.sub(r"[*_`\[\]]", "", item)) >= MIN_NARRATIVE_FRAGMENT_CHARS
+        ]
+        labeled_count = 0
+        labeled_bold_chars = 0
+        for item in eligible_items:
+            match = label_pattern.match(item)
+            if not match:
+                continue
+            label = match.group(1).strip()
+            remainder = match.group(2).lstrip()
+            if label.endswith(("：", ":")) or remainder.startswith(("：", ":")):
+                labeled_count += 1
+                labeled_bold_chars += len(label)
+        return {
+            "narrative_fragment_count": len(eligible_items),
+            "labeled_fragment_count": labeled_count,
+            "labeled_fragment_bold_chars": labeled_bold_chars,
+            "missing_label_count": len(eligible_items) - labeled_count,
+        }
+
+    @staticmethod
+    def _restore_strict_skill_section_headings(
+        state: LoopState,
+        document: str,
+    ) -> tuple[str, int]:
+        """Restore a strict Skill's section contract without changing its content."""
+        strict_ids = {
+            str(item) for item in state.environment.get("strict_skill_ids", [])
+        }
+        expected = [
+            str(step.get("title") or "").strip()
+            for skill in state.environment.get("applied_skills", [])
+            if isinstance(skill, dict)
+            and (not strict_ids or str(skill.get("id") or "") in strict_ids)
+            for step in skill.get("execution_steps", []) or []
+            if isinstance(step, dict) and str(step.get("title") or "").strip()
+        ]
+        matches = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", document))
+        if not expected or len(matches) != len(expected):
+            return document, 0
+        replacements = 0
+        chunks: list[str] = []
+        cursor = 0
+        for match, title in zip(matches, expected):
+            chunks.append(document[cursor:match.start()])
+            chunks.append(f"## {title}")
+            cursor = match.end()
+            if match.group(1).strip() != title:
+                replacements += 1
+        chunks.append(document[cursor:])
+        return "".join(chunks), replacements
 
     @staticmethod
     def _ai_style_signals(prose: str) -> dict[str, Any]:
@@ -3905,6 +4893,83 @@ class CreationAgentLoop:
                 row_index += 1
         return has_table, malformed
 
+    @classmethod
+    def _planned_diagram_gaps(
+        cls,
+        document: str,
+        visual_plan: Any,
+    ) -> list[dict[str, Any]]:
+        """检查 Visual Plan 中的图是否落在对应章节且图类型一致。"""
+        if not isinstance(visual_plan, dict):
+            return []
+        diagrams = visual_plan.get("diagrams")
+        if not isinstance(diagrams, list) or not diagrams:
+            return []
+        spans = cls._markdown_section_spans(document)
+        expected_prefixes = {
+            "flowchart": ("flowchart", "graph"),
+            "flowchart_lr": ("flowchart", "graph"),
+            "sequence": ("sequencediagram",),
+            "state": ("statediagram",),
+            "class": ("classdiagram",),
+            "er": ("erdiagram",),
+            "journey": ("journey",),
+            "gantt": ("gantt",),
+            "mindmap": ("mindmap",),
+        }
+        gaps: list[dict[str, Any]] = []
+        for spec in diagrams:
+            if not isinstance(spec, dict):
+                continue
+            section_title = str(spec.get("section_title") or "").strip()
+            matched = cls._find_section_span(section_title, spans)
+            if not matched:
+                gaps.append(
+                    {
+                        "diagram_id": spec.get("id"),
+                        "section_title": section_title,
+                        "expected_type": spec.get("diagram_type"),
+                        "reason": "section_missing",
+                    }
+                )
+                continue
+            section = document[int(matched["start"]) : int(matched["end"])]
+            blocks = re.findall(
+                r"```\s*mermaid\s*\n([\s\S]*?)```",
+                section,
+                re.IGNORECASE,
+            )
+            if not blocks:
+                gaps.append(
+                    {
+                        "diagram_id": spec.get("id"),
+                        "section_title": section_title,
+                        "expected_type": spec.get("diagram_type"),
+                        "reason": "diagram_missing",
+                    }
+                )
+                continue
+            expected_type = str(spec.get("diagram_type") or "flowchart")
+            prefixes = expected_prefixes.get(expected_type, ())
+            normalized_first_lines = [
+                re.sub(r"\s+", "", block.strip().splitlines()[0]).lower()
+                for block in blocks
+                if block.strip()
+            ]
+            if prefixes and not any(
+                any(line.startswith(prefix) for prefix in prefixes)
+                for line in normalized_first_lines
+            ):
+                gaps.append(
+                    {
+                        "diagram_id": spec.get("id"),
+                        "section_title": section_title,
+                        "expected_type": expected_type,
+                        "reason": "diagram_type_mismatch",
+                    }
+                )
+        return gaps
+
     async def _apply_model_result(
         self, state: LoopState, model_result: str
     ) -> AsyncIterator[dict[str, Any]]:
@@ -4086,6 +5151,17 @@ class CreationAgentLoop:
         if step["action"] == "polisher":
             if not cleaned:
                 raise RuntimeError(f"{step['name']} 未返回润色后的完整文档")
+            if (
+                step["id"] == "document_unify_polisher"
+                and state.environment.get("strict_skill_workflow")
+            ):
+                cleaned, restored_heading_count = (
+                    self._restore_strict_skill_section_headings(state, cleaned)
+                )
+                if restored_heading_count:
+                    state.environment["strict_skill_heading_restore"] = {
+                        "restored_heading_count": restored_heading_count,
+                    }
             base_document = state.current_document
             relevant_issues = [
                 item
@@ -4261,6 +5337,14 @@ class CreationAgentLoop:
                             "assembly_audit": assembly_audit,
                         },
                     )
+        elif step.get("id") == "chapter_design_agent":
+            blueprint, visual_plan = parse_chapter_design_result(cleaned)
+            state.environment["chapter_design"] = blueprint
+            state.environment["visual_plan"] = visual_plan
+            patch = {
+                "chapter_design": self.service._clip(blueprint, 1200),
+                "visual_plan": visual_plan,
+            }
         else:
             output_key = step.get("output_key") or step["id"]
             state.environment[output_key] = cleaned
@@ -4760,18 +5844,20 @@ execution_steps 是唯一流程和章节白名单。只生成当前步骤 title/
 workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 execution_steps 不是本轮流程，也不得据此增加章节。
 除非当前步骤逐字要求，否则不得自行添加“结论”“重点进展”“风险/阻塞”“下周计划”等通用模板栏目。只使用当前步骤环境中的 Tool 结果、上一步产出和用户材料；缺少信息时直接省略，不得补造事实或占位说明。
 章节结构和字体格式也是当前步骤的交付质量：外层二级标题会由 Harness 使用步骤 title 统一生成，不要重复输出。objective/output 明确包含多个子主题时，可使用与这些子主题语义一致的三级标题；不得新增未声明的通用栏目。
-要求列表展示时，不要把多个长句无差别平铺：同级列表项统一采用 `- **短标签：** 事实、动作或结果`。当至少四项内容存在由当前证据直接支持的稳定分类时，使用最多两级的父子列表，父项写 `- **分类名称**`，子项写 `  - **对象：** 具体进展`；无法确认分类时保留同级列表，不得为了版式虚构父子关系。步骤、优先级或时间顺序才使用有序列表。标题本身不重复加粗，不使用内联 HTML、字号或颜色。
+要求列表展示时，不要把多个长句无差别平铺。同一组含两个以上较长、彼此独立的无序列表片段时，每项开头必须提炼一个能区分对象或主题的最短名词短语，写成 `- **短标签：** 事实、动作或结果`；只加粗短标签，不能把整句前半段当标签。短小枚举不强制添加标签。当至少四项内容存在由当前证据直接支持的稳定分类时，使用最多两级的父子列表；无法确认分类时保留同级列表，不得为了版式虚构父子关系。步骤、优先级或时间顺序才使用有序列表。标题本身不重复加粗，不使用内联 HTML、字号或颜色。
 环境存在“确定性数据查询结果”时，筛选、排序、分组、聚合、去重和行数限制必须服从该结果；不得从原始表格重新计算或跨行拼接。只有 validation.status=verified 的结果可以写成完整集合或全局排名。plan.presentation 只决定使用表格、图表、正文或指标卡表达，不得改变执行结果或强制把所有数据写成表格。
 输出可直接放入当前步骤对应章节的 Markdown 正文，不输出 JSON、修改说明或思考过程。"""
             else:
                 system = """你是 MemoryBread 的文档撰写 Agent。请依据目标、子 Agent 结论、Tool 证据和 Skill 规则，输出完整 Markdown 文档。
 环境中存在“已激活的 Skill 步骤”时，必须按记录顺序消费每一步的 content，并把这些中间产物拼接成完整文档；不得跳过步骤、调换步骤，或只依据最后一次 Tool 结果重写全部内容。
 章节设计 Agent 已给出章节蓝图时，以蓝图作为初稿骨架；信息缺乏支持时省略无法确认的内容，不能用套话把章节撑满。
+任务画像含 `coverage_contract` 时，它是硬性覆盖合同：必须逐个覆盖 targets，并在每个目标内逐项回答 facets；不得只围绕其中一个高频目标展开，也不得用其他对象、上位业务或邻近口径的指标替代当前 facet。证据未覆盖某个单元格时，在对应目标下简洁写明“现有证据未覆盖”，不得把缺失项扩写成旁支业务章节。除必要的开头结论和结尾建议外，不新增与 targets 平级的其他业务场景。
+环境中的“已准备的章节 Mermaid 图示”是章节级交付合同：逐项在 section_title 对应章节按 placement 插入一个 ```mermaid 代码块，图前用一句正文说明阅读方式，图后补充必要边界。节点、动作、状态和连线只能来自 source_points、正文或已有证据；starter 仅是语法骨架，不得把示例对象写入成稿。没有准备图示的章节不要为了版式自行配图。
 对于已安装的技能，优先复刻 title_design_style 中的子标题句式、writing_design 中的行文推进、voice_style 中的惯用话术和 image_generation 中的代码生图方式；field_examples 只用于学习写法，不得照抄主题或事实。示例文档不会进入运行时事实环境。不要把这些鲜明特征稀释成通用公文。
 除非用户要求或当前 Skill execution_steps 的目标/产出明确要求分析证据状态，否则不要输出“证据不足”“证据缺口”“证据完备”“待核验说明”等元说明。
 环境存在“确定性数据查询结果”时，筛选、排序、分组、聚合、去重和行数限制必须逐字服从该结果；不得从原始表格重新计算或跨行拼接。只有 validation.status=verified 的结果可以表述为完整集合或全局排名，insufficient_coverage 只能描述已捕获范围。plan.presentation 只控制最终表达形式；auto 时根据当前文档语境选择正文、表格、图表或指标卡。
 参考文档的 `refresh_status=fresh_complete` 表示本轮已校验当前原文；`fresh_recent` 表示节流窗口内复用近期完整校验，可继续支持当前事实；`fresh_partial` / `fresh_recent_partial` 只能支持已读取段落，不得声称已通读全文；`historical_only` 只能作历史背景，不得用来证明“当前/最新”事实。
-要求：保留可验证事实；不编造政策编号、指标或来源；对外部信息给出链接；数据、文档、知识、操作和互联网线索是平权证据，不因所属模块获得额外优先级，按相关性、可靠性、时效和口径适配度取舍；“本周/今日”等相对时间只能使用环境给出的确定日期、年份和周次，禁止输出“第X周”等占位符；使用数据时写明统计周期和采集时间，`can_use=false` 或陈旧快照不得写成当前结论；数据来源名称、URL 与采集时间只能逐字取自同一条可用数据结果，不能根据相邻参考资料猜测或拼接，页面筛选日期只能写成统计周期，不能冒充浏览器采集时间；无法确认归属时省略相关事实与“数据来源”行；缺失指标直接省略，不得写“数据未明确区分”等占位值；环境包含 PlantUML 画图约束时必须输出对应的 ```plantuml 代码块，否则技术关系优先使用 Mermaid；只输出文档正文。"""
+要求：保留可验证事实；不编造政策编号、指标或来源；对外部信息给出链接；数据、文档、知识、操作和互联网线索是平权证据，不因所属模块获得额外优先级，按相关性、可靠性、时效和口径适配度取舍；“本周/今日”等相对时间只能使用环境给出的确定日期、年份和周次，禁止输出“第X周”等占位符；使用数据时写明统计周期和采集时间，`can_use=false` 或陈旧快照不得写成当前结论；数据来源名称、URL 与采集时间只能逐字取自同一条可用数据结果，不能根据相邻参考资料猜测或拼接，页面筛选日期是请求范围，指标实际统计周期以来源证据为准，不能冒充浏览器采集时间；无法确认归属时省略相关事实与“数据来源”行；缺失指标有 qualified 参考值时必须保留数值和风险标注；完全无来源数字时不编造，不得写“数据未明确区分”等占位值；页面交互、滚动或分页未验证完成时，只能说明“本次未完成采集”，不得改写为“看板未展示、不包含或不存在该字段”；环境包含 PlantUML 画图约束时必须输出对应的 ```plantuml 代码块，否则技术关系优先使用 Mermaid；只输出文档正文。"""
             if state.mode == "revision" and not step.get("skill_step_id"):
                 intent = state.environment.get("edit_intent", {})
                 targets = [str(item) for item in intent.get("target_sections", [])]
@@ -4802,10 +5888,10 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
 删除空泛开场、重复小结、机械的“首先/其次/最后”和无增量的转折；普通概念不要为了强调而滥用引号，真实引语、字段名、代码和专有名词除外。把过长复句拆成自然短句，长短句交替；补出明确主语和动作，能用直接动词就不用“进行、实现、赋能”等名词化套话。优先贴合已安装 Skill 的 voice_style、用户历史表达和当前文档语域，但不得模仿特定在世作者。保持原意和事实强度，不把严谨内容改成网络口头禅。""",
                 "detail_polish_agent": """逐章检查观点是否有完整的“对象/边界—依据—动作或机制—结果/验证”。只在已有用户材料、Tool 证据、数据分析和专业 Agent 结论支持的范围内补充细节；需要数据但当前环境没有可用结果时省略对应细节，不得补造数字或主动添加待核验说明。优先深挖质检列出的短章节、跳步推论和只写口号的段落，避免为了变长而重复同义句。""",
                 "table_polish_agent": """修复不合法的 Markdown 表格；对确实需要逐项比较、职责映射、参数口径或验收矩阵的内容使用表格。表头要短而明确，同一列保持同一口径，单元格避免堆整段正文；复杂解释仍放在表格前后。只输出标准 Markdown 表格，不写内联 HTML/CSS。创作页面会自动为合法表头应用品牌背景色、边框、对齐和斑马纹。""",
-                "typography_polish_agent": """只强调读者必须先看到的结论、决策、关键数字、风险和行动项。使用标准 Markdown `**重点**`，每千字通常保留 3—8 处，不能整段加粗，也不要用内联 HTML。页面会把 `strong` 渲染为品牌色、加粗和下划线；标题本身已有层级，不再重复强调。""",
-                "image_polish_agent": """只在组件关系、状态变化、跨角色流程或时间交互用文字难以准确理解时补充代码图示。环境有 PlantUML 约束时输出 `plantuml` 代码块；有 Mermaid 约束时输出 `mermaid` 代码块；两者同时存在时跟随各自约束，均不存在时默认使用 `mermaid`。图中对象、连线和标签必须来自正文，先用一段正文说明阅读方式，图后补充异常或边界；不插入装饰图、占位图片或无法编辑的外链图片。""",
+                "typography_polish_agent": """Markdown `**重点**` 只表达语义上的强强调，不承担下划线或交互提示。普通自然段没有必要时可以完全不使用；同一组含两个以上较长、彼此独立的无序列表片段时，每项开头必须提炼一个能区分对象或主题的最短名词短语，写成 `- **短标签：** 事实、动作或结果`。只加粗短标签，以及读者必须先看到的关键判断、数字、风险或行动中的最短完整词组；不得加粗整句、整段、标题或列表正文，也不要用内联 HTML。""",
+                "image_polish_agent": """只在组件关系、状态变化、跨角色流程或时间交互用文字难以准确理解时补充代码图示。环境存在章节 Visual Plan 时，只修复质检指出的缺失章节，并逐项服从 section_title、diagram_type、source_points、placement 和 max_nodes；不得把图统一追加到文末。没有 Visual Plan 时，环境有 PlantUML 约束则输出 `plantuml`，有 Mermaid 约束则输出 `mermaid`，均不存在时默认使用 `mermaid`。图中对象、连线和标签必须来自正文，先用一段正文说明阅读方式，图后补充异常或边界；不插入装饰图、占位图片或无法编辑的外链图片。""",
                 "document_unify_polisher": """当前文档由多个 Skill 步骤独立推理的产物拼接而成。你的任务只做全文整合润色：统一术语、称谓、时态与数字口径；删除章节之间重复的过渡句、重复背景与相互矛盾的表述；保持 Skill 声明的二级章节标题、数量与顺序不变，不新增也不删除二级章节。
-同时统一章节内部的 Markdown 表达：步骤目标中已经声明多个子主题时，用语义一致的三级标题分隔；并列项使用 `- **短标签：** 事实、动作或结果`。同一章节有至少四项内容且现有事实能够直接支持稳定分类时，改成最多两级的父子列表，父项写 `- **分类名称**`，子项写 `  - **对象：** 具体进展`；没有可靠分类时保留同级列表，不得虚构归属。只对关键结论、关键数字、风险和行动项加粗，不加粗整段，也不在标题上重复加粗。连续解释因果或取舍的内容保留为自然段，不为追求形式强行列表化。
+同时统一章节内部的 Markdown 表达：步骤目标中已经声明多个子主题时，用语义一致的三级标题分隔。同一组含两个以上较长、彼此独立的无序列表片段时，每项开头必须提炼一个能区分对象或主题的最短名词短语，写成 `- **短标签：** 事实、动作或结果`；只加粗短标签，不能把整句前半段当标签。短小枚举、连续解释因果或取舍的自然段不强制添加标签。同一章节有至少四项内容且现有事实能够直接支持稳定分类时，改成最多两级的父子列表；没有可靠分类时保留同级列表，不得虚构归属。除短标签外，只对关键判断、关键数字、风险和行动项的最短完整词组加粗，不加粗整句、整段或标题。
 逐字保留事实、数字、统计周期、来源链接、表格和代码块；环境中 can_use=true 且 validation/verified_claims 已通过校验的指标必须写入对应章节，禁止将它们改成“待补充”“见原文”或任何占位内容；不得补造新事实，也不得删除任何实质性信息。""",
             }
             system = (
@@ -4818,22 +5904,42 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
 workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 execution_steps 不是本轮流程，也不得据此增加章节。
 除非当前步骤逐字要求，否则不得自行添加“结论”“重点进展”“风险/阻塞”“下周计划”等通用模板栏目，也不得用文档类型常见结构补齐 Skill 没有声明的内容。
 章节结构和字体格式也是当前步骤的交付质量：外层二级标题会由 Harness 使用步骤 title 统一生成，不要重复输出。objective/output 明确包含多个子主题时，可使用与这些子主题语义一致的三级标题；不得新增未声明的通用栏目。
-要求列表展示时，不要把多个长句无差别平铺：同级列表项统一采用 `- **短标签：** 事实、动作或结果`。当至少四项内容存在由当前证据直接支持的稳定分类时，使用最多两级的父子列表，父项写 `- **分类名称**`，子项写 `  - **对象：** 具体进展`；无法确认分类时保留同级列表，不得为了版式虚构父子关系。步骤、优先级或时间顺序才使用有序列表。标题本身不重复加粗，不使用内联 HTML、字号或颜色。
+要求列表展示时，不要把多个长句无差别平铺。同一组含两个以上较长、彼此独立的无序列表片段时，每项开头必须提炼一个能区分对象或主题的最短名词短语，写成 `- **短标签：** 事实、动作或结果`；只加粗短标签，不能把整句前半段当标签。短小枚举不强制添加标签。当至少四项内容存在由当前证据直接支持的稳定分类时，使用最多两级的父子列表；无法确认分类时保留同级列表，不得为了版式虚构父子关系。步骤、优先级或时间顺序才使用有序列表。标题本身不重复加粗，不使用内联 HTML、字号或颜色。
 当前步骤声明的 Tool 已由 Harness 在你开始处理前执行。objective 中“用 @某 Tool 获取”表示直接消费当前环境中的“Tool 执行回执”及对应结果，不是要求你再次调用 Tool；不得声称工具列表缺少接口、自己无法调用 Tool，或要求后续再调用已经执行完成的 Tool。
 只使用当前环境中已有的 Tool 结果、上一步产出和用户材料，按照当前步骤的 objective 形成明确中间产物；预期产出为空时，根据步骤标题和目标给出最适合后续拼接的结构。
 环境存在“确定性数据查询结果”时，它是筛选、排序、分组、聚合、去重和行数限制的唯一依据：validation.status=verified 才能把结果写成完整确定结论；不得绕过该结果重新从原始表格计算。insufficient_coverage 只能支持已捕获范围内的观察，不得写成全局排名或完整集合。plan.presentation 只控制最终表达形式；没有表格要求时可正常输出正文、图表或指标卡，不得为了使用查询结果强制生成表格。
 结果必须可直接交给下一个 Skill 步骤或最终文档撰写 Agent：保留有依据的事实、数字、来源和时间口径，不得把不同来源的名称、时间与数值混拼，不得补造信息。
+本地参考中的 `period_evidence` 只依据正文逐字出现的完整日期：`match_status=matched` 表示正文事件日期明确落在请求周期内，可以用于该周期；`observed_at` 和 `refresh_collected_at` 只是记录/刷新时间，不得用它们否定正文日期。`match_status=unknown` 仅表示未提取到完整日期，不等于正文不属于该周期。
 “本周/今日”等相对时间必须逐字服从环境中的当前确定时间；禁止输出“第X周”等占位符。缺失的指标或进展直接省略，不得写“数据未明确区分”“暂无明确进展”等占位内容。
 除非用户要求或当前 Skill 步骤的 objective/output 明确要求分析证据状态，否则不要输出“证据不足”“证据缺口”“证据完备”“待核验说明”等元说明；结果无法支持某项事实时，直接省略该事实，只保留有依据的内容。
 只输出本步骤产出正文，不输出思考过程、JSON、完整成稿或与本步骤无关的章节。"""
         else:
             role_instructions = {
-                "data_analysis_agent": "优先使用网页实时采集后且已通过 AX 或 DOM 结构化校验的数据；截图与 OCR 只用于补充留证，不得作为结构化网页数据可用性的唯一门槛。其次使用数据检索中 can_use=true 的工作记忆。目标列出多个指标时逐项消费已校验成功的值：可用几项就展示几项，不因其他指标缺失拒绝整个来源，也不为缺失项生成占位行。需要趋势、环比或历史比较时，必须读取同一结果的 history，并按 period_key/period_start_at/period_end_at 对齐阶段；同一自然周内的数据视为一个阶段，不同阶段不得覆盖或混写。每个数字都要与同一结果中的 source_id、title、source_url、collected_at/observed_at 绑定；页面筛选日期是统计周期，不是采集时间。不同来源、周期或口径不得擅自拼接。工作记忆只能按 observed_at 加权，陈旧数据必须标注。禁止编造数字或来源，只输出有支持的‘结论—指标—统计阶段—采集时间—来源’，不主动生成证据缺口或待核验说明。",
-                "industry_research_agent": "综合互联网检索结果，只提炼有来源支持的行业现状、趋势与约束，每条外部结论保留来源 URL；省略无法确认的事实，不主动生成证据缺口或待核验说明。",
+                "data_analysis_agent": "优先使用网页实时采集后且已通过 AX 或 DOM 结构化校验的数据；截图与 OCR 只用于补充留证，不得作为结构化网页数据可用性的唯一门槛。其次使用数据检索中 can_use=true 的工作记忆。任务画像含 coverage_contract 时，只保留能够归属于某个 target 且直接回答某个 facet 的事实，按目标与维度组织；其他对象、上位业务或邻近口径的指标不得替代当前 facet。目标列出多个指标时逐项消费已校验成功的值：可用几项就展示几项，不因其他指标缺失拒绝整个来源，也不为缺失项生成占位行。需要趋势、环比或历史比较时，必须读取同一结果的 history，并按 period_key/period_start_at/period_end_at 对齐阶段；同一自然周内的数据视为一个阶段，不同阶段不得覆盖或混写。每个数字都要与同一结果中的 source_id、title、source_url、collected_at/observed_at 绑定；页面筛选日期是请求范围，指标实际统计周期以来源证据为准，不是采集时间。不同来源、周期或口径不得擅自拼接。工作记忆只能按 observed_at 加权，陈旧数据必须标注。禁止编造数字或来源，只输出有支持的‘结论—指标—统计阶段—采集时间—来源’，qualified 参考值必须附带实际周期、目标周期与风险说明，不能省略披露。",
+                "industry_research_agent": "综合互联网检索结果，只提炼有来源支持的行业现状、趋势与约束，每条外部结论保留来源 URL；省略无法确认的事实，qualified 参考值必须附带实际周期、目标周期与风险说明，不能省略披露。",
                 "solution_design_agent": "围绕目标、约束和证据设计可落地方案，明确边界、关键决策、组件关系、实施步骤、风险和验证方式。",
-                "chapter_design_agent": "先设计章节，再交给文档撰写 Agent。结合目标、读者、文档类型、证据和 Skill，输出有顺序的章节蓝图；每章写明目的、要回答的问题、可用证据、建议表达形式和完成标准。章节必须互斥且共同覆盖目标，不写正文，不补造事实。",
+                "chapter_design_agent": """先设计章节，再交给文档撰写 Agent。结合目标、读者、文档类型、证据和 Skill，输出有顺序的章节蓝图；每章写明目的、要回答的问题、可用证据、建议表达形式和完成标准。章节必须互斥且共同覆盖目标，不写正文，不补造事实。任务画像含 coverage_contract 时，按 targets 建立主体章节，并在每个目标内逐项覆盖 facets；不得把邻近指标或其他业务场景提升为平级主体章节。
+同时对每章做通用的关系表达判断：只有当已有信息包含多个对象之间的依赖、步骤与分支、跨角色时间交互、状态变化或实体关系，并且图比连续文字更容易准确理解时，才加入 Visual Plan；背景、目标、原则、孤立清单和证据不足的章节不配图。判断依据是内容结构，不是文档名称或行业关键词。
+只输出一个 JSON 对象，格式为 {"blueprint_markdown":"章节蓝图 Markdown","visual_plan":{"schema_version":"creation.visual-plan.v1","policy":"auto","max_diagrams":4,"diagrams":[{"id":"稳定英文或数字标识","section_title":"与蓝图完全一致的章节标题","purpose":"图要帮助读者理解什么","diagram_type":"flowchart|flowchart_lr|sequence|state|class|er|journey|gantt|mindmap","required":true,"reason":"为什么文字不足以表达","source_points":["允许画入的对象、动作、状态或关系短句"],"placement":"after_intro|before_details|after_details","max_nodes":12}]}}。diagrams 可为空；通常一章最多一图，最多八图。""",
             }
             system = f"你是 MemoryBread 的{step['name']}。{role_instructions.get(agent_id, '完成当前专业分析。')}"
+        structure_requirements = step.get("skill_step_structure_requirements")
+        if isinstance(structure_requirements, dict) and (
+            structure_requirements.get("minimum_subsections")
+            or structure_requirements.get("minimum_subsection_chars")
+        ):
+            minimum_count = structure_requirements.get("minimum_subsections")
+            minimum_chars = structure_requirements.get("minimum_subsection_chars")
+            constraints: list[str] = []
+            if minimum_count:
+                constraints.append(f"至少 {minimum_count} 个三级或更深子章节")
+            if minimum_chars:
+                constraints.append(f"每个子章节正文不少于 {minimum_chars} 字")
+            system += (
+                "\n当前执行动作包含可量化的章节要求："
+                f"{'、'.join(constraints)}。这些要求是当前动作正文的一部分，必须直接落实；"
+                "子章节标题应对应动作要求的真实对象或主题，不得用无关通用栏目凑数。"
+            )
         workflow_context = ""
         if step.get("skill_step_id"):
             workflow_context = f"""【当前 Skill 执行步骤】
@@ -4841,6 +5947,7 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
 目标：{step.get("skill_step_objective", "")}
 预期产出：{step.get("skill_step_output", "")}
 可协同 Skill：{"、".join(step.get("skill_step_skills", [])) or "无"}
+从执行动作提取的结构要求：{structure_requirements}
 
 """
         user = f"""{workflow_context}【目标】
@@ -4855,6 +5962,7 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
 【当前环境】
 {environment}
 """
+        system += "\n数据风险披露规则优先于省略缺失项或禁止元说明的通用写作规则：当 can_use=true 且 data_usage_status=qualified 时，必须使用来源提供的原始参考值补齐对应指标，并在数据下方标明实际统计周期、请求周期、来源与 data_risks 风险；不能把参考值写成目标周期实绩。编辑、整合与润色必须保留数值及风险标注。指标语义未匹配时只保留原名供参考，不能擅自改名；完全无来源数值、鉴权失败或视图未验证时不得编造或绕过校验。"
         return system, user
 
     @staticmethod
@@ -4886,11 +5994,14 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
 
     @classmethod
     def _step_context_query(cls, state: LoopState, step: dict[str, Any]) -> str:
+        step_id = str(step.get("id") or "")
+        query_key = (
+            "retrieval_query" if step_id == MEMORY_SEARCH_TOOL_ID else "context_query"
+        )
         context_query = str(
-            state.environment.get("context_query") or state.user_message
+            state.environment.get(query_key) or state.user_message
         ).strip()
         step_specific_query = cls._step_focus_query(step)
-        step_id = str(step.get("id") or "")
         if step_id == "data_query_planner" and step_specific_query:
             return step_specific_query
         if (
@@ -4991,7 +6102,13 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
                 and result["creation_evidence"].get("validation_status") == "verified"
             )
             if result.get("can_use") is True and evidence_verified:
-                reference["data_use_policy"] = "current_snapshot_available"
+                if result.get("risk_disclosure_required"):
+                    reference["data_use_policy"] = "qualified_snapshot_available"
+                    reference["data_freshness"]["risk_disclosure_required"] = True
+                    reference["content"] = ""
+                    reference["summary"] = "该来源已取得带风险标注的参考数据；只能使用当前数据结果中的数值、实际周期与风险说明，不从旧文档补充当前数值。"
+                else:
+                    reference["data_use_policy"] = "current_snapshot_available"
                 continue
             reference["content"] = ""
             reference["summary"] = (
@@ -5013,6 +6130,7 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             )
             if verified:
                 validation = evidence.get("validation") or {}
+                original_structured = result.get("structured_data")
                 claims = [
                     claim
                     for claim in validation.get("verified_claims", [])
@@ -5023,11 +6141,31 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
                     for claim in claims
                     if str(claim.get("statement") or "").strip()
                 )
-                result["structured_data"] = {
+                verified_structured = {
                     "validation": validation.get("reason") or "programmatic_verified",
                     "primary_channel": validation.get("primary_channel"),
                     "verified_claims": claims,
+                    "data_usage_status": validation.get("data_usage_status", "verified"),
+                    "risk_disclosure_required": bool(validation.get("risk_disclosure_required")),
                 }
+                result["data_usage_status"] = validation.get("data_usage_status", "verified")
+                result["risk_disclosure_required"] = bool(validation.get("risk_disclosure_required"))
+                result["data_risks"] = validation.get("data_risks", [])
+                # 页面证据已通过校验时，保留同一次采集产生的关系表及覆盖率
+                # 元数据。QueryPlan 需要完整行边界执行排序、分组和 Top-N；
+                # 不能把表格压扁成若干独立 claim。这里只按通用结构键保留，
+                # 不识别任何报表、字段名或业务维度。
+                if isinstance(original_structured, dict):
+                    for key in (
+                        "tables",
+                        "pagination",
+                        "completeness",
+                        "summary_metrics",
+                    ):
+                        value = original_structured.get(key)
+                        if value is not None:
+                            verified_structured[key] = value
+                result["structured_data"] = verified_structured
                 result["provenance"] = {
                     "creation_evidence_id": evidence.get("id"),
                     "captured_at": evidence.get("captured_at") or result.get("collected_at"),
@@ -5039,6 +6177,98 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             result["content_excerpt"] = None
             result["structured_data"] = None
             result["provenance"] = None
+
+    @classmethod
+    def _apply_data_risk_disclosures(
+        cls, document: str, data_results: list[dict[str, Any]],
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """在模型整合/润色后确定性补齐参考数据和风险，不依赖模型自行披露。"""
+        if not document.strip() or not data_results:
+            return document, []
+        def source_key(result: dict) -> str:
+            evidence = result.get("creation_evidence") or {}
+            identity = repr((result.get("source_id"), result.get("source_url") or evidence.get("source_url")))
+            return hashlib.sha256(identity.encode()).hexdigest()[:16]
+
+        current_keys = {source_key(result) for result in data_results if isinstance(result, dict) and result.get("can_use") is True}
+        removed = set()
+        def remove_current(match: re.Match) -> str:
+            if match.group(1) not in current_keys:
+                return match.group(0)
+            removed.add(match.group(1))
+            return ""
+        # 重复渲染或修订时重建本程序的说明，不触碰用户自行写的备注。
+        document = re.sub(
+            r"\n*<!-- memorybread:data-risks:([a-f0-9]+) -->.*?<!-- /memorybread:data-risks -->",
+            remove_current, document, flags=re.DOTALL,
+        )
+
+        def cell(value: Any) -> str:
+            return " ".join(str(value or "").split()).replace("|", "\\|").replace("<", "&lt;").replace(">", "&gt;")
+
+        audit = []
+        insertions: dict[int, list[str]] = {}
+        seen = set()
+        spans = cls._markdown_section_spans(document)
+        for result in data_results:
+            if not isinstance(result, dict) or result.get("can_use") is not True:
+                continue
+            evidence = result.get("creation_evidence") or {}
+            validation = evidence.get("validation") or {}
+            risks = result.get("data_risks") or validation.get("data_risks") or []
+            risks = [risk for risk in risks if isinstance(risk, dict) and str(risk.get("value") or "").strip()]
+            if not risks:
+                continue
+            # 概念偏好没有字段命中时，仅披露正文实际采用的原名事实；不把
+            # 任意相关数字强行补入请求字段。同指标跨周期的参考值则完整列出。
+            risks = [risk for risk in risks if risk.get("kind") != "semantic_match_unverified"
+                     or (str(risk.get("label") or "") in document and str(risk.get("value")) in document)]
+            if not risks:
+                continue
+            source_url = str(result.get("source_url") or evidence.get("source_url") or "")
+            source_title = cell(result.get("title") or evidence.get("page_title") or "数据来源")
+            key = source_key(result)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows = []
+            for risk in risks:
+                expected = risk.get("expected_period") or {}
+                requested_period = " 至 ".join(str(expected.get(field) or "") for field in ("start", "end")).strip(" 至") or "未指定"
+                rows.append("| " + " | ".join(cell(value) for value in (
+                    risk.get("label"), risk.get("value"), risk.get("actual_period") or "未明确",
+                    requested_period, risk.get("note"),
+                )) + " |")
+            source = source_title
+            if source_url.startswith(("https://", "http://")):
+                safe_url = source_url.replace("(", "%28").replace(")", "%29").replace(" ", "%20").replace("\n", "").replace("\r", "")
+                source = f"[{source_title.replace('[', '').replace(']', '')}]({safe_url})"
+            block = "\n\n".join((
+                f"<!-- memorybread:data-risks:{key} -->",
+                "**数据风险说明（参考值）**",
+                "以下为有来源支持、但周期或口径尚不完全符合本次请求的参考数值；不代表目标周期实绩，请核验后使用。",
+                "\n".join(["| 来源指标 | 参考值 | 实际统计周期 | 请求周期 | 风险说明 |", "| --- | --- | --- | --- | --- |", *rows]),
+                f"来源：{source}",
+                "<!-- /memorybread:data-risks -->",
+            ))
+            target = str(result.get("target_section") or "")
+            span = cls._find_section_span(target, spans) if target else None
+            if span is None and spans:
+                ranked = []
+                for candidate in spans:
+                    section = document[int(candidate["start"]):int(candidate["end"])]
+                    score = sum(str(risk.get("label") or "") in section for risk in risks)
+                    ranked.append((score, -len(section), candidate))
+                score, _, best = max(ranked, key=lambda entry: entry[:2])
+                if score:
+                    span = best
+            offset = int(span["end"]) if span else len(document)
+            insertions.setdefault(offset, []).append(block)
+            audit.append({"source_id": result.get("source_id"), "risk_count": len(risks), "data_risks": risks})
+        for offset in sorted(insertions, reverse=True):
+            document = document[:offset].rstrip() + "\n\n" + "\n\n".join(insertions[offset]) + "\n\n" + document[offset:].lstrip()
+        audit.extend({"source_key": key, "risk_count": 0, "status": "resolved"} for key in removed - seen)
+        return document.rstrip(), audit
 
     @classmethod
     def _guard_data_citations(
@@ -5485,6 +6715,8 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
                     "evidence_status",
                     "evidence_reason",
                     "unavailable_reason",
+                    "data_usage_status",
+                    "risk_disclosure_required",
                 )
                 if raw.get(key) is not None
             }
@@ -5513,7 +6745,7 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
                         claim_limit = (
                             12
                             if validation_reason
-                            in {"requested_metrics_verified", "requested_metrics_partial"}
+                            in {"requested_metrics_verified", "requested_metrics_partial", "requested_metrics_qualified"}
                             else 4
                         )
                         compact_structured["verified_claims"] = [
@@ -5605,6 +6837,7 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
                     "final_weight",
                     "source_url",
                     "observed_at",
+                    "period_evidence",
                     "data_use_policy",
                     "data_freshness",
                     "refresh_status",
@@ -5886,6 +7119,18 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             char_budget=MAX_PROMPT_COMPLETED_STEPS_CHARS,
             item_limit=16,
         )
+        brainstorm_context = str(
+            state.environment.get("creation_brief_context") or ""
+        ).strip()
+        if (
+            not brainstorm_context
+            and state.creation_mode == "brainstorm"
+            and state.environment.get("creation_brief")
+        ):
+            # 兼容修复前已持久化、尚未带紧凑上下文的 continuation。
+            brainstorm_context = self._brainstorm_prompt_context(
+                state.environment.get("creation_brief")
+            )
         blocks = [
             f"当前确定时间（本机时区，禁止自行猜测）：{time_context}",
             f"原始需求：{state.root_request}",
@@ -5893,6 +7138,7 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             f"任务画像：{state.environment.get('requirement', {})}",
             f"确定性数据查询结果：{compact_query_results}",
             f"当前步骤数据事实：{compact_data_results}",
+            "数据风险使用规则：优先使用目标周期且口径匹配的数据；can_use=true 且 data_usage_status=qualified 的来源事实允许用于补齐缺失指标，必须写出原始值并标记‘参考值’，在表格或段落下方披露 data_risks 中的实际周期、请求周期、来源及风险。verified_claims 仅表示来源事实已核验，不代表符合目标周期；不得将参考值写成本周实绩，不得混合周期推算环比或增长率。整合、编辑、润色时必须保留这些数值和风险说明。没有来源数字时不得编造。",
             f"当前步骤网页采集回执：{compact_scrapes}",
             (
                 "Tool 执行回执（Tool 已由 Harness 调用，Agent 直接消费结果）："
@@ -5906,6 +7152,8 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             f"GitHub 公开仓库：{self._compact_prompt_value(state.environment.get('github_results', []))}",
             f"PlantUML 画图约束：{self._compact_prompt_value(state.environment.get('plantuml_diagram', {}))}",
             f"Mermaid 画图约束：{self._compact_prompt_value(state.environment.get('mermaid_diagram', {}))}",
+            f"章节 Visual Plan：{self._compact_prompt_value(state.environment.get('visual_plan', {}))}",
+            f"已准备的章节 Mermaid 图示：{self._compact_prompt_value(state.environment.get('mermaid_diagrams', []))}",
             f"数据分析：{state.environment.get('data_analysis', '')}",
             f"行业调研：{state.environment.get('industry_research', '')}",
             f"方案设计：{state.environment.get('solution_design', '')}",
@@ -5913,6 +7161,9 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             f"上一轮质量审校：{state.environment.get('quality_review', {})}",
             f"当前质检问题：{state.environment.get('quality_issues', [])}",
         ]
+        if brainstorm_context:
+            # 提前放置，保证环境达到总长度上限时仍保留用户已选决策。
+            blocks.insert(2, brainstorm_context)
         if state.current_document and not strict_isolated:
             outline = "\n".join(
                 f"{'#' * int(span['level'])} {span['title']}"
@@ -5953,7 +7204,11 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             )
         return f"文档目录：\n{outline}\n\n目标章节上下文：\n{section_context}"
 
-    def _reference_to_state(self, item: ReferenceDocument) -> dict[str, Any]:
+    def _reference_to_state(
+        self,
+        item: ReferenceDocument,
+        period_evidence: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
         content_limit = 8000 if item.refresh_status.startswith("fresh_") else 1600
         return {
             "id": item.id,
@@ -5974,8 +7229,15 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             "lexical_score": round(item.lexical_score, 4),
             "semantic_score": round(item.semantic_score, 4),
             "entity_score": round(item.entity_score, 4),
+            "retrieval_mode": item.retrieval_mode,
+            "primary_target": item.primary_target,
+            "matched_components": list(item.matched_components),
+            "matched_relations": list(item.matched_relations),
+            "relation_score": round(item.relation_score, 4),
+            "selection_reasons": list(item.selection_reasons),
             "source_url": item.source_url,
             "observed_at": item.observed_at,
+            "period_evidence": period_evidence or {},
             "refresh_status": item.refresh_status,
             "refresh_completeness": item.refresh_completeness,
             "refresh_collected_at": item.refresh_collected_at,

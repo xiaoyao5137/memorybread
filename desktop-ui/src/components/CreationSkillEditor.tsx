@@ -1244,9 +1244,9 @@ export default function CreationSkillEditor({ source, initialSkill, onClose, onS
                       </button>
                     </header>
                     <label>
-                      <span>执行动作 <small>写明本步做什么与产出；输入 @ 提及要调用的能力</small></span>
+                      <span>执行动作 <small>写明本步做什么、产出及数量/篇幅要求；输入 @ 提及能力</small></span>
                       <div className="creation-skill-mention-anchor">
-                        <MentionHighlightTextarea mentionLabels={mentionHighlightLabels} rows={3} maxLength={500} aria-label={`执行步骤 ${index + 1} 执行动作`} placeholder="例如：用 @行业调研 Agent 和 @互联网检索 收集行业背景、竞品做法与关键数据，产出调研结论清单。" value={step.objective} onChange={event => handleStepFieldChange(index, 'objective', event.target.value, event.target)} onKeyDown={event => handleStepFieldKeyDown(event, step)} onCompositionStart={mentionImeGuard.onCompositionStart} onCompositionEnd={mentionImeGuard.onCompositionEnd} onBlur={() => { mentionImeGuard.onBlur(); setMention(null) }} />
+                        <MentionHighlightTextarea mentionLabels={mentionHighlightLabels} rows={3} maxLength={500} aria-label={`执行步骤 ${index + 1} 执行动作`} placeholder="例如：展开关键组件，至少形成 3 个子章节，每节不少于 80 字；用 @方案设计 Agent 完成方案。" value={step.objective} onChange={event => handleStepFieldChange(index, 'objective', event.target.value, event.target)} onKeyDown={event => handleStepFieldKeyDown(event, step)} onCompositionStart={mentionImeGuard.onCompositionStart} onCompositionEnd={mentionImeGuard.onCompositionEnd} onBlur={() => { mentionImeGuard.onBlur(); setMention(null) }} />
                         {renderMentionPicker(step, index, 'objective')}
                       </div>
                     </label>

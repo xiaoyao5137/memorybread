@@ -41,6 +41,25 @@ export interface CreationReferenceItem {
   freshness_score: number
   usage_count: number
   reason: string
+  retrieval_tier?: string
+  retrieval_paths?: string[]
+  matched_keywords?: string[]
+  matched_entities?: string[]
+  lexical_score?: number
+  semantic_score?: number
+  entity_score?: number
+  /** Query planner mode emitted by the current retrieval contract. */
+  retrieval_mode?: string
+  primary_target?: string
+  matched_components?: string[]
+  matched_relations?: string[]
+  relation_score?: number
+  /** Forward-compatible aliases accepted from newer/experimental planners. */
+  intent_mode?: string
+  matched_concepts?: string[]
+  primary_target_score?: number
+  coverage?: number
+  relation_coverage?: number
   summary?: string
   source_url?: string
   source_type?: string
@@ -59,6 +78,8 @@ export interface CreationReferencePreview {
     audience: string
     style: string
     keywords: string[]
+    retrieval_plan?: Record<string, unknown>
+    entity_context?: Record<string, unknown>
   }
   references: CreationReferenceItem[]
 }
@@ -78,7 +99,7 @@ export interface CreationDataReferenceItem {
 export interface CreationChatMessage {
   id: string
   role: 'user' | 'assistant'
-  kind?: 'message' | 'user_abort'
+  kind?: 'message' | 'user_abort' | 'session_end'
   content: string
   createdAt: number
   runId?: string
@@ -111,6 +132,69 @@ export interface CreationAgentEvent {
   data?: Record<string, unknown>
 }
 
+export type CreationMode = 'direct' | 'brainstorm'
+
+export interface CreationBrainstormOption {
+  id: string
+  label: string
+  description: string
+  recommended?: boolean
+}
+
+export interface CreationBrainstormContinuationDirection {
+  id: string
+  label: string
+  description: string
+  recommended?: boolean
+}
+
+export interface CreationBrainstormQuestion {
+  id: string
+  dimension_id?: string
+  dimension: string
+  type: 'single_choice' | 'multi_choice' | 'confirm_inference'
+  prompt: string
+  why_now: string
+  required: boolean
+  allow_custom: boolean
+  options: CreationBrainstormOption[]
+  answer_template: string
+}
+
+export interface CreationBrainstormAnswer {
+  selected_option_ids: string[]
+  custom_text: string
+  source: 'user' | 'agent_assumption' | string
+}
+
+export interface CreationBrainstormHistoryItem {
+  question: CreationBrainstormQuestion
+  answer: CreationBrainstormAnswer
+}
+
+export interface CreationBrainstormState {
+  session_id: string
+  phase: 'exploring' | 'ready' | 'abandoned' | string
+  revision: number
+  current_question: CreationBrainstormQuestion | null
+  brief_markdown: string
+  answered_count: number
+  depth: number
+  can_continue_brainstorm: boolean
+  open_flags: string[]
+  readiness_reason: string
+  continuation_directions: CreationBrainstormContinuationDirection[]
+  invalidated_question_ids: string[]
+  history?: CreationBrainstormHistoryItem[]
+  decisions: Array<{
+    question_id: string
+    dimension_id?: string
+    dimension: string
+    summary: string
+    source: 'user' | 'agent_assumption' | string
+  }>
+}
+
 export interface CreationDraft {
   prompt: string
   docType: string
@@ -132,6 +216,8 @@ export interface CreationDraft {
   rootRequest: string
   conversation: CreationChatMessage[]
   agentEvents: CreationAgentEvent[]
+  creationMode: CreationMode
+  brainstormState: CreationBrainstormState | null
 }
 
 export interface CreationBackTarget {
@@ -444,6 +530,8 @@ const initialCreationDraft: CreationDraft = {
   rootRequest: '',
   conversation: [],
   agentEvents: [],
+  creationMode: 'direct',
+  brainstormState: null,
 }
 
 const startupDebugModeEnabled = getStartupDebugModeEnabled()

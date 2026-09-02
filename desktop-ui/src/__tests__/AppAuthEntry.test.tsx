@@ -109,17 +109,14 @@ describe('App auth entry', () => {
     expect(initializationMocks.fetchInitializationStatus).toHaveBeenCalled()
   })
 
-  it('初始化已完成但 AI 管线仍在预热时继续显示 Loading', async () => {
-    initializationMocks.fetchRuntimeReadiness.mockResolvedValue(false)
+  it('初始化已完成且本地服务可用时进入主界面', async () => {
+    initializationMocks.fetchRuntimeReadiness.mockResolvedValue(true)
 
     render(<App />)
 
-    await waitFor(() => {
-      expect(initializationMocks.fetchRuntimeReadiness).toHaveBeenCalled()
-    })
-    expect(screen.getByTestId('startup-loading')).toBeInTheDocument()
-    expect(screen.queryByTestId('rag-panel')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('initialization-gate')).not.toBeInTheDocument()
+    expect(await screen.findByTestId('rag-panel')).toBeInTheDocument()
+    expect(initializationMocks.fetchRuntimeReadiness).toHaveBeenCalled()
+    expect(screen.queryByTestId('startup-loading')).not.toBeInTheDocument()
   })
 
   it('已完成初始化的后台核验发现能力未就绪时回到 Loading 而非初始化页', async () => {

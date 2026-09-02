@@ -17,7 +17,8 @@
         "internet_search",
         "memory_search",
         "data_search",
-        "webpage_scrape"
+        "webpage_scrape",
+        "mermaid_diagram"
       ]
     },
     "max_references": {
@@ -47,6 +48,54 @@
         "mermaid_diagram",
         "github_search"
       ]
+    },
+    "visual_plan": {
+      "type": "object",
+      "description": "章节设计阶段产出的通用代码图示计划。Harness 只调度已启用的 Tool；计划描述内容关系，不绑定特定业务文档模板。",
+      "required": ["schema_version", "policy", "max_diagrams", "diagrams"],
+      "properties": {
+        "schema_version": {"const": "creation.visual-plan.v1"},
+        "policy": {"type": "string", "enum": ["auto", "required", "off"]},
+        "max_diagrams": {"type": "integer", "minimum": 0, "maximum": 8},
+        "diagrams": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {"$ref": "#/$defs/diagram_spec"}
+        }
+      }
+    },
+    "diagram_spec": {
+      "type": "object",
+      "description": "单个章节的图示合同；节点和关系来源必须能够回溯到章节蓝图、证据或专业 Agent 产物。",
+      "required": [
+        "id",
+        "section_title",
+        "diagram_type",
+        "required",
+        "reason",
+        "source_points",
+        "placement"
+      ],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 80},
+        "section_title": {"type": "string", "minLength": 1, "maxLength": 120},
+        "purpose": {"type": "string", "maxLength": 240},
+        "diagram_type": {
+          "type": "string",
+          "enum": ["flowchart", "flowchart_lr", "sequence", "state", "class", "er", "journey", "gantt", "mindmap"]
+        },
+        "required": {"type": "boolean"},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 240},
+        "source_points": {
+          "type": "array",
+          "description": "图中允许使用的对象、动作、状态或关系短句，不是额外事实来源。",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {"type": "string", "minLength": 1, "maxLength": 160}
+        },
+        "placement": {"type": "string", "enum": ["after_intro", "before_details", "after_details"]},
+        "max_nodes": {"type": "integer", "minimum": 2, "maximum": 24}
+      }
     },
     "tool_event": {
       "type": "object",
@@ -219,6 +268,30 @@
                   "type": "array",
                   "items": {"type": "string", "enum": ["webpage_scrape", "data_analysis_agent"]},
                   "uniqueItems": true
+                },
+                "error_code": {"type": ["string", "null"]}
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "trigger",
+                "trigger_status",
+                "reason_code",
+                "diagram_count",
+                "scheduled"
+              ],
+              "properties": {
+                "trigger": {"const": "chapter_design_agent"},
+                "trigger_status": {"type": "string", "enum": ["completed", "failed"]},
+                "reason_code": {
+                  "type": "string",
+                  "enum": ["visual_plan_ready", "visual_plan_empty", "explicit_visual_request", "visual_tool_disabled", "chapter_design_failed"]
+                },
+                "diagram_count": {"type": "integer", "minimum": 0, "maximum": 8},
+                "scheduled": {
+                  "type": "array",
+                  "items": {"const": "mermaid_diagram"}
                 },
                 "error_code": {"type": ["string", "null"]}
               }

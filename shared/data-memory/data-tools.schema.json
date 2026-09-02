@@ -4,6 +4,31 @@
   "title": "MemoryBread Data Tools v1",
   "type": "object",
   "$defs": {
+    "creation_data_usage": {
+      "type": "object",
+      "description": "verified 表示来源事实已核验，不等于任务周期匹配。qualified 数值仅可连同风险披露使用；不得编造数值或修改原始周期。",
+      "properties": {
+        "data_usage_status": {"type": "string", "enum": ["verified", "qualified", "unavailable"]},
+        "fallback_policy": {"type": "string", "enum": ["allow_with_disclosure", "strict"], "default": "allow_with_disclosure"},
+        "risk_disclosure_required": {"type": "boolean"},
+        "data_risks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "requested_metric", "label", "value", "actual_period", "expected_period", "note"],
+            "properties": {
+              "kind": {"type": "string", "enum": ["period_mismatch", "period_unverified", "semantic_match_unverified"]},
+              "requested_metric": {"type": "string"},
+              "label": {"type": "string"},
+              "value": {"type": "string"},
+              "actual_period": {"type": "string"},
+              "expected_period": {"type": "object"},
+              "note": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
     "tool_id": {
       "type": "string",
       "enum": ["data_search", "webpage_scrape"]
@@ -137,7 +162,7 @@
         "content_hash": {"type": "string"},
         "screenshot_source": {"const": "browser_window"},
         "validation_status": {"type": "string", "enum": ["pending", "verified", "rejected"]},
-        "validation": {"type": "object"}
+        "validation": {"$ref": "#/$defs/creation_data_usage"}
       }
     },
     "data_query_plan": {
@@ -271,7 +296,10 @@
         "relevance_score": {"type": "number", "minimum": 0, "maximum": 1},
         "final_score": {"type": "number", "minimum": 0, "maximum": 1},
         "refresh_required": {"type": "boolean"},
-        "can_use": {"type": "boolean"},
+        "can_use": {"type": "boolean", "description": "qualified 结果可使用，但必须保留 data_risks 风险说明"},
+        "data_usage_status": {"type": "string", "enum": ["verified", "qualified", "unavailable"]},
+        "risk_disclosure_required": {"type": "boolean"},
+        "data_risks": {"$ref": "#/$defs/creation_data_usage/properties/data_risks"},
         "content_excerpt": {"type": ["string", "null"]},
         "structured_data": {
           "type": ["object", "array", "null"],
@@ -306,6 +334,92 @@
         "schema_version": {"const": "memorybread.data-search.v1"},
         "query": {"type": "string"},
         "results": {"type": "array", "items": {"$ref": "#/$defs/data_result"}}
+      }
+    },
+    "page_interaction_target": {
+      "type": "object",
+      "properties": {
+        "role_hints": {"type": "array", "maxItems": 8, "items": {"type": "string", "minLength": 1}},
+        "labels": {"type": "array", "maxItems": 8, "items": {"type": "string", "minLength": 1}},
+        "ordinal": {"type": "integer", "minimum": 1, "maximum": 100},
+        "within": {
+          "type": "object",
+          "properties": {
+            "labels": {"type": "array", "maxItems": 8, "items": {"type": "string", "minLength": 1}}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "page_interaction_postcondition": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": {"type": "string", "enum": ["selected", "expanded", "value_displayed", "text_present", "date_range_displayed", "data_stable"]},
+        "target_ref": {"type": ["string", "null"]},
+        "any": {"type": "array", "maxItems": 24, "items": {"type": "string", "minLength": 1}},
+        "minimum_stable_passes": {"type": "integer", "minimum": 1, "maximum": 10},
+        "source": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "page_interaction_step": {
+      "type": "object",
+      "required": ["id", "action"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 80},
+        "action": {"type": "string", "enum": ["wait_for", "activate", "set_value", "select_option", "set_date_range", "expand", "scroll_collect", "paginate", "collect"]},
+        "target": {"$ref": "#/$defs/page_interaction_target"},
+        "value": {},
+        "postconditions": {"type": "array", "maxItems": 8, "items": {"$ref": "#/$defs/page_interaction_postcondition"}},
+        "scope": {"type": ["string", "null"], "enum": ["page", "all_scroll_containers", "target", null]},
+        "pagination": {"type": ["string", "null"], "enum": ["until_end", "current_page", null]}
+      },
+      "additionalProperties": false
+    },
+    "page_interaction_plan": {
+      "type": "object",
+      "required": ["schema_version", "steps"],
+      "properties": {
+        "schema_version": {"const": "memorybread.page-interaction-plan.v1"},
+        "intent": {"type": "string", "const": "collect_metrics", "default": "collect_metrics"},
+        "safety_mode": {"type": "string", "const": "read_only", "default": "read_only"},
+        "steps": {"type": "array", "maxItems": 12, "items": {"$ref": "#/$defs/page_interaction_step"}},
+        "requested_metrics": {"type": "array", "maxItems": 24, "items": {"type": "string", "minLength": 1}}
+      },
+      "additionalProperties": false
+    },
+    "page_interaction_result": {
+      "type": "object",
+      "required": ["schema_version", "status", "steps", "view_status", "collection_status", "metric_results", "incidental_claims"],
+      "properties": {
+        "schema_version": {"const": "memorybread.page-interaction-result.v1"},
+        "status": {"type": "string", "enum": ["completed", "completed_partial", "failed"]},
+        "plan_source": {"type": "string", "enum": ["explicit", "objective_compatibility"]},
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "action", "status", "attempts", "candidate_count"],
+            "properties": {
+              "id": {"type": "string"},
+              "action": {"type": "string"},
+              "status": {"type": "string", "enum": ["completed", "failed"]},
+              "attempts": {"type": "integer", "minimum": 0, "maximum": 2},
+              "candidate_count": {"type": "integer", "minimum": 0},
+              "error_code": {"type": "string"}
+            },
+            "additionalProperties": false
+          }
+        },
+        "view_status": {"type": "string", "enum": ["verified", "unverified"]},
+        "collection_status": {"type": "string", "enum": ["not_started", "pending", "complete", "partial"]},
+        "metric_results": {"type": "array"},
+        "incidental_claims": {"type": "array"},
+        "actions": {"type": "array"},
+        "expected_period": {"type": "object"},
+        "period_verified": {"type": "boolean"}
       }
     },
     "webpage_scrape_request": {
@@ -376,6 +490,13 @@
         "expected_period_end": {
           "type": ["string", "null"],
           "format": "date"
+        },
+        "interaction_plan": {
+          "anyOf": [
+            {"$ref": "#/$defs/page_interaction_plan"},
+            {"type": "null"}
+          ],
+          "description": "版本化只读页面交互计划；存在时优先于 objective 的兼容解析"
         }
       },
       "additionalProperties": false

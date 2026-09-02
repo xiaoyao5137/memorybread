@@ -6,7 +6,7 @@
 
 use std::{
     collections::hash_map::DefaultHasher,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     hash::{Hash, Hasher},
     io::{BufRead, BufReader, BufWriter, Write},
@@ -24,11 +24,136 @@ use uuid::Uuid;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 
 const CONNECTED_TTL_MS: i64 = 15_000;
+const JOB_CLAIM_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_BRIDGE_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_PREVIEW_BYTES: usize = 768 * 1024;
 const COMPLETED_JOB_TTL_MS: i64 = 30_000;
 pub const BROWSER_BRIDGE_SOCKET_ENV: &str = "MEMORY_BREAD_BROWSER_BRIDGE_SOCKET";
 const BROWSER_BRIDGE_SOCKET_MAX_BYTES: usize = 100;
+const MAX_INTERACTION_STEPS: usize = 12;
+const MAX_INTERACTION_LABELS: usize = 8;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageInteractionPlan {
+    pub schema_version: String,
+    #[serde(default = "default_interaction_intent")]
+    pub intent: String,
+    #[serde(default = "default_interaction_safety_mode")]
+    pub safety_mode: String,
+    #[serde(default)]
+    pub steps: Vec<PageInteractionStep>,
+    #[serde(default)]
+    pub requested_metrics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageInteractionStep {
+    pub id: String,
+    pub action: String,
+    #[serde(default)]
+    pub target: Option<PageInteractionTarget>,
+    #[serde(default)]
+    pub value: Option<Value>,
+    #[serde(default)]
+    pub postconditions: Vec<PageInteractionPostcondition>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub pagination: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageInteractionTarget {
+    #[serde(default)]
+    pub role_hints: Vec<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub ordinal: Option<usize>,
+    #[serde(default)]
+    pub within: Option<PageInteractionScope>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageInteractionScope {
+    #[serde(default)]
+    pub labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageInteractionPostcondition {
+    pub kind: String,
+    #[serde(default)]
+    pub target_ref: Option<String>,
+    #[serde(default)]
+    pub any: Vec<String>,
+    #[serde(default)]
+    pub minimum_stable_passes: Option<usize>,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+fn default_interaction_intent() -> String {
+    "collect_metrics".to_string()
+}
+
+fn default_interaction_safety_mode() -> String {
+    "read_only".to_string()
+}
+
+impl PageInteractionPlan {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.schema_version != "memorybread.page-interaction-plan.v1"
+            || self.safety_mode != "read_only"
+            || self.steps.len() > MAX_INTERACTION_STEPS
+        {
+            return Err("INTERACTION_PLAN_INVALID");
+        }
+        let mut ids = HashSet::new();
+        for step in &self.steps {
+            if step.id.trim().is_empty()
+                || !ids.insert(step.id.as_str())
+                || !matches!(
+                    step.action.as_str(),
+                    "wait_for"
+                        | "activate"
+                        | "set_value"
+                        | "select_option"
+                        | "set_date_range"
+                        | "expand"
+                        | "scroll_collect"
+                        | "paginate"
+                        | "collect"
+                )
+            {
+                return Err("INTERACTION_PLAN_INVALID");
+            }
+            if !matches!(
+                step.action.as_str(),
+                "collect" | "scroll_collect" | "paginate"
+            ) && step.target.is_none()
+                && step.action != "set_date_range"
+            {
+                return Err("INTERACTION_PLAN_INVALID");
+            }
+            if let Some(target) = &step.target {
+                if target.labels.len() > MAX_INTERACTION_LABELS
+                    || target.role_hints.len() > MAX_INTERACTION_LABELS
+                    || target.ordinal == Some(0)
+                    || target.ordinal.is_some_and(|value| value > 100)
+                {
+                    return Err("INTERACTION_PLAN_INVALID");
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -56,6 +181,8 @@ pub struct BrowserExtensionJob {
     pub requested_metrics: Vec<String>,
     pub expected_period_start: Option<String>,
     pub expected_period_end: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interaction_plan: Option<PageInteractionPlan>,
     pub max_characters: usize,
     pub max_segments: usize,
     pub deadline_ms: i64,
@@ -79,11 +206,17 @@ impl BrowserExtensionJob {
             requested_metrics,
             expected_period_start,
             expected_period_end,
+            interaction_plan: None,
             max_characters: 80_000,
             max_segments: 20,
             deadline_ms: now_ms() + timeout.as_millis() as i64,
             focus_policy: "never",
         }
+    }
+
+    pub fn with_interaction_plan(mut self, plan: Option<PageInteractionPlan>) -> Self {
+        self.interaction_plan = plan;
+        self
     }
 }
 
@@ -171,6 +304,7 @@ pub struct BrowserBridgeResponse {
 #[derive(Debug)]
 pub enum BrowserExtensionError {
     Unavailable,
+    Unresponsive,
     Timeout,
     Failed(String, String),
     Internal,
@@ -233,6 +367,16 @@ impl BrowserExtensionBroker {
             };
         };
         let current_time = now_ms();
+        let pending_job_ids = state.pending.keys().cloned().collect::<HashSet<_>>();
+        for (job_id, job) in state.live_jobs.iter_mut() {
+            if matches!(job.view.status.as_str(), "queued" | "running")
+                && !pending_job_ids.contains(job_id)
+            {
+                job.view.status = "failed".to_string();
+                job.view.stage = "expired".to_string();
+                job.view.updated_at = current_time;
+            }
+        }
         state.live_jobs.retain(|_, job| {
             job.view.status == "queued"
                 || job.view.status == "running"
@@ -396,6 +540,16 @@ impl BrowserExtensionBroker {
         job: BrowserExtensionJob,
         timeout: Duration,
     ) -> Result<BrowserExtensionResult, BrowserExtensionError> {
+        self.submit_with_claim_timeout(job, timeout, JOB_CLAIM_TIMEOUT)
+            .await
+    }
+
+    async fn submit_with_claim_timeout(
+        &self,
+        job: BrowserExtensionJob,
+        timeout: Duration,
+        claim_timeout: Duration,
+    ) -> Result<BrowserExtensionResult, BrowserExtensionError> {
         if !self.status().connected {
             return Err(BrowserExtensionError::Unavailable);
         }
@@ -426,7 +580,39 @@ impl BrowserExtensionBroker {
             );
             state.queue.push_back(job);
         }
-        let result = tokio::time::timeout(timeout, receiver).await;
+        let started_at = tokio::time::Instant::now();
+        let mut receiver = receiver;
+        let first_wait = tokio::time::timeout(timeout.min(claim_timeout), &mut receiver).await;
+        let result = match first_wait {
+            Ok(result) => Ok(result),
+            Err(_) => {
+                let still_queued = {
+                    let mut state = self
+                        .state
+                        .lock()
+                        .map_err(|_| BrowserExtensionError::Internal)?;
+                    let still_queued = state
+                        .live_jobs
+                        .get(&job_id)
+                        .is_some_and(|job| job.view.status == "queued");
+                    if still_queued {
+                        state.queue.retain(|queued| queued.browser_job_id != job_id);
+                        state.pending.remove(&job_id);
+                        if let Some(job) = state.live_jobs.get_mut(&job_id) {
+                            job.view.status = "failed".to_string();
+                            job.view.stage = "unresponsive".to_string();
+                            job.view.updated_at = now_ms();
+                        }
+                    }
+                    still_queued
+                };
+                if still_queued {
+                    return Err(BrowserExtensionError::Unresponsive);
+                }
+                let remaining = timeout.saturating_sub(started_at.elapsed());
+                tokio::time::timeout(remaining, receiver).await
+            }
+        };
         let mut state = self
             .state
             .lock()
@@ -567,6 +753,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn interaction_plan_accepts_generic_read_only_steps_and_rejects_writes() {
+        let valid: PageInteractionPlan = serde_json::from_value(serde_json::json!({
+            "schema_version": "memorybread.page-interaction-plan.v1",
+            "safety_mode": "read_only",
+            "steps": [{
+                "id": "open-target",
+                "action": "activate",
+                "target": {"role_hints": ["tab"], "ordinal": 2},
+                "postconditions": [{"kind": "selected"}]
+            }, {
+                "id": "collect",
+                "action": "collect",
+                "scope": "page"
+            }]
+        }))
+        .unwrap();
+        assert!(valid.validate().is_ok());
+
+        let invalid: PageInteractionPlan = serde_json::from_value(serde_json::json!({
+            "schema_version": "memorybread.page-interaction-plan.v1",
+            "safety_mode": "read_only",
+            "steps": [{"id": "write", "action": "submit", "target": {"labels": ["提交"]}}]
+        }))
+        .unwrap();
+        assert_eq!(invalid.validate(), Err("INTERACTION_PLAN_INVALID"));
+    }
+
+    #[test]
     fn browser_bridge_socket_keeps_short_paths_unchanged() {
         let path = PathBuf::from("/tmp/memorybread-browser-bridge.sock");
         assert_eq!(bounded_browser_bridge_socket_path(path.clone()), path);
@@ -609,6 +823,30 @@ mod tests {
             Err(BrowserExtensionError::Unavailable)
         ));
         assert_eq!(broker.status().queued_job_count, 0);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_without_polling_fails_fast_and_clears_the_queue() {
+        let broker = BrowserExtensionBroker::new();
+        broker.heartbeat(Some("0.2.3".to_string()));
+        let job = BrowserExtensionJob::new(
+            "https://example.com/report".to_string(),
+            None,
+            vec![],
+            None,
+            None,
+            Duration::from_secs(1),
+        );
+
+        let result = broker
+            .submit_with_claim_timeout(job, Duration::from_secs(1), Duration::from_millis(20))
+            .await;
+
+        assert!(matches!(result, Err(BrowserExtensionError::Unresponsive)));
+        let status = broker.status();
+        assert_eq!(status.active_job_count, 0);
+        assert_eq!(status.queued_job_count, 0);
+        assert_eq!(status.jobs[0].stage, "unresponsive");
     }
 
     #[tokio::test]
@@ -693,5 +931,33 @@ mod tests {
         }));
         assert!(submitter.await.expect("task joined").is_ok());
         assert_eq!(broker.status().jobs[0].status, "completed");
+    }
+
+    #[test]
+    fn status_closes_orphaned_running_jobs_instead_of_showing_permanent_activity() {
+        let broker = BrowserExtensionBroker::new();
+        broker.state.lock().unwrap().live_jobs.insert(
+            "orphan".to_string(),
+            BrowserLiveJob {
+                view: BrowserLiveJobView {
+                    browser_job_id: "orphan".to_string(),
+                    url: "https://example.com/report".to_string(),
+                    title: "报表".to_string(),
+                    status: "running".to_string(),
+                    stage: "loading".to_string(),
+                    updated_at: now_ms(),
+                    has_preview: false,
+                    preview_revision: 0,
+                },
+                preview_mime_type: None,
+                preview_bytes: None,
+            },
+        );
+
+        let status = broker.status();
+
+        assert_eq!(status.active_job_count, 0);
+        assert_eq!(status.jobs[0].status, "failed");
+        assert_eq!(status.jobs[0].stage, "expired");
     }
 }

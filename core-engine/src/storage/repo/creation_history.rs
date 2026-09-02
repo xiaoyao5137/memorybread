@@ -5,7 +5,8 @@ const HISTORY_SELECT: &str = "SELECT id, prompt, generated_content, doc_type, au
     reference_count, references_json, model, latency_ms, session_id, conversation_json,
     agent_trace_json, goal_json, root_request, parent_history_id, revision_no,
     edit_operation, document_patch_json, evidence_json, created_at, updated_at,
-    source_kind, source_ref_id
+    source_kind, source_ref_id, lifecycle_status,
+    creation_mode, creation_brief_json, brainstorm_revision, progress_epoch
     FROM creation_history ch";
 
 const LATEST_SESSION_PREDICATE: &str = "(COALESCE(TRIM(ch.session_id), '') = ''
@@ -69,6 +70,16 @@ pub struct CreationHistory {
     pub source_kind: String,
     #[serde(default)]
     pub source_ref_id: Option<i64>,
+    #[serde(default = "default_lifecycle_status")]
+    pub lifecycle_status: String,
+    #[serde(default = "default_creation_mode")]
+    pub creation_mode: String,
+    #[serde(default)]
+    pub creation_brief_json: Option<String>,
+    #[serde(default)]
+    pub brainstorm_revision: Option<i64>,
+    #[serde(default)]
+    pub progress_epoch: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -344,6 +355,128 @@ pub fn set_source(
     Ok(())
 }
 
+pub fn set_lifecycle_status(
+    conn: &Connection,
+    history_id: i64,
+    lifecycle_status: &str,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp_millis();
+    conn.execute(
+        "UPDATE creation_history
+         SET lifecycle_status = ?2, updated_at = ?3
+         WHERE id = ?1",
+        params![history_id, lifecycle_status, now],
+    )?;
+    Ok(())
+}
+
+pub fn set_brainstorm_metadata(
+    conn: &Connection,
+    history_id: i64,
+    creation_mode: &str,
+    creation_brief_json: Option<&str>,
+    brainstorm_revision: Option<i64>,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp_millis();
+    conn.execute(
+        "UPDATE creation_history
+         SET creation_mode = ?2,
+             creation_brief_json = COALESCE(?3, creation_brief_json),
+             brainstorm_revision = COALESCE(?4, brainstorm_revision),
+             updated_at = ?5
+         WHERE id = ?1",
+        params![
+            history_id,
+            creation_mode,
+            creation_brief_json,
+            brainstorm_revision,
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn update_progress(
+    conn: &Connection,
+    history_id: i64,
+    lifecycle_status: &str,
+    generated_content: Option<&str>,
+    conversation_json: Option<&str>,
+    agent_trace_json: Option<&str>,
+    latency_ms: Option<i64>,
+    progress_epoch: Option<i64>,
+) -> Result<bool> {
+    let now = chrono::Utc::now().timestamp_millis();
+    let changed = conn.execute(
+        "UPDATE creation_history
+         SET lifecycle_status = ?2,
+             generated_content = COALESCE(?3, generated_content),
+             conversation_json = COALESCE(?4, conversation_json),
+             agent_trace_json = COALESCE(?5, agent_trace_json),
+             latency_ms = COALESCE(?6, latency_ms),
+             updated_at = ?7
+         WHERE id = ?1
+           AND (?8 IS NULL OR progress_epoch = ?8)
+           AND NOT (
+             ?2 = 'running'
+             AND lifecycle_status IN ('completed', 'failed', 'cancelled')
+           )",
+        params![
+            history_id,
+            lifecycle_status,
+            generated_content,
+            conversation_json,
+            agent_trace_json,
+            latency_ms,
+            now,
+            progress_epoch,
+        ],
+    )?;
+    if changed > 0 {
+        return Ok(true);
+    }
+
+    // A late in-flight snapshot is an accepted no-op after a terminal write. Return true so the
+    // API does not misreport an existing record as missing, while preserving the terminal state,
+    // document, conversation and trace atomically.
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM creation_history WHERE id = ?1",
+            params![history_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    Ok(exists)
+}
+
+/// Explicitly starts a new run on an existing history record.
+///
+/// Unlike `update_progress`, this operation may reopen a terminal record and increments the
+/// persisted epoch. Subsequent snapshots must carry that epoch, so an older run cannot overwrite
+/// the new run even if its request arrives after this transition.
+pub fn start_progress(
+    conn: &Connection,
+    history_id: i64,
+    generated_content: Option<&str>,
+    conversation_json: Option<&str>,
+) -> Result<Option<i64>> {
+    let now = chrono::Utc::now().timestamp_millis();
+    conn.query_row(
+        "UPDATE creation_history
+         SET lifecycle_status = 'running',
+             progress_epoch = progress_epoch + 1,
+             generated_content = COALESCE(?2, generated_content),
+             conversation_json = COALESCE(?3, conversation_json),
+             updated_at = ?4
+         WHERE id = ?1
+         RETURNING progress_epoch",
+        params![history_id, generated_content, conversation_json, now],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 fn map_history_row(row: &rusqlite::Row<'_>) -> Result<CreationHistory> {
     Ok(CreationHistory {
         id: row.get(0)?,
@@ -371,6 +504,15 @@ fn map_history_row(row: &rusqlite::Row<'_>) -> Result<CreationHistory> {
             .get::<_, Option<String>>(21)?
             .unwrap_or_else(default_source_kind),
         source_ref_id: row.get(22)?,
+        lifecycle_status: row
+            .get::<_, Option<String>>(23)?
+            .unwrap_or_else(default_lifecycle_status),
+        creation_mode: row
+            .get::<_, Option<String>>(24)?
+            .unwrap_or_else(default_creation_mode),
+        creation_brief_json: row.get(25)?,
+        brainstorm_revision: row.get(26)?,
+        progress_epoch: row.get(27)?,
     })
 }
 
@@ -382,8 +524,16 @@ fn default_source_kind() -> String {
     "creation".to_string()
 }
 
+fn default_lifecycle_status() -> String {
+    "completed".to_string()
+}
+
 fn default_edit_operation() -> String {
     "create_document".to_string()
+}
+
+fn default_creation_mode() -> String {
+    "direct".to_string()
 }
 
 #[cfg(test)]
@@ -417,6 +567,11 @@ mod tests {
                 updated_at INTEGER NOT NULL,
                 source_kind TEXT NOT NULL DEFAULT 'creation',
                 source_ref_id INTEGER
+                , lifecycle_status TEXT NOT NULL DEFAULT 'completed'
+                , creation_mode TEXT NOT NULL DEFAULT 'direct'
+                , creation_brief_json TEXT
+                , brainstorm_revision INTEGER
+                , progress_epoch INTEGER NOT NULL DEFAULT 0
             );",
         )
         .unwrap();
@@ -503,6 +658,51 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("evidence-1"));
+    }
+
+    #[test]
+    fn persists_brainstorm_mode_brief_and_consumed_revision() {
+        let conn = connection();
+        let id = insert(
+            &conn,
+            "设计数据治理平台方案",
+            "# 数据治理平台方案",
+            None,
+            None,
+            0,
+            Some("[]"),
+            None,
+            None,
+            Some("session-brainstorm-history"),
+            None,
+            Some("[]"),
+            None,
+            Some("设计数据治理平台方案"),
+            None,
+            1,
+            "create_document",
+            None,
+        )
+        .unwrap();
+
+        set_brainstorm_metadata(
+            &conn,
+            id,
+            "brainstorm",
+            Some(r#"{"revision":4,"phase":"ready"}"#),
+            Some(4),
+        )
+        .unwrap();
+
+        let (items, total) = list_page(&conn, None, 20, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(items[0].creation_mode, "brainstorm");
+        assert_eq!(items[0].brainstorm_revision, Some(4));
+        assert!(items[0]
+            .creation_brief_json
+            .as_deref()
+            .unwrap()
+            .contains("\"phase\":\"ready\""));
     }
 
     #[test]
@@ -664,5 +864,129 @@ mod tests {
         let (items, total) = list_page(&conn, None, 20, 0).unwrap();
         assert_eq!(total, 1);
         assert_eq!(items[0].source_kind, "scheduled_task");
+    }
+
+    #[test]
+    fn tracks_running_progress_and_terminal_status_on_the_same_record() {
+        let conn = connection();
+        let id = insert(
+            &conn,
+            "生成后台方案",
+            "",
+            None,
+            None,
+            0,
+            Some("[]"),
+            None,
+            None,
+            Some("running-session"),
+            Some(r#"[{"role":"user","content":"生成后台方案"}]"#),
+            Some("[]"),
+            None,
+            Some("生成后台方案"),
+            None,
+            1,
+            "create_document",
+            None,
+        )
+        .unwrap();
+
+        let first_epoch = start_progress(&conn, id, None, None).unwrap().unwrap();
+        assert_eq!(first_epoch, 1);
+        update_progress(
+            &conn,
+            id,
+            "running",
+            Some("# 已完成的部分"),
+            None,
+            Some(r#"[{"type":"phase.started","status":"running"}]"#),
+            Some(850),
+            Some(first_epoch),
+        )
+        .unwrap();
+        let running = get_by_id(&conn, id).unwrap().unwrap();
+        assert_eq!(running.lifecycle_status, "running");
+        assert_eq!(running.generated_content, "# 已完成的部分");
+        assert!(running.agent_trace_json.unwrap().contains("phase.started"));
+
+        update_progress(
+            &conn,
+            id,
+            "completed",
+            Some("# 最终方案"),
+            None,
+            Some(r#"[{"type":"run.completed","status":"completed"}]"#),
+            Some(1200),
+            Some(first_epoch),
+        )
+        .unwrap();
+        let completed = get_by_id(&conn, id).unwrap().unwrap();
+        assert_eq!(completed.lifecycle_status, "completed");
+        assert_eq!(completed.generated_content, "# 最终方案");
+        assert_eq!(completed.latency_ms, Some(1200));
+
+        let accepted = update_progress(
+            &conn,
+            id,
+            "running",
+            Some("# 迟到的中间版本"),
+            None,
+            Some(r#"[{"type":"phase.started","status":"running"}]"#),
+            Some(1800),
+            Some(first_epoch),
+        )
+        .unwrap();
+        assert!(accepted);
+        let still_completed = get_by_id(&conn, id).unwrap().unwrap();
+        assert_eq!(still_completed.lifecycle_status, "completed");
+        assert_eq!(still_completed.generated_content, "# 最终方案");
+        assert_eq!(still_completed.latency_ms, Some(1200));
+        assert!(still_completed
+            .agent_trace_json
+            .as_deref()
+            .unwrap()
+            .contains("run.completed"));
+
+        let restarted = start_progress(
+            &conn,
+            id,
+            Some("# 第二轮草稿"),
+            Some(r#"[{"role":"user","content":"继续修改"}]"#),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(restarted, 2);
+
+        let running_again = get_by_id(&conn, id).unwrap().unwrap();
+        assert_eq!(running_again.lifecycle_status, "running");
+        assert_eq!(running_again.generated_content, "# 第二轮草稿");
+        assert_eq!(
+            running_again.conversation_json.as_deref(),
+            Some(r#"[{"role":"user","content":"继续修改"}]"#)
+        );
+        assert!(running_again
+            .agent_trace_json
+            .as_deref()
+            .unwrap()
+            .contains("run.completed"));
+
+        let stale_previous_run = update_progress(
+            &conn,
+            id,
+            "running",
+            Some("# 第一轮迟到版本"),
+            None,
+            Some(r#"[{"type":"phase.started","status":"running"}]"#),
+            Some(2200),
+            Some(first_epoch),
+        )
+        .unwrap();
+        assert!(stale_previous_run);
+
+        let still_second_run = get_by_id(&conn, id).unwrap().unwrap();
+        assert_eq!(still_second_run.progress_epoch, 2);
+        assert_eq!(still_second_run.lifecycle_status, "running");
+        assert_eq!(still_second_run.generated_content, "# 第二轮草稿");
+        assert_eq!(still_second_run.latency_ms, Some(1200));
     }
 }

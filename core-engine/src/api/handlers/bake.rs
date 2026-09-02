@@ -13,8 +13,8 @@ use crate::{
     api::{
         error::ApiError,
         handlers::data::{
-            looks_like_terminal_page, normalize_preview_id, scrape_browser_async, DataToolError,
-            BROWSER_DOCUMENT_READY_POLL_ATTEMPTS,
+            looks_like_terminal_page, normalize_preview_id, scrape_browser_async,
+            scrape_browser_extension_async, DataToolError, BROWSER_DOCUMENT_READY_POLL_ATTEMPTS,
         },
         state::AppState,
     },
@@ -147,6 +147,14 @@ pub struct RefreshBakeDocumentRequest {
     /// 但不能绕过 never、URL 安全、终态错误和 6 小时节流门禁。
     #[serde(default)]
     pub require_latest: bool,
+    /// 开启网页爬虫时，文档刷新与报表刷新统一走 Chrome 扩展后台标签页。
+    /// 关闭时保留兼容的 Apple Events 一次性浏览器会话。
+    #[serde(default = "default_browser_extension_enabled")]
+    pub browser_extension_enabled: bool,
+}
+
+fn default_browser_extension_enabled() -> bool {
+    true
 }
 
 #[derive(serde::Deserialize)]
@@ -489,16 +497,33 @@ pub async fn refresh_bake_document(
             objective.clone(),
             None,
             None,
+            None,
             BROWSER_DOCUMENT_READY_POLL_ATTEMPTS,
             false,
         )
     };
 
-    // 与最新数据取数保持一致：直接创建带唯一标识的一次性隐藏窗口，
-    // 在后台完成页面加载、交互和长页遍历，采集结束后由浏览器采集器清理。
-    let preview_token = normalize_preview_id(None).map_err(scrape_error_to_api)?;
-    tracing::info!(document_id = id, "文档即时刷新开始使用一次性隐藏浏览器会话");
-    let scrape_result = scrape_once(Some(preview_token)).await;
+    let scrape_result = if body.browser_extension_enabled {
+        tracing::info!(
+            document_id = id,
+            "文档即时刷新开始使用 Chrome 扩展后台标签页"
+        );
+        scrape_browser_extension_async(
+            &state.browser_extension,
+            url.clone(),
+            objective.clone(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+    } else {
+        // 兼容未开启网页爬虫的用户：沿用带唯一标识的一次性浏览器会话。
+        let preview_token = normalize_preview_id(None).map_err(scrape_error_to_api)?;
+        tracing::info!(document_id = id, "文档即时刷新开始使用一次性隐藏浏览器会话");
+        scrape_once(Some(preview_token)).await
+    };
 
     let result = match scrape_result {
         Ok(result) => result,
@@ -1181,6 +1206,18 @@ pub async fn get_bake_overview(
 #[cfg(test)]
 mod document_refresh_tests {
     use super::*;
+
+    #[test]
+    fn document_refresh_defaults_to_background_extension() {
+        let request: RefreshBakeDocumentRequest =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(request.browser_extension_enabled);
+
+        let disabled: RefreshBakeDocumentRequest =
+            serde_json::from_value(serde_json::json!({"browser_extension_enabled": false}))
+                .unwrap();
+        assert!(!disabled.browser_extension_enabled);
+    }
 
     #[test]
     fn document_identity_ignores_scheme_case_query_and_fragment() {

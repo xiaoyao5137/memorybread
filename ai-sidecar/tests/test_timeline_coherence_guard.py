@@ -273,6 +273,13 @@ class _SplitThenExtract:
         return None
 
 
+class _FailGroupThenExtractSingles(_SplitThenExtract):
+    def extract_merged(self, captures, preempt_check=None):
+        if len(captures) > 1:
+            return None
+        return super().extract_merged(captures, preempt_check=preempt_check)
+
+
 async def _skip_vectorization(*args, **kwargs):
     return True
 
@@ -311,6 +318,36 @@ def test_background_processor_persists_split_groups_separately(tmp_path, monkeyp
     assert capture_links[0][1] != capture_links[1][1]
 
 
+def test_repeated_group_failure_falls_back_to_single_captures(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "coherence.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    monkeypatch.setattr(
+        processor,
+        "_get_knowledge_extractor",
+        lambda: _FailGroupThenExtractSingles(),
+    )
+    monkeypatch.setattr(processor, "_process_knowledge_vectorization", _skip_vectorization)
+    monkeypatch.setattr("inference_queue.get_global_queue", lambda: _ImmediateQueue())
+    captures = [
+        _capture(1, "ChatGPT", "代码任务第一帧"),
+        _capture(2, "Chrome", "天气任务第一帧"),
+        _capture(3, "ChatGPT", "代码任务第二帧"),
+        _capture(4, "Chrome", "天气任务第二帧"),
+    ]
+
+    assert asyncio.run(processor._process_capture_group(captures)) is False
+    assert asyncio.run(processor._process_capture_group(captures)) is True
+
+    conn = sqlite3.connect(db_path)
+    capture_links = conn.execute(
+        "SELECT id, timeline_id FROM captures ORDER BY id"
+    ).fetchall()
+    conn.close()
+    assert all(timeline_id is not None for _, timeline_id in capture_links)
+    assert processor._timeline_retry_state == {}
+
+
 def test_merged_prompt_exposes_capture_ids():
     extractor = KnowledgeExtractorV2.__new__(KnowledgeExtractorV2)
     merged = extractor._build_merged_blocks([
@@ -318,3 +355,19 @@ def test_merged_prompt_exposes_capture_ids():
     ])
 
     assert "采集ID:3194" in merged
+
+
+def test_merged_prompt_preserves_every_id_when_bodies_are_identical():
+    extractor = KnowledgeExtractorV2.__new__(KnowledgeExtractorV2)
+    captures = [
+        _capture(69803, "Chrome", "完全相同的页面正文"),
+        _capture(69832, "Chrome", "完全相同的页面正文"),
+        _capture(69846, "Chrome", "完全相同的页面正文"),
+        _capture(69847, "Chrome", "完全相同的页面正文"),
+    ]
+
+    merged = extractor._build_merged_blocks(captures)
+
+    for capture in captures:
+        assert f"采集ID:{capture['id']}" in merged
+    assert merged.count("完全相同的页面正文") == 1

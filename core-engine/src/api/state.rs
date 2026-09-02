@@ -67,6 +67,12 @@ fn default_debug_log_specs() -> Vec<DebugLogSpec> {
             "model_api.log",
         ),
         DebugLogSpec::new(
+            "creation",
+            "creation.log · Creation Service",
+            log_dir.clone(),
+            "creation.log",
+        ),
+        DebugLogSpec::new(
             "bake_extract_errors",
             "bake_extract_errors.log · Bake 提炼错误",
             log_dir.clone(),
@@ -97,6 +103,12 @@ pub struct CreationSkillAnalysisJobRecord {
     pub updated_at_ms: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct CreationSessionLease {
+    pub owner_request_id: String,
+    pub updated_at_ms: i64,
+}
+
 /// 所有 Handler 共享的应用状态。
 ///
 /// 使用 `Arc<AppState>` 确保零拷贝跨线程共享。
@@ -110,6 +122,7 @@ pub struct AppState {
     pub rag_job_seq: Arc<AtomicU64>,
     pub creation_skill_analysis_jobs: Arc<Mutex<HashMap<String, CreationSkillAnalysisJobRecord>>>,
     pub creation_skill_analysis_job_seq: Arc<AtomicU64>,
+    pub creation_session_leases: Arc<Mutex<HashMap<String, CreationSessionLease>>>,
     pub capture_enabled: Arc<AtomicBool>,
     pub keyboard_signal_enabled: Arc<AtomicBool>,
     pub capture_schedule: Arc<CaptureSchedule>,
@@ -205,6 +218,7 @@ impl AppState {
             rag_job_seq: Arc::new(AtomicU64::new(1)),
             creation_skill_analysis_jobs: Arc::new(Mutex::new(HashMap::new())),
             creation_skill_analysis_job_seq: Arc::new(AtomicU64::new(1)),
+            creation_session_leases: Arc::new(Mutex::new(HashMap::new())),
             capture_enabled: Arc::new(AtomicBool::new(capture_enabled)),
             keyboard_signal_enabled: Arc::new(AtomicBool::new(keyboard_signal_enabled)),
             capture_schedule: Arc::new(CaptureSchedule::new(capture_interval_secs)),

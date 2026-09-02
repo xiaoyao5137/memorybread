@@ -442,6 +442,30 @@ static MIGRATIONS: &[(&str, &str)] = &[
         "103_data_fact_quality_gate",
         include_str!("migrations/103_data_fact_quality_gate.sql"),
     ),
+    (
+        "104_creation_history_lifecycle",
+        include_str!("migrations/104_creation_history_lifecycle.sql"),
+    ),
+    (
+        "105_operation_evidence_recovery",
+        include_str!("migrations/105_operation_evidence_recovery.sql"),
+    ),
+    (
+        "106_creation_brainstorm_sessions",
+        include_str!("migrations/106_creation_brainstorm_sessions.sql"),
+    ),
+    (
+        "107_creation_history_progress_epoch",
+        include_str!("migrations/107_creation_history_progress_epoch.sql"),
+    ),
+    (
+        "108_creation_inline_edit_runs",
+        include_str!("migrations/108_creation_inline_edit_runs.sql"),
+    ),
+    (
+        "109_reconcile_operation_replay_queue",
+        include_str!("migrations/109_reconcile_operation_replay_queue.sql"),
+    ),
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -643,6 +667,81 @@ impl StorageManager {
                         rusqlite::params![version, current_ts_ms()],
                     )?;
                 }
+                info!("迁移 {} 执行成功", version);
+                continue;
+            }
+
+            if *version == "104_creation_history_lifecycle" {
+                Self::add_column_if_missing(
+                    &conn,
+                    "creation_history",
+                    "lifecycle_status",
+                    "TEXT NOT NULL DEFAULT 'completed'",
+                )?;
+                conn.execute_batch(sql)
+                    .map_err(|e| StorageError::MigrationFailed {
+                        version,
+                        reason: e.to_string(),
+                    })?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_migrations (version, applied_at)
+                     VALUES (?1, ?2)",
+                    rusqlite::params![version, current_ts_ms()],
+                )?;
+                info!("迁移 {} 执行成功", version);
+                continue;
+            }
+
+            if *version == "106_creation_brainstorm_sessions" {
+                Self::add_column_if_missing(
+                    &conn,
+                    "creation_history",
+                    "creation_mode",
+                    "TEXT NOT NULL DEFAULT 'direct'",
+                )?;
+                Self::add_column_if_missing(
+                    &conn,
+                    "creation_history",
+                    "creation_brief_json",
+                    "TEXT",
+                )?;
+                Self::add_column_if_missing(
+                    &conn,
+                    "creation_history",
+                    "brainstorm_revision",
+                    "INTEGER",
+                )?;
+                conn.execute_batch(sql)
+                    .map_err(|e| StorageError::MigrationFailed {
+                        version,
+                        reason: e.to_string(),
+                    })?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_migrations (version, applied_at)
+                     VALUES (?1, ?2)",
+                    rusqlite::params![version, current_ts_ms()],
+                )?;
+                info!("迁移 {} 执行成功", version);
+                continue;
+            }
+
+            if *version == "107_creation_history_progress_epoch" {
+                Self::add_column_if_missing(
+                    &conn,
+                    "creation_history",
+                    "progress_epoch",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )?;
+                conn.execute_batch(sql)
+                    .map_err(|e| StorageError::MigrationFailed {
+                        version,
+                        reason: e.to_string(),
+                    })?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_migrations (version, applied_at)
+                     VALUES (?1, ?2)",
+                    rusqlite::params![version, current_ts_ms()],
+                )?;
                 info!("迁移 {} 执行成功", version);
                 continue;
             }
@@ -935,6 +1034,18 @@ impl StorageManager {
                 "TEXT NOT NULL DEFAULT 'creation'",
             )?;
             Self::add_column_if_missing(conn, "creation_history", "source_ref_id", "INTEGER")?;
+            Self::add_column_if_missing(
+                conn,
+                "creation_history",
+                "lifecycle_status",
+                "TEXT NOT NULL DEFAULT 'completed'",
+            )?;
+            Self::add_column_if_missing(
+                conn,
+                "creation_history",
+                "progress_epoch",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_creation_history_session
                  ON creation_history(session_id, created_at DESC)",
@@ -943,6 +1054,11 @@ impl StorageManager {
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_creation_history_session_revision
                  ON creation_history(session_id, revision_no DESC, created_at DESC)",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_creation_history_lifecycle_updated
+                 ON creation_history(lifecycle_status, updated_at DESC)",
                 [],
             )?;
         }
@@ -1409,6 +1525,11 @@ mod tests {
                     conn,
                     "creation_history",
                     "document_patch_json"
+                )?);
+                assert!(StorageManager::has_column(
+                    conn,
+                    "creation_history",
+                    "progress_epoch"
                 )?);
                 Ok(())
             })
@@ -2164,5 +2285,85 @@ mod tests {
             .unwrap();
         assert_eq!(ledger_count, 0);
         assert_eq!(queued, vec!["hard-point", "soft-point"]);
+    }
+
+    #[test]
+    fn operation_replay_reconciliation_keeps_only_actionable_evidence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("operation-replay-reconciliation.db");
+        let storage = StorageManager::open(&db).unwrap();
+
+        storage
+            .with_conn(|conn| {
+                for timeline_id in 1_i64..=4 {
+                    let primary_capture_id = timeline_id * 10;
+                    conn.execute(
+                        "INSERT INTO captures (id, ts, event_type, timeline_id)
+                         VALUES (?1, ?2, 'mouse_click', ?3)",
+                        rusqlite::params![primary_capture_id, timeline_id * 1_000, timeline_id],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO timelines
+                         (id, capture_id, summary, category, updated_at_ms)
+                         VALUES (?1, ?2, ?3, '代码', ?4)",
+                        rusqlite::params![
+                            timeline_id,
+                            primary_capture_id,
+                            format!("回放候选 {timeline_id}"),
+                            timeline_id * 1_000
+                        ],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO operation_replay_queue
+                         (timeline_id, reason, status, priority, queued_at_ms)
+                         VALUES (?1, 'test', 'pending', 10, ?2)",
+                        rusqlite::params![timeline_id, timeline_id * 1_000],
+                    )?;
+                }
+
+                // timeline 1 只有单帧，应直接终态收敛；其余候选具备最低两帧证据。
+                for timeline_id in 2_i64..=4 {
+                    conn.execute(
+                        "INSERT INTO captures (id, ts, event_type, timeline_id)
+                         VALUES (?1, ?2, 'auto', ?3)",
+                        rusqlite::params![timeline_id * 10 + 1, timeline_id * 1_000 + 1, timeline_id],
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO bake_sops (timeline_id, title, summary, created_at_ms, updated_at_ms)
+                     VALUES (3, '已有操作', '无需再次回放', 1, 1)",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO bake_retry_state
+                     (timeline_id, failure_count, last_error, last_failed_at_ms, next_retry_at_ms)
+                     VALUES (4, 3, 'exhausted', 1, 0)",
+                    [],
+                )?;
+
+                conn.execute_batch(include_str!(
+                    "migrations/109_reconcile_operation_replay_queue.sql"
+                ))?;
+
+                let states = conn
+                    .prepare(
+                        "SELECT timeline_id, status
+                         FROM operation_replay_queue
+                         ORDER BY timeline_id",
+                    )?
+                    .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                assert_eq!(
+                    states,
+                    vec![
+                        (1, "discarded".to_string()),
+                        (2, "pending".to_string()),
+                        (3, "discarded".to_string()),
+                        (4, "discarded".to_string()),
+                    ]
+                );
+                Ok(())
+            })
+            .unwrap();
     }
 }

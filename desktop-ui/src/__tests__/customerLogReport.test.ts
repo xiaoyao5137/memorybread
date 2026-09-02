@@ -33,6 +33,9 @@ describe('customer log privacy', () => {
       'api_key=sk-secretvalue123456789',
       'email=alice@example.com phone=13800138000',
       'password=hunter2',
+      'url=https://example.com/private?token=secret',
+      'local=http://127.0.0.1:7071/status?token=local-secret',
+      'temp=/private/tmp/alice/trace.log hostname=alice-mac',
     ].join('\n')
 
     const result = scrubDiagnosticLog(source)
@@ -43,6 +46,10 @@ describe('customer log privacy', () => {
     expect(result).not.toContain('13800138000')
     expect(result).not.toContain('hunter2')
     expect(result).not.toContain('eyJhbGci')
+    expect(result).not.toContain('example.com')
+    expect(result).not.toContain('alice-mac')
+    expect(result).not.toContain('local-secret')
+    expect(result).toContain('http://127.0.0.1:7071/status?token=[REDACTED]')
     expect(result).toContain('[USER_HOME]')
     expect(result).toContain('[REDACTED_EMAIL]')
     expect(result).toContain('[REDACTED_PHONE]')
@@ -99,7 +106,7 @@ describe('customer log privacy', () => {
       adminApiBaseUrl: 'https://memorybread.cn',
       localApiBaseUrl: 'http://127.0.0.1:7070/',
       metadata,
-      description: '无法启动',
+      description: '无法启动 token=private-token-value',
     })
 
     expect(receipt.log_id).toBe('018f0000-0000-7000-8000-000000000001')
@@ -117,7 +124,58 @@ describe('customer log privacy', () => {
       oss_object_key: 'customer-logs/production/2026/08/17/report.zip',
       platform: 'macos',
       architecture: 'aarch64',
-      description: '无法启动',
+      description: '无法启动 token=[REDACTED]',
+      initialization_report_id: null,
+    })
+  })
+
+  it('falls back to sidecar logs and links an initialization report when core is down', async () => {
+    useAppStore.setState({ serviceEnvironment: 'production' })
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError('Load failed'))
+      .mockResolvedValueOnce(jsonResponse({
+        items: [{ key: 'core', label: '核心服务日志', exists: true, size_bytes: 42, modified_at: 1 }],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        key: 'core',
+        label: '核心服务日志',
+        content: 'database migration failed at /Users/alice/private.db',
+        truncated: false,
+        total_size_bytes: 56,
+        returned_bytes: 56,
+        modified_at: 1,
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        data: {
+          upload_id: '018f0000-0000-7000-8000-000000000002',
+          oss_object_key: 'customer-logs/production/2026/09/01/report.zip',
+          upload_url: 'https://example-bucket.oss.example.com/report.zip',
+          required_headers: { 'content-type': 'application/zip' },
+        },
+      }))
+      .mockResolvedValueOnce(new Response(null, { status: 200 }))
+      .mockResolvedValueOnce(jsonResponse({
+        data: {
+          log_id: '018f0000-0000-7000-8000-000000000002',
+          received_at: '2026-09-01T05:00:00Z',
+          duplicate: false,
+        },
+      }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await reportCustomerLogs({
+      adminApiBaseUrl: 'https://memorybread.cn',
+      localApiBaseUrl: 'http://127.0.0.1:7070',
+      metadata,
+      installationId: '018f0000-0000-7000-8000-000000000010',
+      initializationReportId: '018f0000-0000-7000-8000-000000000011',
+    })
+
+    expect(fetchMock.mock.calls[1][0]).toBe('http://127.0.0.1:7071/api/debug/log-files')
+    const prepareBody = JSON.parse(String(fetchMock.mock.calls[3][1]?.body))
+    expect(prepareBody).toMatchObject({
+      installation_id: '018f0000-0000-7000-8000-000000000010',
+      initialization_report_id: '018f0000-0000-7000-8000-000000000011',
     })
   })
 })

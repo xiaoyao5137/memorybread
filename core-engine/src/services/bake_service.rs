@@ -451,7 +451,6 @@ pub enum BakeDocumentEvidenceKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BakeSourceSurface {
-    Chat,
     Browser,
     DocumentEditor,
     Other,
@@ -2266,6 +2265,24 @@ impl BakeService {
         Ok(run_id)
     }
 
+    fn advance_unified_watermark(
+        &self,
+        max_processed_ts: &mut i64,
+        candidate_ts: i64,
+        out_of_order: bool,
+    ) -> Result<(), ApiError> {
+        if out_of_order {
+            return Ok(());
+        }
+        let next = (*max_processed_ts).max(candidate_ts);
+        if next != *max_processed_ts {
+            *max_processed_ts = next;
+            self.storage
+                .upsert_bake_watermark(UNIFIED_BAKE_PIPELINE_NAME, next)?;
+        }
+        Ok(())
+    }
+
     async fn execute_bake_pipeline(
         &self,
         run_id: i64,
@@ -2309,6 +2326,13 @@ impl BakeService {
         let retry_candidates = self
             .storage
             .list_bake_memory_retry_candidates(scan_limit, MAX_BAKE_RETRY_FAILURES)?;
+        let operation_replay_candidates = self
+            .storage
+            .list_bake_memory_operation_replay_candidates(scan_limit, MAX_BAKE_RETRY_FAILURES)?;
+        let operation_replay_ids: HashSet<i64> = operation_replay_candidates
+            .iter()
+            .map(|candidate| candidate.timeline.id)
+            .collect();
 
         // Watermark 自动回退：如果 watermark 已超过所有现有 timeline 的 updated_at_ms，
         // 导致候选列表为空（真正有 pending 的情况下），则把 watermark 重置为 0 重新扫描全量。
@@ -2345,10 +2369,16 @@ impl BakeService {
             }
         }
 
-        // 两条 lane 分开查询、按 4:1 交错。旧重试不再占满 LIMIT，也不会因
-        // watermark 已越过自身而被丢弃；新任务和重试任务都能持续取得配额。
-        let candidates =
-            merge_bake_candidate_lanes(fresh_candidates, retry_candidates, scan_limit, run_id);
+        // 回放候选优先替换 fresh 配额，但各 lane 合计仍受同一个 scan_limit 和
+        // 后续 limit 约束。该队列不会启动额外推理，单轮模型调用上限保持不变。
+        let candidates = merge_bake_candidate_lanes_with_replay(
+            fresh_candidates,
+            retry_candidates,
+            operation_replay_candidates,
+            scan_limit,
+            limit.saturating_add(1) / 2,
+            run_id,
+        );
 
         // 增量查询：只针对本批候选的 timeline_id 集合查已有 knowledge/sop，
         // 避免全量拉取 500 条导致随数据增长内存和时间开销膨胀。
@@ -2386,6 +2416,7 @@ impl BakeService {
 
         let mut work_queue: Vec<BakeWorkItem> = Vec::new();
         let mut metadata_refresh_count = 0_usize;
+        let mut local_queue_progress_count = 0_usize;
         let mut queued_document_urls = std::collections::HashSet::new();
         // URL 去重被跳过的候选：已有文档时已当场登记；无文档的留给本轮先入队候选
         // 创建，待产物全部落盘后统一补登记，避免 capture/timeline 漏进文档来源。
@@ -2397,15 +2428,18 @@ impl BakeService {
                 break;
             }
             let candidate_ts = candidate.timeline.updated_at_ms;
+            let is_operation_replay = operation_replay_ids.contains(&candidate.timeline.id);
 
             // 已有文档的来源元数据是本地确定性信息，不应依赖 sidecar 是否接受内容合并。
             // 即使全局 watermark 已越过该 timeline，也要先补齐后来追加的 capture 和 URL。
             if existing_document_sources.contains(&candidate.timeline.id) {
+                let mut source_metadata_changed = false;
                 if let Some(existing_doc) = self
                     .storage
                     .find_bake_document_by_source_memory_id(candidate.timeline.id)?
                 {
                     if self.refresh_document_source_metadata(&candidate, &existing_doc)? {
+                        source_metadata_changed = true;
                         tracing::info!(
                             "bake document source metadata refreshed: timeline_id={} doc_id={} source_url={:?}",
                             candidate.timeline.id,
@@ -2436,14 +2470,43 @@ impl BakeService {
                         }
                     }
                 }
-                if candidate_ts <= max_processed_ts {
-                    metadata_refresh_count += 1;
+                // 普通历史候选只需刷新来源元数据；无变化时不消耗本轮额度。
+                // operation replay 的目标是重新判定 SOP，已有 document 不能把它
+                // 提前短路，否则相同回放项会永久停在队首。
+                if candidate_ts <= max_processed_ts && !is_operation_replay {
+                    if source_metadata_changed {
+                        metadata_refresh_count += 1;
+                    }
                     continue;
                 }
             }
 
-            if candidate_ts <= max_processed_ts && candidate.retry_failure_count == 0 {
+            if candidate_ts <= max_processed_ts
+                && candidate.retry_failure_count == 0
+                && !is_operation_replay
+            {
                 continue;
+            }
+            if is_operation_replay {
+                let eligibility = sop_eligibility(&candidate);
+                if eligibility.state != SopEligibilityState::Eligible {
+                    self.storage
+                        .upsert_bake_candidate_audit(&new_bake_candidate_audit(
+                            run_id,
+                            &candidate,
+                            "skipped",
+                            Some(eligibility.reason),
+                        ))?;
+                    self.storage
+                        .finish_operation_replay(candidate.timeline.id, "discarded")?;
+                    local_queue_progress_count += 1;
+                    work_queue.push(BakeWorkItem::Skip {
+                        timeline_id: candidate.timeline.id,
+                        candidate_ts,
+                        clear_retry: false,
+                    });
+                    continue;
+                }
             }
             if !is_high_value_candidate(&candidate) {
                 tracing::info!(
@@ -2464,6 +2527,11 @@ impl BakeService {
                         "skipped",
                         Some("not_high_value"),
                     ))?;
+                if is_operation_replay {
+                    self.storage
+                        .finish_operation_replay(candidate.timeline.id, "discarded")?;
+                    local_queue_progress_count += 1;
+                }
                 work_queue.push(BakeWorkItem::Skip {
                     timeline_id: candidate.timeline.id,
                     candidate_ts,
@@ -2485,6 +2553,11 @@ impl BakeService {
                         "skipped",
                         Some("fingerprint_unchanged"),
                     ))?;
+                if is_operation_replay {
+                    self.storage
+                        .finish_operation_replay(candidate.timeline.id, "discarded")?;
+                    local_queue_progress_count += 1;
+                }
                 work_queue.push(BakeWorkItem::Skip {
                     timeline_id: candidate.timeline.id,
                     candidate_ts,
@@ -2493,6 +2566,37 @@ impl BakeService {
                 continue;
             }
             if let Some(document_url) = substantive_document_url(&candidate) {
+                // 同 URL 文档已经存在时，来源合并是纯本地确定性操作。不能仍先
+                // 调模型：长文档推理超时会让明明可直接关联的 timeline 进入重试。
+                if self
+                    .storage
+                    .find_document_by_source_url(&document_url)?
+                    .is_some()
+                {
+                    self.register_skipped_document_candidate_source(
+                        &candidate,
+                        &document_url,
+                        &mut deferred_coalesce_sources,
+                    )?;
+                    self.storage
+                        .upsert_bake_candidate_audit(&new_bake_candidate_audit(
+                            run_id,
+                            &candidate,
+                            "skipped",
+                            Some("existing_document_url_linked"),
+                        ))?;
+                    if is_operation_replay {
+                        self.storage
+                            .finish_operation_replay(candidate.timeline.id, "discarded")?;
+                        local_queue_progress_count += 1;
+                    }
+                    work_queue.push(BakeWorkItem::Skip {
+                        timeline_id: candidate.timeline.id,
+                        candidate_ts,
+                        clear_retry: candidate.retry_failure_count > 0,
+                    });
+                    continue;
+                }
                 if !reserve_document_task(&candidate, &mut queued_document_urls) {
                     tracing::info!(
                         "bake coalesce: timeline_id={} canonical_url={} reason=document_url_already_queued",
@@ -2512,6 +2616,11 @@ impl BakeService {
                             "skipped",
                             Some("document_url_already_queued"),
                         ))?;
+                    if is_operation_replay {
+                        self.storage
+                            .finish_operation_replay(candidate.timeline.id, "discarded")?;
+                        local_queue_progress_count += 1;
+                    }
                     work_queue.push(BakeWorkItem::Skip {
                         timeline_id: candidate.timeline.id,
                         candidate_ts,
@@ -2519,6 +2628,13 @@ impl BakeService {
                     });
                     continue;
                 }
+            }
+            if is_operation_replay
+                && !self
+                    .storage
+                    .claim_operation_replay(candidate.timeline.id, run_id)?
+            {
+                continue;
             }
             initial_candidate_count += 1;
             self.storage
@@ -2588,12 +2704,11 @@ impl BakeService {
                     if clear_retry {
                         self.storage.clear_bake_retry_failure(timeline_id)?;
                     }
-                    let next = max_processed_ts.max(candidate_ts);
-                    if next != max_processed_ts {
-                        max_processed_ts = next;
-                        self.storage
-                            .upsert_bake_watermark(UNIFIED_BAKE_PIPELINE_NAME, next)?;
-                    }
+                    self.advance_unified_watermark(
+                        &mut max_processed_ts,
+                        candidate_ts,
+                        clear_retry && candidate_ts > initial_watermark_ts,
+                    )?;
                     continue;
                 }
                 BakeWorkResult::Extracted(candidate, extract_result) => (candidate, extract_result),
@@ -2602,6 +2717,7 @@ impl BakeService {
             let extracted = match extract_result {
                 Ok(v) => v,
                 Err(err) => {
+                    let is_operation_replay = operation_replay_ids.contains(&candidate.timeline.id);
                     // 前台推理抢占、限流和明确的服务不可用只会延后本批。
                     // 不写候选死信，也不推进 watermark，下一批从同一候选继续。
                     if is_untracked_transient_bake_error(&err) {
@@ -2611,6 +2727,10 @@ impl BakeService {
                             "deferred",
                             Some(bake_retry_error_code(&err)),
                         )?;
+                        if is_operation_replay {
+                            self.storage
+                                .finish_operation_replay(candidate.timeline.id, "pending")?;
+                        }
                         return Err(err);
                     }
                     let count = self
@@ -2632,12 +2752,12 @@ impl BakeService {
                             MAX_BAKE_RETRY_FAILURES,
                             err
                         );
-                        let next = max_processed_ts.max(candidate.timeline.updated_at_ms);
-                        if next != max_processed_ts {
-                            max_processed_ts = next;
-                            self.storage
-                                .upsert_bake_watermark(UNIFIED_BAKE_PIPELINE_NAME, next)?;
-                        }
+                        self.advance_unified_watermark(
+                            &mut max_processed_ts,
+                            candidate.timeline.updated_at_ms,
+                            candidate.retry_failure_count > 0
+                                && candidate.timeline.updated_at_ms > initial_watermark_ts,
+                        )?;
                         processed_episode_count += 1;
                         let _ = self.storage.update_bake_run_progress(
                             run_id,
@@ -2650,6 +2770,10 @@ impl BakeService {
                             "retry_scheduled",
                             Some(bake_retry_error_code(&err)),
                         )?;
+                        if is_operation_replay {
+                            self.storage
+                                .finish_operation_replay(candidate.timeline.id, "pending")?;
+                        }
                         continue;
                     }
                     tracing::error!(
@@ -2659,12 +2783,12 @@ impl BakeService {
                         is_bake_candidate_timeout(&err),
                         err
                     );
-                    let next = max_processed_ts.max(candidate.timeline.updated_at_ms);
-                    if next != max_processed_ts {
-                        max_processed_ts = next;
-                        self.storage
-                            .upsert_bake_watermark(UNIFIED_BAKE_PIPELINE_NAME, next)?;
-                    }
+                    self.advance_unified_watermark(
+                        &mut max_processed_ts,
+                        candidate.timeline.updated_at_ms,
+                        candidate.retry_failure_count > 0
+                            && candidate.timeline.updated_at_ms > initial_watermark_ts,
+                    )?;
                     discarded_count += 1;
                     processed_episode_count += 1;
                     self.storage.finalize_bake_candidate_audit(
@@ -2673,6 +2797,10 @@ impl BakeService {
                         "failed",
                         Some(bake_retry_error_code(&err)),
                     )?;
+                    if is_operation_replay {
+                        self.storage
+                            .finish_operation_replay(candidate.timeline.id, "discarded")?;
+                    }
                     let _ = self.storage.update_bake_run_progress(
                         run_id,
                         initial_candidate_count,
@@ -2738,6 +2866,7 @@ impl BakeService {
             {
                 Ok(r) => r,
                 Err(err) => {
+                    let is_operation_replay = operation_replay_ids.contains(&candidate.timeline.id);
                     // 文档合并同样会经过 sidecar，可能在持久化阶段被前台任务抢占。
                     // 此时本地已落盘的部分产物保持幂等，候选留给下一批补齐。
                     if is_untracked_transient_bake_error(&err) {
@@ -2747,6 +2876,10 @@ impl BakeService {
                             "deferred",
                             Some(bake_retry_error_code(&err)),
                         )?;
+                        if is_operation_replay {
+                            self.storage
+                                .finish_operation_replay(candidate.timeline.id, "pending")?;
+                        }
                         return Err(err);
                     }
                     let count = self
@@ -2765,12 +2898,12 @@ impl BakeService {
                             MAX_BAKE_RETRY_FAILURES,
                             err
                         );
-                        let next = max_processed_ts.max(candidate.timeline.updated_at_ms);
-                        if next != max_processed_ts {
-                            max_processed_ts = next;
-                            self.storage
-                                .upsert_bake_watermark(UNIFIED_BAKE_PIPELINE_NAME, next)?;
-                        }
+                        self.advance_unified_watermark(
+                            &mut max_processed_ts,
+                            candidate.timeline.updated_at_ms,
+                            candidate.retry_failure_count > 0
+                                && candidate.timeline.updated_at_ms > initial_watermark_ts,
+                        )?;
                         processed_episode_count += 1;
                         let _ = self.storage.update_bake_run_progress(
                             run_id,
@@ -2783,6 +2916,10 @@ impl BakeService {
                             "retry_scheduled",
                             Some(bake_retry_error_code(&err)),
                         )?;
+                        if is_operation_replay {
+                            self.storage
+                                .finish_operation_replay(candidate.timeline.id, "pending")?;
+                        }
                         continue;
                     }
                     tracing::error!(
@@ -2792,12 +2929,12 @@ impl BakeService {
                         is_bake_candidate_timeout(&err),
                         err
                     );
-                    let next = max_processed_ts.max(candidate.timeline.updated_at_ms);
-                    if next != max_processed_ts {
-                        max_processed_ts = next;
-                        self.storage
-                            .upsert_bake_watermark(UNIFIED_BAKE_PIPELINE_NAME, next)?;
-                    }
+                    self.advance_unified_watermark(
+                        &mut max_processed_ts,
+                        candidate.timeline.updated_at_ms,
+                        candidate.retry_failure_count > 0
+                            && candidate.timeline.updated_at_ms > initial_watermark_ts,
+                    )?;
                     discarded_count += 1;
                     processed_episode_count += 1;
                     self.storage.finalize_bake_candidate_audit(
@@ -2806,6 +2943,10 @@ impl BakeService {
                         "failed",
                         Some(bake_retry_error_code(&err)),
                     )?;
+                    if is_operation_replay {
+                        self.storage
+                            .finish_operation_replay(candidate.timeline.id, "discarded")?;
+                    }
                     let _ = self.storage.update_bake_run_progress(
                         run_id,
                         initial_candidate_count,
@@ -2823,6 +2964,16 @@ impl BakeService {
                     .unwrap_or("not_evaluated"),
                 candidate_result.sop_persist_reason.as_deref(),
             )?;
+            if operation_replay_ids.contains(&candidate.timeline.id) {
+                self.storage.finish_operation_replay(
+                    candidate.timeline.id,
+                    if candidate_result.sop_created_count > 0 {
+                        "completed"
+                    } else {
+                        "discarded"
+                    },
+                )?;
+            }
 
             auto_created_count += candidate_result.auto_created_count;
             candidate_count += candidate_result.candidate_count;
@@ -2832,12 +2983,12 @@ impl BakeService {
             sop_created_count += candidate_result.sop_created_count;
             self.storage
                 .clear_bake_retry_failure(candidate.timeline.id)?;
-            let next = max_processed_ts.max(candidate.timeline.updated_at_ms);
-            if next != max_processed_ts {
-                max_processed_ts = next;
-                self.storage
-                    .upsert_bake_watermark(UNIFIED_BAKE_PIPELINE_NAME, next)?;
-            }
+            self.advance_unified_watermark(
+                &mut max_processed_ts,
+                candidate.timeline.updated_at_ms,
+                candidate.retry_failure_count > 0
+                    && candidate.timeline.updated_at_ms > initial_watermark_ts,
+            )?;
             // 只有产物和 watermark 都成功落盘后才计入实时进度。若中途被 P0
             // 抢占，deferred run 展示的是可从断点继续的真实完成数。
             processed_episode_count += 1;
@@ -2876,6 +3027,7 @@ impl BakeService {
         let latency_ms = completed_at.saturating_sub(started_at);
         let final_status = if processed_episode_count == 0
             && metadata_refresh_count == 0
+            && local_queue_progress_count == 0
             && max_processed_ts == initial_watermark_ts
         {
             "no_op"
@@ -4773,11 +4925,24 @@ fn new_bake_candidate_audit(
 ) -> NewBakeCandidateAudit {
     let source_capture_count = source_capture_id_strings(candidate).len() as i64;
     let eligibility = sop_eligibility(candidate);
-    let (sop_eligible, sop_eligibility_reason) = if persist_status != "queued" {
-        (false, persist_reason.unwrap_or("precheck_skipped"))
-    } else {
-        (eligibility.eligible, eligibility.reason)
-    };
+    let preserves_enrichment_state = matches!(
+        persist_reason,
+        Some(
+            "insufficient_source_capture_count"
+                | "missing_real_action"
+                | "missing_attributed_result"
+        )
+    );
+    let (sop_eligible, sop_eligibility_state, sop_eligibility_reason) =
+        if persist_status != "queued" && !preserves_enrichment_state {
+            (
+                false,
+                SopEligibilityState::Rejected,
+                persist_reason.unwrap_or("precheck_skipped"),
+            )
+        } else {
+            (eligibility.eligible, eligibility.state, eligibility.reason)
+        };
     NewBakeCandidateAudit {
         run_id,
         timeline_id: candidate.timeline.id,
@@ -4789,6 +4954,7 @@ fn new_bake_candidate_audit(
         source_capture_count,
         effective_capture_count: eligibility.effective_capture_count,
         sop_eligible,
+        sop_eligibility_state: sop_eligibility_state.as_str().to_string(),
         sop_eligibility_reason: Some(sop_eligibility_reason.to_string()),
         sop_evidence_mode: eligibility.mode.map(|mode| mode.as_str().to_string()),
         persist_status: persist_status.to_string(),
@@ -4814,9 +4980,27 @@ impl SopEvidenceMode {
 #[derive(Debug, Clone, Copy)]
 struct SopEligibility {
     eligible: bool,
+    state: SopEligibilityState,
     reason: &'static str,
     mode: Option<SopEvidenceMode>,
     effective_capture_count: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SopEligibilityState {
+    Eligible,
+    NeedsEnrichment,
+    Rejected,
+}
+
+impl SopEligibilityState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Eligible => "eligible",
+            Self::NeedsEnrichment => "needs_enrichment",
+            Self::Rejected => "rejected",
+        }
+    }
 }
 
 fn sop_eligibility(candidate: &BakeMemorySourceRecord) -> SopEligibility {
@@ -4824,6 +5008,7 @@ fn sop_eligibility(candidate: &BakeMemorySourceRecord) -> SopEligibility {
     if source_capture_count < 2 {
         return SopEligibility {
             eligible: false,
+            state: SopEligibilityState::NeedsEnrichment,
             reason: "insufficient_source_capture_count",
             mode: None,
             effective_capture_count: source_capture_count,
@@ -4856,6 +5041,7 @@ fn sop_eligibility(candidate: &BakeMemorySourceRecord) -> SopEligibility {
     if evidence_ids.len() >= 2 && !action_records.is_empty() && has_attributed_result {
         return SopEligibility {
             eligible: true,
+            state: SopEligibilityState::Eligible,
             reason: "eligible_direct_action_result",
             mode: Some(SopEvidenceMode::DirectInteraction),
             effective_capture_count: evidence_ids.len() as i64,
@@ -4945,6 +5131,7 @@ fn sop_eligibility(candidate: &BakeMemorySourceRecord) -> SopEligibility {
     {
         return SopEligibility {
             eligible: true,
+            state: SopEligibilityState::Eligible,
             reason: "eligible_semantic_workflow_with_action_anchor",
             mode: Some(SopEvidenceMode::SemanticWorkflow),
             effective_capture_count: evidence_ids.len() as i64,
@@ -4962,18 +5149,22 @@ fn sop_eligibility(candidate: &BakeMemorySourceRecord) -> SopEligibility {
                 .as_deref()
                 .map_or(true, |value| value.trim().is_empty())
     });
-    let reason = if passive_report_only {
-        "passive_report_only"
+    let (state, reason) = if passive_report_only {
+        (SopEligibilityState::Rejected, "passive_report_only")
     } else if action_records.is_empty() {
-        "missing_real_action"
+        (SopEligibilityState::NeedsEnrichment, "missing_real_action")
     } else if !has_attributed_result {
-        "missing_attributed_result"
+        (
+            SopEligibilityState::NeedsEnrichment,
+            "missing_attributed_result",
+        )
     } else {
-        "insufficient_sop_evidence"
+        (SopEligibilityState::Rejected, "insufficient_sop_evidence")
     };
 
     SopEligibility {
         eligible: false,
+        state,
         reason,
         mode: None,
         effective_capture_count: evidence_ids.len() as i64,
@@ -5088,6 +5279,35 @@ fn merge_bake_candidate_lanes(
             merged.push(candidate);
         } else {
             break;
+        }
+    }
+    merged
+}
+
+fn merge_bake_candidate_lanes_with_replay(
+    fresh: Vec<BakeMemorySourceRecord>,
+    retry: Vec<BakeMemorySourceRecord>,
+    replay: Vec<BakeMemorySourceRecord>,
+    scan_limit: usize,
+    replay_quota: usize,
+    run_id: i64,
+) -> Vec<BakeMemorySourceRecord> {
+    let mut merged = Vec::with_capacity(scan_limit);
+    let mut seen = HashSet::new();
+
+    // replay_quota 按实际执行额度计算，不能按放大后的扫描窗口计算；否则外层
+    // 在遇到 fresh 前就会耗尽执行额度，形成新采集饥饿。
+    for candidate in replay.into_iter().take(replay_quota.min(scan_limit)) {
+        if seen.insert(candidate.timeline.id) {
+            merged.push(candidate);
+        }
+    }
+    for candidate in merge_bake_candidate_lanes(fresh, retry, scan_limit, run_id) {
+        if merged.len() >= scan_limit {
+            break;
+        }
+        if seen.insert(candidate.timeline.id) {
+            merged.push(candidate);
         }
     }
     merged
@@ -6542,23 +6762,36 @@ fn document_evidence(candidate: &BakeMemorySourceRecord) -> BakeDocumentEvidence
     const MIN_DOCUMENT_CHARS: usize = 200;
 
     let app_name = candidate.capture_app_name.as_deref().unwrap_or_default();
-    let source_surface = classify_source_surface(app_name);
     let has_document_url = candidate
         .capture_url
         .as_deref()
-        .is_some_and(looks_like_document_url);
-    let has_document_page_title = candidate
+        .is_some_and(is_refreshable_document_url);
+    let has_document_semantics = {
+        let category = candidate.timeline.category.trim().to_lowercase();
+        category.contains("文档")
+            || matches!(category.as_str(), "document" | "design")
+            || matches!(
+                candidate.timeline.content_origin.as_deref(),
+                Some("document_reference")
+            )
+            || matches!(
+                candidate.timeline.activity_type.as_deref(),
+                Some("document_reference")
+            )
+    };
+    // 页面标题必须来自采集器提供的结构化页面/窗口元数据，而不是 OCR/模型从
+    // 聊天卡片中猜出的文档名。这样未知浏览器和未知协作工具都按证据处理，
+    // 无需枚举应用名。
+    let has_structured_web_title = candidate
         .preferred_source_title
         .as_deref()
-        .is_some_and(looks_like_document_title)
+        .and_then(|title| canonical_document_source_title(title, Some(app_name)))
+        .is_some()
         || candidate
             .capture_webpage_title
             .as_deref()
-            .is_some_and(looks_like_document_title)
-        || candidate
-            .capture_win_title
-            .as_deref()
-            .is_some_and(looks_like_document_title);
+            .and_then(|title| canonical_document_source_title(title, Some(app_name)))
+            .is_some();
     let aggregated_body_char_count = candidate
         .url_aggregated_text
         .as_deref()
@@ -6579,27 +6812,33 @@ fn document_evidence(candidate: &BakeMemorySourceRecord) -> BakeDocumentEvidence
     let has_substantive_document_body = body_char_count >= MIN_DOCUMENT_CHARS;
     let has_meaningful_native_title = [
         candidate.preferred_source_title.as_deref(),
-        candidate.capture_webpage_title.as_deref(),
         candidate.capture_win_title.as_deref(),
     ]
     .into_iter()
     .flatten()
-    .any(|title| canonical_document_source_title(title, Some(app_name)).is_some());
+    .any(|title| {
+        looks_like_native_document_title(title)
+            && canonical_document_source_title(title, Some(app_name)).is_some()
+    });
+    let has_document_page_title = has_structured_web_title || has_meaningful_native_title;
 
-    let is_code_editor = is_code_editor_app(app_name);
-    let kind = if !has_substantive_document_body || source_surface == BakeSourceSurface::Chat {
+    let kind = if !has_substantive_document_body || !has_document_semantics {
         BakeDocumentEvidenceKind::Insufficient
-    } else if has_document_url {
+    } else if has_document_url && has_structured_web_title {
         BakeDocumentEvidenceKind::DocumentUrl
-    } else if source_surface == BakeSourceSurface::Browser && has_document_page_title {
+    } else if candidate.capture_webpage_title.is_some() && has_structured_web_title {
         BakeDocumentEvidenceKind::BrowserDocument
-    } else if source_surface == BakeSourceSurface::DocumentEditor
-        && has_meaningful_native_title
-        && (!is_code_editor || has_document_page_title)
-    {
+    } else if has_meaningful_native_title {
         BakeDocumentEvidenceKind::NativeDocument
     } else {
         BakeDocumentEvidenceKind::Insufficient
+    };
+    let source_surface = match kind {
+        BakeDocumentEvidenceKind::DocumentUrl | BakeDocumentEvidenceKind::BrowserDocument => {
+            BakeSourceSurface::Browser
+        }
+        BakeDocumentEvidenceKind::NativeDocument => BakeSourceSurface::DocumentEditor,
+        BakeDocumentEvidenceKind::Insufficient => BakeSourceSurface::Other,
     };
 
     BakeDocumentEvidencePayload {
@@ -6616,83 +6855,17 @@ fn non_whitespace_char_count(value: &str) -> usize {
     value.chars().filter(|ch| !ch.is_whitespace()).count()
 }
 
-fn classify_source_surface(app_name: &str) -> BakeSourceSurface {
-    let normalized = app_name.trim().to_lowercase();
-    if [
-        "kim",
-        "kem",
-        "微信",
-        "wechat",
-        "slack",
-        "teams",
-        "microsoft teams",
-        "钉钉",
-        "dingtalk",
-        "飞书",
-        "feishu",
-        "lark",
-    ]
-    .iter()
-    .any(|marker| normalized == *marker || normalized.contains(marker))
-    {
-        return BakeSourceSurface::Chat;
-    }
-    if [
-        "chrome",
-        "safari",
-        "arc",
-        "edge",
-        "firefox",
-        "chatgpt atlas",
-    ]
-    .iter()
-    .any(|marker| normalized.contains(marker))
-    {
-        return BakeSourceSurface::Browser;
-    }
-    if [
-        "microsoft word",
-        "word",
-        "pages",
-        "wps",
-        "libreoffice writer",
-        "obsidian",
-        "typora",
-        "cursor",
-        "visual studio code",
-        "code",
-    ]
-    .iter()
-    .any(|marker| normalized == *marker || normalized.contains(marker))
-    {
-        return BakeSourceSurface::DocumentEditor;
-    }
-    BakeSourceSurface::Other
-}
-
-fn is_code_editor_app(app_name: &str) -> bool {
-    let normalized = app_name.trim().to_lowercase();
-    ["cursor", "visual studio code", "code", "xcode"]
-        .iter()
-        .any(|marker| normalized == *marker || normalized.contains(marker))
-}
-
-fn looks_like_document_title(title: &str) -> bool {
+fn looks_like_native_document_title(title: &str) -> bool {
     let lowered = title.trim().to_lowercase();
     [
-        "云文档",
-        "在线文档",
-        "google docs",
-        "google 文档",
-        "飞书文档",
-        "语雀",
-        "notion",
-        "confluence",
-        "石墨文档",
         ".doc",
         ".docx",
         ".pages",
+        ".odt",
+        ".rtf",
         ".md",
+        ".markdown",
+        ".txt",
     ]
     .iter()
     .any(|marker| lowered.contains(marker))
@@ -6705,7 +6878,7 @@ fn substantive_document_url(candidate: &BakeMemorySourceRecord) -> Option<String
     candidate
         .capture_url
         .as_deref()
-        .filter(|url| looks_like_document_url(url))
+        .filter(|url| is_refreshable_document_url(url))
         .map(normalize_doc_url)
         .filter(|url| !url.is_empty())
 }
@@ -6717,27 +6890,6 @@ fn reserve_document_task(
     substantive_document_url(candidate)
         .map(|url| queued_document_urls.insert(url))
         .unwrap_or(true)
-}
-
-fn looks_like_document_url(url: &str) -> bool {
-    let lowered = url.trim().to_lowercase();
-    [
-        "/docs/",
-        "docs.google",
-        "/document/",
-        "yuque.com",
-        "feishu.cn/docx",
-        "feishu.cn/wiki",
-        "notion.so",
-        "confluence",
-        "/wiki/",
-        "shimo.im",
-        "/d/home/",
-        "/s/home/",
-        "/k/home/",
-    ]
-    .iter()
-    .any(|marker| lowered.contains(marker))
 }
 
 fn build_inventory_trend(
@@ -7682,13 +7834,15 @@ mod tests {
         let capture_id = seed_capture(
             &service,
             1_710_000_000_000,
-            "Google Chrome",
+            "Unlisted Web Shell",
             "弹性伸缩 - 云文档",
         );
         let timeline_id = seed_knowledge(&service, "文档", capture_id, 2, 1);
         let mut candidate = make_candidate(&service, timeline_id);
+        candidate.capture_app_name = Some("Unlisted Web Shell".to_string());
         candidate.capture_url =
             Some("https://docs.example.com/k/home/space/document-id?from=home#section".to_string());
+        candidate.capture_webpage_title = Some("弹性伸缩 - 云文档".to_string());
         candidate.capture_ax_text = Some("文档正文".repeat(80));
         candidate.timeline.history_view = false;
         candidate.timeline.activity_type = None;
@@ -7728,13 +7882,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_chat_document_mentions_cannot_create_document_artifact() {
+    async fn test_unlisted_chat_document_mentions_cannot_create_document_artifact() {
         let service = make_service();
-        let capture_id = seed_capture(&service, 1_710_000_000_000, "Kim", "Kim");
+        let capture_id = seed_capture(
+            &service,
+            1_710_000_000_000,
+            "Unlisted Collaboration App",
+            "Project Discussion",
+        );
         let timeline_id = seed_knowledge(&service, "会议", capture_id, 4, 2);
         let mut candidate = make_candidate(&service, timeline_id);
-        candidate.capture_app_name = Some("Kim".to_string());
-        candidate.capture_win_title = Some("Kim".to_string());
+        candidate.capture_app_name = Some("Unlisted Collaboration App".to_string());
+        candidate.capture_win_title = Some("Project Discussion".to_string());
         candidate.capture_ax_text = Some(
             "会议群聊天：你之前设计的那个剧本库文档看一下。[云文档] AIGC 剧本创作规范。".repeat(20),
         );
@@ -7747,7 +7906,7 @@ mod tests {
         assert!(is_high_value_candidate(&candidate));
         let evidence = document_evidence(&candidate);
         assert_eq!(evidence.kind, BakeDocumentEvidenceKind::Insufficient);
-        assert_eq!(evidence.source_surface, BakeSourceSurface::Chat);
+        assert_eq!(evidence.source_surface, BakeSourceSurface::Other);
         assert!(evidence.has_substantive_document_body);
         assert!(!evidence.allows_auto_create);
         let payload = map_extract_candidate_payload(&candidate);
@@ -7803,12 +7962,12 @@ mod tests {
         let capture_id = seed_capture(
             &service,
             1_710_000_000_000,
-            "Microsoft Word",
+            "Unlisted Native Editor",
             "季度复盘方案.docx",
         );
         let timeline_id = seed_knowledge(&service, "文档", capture_id, 2, 1);
         let mut candidate = make_candidate(&service, timeline_id);
-        candidate.capture_app_name = Some("Microsoft Word".to_string());
+        candidate.capture_app_name = Some("Unlisted Native Editor".to_string());
         candidate.capture_win_title = Some("季度复盘方案.docx".to_string());
         candidate.capture_ax_text = Some("季度复盘正文".repeat(80));
         candidate.capture_url = None;
@@ -8030,6 +8189,7 @@ mod tests {
         first.capture_ax_text = Some("文档正文".repeat(80));
         first.capture_url =
             Some("https://docs.example.com/k/home/space/document-id?from=home".to_string());
+        first.capture_webpage_title = Some("弹性伸缩 - 云文档".to_string());
         let mut second = first.clone();
         second.capture_url =
             Some("https://docs.example.com/k/home/space/document-id#section".to_string());
@@ -8465,6 +8625,28 @@ mod tests {
     }
 
     #[test]
+    fn test_sop_audit_preserves_needs_enrichment_on_deterministic_skip() {
+        let service = make_service();
+        let capture_id = seed_capture(&service, 1_710_000_000_000, "Code", "步骤一");
+        let timeline_id = seed_knowledge(&service, "coding", capture_id, 4, 1);
+        let candidate = make_candidate(&service, timeline_id);
+
+        let audit = new_bake_candidate_audit(
+            1,
+            &candidate,
+            "skipped",
+            Some("insufficient_source_capture_count"),
+        );
+
+        assert!(!audit.sop_eligible);
+        assert_eq!(audit.sop_eligibility_state, "needs_enrichment");
+        assert_eq!(
+            audit.sop_eligibility_reason.as_deref(),
+            Some("insufficient_source_capture_count")
+        );
+    }
+
+    #[test]
     fn test_sop_eligibility_rejects_navigation_only_trace() {
         let service = make_service();
         let first = seed_capture(&service, 1_710_000_000_000, "Chrome", "文档一");
@@ -8484,6 +8666,7 @@ mod tests {
         let eligibility = sop_eligibility(&candidate);
 
         assert!(!eligibility.eligible);
+        assert_eq!(eligibility.state, SopEligibilityState::Rejected);
         assert_eq!(eligibility.reason, "passive_report_only");
         assert!(eligibility.mode.is_none());
     }
@@ -8519,6 +8702,7 @@ mod tests {
         let eligibility = sop_eligibility(&candidate);
 
         assert!(!eligibility.eligible);
+        assert_eq!(eligibility.state, SopEligibilityState::Rejected);
         assert_eq!(eligibility.reason, "passive_report_only");
         assert!(eligibility.mode.is_none());
         assert_eq!(eligibility.effective_capture_count, 0);
@@ -8549,6 +8733,7 @@ mod tests {
         let eligibility = sop_eligibility(&candidate);
 
         assert!(!eligibility.eligible);
+        assert_eq!(eligibility.state, SopEligibilityState::NeedsEnrichment);
         assert_eq!(eligibility.reason, "missing_real_action");
         assert_eq!(eligibility.mode, None);
         assert_eq!(eligibility.effective_capture_count, 0);
@@ -8586,6 +8771,112 @@ mod tests {
         assert_eq!(retry_count, 2);
         assert_eq!(merged[0].retry_failure_count, 1);
         assert_eq!(merged[5].retry_failure_count, 1);
+    }
+
+    #[test]
+    fn test_operation_replay_replaces_existing_budget_without_expanding_limit() {
+        let service = make_service();
+        let capture_id = seed_capture(&service, 1_710_000_000_000, "Code", "候选");
+        let timeline_id = seed_knowledge(&service, "coding", capture_id, 4, 1);
+        let template = make_candidate(&service, timeline_id);
+        let build = |base: i64| {
+            (0..20)
+                .map(|offset| {
+                    let mut candidate = template.clone();
+                    candidate.timeline.id = base + offset;
+                    candidate
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let merged = merge_bake_candidate_lanes_with_replay(
+            build(1_000),
+            Vec::new(),
+            build(3_000),
+            10,
+            5,
+            0,
+        );
+
+        assert_eq!(merged.len(), 10);
+        assert_eq!(
+            merged
+                .iter()
+                .filter(|candidate| candidate.timeline.id >= 3_000)
+                .count(),
+            5
+        );
+    }
+
+    #[test]
+    fn test_suppressed_out_of_order_candidate_does_not_advance_unified_watermark() {
+        let service = make_service();
+        service
+            .storage
+            .upsert_bake_watermark(UNIFIED_BAKE_PIPELINE_NAME, 100)
+            .unwrap();
+        let mut max_processed_ts = 100;
+
+        service
+            .advance_unified_watermark(&mut max_processed_ts, 200, true)
+            .unwrap();
+        assert_eq!(max_processed_ts, 100);
+        assert_eq!(
+            service
+                .storage
+                .get_bake_watermark(UNIFIED_BAKE_PIPELINE_NAME)
+                .unwrap()
+                .unwrap()
+                .last_processed_ts,
+            100
+        );
+
+        service
+            .advance_unified_watermark(&mut max_processed_ts, 200, false)
+            .unwrap();
+        assert_eq!(max_processed_ts, 200);
+    }
+
+    #[test]
+    fn test_operation_replay_quota_uses_execution_budget_not_scan_window() {
+        let service = make_service();
+        let capture_id = seed_capture(&service, 1_710_000_000_000, "Code", "候选");
+        let timeline_id = seed_knowledge(&service, "coding", capture_id, 4, 1);
+        let template = make_candidate(&service, timeline_id);
+        let build = |base: i64, count: i64| {
+            (0..count)
+                .map(|offset| {
+                    let mut candidate = template.clone();
+                    candidate.timeline.id = base + offset;
+                    candidate
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // 真实流水线会扫描 execution_limit 的 6 倍。即使 scan_limit=60，
+        // execution_limit=10 对应的 replay 配额仍只能是 5。
+        let merged = merge_bake_candidate_lanes_with_replay(
+            build(1_000, 60),
+            Vec::new(),
+            build(3_000, 60),
+            60,
+            5,
+            0,
+        );
+
+        assert_eq!(merged.len(), 60);
+        assert_eq!(
+            merged
+                .iter()
+                .take(10)
+                .filter(|candidate| candidate.timeline.id >= 3_000)
+                .count(),
+            5
+        );
+        assert!(merged
+            .iter()
+            .take(10)
+            .any(|candidate| candidate.timeline.id < 3_000));
     }
 
     #[test]
@@ -8731,6 +9022,7 @@ mod tests {
         let timeline_id = seed_knowledge(&service, "文档", capture_id, 3, 1);
         let mut candidate = make_candidate(&service, timeline_id);
         candidate.capture_url = Some("https://docs.example.com/d/home/recruiting".to_string());
+        candidate.capture_webpage_title = Some("招聘方案 - 云文档".to_string());
         candidate.capture_ax_text = Some("招聘方案正文".repeat(100));
         let run_id = service
             .storage

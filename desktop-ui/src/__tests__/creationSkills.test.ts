@@ -1193,7 +1193,7 @@ describe('提交后的执行时技能解析', () => {
     expect(resolution.matches).toHaveLength(0)
   })
 
-  it('模型输出不可恢复时不根据主题词猜测技能', async () => {
+  it('模型输出不可恢复时不根据标题或主题规则补选技能', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({
       skill_ids: [],
       source: 'fallback',
@@ -1210,12 +1210,38 @@ describe('提交后的执行时技能解析', () => {
     expect(resolution.matches).toHaveLength(0)
   })
 
-  it('模型路由接口报错时不挂载技能且不阻断普通创作', async () => {
+  it('模型路由接口报错时空召回且不阻断普通创作', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 502 })))
 
     const resolution = await resolveExecutionSkills({
       apiBaseUrl: 'http://127.0.0.1:7070',
       prompt: '请生成下本周GPU成本优化的周报',
+      skills: [gpuWeeklyTemplate],
+    })
+
+    expect(resolution.source).toBe('unavailable')
+    expect(resolution.matches).toHaveLength(0)
+  })
+
+  it('路由不可用时不会把只有领域相似的问答强制套入周报技能', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 502 })))
+
+    const resolution = await resolveExecutionSkills({
+      apiBaseUrl: 'http://127.0.0.1:7070',
+      prompt: '帮我分析GPU成本优化的关键指标应该怎么定',
+      skills: [gpuWeeklyTemplate],
+    })
+
+    expect(resolution.source).toBe('unavailable')
+    expect(resolution.matches).toHaveLength(0)
+  })
+
+  it('路由不可用时包含完整标题的问答仍不会强制套入技能', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 502 })))
+
+    const resolution = await resolveExecutionSkills({
+      apiBaseUrl: 'http://127.0.0.1:7070',
+      prompt: 'GPU成本优化周报有哪些固定章节？',
       skills: [gpuWeeklyTemplate],
     })
 

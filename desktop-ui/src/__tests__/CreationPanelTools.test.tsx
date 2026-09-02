@@ -26,7 +26,7 @@ describe('创作工具 Tab', () => {
 
   it('使用精简卡片展示必备 Tool，并可分别安装和开启可选 Tool', async () => {
     render(<CreationPanel />)
-    fireEvent.click(screen.getByRole('button', { name: '工具 (4)' }))
+    fireEvent.click(screen.getByRole('button', { name: '工具 (5)' }))
 
     expect(screen.queryByText('随 MemoryBread 默认安装并开启，保证创作具备公开信息与本地记忆两类基础上下文。')).not.toBeInTheDocument()
     expect(screen.queryByText('安装后才会进入 Agent 的可用能力列表；关闭时保留安装，但本次创作不会调用。')).not.toBeInTheDocument()
@@ -39,6 +39,9 @@ describe('创作工具 Tab', () => {
     expect(screen.getByRole('button', { name: '数据检索已开启' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '网页爬取已安装' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '网页爬取已开启' })).toBeDisabled()
+    const mermaidCard = screen.getByText('Mermaid 画图').closest('article')
+    expect(mermaidCard).not.toBeNull()
+    expect(within(mermaidCard as HTMLElement).getByRole('button', { name: '关闭Mermaid 画图' })).toBeEnabled()
     expect(screen.getByRole('spinbutton', { name: '记忆搜索默认召回条数' })).toHaveValue(10)
     expect(screen.getByRole('spinbutton', { name: '数据检索默认召回条数' })).toHaveValue(30)
 
@@ -122,6 +125,7 @@ describe('创作工具 Tab', () => {
       'memory_search',
       'data_search',
       'webpage_scrape',
+      'mermaid_diagram',
       'github_search',
     ])
     expect(agentPayloads[0].max_references).toBe(12)

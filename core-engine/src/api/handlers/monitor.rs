@@ -398,6 +398,7 @@ pub struct MonitorOverview {
     pub ocr_backfill: OcrBackfillMetricsSnapshot,
     pub capture_flow: CaptureFlow,
     pub knowledge_flow: KnowledgeFlow,
+    pub operation_flow: OperationFlow,
     pub rag_sessions: RagSessionStats,
     pub task_executions: TaskExecutionStats,
 }
@@ -655,6 +656,18 @@ pub struct HourCount {
 pub struct AppCount {
     pub app: String,
     pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OperationFlow {
+    pub period_audited_count: i64,
+    pub eligible_count: i64,
+    pub needs_enrichment_count: i64,
+    pub rejected_count: i64,
+    pub eligible_rate: f64,
+    pub pending_replay_count: i64,
+    /// 候选量已经足够但操作准入仍为零，属于业务漏斗软故障。
+    pub zero_eligible_alert: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1217,6 +1230,31 @@ pub async fn monitor_overview(
             .filter_map(|r| r.ok())
             .collect();
 
+        let (operation_audited, operation_eligible, operation_needs_enrichment, operation_rejected):
+            (i64, i64, i64, i64) = conn.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(sop_eligibility_state = 'eligible'), 0),
+                    COALESCE(SUM(sop_eligibility_state = 'needs_enrichment'), 0),
+                    COALESCE(SUM(sop_eligibility_state = 'rejected'), 0)
+             FROM bake_candidate_audits
+             WHERE created_at_ms >= ?1",
+            rusqlite::params![from_ms],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        let pending_replay_count: i64 = conn.query_row(
+            "SELECT COUNT(*)
+             FROM operation_replay_queue
+             WHERE status = 'pending'
+                OR (status = 'claimed' AND COALESCE(claimed_at_ms, 0) <= ?1)",
+            rusqlite::params![now_ms.saturating_sub(30 * 60 * 1000)],
+            |row| row.get(0),
+        )?;
+        let operation_eligible_rate = if operation_audited > 0 {
+            operation_eligible as f64 / operation_audited as f64
+        } else {
+            0.0
+        };
+
         Ok(MonitorOverview {
             db_size_bytes,
             capture_total_count,
@@ -1281,6 +1319,15 @@ pub async fn monitor_overview(
                 extracting: Vec::new(),
                 last_extraction_at_ms: None,
                 extractor_status: "stalled".to_string(),
+            },
+            operation_flow: OperationFlow {
+                period_audited_count: operation_audited,
+                eligible_count: operation_eligible,
+                needs_enrichment_count: operation_needs_enrichment,
+                rejected_count: operation_rejected,
+                eligible_rate: operation_eligible_rate,
+                pending_replay_count,
+                zero_eligible_alert: operation_audited >= 50 && operation_eligible == 0,
             },
             rag_sessions: RagSessionStats {
                 today_count: rag_today_count,

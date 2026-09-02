@@ -1,54 +1,93 @@
-import React from 'react'
-import ReactDOM from 'react-dom/client'
-import App from './App'
-import './index.css'
+let appMounted = false
 
-// 全局错误捕获
+const readableError = (error: unknown) => {
+  if (error instanceof Error) {
+    return [error.message, error.stack].filter(Boolean).join('\n\n')
+  }
+  return String(error || '未知错误')
+}
+
+export const renderBootstrapFailure = (error: unknown) => {
+  if (appMounted) return
+
+  const rootElement = document.getElementById('root')
+  if (!rootElement) return
+
+  const page = document.createElement('main')
+  page.className = 'memorybread-bootstrap memorybread-bootstrap--error'
+  page.dataset.bootstrapState = 'failed'
+  page.setAttribute('role', 'alert')
+
+  const content = document.createElement('section')
+  content.className = 'memorybread-bootstrap__content'
+
+  const title = document.createElement('h1')
+  title.textContent = '界面资源加载失败'
+
+  const description = document.createElement('p')
+  description.textContent = '页面资源没有完整加载。请先重新加载；若仍未恢复，请重启桌面界面。'
+
+  const details = document.createElement('details')
+  const summary = document.createElement('summary')
+  summary.textContent = '查看错误信息'
+  const technicalDetail = document.createElement('pre')
+  technicalDetail.textContent = readableError(error)
+  details.append(summary, technicalDetail)
+
+  const reload = document.createElement('button')
+  reload.type = 'button'
+  reload.textContent = '重新加载'
+  reload.addEventListener('click', () => window.location.reload())
+
+  content.append(title, description, details, reload)
+  page.append(content)
+  rootElement.replaceChildren(page)
+}
+
+// 入口不再静态依赖 App。模块图解析失败时，这些监听器和错误页仍然可用。
 window.addEventListener('error', (event) => {
-  console.error('全局错误:', event.error)
-  console.error('错误信息:', event.message)
-  console.error('错误栈:', event.error?.stack)
-  document.body.innerHTML = `
-    <div style="padding: 20px; font-family: monospace; background: #fee; color: #c00;">
-      <h1>前端加载错误</h1>
-      <pre>${event.message}\n\n${event.error?.stack || ''}</pre>
-    </div>
-  `
+  console.error('全局错误:', event.error || event.message)
+  renderBootstrapFailure(event.error || event.message)
 })
 
 window.addEventListener('unhandledrejection', (event) => {
   console.error('未处理的 Promise 拒绝:', event.reason)
-  document.body.innerHTML = `
-    <div style="padding: 20px; font-family: monospace; background: #fee; color: #c00;">
-      <h1>Promise 错误</h1>
-      <pre>${event.reason}</pre>
-    </div>
-  `
+  renderBootstrapFailure(event.reason)
 })
 
-console.log('=== 记忆面包前端启动 ===')
-console.log('React 版本:', React.version)
-console.log('根元素:', document.getElementById('root'))
-
-try {
+export const bootstrapApp = async () => {
   const rootElement = document.getElementById('root')
   if (!rootElement) {
     throw new Error('找不到 root 元素')
   }
 
-  console.log('开始渲染 React 应用...')
-  ReactDOM.createRoot(rootElement).render(
-    <React.StrictMode>
-      <App />
-    </React.StrictMode>,
-  )
-  console.log('React 应用渲染成功')
-} catch (error) {
-  console.error('渲染失败:', error)
-  document.body.innerHTML = `
-    <div style="padding: 20px; font-family: monospace; background: #fee; color: #c00;">
-      <h1>React 渲染失败</h1>
-      <pre>${error}</pre>
-    </div>
-  `
+  console.log('=== 记忆面包前端启动 ===')
+  console.log('根元素:', rootElement)
+
+  try {
+    const [{ default: React }, ReactDOM, { default: App }] = await Promise.all([
+      import('react'),
+      import('react-dom/client'),
+      import('./App'),
+      import('./index.css'),
+    ])
+
+    console.log('React 版本:', React.version)
+    console.log('开始渲染 React 应用...')
+    rootElement.replaceChildren()
+    ReactDOM.createRoot(rootElement).render(
+      React.createElement(
+        React.StrictMode,
+        null,
+        React.createElement(App),
+      ),
+    )
+    appMounted = true
+    console.log('React 应用渲染成功')
+  } catch (error) {
+    console.error('前端入口加载失败:', error)
+    renderBootstrapFailure(error)
+  }
 }
+
+export const bootstrapPromise = bootstrapApp()

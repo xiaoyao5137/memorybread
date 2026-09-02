@@ -28,6 +28,55 @@ def document_408() -> dict:
     }
 
 
+def test_reference_period_evidence_uses_document_date_not_refresh_time():
+    reference = ReferenceDocument(
+        id=752,
+        title="大模型资源成本优化专项周会",
+        doc_type="会议纪要",
+        summary="专项周会纪要",
+        full_content=(
+            "**时间**：2026 年 08 月 17 日 19:01-19:32\n"
+            "本周释放 200+ 张 GPU，并明确后续行动项。"
+        ),
+        sections_json="[]",
+        style_phrases="[]",
+        prompt_hint="",
+        usage_count=0,
+        review_status="auto_created",
+        updated_at=1_787_725_145_875,
+        source_url="https://docs.example/meeting/gpu-weekly",
+        relevance_score=0.9,
+        quality_score=1.0,
+        completeness_score=0.8,
+        usage_score=0.0,
+        format_score=0.6,
+        freshness_score=1.0,
+        final_weight=1.0,
+        reason="主题相关",
+        observed_at=1_787_725_145_875,
+        refresh_collected_at=1_787_725_145_875,
+    )
+
+    evidence = CreationService.reference_period_evidence(
+        reference,
+        {
+            "period_start": "2026-08-17",
+            "period_end": "2026-08-23",
+        },
+    )
+
+    assert evidence == {
+        "basis": "explicit_document_content_date",
+        "requested_period_start": "2026-08-17",
+        "requested_period_end": "2026-08-23",
+        "explicit_dates": ["2026-08-17"],
+        "matched_dates": ["2026-08-17"],
+        "match_status": "matched",
+    }
+    service = CreationService.__new__(CreationService)
+    assert service._infer_doc_type("获取本周会议纪要并总结") == "会议纪要"
+
+
 def test_vector_evidence_survives_keyword_dedup_and_relevance_filter(tmp_path):
     service = CreationService.__new__(CreationService)
     service.db_path = str(tmp_path / "memory-bread.db")
@@ -247,6 +296,33 @@ def test_current_week_is_resolved_to_runtime_iso_week_and_exact_dates():
     assert context["period_start"] == "2026-08-10"
     assert context["period_end"] == "2026-08-16"
     assert context["display"] == "2026年第33周（2026-08-10 至 2026-08-16）"
+
+
+def test_current_week_report_collection_does_not_submit_future_dates():
+    now = datetime(2026, 8, 13, 20, 20, tzinfo=timezone(timedelta(hours=8)))
+    context = CreationService._relative_time_context("生成本周周报", now=now)
+
+    collection_period = CreationService._report_collection_period(context)
+
+    assert context["period_end"] == "2026-08-16"
+    assert collection_period == {
+        "start": "2026-08-10",
+        "end": "2026-08-13",
+        "display": "2026-08-10 至 2026-08-13",
+    }
+
+
+def test_completed_report_period_is_not_truncated():
+    now = datetime(2026, 8, 13, 20, 20, tzinfo=timezone(timedelta(hours=8)))
+    context = CreationService._relative_time_context("生成上周周报", now=now)
+
+    collection_period = CreationService._report_collection_period(context)
+
+    assert collection_period == {
+        "start": "2026-08-03",
+        "end": "2026-08-09",
+        "display": "2026年第32周（2026-08-03 至 2026-08-09）",
+    }
 
 
 def _create_unified_memory_db(path):
@@ -574,10 +650,12 @@ async def test_document_refresh_consumes_verified_snapshot_without_replacing_bak
         [reference],
         "请基于最新版本创作",
         require_latest=True,
+        browser_extension_enabled=True,
     )
 
     assert "allow_foreground" not in calls[0][1]
     assert calls[0][1]["require_latest"] is True
+    assert calls[0][1]["browser_extension_enabled"] is True
     assert reference.full_content == "本轮浏览器抓取正文"
     assert reference.full_content != "不可消费的烘焙正文返回值"
     assert reference.refresh_status == expected_refresh_status
@@ -1258,3 +1336,591 @@ def test_short_complete_document_not_penalized_by_long_content_denominator():
     }
 
     assert service._score_completeness(row) >= 0.65
+
+
+def _insert_original_script_agent_fixture(db_path):
+    now_ms = int(time.time() * 1000)
+    conn = sqlite3.connect(db_path)
+    # 超过单域候选窗口的近期 Agent 噪声，复现创作记录 #114 中宽泛词
+    # 占满 OR 查询结果、较早“原创剧本”资料无法进入排序的问题。
+    for index in range(240):
+        content = f"Agent 工具执行记录 {index}，记录通用任务编排状态。"
+        conn.execute(
+            "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, ?, 3, 0, ?, ?)",
+            (
+                20_000 + index,
+                f"Agent 运行记录 {index}",
+                content,
+                content,
+                content,
+                '["Agent"]',
+                now_ms + index,
+                now_ms + index,
+            ),
+        )
+    conn.execute(
+        "INSERT INTO bake_documents VALUES (?, ?, ?, ?, ?, '[]', '[]', '', 0, "
+        "'auto_created', ?, ?, NULL, 'enabled')",
+        (
+            824,
+            "原创剧本设计思路",
+            "设计文档",
+            "原创剧本的世界观、人物弧光和分幕结构设计。",
+            "原创剧本应先建立人物目标，再按冲突升级组织三幕结构。",
+            now_ms - 10_000,
+            "https://docs.example/original-script",
+        ),
+    )
+    combined = "原创剧本与当前 Agent 结合，按人物、冲突和场景逐步生成。"
+    conn.execute(
+        "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, ?, 5, 1, ?, ?)",
+        (
+            3147,
+            "原创剧本与 Agent 结合方案",
+            combined,
+            combined,
+            combined,
+            '["原创剧本"]',
+            now_ms - 20_000,
+            now_ms - 20_000,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_creation_record_114_uses_rare_primary_target_and_relational_plan(tmp_path):
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    _insert_original_script_agent_fixture(db_path)
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+    service.enable_vector_recall = False
+    service._embedding_model = None
+    query = "生成下原创剧本和当前Agent的结合方案"
+
+    requirement = service.analyze_requirement(query, CreationOptions())
+    plan = requirement["retrieval_plan"]
+
+    assert "原创剧本" in requirement["keywords"]
+    assert "下原创剧本" not in requirement["keywords"]
+    assert plan["schema_version"] == "creation-query-plan.v1"
+    assert plan["mode"] == "relational"
+    assert plan["primary_target"] == "原创剧本"
+    assert plan["components"] == ["原创剧本", "Agent"]
+    assert plan["relations"] == ["结合"]
+    assert plan["hard_entity_gate"] is False
+    assert "Agent" not in {
+        item["name"]
+        for item in requirement["entity_context"]["primary_entities"]
+    }
+    assert plan["term_weights"]["原创剧本"] > plan["term_weights"]["agent"]
+
+    references = service.retrieve_references(
+        query,
+        requirement,
+        CreationOptions(max_references=10),
+    )
+
+    assert [item.source_id for item in references[:2]] == [3147, 824]
+    assert all("原创剧本" in (item.title + item.summary + item.full_content) for item in references)
+    assert references[0].retrieval_mode == "relational"
+    assert references[0].primary_target == "原创剧本"
+    assert references[0].matched_components == ("原创剧本", "Agent")
+    assert references[0].matched_relations == ("结合",)
+    assert references[0].relation_score == 1.0
+    assert "检索模式：关系逻辑匹配" in references[0].reason
+    assert "主目标：原创剧本" in references[0].reason
+    assert "关系命中：结合" in references[0].reason
+
+
+def test_multi_target_question_preserves_every_business_target_and_dimension(tmp_path):
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    now_ms = int(time.time() * 1000)
+    conn = sqlite3.connect(db_path)
+    fixtures = (
+        (91_001, "快手电商混剪切片模型盘点", "混剪与切片所用模型、模型占比和成本。"),
+        (91_002, "AIGC规模化生产模型盘点", "规模化生产所用模型、模型占比和成本。"),
+        (91_003, "灵机独立站模型盘点", "灵机独立站所用模型、模型占比和成本。"),
+    )
+    for source_id, title, content in fixtures:
+        conn.execute(
+            "INSERT INTO bake_documents VALUES (?, ?, ?, ?, ?, '[]', '[]', '', 0, "
+            "'auto_created', ?, ?, NULL, 'enabled')",
+            (
+                source_id,
+                title,
+                "业务盘点",
+                content,
+                content,
+                now_ms,
+                f"https://docs.example/{source_id}",
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+    service.enable_vector_recall = False
+    service._embedding_model = None
+    query = (
+        "快手电商混剪/切片、AIGC规模化生产、灵机独立站分别用了哪些模型，"
+        "占比多少，成本情况如何，写一篇总结文档出来"
+    )
+
+    requirement = service.analyze_requirement(query, CreationOptions())
+    contract = requirement["coverage_contract"]
+    plan = requirement["retrieval_plan"]
+
+    assert contract == {
+        "schema_version": "creation-coverage-contract.v1",
+        "targets": ["快手电商混剪/切片", "AIGC规模化生产", "灵机独立站"],
+        "facets": ["用了哪些模型", "占比多少", "成本情况如何"],
+        "matrix_size": 9,
+    }
+    assert plan["mode"] == "multi_target"
+    assert plan["targets"] == contract["targets"]
+    assert plan["components"] == contract["targets"]
+    assert "灵机独立站分别" not in requirement["entity_context"]["candidate_entities"]
+    assert "占比多少" not in requirement["entity_context"]["candidate_entities"]
+
+    references = service.retrieve_references(
+        query,
+        requirement,
+        CreationOptions(max_references=3),
+    )
+
+    assert {item.source_id for item in references} == {91_001, 91_002, 91_003}
+    assert {
+        reason
+        for item in references
+        for reason in item.selection_reasons
+        if reason.startswith("component_anchor:")
+    } == {
+        "component_anchor:快手电商混剪/切片",
+        "component_anchor:AIGC规模化生产",
+        "component_anchor:灵机独立站",
+    }
+
+
+def test_how_to_use_query_covers_both_relation_ends_and_keeps_source_document(
+    tmp_path,
+):
+    """脑暴记录 #117 的原始需求是“X 如何在 Y 使用”。
+
+    该句式必须作为关系查询覆盖两端；标题直接命中 X 的原始
+    文档不能再被派生知识或宽泛 Agent 资料挤出 Top-K。
+    """
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    _insert_original_script_agent_fixture(db_path)
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+    service.enable_vector_recall = False
+    service._embedding_model = None
+    query = "设计下原创剧本如何在快手灵机独立站使用"
+
+    requirement = service.analyze_requirement(query, CreationOptions())
+    plan = requirement["retrieval_plan"]
+
+    assert plan["mode"] == "relational"
+    assert plan["primary_target"] == "原创剧本"
+    assert plan["components"] == ["原创剧本", "快手灵机独立站"]
+    assert plan["relations"] == ["迁移"]
+    assert plan["hard_entity_gate"] is False
+
+    references = service.retrieve_references(
+        query,
+        requirement,
+        CreationOptions(max_references=10),
+    )
+
+    document = next(item for item in references if item.source_id == 824)
+    assert document.source_type == "document"
+    assert document.selection_reasons == ("component_anchor:原创剧本",)
+    diagnostics = requirement["retrieval_diagnostics"]
+    assert diagnostics["candidate_count"] >= diagnostics["eligible_count"]
+    assert diagnostics["selected_count"] == len(references)
+    assert isinstance(diagnostics["filter_counts"], dict)
+
+
+def test_confirmed_brainstorm_facts_are_low_weight_and_cannot_replace_subject():
+    service = CreationService.__new__(CreationService)
+    service.db_path = "/path/that/does/not/exist"
+
+    requirement = service.analyze_requirement(
+        "设计原创剧本使用方案",
+        CreationOptions(),
+        retrieval_context_terms=["面向全平台通用用户", "创作前灵感枯竭"],
+    )
+    plan = requirement["retrieval_plan"]
+
+    assert plan["primary_target"] != "面向全平台通用用户"
+    assert plan["term_weights"]["面向全平台通用用户"] == 0.15
+    assert plan["term_weights"]["创作前灵感枯竭"] == 0.15
+
+
+def test_high_df_curated_exact_entity_still_cannot_enable_hard_gate(tmp_path):
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    _insert_original_script_agent_fixture(db_path)
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+
+    requirement = service.analyze_requirement(
+        "总结 Agent 的能力边界",
+        CreationOptions(),
+    )
+
+    assert requirement["entity_context"]["has_high_confidence_entity"] is False
+    assert requirement["entity_context"]["primary_entities"] == []
+    assert requirement["retrieval_plan"]["mode"] == "topic"
+    assert requirement["retrieval_plan"]["hard_entity_gate"] is False
+
+
+def test_onepoint_query_plan_remains_strict_entity_lookup(tmp_path):
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    _insert_entity_reference_fixture(db_path)
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+
+    requirement = service.analyze_requirement("介绍 Onepoint 产品", CreationOptions())
+    plan = requirement["retrieval_plan"]
+
+    assert [
+        item["name"] for item in requirement["entity_context"]["primary_entities"]
+    ] == ["Onepoint"]
+    assert plan["mode"] == "entity_lookup"
+    assert plan["primary_target"] == "Onepoint"
+    assert plan["components"] == ["Onepoint"]
+    assert plan["hard_entity_gate"] is True
+
+
+def test_ascii_entity_matches_require_token_boundaries():
+    service = CreationService.__new__(CreationService)
+
+    assert service._contains_retrieval_term("当前 Agent 的能力", "Agent") is True
+    assert service._contains_retrieval_term("TieAgent 架构", "Agent") is False
+    assert service._contains_retrieval_term("调整 agent_loop.py", "Agent") is False
+    assert service._contains_retrieval_term("MultiAgent 调度", "Agent") is False
+
+    tier, matches, score = service._classify_entity_tier(
+        {
+            "title": "TieAgent 架构",
+            "summary": "调整 multiagent 调度",
+            "entity_text": "",
+            "full_content": "修改 agent_loop.py 的执行逻辑。",
+            "prompt_hint": "",
+        },
+        ["Agent"],
+    )
+    assert (tier, matches, score) == ("background", [], 0.0)
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        for text, term, expected in (
+            ("原创剧本Agent", "原创剧本", True),
+            ("当前 Onepoint 产品", "Onepoint", True),
+            ("NeoOnepoint 产品", "Onepoint", False),
+            ("Onepoint_test", "Onepoint", False),
+            ("100%_完成", "100%_完成", True),
+            ("100xx完成", "100%_完成", False),
+        ):
+            predicate, params = service._sqlite_token_predicate("LOWER(?)", term)
+            actual = bool(
+                conn.execute(
+                    f"SELECT {predicate}",
+                    [text, *params],
+                ).fetchone()[0]
+            )
+            assert actual is expected
+    finally:
+        conn.close()
+
+
+def test_ascii_exact_candidate_survives_more_than_one_window_of_substring_decoys(
+    tmp_path,
+):
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    now_ms = int(time.time() * 1000)
+    conn = sqlite3.connect(db_path)
+    for index in range(210):
+        content = f"NeoOnepoint 竞品资料 {index}"
+        conn.execute(
+            "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, ?, 3, 0, ?, ?)",
+            (
+                40_000 + index,
+                content,
+                content,
+                content,
+                content,
+                '["NeoOnepoint"]',
+                now_ms + index,
+                now_ms + index,
+            ),
+        )
+    for index in range(2):
+        content = f"Onepoint 产品能力与知识工作场景 {index}"
+        conn.execute(
+            "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, ?, 5, 1, ?, ?)",
+            (
+                50_000 + index,
+                content,
+                content,
+                content,
+                content,
+                '["Onepoint"]',
+                now_ms - 100_000 - index,
+                now_ms - 100_000 - index,
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+    service.enable_vector_recall = False
+    service._embedding_model = None
+    query = "介绍 Onepoint 产品"
+    requirement = service.analyze_requirement(query, CreationOptions())
+
+    assert requirement["retrieval_plan"]["mode"] == "entity_lookup"
+    references = service.retrieve_references(
+        query,
+        requirement,
+        CreationOptions(max_references=10),
+    )
+
+    assert {item.source_id for item in references} == {50_000, 50_001}
+    assert all("NeoOnepoint" not in item.title for item in references)
+
+
+def test_ascii_entity_fragment_can_expand_to_full_curated_name(tmp_path):
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    now_ms = int(time.time() * 1000)
+    conn = sqlite3.connect(db_path)
+    for index in range(2):
+        content = f"Alpha Project 交付进展 {index}"
+        conn.execute(
+            "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, ?, 5, 1, ?, ?)",
+            (
+                72_000 + index,
+                content,
+                content,
+                content,
+                content,
+                '["Alpha Project"]',
+                now_ms,
+                now_ms,
+            ),
+        )
+    for index in range(30):
+        content = f"其他主题 {index}"
+        conn.execute(
+            "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, '[]', 3, 0, ?, ?)",
+            (
+                73_000 + index,
+                content,
+                content,
+                content,
+                content,
+                now_ms,
+                now_ms,
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+    requirement = service.analyze_requirement("介绍 Project 产品", CreationOptions())
+
+    assert requirement["entity_context"]["primary_entities"][0]["name"] == (
+        "Alpha Project"
+    )
+    assert requirement["retrieval_plan"]["mode"] == "entity_lookup"
+    assert requirement["retrieval_plan"]["primary_target"] == "Alpha Project"
+
+
+def test_substring_variants_do_not_inflate_exact_entity_document_frequency(tmp_path):
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    now_ms = int(time.time() * 1000)
+    conn = sqlite3.connect(db_path)
+    for index in range(24):
+        content = f"NeoOnepoint 竞品资料 {index}"
+        conn.execute(
+            "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, ?, 3, 0, ?, ?)",
+            (
+                70_000 + index,
+                content,
+                content,
+                content,
+                content,
+                '["NeoOnepoint"]',
+                now_ms + index,
+                now_ms + index,
+            ),
+        )
+    for index in range(2):
+        content = f"Onepoint 精确产品资料 {index}"
+        conn.execute(
+            "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, ?, 5, 1, ?, ?)",
+            (
+                71_000 + index,
+                content,
+                content,
+                content,
+                content,
+                '["Onepoint"]',
+                now_ms,
+                now_ms,
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+    requirement = service.analyze_requirement("介绍 Onepoint 产品", CreationOptions())
+    onepoint_stats = next(
+        item
+        for item in requirement["entity_context"]["candidate_statistics"]
+        if item["normalized"] == "onepoint"
+    )
+
+    assert onepoint_stats["document_frequency"] == 2
+    assert onepoint_stats["is_high_df_generic"] is False
+    assert requirement["retrieval_plan"]["mode"] == "entity_lookup"
+    assert requirement["retrieval_plan"]["hard_entity_gate"] is True
+
+
+def test_substring_variants_cannot_expand_into_a_different_ascii_entity(tmp_path):
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    now_ms = int(time.time() * 1000)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, ?, 5, 1, ?, ?)",
+        (
+            74_000,
+            "Onepoint 精确资料",
+            "Onepoint 产品资料",
+            "Onepoint 产品资料",
+            "Onepoint 产品资料",
+            '["Onepoint"]',
+            now_ms,
+            now_ms,
+        ),
+    )
+    for index in range(2):
+        content = f"NeoOnepoint 竞品资料 {index}"
+        conn.execute(
+            "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, ?, 3, 0, ?, ?)",
+            (
+                74_100 + index,
+                content,
+                content,
+                content,
+                content,
+                '["NeoOnepoint"]',
+                now_ms,
+                now_ms,
+            ),
+        )
+    for index in range(30):
+        content = f"其他主题 {index}"
+        conn.execute(
+            "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, '[]', 3, 0, ?, ?)",
+            (
+                74_200 + index,
+                content,
+                content,
+                content,
+                content,
+                now_ms,
+                now_ms,
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+    requirement = service.analyze_requirement("介绍 Onepoint 产品", CreationOptions())
+
+    assert requirement["entity_context"]["primary_entities"] == []
+    assert requirement["retrieval_plan"]["mode"] == "topic"
+    assert requirement["retrieval_plan"]["hard_entity_gate"] is False
+
+
+def test_creation_entity_corpus_recalibrates_planner_mid_frequency_term(tmp_path):
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    now_ms = int(time.time() * 1000)
+    conn = sqlite3.connect(db_path)
+    for index in range(15):
+        content = f"Agent 通用执行记录 {index}"
+        conn.execute(
+            "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, ?, 3, 0, ?, ?)",
+            (
+                60_000 + index,
+                content,
+                content,
+                content,
+                content,
+                '["Agent"]',
+                now_ms + index,
+                now_ms + index,
+            ),
+        )
+    for index in range(85):
+        content = f"其他主题 {index}"
+        conn.execute(
+            "INSERT INTO bake_knowledge VALUES (?, ?, ?, ?, ?, '[]', 3, 0, ?, ?)",
+            (
+                61_000 + index,
+                content,
+                content,
+                content,
+                content,
+                now_ms,
+                now_ms,
+            ),
+        )
+    conn.execute(
+        "INSERT INTO bake_documents VALUES (?, ?, ?, ?, ?, '[]', '[]', '', 0, "
+        "'auto_created', ?, ?, NULL, 'enabled')",
+        (
+            62_000,
+            "原创剧本设计",
+            "设计文档",
+            "原创剧本的人物与冲突设计。",
+            "原创剧本的人物与冲突设计。",
+            now_ms,
+            "https://docs.example/script",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+    requirement = service.analyze_requirement(
+        "生成原创剧本和 Agent 的结合方案",
+        CreationOptions(),
+    )
+    plan = requirement["retrieval_plan"]
+    agent_term = next(item for item in plan["terms"] if item["text"] == "agent")
+
+    assert plan["mode"] == "relational"
+    assert plan["primary_target"] == "原创剧本"
+    assert agent_term["planner_role"] == "discriminative"
+    assert agent_term["role"] == "generic"
+    assert agent_term["calibration"] == "creation_entity_corpus_df"
+    assert plan["term_weights"]["agent"] == 0.15

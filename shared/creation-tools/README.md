@@ -4,13 +4,14 @@
 
 ## 兼容规则
 
-- `enabled_tools` 是新增的可选请求字段；旧客户端不传时，Core Engine 与 Sidecar 都补齐 `internet_search`、`memory_search`、`data_search`、`webpage_scrape`。
+- `enabled_tools` 是新增的可选请求字段；旧客户端不传时，Core Engine 与 Sidecar 补齐四个必备 Tool，新版客户端与 Sidecar 还默认启用官方内置的 `mermaid_diagram`。
 - `internet_search`、`memory_search`、`data_search`、`webpage_scrape` 是必备 Tool，客户端不得卸载或关闭，服务端收到空数组时也必须补齐。
 - `memory_search` 默认最多召回 10 条，可在创作“工具”页配置为 1～30 条；`data_search` 默认最多召回 30 条，可配置为 1～50 条。旧客户端不传 `max_references` / `data_search_limit` 时由 Core Engine 与 Sidecar 补齐默认值，越界值在服务端收敛到契约范围。
 - 日报、周报、项目总结和分析任务可把 `data_search` 作为与记忆、文档、知识等来源平权的证据探针；报表 URL 统一参加 Top-K。Harness 对 Top-K 报表调用 `webpage_scrape` 时先做不抢焦点的 DOM/AX 静默取数；页面未打开或静默结构不足时，可在焦点硬门禁下为每个来源降级一次专用浏览器会话。关闭截图时只在建立隐藏窗口时短暂切换一次，恢复原应用后在隐藏窗口完成页面交互和长 DOM 采集。Skill 的“保留证据截图”只控制图片资产，不控制即时取数。只有程序化校验通过的数据才进入 `data_analysis_agent`，不预置供应商专用流程。
 - 初稿质检通过 `$defs.quality_issue` 返回问题代码、严重度、目标 Agent、可观察证据和前置能力。`harness.decision` 兼容数据反馈与质量反馈两个分支；质量分支可通过 `activated_skills[]` 动态激活匹配的已应用 Skill，并追加数据分析、PlantUML、Mermaid、文档重写、五类专项润色和再次质检。
 - 首次创作必须把 `chapter_design_agent` 放在首个 Writer 前；专项润色不预置成固定流水线，只在质量问题命中时运行，最多三轮。
-- 可选 Tool 当前包括 `plantuml_diagram`、`mermaid_diagram`、`github_search`。未安装或未开启时不得进入 Agent 计划。
+- `chapter_design_agent` 同时输出 `creation.visual-plan.v1`：它按章节内容中的对象关系、步骤分支、时间交互、状态变化或实体关系判断是否需要代码图示，不按某一种方案名称写死规则。Harness 在章节设计完成后为每个有效 `diagram_spec` 调度一次章节级 Mermaid 准备步骤，Writer 必须把图放入 `section_title` 对应章节；质检按计划逐章检查，不再以“全文存在任意一张图”视为通过。
+- 可选 Tool 当前包括 `plantuml_diagram`、`mermaid_diagram`、`github_search`。Mermaid 为官方内置且默认启用，但用户可以关闭；其余可选 Tool 未安装或未开启时不得进入 Agent 计划。显式 Skill 仍以自身 `execution_steps` 为业务执行边界，只有声明的画图步骤才会运行。
 - 未识别的 Tool ID 保留在转发契约中，但旧 Sidecar 不调用，以便新客户端与旧服务兼容。
 - `enable_rag`、`enable_web_search` 暂时保留供旧客户端兼容；新客户端以 `enabled_tools` 为准。
 

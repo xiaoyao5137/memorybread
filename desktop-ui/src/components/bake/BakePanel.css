@@ -4982,6 +4982,15 @@ td.bake-capture-table__time .bake-capture-table__id {
   white-space: nowrap;
 }
 
+.bake-memory-graph__inspector strong.bake-memory-graph__inspector-title {
+  display: -webkit-box;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
 .bake-memory-graph__inspector > span:not(.bake-memory-graph__inspector-type),
 .bake-memory-graph__inspector small {
   display: -webkit-box;

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import CreationPanel from '../components/CreationPanel'
 import { useAppStore } from '../store/useAppStore'
 
@@ -122,6 +122,33 @@ describe('创作 Agent 多轮 Loop', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals()
+  })
+
+  it('隐藏数据风险说明的内部边界标记并保留用户可读内容', async () => {
+    const documentWithMarkers = [
+      '# 数据周报',
+      '',
+      '<!-- memorybread:data-risks:0123456789abcdef -->',
+      '**数据风险说明（参考值）**',
+      '',
+      '该数据的实际统计周期与请求周期不同。',
+      '\\<!-- /memorybread:data-risks -->',
+    ].join('\n')
+    useAppStore.getState().setCreationDraft({ generatedContent: documentWithMarkers })
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    const { container } = render(<CreationPanel />)
+
+    expect(await screen.findByText('数据风险说明（参考值）')).toBeInTheDocument()
+    expect(screen.getByText('该数据的实际统计周期与请求周期不同。')).toBeInTheDocument()
+    expect(container.textContent).not.toContain('memorybread:data-risks')
   })
 
   it('输入法确认候选词时不启动创作', async () => {
@@ -577,6 +604,16 @@ describe('创作 Agent 多轮 Loop', () => {
               result_count: 2,
               skill_step_title: 'AIGC进度总结',
               query: '当前步骤：AIGC进度总结 用@记忆搜索 Tool 工具获取本周AIGC共建项目的进展，以及AIGC共建项目周报里关于推理性能优化相关的进展，并以列表形式展示，最多10行文字\n整体创作背景：请使用@GPU成本优化周报创作法完成本周周报',
+              entity_context: {
+                primary_entities: [{ name: 'Agent', confidence: 0.42 }],
+                has_high_confidence_entity: false,
+              },
+              retrieval_plan: {
+                mode: 'relational',
+                primary_target: '原创剧本',
+                components: ['Agent'],
+                relations: ['结合'],
+              },
             },
             {
               references: [{
@@ -594,6 +631,23 @@ describe('创作 Agent 多轮 Loop', () => {
                 freshness_score: 0.9,
                 usage_count: 3,
                 reason: '主题高度相关',
+                retrieval_tier: 'related',
+                retrieval_paths: ['keyword', 'semantic'],
+                matched_keywords: ['原创剧本', 'Agent'],
+                matched_entities: ['Agent'],
+                lexical_score: 0.61,
+                semantic_score: 0.74,
+                entity_score: 0.18,
+                retrieval_mode: 'relational',
+                primary_target: '原创剧本',
+                matched_components: ['原创剧本', 'Agent'],
+                matched_relations: ['结合'],
+                relation_score: 0.82,
+                intent_mode: 'relational',
+                matched_concepts: ['原创剧本', 'Agent'],
+                primary_target_score: 0.95,
+                coverage: 0.78,
+                relation_coverage: 0.75,
               }, {
                 id: 60,
                 source_id: 60,
@@ -760,6 +814,7 @@ describe('创作 Agent 多轮 Loop', () => {
     expect(screen.getByRole('tab', { name: '参考资料 (2)' })).toHaveAttribute('aria-selected', 'true')
     const referenceGroup = screen.getByLabelText('AIGC进度总结参考资料组')
     await waitFor(() => expect(referenceGroup).toHaveFocus())
+    expect(referenceGroup).toHaveTextContent('主题高度相关')
     expect(referenceGroup.querySelector('.creation-reference-group__query')).toHaveTextContent(
       '当前步骤：AIGC进度总结 用@记忆搜索 Tool 工具获取本周AIGC共建项目的进展，以及AIGC共建项目周报里关于推理性能优化相关的进展，并以列表形式展示，最多10行文字 整体创作背景：请使用@GPU成本优化周报创作法完成本周周报',
     )
@@ -803,6 +858,7 @@ describe('创作 Agent 多轮 Loop', () => {
     const followUp = screen.getByPlaceholderText(/继续告诉 Agent 如何修改当前文档/)
     fireEvent.change(followUp, { target: { value: '补充质量门禁和多轮测试' } })
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    expect(followUp).toHaveValue('')
 
     await waitFor(() => expect(agentPayloads).toHaveLength(2))
     expect(agentPayloads[0].selected_skills[0]).toMatchObject({
@@ -829,7 +885,8 @@ describe('创作 Agent 多轮 Loop', () => {
     await screen.findByText('本轮补充质量门禁。')
     const emphasized = screen.getByText('目标驱动')
     expect(emphasized.tagName).toBe('STRONG')
-    expect(emphasized).toHaveStyle({ color: 'var(--mb-brand-strong)', textDecoration: 'underline' })
+    expect(emphasized).toHaveStyle({ color: 'var(--mb-brand-text)', fontWeight: '650' })
+    expect(emphasized).not.toHaveStyle({ textDecoration: 'underline' })
     expect(screen.getByRole('columnheader', { name: '能力' })).toHaveStyle({
       background: 'var(--mb-brand-soft)',
       color: 'var(--mb-brand-text)',
@@ -897,6 +954,43 @@ describe('创作 Agent 多轮 Loop', () => {
     const storedPatch = savedHistories[1].agent_trace.find((item: any) => item.type === 'document.patch.applied')
     const storedHarnessDecision = savedHistories[1].agent_trace.find((item: any) => item.type === 'harness.decision')
     const storedDataSearch = savedHistories[1].agent_trace.find((item: any) => item.actor?.id === 'data_search')
+    const storedMemorySearch = savedHistories[0].agent_trace.find((item: any) => item.actor?.id === 'memory_search')
+    expect(savedHistories[0].references[0]).toMatchObject({
+      retrieval_tier: 'related',
+      retrieval_paths: ['keyword', 'semantic'],
+      matched_keywords: ['原创剧本', 'Agent'],
+      matched_entities: ['Agent'],
+      lexical_score: 0.61,
+      semantic_score: 0.74,
+      entity_score: 0.18,
+      retrieval_mode: 'relational',
+      primary_target: '原创剧本',
+      matched_components: ['原创剧本', 'Agent'],
+      matched_relations: ['结合'],
+      relation_score: 0.82,
+      intent_mode: 'relational',
+      matched_concepts: ['原创剧本', 'Agent'],
+      primary_target_score: 0.95,
+      coverage: 0.78,
+      relation_coverage: 0.75,
+    })
+    expect(storedMemorySearch.environment_patch.references[0]).toMatchObject({
+      retrieval_mode: 'relational',
+      primary_target: '原创剧本',
+      matched_components: ['原创剧本', 'Agent'],
+      matched_relations: ['结合'],
+      relation_score: 0.82,
+    })
+    expect(storedMemorySearch.data.entity_context).toEqual({
+      primary_entities: [{ name: 'Agent', confidence: 0.42 }],
+      has_high_confidence_entity: false,
+    })
+    expect(storedMemorySearch.data.retrieval_plan).toEqual({
+      mode: 'relational',
+      primary_target: '原创剧本',
+      components: ['Agent'],
+      relations: ['结合'],
+    })
     expect(storedDataSearch.environment_patch.data_sources).toEqual([
       {
         source_id: 7,
@@ -1591,7 +1685,11 @@ describe('创作 Agent 多轮 Loop', () => {
       }
       if (url.pathname === '/v1/gateway/chat') {
         gatewayPayloads.push(JSON.parse(String(init?.body || '{}')))
-        return Response.json({ content: '方案设计结论' })
+        return sse([
+          { type: 'delta', text: '方案设计' },
+          { type: 'delta', text: '结论' },
+          { type: 'done', answer: '方案设计结论' },
+        ])
       }
       if (url.pathname === '/api/creation/agent/run') {
         const payload = JSON.parse(String(init?.body || '{}'))
@@ -1653,8 +1751,10 @@ describe('创作 Agent 多轮 Loop', () => {
     expect(agentPayloads[1].model_result).toBe('方案设计结论')
     expect(gatewayPayloads).toHaveLength(1)
     expect(gatewayPayloads[0]).toMatchObject({
+      request_id: 'model-request-1',
       brand_model_id: 'mbcd-plus-v1',
       caller: 'creation',
+      stream: true,
       privacy: { content_logging: false, client_scrubbed: true },
     })
     expect(gatewayPayloads[0]).not.toHaveProperty('provider')
@@ -1664,6 +1764,234 @@ describe('创作 Agent 多轮 Loop', () => {
     const storedPause = savedHistories[0].agent_trace.find((item: any) => item.type === 'run.paused')
     expect(storedModelRequest.data).toEqual({ request_id: 'model-request-1' })
     expect(storedPause.data).toEqual({ reason: 'external_model' })
+  })
+
+  it('暂停后的品牌模型调用失败时终止运行轨迹并停止呼吸灯', async () => {
+    const progressPayloads: any[] = []
+    const fallbackHistories: any[] = []
+    useAppStore.getState().setAuthSession({
+      access_token: 'test-token',
+      expires_at: '2099-01-01T00:00:00Z',
+      user: {
+        id: 'user-agent-test',
+        nickname: '小麦',
+        status: 'active',
+        roles: ['user'],
+        locale: 'zh-CN',
+        timezone: 'Asia/Shanghai',
+        created_at: '2026-01-01T00:00:00Z',
+      },
+    })
+    useAppStore.getState().setCreationModelConfig('mbcd-plus-v1', { enabled: true })
+
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/v1/billing/balance') {
+        return Response.json({
+          data: {
+            available: '100.0000',
+            reserved: '0.0000',
+            currency: 'CREDIT',
+            as_of: '2026-07-26T00:00:00Z',
+          },
+        })
+      }
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history/start') return Response.json({ id: 91 })
+      if (url.pathname === '/api/creation/history/91/progress' && init?.method === 'PATCH') {
+        progressPayloads.push(JSON.parse(String(init.body || '{}')))
+        return new Response('{}', { status: 503 })
+      }
+      if (url.pathname === '/api/creation/history' && init?.method === 'POST') {
+        fallbackHistories.push(JSON.parse(String(init.body || '{}')))
+        return Response.json({ id: 91 })
+      }
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.pathname === '/v1/gateway/chat') {
+        return Response.json({
+          error: {
+            code: 'MODEL_SERVICE_UNAVAILABLE',
+            message: '生成失败，请稍后重试',
+            retryable: true,
+          },
+        }, { status: 503 })
+      }
+      if (url.pathname === '/api/creation/agent/run') {
+        return sse([
+          event('run.started', 1, '创作 Agent 已接管目标'),
+          event('phase.started', 2, '阶段开始：生成文档内容', undefined, {
+            phase_id: 'step:document_writer_agent',
+            phase_title: '生成文档内容',
+            phase_kind: 'plan_step',
+          }),
+          event('thinking.started', 3, '深度思考中：生成文档内容', undefined, {
+            stage: 'generation',
+          }),
+          event(
+            'model.request',
+            4,
+            '文档撰写 Agent 请求品牌模型推理',
+            { kind: 'agent', id: 'document_writer_agent', name: '文档撰写 Agent' },
+            { messages: [{ role: 'user', content: '生成文档' }] },
+          ),
+          {
+            ...event(
+              'run.paused',
+              5,
+              '等待品牌模型返回',
+              undefined,
+              { reason: 'external_model', continuation: { cursor: 1 } },
+            ),
+            status: 'waiting',
+          },
+        ])
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+    const input = screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/)
+    fireEvent.change(input, { target: { value: '生成一份技术方案' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
+
+    expect(await screen.findByText('生成失败，请稍后重试')).toBeInTheDocument()
+    const phaseTitle = screen.getByText('1. 生成文档内容')
+    await waitFor(() => expect(phaseTitle.closest('.creation-trace-phase')).toHaveTextContent('未完成'))
+    expect(phaseTitle.closest('.creation-trace-phase')).not.toHaveClass('is-running')
+    expect(screen.queryByText(/深度思考中/)).not.toBeInTheDocument()
+    expect(document.querySelector('.creation-trace-thinking.is-running')).toBeNull()
+    expect(document.querySelector('.creation-agent-event__activity')).toBeNull()
+    expect(screen.queryByRole('button', { name: '中止' })).not.toBeInTheDocument()
+    expect(useAppStore.getState().creationDraft.agentEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'run.failed',
+        status: 'failed',
+        summary: '生成失败，本轮创作已停止',
+      }),
+    ]))
+    await waitFor(() => expect(progressPayloads.some(payload => (
+      payload.lifecycle_status === 'failed'
+    ))).toBe(true))
+    const failedProgress = progressPayloads.find(payload => payload.lifecycle_status === 'failed')
+    expect(failedProgress.agent_trace).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'run.failed',
+        data: {
+          error_code: 'MODEL_SERVICE_UNAVAILABLE',
+          retryable: true,
+        },
+      }),
+    ]))
+    await waitFor(() => expect(fallbackHistories).toHaveLength(1))
+    expect(fallbackHistories[0]).toMatchObject({
+      history_id: 91,
+      lifecycle_status: 'failed',
+      session_id: expect.any(String),
+    })
+    expect(fallbackHistories[0].agent_trace).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'run.failed',
+        data: {
+          error_code: 'MODEL_SERVICE_UNAVAILABLE',
+          retryable: true,
+        },
+      }),
+    ]))
+  })
+
+  it('Gateway 首响应前网络失败时记录可重试稳定错误而非客户端兜底码', async () => {
+    const progressPayloads: any[] = []
+    useAppStore.getState().setAuthSession({
+      access_token: 'test-token',
+      expires_at: '2099-01-01T00:00:00Z',
+      user: {
+        id: 'user-agent-test',
+        nickname: '小麦',
+        status: 'active',
+        roles: ['user'],
+        locale: 'zh-CN',
+        timezone: 'Asia/Shanghai',
+        created_at: '2026-01-01T00:00:00Z',
+      },
+    })
+    useAppStore.getState().setCreationModelConfig('mbcd-plus-v1', { enabled: true })
+
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/v1/billing/balance') {
+        return Response.json({
+          data: {
+            available: '100.0000',
+            reserved: '0.0000',
+            currency: 'CREDIT',
+            as_of: '2026-07-26T00:00:00Z',
+          },
+        })
+      }
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history/start') {
+        return Response.json({ id: 92, progress_epoch: 7 })
+      }
+      if (url.pathname === '/api/creation/history/92/progress' && init?.method === 'PATCH') {
+        progressPayloads.push(JSON.parse(String(init.body || '{}')))
+        return Response.json({ ok: true })
+      }
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.pathname === '/v1/gateway/chat') throw new TypeError('Load failed')
+      if (url.pathname === '/api/creation/agent/run') {
+        return sse([
+          event('run.started', 1, '创作 Agent 已接管目标'),
+          event(
+            'model.request',
+            2,
+            '文档撰写 Agent 请求品牌模型推理',
+            { kind: 'agent', id: 'document_writer_agent', name: '文档撰写 Agent' },
+            {
+              request_id: 'model-network-failure',
+              messages: [{ role: 'user', content: '生成文档' }],
+            },
+          ),
+          {
+            ...event(
+              'run.paused',
+              3,
+              '等待品牌模型返回',
+              undefined,
+              { reason: 'external_model', continuation: { cursor: 1 } },
+            ),
+            status: 'waiting',
+          },
+        ])
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+    const input = screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/)
+    fireEvent.change(input, { target: { value: '生成一份技术方案' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
+
+    expect(await screen.findByText('云端模型连接失败，请检查网络后重试')).toBeInTheDocument()
+    await waitFor(() => expect(progressPayloads.some(payload => (
+      payload.lifecycle_status === 'failed'
+    ))).toBe(true))
+    const failedProgress = progressPayloads.find(payload => payload.lifecycle_status === 'failed')
+    expect(failedProgress.progress_epoch).toBe(7)
+    expect(failedProgress.agent_trace).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'run.failed',
+        data: {
+          error_code: 'GATEWAY_NETWORK_UNAVAILABLE',
+          retryable: true,
+        },
+      }),
+    ]))
+    expect(JSON.stringify(failedProgress.agent_trace)).not.toContain('Load failed')
+    expect(JSON.stringify(failedProgress.agent_trace)).not.toContain('CLIENT_EXECUTION_FAILED')
   })
 
   it('完成事件可恢复最终文档，避免中间文档事件缺失后误报失败', async () => {
@@ -2110,17 +2438,24 @@ describe('创作 Agent 多轮 Loop', () => {
     })
   })
 
-  it('报表校验未通过时步骤及所属阶段显示黄色警告圆点', async () => {
+  it('报表校验未通过时显示警告及未采用来源详情并写入历史', async () => {
+    const rejectedSources = [{
+      source_id: 12,
+      title: 'Token 数据报表',
+      url: 'https://bi.example.com/token-report',
+    }]
     const warningEvent = {
       ...event(
         'tool.completed',
         3,
-        '浏览器访问 1 个报表，但没有指标通过页面结构校验，本轮不采用这些页面的数值',
+        '已读取 2 个报表，采用其中 1 个来源；1 个来源暂未取得目标指标，未采用',
         { kind: 'tool', id: 'webpage_scrape', name: '网页爬取 Tool' },
-        { result_count: 0, failed_count: 1, attempted_count: 1 },
+        { result_count: 1, failed_count: 1, attempted_count: 2, rejected_sources: rejectedSources },
+        { rejected_sources: rejectedSources },
       ),
       status: 'warning',
     }
+    let storedTrace: any[] = []
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input))
       if (url.pathname === '/api/creation/skills') return Response.json([])
@@ -2128,6 +2463,7 @@ describe('创作 Agent 多轮 Loop', () => {
         return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
       }
       if (url.pathname === '/api/creation/history' && init?.method === 'POST') {
+        storedTrace = JSON.parse(String(init.body || '{}')).agent_trace || []
         return Response.json({ id: 99 })
       }
       if (url.pathname === '/api/creation/agent/run') {
@@ -2162,10 +2498,64 @@ describe('创作 Agent 多轮 Loop', () => {
     expect(phase).toHaveTextContent('有警告')
 
     fireEvent.click(phase?.querySelector('.creation-trace-phase__header') as HTMLElement)
-    const warningSummary = await screen.findByText(/没有指标通过页面结构校验/)
+    const warningSummary = await screen.findByText(/1 个来源暂未取得目标指标，未采用/)
     const warningStep = warningSummary.closest('.creation-agent-event')
     expect(warningStep).toHaveClass('is-warning')
     expect(warningStep?.querySelector('.creation-agent-event__dot.is-warning')).toBeTruthy()
+    expect(warningStep).not.toHaveTextContent('全程在后台读取，未打断当前操作')
+
+    fireEvent.click(warningStep?.querySelector('.creation-agent-event__row') as HTMLElement)
+    expect(await screen.findByText('未采用来源')).toBeInTheDocument()
+    expect(screen.getByText('Token 数据报表 · https://bi.example.com/token-report'))
+      .toBeInTheDocument()
+
+    await waitFor(() => expect(storedTrace.length).toBeGreaterThan(0))
+    const storedWarning = storedTrace.find(item => (
+      item.type === 'tool.completed' && item.actor?.id === 'webpage_scrape'
+    ))
+    expect(storedWarning.data.rejected_sources).toEqual(rejectedSources)
+    expect(storedWarning.environment_patch.rejected_sources).toEqual(rejectedSources)
+  })
+
+  it('划选文档片段时保持精确选区，并在收起选区后同步流式内容', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+    useAppStore.getState().setCreationDraft({
+      generatedContent: '# 选区测试\n\n精确片段需要保持。',
+    })
+
+    render(<CreationPanel />)
+    const paragraph = await screen.findByText('精确片段需要保持。')
+    const textNode = paragraph.firstChild as Text
+    const selection = window.getSelection()
+    const range = document.createRange()
+    range.setStart(textNode, 0)
+    range.setEnd(textNode, 4)
+    selection?.removeAllRanges()
+    selection?.addRange(range)
+    document.dispatchEvent(new Event('selectionchange'))
+    expect(selection?.toString()).toBe('精确片段')
+
+    act(() => {
+      useAppStore.getState().setCreationDraft({
+        generatedContent: '# 选区测试\n\n精确片段需要保持。\n\n流式新增内容。',
+      })
+    })
+
+    expect(selection?.toString()).toBe('精确片段')
+    expect(screen.queryByText('流式新增内容。')).not.toBeInTheDocument()
+
+    act(() => {
+      selection?.removeAllRanges()
+      document.dispatchEvent(new Event('selectionchange'))
+    })
+    expect(await screen.findByText('流式新增内容。')).toBeInTheDocument()
   })
 
   it('用户中止后在对话中记录行为，并把进行中的执行轨迹标记为结束', async () => {
@@ -2218,5 +2608,62 @@ describe('创作 Agent 多轮 Loop', () => {
       expect.objectContaining({ type: 'run.cancelled', status: 'cancelled' }),
     ]))
     expect(screen.queryByText('已中止本次创作')).not.toBeInTheDocument()
+  })
+
+  it('切走创作界面后继续执行，并把同一记录从进行中更新为完成', async () => {
+    const encoder = new TextEncoder()
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    const requestLog: string[] = []
+    const savedBodies: Array<Record<string, unknown>> = []
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      const method = init?.method || 'GET'
+      requestLog.push(`${method} ${url.pathname}`)
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history' && method === 'GET') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.pathname === '/api/creation/history/start') return Response.json({ id: 41 })
+      if (url.pathname === '/api/creation/history/41/progress') return new Response(null, { status: 204 })
+      if (url.pathname === '/api/creation/history' && method === 'POST') {
+        savedBodies.push(JSON.parse(String(init?.body || '{}')))
+        return Response.json({ id: 41 })
+      }
+      if (url.pathname === '/api/creation/agent/run') {
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamController = controller
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(event('run.started', 1, '创作 Agent 已接管目标'))}\n\n`))
+          },
+        }), { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    const view = render(<CreationPanel active />)
+    const input = screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/)
+    fireEvent.change(input, { target: { value: '生成后台持续创作方案' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
+
+    await waitFor(() => expect(requestLog).toContain('POST /api/creation/history/start'))
+    await waitFor(() => expect(streamController).not.toBeNull())
+    view.rerender(<CreationPanel active={false} />)
+    act(() => {
+      streamController?.enqueue(encoder.encode(`data: ${JSON.stringify({
+        ...event('run.completed', 2, '本轮创作完成', undefined, { document: '# 后台创作已完成' }),
+        status: 'completed',
+      })}\n\n`))
+      streamController?.close()
+    })
+
+    await waitFor(() => expect(savedBodies).toHaveLength(1))
+    expect(savedBodies[0]).toMatchObject({
+      session_id: expect.any(String),
+      generated_content: '# 后台创作已完成',
+      lifecycle_status: 'completed',
+    })
+    expect(requestLog.indexOf('POST /api/creation/history/start'))
+      .toBeLessThan(requestLog.indexOf('POST /api/creation/agent/run'))
+    expect(useAppStore.getState().creationDraft.generatedContent).toBe('# 后台创作已完成')
   })
 })

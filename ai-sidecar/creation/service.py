@@ -20,9 +20,12 @@ from uuid import uuid4
 
 import httpx
 
+from rag.query_planner import ArtifactQueryPlan, PlannedTerm, build_artifact_query_plan
+
 from .tools import (
     CreationToolExecutionError,
     DATA_SEARCH_TOOL_ID,
+    DEFAULT_CREATION_TOOL_IDS,
     INTERNET_SEARCH_TOOL_ID,
     MEMORY_SEARCH_TOOL_ID,
     WEBPAGE_SCRAPE_TOOL_ID,
@@ -64,6 +67,7 @@ TRANSIENT_REPORT_REFRESH_ERROR_CODES = frozenset(
         "SCRAPE_HTTP_502",
         "SCRAPE_HTTP_503",
         "SCRAPE_HTTP_504",
+        "SCRAPE_PAGE_ERROR",
         "BROWSER_ATTACH_UNAVAILABLE",
     }
 )
@@ -250,12 +254,7 @@ class CreationOptions:
     freshness_weight: float = 0.05
     max_references: int = 10
     data_search_limit: int = 30
-    enabled_tools: tuple[str, ...] = (
-        INTERNET_SEARCH_TOOL_ID,
-        MEMORY_SEARCH_TOOL_ID,
-        DATA_SEARCH_TOOL_ID,
-        WEBPAGE_SCRAPE_TOOL_ID,
-    )
+    enabled_tools: tuple[str, ...] = DEFAULT_CREATION_TOOL_IDS
 
     def __post_init__(self) -> None:
         self.enabled_tools = normalize_creation_tool_ids(self.enabled_tools)
@@ -298,6 +297,12 @@ class ReferenceDocument:
     lexical_score: float = 0.0
     semantic_score: float = 0.0
     entity_score: float = 0.0
+    retrieval_mode: str = "topic"
+    primary_target: str = ""
+    matched_components: tuple[str, ...] = ()
+    matched_relations: tuple[str, ...] = ()
+    relation_score: float = 0.0
+    selection_reasons: tuple[str, ...] = ()
     refresh_status: str = "historical_only"
     refresh_completeness: str = "unverified"
     refresh_collected_at: Optional[int] = None
@@ -322,6 +327,9 @@ class GithubSearchResult:
 
 
 class CreationService:
+    SKILL_ROUTE_MODEL_TIMEOUT_SECONDS = 120.0
+    SKILL_ROUTE_MAX_PREDICT_TOKENS = 768
+
     def __init__(
         self,
         ollama_base_url: str = "http://localhost:11434",
@@ -391,7 +399,13 @@ class CreationService:
                 "本地数据检索返回格式无效",
             ) from exc
         results = data.get("results") if isinstance(data, dict) else []
-        return [item for item in (results or []) if isinstance(item, dict)][:50]
+        normalized = [
+            item for item in (results or []) if isinstance(item, dict)
+        ][:50]
+        return self._apply_requested_period_policy(
+            normalized,
+            parsed_requirement.get("time_context") or {},
+        )
 
     async def scrape_data_context(
         self,
@@ -406,7 +420,7 @@ class CreationService:
         browser_extension_enabled: bool = True,
     ) -> dict:
         """刷新 Top-K 报表源，以 AX/DOM 校验数据并按需保留截图证据。"""
-        report_sources = self._select_refreshable_report_sources(data_results)[
+        report_sources = self._select_refreshable_report_sources(data_results, query)[
             : max(1, min(int(limit), MAX_REPORT_REFRESH_SOURCES))
         ]
         if not report_sources:
@@ -414,14 +428,11 @@ class CreationService:
 
         requested_metrics = self._extract_requested_metrics(query)
         time_context = parsed_requirement.get("time_context") or {}
-        expected_period = (
-            {
-                "start": str(time_context.get("period_start") or ""),
-                "end": str(time_context.get("period_end") or ""),
-                "display": str(time_context.get("display") or ""),
-            }
-            if time_context.get("has_relative_time")
-            else {}
+        expected_period = self._report_collection_period(time_context)
+        interaction_plan = self._build_page_interaction_plan(
+            query,
+            requested_metrics,
+            expected_period,
         )
 
         scrapes: list[dict] = []
@@ -443,7 +454,10 @@ class CreationService:
                     [(True, "allow_once", "evidence_capture")]
                     if retain_screenshot
                     else (
-                        [(False, "never", "extension_background")]
+                        [
+                            (False, "never", "extension_background"),
+                            (False, "never", "extension_current_view"),
+                        ]
                         if browser_extension_enabled
                         else [
                             (False, "never", "silent"),
@@ -454,6 +468,8 @@ class CreationService:
                 )
                 payload = None
                 evidence = None
+                qualified_payload = None
+                qualified_evidence = None
                 error_code = "SCRAPE_FAILED"
                 collection_attempt = "silent"
                 for allow_foreground, focus_policy, attempt_name in attempts:
@@ -481,8 +497,21 @@ class CreationService:
                                 "preview_id": preview_id,
                                 "objective": query,
                                 "requested_metrics": requested_metrics,
-                                "expected_period_start": expected_period.get("start"),
-                                "expected_period_end": expected_period.get("end"),
+                                "expected_period_start": (
+                                    None
+                                    if attempt_name == "extension_current_view"
+                                    else expected_period.get("start")
+                                ),
+                                "expected_period_end": (
+                                    None
+                                    if attempt_name == "extension_current_view"
+                                    else expected_period.get("end")
+                                ),
+                                "interaction_plan": (
+                                    None
+                                    if attempt_name == "extension_current_view"
+                                    else interaction_plan
+                                ),
                             },
                         )
                         if not response.is_success:
@@ -508,14 +537,22 @@ class CreationService:
                             required_metrics=requested_metrics,
                             expected_period=expected_period,
                         )
+                        if (evidence.get("validation_status") == "verified"
+                                and evidence.get("validation", {}).get("risk_disclosure_required")):
+                            qualified_payload, qualified_evidence = payload, evidence
                         if (
                             evidence.get("validation_status") == "verified"
-                            or attempt_name != "silent"
+                            and not evidence.get("validation", {}).get(
+                                "risk_disclosure_required"
+                            )
                         ):
                             break
-                        # 已打开的标签可能停留在默认 Tab，或仍缺少本周筛选。
-                        # 静默读取的结构校验不通过时，用专用页面再执行一次交互。
-                        continue
+                        # 已打开的标签可能停留在默认 Tab，动态页面也可能只返回
+                        # 稳定壳层。后台扩展首读未取得目标指标时，必须继续回读
+                        # 当前视图；不能因为 HTTP 200 就提前终止两阶段采集。
+                        if attempt_name in {"silent", "extension_background"}:
+                            continue
+                        break
                     except httpx.TimeoutException:
                         error_code = "SCRAPE_TIMEOUT"
                     except httpx.RequestError:
@@ -532,6 +569,14 @@ class CreationService:
                     ):
                         continue
                     break
+
+                if (qualified_evidence is not None
+                        and (payload is None or not isinstance(evidence, dict)
+                             or evidence.get("validation_status") != "verified")):
+                    # 优先尝试准确周期，但后续刷新失败不能抹掉已经读到的
+                    # 可披露参考值。沿用其原始来源/周期，不伪装成刷新成功。
+                    payload, evidence = qualified_payload, qualified_evidence
+                    collection_attempt = "qualified_snapshot_fallback"
 
                 if payload is None:
                     logger.warning(
@@ -617,6 +662,7 @@ class CreationService:
         references: "list[ReferenceDocument]",
         query: str,
         require_latest: bool = False,
+        browser_extension_enabled: bool = True,
     ) -> dict:
         """对召回的烘焙文档做浏览器即时校验，并把来源快照放入本轮上下文。
 
@@ -655,6 +701,9 @@ class CreationService:
                     json={
                         "objective": query,
                         "require_latest": bool(require_latest),
+                        "browser_extension_enabled": bool(
+                            browser_extension_enabled
+                        ),
                     },
                 )
             except asyncio.CancelledError:
@@ -784,9 +833,250 @@ class CreationService:
                 error_code == "FOCUS_POLICY_BLOCKED"
                 or error_code in TRANSIENT_REPORT_REFRESH_ERROR_CODES
             )
+        if attempt_name == "extension_background":
+            # 日期/页签控件可能由 Canvas 或受控组件渲染，当前页面已经展示
+            # 正确数据时仍无法验证控件状态。只在这种后置条件失败时后台回读
+            # 当前视图；回读结果随后仍须通过目标指标与目标周期校验。
+            return (
+                error_code == "INTERACTION_POSTCONDITION_FAILED"
+                or error_code in TRANSIENT_REPORT_REFRESH_ERROR_CODES
+            )
         if attempt_name == "foreground_fallback":
             return error_code in TRANSIENT_REPORT_REFRESH_ERROR_CODES
         return False
+
+    @staticmethod
+    def _report_collection_period(time_context: dict) -> dict:
+        """返回报表实际可采集的相对时间窗口。
+
+        周报/月报的文档语义仍使用完整自然周期，但周期尚未结束时，页面筛选
+        不能提交未来日期。否则正常报表会因为无法显示未来结束日而被误判为
+        INTERACTION_POSTCONDITION_FAILED。这里仅截断浏览器采集结束日，不修改
+        requirement 中用于成稿和历史快照匹配的完整周期。
+        """
+        if not time_context.get("has_relative_time"):
+            return {}
+        start = str(time_context.get("period_start") or "").strip()
+        end = str(time_context.get("period_end") or "").strip()
+        current = str(time_context.get("current_date") or "").strip()
+        try:
+            start_date = datetime.strptime(start, "%Y-%m-%d").date()
+            end_date = datetime.strptime(end, "%Y-%m-%d").date()
+            current_date = datetime.strptime(current, "%Y-%m-%d").date()
+        except ValueError:
+            return {
+                "start": start,
+                "end": end,
+                "display": str(time_context.get("display") or ""),
+            }
+        collection_end = min(end_date, current_date)
+        if collection_end < start_date:
+            collection_end = start_date
+        return {
+            "start": start_date.isoformat(),
+            "end": collection_end.isoformat(),
+            "display": (
+                f"{start_date.isoformat()} 至 {collection_end.isoformat()}"
+                if collection_end != end_date
+                else str(time_context.get("display") or "")
+            ),
+        }
+
+    @staticmethod
+    def _period_bounds_from_mapping(value: object) -> tuple[int, int]:
+        if not isinstance(value, dict):
+            return (0, 0)
+        structured = value.get("structured_data")
+        provenance = value.get("provenance")
+        period = None
+        if isinstance(structured, dict) and isinstance(
+            structured.get("period"), dict
+        ):
+            period = structured.get("period")
+        elif isinstance(provenance, dict) and isinstance(
+            provenance.get("period"), dict
+        ):
+            period = provenance.get("period")
+        if isinstance(period, dict):
+            return (
+                int(period.get("start_at") or 0),
+                int(period.get("end_at") or 0),
+            )
+        observed_at = int(
+            value.get("observed_at") or value.get("collected_at") or 0
+        )
+        return (observed_at, observed_at)
+
+    @staticmethod
+    def _calendar_dates_in_text(value: object) -> list[datetime]:
+        normalized = (
+            str(value or "")
+            .replace("年", "-")
+            .replace("月", "-")
+            .replace("日", "")
+            .replace("/", "-")
+            .replace(".", "-")
+        )
+        dates: list[datetime] = []
+        for match in re.findall(r"20\d{2}-\d{1,2}-\d{1,2}", normalized):
+            try:
+                dates.append(datetime.strptime(match, "%Y-%m-%d"))
+            except ValueError:
+                continue
+        return dates
+
+    @classmethod
+    def _filter_metric_facts_for_period(
+        cls,
+        structured_data: object,
+        period_start_ms: int,
+        period_end_ms: int,
+    ) -> tuple[dict, bool, bool]:
+        """移除统计日期明确落在目标周期外的指标事实。
+
+        返回过滤后的结构、是否见到显式指标日期、是否仍保留至少一条指标。
+        快照周标签只能筛选快照，不能覆盖指标 statement 自带的实际日期。
+        """
+        if not isinstance(structured_data, dict):
+            return ({}, False, False)
+        filtered = dict(structured_data)
+        start = datetime.fromtimestamp(period_start_ms / 1000).date()
+        end = datetime.fromtimestamp(period_end_ms / 1000).date()
+        saw_explicit_period = False
+        retained_metric = False
+        metric_rows_present = False
+        metric_rows_retained = False
+        for key in ("metric_rows", "metric_statements"):
+            raw_items = structured_data.get(key)
+            if not isinstance(raw_items, list):
+                continue
+            if key == "metric_rows" and raw_items:
+                metric_rows_present = True
+            kept = []
+            for raw in raw_items:
+                if not isinstance(raw, dict):
+                    continue
+                evidence = "\n".join(
+                    str(raw.get(field) or "")
+                    for field in (
+                        "statement",
+                        "dimension",
+                        "target_context",
+                        "evidence_quote",
+                        "note",
+                    )
+                )
+                dates = [item.date() for item in cls._calendar_dates_in_text(evidence)]
+                if dates:
+                    saw_explicit_period = True
+                    if max(dates) < start or min(dates) > end:
+                        continue
+                kept.append(dict(raw))
+            filtered[key] = kept
+            retained_metric = retained_metric or bool(kept)
+            if key == "metric_rows":
+                metric_rows_retained = bool(kept)
+        return (
+            filtered,
+            saw_explicit_period,
+            metric_rows_retained if metric_rows_present else retained_metric,
+        )
+
+    @classmethod
+    def _apply_requested_period_policy(
+        cls,
+        results: list[dict],
+        time_context: dict,
+    ) -> list[dict]:
+        """为相对时间任务选择同周期快照，并在指标粒度二次校验。
+
+        report_url 仍保留给即时刷新；不可刷新的工作记忆只有在快照周期与
+        指标事实周期都可接受时才进入 Writer 上下文。
+        """
+        if not time_context.get("has_relative_time"):
+            return results
+        start_ms = int(time_context.get("period_start_ms") or 0)
+        end_ms = int(time_context.get("period_end_ms") or 0)
+        if start_ms <= 0 or end_ms <= 0:
+            return results
+        filtered_results: list[dict] = []
+        for original in results:
+            item = dict(original)
+            if item.get("source_kind") == "report_url":
+                filtered_results.append(item)
+                continue
+            candidates = [item]
+            candidates.extend(
+                candidate
+                for candidate in item.get("history", [])
+                if isinstance(candidate, dict)
+            )
+            selected = None
+            for candidate in candidates:
+                period_start, period_end = cls._period_bounds_from_mapping(candidate)
+                if period_end >= start_ms and period_start <= end_ms:
+                    selected = candidate
+                    break
+            if selected is None:
+                item.update(
+                    {
+                        "can_use": False,
+                        "period_match": False,
+                        "unavailable_reason": "requested_period_mismatch",
+                        "content_excerpt": None,
+                        "structured_data": None,
+                        "provenance": None,
+                    }
+                )
+                filtered_results.append(item)
+                continue
+            if selected is not item:
+                item.update(
+                    {
+                        "observed_at": selected.get("observed_at")
+                        or selected.get("collected_at"),
+                        "collected_at": selected.get("collected_at"),
+                        "content_excerpt": selected.get("content_text"),
+                        "structured_data": selected.get("structured_data"),
+                        "provenance": selected.get("provenance"),
+                    }
+                )
+            structured, saw_explicit_period, retained_metric = (
+                cls._filter_metric_facts_for_period(
+                    item.get("structured_data"), start_ms, end_ms
+                )
+            )
+            original_structured = item.get("structured_data")
+            had_metrics = isinstance(original_structured, dict) and any(
+                isinstance(original_structured.get(key), list)
+                and bool(original_structured.get(key))
+                for key in ("metric_rows", "metric_statements")
+            )
+            if had_metrics and saw_explicit_period and not retained_metric:
+                item.update(
+                    {
+                        "can_use": False,
+                        "period_match": False,
+                        "unavailable_reason": "metric_period_mismatch",
+                        "content_excerpt": None,
+                        "structured_data": None,
+                        "provenance": None,
+                    }
+                )
+            else:
+                item["period_match"] = True
+                if isinstance(original_structured, dict):
+                    item["structured_data"] = structured
+                    statements = [
+                        str(row.get("statement") or "").strip()
+                        for row in structured.get("metric_rows", [])
+                        if isinstance(row, dict)
+                        and str(row.get("statement") or "").strip()
+                    ]
+                    if statements:
+                        item["content_excerpt"] = "\n".join(statements)
+            filtered_results.append(item)
+        return filtered_results
 
     @staticmethod
     def _stale_snapshot_fallback_info(
@@ -806,52 +1096,104 @@ class CreationService:
         try:
             conn = sqlite3.connect(db_path)
             try:
-                row = conn.execute(
+                rows = conn.execute(
                     "SELECT collected_at,"
                     " COALESCE(period_start_at, observed_at, collected_at),"
                     " COALESCE(period_end_at, observed_at, collected_at),"
                     " content_text, structured_data, collector"
                     " FROM data_snapshots WHERE source_id = ?"
-                    " ORDER BY collected_at DESC, id DESC LIMIT 1",
+                    " ORDER BY collected_at DESC, id DESC LIMIT 20",
                     (int(source_id),),
-                ).fetchone()
+                ).fetchall()
             finally:
                 conn.close()
         except sqlite3.Error:
             return None
-        if row is None:
-            return None
-        collected_at = int(row[0] or 0)
-        period_start = int(row[1] or 0)
-        period_end = int(row[2] or 0)
-        content_text = str(row[3] or "").strip()
-        try:
-            structured_data = json.loads(str(row[4] or "{}"))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            structured_data = {}
-        if not isinstance(structured_data, dict):
-            structured_data = {}
-        collector = str(row[5] or "snapshot_fallback")
-        if collected_at <= 0:
-            return None
-        if time_context.get("has_relative_time"):
-            start_ms = int(time_context.get("period_start_ms") or 0)
-            end_ms = int(time_context.get("period_end_ms") or 0)
-            if not (period_end >= start_ms and period_start <= end_ms):
-                return None
-            reason = "refresh_failed_period_matched_snapshot"
-        else:
-            now_ms = int(time.time() * 1000)
-            if now_ms - collected_at > REPORT_STALE_FALLBACK_MAX_AGE_MS:
-                return None
-            reason = "refresh_failed_recent_snapshot"
-        return {
-            "reason": reason,
-            "snapshot_collected_at": collected_at,
-            "content_excerpt": content_text,
-            "structured_data": structured_data,
-            "collector": collector,
+        for row in rows:
+            collected_at = int(row[0] or 0)
+            period_start = int(row[1] or 0)
+            period_end = int(row[2] or 0)
+            content_text = str(row[3] or "").strip()
+            try:
+                structured_data = json.loads(str(row[4] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                structured_data = {}
+            if not isinstance(structured_data, dict):
+                structured_data = {}
+            if CreationService._looks_like_failed_report_snapshot(
+                content_text, structured_data
+            ):
+                # 旧版本可能把业务错误壳误存为 success。降级时跳过这些
+                # 已污染快照，继续寻找同周期的上一份有效采集。
+                continue
+            collector = str(row[5] or "snapshot_fallback")
+            if collected_at <= 0:
+                continue
+            if time_context.get("has_relative_time"):
+                start_ms = int(time_context.get("period_start_ms") or 0)
+                end_ms = int(time_context.get("period_end_ms") or 0)
+                if not (period_end >= start_ms and period_start <= end_ms):
+                    continue
+                filtered_structured, saw_explicit_period, retained_metric = (
+                    CreationService._filter_metric_facts_for_period(
+                        structured_data, start_ms, end_ms
+                    )
+                )
+                had_metrics = any(
+                    isinstance(structured_data.get(key), list)
+                    and bool(structured_data.get(key))
+                    for key in ("metric_rows", "metric_statements")
+                )
+                if had_metrics and saw_explicit_period and not retained_metric:
+                    continue
+                structured_data = filtered_structured
+                statements = [
+                    str(item.get("statement") or "").strip()
+                    for item in structured_data.get("metric_rows", [])
+                    if isinstance(item, dict)
+                    and str(item.get("statement") or "").strip()
+                ]
+                if statements:
+                    content_text = "\n".join(statements)
+                reason = "refresh_failed_period_matched_snapshot"
+            else:
+                now_ms = int(time.time() * 1000)
+                if now_ms - collected_at > REPORT_STALE_FALLBACK_MAX_AGE_MS:
+                    continue
+                reason = "refresh_failed_recent_snapshot"
+            return {
+                "reason": reason,
+                "snapshot_collected_at": collected_at,
+                "content_excerpt": content_text,
+                "structured_data": structured_data,
+                "collector": collector,
+            }
+        return None
+
+    @staticmethod
+    def _looks_like_failed_report_snapshot(
+        content_text: str, structured_data: dict
+    ) -> bool:
+        page_state = structured_data.get("page_state")
+        if isinstance(page_state, dict) and int(
+            page_state.get("terminal_error_marker_count") or 0
+        ) > 0:
+            return True
+        exact_markers = {
+            "网络错误", "网络异常", "请求失败", "请求错误", "系统异常",
+            "服务异常", "加载失败", "加载异常", "failed to load", "network error",
         }
+        for raw_line in content_text.splitlines():
+            line = " ".join(raw_line.lower().split()).strip()
+            if line in exact_markers:
+                return True
+            if (
+                line.startswith(("获取", "读取", "查询", "刷新"))
+                and line.endswith("失败")
+                and len(line) <= 48
+            ):
+                return True
+        return False
 
     @staticmethod
     def _select_canonical_report_sources(items: list[dict]) -> list[dict]:
@@ -898,7 +1240,11 @@ class CreationService:
         ]
 
     @classmethod
-    def _select_refreshable_report_sources(cls, items: list[dict]) -> list[dict]:
+    def _select_refreshable_report_sources(
+        cls,
+        items: list[dict],
+        query: str = "",
+    ) -> list[dict]:
         """从检索候选中挑选本轮应刷新的报表。
 
         当查询已经明确命中一个或多个来源身份时，只刷新同一身份强度层的
@@ -918,6 +1264,37 @@ class CreationService:
         )
         if not candidates:
             return []
+
+        # 查询明确写出报表名称时，优先采用最长的完整名称命中。这样“某模型
+        # 中心运营看板”不会同时刷新同品牌的模型广场、帮助页等泛化来源。
+        # 规则只比较候选标题与查询文本，不依赖站点或业务名称。
+        normalized_query = re.sub(
+            r"[^a-z0-9\u3400-\u9fff]+",
+            "",
+            str(query or "").lower(),
+        )
+
+        def explicit_title_identity(item: dict) -> int:
+            primary_title = re.split(
+                r"\s+(?:[-–—|｜])\s+",
+                str(item.get("title") or "").strip(),
+                maxsplit=1,
+            )[0]
+            normalized = re.sub(
+                r"[^a-z0-9\u3400-\u9fff]+",
+                "",
+                primary_title.lower(),
+            )
+            return len(normalized) if len(normalized) >= 6 and normalized in normalized_query else 0
+
+        explicit_scores = [explicit_title_identity(item) for item in candidates]
+        strongest_explicit = max(explicit_scores, default=0)
+        if strongest_explicit:
+            candidates = [
+                item
+                for item, explicit_score in zip(candidates, explicit_scores)
+                if explicit_score == strongest_explicit
+            ]
 
         def score(item: dict, key: str) -> float:
             try:
@@ -1049,6 +1426,206 @@ class CreationService:
         return CreationService._extract_requested_metrics(query)
 
     @staticmethod
+    def _build_page_interaction_plan(
+        query: str,
+        requested_metrics: list[str],
+        expected_period: dict,
+    ) -> dict:
+        """把通用页面操作意图转换为只读、可验证的稳定计划。"""
+        text = str(query or "")
+        steps: list[dict] = []
+        ordinal: Optional[int] = None
+        arabic = re.search(r"(?:第\s*)?(\d+)\s*(?:个\s*)?(?:tab|页签|标签页)", text, re.I)
+        chinese = re.search(
+            r"第\s*([一二两三四五六七八九十]+)\s*(?:个\s*)?(?:tab|页签|标签页)",
+            text,
+            re.I,
+        )
+        if arabic:
+            ordinal = max(1, min(int(arabic.group(1)), 100))
+        elif chinese:
+            digits = {
+                "一": 1,
+                "二": 2,
+                "两": 2,
+                "三": 3,
+                "四": 4,
+                "五": 5,
+                "六": 6,
+                "七": 7,
+                "八": 8,
+                "九": 9,
+            }
+            raw = chinese.group(1)
+            if "十" in raw:
+                left, right = raw.split("十", 1)
+                ordinal = digits.get(left, 1) * 10 + digits.get(right, 0)
+            else:
+                ordinal = digits.get(raw)
+
+        tab_labels: list[str] = []
+        for match in re.finditer(
+            r"(?:切换到|进入|打开|选择)\s*([^，。；\n]{1,40}?)\s*(?:tab|页签|标签页)",
+            text,
+            re.I,
+        ):
+            label = " ".join(match.group(1).split()).strip(" ：:的")
+            if label and not re.search(r"第\s*[一二两三四五六七八九十\d]+\s*个?$", label):
+                tab_labels.append(label)
+
+        if ordinal is not None or tab_labels:
+            target: dict = {
+                "role_hints": ["tab", "navigation_item"],
+                "labels": list(dict.fromkeys(tab_labels))[:8],
+            }
+            if ordinal is not None:
+                target["ordinal"] = ordinal
+            # 指标值可能只有设置日期并点击查询后才出现，不能在页签激活步骤
+            # 提前要求指标文本存在。这里仅等待目标视图稳定，最终指标覆盖率
+            # 仍由采集后的结构化/OCR 校验负责。
+            postconditions = [
+                {"kind": "data_stable", "minimum_stable_passes": 2}
+            ]
+            steps.append(
+                {
+                    "id": "activate-target-view",
+                    "action": "activate",
+                    "target": target,
+                    "postconditions": postconditions,
+                }
+            )
+
+        role_by_control = {
+            "按钮": ["button"],
+            "菜单": ["navigation_item"],
+            "菜单项": ["navigation_item"],
+            "导航": ["navigation_item"],
+            "导航项": ["navigation_item"],
+        }
+        seen_activate_labels = set(tab_labels)
+        for match in re.finditer(
+            r"(?:点击|进入|打开|选择)\s*([^，。；\n]{1,40}?)\s*"
+            r"(按钮|菜单项|菜单|导航项|导航)",
+            text,
+        ):
+            label = " ".join(match.group(1).split()).strip(" ：:的")
+            if not label or label in seen_activate_labels:
+                continue
+            seen_activate_labels.add(label)
+            control_kind = match.group(2)
+            steps.append(
+                {
+                    "id": "activate-control-%d" % len(steps),
+                    "action": "activate",
+                    "target": {
+                        "role_hints": role_by_control[control_kind],
+                        "labels": [label],
+                    },
+                    "postconditions": [
+                        {
+                            "kind": (
+                                "data_stable"
+                                if control_kind == "按钮"
+                                else "selected"
+                            ),
+                            "minimum_stable_passes": 2,
+                        }
+                    ],
+                }
+            )
+
+        for match in re.finditer(
+            r"展开\s*([^，。；\n]{1,40}?)(?:区域|面板|详情|筛选项)(?=[，。；\n]|$)",
+            text,
+        ):
+            label = " ".join(match.group(1).split()).strip(" ：:的")
+            if label:
+                steps.append(
+                    {
+                        "id": "expand-control-%d" % len(steps),
+                        "action": "expand",
+                        "target": {
+                            "role_hints": ["button", "interactive"],
+                            "labels": [label],
+                        },
+                        "postconditions": [
+                            {"kind": "expanded", "target_ref": "self"}
+                        ],
+                    }
+                )
+
+        for match in re.finditer(
+            r"在\s*([^，。；\n]{1,30}?)(?:下拉框|筛选器|筛选项)"
+            r"(?:中)?\s*(?:选择|设为)\s*([^，。；\n]{1,30})",
+            text,
+        ):
+            field = " ".join(match.group(1).split()).strip(" ：:的")
+            value = " ".join(match.group(2).split()).strip(" ：:")
+            if field and value:
+                steps.append(
+                    {
+                        "id": "select-option-%d" % len(steps),
+                        "action": "select_option",
+                        "target": {
+                            "role_hints": ["combobox"],
+                            "labels": [field],
+                        },
+                        "value": value,
+                        "postconditions": [
+                            {
+                                "kind": "value_displayed",
+                                "target_ref": "self",
+                                "any": [value],
+                            }
+                        ],
+                    }
+                )
+
+        start = str(expected_period.get("start") or "").strip()
+        end = str(expected_period.get("end") or "").strip()
+        if start and end:
+            steps.append(
+                {
+                    "id": "set-period",
+                    "action": "set_date_range",
+                    "value": {"start": start, "end": end},
+                    "postconditions": [
+                        {"kind": "date_range_displayed", "source": "page"}
+                    ],
+                }
+            )
+
+        # “查询/应用”一类按钮必须在导航、展开、筛选值和周期设置之后执行。
+        # 这里只按控件语义排序，不依赖任何站点或业务字段。
+        deferred_buttons = [
+            step
+            for step in steps
+            if step.get("action") == "activate"
+            and step.get("target", {}).get("role_hints") == ["button"]
+        ]
+        steps = [step for step in steps if step not in deferred_buttons]
+        steps.extend(deferred_buttons)
+
+        steps.extend(
+            [
+                {
+                    "id": "collect-scroll-containers",
+                    "action": "scroll_collect",
+                    "scope": "all_scroll_containers",
+                    "pagination": "until_end",
+                },
+                {"id": "collect", "action": "collect", "scope": "page"},
+            ]
+        )
+        return {
+            "schema_version": "memorybread.page-interaction-plan.v1",
+            "intent": "collect_metrics",
+            "safety_mode": "read_only",
+            "steps": steps[:12],
+            "requested_metrics": requested_metrics[:24],
+        }
+
+    @staticmethod
     def _merge_scrape_results(
         data_results: list[dict],
         payload_by_source: dict[int, dict],
@@ -1106,7 +1683,7 @@ class CreationService:
                         "title": payload.get("title") or item.get("title"),
                         "source_url": payload.get("url") or item.get("source_url"),
                         "collected_at": collected_at,
-                        "observed_at": collected_at,
+                        "observed_at": payload.get("observed_at") or collected_at,
                         "freshness_class": "fresh" if evidence_verified else "unverified",
                         "freshness_score": 1.0 if evidence_verified else 0.0,
                         "refresh_required": not evidence_verified,
@@ -1118,6 +1695,9 @@ class CreationService:
                             else "rejected"
                         ),
                         "evidence_reason": validation.get("reason") or "evidence_missing",
+                        "data_usage_status": validation.get("data_usage_status", "verified") if evidence_verified else "unavailable",
+                        "risk_disclosure_required": bool(evidence_verified and validation.get("risk_disclosure_required")),
+                        "data_risks": validation.get("data_risks", []) if evidence_verified else [],
                         "provenance": {
                             "collector": payload.get("collector"),
                             "browser": payload.get("browser"),
@@ -1219,9 +1799,19 @@ class CreationService:
             required_metrics or [],
             expected_period or {},
         )
+        validation = self._enforce_interaction_validation(
+            validation,
+            scrape_payload,
+        )
 
         evidence = scrape_payload.get("evidence")
-        if not isinstance(evidence, dict) or not evidence.get("id"):
+        persistent_evidence = (
+            isinstance(evidence, dict) and bool(evidence.get("id"))
+        )
+        transient_preview_url = str(
+            scrape_payload.get("transient_preview_url") or ""
+        ).strip()
+        if not persistent_evidence and not transient_preview_url:
             return {
                 "validation_status": (
                     "verified"
@@ -1232,31 +1822,42 @@ class CreationService:
                 "validation": validation,
             }
 
-        metadata_ok = (
-            str(evidence.get("source_url") or "")
-            == str(scrape_payload.get("url") or "")
-            and str(evidence.get("page_title") or "")
-            == str(scrape_payload.get("title") or "")
-            and int(evidence.get("captured_at") or 0)
-            == int(scrape_payload.get("collected_at") or -1)
-        )
-        validation["metadata_match"] = metadata_ok
-        if not metadata_ok:
-            validation["reason"] = "metadata_mismatch"
-            validation["verified_claims"] = []
+        if persistent_evidence:
+            metadata_ok = (
+                str(evidence.get("source_url") or "")
+                == str(scrape_payload.get("url") or "")
+                and str(evidence.get("page_title") or "")
+                == str(scrape_payload.get("title") or "")
+                and int(evidence.get("captured_at") or 0)
+                == int(scrape_payload.get("collected_at") or -1)
+            )
+            validation["metadata_match"] = metadata_ok
+            if not metadata_ok:
+                validation["reason"] = "metadata_mismatch"
+                validation["verified_claims"] = []
 
-        image_url = str(evidence.get("image_url") or "")
+        image_url = (
+            str(evidence.get("image_url") or "")
+            if persistent_evidence
+            else transient_preview_url
+        )
         image_response = await client.get(f"{self.core_engine_base_url}{image_url}")
         if not image_response.is_success:
             validation["screenshot_status"] = "unreadable"
-            return await self._persist_evidence_validation(
-                client,
-                evidence,
+            status = (
                 "verified"
                 if self._validation_is_verified(validation)
-                else "rejected",
-                validation,
+                else "rejected"
             )
+            if persistent_evidence:
+                return await self._persist_evidence_validation(
+                    client, evidence, status, validation
+                )
+            return {
+                "validation_status": status,
+                "evidence_kind": "transient_preview_ocr",
+                "validation": validation,
+            }
 
         temp_path = ""
         try:
@@ -1278,6 +1879,14 @@ class CreationService:
             )
             ocr_structured["requested_metrics"] = list(required_metrics or [])
             ocr_payload["structured_data"] = ocr_structured
+            if not persistent_evidence:
+                # 瞬时预览由同一个浏览器任务返回，生命周期内用响应元数据
+                # 建立等价绑定；它不会伪装成或持久化为证据资产。
+                ocr_payload["evidence"] = {
+                    "source_url": scrape_payload.get("url"),
+                    "page_title": scrape_payload.get("title"),
+                    "captured_at": scrape_payload.get("collected_at"),
+                }
             base_validation = dict(validation)
             validation = self._validation_with_ocr_output(
                 base_validation,
@@ -1292,7 +1901,7 @@ class CreationService:
             # 明明在图里的“标签 → 日期 → 数值”被拆散。仅在定向指标仍
             # 未完整命中时，把长图切成有重叠的横向分片并放大重识别。
             # 该降级只依据图像形态和请求契约，不感知具体看板或字段名。
-            matched_count = len(validation.get("matched_requested_metrics", []))
+            matched_count = len(validation.get("exact_matched_requested_metrics", validation.get("matched_requested_metrics", [])))
             if required_metrics and matched_count < len(required_metrics):
                 adaptive_output, tile_count = await asyncio.to_thread(
                     self._ocr_long_image_tiles,
@@ -1314,11 +1923,15 @@ class CreationService:
                         validation = adaptive_validation
                         output = adaptive_output
 
-            display_crop = self._derive_evidence_display_crop(
-                scrape_payload,
-                evidence,
-                validation,
-                getattr(output, "boxes", []),
+            display_crop = (
+                self._derive_evidence_display_crop(
+                    scrape_payload,
+                    evidence,
+                    validation,
+                    getattr(output, "boxes", []),
+                )
+                if persistent_evidence
+                else None
             )
             if display_crop:
                 validation["display_crop"] = display_crop
@@ -1335,8 +1948,53 @@ class CreationService:
                 except OSError:
                     pass
 
+        validation = self._enforce_interaction_validation(
+            validation,
+            scrape_payload,
+        )
         status = "verified" if self._validation_is_verified(validation) else "rejected"
-        return await self._persist_evidence_validation(client, evidence, status, validation)
+        if persistent_evidence:
+            return await self._persist_evidence_validation(
+                client, evidence, status, validation
+            )
+        return {
+            "validation_status": status,
+            "evidence_kind": "transient_preview_ocr",
+            "validation": validation,
+        }
+
+    @staticmethod
+    def _enforce_interaction_validation(
+        validation: dict,
+        scrape_payload: dict,
+    ) -> dict:
+        """目标视图未验证时隔离当前页的偶然指标。"""
+        structured = scrape_payload.get("structured_data")
+        interaction = (
+            structured.get("interaction_result")
+            if isinstance(structured, dict)
+            and isinstance(structured.get("interaction_result"), dict)
+            else None
+        )
+        if not interaction or interaction.get("view_status") != "unverified":
+            return validation
+        merged = dict(validation)
+        incidental = [
+            item
+            for item in merged.get("verified_claims", [])
+            if isinstance(item, dict)
+        ]
+        merged["incidental_claims"] = incidental
+        merged["verified_claims"] = []
+        merged["requirements_satisfied"] = False
+        merged["available_values_retained"] = False
+        merged["reason"] = "interaction_view_unverified"
+        merged["interaction_error_codes"] = [
+            str(step.get("error_code") or "")
+            for step in interaction.get("steps", [])
+            if isinstance(step, dict) and step.get("status") == "failed"
+        ]
+        return merged
 
     @classmethod
     def _validation_with_ocr_output(
@@ -1380,8 +2038,9 @@ class CreationService:
         )
 
     @staticmethod
-    def _ocr_validation_score(validation: dict) -> tuple[int, float, int, float]:
+    def _ocr_validation_score(validation: dict) -> tuple[int, int, float, int, float]:
         return (
+            len(validation.get("exact_matched_requested_metrics", validation.get("matched_requested_metrics", []))),
             len(validation.get("matched_requested_metrics", [])),
             float(validation.get("required_metric_coverage") or 0.0),
             len(validation.get("verified_claims", [])),
@@ -1523,100 +2182,127 @@ class CreationService:
         validation: dict,
         required_metrics: list[str],
         expected_period: dict,
+        *,
+        fallback_policy: Optional[str] = None,
     ) -> dict:
+        """优先采用匹配周期的来源事实，缺项可带风险披露使用参考值。
+
+        verified_claims 保留原始事实；data_usage_status 单独描述任务适配度，
+        不把周期不符误写成来源事实未核验，也不把参考值写成目标周期实绩。
+        """
         merged = dict(validation)
-        requested = list(
-            dict.fromkeys(
-                str(item).strip()
-                for item in required_metrics
-                if str(item).strip()
-            )
+        policy = fallback_policy or os.getenv(
+            "MEMORYBREAD_CREATION_DATA_FALLBACK_POLICY", "allow_with_disclosure"
         )
+        allow_fallback = policy == "allow_with_disclosure"
+        requested = list(dict.fromkeys(str(item).strip() for item in required_metrics if str(item).strip()))
         if not requested:
             merged["requirements_satisfied"] = True
             merged["requested_metric_policy"] = "preference"
             return merged
-        claims = [
-            item
-            for item in merged.get("verified_claims", [])
-            if isinstance(item, dict) and item.get("claim_type") == "metric"
-        ]
-        matched: dict[str, dict] = {}
-        used_claim_indexes: set[int] = set()
-        for metric in requested:
-            for claim_index, claim in enumerate(claims):
-                if claim_index in used_claim_indexes:
-                    continue
-                if cls._claim_matches_required_metric(claim, metric):
-                    matched[metric] = claim
-                    used_claim_indexes.add(claim_index)
-                    break
-        missing = [metric for metric in requested if metric not in matched]
-        period_mismatches: list[str] = []
+        claims = [dict(item) for item in merged.get("verified_claims", [])
+                  if isinstance(item, dict) and item.get("claim_type") == "metric"
+                  and str(item.get("value") if item.get("value") is not None else "").strip()]
         start = str(expected_period.get("start") or "").strip()
         end = str(expected_period.get("end") or "").strip()
-        if start and end:
-            for metric, claim in matched.items():
-                period = str(claim.get("statistical_period") or "")
-                if period and not cls._statistical_period_overlaps(period, start, end):
-                    period_mismatches.append(metric)
-        usable = {
-            metric: claim
-            for metric, claim in matched.items()
-            if metric not in period_mismatches
-        }
-        coverage = len(usable) / max(1, len(requested))
-        if usable:
-            # 只把真正命中本步骤语义的指标交给 Writer。允许部分命中，
-            # 但不能用同页上的费用、总量或其他数字替代用户要的字段。
-            selected_claims = list(usable.values())
-            satisfied = True
-            available_values_retained = False
-        elif matched:
-            # 页面字段已经明确命中请求语义，但统计周期不符时不能降级为
-            # “概念偏好”；否则旧周期数值会借软匹配重新进入文档。
-            selected_claims = []
-            satisfied = False
-            available_values_retained = False
+
+        def period_risk(claim: dict) -> str:
+            if not start or not end:
+                return ""
+            period = str(claim.get("statistical_period") or "")
+            if not cls._calendar_dates_in_text(period):
+                return "period_unverified"
+            if not cls._statistical_period_overlaps(period, start, end):
+                return "period_mismatch"
+            return ""
+
+        def candidate_rank(entry: tuple[int, dict]) -> tuple[int, float, int]:
+            index, claim = entry
+            risk = period_risk(claim)
+            dates = cls._calendar_dates_in_text(str(claim.get("statistical_period") or ""))
+            target_dates = cls._calendar_dates_in_text(f"{start} {end}")
+            distance = float("inf")
+            if dates and target_dates:
+                distance = min(abs((date - target).days) for date in dates for target in target_dates)
+            return (0 if not risk else 1 if risk == "period_mismatch" else 2, distance, index)
+
+        matched: dict[str, dict] = {}
+        used: set[int] = set()
+        for metric in requested:
+            candidates = [(index, claim) for index, claim in enumerate(claims)
+                          if index not in used and cls._claim_matches_required_metric(claim, metric)]
+            if candidates:
+                index, claim = min(candidates, key=candidate_rank)
+                matched[metric] = claim
+                used.add(index)
+        # 重复覆盖校验（如 OCR 补充后）也保留 strict 模式上轮的拒绝原因。
+        mismatches = [metric for metric in merged.get("period_mismatch_metrics", [])
+                      if metric in requested and metric not in matched
+                      and merged.get("expected_statistical_period") == expected_period]
+        selected: list[dict] = []
+        exact: list[str] = []
+        available: list[str] = []
+        risks: list[dict] = []
+
+        def retain(claim: dict, metric: str, risk: str) -> None:
+            item = dict(claim)
+            item.pop("data_risks", None)
+            item["data_usage_status"] = "qualified" if risk else "verified"
+            item["requested_metric"] = metric
+            if risk:
+                notes = {
+                    "period_mismatch": "未取得目标周期数据，暂用同指标其他周期的原始数值；不能视为目标周期实绩或据此计算目标周期增长率。",
+                    "period_unverified": "来源未明确统计周期，暂作参考，不能认定属于目标周期。",
+                    "semantic_match_unverified": "未取得直接匹配的目标指标，保留相关来源事实供参考；指标口径尚未确认，不可等同于请求指标。",
+                }
+                entry = {"kind": risk, "requested_metric": metric,
+                         "label": str(item.get("label") or ""), "value": str(item.get("value")),
+                         "actual_period": str(item.get("statistical_period") or ""),
+                         "expected_period": dict(expected_period), "note": notes[risk]}
+                item["data_risks"] = [entry]
+                risks.append(entry)
+            selected.append(item)
+
+        for metric, claim in matched.items():
+            risk = period_risk(claim)
+            if risk == "period_mismatch":
+                mismatches.append(metric)
+            if not risk:
+                exact.append(metric)
+            if not risk or allow_fallback:
+                retain(claim, metric, risk)
+                available.append(metric)
+        available_values_retained = False
+        if not matched and not mismatches and claims:
+            # 自然语言可能指定概念而非字段名；保留原名，明确口径未匹配，
+            # 不能把费用、汇总等数字无标注地改名成用户请求的指标。
+            for claim in claims:
+                if allow_fallback or not period_risk(claim):
+                    retain(claim, " / ".join(requested), "semantic_match_unverified")
+            available_values_retained = bool(selected)
+        missing = [metric for metric in requested if metric not in matched and metric not in mismatches]
+        merged.update({
+            "verified_claims": selected,
+            "requested_metrics": requested, "required_metrics": requested,
+            "matched_requested_metrics": available, "matched_required_metrics": available,
+            "exact_matched_requested_metrics": exact,
+            "missing_requested_metrics": missing, "missing_required_metrics": missing,
+            "required_metric_coverage": round(len(available) / max(1, len(requested)), 4),
+            "exact_metric_coverage": round(len(exact) / max(1, len(requested)), 4),
+            "expected_statistical_period": expected_period, "period_mismatch_metrics": mismatches,
+            "requirements_satisfied": bool(selected), "requested_metric_policy": "preference",
+            "available_values_retained": available_values_retained,
+            "unrequested_verified_claim_count": max(0, len(claims) - len(available)),
+            "fallback_policy": "allow_with_disclosure" if allow_fallback else "strict",
+            "data_usage_status": "qualified" if risks else "verified" if selected else "unavailable",
+            "risk_disclosure_required": bool(risks), "data_risks": risks,
+        })
+        if risks:
+            merged["reason"] = "requested_metrics_qualified"
+        elif not available:
+            merged["reason"] = "requested_metrics_period_mismatch" if mismatches else "requested_metrics_unmatched" if claims else "requested_metrics_unavailable"
         else:
-            # requested metrics 是选择偏好，不是字段级硬门禁。自然语言目标
-            # 可能写“算力、收益、稳定性”等概念，而页面展示的是具体字段名；
-            # 此时保留已经通过 DOM/AX 与截图交叉验证的页面事实，由 Writer
-            # 结合步骤语义选择，不能因为零字面命中拒绝整张有效报表。
-            selected_claims = claims
-            satisfied = bool(claims)
-            available_values_retained = bool(claims)
-        merged["verified_claims"] = selected_claims
-        merged.update(
-            {
-                "requested_metrics": requested,
-                # 保留旧字段，便于读取已保存的校验记录。
-                "required_metrics": requested,
-                "matched_requested_metrics": list(usable),
-                "matched_required_metrics": list(usable),
-                "missing_requested_metrics": missing,
-                "missing_required_metrics": missing,
-                "required_metric_coverage": round(coverage, 4),
-                "expected_statistical_period": expected_period,
-                "period_mismatch_metrics": period_mismatches,
-                "requirements_satisfied": satisfied,
-                "requested_metric_policy": "preference",
-                "available_values_retained": available_values_retained,
-                "unrequested_verified_claim_count": max(0, len(claims) - len(usable)),
-            }
-        )
-        if not usable:
-            merged["reason"] = (
-                "requested_metrics_period_mismatch"
-                if period_mismatches
-                else "requested_metrics_unmatched"
-                if claims
-                else "requested_metrics_unavailable"
-            )
-        elif missing or period_mismatches:
-            merged["reason"] = "requested_metrics_partial"
-        else:
-            merged["reason"] = "requested_metrics_verified"
+            merged["reason"] = "requested_metrics_partial" if missing or mismatches else "requested_metrics_verified"
         return merged
 
     @staticmethod
@@ -2282,6 +2968,7 @@ class CreationService:
                 (
                     cls._normalize_evidence_text(str(claim.get("label") or "")),
                     cls._normalize_evidence_text(str(claim.get("value") or "")),
+                    str(claim.get("statistical_period") or ""),
                 )
                 for claim in existing_claims
             }
@@ -2289,6 +2976,7 @@ class CreationService:
                 key = (
                     cls._normalize_evidence_text(str(claim.get("label") or "")),
                     cls._normalize_evidence_text(str(claim.get("value") or "")),
+                    str(claim.get("statistical_period") or ""),
                 )
                 if key not in seen:
                     existing_claims.append(claim)
@@ -2369,6 +3057,7 @@ class CreationService:
             re.IGNORECASE,
         )
         candidates: list[dict] = []
+        fallback_candidates: list[dict] = []
         for index, raw_line in enumerate(ocr_lines):
             line = cls._normalize_ocr_metric_value_line(raw_line)
             previous_line = ocr_lines[index - 1] if index > 0 else ""
@@ -2423,7 +3112,7 @@ class CreationService:
             )
             best_support_label = requested_support
             best_score = 1.0 if requested_support else 0.0
-            if not requested_metrics:
+            if not requested_support:
                 for dom_label in dom_labels:
                     normalized_dom = cls._normalize_evidence_text(dom_label)
                     matched = [
@@ -2439,10 +3128,6 @@ class CreationService:
                         best_score = score
                 if not best_support_label or best_score < 0.35:
                     continue
-            elif not requested_support:
-                # 有定向指标时，只消费截图中与请求语义匹配的指标卡；同页
-                # 费用、总量、图表刻度等数字仍保留在原图中，不进入 Writer。
-                continue
             period = cls._ocr_statistical_period(nearby_lines)
             candidate = {
                 "claim_type": "metric",
@@ -2463,7 +3148,15 @@ class CreationService:
                 candidate["requested_metric"] = requested_support[:240]
             else:
                 candidate["dom_support_label"] = best_support_label[:240]
-            candidates.append(candidate)
+            if requested_metrics and not requested_support:
+                # 精确请求字段优先；只有页面上一个也找不到时，才把与 DOM
+                # 标签交叉验证过的当前页指标作为可用值降级交给 Writer。
+                fallback_candidates.append(candidate)
+            else:
+                candidates.append(candidate)
+
+        if requested_metrics and not candidates:
+            candidates = fallback_candidates
 
         deduplicated: list[dict] = []
         seen: set[tuple[str, str]] = set()
@@ -2859,12 +3552,13 @@ class CreationService:
             )
 
         deduplicated: list[dict] = []
-        seen: set[tuple[str, str, str]] = set()
+        seen: set[tuple[str, str, str, str]] = set()
         for candidate in candidates:
             key = (
                 cls._normalize_evidence_text(str(candidate.get("label") or "")),
                 cls._normalize_evidence_text(str(candidate.get("value") or "")),
                 str(candidate.get("claim_type") or "metric"),
+                str(candidate.get("statistical_period") or ""),
             )
             if key in seen:
                 continue
@@ -2872,8 +3566,11 @@ class CreationService:
             deduplicated.append(candidate)
         # 为报表数值保留校验预算。菜单和说明性 text block 可以很多，
         # 若它们先占满 AX/DOM 比对上限，后面已加载的指标卡会被误丢弃。
+        requested_metrics = structured.get("requested_metrics", []) if isinstance(structured, dict) else []
+        requested_metrics = [str(metric) for metric in requested_metrics[:24]] if isinstance(requested_metrics, list) else []
         deduplicated.sort(
             key=lambda item: (
+                0 if any(cls._claim_matches_required_metric(item, metric) for metric in requested_metrics) else 1,
                 0
                 if item.get("evidence_origin")
                 in {"structured_region_metric", "content_adjacent_metric"}
@@ -3249,27 +3946,47 @@ class CreationService:
     # 创作提交后的执行时 Skill 召回（模型路由）
     #
     # 输入过程中的逐键自动推荐已下线（会造成输入卡顿），这里只在创作提交
-    # 后执行一次：与 Tool/Agent 能力路由同构——自描述渐进式披露 + 白名单
-    # 双重校验 + 失败降级为空召回。召回与否完全由模型依据每个 Skill 自己
-    # 声明的描述决策，不做枚举式意图门控：技能描述没有声明的用途（例如
-    # 文档模板未声明支持画图），模型按通用规则返回空数组即可拦住。
+    # 后执行一次。除用户显式 @ 选择外，自动召回完全由模型在思考模式下依据
+    # Skill 自描述决策；输出只做候选白名单校验，不做关键词或规则补选。
     # ------------------------------------------------------------------
 
     @classmethod
     def _skill_match_description(cls, skill: dict) -> str:
-        """只披露路由所需的自描述证据：用途 + 解决的问题，不装载正文模板。"""
+        """只披露路由所需的精简自描述，不装载正文模板。"""
         description_payload = skill.get("skill_description") or {}
-        description = str(
+        purpose = str(
             description_payload.get("purpose") or skill.get("summary") or ""
-        ).strip()
-        problems = [
-            str(item).strip()
-            for item in (description_payload.get("problems") or [])
+        ).strip()[:180]
+        description_parts = [purpose] if purpose else []
+        document_types = [
+            str(item).strip()[:40]
+            for item in (description_payload.get("document_types") or [])[:6]
             if str(item).strip()
         ]
+        domains = [
+            str(item).strip()[:40]
+            for item in (description_payload.get("domains") or [])[:6]
+            if str(item).strip()
+        ]
+        deliverables = [
+            str(item).strip()[:80]
+            for item in (description_payload.get("deliverables") or [])[:6]
+            if str(item).strip()
+        ]
+        problems = [
+            str(item).strip()[:120]
+            for item in (description_payload.get("problems") or [])[:2]
+            if str(item).strip()
+        ]
+        if document_types:
+            description_parts.append("产物：" + "、".join(document_types))
+        if domains:
+            description_parts.append("领域：" + "、".join(domains))
+        if deliverables:
+            description_parts.append("交付物：" + "、".join(deliverables))
         if problems:
-            description += f"（解决的问题：{'；'.join(problems)}）"
-        return description
+            description_parts.append("解决：" + "；".join(problems))
+        return "；".join(description_parts)
 
     def build_skill_match_prompts(self, prompt: str, skills: list) -> tuple:
         lines: list = []
@@ -3282,12 +3999,17 @@ class CreationService:
             "你是创作技能路由器。根据用户输入，从候选 Skill 中选择最多 1 个最匹配的执行时引入。\n"
             "规则：\n"
             "1. 只做选择，不写正文，不输出任何创作内容。\n"
-            "2. 严格依据每个 Skill 自述的用途与解决的问题判断：仅当用户的创作目标"
-            "与该 Skill 声明的用途一致时才可选；用户请求（如纯画图、讲解、问答）"
-            "不在任何 Skill 描述声明的用途范围内时，返回空数组。\n"
-            "3. 用户输入是纯问答或闲聊、没有创作诉求时，返回空数组。\n"
-            "4. 没有足够把握时宁可返回空数组，不要强行套用模板。\n"
-            '只输出 JSON：{"skill_ids": [...], "reasoning": "不超过50字的理由"}\n\n'
+            "2. 思考的第一步必须先判断用户是在要求执行创作、生成或更新一个交付物，"
+            "还是仅仅在询问、解释、评价某个 Skill、模板或文档。只有前一种情况才允许选择 Skill。\n"
+            "3. 用户提到 Skill 标题、模板名称或相同主题，不代表要求调用它。"
+            "例如“某周报模板有哪些章节？”是在询问模板，应返回空数组；"
+            "“请用某周报模板生成本周周报”才是在要求执行。\n"
+            "4. 严格依据每个 Skill 自述的用途、产物类型、领域、解决的问题和交付物判断。"
+            "纯问答、闲聊、讲解、评价或只要求局部能力且不需要该 Skill 交付物时，返回空数组。\n"
+            "5. 思考时逐一比较候选，并明确最接近候选的支持证据与排除理由；"
+            "只有用户动作、目标交付物和 Skill 用途都一致时才可选择。\n"
+            "6. 没有足够把握时宁可返回空数组，不要强行套用模板。\n"
+            '只输出单行 JSON：{"skill_ids": [...], "reasoning": "不超过30字的理由"}\n\n'
             "候选 Skill：\n" + "\n".join(lines)
         )
         user_prompt = f"用户输入：{str(prompt).strip()}"
@@ -3344,7 +4066,8 @@ class CreationService:
         }
 
     async def route_creation_skills(self, *, prompt: str, skills: list) -> dict:
-        """创作提交后由模型路由决定执行时引入哪个 Skill，失败降级为空召回。"""
+        """只由思考模式模型选择执行时 Skill，失败时安全降级为空召回。"""
+        started_ms = int(time.time() * 1000)
         empty_recall = {"skill_ids": [], "source": "fallback", "reasoning": ""}
         trimmed = str(prompt or "").strip()
         if not trimmed or not skills:
@@ -3358,42 +4081,69 @@ class CreationService:
         allowed_ids = {int(skill["id"]) for skill in candidates}
         system_prompt, user_prompt = self.build_skill_match_prompts(trimmed, candidates)
         model_name = self.model
-        started_ms = int(time.time() * 1000)
         parts: list = []
-        try:
+
+        async def collect_completion() -> str:
             async for chunk in self._stream_direct_completion(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 creation_model=None,
                 creation_api_key=None,
                 creation_base_url=None,
-                num_predict=200,
+                num_predict=self.SKILL_ROUTE_MAX_PREDICT_TOKENS,
                 temperature=0.1,
-                disable_thinking=True,
+                disable_thinking=False,
             ):
                 parts.append(chunk)
-            response_text = "".join(parts)
+            return "".join(parts)
+
+        try:
+            response_text = await asyncio.wait_for(
+                collect_completion(),
+                timeout=self.SKILL_ROUTE_MODEL_TIMEOUT_SECONDS,
+            )
             decision = self.parse_skill_match_decision(response_text, allowed_ids)
             decision["source"] = "model"
+            latency_ms = int(time.time() * 1000) - started_ms
             self._log_creation_usage(
                 model_name=model_name,
                 prompt_text=system_prompt + "\n\n" + user_prompt,
                 response_text=response_text,
-                latency_ms=int(time.time() * 1000) - started_ms,
+                latency_ms=latency_ms,
                 status="success",
+            )
+            logger.info(
+                "技能召回完成 source=model candidates=%d selected_ids=%s latency_ms=%d",
+                len(candidates),
+                decision["skill_ids"],
+                latency_ms,
             )
             return decision
         except Exception as exc:
-            logger.warning("技能召回模型推理失败，降级为空召回: %s", exc)
+            latency_ms = int(time.time() * 1000) - started_ms
+            fallback_reason = (
+                "model_timeout" if isinstance(exc, asyncio.TimeoutError)
+                else "model_failed"
+            )
+            logger.warning(
+                "技能召回模型推理失败，降级为空召回 reason=%s candidates=%d latency_ms=%d error=%s",
+                fallback_reason,
+                len(candidates),
+                latency_ms,
+                exc,
+            )
             self._log_creation_usage(
                 model_name=model_name,
                 prompt_text=system_prompt + "\n\n" + user_prompt,
                 response_text="".join(parts),
-                latency_ms=int(time.time() * 1000) - started_ms,
+                latency_ms=latency_ms,
                 status="failed",
                 error_msg=str(exc),
             )
-            return empty_recall
+            return {
+                **empty_recall,
+                "fallback_reason": fallback_reason,
+            }
 
     async def run_specialist_agent(
         self,
@@ -3555,12 +4305,16 @@ class CreationService:
         num_predict: int,
         temperature: float,
         disable_thinking: bool = False,
+        json_mode: bool = False,
     ) -> AsyncIterator[str]:
         """统一子 Agent 的本地/自带密钥模型调用，不包含 RAG 等上层编排。
 
-        disable_thinking 用于路由、章节设计等结构化决策调用：Qwen3.5 默认
-        进入思考模式，长上下文下思考可能占满 num_predict 预算导致正文为 0，
-        此时用 /no_think 指令关闭思考，让预算全部留给结论本身。
+        disable_thinking 仅供明确要求快速结构化输出的调用方使用：Qwen3.5
+        默认进入思考模式，长上下文下思考可能占满 num_predict 预算导致正文为 0，
+        此时用 /no_think 指令关闭思考。Skill 路由显式保留思考模式。
+
+        json_mode 仅用于调用方后续会严格校验的 JSON 协议输出；本地 Ollama
+        会在解码阶段约束语法，避免小模型因缺逗号或冒号导致整个业务请求失败。
         """
         if creation_model and creation_api_key:
             async for chunk in self._generate_cloud(
@@ -3608,6 +4362,9 @@ class CreationService:
                 },
             }
             endpoint = "/api/chat"
+
+        if json_mode:
+            payload["format"] = "json"
 
         async with httpx.AsyncClient(timeout=300.0) as client:
             async with client.stream(
@@ -5641,6 +6398,7 @@ flowchart LR
         user_prompt: str,
         options: CreationOptions,
         entity_focus_text: str = "",
+        retrieval_context_terms: Optional[list[str]] = None,
     ) -> dict:
         """轻量需求解析，先用规则把创作任务结构化。
 
@@ -5654,17 +6412,33 @@ flowchart LR
         audience = options.audience.strip() or self._infer_audience(text)
         keywords = self._extract_keywords(text)
         time_context = self._relative_time_context(text)
+        coverage_contract = self._enumerated_coverage_contract(text)
         focus_text = entity_focus_text.strip() or text
+        if coverage_contract and not entity_focus_text.strip():
+            # “A、B、C 分别……”的后半段描述待回答维度，不是实体。
+            # 只让目标列表进入实体统计，避免“分别用了哪些模型”“占比多少”
+            # 被提炼为伪实体并挤掉真正的业务对象。
+            focus_text = "、".join(coverage_contract["targets"])
         supplement = keywords if entity_focus_text.strip() else None
         entity_context = self._analyze_entity_context(focus_text, supplement)
+        retrieval_plan = self._build_creation_retrieval_plan(
+            text,
+            keywords,
+            entity_context,
+            retrieval_context_terms=retrieval_context_terms,
+            coverage_contract=coverage_contract,
+        )
 
         return {
             "topic": self._infer_topic(text),
             "doc_type": doc_type,
             "audience": audience,
             "keywords": keywords,
+            "retrieval_context_terms": list(retrieval_context_terms or []),
             "style": self._infer_style(text),
             "entity_context": entity_context,
+            "retrieval_plan": retrieval_plan,
+            "coverage_contract": coverage_contract,
             "needs_latest": bool(time_context.get("has_relative_time"))
             or any(
                 word in text
@@ -5673,6 +6447,444 @@ flowchart LR
             "needs_images": options.enable_image_generation
             or any(word in text for word in ["图片", "配图", "架构图", "流程图", "插图", "封面图"]),
             "time_context": time_context,
+        }
+
+    # 这些词描述“两个主题之间要做什么”，不是业务实体。它们仅用于把
+    # 创作指令编译成结构化检索计划，不承担领域词黑白名单的职责。
+    RETRIEVAL_RELATION_PATTERNS = (
+        ("结合", re.compile(r"(?:结合|融合|整合|协同|联动)")),
+        ("比较", re.compile(r"(?:比较|对比|区别|异同)")),
+        (
+            "迁移",
+            re.compile(
+                r"(?:迁移|移植|适配|应用到|应用于|"
+                r"如何在.{2,80}?(?:中|上|内)?使用)"
+            ),
+        ),
+        ("影响", re.compile(r"(?:影响|作用于|依赖|制约)")),
+        ("关联", re.compile(r"(?:关联|关系|联系)")),
+    )
+    RETRIEVAL_COMPONENT_NOISE = frozenset(
+        {
+            "当前",
+            "这个",
+            "该",
+            "现有",
+            "方案",
+            "文档",
+            "报告",
+            "介绍",
+            "总结",
+            "分析",
+            "说明",
+            "内容",
+            "产品",
+        }
+    )
+
+    ENUMERATED_OUTPUT_INSTRUCTION_PATTERN = re.compile(
+        r"^(?:写|生成|输出|整理|形成|撰写|制作|创作).{0,24}"
+        r"(?:文档|报告|总结|表格|清单|材料|方案)"
+    )
+
+    @classmethod
+    def _enumerated_coverage_contract(cls, text: str) -> Optional[dict]:
+        """解析“多个对象分别回答多个维度”的通用覆盖合同。
+
+        这里只识别枚举和疑问句法，不维护行业名、模型名或指标词表。
+        目标与维度会同时进入召回、章节设计、撰写和质检环境，防止多对象
+        请求被单一高 IDF 词压缩成一个主目标。
+        """
+        source = re.sub(r"\s+", " ", str(text or "").strip())
+        matched = re.search(r"(?P<targets>.{3,240}?)分别(?P<facets>.+)", source)
+        if not matched:
+            return None
+
+        raw_targets = matched.group("targets").strip("，,；;：:。 ")
+        raw_targets = re.sub(
+            r"^(?:请|帮我|帮忙|给我|总结|分析|梳理|盘点|介绍|说明)+",
+            "",
+            raw_targets,
+        ).strip("，,；;：:。 ")
+        targets = [
+            item.strip("，,；;：:。 ")
+            for item in re.split(r"[、；;]", raw_targets)
+            if item.strip("，,；;：:。 ")
+        ]
+        targets = list(dict.fromkeys(targets))
+        if not 2 <= len(targets) <= 8:
+            return None
+        if any(len(item) < 2 or len(item) > 80 for item in targets):
+            return None
+
+        facets = []
+        for raw in re.split(r"[，,、；;。]", matched.group("facets")):
+            item = raw.strip("？?！!：:。 ")
+            item = re.sub(r"^(?:以及|并且|同时|和|及)", "", item).strip()
+            if not item or cls.ENUMERATED_OUTPUT_INSTRUCTION_PATTERN.search(item):
+                continue
+            if item not in facets:
+                facets.append(item[:80])
+            if len(facets) >= 8:
+                break
+        if not facets:
+            return None
+        return {
+            "schema_version": "creation-coverage-contract.v1",
+            "targets": targets,
+            "facets": facets,
+            "matrix_size": len(targets) * len(facets),
+        }
+
+    @classmethod
+    def _retrieval_relations(cls, text: str) -> list[str]:
+        return [
+            name
+            for name, pattern in cls.RETRIEVAL_RELATION_PATTERNS
+            if pattern.search(str(text or ""))
+        ]
+
+    @staticmethod
+    def _strip_relational_component(value: object) -> str:
+        text = re.sub(r"\s+", " ", str(value or "").strip())
+        text = re.sub(
+            r"^(?:请|帮我|帮忙|给我|设计一下|设计下|设计|生成一下|生成下|生成)",
+            "",
+            text,
+        )
+        return text.strip("，, ：:")[:80]
+
+    @classmethod
+    def _relational_query_components(cls, text: str) -> list[str]:
+        """从通用关系句式抽取两端，不依赖行业词表。"""
+        source = re.sub(r"\s+", " ", str(text or "").strip())
+        patterns = (
+            re.compile(
+                r"(?P<left>.+?)(?:如何)?在(?P<right>.+?)(?:中|上|内)?使用(?:[？?].*)?$"
+            ),
+            re.compile(
+                r"(?:把)?(?P<left>.+?)(?:应用到|应用于|迁移到|适配到)(?P<right>.+)$"
+            ),
+            re.compile(
+                r"(?P<left>.+?)(?:与|和)(?P<right>.+?)(?:结合|融合|整合|协同|联动)(?:[？?].*)?$"
+            ),
+        )
+        for pattern in patterns:
+            matched = pattern.search(source)
+            if not matched:
+                continue
+            components = [
+                cls._strip_relational_component(matched.group("left")),
+                cls._strip_relational_component(matched.group("right")),
+            ]
+            return [item for item in components if len(item) >= 2]
+        return []
+
+    @classmethod
+    def _is_retrieval_component(cls, value: object) -> bool:
+        token = str(value or "").strip()
+        if len(token) < 2 or token in cls.RETRIEVAL_COMPONENT_NOISE:
+            return False
+        reduced = token
+        for _, pattern in cls.RETRIEVAL_RELATION_PATTERNS:
+            reduced = pattern.sub("", reduced)
+        for noise in sorted(cls.RETRIEVAL_COMPONENT_NOISE, key=len, reverse=True):
+            reduced = reduced.replace(noise, "")
+        return len(reduced.strip()) >= 2
+
+    @staticmethod
+    def _planned_term_payload(term: PlannedTerm, weight: float) -> dict:
+        return {
+            "text": term.text,
+            "role": term.role,
+            "document_frequency": int(term.document_frequency),
+            "idf": round(float(term.idf), 6),
+            "weight": round(float(weight), 6),
+        }
+
+    def _artifact_query_plan(
+        self,
+        query: str,
+    ) -> Optional[ArtifactQueryPlan]:
+        """在创作侧复用统一语料统计器；数据库不完整时安全降级。"""
+        db = Path(getattr(self, "db_path", ""))
+        if not db.exists():
+            return None
+        conn = sqlite3.connect(str(db))
+        try:
+            # 不能把未经 DF 校准的实体候选传为 entity_terms。planner 的该
+            # 参数面向明确 ID 查询，会保留调用方实体；创作自然语言中的
+            # Agent/模型等候选必须与普通词一样先经过语料泛化度判定。
+            return build_artifact_query_plan(conn.cursor(), query)
+        except sqlite3.Error as exc:
+            logger.debug("创作检索计划语料统计失败，降级为词面计划: %s", exc)
+            return None
+        finally:
+            conn.close()
+
+    def _build_creation_retrieval_plan(
+        self,
+        user_prompt: str,
+        keywords: list[str],
+        entity_context: dict,
+        retrieval_context_terms: Optional[list[str]] = None,
+        coverage_contract: Optional[dict] = None,
+    ) -> dict:
+        """把创作指令拆成目标、组件与关系，并附带 corpus-aware 权重。
+
+        规划器的 source_types 在通用 RAG 中可把“方案”解释成文档来源，
+        但创作请求里的“结合方案”是输出约束，不能据此排除知识/操作记忆，
+        因而这里只消费词频/IDF，不继承来源过滤。
+        """
+        normalized_keywords = [
+            str(item).strip()
+            for item in keywords
+            if str(item).strip()
+        ]
+        planning_query = " ".join(normalized_keywords) or str(user_prompt or "")
+        artifact_plan = self._artifact_query_plan(planning_query)
+        candidate_statistics = {
+            str(item.get("normalized") or ""): item
+            for item in entity_context.get("candidate_statistics") or []
+            if str(item.get("normalized") or "")
+        }
+
+        term_payloads: list[dict] = []
+        if artifact_plan is not None:
+            weighted_planned_terms = [
+                (term, term.idf)
+                for term in artifact_plan.discriminative_terms
+            ]
+            weighted_planned_terms.extend(
+                (term, term.idf * 0.75)
+                for term in artifact_plan.fallback_terms
+            )
+            for term, default_weight in weighted_planned_terms:
+                payload = self._planned_term_payload(term, default_weight)
+                statistic = candidate_statistics.get(
+                    self._normalize_entity_name(term.text)
+                )
+                if statistic and statistic.get("is_high_df_generic"):
+                    # shared planner 还会把 data snapshot 行计入 corpus；创作
+                    # 实体门控只基于 docs/knowledge/sops。用后者再次校准，
+                    # 防止 Agent 在 12%~18% 的口径差中被误标为区分词。
+                    payload["planner_role"] = payload["role"]
+                    payload["role"] = "generic"
+                    payload["weight"] = 0.15
+                    payload["calibration"] = "creation_entity_corpus_df"
+                term_payloads.append(payload)
+            # 泛词保留为关系查询的辅助组件，但只能提供很弱的词面信号。
+            # 这样 Agent 可帮助补齐另一端，却不能压过“原创剧本”等稀有目标。
+            term_payloads.extend(
+                self._planned_term_payload(term, 0.15)
+                for term in artifact_plan.generic_terms
+            )
+
+        payload_by_text = {
+            str(item["text"]).casefold(): item for item in term_payloads
+        }
+        display_by_folded = {
+            item.casefold(): item for item in normalized_keywords
+        }
+        components: list[str] = []
+        if artifact_plan is not None:
+            planned_components = [
+                *artifact_plan.discriminative_terms,
+                *artifact_plan.fallback_terms,
+                *artifact_plan.generic_terms,
+            ]
+            for term in planned_components:
+                display = display_by_folded.get(term.text.casefold(), term.text)
+                if (
+                    self._is_retrieval_component(display)
+                    and display.casefold() not in {item.casefold() for item in components}
+                ):
+                    components.append(display)
+        for keyword in normalized_keywords:
+            if (
+                self._is_retrieval_component(keyword)
+                and keyword.casefold() not in {item.casefold() for item in components}
+            ):
+                components.append(keyword)
+
+        primary_entities = [
+            str(item.get("name") or "").strip()
+            for item in entity_context.get("primary_entities") or []
+            if str(item.get("name") or "").strip()
+        ]
+        for entity in primary_entities:
+            if entity.casefold() not in {item.casefold() for item in components}:
+                components.append(entity)
+        components = [
+            item
+            for item in components
+            if not any(
+                item.casefold() != other.casefold()
+                and item.casefold() in other.casefold()
+                for other in components
+            )
+        ]
+
+        multi_targets = [
+            str(item).strip()
+            for item in (coverage_contract or {}).get("targets", [])
+            if str(item).strip()
+        ]
+        relations = self._retrieval_relations(user_prompt)
+        relation_components = self._relational_query_components(user_prompt)
+        if multi_targets:
+            # 多对象请求的 components 是覆盖合同，不混入“哪些模型”、
+            # “占比多少”等疑问包装；细粒度召回词仍由 candidate_terms 保留。
+            components = list(multi_targets)
+        elif relation_components:
+            components = [
+                *relation_components,
+                *[
+                    item
+                    for item in components
+                    if not any(
+                        item.casefold() in component.casefold()
+                        or component.casefold() in item.casefold()
+                        for component in relation_components
+                    )
+                ],
+            ]
+        discriminative_terms = (
+            list(artifact_plan.discriminative_terms)
+            if artifact_plan is not None
+            else []
+        )
+        ranked_targets = [
+            display_by_folded.get(term.text.casefold(), term.text)
+            for term in discriminative_terms
+            if (
+                self._is_retrieval_component(term.text)
+                and payload_by_text.get(term.text.casefold(), {}).get("role")
+                != "generic"
+            )
+        ]
+        if len(multi_targets) >= 2:
+            mode = "multi_target"
+        elif relations and len(components) >= 2:
+            mode = "relational"
+        elif entity_context.get("has_high_confidence_entity"):
+            mode = "hybrid" if len(primary_entities) > 1 else "entity_lookup"
+        elif relations:
+            mode = "hybrid"
+        else:
+            mode = "topic"
+
+        if mode == "multi_target":
+            primary_target = multi_targets[0]
+        elif mode == "entity_lookup" and primary_entities:
+            primary_target = primary_entities[0]
+        elif mode == "relational" and relation_components:
+            primary_target = relation_components[0]
+        elif ranked_targets:
+            primary_target = ranked_targets[0]
+        elif relations and components:
+            primary_target = max(
+                components,
+                key=lambda item: (
+                    sum(1 for char in item if "\u4e00" <= char <= "\u9fff"),
+                    len(item),
+                ),
+            )
+        elif components:
+            primary_target = components[0]
+        else:
+            primary_target = str(user_prompt or "").strip()[:80]
+
+        ordered_components = []
+        if primary_target:
+            ordered_components.append(primary_target)
+        ordered_components.extend(
+            item
+            for item in components
+            if item.casefold() != primary_target.casefold()
+        )
+        components = list(dict.fromkeys(ordered_components))[:8]
+
+        # 候选先用稀有词，再按组件补入泛词；SQL 会继续按下列权重排序，
+        # 所以宽泛组件只能补覆盖，不能在 LIMIT 前饿死稀有主目标。
+        raw_candidate_terms = list(multi_targets)
+        if artifact_plan is not None:
+            raw_candidate_terms.extend(
+                display_by_folded.get(term.casefold(), term)
+                for term in artifact_plan.candidate_terms
+                if self._is_retrieval_component(term)
+            )
+        raw_candidate_terms.extend(components)
+        casefold_seen: set[str] = set()
+        candidate_terms: list[str] = []
+        for raw in raw_candidate_terms:
+            item = str(raw).strip()
+            folded = item.casefold()
+            if not item or folded in casefold_seen:
+                continue
+            casefold_seen.add(folded)
+            candidate_terms.append(item)
+            if len(candidate_terms) >= 12:
+                break
+
+        context_candidates = []
+        for raw in retrieval_context_terms or []:
+            item = re.sub(r"\s+", " ", str(raw).strip())[:80]
+            folded = item.casefold()
+            if self._is_retrieval_component(item) and folded not in casefold_seen:
+                casefold_seen.add(folded)
+                context_candidates.append(item)
+            if len(context_candidates) >= 4:
+                break
+        candidate_terms.extend(context_candidates)
+
+        term_weights: dict[str, float] = {}
+        multi_target_weight = max(
+            [
+                float(item.get("weight") or 0.0)
+                for item in term_payloads
+                if item.get("role") != "generic"
+            ]
+            or [1.0]
+        )
+        for term in candidate_terms:
+            payload = payload_by_text.get(term.casefold())
+            if term in multi_targets:
+                # 多目标合同中的每个对象权重相同；不能让其中一个对象因
+                # 词频更稀有就在 Top-K 前饿死其余对象。
+                weight = multi_target_weight
+            elif payload is not None:
+                weight = float(payload["weight"])
+            elif term.casefold() == primary_target.casefold():
+                weight = 1.0
+            elif term in context_candidates:
+                weight = 0.15
+            else:
+                weight = 0.35
+            term_weights[term.casefold()] = round(max(weight, 0.05), 6)
+        if mode == "entity_lookup" and primary_target:
+            primary_key = primary_target.casefold()
+            primary_weight = term_weights.get(primary_key, 1.0)
+            for key in list(term_weights):
+                if key != primary_key:
+                    term_weights[key] = round(
+                        min(term_weights[key], primary_weight * 0.25),
+                        6,
+                    )
+
+        return {
+            "schema_version": "creation-query-plan.v1",
+            "mode": mode,
+            "primary_target": primary_target,
+            "targets": multi_targets,
+            "facets": list((coverage_contract or {}).get("facets", [])),
+            "components": components,
+            "relations": relations,
+            "candidate_terms": candidate_terms,
+            "term_weights": term_weights,
+            "terms": term_payloads,
+            "corpus_size": int(artifact_plan.corpus_size) if artifact_plan else 0,
+            "hard_entity_gate": mode == "entity_lookup",
         }
 
     @staticmethod
@@ -5744,6 +6956,8 @@ flowchart LR
     EXACT_ENTITY_SATURATION = 8.0
     MIN_STRONG_MENTIONS = 2
     GENERIC_DOC_FREQUENCY_RATIO = 0.12
+    GENERIC_DOC_MIN_CORPUS = 20
+    GENERIC_DOC_MIN_DOCUMENTS = 8
     # 专名实体的词形上限：超过该长度的中文串几乎必然是步骤主题描述
     # （如“大模型性能成本优化周会会议纪要”）而非实体。这类长短语
     # 一旦被升级为核心实体，层级过滤会要求候选字面包含整串，把真正
@@ -5797,6 +7011,7 @@ flowchart LR
         empty = {
             "primary_entities": [],
             "candidate_entities": [],
+            "candidate_statistics": [],
             "has_high_confidence_entity": False,
         }
         text = str(focus_text or "").strip()
@@ -5806,7 +7021,11 @@ flowchart LR
         candidates = [
             str(item)
             for item in keywords
-            if len(str(item)) >= 2 and self._entity_length_ok(str(item))
+            if (
+                len(str(item)) >= 2
+                and self._entity_length_ok(str(item))
+                and self._is_retrieval_component(str(item))
+            )
         ]
         focus_folded = {self._normalize_entity_name(item) for item in candidates}
         for item in supplement_candidates or []:
@@ -5814,6 +7033,7 @@ flowchart LR
             if (
                 len(normalized_item) >= 2
                 and self._entity_length_ok(normalized_item)
+                and self._is_retrieval_component(normalized_item)
                 and self._normalize_entity_name(normalized_item) not in focus_folded
             ):
                 candidates.append(normalized_item)
@@ -5823,6 +7043,7 @@ flowchart LR
 
         total_rows = self._corpus_total_rows()
         verified: list[dict] = []
+        candidate_statistics: list[dict] = []
         seen: set[str] = set()
         for candidate in candidates:
             mention_evidence = self._entity_corpus_evidence(candidate)
@@ -5831,7 +7052,23 @@ flowchart LR
             curated = self._entity_curated_evidence(candidate)
             exact_count = int(curated.get("exact_count") or 0)
             doc_frequency_ratio = mention_count / max(total_rows, 1)
-            discriminative = (
+            is_high_df_generic = (
+                total_rows >= self.GENERIC_DOC_MIN_CORPUS
+                and mention_count >= self.GENERIC_DOC_MIN_DOCUMENTS
+                and doc_frequency_ratio > self.GENERIC_DOC_FREQUENCY_RATIO
+            )
+            candidate_statistics.append(
+                {
+                    "name": candidate,
+                    "normalized": self._normalize_entity_name(candidate),
+                    "document_frequency": mention_count,
+                    "document_frequency_ratio": round(doc_frequency_ratio, 6),
+                    "corpus_size": total_rows,
+                    "is_high_df_generic": is_high_df_generic,
+                }
+            )
+            exact_discriminative = total_rows > 0 and not is_high_df_generic
+            statistically_rare = (
                 total_rows > 0
                 and doc_frequency_ratio <= self.GENERIC_DOC_FREQUENCY_RATIO
             )
@@ -5847,8 +7084,10 @@ flowchart LR
                 if in_focus
                 else self.MIN_SUPPLEMENT_EXACT_MENTIONS
             )
-            if exact_count >= exact_required:
-                # 语料把它当独立专名提炼过：直接采信，不受文档频率影响。
+            if exact_count >= exact_required and exact_discriminative:
+                # 实体字段是 bake 阶段的模型提炼结果，不保证都是专名。
+                # 即使 exact 命中，也必须经过全语料 DF 校准；否则 Agent、
+                # 模型等高频类别词会因反复被提炼而升级为硬实体。
                 name = candidate
                 evidence_count = exact_count
                 confidence = self._curated_entity_confidence(exact_count)
@@ -5860,14 +7099,18 @@ flowchart LR
                     and expanded_count >= exact_required
                     and len(self._normalize_entity_name(candidate)) >= 3
                     and self._entity_length_ok(expanded)
-                    and discriminative
+                    and statistically_rare
                 ):
                     # 关键词是完整专名的片段：用完整形态升级，避免片段
                     # 匹配把同族项目的资料混在一起。
                     name = expanded
                     evidence_count = expanded_count
                     confidence = self._curated_entity_confidence(expanded_count)
-                elif in_focus and strong_count >= self.MIN_STRONG_MENTIONS and discriminative:
+                elif (
+                    in_focus
+                    and strong_count >= self.MIN_STRONG_MENTIONS
+                    and statistically_rare
+                ):
                     # 无提炼证据但标题/摘要多次聚焦提及，且文档频率证明
                     # 它不是语料里随处出现的泛词。
                     confidence = min(
@@ -5896,6 +7139,7 @@ flowchart LR
                     "mention_count": mention_count,
                     "strong_mention_count": strong_count,
                     "entity_exact_count": evidence_count,
+                    "document_frequency_ratio": round(doc_frequency_ratio, 6),
                 }
             )
 
@@ -5910,6 +7154,7 @@ flowchart LR
         return {
             "primary_entities": verified[:2],
             "candidate_entities": candidates,
+            "candidate_statistics": candidate_statistics,
             "has_high_confidence_entity": bool(verified),
         }
 
@@ -5964,9 +7209,6 @@ flowchart LR
         db = Path(getattr(self, "db_path", ""))
         if not db.exists():
             return result
-        escaped = (
-            normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        )
         containing: dict[str, int] = {}
         conn = sqlite3.connect(str(db))
         try:
@@ -5977,13 +7219,32 @@ flowchart LR
                 base_where = (
                     "deleted_at IS NULL" if "deleted_at" in columns else "1=1"
                 )
-                rows = conn.execute(
-                    f"SELECT entities FROM {table} WHERE {base_where} "
-                    f"AND REPLACE(LOWER(COALESCE(entities, '')), ' ', '') LIKE ? "
-                    f"ESCAPE '\\' ORDER BY id DESC LIMIT ?",
-                    (f"%{escaped}%", self.ENTITY_SCAN_ROW_LIMIT),
-                ).fetchall()
-                for (blob,) in rows:
+                entity_expression = (
+                    "REPLACE(LOWER(COALESCE(entities, '')), ' ', '')"
+                )
+                exact_predicate, exact_params = self._sqlite_token_predicate(
+                    entity_expression,
+                    normalized,
+                )
+                # 两条候选 lane 各自保留预算：边界 lane 保证大量
+                # NeoOnepoint 不会挤掉较旧的 exact Onepoint；literal
+                # substring lane 则保留 Project -> Alpha Project 的完整专名
+                # 扩展能力。INSTR 把 %/_ 当普通字符，不存在 LIKE 通配。
+                rows_by_id: dict[int, object] = {}
+                for row_id, blob in conn.execute(
+                    f"SELECT id, entities FROM {table} WHERE {base_where} "
+                    f"AND {exact_predicate} ORDER BY id DESC LIMIT ?",
+                    [*exact_params, self.ENTITY_SCAN_ROW_LIMIT],
+                ).fetchall():
+                    rows_by_id[int(row_id)] = blob
+                for row_id, blob in conn.execute(
+                    f"SELECT id, entities FROM {table} WHERE {base_where} "
+                    f"AND INSTR({entity_expression}, ?) > 0 "
+                    f"ORDER BY id DESC LIMIT ?",
+                    (normalized, self.ENTITY_SCAN_ROW_LIMIT),
+                ).fetchall():
+                    rows_by_id.setdefault(int(row_id), blob)
+                for blob in rows_by_id.values():
                     try:
                         parsed = json.loads(blob)
                     except (TypeError, ValueError):
@@ -5998,7 +7259,7 @@ flowchart LR
                             continue
                         if item_norm == normalized:
                             doc_exact = True
-                        elif normalized in item_norm:
+                        elif self._contains_retrieval_term(str(item), entity):
                             doc_containing.add(str(item).strip())
                     if doc_exact:
                         result["exact_count"] += 1
@@ -6020,7 +7281,6 @@ flowchart LR
             return {"mention_count": 0, "strong_mention_count": 0}
         conn = sqlite3.connect(str(db))
         try:
-            pattern = f"%{entity.casefold()}%"
             mention_count = 0
             strong_count = 0
             table_specs = (
@@ -6060,16 +7320,26 @@ flowchart LR
                     else "1=1"
                 )
                 try:
+                    mention_predicate, mention_params = self._sqlite_token_predicate(
+                        all_text,
+                        entity,
+                    )
+                    strong_predicate, strong_params = self._sqlite_token_predicate(
+                        strong_text,
+                        entity,
+                    )
                     mention_count += int(
                         conn.execute(
-                            f"SELECT COUNT(*) FROM {table} WHERE {base_where} AND {all_text} LIKE ?",
-                            (pattern,),
+                            f"SELECT COUNT(*) FROM {table} WHERE {base_where} "
+                            f"AND {mention_predicate}",
+                            mention_params,
                         ).fetchone()[0]
                     )
                     strong_count += int(
                         conn.execute(
-                            f"SELECT COUNT(*) FROM {table} WHERE {base_where} AND {strong_text} LIKE ?",
-                            (pattern,),
+                            f"SELECT COUNT(*) FROM {table} WHERE {base_where} "
+                            f"AND {strong_predicate}",
+                            strong_params,
                         ).fetchone()[0]
                     )
                 except sqlite3.Error as exc:
@@ -6094,6 +7364,26 @@ flowchart LR
         if not db.exists():
             logger.warning("知识库数据库不存在: %s", db)
             return []
+
+        # 该对象同时是本轮本地 trace 的结构化诊断容器；保留调用方
+        # 传入的 dict，使候选过滤计数和最终选择结果可随创作事件落库。
+        parsed_requirement = (
+            parsed_requirement if isinstance(parsed_requirement, dict) else {}
+        )
+        if not isinstance(parsed_requirement.get("retrieval_plan"), dict):
+            keywords = [
+                str(item).strip()
+                for item in parsed_requirement.get("keywords") or []
+                if str(item).strip()
+            ] or self._extract_keywords(user_prompt)
+            parsed_requirement["keywords"] = keywords
+            parsed_requirement["retrieval_plan"] = (
+                self._build_creation_retrieval_plan(
+                    user_prompt,
+                    keywords,
+                    parsed_requirement.get("entity_context") or {},
+                )
+            )
 
         # 路径1: 文档、知识、操作、数据与尚未完成提炼的近期文档采集统一召回。
         try:
@@ -6149,6 +7439,12 @@ flowchart LR
         merged_rows = list(merged_by_id.values())
 
         if not merged_rows:
+            parsed_requirement["retrieval_diagnostics"] = {
+                "candidate_count": 0,
+                "eligible_count": 0,
+                "selected_count": 0,
+                "filter_counts": {},
+            }
             return []
 
         # 对所有记忆域使用同一个 embedding 空间补充语义相关性。这里没有
@@ -6157,19 +7453,30 @@ flowchart LR
             self._apply_semantic_similarities(semantic_query, merged_rows)
 
         entity_context = parsed_requirement.get("entity_context") or {}
+        retrieval_plan = parsed_requirement.get("retrieval_plan") or {}
+        retrieval_mode = str(retrieval_plan.get("mode") or "topic")
+        primary_target = str(retrieval_plan.get("primary_target") or "").strip()
         primary_entities = [
             str(item.get("name") or "").strip()
             for item in entity_context.get("primary_entities") or []
             if str(item.get("name") or "").strip()
         ]
         entity_aware = bool(
-            entity_context.get("has_high_confidence_entity") and primary_entities
+            retrieval_plan.get("hard_entity_gate")
+            and retrieval_plan.get("mode") == "entity_lookup"
+            and entity_context.get("has_high_confidence_entity")
+            and primary_entities
         )
 
         # 统一评分。精准实体查询提高相关性占比，且质量只能在相关候选之间排序。
         max_usage = max(int(row.get("usage_count") or 0) for row in merged_rows) or 1
         now_ms = int(time.time() * 1000)
         refs: list[ReferenceDocument] = []
+        filter_counts: dict[str, int] = {}
+
+        def record_filter(reason: str) -> None:
+            filter_counts[reason] = filter_counts.get(reason, 0) + 1
+
         for row in merged_rows:
             diagnostics = self._relevance_diagnostics(row, parsed_requirement)
             relevance = diagnostics["relevance_score"]
@@ -6195,6 +7502,7 @@ flowchart LR
 
             if entity_aware and self._is_aggregate_page(row):
                 # 聚合主页/导航列表只用于发现资料，不能作为目标产品的事实来源。
+                record_filter("aggregate_page")
                 continue
 
             if entity_aware:
@@ -6212,6 +7520,16 @@ flowchart LR
                     final = min(final + 0.04, 1.0)
                 else:
                     final *= 0.55
+            elif retrieval_mode == "relational":
+                final = (
+                    relevance * 0.58
+                    + diagnostics["relation_score"] * 0.17
+                    + quality * 0.10
+                    + completeness * 0.07
+                    + usage * 0.02
+                    + format_score * 0.02
+                    + freshness * 0.04
+                )
             else:
                 final = (
                     relevance * options.content_weight
@@ -6224,17 +7542,35 @@ flowchart LR
 
             # 普通查询保持原阈值；精准实体查询的背景资料必须有足够强的语义证据。
             if relevance < 0.25 or (relevance < 0.4 and final < 0.6):
+                record_filter("relevance_threshold")
                 continue
             if entity_aware and tier == "background" and diagnostics["semantic_score"] < 0.72:
+                record_filter("entity_background_threshold")
+                continue
+            if (
+                retrieval_mode == "relational"
+                and primary_target
+                and not diagnostics["primary_target_matched"]
+                and diagnostics["semantic_score"] < 0.72
+            ):
+                # 关系查询首先要围绕主目标建立证据。仅命中 Agent 这类
+                # 辅助组件的资料不能靠数量/新鲜度进入 Top-K；真正的跨词
+                # 同义资料仍可凭独立的高语义分通过。
+                record_filter("relational_primary_threshold")
                 continue
 
             retrieval_paths = tuple(
                 sorted(str(item) for item in row.get("_retrieval_paths") or set())
             )
             reason = self._build_retrieval_reason(
+                retrieval_mode=retrieval_mode,
+                primary_target=primary_target,
                 tier=tier if entity_aware else "general",
                 matched_entities=matched_entities,
                 matched_keywords=diagnostics["matched_keywords"],
+                matched_components=diagnostics["matched_components"],
+                relations=list(retrieval_plan.get("relations") or []),
+                matched_relations=diagnostics["matched_relations"],
                 retrieval_paths=retrieval_paths,
                 semantic_score=diagnostics["semantic_score"],
                 quality=quality,
@@ -6275,6 +7611,11 @@ flowchart LR
                     lexical_score=diagnostics["lexical_score"],
                     semantic_score=diagnostics["semantic_score"],
                     entity_score=entity_score,
+                    retrieval_mode=retrieval_mode,
+                    primary_target=primary_target,
+                    matched_components=tuple(diagnostics["matched_components"]),
+                    matched_relations=tuple(diagnostics["matched_relations"]),
+                    relation_score=diagnostics["relation_score"],
                 )
             )
 
@@ -6283,14 +7624,151 @@ flowchart LR
             key=lambda item: (
                 -tier_order.get(item.retrieval_tier, 3),
                 item.final_weight,
+                item.relevance_score,
+                item.completeness_score,
             ),
             reverse=True,
         )
         refs = self._deduplicate_reference_origins(refs)
         limit = max(1, min(options.max_references, 30))
         if entity_aware:
-            return self._select_entity_aware_references(refs, limit)
-        return self._select_diverse_references(refs, limit)
+            selected = self._select_entity_aware_references(refs, limit)
+        elif retrieval_mode in {"relational", "multi_target"}:
+            selected = self._select_component_aware_references(
+                refs,
+                [
+                    str(item).strip()
+                    for item in (
+                        retrieval_plan.get("targets")
+                        or retrieval_plan.get("components")
+                        or []
+                    )
+                    if str(item).strip()
+                ],
+                limit,
+                prioritize_anchors=retrieval_mode == "multi_target",
+            )
+        else:
+            selected = self._select_diverse_references(refs, limit)
+        for item in selected:
+            if not item.selection_reasons:
+                item.selection_reasons = ("global_rank",)
+        parsed_requirement["retrieval_diagnostics"] = {
+            "candidate_count": len(merged_rows),
+            "eligible_count": len(refs),
+            "selected_count": len(selected),
+            "filter_counts": filter_counts,
+        }
+        return selected
+
+    @classmethod
+    def _select_component_aware_references(
+        cls,
+        references: list[ReferenceDocument],
+        components: list[str],
+        limit: int,
+        prioritize_anchors: bool = False,
+    ) -> list[ReferenceDocument]:
+        """关系查询先覆盖两端，再按全局排名补齐 Top-K。
+
+        若某个组件存在标题直接命中的具体文档，它作为该组件的
+        一手资料锚点；聚合页、导航页不能获得该优先级。
+        """
+        if limit <= 0:
+            return []
+        selected: list[ReferenceDocument] = []
+        selected_keys: set[tuple[str, int]] = set()
+
+        def reference_key(item: ReferenceDocument) -> tuple[str, int]:
+            return (item.source_type, int(item.source_id or item.id))
+
+        def matches_component(item: ReferenceDocument, component: str) -> bool:
+            folded_component = component.casefold()
+            signals = [*item.matched_components, *item.matched_keywords]
+            return any(
+                (
+                    len(signal.strip()) >= 4
+                    or sum(
+                        1
+                        for char in signal
+                        if "\u4e00" <= char <= "\u9fff"
+                    ) >= 2
+                )
+                and (
+                    signal.casefold() in folded_component
+                    or folded_component in signal.casefold()
+                )
+                for signal in signals
+            )
+
+        for component in components[:4]:
+            folded = component.casefold()
+            matched = [
+                item
+                for item in references
+                if matches_component(item, component)
+                or folded in item.title.casefold()
+            ]
+            if not matched:
+                continue
+            original_documents = [
+                item
+                for item in matched
+                if item.source_type == "document"
+                and folded in item.title.casefold()
+                and not cls._is_aggregate_reference(item)
+            ]
+            anchor = max(
+                original_documents or matched,
+                key=lambda item: (
+                    item.final_weight,
+                    item.relevance_score,
+                    item.completeness_score,
+                ),
+            )
+            key = reference_key(anchor)
+            if key in selected_keys:
+                continue
+            anchor.selection_reasons = tuple(
+                dict.fromkeys(
+                    [*anchor.selection_reasons, f"component_anchor:{component}"]
+                )
+            )
+            selected.append(anchor)
+            selected_keys.add(key)
+            if len(selected) >= limit:
+                return selected
+
+        remaining = [
+            item for item in references if reference_key(item) not in selected_keys
+        ]
+        for item in cls._select_diverse_references(remaining, limit - len(selected)):
+            item.selection_reasons = tuple(
+                dict.fromkeys([*item.selection_reasons, "global_rank"])
+            )
+            selected.append(item)
+        if not prioritize_anchors:
+            global_order = {
+                reference_key(item): index for index, item in enumerate(references)
+            }
+            selected.sort(
+                key=lambda item: global_order.get(
+                    reference_key(item), len(references)
+                )
+            )
+        return selected[:limit]
+
+    @classmethod
+    def _is_aggregate_reference(cls, reference: ReferenceDocument) -> bool:
+        return cls._is_aggregate_page(
+            {
+                "source_type": reference.source_type,
+                "title": reference.title,
+                "summary": reference.summary,
+                "full_content": reference.full_content,
+                "source_url": reference.source_url,
+            }
+        )
 
     @staticmethod
     def _select_diverse_references(
@@ -6412,6 +7890,12 @@ flowchart LR
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         rows: list[dict] = []
+        seed_requirement = {
+            key: value
+            for key, value in parsed_requirement.items()
+            if key != "retrieval_plan"
+        }
+        seed_requirement["keywords"] = []
         try:
             for table, source_type in (
                 ("bake_knowledge", "knowledge"),
@@ -6423,7 +7907,7 @@ flowchart LR
                         table,
                         source_type,
                         "",
-                        {**parsed_requirement, "keywords": []},
+                        seed_requirement,
                         options,
                     )
                 )
@@ -6431,7 +7915,7 @@ flowchart LR
                 self._query_data_memory_rows(
                     conn,
                     "",
-                    {**parsed_requirement, "keywords": []},
+                    seed_requirement,
                     options,
                 )
             )
@@ -6439,7 +7923,7 @@ flowchart LR
                 self._query_pending_capture_rows(
                     conn,
                     "",
-                    {**parsed_requirement, "keywords": []},
+                    seed_requirement,
                     options,
                 )
             )
@@ -6461,8 +7945,21 @@ flowchart LR
         }
 
     @staticmethod
-    def _memory_like_terms(user_prompt: str, parsed_requirement: dict) -> list[str]:
-        terms = [
+    def _memory_term_specs(
+        user_prompt: str,
+        parsed_requirement: dict,
+    ) -> list[tuple[str, float]]:
+        retrieval_plan = parsed_requirement.get("retrieval_plan") or {}
+        weights = {
+            str(key).casefold(): max(float(value), 0.05)
+            for key, value in (retrieval_plan.get("term_weights") or {}).items()
+        }
+        planned_terms = [
+            str(item).strip()
+            for item in retrieval_plan.get("candidate_terms") or []
+            if len(str(item).strip()) >= 2
+        ]
+        terms = planned_terms or [
             str(item).strip()
             for item in parsed_requirement.get("keywords", [])
             if len(str(item).strip()) >= 2
@@ -6471,7 +7968,108 @@ flowchart LR
             compact = " ".join(user_prompt.split()).strip()
             if compact:
                 terms.append(compact[:80])
-        return list(dict.fromkeys(terms))[:16]
+        deduplicated: dict[str, tuple[str, float]] = {}
+        for term in terms:
+            key = term.casefold()
+            weight = weights.get(key, 1.0)
+            current = deduplicated.get(key)
+            if current is None or weight > current[1]:
+                deduplicated[key] = (term, weight)
+        return sorted(
+            list(deduplicated.values())[:16],
+            key=lambda item: (item[1], len(item[0])),
+            reverse=True,
+        )
+
+    @classmethod
+    def _memory_like_terms(
+        cls,
+        user_prompt: str,
+        parsed_requirement: dict,
+    ) -> list[str]:
+        return [
+            term
+            for term, _ in cls._memory_term_specs(user_prompt, parsed_requirement)
+        ]
+
+    @staticmethod
+    def _weighted_like_query(
+        expression: str,
+        term_specs: list[tuple[str, float]],
+    ) -> tuple[str, list[object], str, list[object]]:
+        if not term_specs:
+            return "1=1", [], "0.0", []
+        clauses = []
+        where_params: list[object] = []
+        score_parts = []
+        score_params: list[object] = []
+        for term, weight in term_specs:
+            predicate, predicate_params = CreationService._sqlite_token_predicate(
+                expression,
+                term,
+            )
+            clauses.append(predicate)
+            where_params.extend(predicate_params)
+            score_parts.append(
+                f"CASE WHEN {predicate} THEN {max(float(weight), 0.05):.6f} "
+                "ELSE 0 END"
+            )
+            score_params.extend(predicate_params)
+        return (
+            f"({' OR '.join(clauses)})",
+            where_params,
+            f"({' + '.join(score_parts)})",
+            score_params,
+        )
+
+    @staticmethod
+    def _sqlite_glob_literal(value: object) -> str:
+        """把查询词转成 SQLite GLOB 字面量，避免通配符注入。"""
+        escaped = []
+        replacements = {
+            "*": "[*]",
+            "?": "[?]",
+            "[": "[[]",
+            "]": "[]]",
+        }
+        for char in str(value or "").casefold():
+            escaped.append(replacements.get(char, char))
+        return "".join(escaped)
+
+    @classmethod
+    def _sqlite_token_predicate(
+        cls,
+        expression: str,
+        term: object,
+    ) -> tuple[str, list[object]]:
+        """构造与 Python rerank 一致的 ASCII token 边界谓词。
+
+        SQLite LIKE 会把 `%`/`_` 当通配符，也会让 Onepoint 命中
+        NeoOnepoint。GLOB 的排除字符类可在 SQL LIMIT 之前确认两侧不是
+        ASCII 标识符字符；中文相邻字符仍按短语子串语义处理。
+        """
+        normalized = str(term or "").casefold()
+        if not any(char.isascii() and char.isalnum() for char in normalized):
+            # 与 `_contains_retrieval_term` 的中文分支完全一致；不能要求
+            # 中文短语两侧再出现边界，否则“原创剧本Agent”会漏召回。
+            return f"INSTR({expression}, ?) > 0", [normalized]
+
+        literal = cls._sqlite_glob_literal(normalized)
+        boundary = "[^a-z0-9_]"
+        prefix = (
+            boundary
+            if normalized[0].isascii() and normalized[0].isalnum()
+            else ""
+        )
+        suffix = (
+            boundary
+            if normalized[-1].isascii() and normalized[-1].isalnum()
+            else ""
+        )
+        # 两侧补空格后，一个 GLOB 即可同时覆盖字符串开头/中间/结尾，
+        # 避免为每个词重复计算八次大型正文拼接表达式。
+        pattern = "*" + prefix + literal + suffix + "*"
+        return f"((' ' || {expression} || ' ') GLOB ?)", [pattern]
 
     def _query_bake_artifact_rows(
         self,
@@ -6492,13 +8090,14 @@ flowchart LR
         ]
         if not searchable:
             return []
-        terms = self._memory_like_terms(user_prompt, parsed_requirement)
-        expression = " || ' ' || ".join(
+        term_specs = self._memory_term_specs(user_prompt, parsed_requirement)
+        expression = "LOWER(" + " || ' ' || ".join(
             f"COALESCE({column}, '')" for column in searchable
+        ) + ")"
+        where, params, candidate_score, score_params = self._weighted_like_query(
+            expression,
+            term_specs,
         )
-        clauses = [f"LOWER({expression}) LIKE ?" for _ in terms]
-        params: list[object] = [f"%{term.lower()}%" for term in terms]
-        where = f"({' OR '.join(clauses)})" if clauses else "1=1"
         content_parts = [
             f"COALESCE({column}, '')"
             for column in ("content", "detailed_content")
@@ -6536,10 +8135,14 @@ flowchart LR
                    {("COALESCE(entities, '')" if "entities" in columns else "''")} AS entity_text
             FROM {table}
             WHERE {where}
-            ORDER BY {updated_at} DESC, id DESC
+            ORDER BY {candidate_score} DESC, {updated_at} DESC, id DESC
             LIMIT ?
             """,
-            [*params, max(options.max_references * 8, 80)],
+            [
+                *params,
+                *score_params,
+                max(options.max_references * 20, 200),
+            ],
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -6554,15 +8157,16 @@ flowchart LR
             conn, "data_snapshots"
         ):
             return []
-        terms = self._memory_like_terms(user_prompt, parsed_requirement)
+        term_specs = self._memory_term_specs(user_prompt, parsed_requirement)
         expression = (
             "LOWER(COALESCE(source.title, '') || ' ' || "
             "COALESCE(snapshot.content_text, '') || ' ' || "
             "COALESCE(snapshot.structured_data, ''))"
         )
-        clauses = [f"{expression} LIKE ?" for _ in terms]
-        where = f"({' OR '.join(clauses)})" if clauses else "1=1"
-        params: list[object] = [f"%{term.lower()}%" for term in terms]
+        where, params, candidate_score, score_params = self._weighted_like_query(
+            expression,
+            term_specs,
+        )
         time_context = parsed_requirement.get("time_context") or {}
         period_clause = ""
         if time_context.get("has_relative_time"):
@@ -6597,10 +8201,14 @@ flowchart LR
                   ORDER BY latest.collected_at DESC, latest.id DESC LIMIT 1
               )
               AND {where}{period_clause}
-            ORDER BY snapshot.collected_at DESC, source.id DESC
+            ORDER BY {candidate_score} DESC, snapshot.collected_at DESC, source.id DESC
             LIMIT ?
             """,
-            [*params, max(options.max_references * 6, 60)],
+            [
+                *params,
+                *score_params,
+                max(options.max_references * 12, 120),
+            ],
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -6615,15 +8223,16 @@ flowchart LR
         required = {"id", "ts", "ax_text", "ocr_text", "url"}
         if not required.issubset(columns):
             return []
-        terms = self._memory_like_terms(user_prompt, parsed_requirement)
+        term_specs = self._memory_term_specs(user_prompt, parsed_requirement)
         expression = (
             "LOWER(COALESCE(webpage_title, '') || ' ' || COALESCE(win_title, '') || "
             "' ' || COALESCE(ax_text, '') || ' ' || COALESCE(ocr_text, '') || "
             "' ' || COALESCE(input_text, '') || ' ' || COALESCE(audio_text, ''))"
         )
-        clauses = [f"{expression} LIKE ?" for _ in terms]
-        where = f"({' OR '.join(clauses)})" if clauses else "1=1"
-        params: list[object] = [f"%{term.lower()}%" for term in terms]
+        where, params, candidate_score, score_params = self._weighted_like_query(
+            expression,
+            term_specs,
+        )
         time_context = parsed_requirement.get("time_context") or {}
         if time_context.get("has_relative_time"):
             params.extend(
@@ -6655,10 +8264,14 @@ flowchart LR
               AND COALESCE(url, '') <> ''
               AND LENGTH(COALESCE(ax_text, '') || COALESCE(ocr_text, '')) >= 200
               AND {where} {time_clause}
-            ORDER BY ts DESC, id DESC
+            ORDER BY {candidate_score} DESC, ts DESC, id DESC
             LIMIT ?
             """,
-            [*params, max(options.max_references * 20, 200)],
+            [
+                *params,
+                *score_params,
+                max(options.max_references * 30, 300),
+            ],
         ).fetchall()
 
         # 同一页面连续采集只保留信息量最大且较新的一个版本。
@@ -6864,28 +8477,22 @@ flowchart LR
         parsed_requirement: dict,
         options: CreationOptions,
     ) -> list[dict]:
-        keywords = parsed_requirement.get("keywords") or []
-        like_terms = keywords[:12] or [user_prompt[:80]]
-        params: list[object] = []
+        term_specs = self._memory_term_specs(user_prompt, parsed_requirement)
+        expression = (
+            "LOWER(COALESCE(title, '') || ' ' || COALESCE(summary, '') || ' ' || "
+            "COALESCE(full_content, '') || ' ' || COALESCE(prompt_hint, ''))"
+        )
+        where, params, candidate_score, score_params = self._weighted_like_query(
+            expression,
+            term_specs,
+        )
         # 正文与摘要都为空的占位文档没有可引用内容，不能作为创作
         # 参考；同源原始采集会在后续仲裁中充当替身。
         clauses: list[str] = [
             "deleted_at IS NULL",
             "(COALESCE(full_content, '') <> '' OR COALESCE(summary, '') <> '')",
         ]
-
-        keyword_clauses = []
-        for term in like_terms:
-            pattern = f"%{term}%"
-            keyword_clauses.append(
-                "CASE WHEN (title LIKE ? OR COALESCE(summary, '') LIKE ? OR "
-                "COALESCE(full_content, '') LIKE ?) THEN 1 ELSE 0 END"
-            )
-            params.extend([pattern] * 3)
-        if keyword_clauses:
-            # 候选生成只要求命中一个有辨识度的步骤词，严格相关性统一在后续
-            # 评分完成。这里要求“一半关键词”会让同义表达和长 Skill 目标漏召回。
-            clauses.append(f"({' + '.join(keyword_clauses)}) >= 1")
+        clauses.append(where)
 
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -6902,11 +8509,15 @@ flowchart LR
                        'document' AS source_type, id AS source_id, updated_at AS observed_at
                 FROM bake_documents
                 WHERE {' AND '.join(clauses)}
-                ORDER BY usage_count DESC, updated_at DESC, id DESC
+                ORDER BY {candidate_score} DESC, usage_count DESC, updated_at DESC, id DESC
                 LIMIT ?
             """
-            params.append(max(options.max_references * 4, 16))
-            rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
+            query_params = [
+                *params,
+                *score_params,
+                max(options.max_references * 20, 200),
+            ]
+            rows = [dict(row) for row in conn.execute(sql, query_params).fetchall()]
             if rows:
                 return rows
             return [
@@ -6965,26 +8576,28 @@ flowchart LR
             # 用查询主题词做 LIKE 再补一批命中文档。
             extra_terms = self._vector_recall_terms(query)
             if extra_terms:
-                like_clauses = [
-                    "(title LIKE ? OR COALESCE(summary, '') LIKE ? OR "
-                    "COALESCE(full_content, '') LIKE ?)"
-                    for _ in extra_terms
+                expression = (
+                    "LOWER(COALESCE(title, '') || ' ' || "
+                    "COALESCE(summary, '') || ' ' || COALESCE(full_content, ''))"
+                )
+                term_specs = [
+                    (term, float(len(extra_terms) - index))
+                    for index, term in enumerate(extra_terms)
                 ]
-                extra_params: list[object] = []
-                for term in extra_terms:
-                    extra_params.extend([f"%{term}%"] * 3)
-                extra_params.append(100)
+                where, where_params, candidate_score, score_params = (
+                    self._weighted_like_query(expression, term_specs)
+                )
                 existing_ids = {row["id"] for row in rows}
                 for row in conn.execute(
                     f"""
                     SELECT {select_fields}
                     FROM bake_documents
                     WHERE deleted_at IS NULL AND full_content IS NOT NULL
-                      AND ({' OR '.join(like_clauses)})
-                    ORDER BY updated_at DESC
+                      AND {where}
+                    ORDER BY {candidate_score} DESC, updated_at DESC
                     LIMIT ?
                     """,
-                    extra_params,
+                    [*where_params, *score_params, 100],
                 ).fetchall():
                     item = dict(row)
                     if item["id"] not in existing_ids:
@@ -7047,6 +8660,24 @@ flowchart LR
 
     @staticmethod
     def _semantic_recall_query(user_prompt: str, parsed_requirement: dict) -> str:
+        retrieval_plan = parsed_requirement.get("retrieval_plan") or {}
+        planned = []
+        primary_target = str(retrieval_plan.get("primary_target") or "").strip()
+        if primary_target:
+            planned.append(primary_target)
+        planned.extend(
+            str(item).strip()
+            for item in retrieval_plan.get("components") or []
+            if str(item).strip()
+        )
+        planned.extend(
+            str(item).strip()
+            for item in retrieval_plan.get("relations") or []
+            if str(item).strip()
+        )
+        planned = list(dict.fromkeys(planned))
+        if planned:
+            return " ".join(planned)
         keywords = [
             str(item).strip()
             for item in parsed_requirement.get("keywords", [])
@@ -7387,6 +9018,7 @@ flowchart LR
 
     def _infer_doc_type(self, text: str) -> str:
         mapping = [
+            ("会议纪要", ["会议纪要", "会议记录", "周会纪要", "复盘纪要"]),
             ("操作手册", ["操作手册", "使用手册", "用户手册", "SOP", "流程"]),
             ("建设方案", ["建设方案", "实施方案", "总体方案", "解决方案", "技术方案"]),
             ("汇报材料", ["汇报", "述职", "总结", "报告"]),
@@ -7398,6 +9030,68 @@ flowchart LR
             if any(word in text for word in words):
                 return doc_type
         return "通用文档"
+
+    _EXPLICIT_CONTENT_DATE_PATTERN = re.compile(
+        r"(?<!\d)(20\d{2})\s*(?:[-/.]|年)\s*(\d{1,2})\s*"
+        r"(?:[-/.]|月)\s*(\d{1,2})\s*日?(?!\d)"
+    )
+
+    @classmethod
+    def reference_period_evidence(
+        cls,
+        reference: ReferenceDocument,
+        requested_time_context: dict,
+    ) -> dict:
+        """对齐参考正文中的明确日期与创作请求周期。
+
+        updated_at/observed_at 描述资料何时被记录或刷新，不能替代会议、报告
+        等正文自己的事件日期。这里仅提取正文逐字出现的完整日期并做确定性
+        区间判断，不推测无年份日期，也不因未识别日期而拒绝资料。
+        """
+        start = str(requested_time_context.get("period_start") or "").strip()
+        end = str(requested_time_context.get("period_end") or "").strip()
+        if not start or not end:
+            return {}
+
+        explicit_dates: list[str] = []
+        source_text = "\n".join(
+            value
+            for value in (
+                str(reference.title or ""),
+                str(reference.summary or ""),
+                str(reference.full_content or ""),
+            )
+            if value
+        )
+        for match in cls._EXPLICIT_CONTENT_DATE_PATTERN.finditer(source_text):
+            try:
+                normalized = datetime(
+                    int(match.group(1)),
+                    int(match.group(2)),
+                    int(match.group(3)),
+                ).date().isoformat()
+            except ValueError:
+                continue
+            if normalized not in explicit_dates:
+                explicit_dates.append(normalized)
+            if len(explicit_dates) >= 12:
+                break
+
+        matched_dates = [value for value in explicit_dates if start <= value <= end]
+        return {
+            "basis": "explicit_document_content_date",
+            "requested_period_start": start,
+            "requested_period_end": end,
+            "explicit_dates": explicit_dates,
+            "matched_dates": matched_dates,
+            "match_status": (
+                "matched"
+                if matched_dates
+                else "outside"
+                if explicit_dates
+                else "unknown"
+            ),
+        }
 
     def _infer_audience(self, text: str) -> str:
         for audience in ["政府", "企业管理人员", "客户", "研发团队", "运维人员", "销售", "领导"]:
@@ -7426,8 +9120,8 @@ flowchart LR
         # 步骤 objective 中真正的数据对象；否则长 Skill 名会占满前 12 个词。
         text_clean = re.sub(r"@[A-Za-z0-9_\-\u4e00-\u9fff]+", " ", text)
         text_clean = re.sub(
-            r"(?i:\btool\b)|(?:请|帮我|帮忙|给我|写一份|生成一份|生成|撰写|"
-            r"输出|制作|创作下|创作|使用|用|工具获取|获取|工具)",
+            r"(?i:\btool\b)|(?:请|帮我|帮忙|给我|写一份|生成(?:一份|一下|下)?|撰写|"
+            r"输出|制作|创作(?:一份|一下|下)?|使用|用|工具获取|获取|工具)",
             " ",
             text_clean,
         )
@@ -7473,6 +9167,10 @@ flowchart LR
             "格式",
             "需要",
             "本次",
+            "当前",
+            "这个",
+            "该",
+            "现有",
             "总结",
             "展示",
             "列表形式",
@@ -7633,8 +9331,9 @@ flowchart LR
             and len(str(row.get("full_content") or "")) > 1200
         )
 
-    @staticmethod
+    @classmethod
     def _classify_entity_tier(
+        cls,
         row: dict,
         primary_entities: list[str],
     ) -> tuple[str, list[str], float]:
@@ -7647,27 +9346,55 @@ flowchart LR
         body = "\n".join(
             str(row.get(key) or "")
             for key in ("full_content", "prompt_hint")
-        ).casefold()
+        )
         direct_matches = [
-            entity for entity in primary_entities if entity.casefold() in title_summary_entities
+            entity
+            for entity in primary_entities
+            if cls._contains_retrieval_term(title_summary_entities, entity)
         ]
         if direct_matches:
             return "direct", direct_matches, 1.0
         body_matches = [
-            entity for entity in primary_entities if entity.casefold() in body
+            entity
+            for entity in primary_entities
+            if cls._contains_retrieval_term(body, entity)
         ]
         if body_matches:
             return "related", body_matches, 0.65
         return "background", [], 0.0
 
-    def _relevance_diagnostics(self, row: dict, parsed_requirement: dict) -> dict:
-        semantic_score = min(
-            max(float(row.get("_vector_similarity") or 0), 0.0),
-            1.0,
-        )
-        haystack = "\n".join(
+    @staticmethod
+    def _contains_retrieval_term(text: object, term: object) -> bool:
+        """词面匹配遵守 ASCII token 边界，中文仍使用短语匹配。
+
+        `Agent` 可以命中“当前 Agent”，但不能命中 `TieAgent`、
+        `agent_loop.py` 或 `multiagent`。这避免类别词通过代码标识符被误
+        计为实体/组件命中。
+        """
+        haystack = str(text or "").casefold()
+        needle = str(term or "").strip().casefold()
+        if not needle:
+            return False
+        if not any(char.isascii() and char.isalnum() for char in needle):
+            return needle in haystack
+        escaped = re.escape(needle)
+        escaped = re.sub(r"(?:\\\s)+", r"\\s+", escaped)
+        prefix = r"(?<![a-z0-9_])" if needle[0].isascii() and needle[0].isalnum() else ""
+        suffix = r"(?![a-z0-9_])" if needle[-1].isascii() and needle[-1].isalnum() else ""
+        return bool(re.search(prefix + escaped + suffix, haystack, re.IGNORECASE))
+
+    def _relation_diagnostics(self, row: dict, parsed_requirement: dict) -> dict:
+        retrieval_plan = parsed_requirement.get("retrieval_plan") or {}
+        mode = str(retrieval_plan.get("mode") or "topic")
+        primary_target = str(retrieval_plan.get("primary_target") or "").strip()
+        components = [
+            str(item).strip()
+            for item in retrieval_plan.get("components") or []
+            if str(item).strip()
+        ]
+        fields = "\n".join(
             str(row.get(key) or "")
-            for key in [
+            for key in (
                 "title",
                 "doc_type",
                 "summary",
@@ -7675,51 +9402,153 @@ flowchart LR
                 "sections_json",
                 "prompt_hint",
                 "entity_text",
-            ]
+            )
         )
-        keywords = parsed_requirement.get("keywords") or []
+        matched_components = [
+            component
+            for component in components
+            if self._contains_retrieval_term(fields, component)
+        ]
+        relations = [
+            str(item).strip()
+            for item in retrieval_plan.get("relations") or []
+            if str(item).strip()
+        ]
+        matched_relations = [
+            relation
+            for relation in relations
+            if any(
+                name == relation and pattern.search(fields)
+                for name, pattern in self.RETRIEVAL_RELATION_PATTERNS
+            )
+        ]
+        primary_matched = bool(
+            primary_target
+            and self._contains_retrieval_term(fields, primary_target)
+        )
+        secondary_components = [
+            item for item in components if item.casefold() != primary_target.casefold()
+        ]
+        secondary_matches = [
+            item
+            for item in secondary_components
+            if item in matched_components
+        ]
+        relation_score = 0.0
+        if mode == "relational":
+            relation_score = (
+                (0.65 if primary_matched else 0.0)
+                + 0.25
+                * len(secondary_matches)
+                / max(len(secondary_components), 1)
+                + (0.10 if matched_relations else 0.0)
+            )
+        return {
+            "primary_target": primary_target,
+            "primary_target_matched": primary_matched,
+            "matched_components": matched_components,
+            "matched_relations": matched_relations,
+            "relation_score": min(max(relation_score, 0.0), 1.0),
+        }
+
+    def _relevance_diagnostics(self, row: dict, parsed_requirement: dict) -> dict:
+        semantic_score = min(
+            max(float(row.get("_vector_similarity") or 0), 0.0),
+            1.0,
+        )
+        retrieval_plan = parsed_requirement.get("retrieval_plan") or {}
+        planned_terms = [
+            str(item).strip()
+            for item in retrieval_plan.get("candidate_terms") or []
+            if str(item).strip()
+        ]
+        keywords = planned_terms or parsed_requirement.get("keywords") or []
+        relation_diagnostics = self._relation_diagnostics(row, parsed_requirement)
         if not keywords:
             return {
                 "relevance_score": max(0.35, semantic_score),
                 "lexical_score": 0.0,
                 "semantic_score": semantic_score,
                 "matched_keywords": [],
+                **relation_diagnostics,
             }
-        title = str(row.get("title") or "")
-        folded_haystack = haystack.casefold()
-        folded_title = title.casefold()
-        folded_keywords = [
-            str(word).strip().casefold()
-            for word in keywords
-            if str(word).strip()
-        ]
-        matched_keywords = list(
+        normalized_keywords = list(
             dict.fromkeys(
                 str(word).strip()
                 for word in keywords
-                if str(word).strip().casefold() in folded_haystack
+                if str(word).strip()
             )
         )
-        hits = len(matched_keywords)
-        title_hits = sum(
-            1 for word in folded_keywords if word in folded_title
+        term_weights = {
+            str(key).casefold(): max(float(value), 0.05)
+            for key, value in (retrieval_plan.get("term_weights") or {}).items()
+        }
+        fields = (
+            (str(row.get("title") or ""), 1.00),
+            (str(row.get("summary") or ""), 0.82),
+            (str(row.get("entity_text") or ""), 0.90),
+            (str(row.get("doc_type") or ""), 0.45),
+            (str(row.get("full_content") or ""), 0.55),
+            (str(row.get("sections_json") or ""), 0.50),
+            (str(row.get("prompt_hint") or ""), 0.45),
         )
-        score = (hits / max(len(folded_keywords), 1)) + min(title_hits, 3) * 0.12
-        if any(len(word) >= 4 for word in matched_keywords):
-            score = max(score, 0.4)
-        if score < 0.4:
-            score = 0.0
+        match_strengths: dict[str, float] = {}
+        for word in normalized_keywords:
+            match_strengths[word] = max(
+                (
+                    strength
+                    for field, strength in fields
+                    if self._contains_retrieval_term(field, word)
+                ),
+                default=0.0,
+            )
+        matched_keywords = [
+            word for word in normalized_keywords if match_strengths.get(word, 0.0) > 0
+        ]
+        weights = {
+            word: term_weights.get(word.casefold(), 1.0)
+            for word in normalized_keywords
+        }
+        total_weight = sum(weights.values()) or 1.0
+        weighted_coverage = sum(
+            weights[word] * match_strengths.get(word, 0.0)
+            for word in normalized_keywords
+        ) / total_weight
+        strongest_weight = max(weights.values(), default=1.0)
+        strongest_match = max(
+            (
+                match_strengths.get(word, 0.0)
+                * min(weights[word] / max(strongest_weight, 0.05), 1.0)
+                for word in normalized_keywords
+            ),
+            default=0.0,
+        )
+        # 覆盖率负责“命中了多少重要目标”，字段强度负责标题/摘要优先。
+        # 不再以 len(term)>=4 提供硬保底，避免任一长泛词直接跃升相关。
+        lexical_score = min(
+            max(0.34 * weighted_coverage + 0.66 * strongest_match, 0.0),
+            1.0,
+        )
+        if lexical_score < 0.18:
+            lexical_score = 0.0
         if (
             parsed_requirement.get("doc_type")
             and parsed_requirement["doc_type"] == row.get("doc_type")
         ):
-            score += 0.15
-        lexical_score = min(max(score, 0.0), 1.0)
-        if lexical_score > 0 and semantic_score > 0:
-            relevance = min(
-                1.0 - (1.0 - lexical_score) * (1.0 - semantic_score),
-                1.0,
-            )
+            lexical_score = min(lexical_score + 0.08, 1.0)
+
+        discriminative_matches = [
+            word
+            for word in keywords
+            if match_strengths.get(str(word).strip(), 0.0) > 0
+            and term_weights.get(str(word).strip().casefold(), 1.0) > 0.15
+        ]
+        if lexical_score > 0 and semantic_score > 0 and discriminative_matches:
+            # 语义与区分词词面同时成立时只给小幅 agreement bonus，不再用
+            # noisy-OR 把同一个 Agent 信号当两份独立证据重复放大。
+            higher = max(lexical_score, semantic_score)
+            lower = min(lexical_score, semantic_score)
+            relevance = min(higher + 0.20 * lower * (1.0 - higher), 1.0)
         else:
             relevance = max(lexical_score, semantic_score)
         return {
@@ -7727,19 +9556,42 @@ flowchart LR
             "lexical_score": lexical_score,
             "semantic_score": semantic_score,
             "matched_keywords": matched_keywords,
+            **relation_diagnostics,
         }
 
     @staticmethod
     def _build_retrieval_reason(
         *,
+        retrieval_mode: str,
+        primary_target: str,
         tier: str,
         matched_entities: list[str],
         matched_keywords: list[str],
+        matched_components: list[str],
+        relations: list[str],
+        matched_relations: list[str],
         retrieval_paths: tuple[str, ...],
         semantic_score: float,
         quality: float,
     ) -> str:
-        parts = []
+        mode_labels = {
+            "entity_lookup": "实体精确匹配",
+            "topic": "主题匹配",
+            "relational": "关系逻辑匹配",
+            "multi_target": "多目标覆盖匹配",
+            "hybrid": "混合匹配",
+        }
+        parts = [f"检索模式：{mode_labels.get(retrieval_mode, retrieval_mode)}"]
+        if primary_target:
+            parts.append(f"主目标：{primary_target}")
+        if relations:
+            relation_text = "、".join(relations)
+            if matched_relations:
+                parts.append(f"关系命中：{'、'.join(matched_relations)}")
+            else:
+                parts.append(f"关注关系：{relation_text}")
+        if matched_components:
+            parts.append(f"命中组件：{'、'.join(matched_components[:5])}")
         if tier == "direct":
             parts.append(f"直接命中核心实体：{'、'.join(matched_entities)}")
         elif tier == "related":

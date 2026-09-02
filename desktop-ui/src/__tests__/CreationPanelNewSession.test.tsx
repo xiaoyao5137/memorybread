@@ -83,6 +83,19 @@ describe('创作新会话', () => {
     expect(timestamp).toHaveAttribute('title', '发送于 2020年8月2日 14:07')
   })
 
+  it('未登录时在用户发言上展示本地生成的昵称', async () => {
+    useAppStore.getState().setLocalNickname('好奇的小法棍')
+
+    render(<CreationPanel />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    const userMessage = screen.getByLabelText('用户消息')
+    expect(userMessage).toHaveTextContent('好奇的小法棍')
+    expect(userMessage.querySelector('.creation-chat-message__meta > span')).not.toHaveTextContent(/^用户$/)
+  })
+
   it('从页面开启新会话，并保留创作偏好', async () => {
     render(<CreationPanel />)
 
@@ -111,5 +124,26 @@ describe('创作新会话', () => {
     await waitFor(() => {
       expect(screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/)).toHaveFocus()
     })
+  })
+
+  it('可在非生成状态终止当前会话，并保留内容直到开启新会话', async () => {
+    render(<CreationPanel />)
+
+    const terminateButton = screen.getByRole('button', { name: '终止当前会话' })
+    expect(terminateButton).toBeEnabled()
+    fireEvent.click(terminateButton)
+
+    expect(await screen.findByLabelText('会话终止消息')).toHaveTextContent('终止了当前会话')
+    expect(screen.getByText('会话已终止，已有内容仍可查看')).toBeInTheDocument()
+    expect(terminateButton).toBeDisabled()
+    expect(terminateButton).toHaveTextContent('已终止')
+    expect(screen.getByPlaceholderText(/继续告诉 Agent/)).toBeDisabled()
+    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '开启新会话' })).toBeEnabled()
+    expect(screen.getByText('当前文档')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '开启新会话' }))
+    expect(screen.queryByLabelText('会话终止消息')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '终止当前会话' })).toBeDisabled()
   })
 })

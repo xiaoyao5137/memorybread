@@ -307,6 +307,17 @@ pub struct AXInfo {
     pub extracted_text: Option<String>,
 }
 
+fn parse_frontmost_basic_fields(raw: &str) -> (Option<String>, Option<String>) {
+    let mut parts = raw.splitn(2, "__MB_AX_FIELD__");
+    let normalized = |value: Option<&str>| {
+        value
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    };
+    (normalized(parts.next()), normalized(parts.next()))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TextExtractor {
     Generic,
@@ -932,29 +943,27 @@ end tell"#,
             tell application "System Events"
                 set front_process to first application process whose frontmost is true
                 set win_title to ""
+                set focused_role to ""
                 try
                     set win_title to name of front window of front_process
                 end try
-                return win_title
+                try
+                    set focused_element to value of attribute "AXFocusedUIElement" of front_process
+                    set focused_role to role of focused_element
+                end try
+                return win_title & "__MB_AX_FIELD__" & focused_role
             end tell
         "#;
 
-        let win_title = match run_osascript_with_timeout(
+        let (win_title, focused_role) = match run_osascript_with_timeout(
             basic_script,
             "front_window_title",
             Duration::from_millis(1200),
         ) {
-            Ok(raw) => {
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            }
+            Ok(raw) => super::parse_frontmost_basic_fields(&raw),
             Err(err) => {
                 debug!(asn = %asn, "AX 窗口标题脚本失败，继续使用 app 基础信息: {}", err);
-                None
+                (None, None)
             }
         };
 
@@ -974,6 +983,7 @@ end tell"#,
             win_title,
             url,
             webpage_title,
+            focused_role,
             ..Default::default()
         })
     }
@@ -1500,6 +1510,14 @@ mod tests {
         };
         let cloned = info.clone();
         assert_eq!(info.app_name, cloned.app_name);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_frontmost_basic_fields_preserve_role_without_input_content() {
+        let (title, role) = super::parse_frontmost_basic_fields("工作台__MB_AX_FIELD__AXTextField");
+        assert_eq!(title.as_deref(), Some("工作台"));
+        assert_eq!(role.as_deref(), Some("AXTextField"));
     }
 
     #[test]

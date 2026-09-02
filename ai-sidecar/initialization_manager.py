@@ -56,6 +56,19 @@ MIN_FREE_DISK_GB = 6.0
 INVALID_STATE_GRACE_SECONDS = 90.0
 MAX_PROCESS_LOG_BYTES = 5 * 1024 * 1024
 PROCESS_LOG_BACKUPS = 2
+CORE_STARTUP_GRACE_SECONDS = 10.0
+CORE_REPAIR_TIMEOUT_SECONDS = 45.0
+AUTO_REPAIRABLE_STAGE_ERRORS = frozenset(
+    {
+        "RUNTIME_DOWNLOAD_FAILED",
+        "RUNTIME_CHECKSUM_MISMATCH",
+        "RUNTIME_START_FAILED",
+        "MODEL_DOWNLOAD_FAILED",
+        "SKILLS_TOOLS_INITIALIZATION_FAILED",
+        "QUALITY_GATE_FAILED",
+        "FEATURE_SMOKE_TEST_FAILED",
+    }
+)
 SANDBOX_COLD_INSTALL_STAGES = frozenset(
     {
         "inference_engine",
@@ -90,6 +103,8 @@ ERROR_SUGGESTIONS = {
     "RUNTIME_START_FAILED": "本地 AI 引擎未能启动，请重试或上报诊断。",
     "MODEL_DOWNLOAD_FAILED": "模型下载未完成，请检查网络和磁盘空间后重试。",
     "DATABASE_INITIALIZATION_FAILED": "本地记忆库未能完成初始化，请重试或上报诊断。",
+    "CORE_SERVICE_UNAVAILABLE": "本地核心服务已自动重启但仍未就绪，请重新启动应用；若仍失败再上报诊断。",
+    "CORE_PORT_CONFLICT": "本地服务端口被其他程序占用，关闭占用 7070 端口的程序后重试。",
     "SKILLS_TOOLS_INITIALIZATION_FAILED": "内置技能或工具未能加载，请重新安装最新版应用。",
     "QUALITY_GATE_FAILED": "组件质检未通过，请重试；重复项会自动跳过。",
     "FEATURE_SMOKE_TEST_FAILED": "核心功能测试未通过，请重试或上报诊断。",
@@ -341,7 +356,12 @@ class InitializationManager:
                 self._begin_stage(state, stage_id, start_progress)
                 started = time.monotonic()
                 try:
-                    skipped, detail = handlers[stage_id](mode, state)
+                    skipped, detail = self._run_stage_with_auto_repair(
+                        mode,
+                        stage_id,
+                        handlers[stage_id],
+                        state,
+                    )
                 except InitializationFailure:
                     raise
                 except Exception as exc:
@@ -423,6 +443,139 @@ class InitializationManager:
                     stage_id,
                     exc.code,
                 )
+
+    def _run_stage_with_auto_repair(
+        self,
+        mode: str,
+        stage_id: str,
+        handler: Callable[[str, dict[str, Any]], tuple[bool, str]],
+        state: dict[str, Any],
+    ) -> tuple[bool, str]:
+        recovery_started = False
+        for attempt in range(2):
+            state = self._load_state(mode)
+            try:
+                result = handler(mode, state)
+                if recovery_started:
+                    latest = self._load_state(mode)
+                    self._set_recovery_state(
+                        latest,
+                        status="succeeded",
+                        action=self._auto_repair_action(stage_id),
+                        attempt=1,
+                        max_attempts=1,
+                        error_code=None,
+                        message="自动修复已完成，继续初始化",
+                    )
+                return result
+            except Exception as error:
+                exc = error if isinstance(error, InitializationFailure) else InitializationFailure(
+                    self._default_error_code(stage_id),
+                    str(error),
+                )
+                if (
+                    attempt > 0
+                    or exc.code not in AUTO_REPAIRABLE_STAGE_ERRORS
+                    or not self._prepare_stage_auto_repair(mode, stage_id, exc)
+                ):
+                    if recovery_started:
+                        latest = self._load_state(mode)
+                        self._set_recovery_state(
+                            latest,
+                            status="exhausted",
+                            action=self._auto_repair_action(stage_id),
+                            attempt=1,
+                            max_attempts=1,
+                            error_code=exc.code,
+                            message="自动修复未能解决问题",
+                        )
+                    if isinstance(error, InitializationFailure):
+                        raise
+                    raise exc from error
+                recovery_started = True
+                latest = self._load_state(mode)
+                self._set_recovery_state(
+                    latest,
+                    status="running",
+                    action=self._auto_repair_action(stage_id),
+                    attempt=1,
+                    max_attempts=1,
+                    error_code=exc.code,
+                    message="检测到可恢复问题，正在自动修复",
+                )
+                logger.warning(
+                    "initialization_auto_repair stage_id=%s error_code=%s action=%s",
+                    stage_id,
+                    exc.code,
+                    self._auto_repair_action(stage_id),
+                )
+        raise AssertionError("unreachable auto repair loop")
+
+    def _prepare_stage_auto_repair(
+        self,
+        mode: str,
+        stage_id: str,
+        failure: InitializationFailure,
+    ) -> bool:
+        if failure.code == "RUNTIME_START_FAILED":
+            return self._stop_owned_ollama_for_repair(mode) or not self._port_in_use(
+                self._ollama_port(mode)
+            )
+        if stage_id == "quality_gate":
+            try:
+                state = self._load_state(mode)
+                self._stage_inference_engine(mode, state)
+                self._stage_capture_model(mode, state)
+                self._stage_vector_model(mode, state)
+                self._stage_database(mode, state)
+            except InitializationFailure:
+                logger.warning("quality gate prerequisite auto repair did not complete")
+                return False
+        return True
+
+    @staticmethod
+    def _auto_repair_action(stage_id: str) -> str:
+        return {
+            "inference_engine": "repair_local_ai_engine",
+            "capture_model": "resume_capture_model",
+            "vector_model": "resume_vector_model",
+            "database": "restart_core_service",
+            "skills_tools": "rebuild_skills_tools_manifest",
+            "quality_gate": "recheck_prerequisites",
+            "feature_smoke_tests": "retry_failed_probe",
+        }.get(stage_id, "retry_stage")
+
+    def _set_recovery_state(
+        self,
+        state: dict[str, Any],
+        *,
+        status: str,
+        action: str,
+        attempt: int,
+        max_attempts: int,
+        error_code: Optional[str],
+        message: str,
+    ) -> None:
+        recovery = state.get("recovery") if isinstance(state.get("recovery"), dict) else {}
+        same_recovery = recovery.get("action") == action and recovery.get("status") in {
+            "waiting",
+            "running",
+        }
+        started_at = recovery.get("started_at") if same_recovery else _utc_now()
+        state["recovery"] = {
+            "status": status,
+            "action": action,
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+            "error_code": error_code,
+            "started_at": started_at,
+            "finished_at": _utc_now() if status in {"succeeded", "exhausted"} else None,
+        }
+        state["message"] = message
+        for stage in state.get("stages", []):
+            if stage.get("id") == state.get("current_stage"):
+                stage["detail"] = message
+        self._save_state(state)
 
     def _begin_stage(self, state: dict[str, Any], stage_id: str, progress: int) -> None:
         with self._lock:
@@ -559,14 +712,129 @@ class InitializationManager:
             existed_before = db_path.exists()
             self._start_sandbox_core()
         else:
-            if not self._http_ok("http://127.0.0.1:7070/health"):
-                raise InitializationFailure("DATABASE_INITIALIZATION_FAILED", "本地核心服务尚未就绪")
+            self._ensure_normal_core_ready(_state)
             db_path = self._database_path(mode)
             existed_before = db_path.exists()
-        self._validate_database(db_path)
+        try:
+            self._validate_database(db_path)
+        except Exception as exc:
+            failure = exc if isinstance(exc, InitializationFailure) else InitializationFailure(
+                "DATABASE_INITIALIZATION_FAILED",
+                "本地数据库检查失败",
+            )
+            if mode != "normal" or not self._request_core_repair_and_wait(
+                _state,
+                "检测到记忆库迁移或读写异常，正在重启核心服务后复检",
+            ):
+                if isinstance(exc, InitializationFailure):
+                    raise
+                raise failure from exc
+            try:
+                self._validate_database(db_path)
+            except InitializationFailure:
+                raise
+            except Exception as retry_exc:
+                raise InitializationFailure(
+                    "DATABASE_INITIALIZATION_FAILED",
+                    "本地数据库自动复检失败",
+                ) from retry_exc
         if existed_before:
             return True, "本地记忆库已存在，迁移与读写检查通过"
         return False, "隔离记忆库已创建，迁移与读写检查通过"
+
+    def _ensure_normal_core_ready(self, state: dict[str, Any]) -> None:
+        if self._core_healthy():
+            return
+        self._set_recovery_state(
+            state,
+            status="waiting",
+            action="wait_for_core_service",
+            attempt=0,
+            max_attempts=1,
+            error_code="DATABASE_INITIALIZATION_FAILED",
+            message="本地核心服务仍在启动，正在自动等待",
+        )
+        if self._wait_for_core_health(CORE_STARTUP_GRACE_SECONDS):
+            self._set_recovery_state(
+                self._load_state("normal"),
+                status="succeeded",
+                action="wait_for_core_service",
+                attempt=0,
+                max_attempts=1,
+                error_code=None,
+                message="本地核心服务已就绪，继续初始化",
+            )
+            return
+        if self._request_core_repair_and_wait(
+            self._load_state("normal"),
+            "本地核心服务未响应，正在安全重启应用内置服务",
+        ):
+            return
+        code = "CORE_PORT_CONFLICT" if self._port_in_use(7070) else "CORE_SERVICE_UNAVAILABLE"
+        message = "本地服务端口 7070 被其他程序占用" if code == "CORE_PORT_CONFLICT" else "本地核心服务自动重启后仍未就绪"
+        raise InitializationFailure(code, message)
+
+    def _request_core_repair_and_wait(self, state: dict[str, Any], message: str) -> bool:
+        if os.environ.get("MEMORY_BREAD_PACKAGED") != "1":
+            logger.info("core service host repair is unavailable outside packaged runtime")
+            return False
+        request_path = self.base_dir / "state" / "backend-repair-core.request"
+        self._write_json_atomic(
+            request_path,
+            {
+                "service": "core",
+                "requested_at": _utc_now(),
+                "run_id": state.get("run_id"),
+            },
+        )
+        self._set_recovery_state(
+            state,
+            status="running",
+            action="restart_core_service",
+            attempt=1,
+            max_attempts=1,
+            error_code="DATABASE_INITIALIZATION_FAILED",
+            message=message,
+        )
+        repaired = self._wait_for_backend_repair(
+            request_path,
+            CORE_REPAIR_TIMEOUT_SECONDS,
+        )
+        latest = self._load_state("normal")
+        self._set_recovery_state(
+            latest,
+            status="succeeded" if repaired else "exhausted",
+            action="restart_core_service",
+            attempt=1,
+            max_attempts=1,
+            error_code=None if repaired else "DATABASE_INITIALIZATION_FAILED",
+            message="本地核心服务已自动恢复" if repaired else "本地核心服务自动修复未完成",
+        )
+        logger.info(
+            "core_service_auto_repair result=%s run_id=%s",
+            "succeeded" if repaired else "exhausted",
+            state.get("run_id"),
+        )
+        return repaired
+
+    def _wait_for_backend_repair(self, request_path: Path, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        acknowledged = False
+        while time.monotonic() < deadline:
+            if not request_path.exists():
+                acknowledged = True
+            if acknowledged and self._core_healthy():
+                return True
+            time.sleep(0.5)
+        return False
+
+    def _wait_for_core_health(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._core_healthy():
+                return True
+            time.sleep(0.5)
+        return False
 
     def _stage_skills_tools(self, mode: str, _state: dict[str, Any]) -> tuple[bool, str]:
         try:
@@ -1073,6 +1341,7 @@ class InitializationManager:
             "can_report": False,
             "started_at": _utc_now(),
             "finished_at": None,
+            "recovery": None,
         }
         if mode == "sandbox":
             cold_start = self._sandbox_artifacts_absent()
@@ -1283,6 +1552,7 @@ class InitializationManager:
             "finished_at",
             "test_mode_enabled",
             "sandbox_isolation",
+            "recovery",
         }
         return {key: copy.deepcopy(value) for key, value in state.items() if key in allowed}
 
@@ -1497,6 +1767,32 @@ class InitializationManager:
                 "旧本地 AI 引擎仍在运行",
             )
 
+    def _stop_owned_ollama_for_repair(self, mode: str) -> bool:
+        """Stop only the managed process whose marker identity still matches."""
+        if not self._managed_ollama_process_owned(mode):
+            return False
+        marker_path = self._workspace_root(mode) / "processes" / "ollama.json"
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            process = psutil.Process(int(marker["pid"]))
+            process.terminate()
+            try:
+                process.wait(timeout=8)
+            except psutil.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            marker_path.unlink(missing_ok=True)
+            owned = self._processes.pop(f"ollama:{mode}", None)
+            if owned is not None:
+                try:
+                    owned.wait(timeout=0.1)
+                except Exception:
+                    pass
+            return True
+        except (OSError, ValueError, KeyError, json.JSONDecodeError, psutil.Error):
+            logger.warning("managed local AI process could not be stopped safely for repair")
+            return False
+
     @staticmethod
     def _find_ollama_executable(root: Path) -> Optional[Path]:
         for candidate in (root / "bin" / "ollama", root / "ollama"):
@@ -1557,6 +1853,17 @@ class InitializationManager:
         try:
             with urllib.request.urlopen(url, timeout=2) as response:
                 return response.status == 200
+        except Exception:
+            return False
+
+    def _core_healthy(self) -> bool:
+        try:
+            payload = self._http_json("http://127.0.0.1:7070/health", timeout=2)
+            return (
+                payload.get("status") == "ok"
+                and payload.get("service") == "memory-bread-core"
+                and bool(payload.get("version"))
+            )
         except Exception:
             return False
 

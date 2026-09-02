@@ -692,7 +692,7 @@ const BakeMemoryGraph: React.FC<{
                     {formatNodeCreatedAt(selectedNode.createdAtMs)}
                   </time>
                 </div>
-                <strong>{selectedNode.label}</strong>
+                <strong className="bake-memory-graph__inspector-title">{selectedNode.label}</strong>
                 <span>{selectedNode.summary}</span>
                 <small>
                   {selectedNode.concepts.length > 0

@@ -149,6 +149,36 @@ describe('首次启动一键初始化', () => {
     )
   })
 
+  it('可恢复异常会先显示自动修复而不要求用户操作', async () => {
+    const repairing = initialization('running', {
+      current_stage: 'database',
+      message: '本地核心服务未响应，正在安全重启应用内置服务',
+      recovery: {
+        status: 'running',
+        action: 'restart_core_service',
+        attempt: 1,
+        max_attempts: 1,
+        error_code: 'DATABASE_INITIALIZATION_FAILED',
+      },
+    })
+    repairing.stages[4] = {
+      ...repairing.stages[4],
+      status: 'running',
+      detail: '本地核心服务未响应，正在安全重启应用内置服务',
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => response({
+      status: 'ok',
+      initialization: repairing,
+    })))
+
+    render(<OnboardingWizard />)
+
+    expect(await screen.findByRole('heading', { name: '正在自动修复' })).toBeInTheDocument()
+    expect(screen.getByText('检测到异常，正在后台自动修复')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '重试失败阶段' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '上报诊断' })).not.toBeInTheDocument()
+  })
+
   it('只有正式环境质检通过后才写入完成标记并开放主界面', async () => {
     const onValidated = vi.fn()
     vi.stubGlobal('fetch', vi.fn(async () => response({
@@ -185,14 +215,41 @@ describe('首次启动一键初始化', () => {
           status: 'ok',
           report: {
             schema_version: 'initialization.v1',
-            run_id: 'init-run-001',
-            installation_id: 'installation-001',
+            run_id: '018f0000-0000-7000-8000-000000000001',
+            installation_id: '018f0000-0000-7000-8000-000000000002',
             error_code: 'MODEL_DOWNLOAD_FAILED',
           },
         })
       }
       if (url.endsWith('/v1/initialization-reports') && init?.method === 'POST') {
-        return response({ data: { report_id: 'report-001' }, request_id: 'request-001' })
+        return response({ data: { report_id: '018f0000-0000-7000-8000-000000000003' }, request_id: 'request-001' })
+      }
+      if (url.endsWith('/api/debug/log-files')) {
+        return response({ items: [{ key: 'core', label: '核心服务日志', exists: true, size_bytes: 20 }] })
+      }
+      if (url.endsWith('/api/debug/log-files/core')) {
+        return response({
+          key: 'core', label: '核心服务日志', content: 'startup failed', truncated: false,
+          total_size_bytes: 14, returned_bytes: 14,
+        })
+      }
+      if (url.endsWith('/v1/customer-logs/upload-url') && init?.method === 'POST') {
+        return response({ data: {
+          upload_id: '018f0000-0000-7000-8000-000000000004',
+          oss_object_key: 'customer-logs/production/report.zip',
+          upload_url: 'https://oss.example.com/report.zip',
+          required_headers: { 'content-type': 'application/zip' },
+        } })
+      }
+      if (url === 'https://oss.example.com/report.zip' && init?.method === 'PUT') {
+        return response({})
+      }
+      if (url.endsWith('/v1/customer-logs') && init?.method === 'POST') {
+        return response({ data: {
+          log_id: '018f0000-0000-7000-8000-000000000004',
+          received_at: '2026-09-01T00:00:00Z',
+          duplicate: false,
+        } })
       }
       if (url.endsWith('/api/initialization/start') && init?.method === 'POST') {
         return response({ status: 'ok', initialization: initialization('running') })
@@ -210,14 +267,20 @@ describe('首次启动一键初始化', () => {
     expect(dialog).toBeInTheDocument()
     fireEvent.click(within(dialog).getByRole('button', { name: '确认上报' }))
 
-    expect(await screen.findByText(/report-001/)).toBeInTheDocument()
+    expect(await screen.findByText(/018f0000 · 日志 018f0000/)).toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledWith(
       'https://memorybread.cn/v1/initialization-reports',
       expect.objectContaining({
         method: 'POST',
-        headers: expect.objectContaining({ 'Idempotency-Key': 'init-run-001' }),
+        headers: expect.objectContaining({ 'Idempotency-Key': '018f0000-0000-7000-8000-000000000001' }),
       }),
     )
+    const completeCall = fetchMock.mock.calls.find(([input, init]) =>
+      String(input).endsWith('/v1/customer-logs') && init?.method === 'POST')
+    expect(JSON.parse(String(completeCall?.[1]?.body))).toMatchObject({
+      initialization_report_id: '018f0000-0000-7000-8000-000000000003',
+      installation_id: '018f0000-0000-7000-8000-000000000002',
+    })
   })
 
   it('失败页会自动发现外部重新启动的初始化任务', async () => {

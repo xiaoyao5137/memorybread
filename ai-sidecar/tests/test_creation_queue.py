@@ -70,6 +70,68 @@ async def test_creation_generate_runs_in_interactive_p0_lane(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_dynamic_brainstorm_runs_in_interactive_p0_lane(monkeypatch):
+    calls: list[tuple[Priority, Optional[str]]] = []
+    received = {}
+
+    async def fake_next_step(**kwargs):
+        received.update(kwargs)
+        return {
+            "status": "question",
+            "readiness_reason": "仍需继续下钻",
+            "open_flags": ["部署边界"],
+            "question": {
+                "id": "q_dynamic",
+                "dimension": "私有化部署下钻",
+                "type": "single_choice",
+                "prompt": "私有化部署首先适配哪类基础设施？",
+                "why_now": "它会改变架构边界。",
+                "required": True,
+                "allow_custom": True,
+                "answer_template": "补充现状。",
+                "options": [],
+            },
+        }
+
+    class ThreadQueue:
+        def submit(self, priority, fn, lane=None):
+            calls.append((priority, lane))
+            future: concurrent.futures.Future = concurrent.futures.Future()
+
+            def run():
+                try:
+                    future.set_result(fn())
+                except Exception as exc:
+                    future.set_exception(exc)
+
+            threading.Thread(target=run, daemon=True).start()
+            return future
+
+    monkeypatch.setattr(creation_app.brainstorm_coordinator, "next_step", fake_next_step)
+    monkeypatch.setattr(creation_app, "get_global_queue", lambda: ThreadQueue())
+
+    transport = httpx.ASGITransport(app=creation_app.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/creation/brainstorm/next",
+            json={
+                "root_request": "设计知识库方案",
+                "decisions": [{"answer": "私有化部署"}],
+                "brief_markdown": "# 创作简报",
+                "selected_skills": [{"title": "微服务技术方案"}],
+                "force_continue": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert calls == [(Priority.P0, LANE_P0_CREATION)]
+    assert response.json()["question"]["dimension"] == "私有化部署下钻"
+    assert received["decisions"][0]["answer"] == "私有化部署"
+    assert received["selected_skills"][0]["title"] == "微服务技术方案"
+    assert received["force_continue"] is True
+
+
+@pytest.mark.asyncio
 async def test_creation_agent_loop_runs_in_interactive_p0_lane(monkeypatch):
     calls: list[tuple[Priority, Optional[str]]] = []
 

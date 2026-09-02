@@ -1,0 +1,283 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://memorybread.local/schema/temporal-evidence-stage-a-v1.json",
+  "title": "MemoryBread Temporal Evidence Stage A",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_version",
+    "claim",
+    "evidence_refs"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "memorybread.temporal-evidence.v1"
+    },
+    "source_version": {
+      "$ref": "#/$defs/source_version"
+    },
+    "claim": {
+      "$ref": "#/$defs/claim"
+    },
+    "evidence_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/evidence_ref"
+      }
+    },
+    "usage_decision": {
+      "anyOf": [
+        { "$ref": "#/$defs/usage_decision" },
+        { "type": "null" }
+      ],
+      "default": null
+    }
+  },
+  "$defs": {
+    "nullable_epoch_ms": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "source_version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_kind",
+        "source_id",
+        "version_hash",
+        "observed_at",
+        "completeness"
+      ],
+      "properties": {
+        "source_kind": {
+          "enum": [
+            "capture",
+            "document",
+            "meeting",
+            "chat",
+            "timeline",
+            "work_memory",
+            "data_snapshot"
+          ]
+        },
+        "source_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "version_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "observed_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source_created_at": {
+          "$ref": "#/$defs/nullable_epoch_ms"
+        },
+        "source_published_at": {
+          "$ref": "#/$defs/nullable_epoch_ms"
+        },
+        "source_modified_at": {
+          "$ref": "#/$defs/nullable_epoch_ms"
+        },
+        "source_time_basis": {
+          "enum": [
+            "native_metadata",
+            "verified_page_metadata",
+            "revision_record",
+            "unknown"
+          ],
+          "default": "unknown"
+        },
+        "completeness": {
+          "enum": ["complete", "partial", "truncated", "unverified"]
+        },
+        "parent_version_hash": {
+          "type": ["string", "null"],
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claim_id",
+        "claim_text",
+        "claim_kind",
+        "modality",
+        "status",
+        "event_time_start",
+        "event_time_end",
+        "time_precision",
+        "time_basis",
+        "decision_state",
+        "contract_version",
+        "extractor_version",
+        "rule_version"
+      ],
+      "properties": {
+        "claim_id": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 64
+        },
+        "claim_text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "subject": {
+          "type": "string",
+          "maxLength": 500,
+          "default": ""
+        },
+        "claim_kind": {
+          "enum": [
+            "progress_event",
+            "status_change",
+            "decision",
+            "metric",
+            "goal",
+            "forecast",
+            "current_status",
+            "background"
+          ]
+        },
+        "modality": {
+          "enum": ["actual", "observed", "planned", "target", "forecast", "unknown"]
+        },
+        "status": {
+          "enum": ["unknown", "planned", "in_progress", "blocked", "cancelled", "completed"]
+        },
+        "event_time_start": {
+          "$ref": "#/$defs/nullable_epoch_ms"
+        },
+        "event_time_end": {
+          "$ref": "#/$defs/nullable_epoch_ms"
+        },
+        "time_precision": {
+          "enum": ["instant", "day", "week", "month", "quarter", "year", "range", "unknown"]
+        },
+        "time_basis": {
+          "enum": [
+            "explicit_text",
+            "structural_context",
+            "relative_to_source_anchor",
+            "user_verified",
+            "unknown",
+            "conflict"
+          ]
+        },
+        "decision_state": {
+          "enum": ["shadow", "published", "conflict", "superseded", "rejected"]
+        },
+        "contract_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "extractor_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "rule_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version_hash",
+        "quote_hash",
+        "locator",
+        "date_role",
+        "validation_status"
+      ],
+      "properties": {
+        "version_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "quote_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "locator": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["start_offset", "end_offset"],
+          "properties": {
+            "section_path": {
+              "type": "array",
+              "items": { "type": "string", "maxLength": 300 },
+              "maxItems": 16
+            },
+            "start_offset": { "type": "integer", "minimum": 0 },
+            "end_offset": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "date_role": {
+          "enum": [
+            "event",
+            "completion",
+            "status_change",
+            "statistical_period",
+            "revision",
+            "publication",
+            "deadline",
+            "goal_horizon",
+            "historical_reference",
+            "observation",
+            "unknown"
+          ]
+        },
+        "scope_kind": {
+          "enum": ["sentence", "table_row", "list_item", "section", "meeting", "document"]
+        },
+        "validation_status": {
+          "enum": ["pending", "verified", "rejected", "conflict"]
+        },
+        "validation_reason": {
+          "type": "string",
+          "maxLength": 200
+        }
+      }
+    },
+    "usage_decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "purpose",
+        "period_start",
+        "period_end",
+        "timezone",
+        "decision",
+        "reason",
+        "rule_version"
+      ],
+      "properties": {
+        "purpose": {
+          "enum": ["period_progress", "metric", "background", "current_status"]
+        },
+        "period_start": { "type": "string", "format": "date" },
+        "period_end": { "type": "string", "format": "date" },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "decision": {
+          "enum": ["eligible", "background_only", "unresolved", "conflict"]
+        },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "rule_version": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    }
+  }
+}

@@ -224,7 +224,9 @@ async fn call_creation_skill_matcher(
             "{}/creation/skills/match",
             creation_sidecar_url.trim_end_matches('/')
         ))
-        .timeout(std::time::Duration::from_secs(30))
+        // Skill 路由启用本地模型思考模式；外层预算必须大于 Sidecar 的
+        // 120 秒推理截止时间，避免模型已完成但响应在边界处被 Core 丢弃。
+        .timeout(std::time::Duration::from_secs(135))
         .json(&MatchCreationSkillsPayload { prompt, skills })
         .send()
         .await

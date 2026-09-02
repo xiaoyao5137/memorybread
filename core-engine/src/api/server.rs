@@ -38,8 +38,10 @@ use super::{
             delete_config_check, install_config_check, list_config_checks, run_config_check,
         },
         creation::{
-            generate_document, get_history, list_history, preview_references, run_creation_agent,
-            save_history,
+            cancel_creation_inline_edit, generate_document, get_history,
+            get_inline_edit_capabilities, list_history, preview_references, run_creation_agent,
+            run_creation_brainstorm_turn, run_creation_inline_edit, save_history, start_history,
+            undo_creation_inline_edit, update_history_progress,
         },
         creation_skill::{
             analyze_creation_skill, create_creation_skill_analysis_job, delete_creation_skill,
@@ -157,10 +159,35 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/pii/scrub", post(pii_scrub))
         .route("/api/creation/generate", post(generate_document))
         .route("/api/creation/agent/run", post(run_creation_agent))
+        .route(
+            "/api/creation/inline-edit/capabilities",
+            get(get_inline_edit_capabilities),
+        )
+        .route(
+            "/api/creation/inline-edit/run",
+            post(run_creation_inline_edit),
+        )
+        .route(
+            "/api/creation/inline-edit/cancel",
+            post(cancel_creation_inline_edit),
+        )
+        .route(
+            "/api/creation/inline-edit/undo",
+            post(undo_creation_inline_edit),
+        )
+        .route(
+            "/api/creation/brainstorm/turn",
+            post(run_creation_brainstorm_turn),
+        )
         .route("/api/creation/references", post(preview_references))
         .route("/api/creation/history", post(save_history))
         .route("/api/creation/history", get(list_history))
+        .route("/api/creation/history/start", post(start_history))
         .route("/api/creation/history/:id", get(get_history))
+        .route(
+            "/api/creation/history/:id/progress",
+            axum::routing::patch(update_history_progress),
+        )
         .route(
             "/api/browser-integration/status",
             get(get_browser_extension_status),

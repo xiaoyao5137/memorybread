@@ -60,6 +60,7 @@ const IPC_SOCKET_ENV: &str = "MEMORY_BREAD_IPC_SOCKET";
 #[cfg(unix)]
 const DEFAULT_IPC_SOCKET_PATH: &str = "/tmp/memory-bread-sidecar.sock";
 const FLOATING_ASSIST_LABEL: &str = "floating-assist";
+const DEVELOPMENT_INSTANCE_SUFFIX: &str = ".development";
 #[cfg(debug_assertions)]
 const SUPERVISOR_SHUTDOWN_MARKER: &str = "supervisor-shutdown-in-progress";
 const FLOATING_ASSIST_DEFAULT_MARGIN: i32 = 24;
@@ -251,6 +252,19 @@ struct BundledBackendProcess {
     child: Child,
 }
 
+#[cfg(any(not(debug_assertions), test))]
+fn backend_repair_request_path(runtime_home: &PathBuf, name: &str) -> Option<PathBuf> {
+    if !matches!(name, "core" | "sidecar" | "model_api" | "creation") {
+        return None;
+    }
+    Some(
+        runtime_home
+            .join(".memory-bread")
+            .join("state")
+            .join(format!("backend-repair-{name}.request")),
+    )
+}
+
 #[derive(Default)]
 struct BundledBackendState {
     children: Mutex<Vec<BundledBackendProcess>>,
@@ -388,6 +402,14 @@ fn show_main_window(app: &AppHandle) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+    }
+}
+
+fn app_instance_identifier(base_identifier: &str, development: bool) -> String {
+    if development {
+        format!("{base_identifier}{DEVELOPMENT_INSTANCE_SUFFIX}")
+    } else {
+        base_identifier.to_string()
     }
 }
 
@@ -971,7 +993,7 @@ fn send_ipc_payload(payload: &[u8]) -> Result<IpcResponse, String> {
     let mut length_buf = [0u8; 4];
     stream
         .read_exact(&mut length_buf)
-        .map_err(|error| error.to_string())?;
+        .map_err(format_ocr_ipc_read_error)?;
     let response_length = u32::from_be_bytes(length_buf) as usize;
     if response_length > 16 * 1024 * 1024 {
         return Err(format!("OCR sidecar 响应过大：{} 字节", response_length));
@@ -979,8 +1001,18 @@ fn send_ipc_payload(payload: &[u8]) -> Result<IpcResponse, String> {
     let mut response_buf = vec![0u8; response_length];
     stream
         .read_exact(&mut response_buf)
-        .map_err(|error| error.to_string())?;
+        .map_err(format_ocr_ipc_read_error)?;
     serde_json::from_slice(&response_buf).map_err(|error| error.to_string())
+}
+
+fn format_ocr_ipc_read_error(error: std::io::Error) -> String {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) {
+        return "屏幕文字识别等待超时，请稍后重试".to_string();
+    }
+    error.to_string()
 }
 
 fn send_sidecar_ocr(path: &str) -> Result<IpcOcrResult, String> {
@@ -1066,6 +1098,7 @@ fn spawn_bundled_backend(
     runtime_home: &PathBuf,
     log_dir: &PathBuf,
     ipc_socket_path: &PathBuf,
+    client_version: &str,
 ) -> Result<BundledBackendProcess, String> {
     let log_path = log_dir.join(format!("{name}.log"));
     let log = OpenOptions::new()
@@ -1082,6 +1115,7 @@ fn spawn_bundled_backend(
         .current_dir(working_directory)
         .env("HOME", runtime_home)
         .env("MEMORY_BREAD_PACKAGED", "1")
+        .env("MEMORY_BREAD_CLIENT_VERSION", client_version)
         .env(IPC_SOCKET_ENV, ipc_socket_path)
         .env("PYTHONUNBUFFERED", "1")
         .stdin(Stdio::null())
@@ -1094,6 +1128,15 @@ fn spawn_bundled_backend(
 
 #[cfg(not(debug_assertions))]
 fn start_bundled_backends(app: &AppHandle) -> Result<(), String> {
+    let runtime_home = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("runtime");
+    let log_dir = runtime_home.join(".memory-bread").join("logs");
+    fs::create_dir_all(&log_dir).map_err(|error| error.to_string())?;
+    let core_repair_request =
+        backend_repair_request_path(&runtime_home, "core").filter(|path| path.is_file());
     let state = app.state::<BundledBackendState>();
     let mut children = state
         .children
@@ -1102,6 +1145,17 @@ fn start_bundled_backends(app: &AppHandle) -> Result<(), String> {
     let mut running_names = Vec::new();
     let mut alive = Vec::with_capacity(children.len());
     for mut process in children.drain(..) {
+        if process.name == "core" && core_repair_request.is_some() {
+            eprintln!("收到本机初始化修复请求，正在重启内置 Core 服务");
+            if process.child.try_wait().ok().flatten().is_none() {
+                process
+                    .child
+                    .kill()
+                    .map_err(|error| format!("无法停止待修复的 Core 服务: {error}"))?;
+            }
+            let _ = process.child.wait();
+            continue;
+        }
         match process.child.try_wait() {
             Ok(None) => {
                 running_names.push(process.name);
@@ -1120,13 +1174,6 @@ fn start_bundled_backends(app: &AppHandle) -> Result<(), String> {
     }
     *children = alive;
 
-    let runtime_home = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?
-        .join("runtime");
-    let log_dir = runtime_home.join(".memory-bread").join("logs");
-    fs::create_dir_all(&log_dir).map_err(|error| error.to_string())?;
     let _ = PACKAGED_RUNTIME_HOME.set(runtime_home.clone());
     #[cfg(unix)]
     let ipc_socket_path =
@@ -1138,6 +1185,7 @@ fn start_bundled_backends(app: &AppHandle) -> Result<(), String> {
 
     let ai = bundled_helper_path("memory-bread-ai")?;
     let core = bundled_helper_path("memory-bread-core")?;
+    let client_version = app.package_info().version.to_string();
     let services: [(&'static str, &PathBuf, &[&str]); 4] = [
         ("sidecar", &ai, &["sidecar"]),
         ("model_api", &ai, &["model-api"]),
@@ -1157,6 +1205,7 @@ fn start_bundled_backends(app: &AppHandle) -> Result<(), String> {
             &runtime_home,
             &log_dir,
             &ipc_socket_path,
+            &client_version,
         ) {
             Ok(child) => children.push(child),
             Err(error) => {
@@ -1165,6 +1214,11 @@ fn start_bundled_backends(app: &AppHandle) -> Result<(), String> {
                     first_error = Some(error);
                 }
             }
+        }
+    }
+    if children.iter().any(|process| process.name == "core") {
+        if let Some(request_path) = core_repair_request {
+            let _ = fs::remove_file(request_path);
         }
     }
     match first_error {
@@ -1407,6 +1461,8 @@ async fn prepare_software_update(
         .map_err(|error| format!("软件更新地址不可用：{error}"))?
         .header("X-MemoryBread-Environment", environment)
         .map_err(|error| format!("软件更新环境头无效：{error}"))?
+        .header("X-MemoryBread-Client", "desktop")
+        .map_err(|error| format!("软件更新客户端头无效：{error}"))?
         .header("X-MemoryBread-Update-Cohort", cohort)
         .map_err(|error| format!("软件更新 cohort 无效：{error}"))?
         .timeout(Duration::from_secs(30))
@@ -1924,6 +1980,7 @@ fn open_downloaded_file(app: AppHandle, path: String) -> Result<(), String> {
 #[tauri::command]
 async fn capture_screen_ocr_for_floating_assist(
     app: AppHandle,
+    hide_floating_window: Option<bool>,
 ) -> Result<FloatingAssistOcrResult, String> {
     schedule_floating_assist_temp_cleanup(false);
 
@@ -1931,20 +1988,35 @@ async fn capture_screen_ocr_for_floating_assist(
     if let Some(window) = floating_window.as_ref() {
         let _ = window.set_content_protected(true);
         let _ = window.set_always_on_top(true);
+        let should_hide_window = hide_floating_window.unwrap_or(false);
+        if should_hide_window {
+            let _ = window.hide();
+        }
 
-        let capture_result = tauri::async_runtime::spawn_blocking(|| {
-            let capture = capture_screen_for_floating_assist()?;
-            let result = run_floating_assist_ocr(&capture.ocr_paths)?;
-            Ok::<_, String>((capture, result))
+        let capture_result = tauri::async_runtime::spawn_blocking(move || {
+            if should_hide_window {
+                // Give WindowServer a short turn to restore the application that was active
+                // before the floating assistant received the click.
+                std::thread::sleep(Duration::from_millis(140));
+            }
+            capture_screen_for_floating_assist()
         })
         .await
         .map_err(|error| format!("悬浮球截图任务失败：{error}"));
 
+        // The window only needs to be absent while WindowServer takes the screenshot.
+        // Restore it before OCR so a slow local model cannot leave the assistant hidden
+        // behind the consulted application for the entire recognition request.
         let _ = window.set_content_protected(false);
         let _ = window.show();
         let _ = window.set_always_on_top(true);
 
-        let (capture, result) = capture_result??;
+        let capture = capture_result??;
+        let ocr_paths = capture.ocr_paths.clone();
+        let result =
+            tauri::async_runtime::spawn_blocking(move || run_floating_assist_ocr(&ocr_paths))
+                .await
+                .map_err(|error| format!("悬浮球 OCR 任务失败：{error}"))??;
         let screenshot_path = capture.preview_path.to_string_lossy().to_string();
         return Ok(FloatingAssistOcrResult {
             text: result.text,
@@ -1982,7 +2054,17 @@ async fn capture_screen_ocr_for_floating_assist(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default().plugin(tauri_plugin_shell::init());
+    let mut context = tauri::generate_context!();
+    let instance_identifier =
+        app_instance_identifier(&context.config().identifier, cfg!(debug_assertions));
+    context.config_mut().identifier = instance_identifier;
+
+    let builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        show_main_window(app);
+    }));
+    let builder = builder.plugin(tauri_plugin_shell::init());
     #[cfg(not(feature = "app-store"))]
     let builder = builder.plugin(
         tauri_plugin_updater::Builder::new()
@@ -2207,7 +2289,7 @@ pub fn run() {
                 }
             }
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|app, event| {
             #[cfg(target_os = "macos")]
@@ -2233,6 +2315,46 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backend_repair_requests_are_scoped_to_known_bundled_services() {
+        let runtime_home = PathBuf::from("/tmp/memorybread-runtime-test");
+        assert_eq!(
+            backend_repair_request_path(&runtime_home, "core"),
+            Some(
+                runtime_home
+                    .join(".memory-bread/state")
+                    .join("backend-repair-core.request")
+            )
+        );
+        assert_eq!(
+            backend_repair_request_path(&runtime_home, "../../other"),
+            None
+        );
+    }
+
+    #[test]
+    fn development_and_production_use_distinct_single_instance_identifiers() {
+        let base = "com.memory-bread.app";
+        assert_eq!(app_instance_identifier(base, false), base);
+        assert_eq!(
+            app_instance_identifier(base, true),
+            "com.memory-bread.app.development"
+        );
+        assert_ne!(
+            app_instance_identifier(base, false),
+            app_instance_identifier(base, true)
+        );
+    }
+
+    #[test]
+    fn floating_assist_ocr_timeout_has_a_user_safe_error() {
+        let error = std::io::Error::new(std::io::ErrorKind::TimedOut, "internal timeout");
+        assert_eq!(
+            format_ocr_ipc_read_error(error),
+            "屏幕文字识别等待超时，请稍后重试"
+        );
+    }
 
     #[test]
     fn floating_assist_collapse_restores_the_expand_origin() {

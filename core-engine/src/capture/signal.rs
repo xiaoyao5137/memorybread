@@ -169,7 +169,7 @@ fn run_macos_event_tap(
             CGEventType::OtherMouseDown,
             CGEventType::ScrollWheel,
         ],
-        move |_proxy, event_type, _event| {
+        move |_proxy, event_type, event_ref| {
             if !capture_enabled.load(Ordering::Relaxed) {
                 return None;
             }
@@ -179,7 +179,13 @@ fn run_macos_event_tap(
                 }
                 CGEventType::LeftMouseDown
                 | CGEventType::RightMouseDown
-                | CGEventType::OtherMouseDown => Some(CaptureEvent::MouseClick { x: 0.0, y: 0.0 }),
+                | CGEventType::OtherMouseDown => {
+                    let location = event_ref.location();
+                    Some(CaptureEvent::MouseClick {
+                        x: location.x,
+                        y: location.y,
+                    })
+                }
                 CGEventType::ScrollWheel => Some(CaptureEvent::Scroll),
                 _ => None,
             };

@@ -708,7 +708,7 @@ const App: React.FC = () => {
       <main className="app-content">
         <PanelErrorBoundary resetKey={`${windowMode}:${debugModeEnabled}`}>
           {windowMode === 'rag'       && <RagPanel />}
-          {windowMode === 'creation'  && <CreationPanel />}
+          <CreationPanel active={windowMode === 'creation'} />
           {windowMode === 'knowledge' && <RepositoryPanel />}
           {windowMode === 'models'    && <ModelManager />}
           {windowMode === 'privacy'   && <PrivacyPanel />}

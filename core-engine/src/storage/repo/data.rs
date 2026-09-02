@@ -18,7 +18,8 @@ use crate::storage::{
 const REPORT_FRESH_SECONDS: i64 = 15 * 60;
 const DATA_TEXT_MAX_CHARS: usize = 80_000;
 const DATA_MEMORY_VERSION: &str = "data-memory.v16";
-const DATA_CONTENT_RENDER_VERSION: &str = "fact-specific.v1";
+const DATA_CONTENT_RENDER_VERSION: &str = "fact-specific.v2";
+const DATA_SUMMARY_RENDER_VERSION: &str = "data-summary.v2";
 const CURRENT_TIMELINE_DATA_FACT_VERSION: &str = "timeline-data-fact.v4";
 const DATA_PERIOD_GRANULARITY: &str = "week";
 const WEEK_MILLIS: i64 = 7 * 24 * 60 * 60 * 1000;
@@ -455,6 +456,27 @@ impl StorageManager {
         structured_data: &Value,
         collected_at: i64,
     ) -> Result<DataSnapshotRecord, StorageError> {
+        self.save_data_snapshot_with_observed_at(
+            source_id,
+            collector,
+            title,
+            content_text,
+            structured_data,
+            collected_at,
+            collected_at,
+        )
+    }
+
+    pub fn save_data_snapshot_with_observed_at(
+        &self,
+        source_id: i64,
+        collector: &str,
+        title: Option<&str>,
+        content_text: &str,
+        structured_data: &Value,
+        collected_at: i64,
+        observed_at: i64,
+    ) -> Result<DataSnapshotRecord, StorageError> {
         self.with_conn(|conn| {
             let mut source = conn
                 .query_row(
@@ -470,21 +492,27 @@ impl StorageManager {
                 .ok_or_else(|| StorageError::NotFound(format!("data source {source_id}")))?;
             let normalized_content = clip_text(content_text, DATA_TEXT_MAX_CHARS);
             let mut enriched_structured = structured_data.clone();
-            let period = weekly_period_tag(collected_at);
+            let period = weekly_period_tag(observed_at);
             let semantic_context = semantic_context_for_source(
                 &source,
                 title.map(str::trim).filter(|value| !value.is_empty()),
                 None,
             );
-            let semantic = semantic_view_for_content(
-                &normalized_content,
-                &enriched_structured,
-                Some(collected_at),
-                &semantic_context,
-            )
-            .map(semantic_view_to_json)
-            .unwrap_or_else(|| rejected_semantic_view_json("no_semantic_metric"));
-            merge_semantic_view(&mut enriched_structured, semantic);
+            let is_manual = enriched_structured
+                .get("manual_entry")
+                .and_then(Value::as_bool)
+                == Some(true);
+            if !is_manual {
+                let semantic = semantic_view_for_content(
+                    &normalized_content,
+                    &enriched_structured,
+                    Some(observed_at),
+                    &semantic_context,
+                )
+                .map(semantic_view_to_json)
+                .unwrap_or_else(|| rejected_semantic_view_json("no_semantic_metric"));
+                merge_semantic_view(&mut enriched_structured, semantic);
+            }
             attach_period_tag(&mut enriched_structured, &period);
             let structured_json = serde_json::to_string(&enriched_structured)?;
             let content_hash = hash_text(&format!("{normalized_content}\n{structured_json}"));
@@ -500,7 +528,7 @@ impl StorageManager {
                     period_start_at, period_end_at, collector, content_text,
                     structured_data, content_hash, freshness_ttl_seconds, provenance,
                     source_capture_ids, source_timeline_ids, status, created_at
-                 ) VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
                            '[]', '[]', 'success', ?2)
                  ON CONFLICT(source_id, period_key) DO UPDATE SET
                     collected_at = excluded.collected_at,
@@ -518,6 +546,7 @@ impl StorageManager {
                 params![
                     source_id,
                     collected_at,
+                    observed_at,
                     DATA_PERIOD_GRANULARITY,
                     period.key,
                     period.start_at,
@@ -1868,16 +1897,40 @@ fn load_timeline_candidates(
                OR state.fact_contract_version <> COALESCE(fact_run.contract_version, '')
                OR state.capture_count <> COALESCE(capture_stats.capture_count, legacy_capture.capture_count, 0)
                OR state.max_capture_id <> COALESCE(capture_stats.max_capture_id, legacy_capture.max_capture_id, 0)
+               OR EXISTS (
+                   SELECT 1
+                   FROM data_source_links render_link
+                   JOIN data_sources render_source ON render_source.id = render_link.source_id
+                   JOIN data_snapshots render_snapshot ON render_snapshot.id = (
+                       SELECT latest.id
+                       FROM data_snapshots latest
+                       WHERE latest.source_id = render_source.id
+                       ORDER BY latest.collected_at DESC, latest.id DESC
+                       LIMIT 1
+                   )
+                   WHERE render_link.timeline_id = t.id
+                     AND render_link.link_kind = 'work_memory'
+                     AND render_source.source_kind = 'work_memory'
+                     AND render_source.deleted_at IS NULL
+                     AND COALESCE(
+                         json_extract(render_snapshot.structured_data, '$.summary_origin'),
+                         'automatic'
+                     ) <> 'user'
+                     AND COALESCE(
+                         json_extract(render_snapshot.structured_data, '$.summary_render_version'),
+                         ''
+                     ) <> ?1
+               )
            )
          ORDER BY MAX(
                     COALESCE(t.updated_at_ms, t.created_at_ms, 0),
                     COALESCE(fact_run.updated_at, 0)
                   ) DESC,
                   t.id DESC
-         LIMIT ?1",
+         LIMIT ?2",
     )?;
     let timeline_rows = stmt
-        .query_map([limit as i64], |row| {
+        .query_map(params![DATA_SUMMARY_RENDER_VERSION, limit as i64], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,
@@ -2177,10 +2230,9 @@ fn upsert_work_memory_view(
     }
     merged_view.rows.truncate(120);
     merged_view.statements.truncate(80);
-    merged_view.summary = clip_text(
-        &semantic_summary(&merged_view.title, &merged_view.rows, None),
-        500,
-    );
+    let summary_subjects = [merged_view.subject.clone()];
+    merged_view.summary =
+        automatic_data_summary(&merged_view.title, &merged_view.rows, &summary_subjects);
     let content = clip_text(&semantic_view_content(&merged_view), DATA_TEXT_MAX_CHARS);
     let mut structured = semantic_view_to_json(merged_view);
     attach_period_tag(&mut structured, &period);
@@ -2636,6 +2688,179 @@ fn clean_dataset_subject(value: &str) -> String {
     subject
 }
 
+fn clean_summary_label(value: &str) -> String {
+    value
+        .replace('_', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|ch: char| "-_·|｜".contains(ch))
+        .trim()
+        .to_string()
+}
+
+fn noisy_summary_label(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty()
+        || value.chars().count() > 60
+        || value.contains('_')
+        || value.contains("http://")
+        || value.contains("https://")
+        || generic_dataset_title(value)
+        || process_like_dataset_title(value)
+}
+
+fn compact_summary_dimension(dimension: &str, subjects: &[String]) -> String {
+    let dimension = dimension.trim();
+    for subject in subjects {
+        let subject = subject.trim();
+        if subject.is_empty() {
+            continue;
+        }
+        if normalize_identity_text(dimension) == normalize_identity_text(subject) {
+            return String::new();
+        }
+        if let Some(suffix) = dimension.strip_prefix(subject) {
+            let suffix = suffix
+                .trim_start_matches(|ch: char| ch.is_whitespace() || "·|｜-_".contains(ch))
+                .trim();
+            if !suffix.is_empty() {
+                return clean_summary_label(suffix);
+            }
+        }
+    }
+    clean_summary_label(dimension)
+}
+
+fn readable_summary_dimension(dimension: &str, subjects: &[String]) -> String {
+    let raw = clean_summary_label(dimension);
+    if !noisy_summary_label(dimension) && !raw.is_empty() {
+        raw
+    } else {
+        compact_summary_dimension(dimension, subjects)
+    }
+}
+
+fn title_expresses_metric(title: &str, metric: &str) -> bool {
+    let title_key = normalize_identity_text(title);
+    let metric_key = normalize_identity_text(metric);
+    if !metric_key.is_empty() && title_key.contains(&metric_key) {
+        return true;
+    }
+    let temporal_metric = ["日期", "时间", "日程", "周期", "时段"]
+        .iter()
+        .any(|marker| metric.contains(marker));
+    temporal_metric
+        && ["日期", "时间", "日程", "周期", "时段"]
+            .iter()
+            .any(|marker| title.contains(marker))
+}
+
+fn preferred_summary_subject(title: &str, subjects: &[String]) -> String {
+    subjects
+        .iter()
+        .map(|value| clean_dataset_subject(value))
+        .find(|value| !noisy_summary_label(value))
+        .map(|value| clean_summary_label(&value))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| clean_summary_label(title))
+}
+
+fn render_single_metric_summary(
+    title: &str,
+    row: &SemanticMetricRow,
+    subjects: &[String],
+) -> String {
+    let title = clean_summary_label(title);
+    let dimension = readable_summary_dimension(&row.dimension, subjects);
+    let subject = if !dimension.is_empty() && !noisy_summary_label(&dimension) {
+        dimension
+    } else {
+        preferred_summary_subject(&title, subjects)
+    };
+    if normalize_identity_text(&subject) == normalize_identity_text(&title)
+        && title_expresses_metric(&title, &row.metric)
+    {
+        format!("{title}为{}。", row.value.trim())
+    } else {
+        format!("{subject}的{}为{}。", row.metric.trim(), row.value.trim())
+    }
+}
+
+fn automatic_data_summary(title: &str, rows: &[SemanticMetricRow], subjects: &[String]) -> String {
+    if rows.is_empty() {
+        return clip_text(&clean_summary_label(title), 300);
+    }
+    if rows.len() == 1 {
+        return clip_text(
+            &render_single_metric_summary(title, &rows[0], subjects),
+            300,
+        );
+    }
+
+    let mut metrics = rows
+        .iter()
+        .map(|row| row.metric.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    metrics.sort();
+    metrics.dedup();
+
+    if metrics.len() == 1 && rows.len() <= 4 {
+        let dimensions = rows
+            .iter()
+            .map(|row| readable_summary_dimension(&row.dimension, subjects))
+            .collect::<Vec<_>>();
+        if dimensions
+            .iter()
+            .all(|value| !value.is_empty() && !noisy_summary_label(value))
+        {
+            let values = rows
+                .iter()
+                .zip(dimensions.iter())
+                .map(|(row, dimension)| format!("{dimension} {}", row.value.trim()))
+                .collect::<Vec<_>>()
+                .join("，");
+            return clip_text(
+                &format!(
+                    "{}中，{}分别为：{values}。",
+                    clean_summary_label(title),
+                    metrics[0]
+                ),
+                300,
+            );
+        }
+    }
+
+    let metric_text = metrics
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("、");
+    let key_values = rows
+        .iter()
+        .take(3)
+        .map(|row| render_single_metric_summary(title, row, subjects))
+        .map(|value| value.trim_end_matches('。').to_string())
+        .collect::<Vec<_>>()
+        .join("；");
+    let metric_scope = if metrics.len() <= 5 {
+        metric_text
+    } else {
+        format!("{metric_text}等{}类指标", metrics.len())
+    };
+    clip_text(
+        &format!(
+            "这组数据汇总“{}”，包含{metric_scope}，共{}行指标。关键数据包括：{key_values}。",
+            clean_summary_label(title),
+            rows.len()
+        ),
+        300,
+    )
+}
+
 fn meaningful_dataset_subject(subject: &str, rows: &[SemanticMetricRow]) -> bool {
     let subject = clean_dataset_subject(subject);
     !subject.is_empty()
@@ -2716,58 +2941,9 @@ fn dataset_semantic_summary(
     title: &str,
     rows: &[SemanticMetricRow],
     subjects: &[String],
-    metrics: &[String],
+    _metrics: &[String],
 ) -> String {
-    let subject_text = subjects
-        .iter()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty() && !generic_dataset_title(value))
-        .take(3)
-        .collect::<Vec<_>>()
-        .join("、");
-    let metric_text = metrics
-        .iter()
-        .take(5)
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join("、");
-    let key_values = rows
-        .iter()
-        .take(3)
-        .map(|row| {
-            let object = row.dimension.trim();
-            if object.is_empty()
-                || normalize_identity_text(object) == normalize_identity_text(&row.metric)
-            {
-                format!("{}为{}", row.metric.trim(), row.value.trim())
-            } else {
-                format!("{}的{}为{}", object, row.metric.trim(), row.value.trim())
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("；");
-    let mut summary = format!("这批数据汇总“{title}”");
-    if !subject_text.is_empty() {
-        summary.push_str(&format!("，涉及{subject_text}"));
-    }
-    if !metric_text.is_empty() {
-        if metrics.len() <= 5 {
-            summary.push_str(&format!("，包含{metric_text}，共{}行指标", rows.len()));
-        } else {
-            summary.push_str(&format!(
-                "，包含{metric_text}等{}类指标，共{}行",
-                metrics.len(),
-                rows.len()
-            ));
-        }
-    } else {
-        summary.push_str(&format!("，共{}行指标", rows.len()));
-    }
-    if !key_values.is_empty() {
-        summary.push_str(&format!("。关键数据包括：{key_values}"));
-    }
-    summary.push('。');
-    clip_text(&summary, 500)
+    automatic_data_summary(title, rows, subjects)
 }
 
 fn aggregate_timeline_data_views(
@@ -4789,12 +4965,16 @@ fn is_resource_metric(metric: &str) -> bool {
 }
 
 fn semantic_summary(title: &str, rows: &[SemanticMetricRow], insight: Option<&str>) -> String {
-    let row_summary = summarize_rows(rows, insight);
-    if row_summary.is_empty() {
-        title.to_string()
-    } else {
-        format!("{title}：{row_summary}")
+    let mut summary = automatic_data_summary(title, rows, &[]);
+    if let Some(insight) = insight.map(str::trim).filter(|value| !value.is_empty()) {
+        if summary.ends_with('。') {
+            summary.pop();
+        }
+        summary.push_str("；");
+        summary.push_str(insight);
+        summary.push('。');
     }
+    clip_text(&summary, 300)
 }
 
 fn semantic_view_content(view: &SemanticDataView) -> String {
@@ -4830,6 +5010,9 @@ fn semantic_view_content(view: &SemanticDataView) -> String {
 fn rejected_semantic_view_json(reason: &str) -> Value {
     json!({
         "extraction_version": DATA_MEMORY_VERSION,
+        "content_render_version": DATA_CONTENT_RENDER_VERSION,
+        "summary_render_version": DATA_SUMMARY_RENDER_VERSION,
+        "summary_origin": "automatic",
         "semantic_origin": "legacy_parser",
         "title": "",
         "summary": "",
@@ -4841,7 +5024,7 @@ fn rejected_semantic_view_json(reason: &str) -> Value {
     })
 }
 
-fn semantic_view_to_json(view: SemanticDataView) -> Value {
+fn semantic_view_to_json(mut view: SemanticDataView) -> Value {
     let semantic_origin = if view.statements.iter().any(|statement| {
         statement
             .get("fact_contract")
@@ -4852,9 +5035,13 @@ fn semantic_view_to_json(view: SemanticDataView) -> Value {
     } else {
         "legacy_parser"
     };
+    let summary_subjects = [view.subject.clone()];
+    view.summary = automatic_data_summary(&view.title, &view.rows, &summary_subjects);
     json!({
         "extraction_version": DATA_MEMORY_VERSION,
         "content_render_version": DATA_CONTENT_RENDER_VERSION,
+        "summary_render_version": DATA_SUMMARY_RENDER_VERSION,
+        "summary_origin": "automatic",
         "semantic_origin": semantic_origin,
         "title": view.title,
         "summary": view.summary,
@@ -4893,7 +5080,16 @@ fn semantic_view_for_content(
 ) -> Option<SemanticDataView> {
     semantic_views_for_content(content_text, structured_data, observed_at, semantic_context)
         .into_iter()
-        .max_by_key(|view| view.rows.len() * 100 + view.summary.chars().count().min(260))
+        .max_by_key(|view| {
+            (
+                // 结构化表格视图没有叙述语句。只要页面提供了可解析的表头
+                // 契约，就优先保留列关联；正文可能重复展开整张表，产生更多
+                // 但错误的“项目/类型=数值”语句，不能靠行数反过来覆盖表格。
+                usize::from(view.statements.is_empty()),
+                view.rows.len(),
+                view.summary.chars().count().min(260),
+            )
+        })
 }
 
 fn semantic_views_for_content(
@@ -4924,14 +5120,14 @@ fn semantic_views_for_content(
             .take(160)
             .map(|statement| json!({"statement": statement, "observed_at": observed_at})),
     );
-    let views = semantic_views_from_statements(&statements, semantic_context);
-    if !views.is_empty() {
-        return views;
+    let mut views = semantic_views_from_statements(&statements, semantic_context);
+    // 页面正文中的汇总卡片可能先形成一条语义事实，但这不能让同次采集的
+    // 结构化明细表失去参选资格。统一加入候选后，由行数与摘要质量选择最
+    // 完整的视图，避免“102 行表格已采集、最终只落库 1 个汇总指标”。
+    if let Some(table_view) = semantic_view_from_tables(structured_data, observed_at) {
+        views.push(table_view);
     }
-
-    semantic_view_from_tables(structured_data, observed_at)
-        .into_iter()
-        .collect()
+    views
 }
 
 fn semantic_view_from_existing_v3(structured: &Value) -> Option<SemanticDataView> {
@@ -5036,8 +5232,13 @@ fn semantic_view_from_tables(
             continue;
         }
         let header = rows.first().filter(|row| {
+            // 型号、版本或规格经常是合法表头的一部分（如“卡数(X40)”），
+            // 不能用“整行不含数字”判断表头。首行有多个字段型单元格即可；
+            // 纯数值/日期行仍不会通过字段语义检查。
             row.iter()
-                .all(|cell| !cell.chars().any(|ch| ch.is_ascii_digit()))
+                .filter(|cell| table_header_is_metric(cell))
+                .count()
+                >= 2
         });
         let data_rows = if header.is_some() {
             &rows[1..]
@@ -5045,8 +5246,13 @@ fn semantic_view_from_tables(
             &rows[..]
         };
         for row in data_rows.iter().take(200) {
+            // 有表头时，度量语义来自列名；行里的“电商”“万擎”或项目名是
+            // 维度，不应再被要求包含“率/成本/GPU”等指标提示词。否则标准的
+            // “日期 + 维度 + 多个指标列”报表会整表被误判为无语义指标。
             let Some(label) = row.iter().find(|cell| {
-                metric_is_meaningful(cell) && !cell.chars().any(|ch| ch.is_ascii_digit())
+                !cell.trim().is_empty()
+                    && !cell.chars().any(|ch| ch.is_ascii_digit())
+                    && (header.is_some() || metric_is_meaningful(cell))
             }) else {
                 continue;
             };
@@ -5054,11 +5260,15 @@ fn semantic_view_from_tables(
                 if !value.chars().any(|ch| ch.is_ascii_digit()) {
                     continue;
                 }
-                let metric = header
-                    .and_then(|cells| cells.get(index))
-                    .filter(|cell| metric_is_meaningful(cell))
-                    .cloned()
-                    .unwrap_or_else(|| label.clone());
+                let metric = if let Some(cells) = header {
+                    let Some(metric) = cells.get(index).filter(|cell| table_header_is_metric(cell))
+                    else {
+                        continue;
+                    };
+                    metric.clone()
+                } else {
+                    label.clone()
+                };
                 let dimension = if metric == *label {
                     String::new()
                 } else {
@@ -5101,6 +5311,39 @@ fn value_as_text(value: &Value) -> String {
         Value::Bool(value) => value.to_string(),
         _ => String::new(),
     }
+}
+
+fn table_header_is_metric(value: &str) -> bool {
+    let normalized = value.trim().to_lowercase();
+    if !metric_is_subject(&normalized) {
+        return false;
+    }
+    // 结构化表格的列名本身就是字段契约，不应继续依赖有限的业务指标词典；
+    // 仅排除通用的标识、维度和操作列，数值列（包括“卡数”“ROI”等任意
+    // 业务字段）都可保留。日期只作为指标的统计阶段，不生成“日期=数值”。
+    !matches!(
+        normalized.as_str(),
+        "日期"
+            | "时间"
+            | "统计日期"
+            | "数据日期"
+            | "名称"
+            | "对象"
+            | "维度"
+            | "领域"
+            | "领域名称"
+            | "类别"
+            | "类型"
+            | "状态"
+            | "负责人"
+            | "操作"
+            | "备注"
+            | "说明"
+            | "id"
+            | "序号"
+    ) && !normalized.ends_with("名称")
+        && !normalized.ends_with(" id")
+        && !normalized.ends_with("_id")
 }
 
 fn score_data_source(
@@ -7371,6 +7614,9 @@ fn merge_semantic_view(structured: &mut Value, semantic: Value) {
     };
     for key in [
         "extraction_version",
+        "content_render_version",
+        "summary_render_version",
+        "summary_origin",
         "title",
         "summary",
         "semantic_subject",
@@ -7444,6 +7690,76 @@ fn clip_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semantic_table_uses_plain_dimension_with_metric_headers() {
+        let structured = json!({
+            "tables": [[
+                ["日期", "领域名称", "卡数", "GPU配额使用率", "UTIL利用率（日均值）"],
+                ["2026-08-23", "电商", "2110", "76.0%", "26.06%"]
+            ]]
+        });
+
+        let view = semantic_view_from_tables(&structured, Some(123)).unwrap();
+
+        assert!(view.rows.iter().any(|row| {
+            row.dimension == "电商" && row.metric == "GPU配额使用率" && row.value == "76.0%"
+        }));
+        assert!(view.rows.iter().any(|row| {
+            row.dimension == "电商" && row.metric == "UTIL利用率（日均值）" && row.value == "26.06%"
+        }));
+        assert!(view.rows.iter().any(|row| {
+            row.dimension == "电商" && row.metric == "卡数" && row.value == "2110"
+        }));
+        assert!(!view.rows.iter().any(|row| row.metric == "日期"));
+    }
+
+    #[test]
+    fn structured_table_competes_with_summary_statement_for_snapshot_view() {
+        let structured = json!({
+            "tables": [[
+                ["项目名称", "卡数", "年化成本", "ROI"],
+                ["项目甲", "20", "120万元", "3.2x"],
+                ["项目乙", "10", "60万元", "2.1x"]
+            ]]
+        });
+
+        let view = semantic_view_for_content(
+            "在用项目数为 102 个。",
+            &structured,
+            Some(123),
+            "通用项目报表",
+        )
+        .unwrap();
+
+        assert!(view.rows.len() >= 6);
+        assert!(view.rows.iter().any(|row| {
+            row.dimension == "项目乙" && row.metric == "年化成本" && row.value == "60万元"
+        }));
+    }
+
+    #[test]
+    fn structured_table_wins_when_flattened_body_produces_more_rows() {
+        let structured = json!({
+            "tables": [[
+                ["项目名称", "领域", "卡数(X40)", "类型", "年化收益（万元）", "年化成本（万元）", "ROI"],
+                ["项目甲", "治理", "20", "提GMV", "GMV 100万元", "60万元", "3.2x"]
+            ]]
+        });
+        let content = (0..40)
+            .map(|index| format!("项目{} 提GMV 12.00 GMV 110000万元", index))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let view =
+            semantic_view_for_content(&content, &structured, Some(123), "通用项目报表").unwrap();
+
+        assert!(view.statements.is_empty());
+        assert!(view.rows.iter().any(|row| {
+            row.dimension == "项目甲" && row.metric == "卡数(X40)" && row.value == "20"
+        }));
+        assert!(!view.rows.iter().any(|row| row.metric == "提GMV"));
+    }
 
     #[test]
     fn list_data_sources_filters_type_and_creation_range() {
@@ -7605,7 +7921,8 @@ mod tests {
         assert_eq!(view.subject, "AI 建设资产分类");
         assert_eq!(view.title, "AI 建设资产分类中生成与理解两类合计占比");
         assert!(!view.summary.contains("商业体系-AI建设资产复用方案"));
-        assert!(view.summary.contains("生成与理解两类合计占比 76%"));
+        assert!(view.summary.contains("生成与理解两类合计占比"));
+        assert!(view.summary.contains("76%"));
         assert!(semantic_view_is_self_contained(view));
 
         let compact_wording = semantic_views_from_statements(
@@ -7675,7 +7992,7 @@ mod tests {
         assert_eq!(self_contained_metric[0].title, "AI 图生成功能每日产出");
         assert_eq!(
             self_contained_metric[0].summary,
-            "AI 图生成功能每日产出：AI 图生成功能每日产出 6 万张"
+            "AI 图生成功能每日产出为6 万张。"
         );
 
         let missing_scope = semantic_views_from_statements(
@@ -7862,7 +8179,7 @@ mod tests {
             .any(|row| { row.metric == "单位 Token 成本降幅" && row.value == "80.7%" }));
         assert!(token_progress[0].title.contains("单位 Token 成本降幅"));
         assert!(token_progress[0].summary.contains("5 倍"));
-        assert!(token_progress[0].summary.contains("80.7%"));
+        assert!(token_progress[0].summary.contains("共4行指标"));
     }
 
     #[test]
@@ -8026,7 +8343,7 @@ mod tests {
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].title, "GPU 利用率对比");
         assert!(!views[0].title.chars().any(|ch| ch.is_ascii_digit()));
-        assert!(views[0].summary.starts_with("GPU 利用率对比："));
+        assert!(views[0].summary.starts_with("GPU 利用率对比中，"));
         assert!(views[0].summary.contains("国内 42%"));
         assert!(views[0].summary.contains("海外 47%"));
         let structured = semantic_view_to_json(views[0].clone());
@@ -8289,7 +8606,7 @@ mod tests {
         assert_eq!(datasets.len(), 1);
         assert_eq!(datasets[0].title, "Python 版本信息与今日活跃一级数据项数量");
         assert!(!datasets[0].title.contains("Quest Window"));
-        assert!(datasets[0].summary.starts_with("这批数据汇总"));
+        assert!(datasets[0].summary.starts_with("这组数据汇总"));
         assert!(datasets[0].summary.contains("版本号"));
         assert!(datasets[0].summary.contains("今日活跃一级数据项数量"));
         assert!(datasets[0].summary.contains("共2行指标"));
@@ -8321,10 +8638,46 @@ mod tests {
         );
 
         assert_eq!(datasets[0].title, "finops-gpu-resource 技能安装量");
+        assert_eq!(datasets[0].summary, "finops-gpu-resource的安装量为16。");
+    }
+
+    #[test]
+    fn renders_single_date_fact_as_readable_sentence_without_seo_title() {
+        let datasets = aggregate_timeline_data_views(
+            vec![SemanticDataView {
+                title: "QCon上海2026大会时间".to_string(),
+                subject: "QCon上海2026_全球软件开发大会暨智能软件开发生态展_InfoQ技术大会"
+                    .to_string(),
+                identity: "qcon-date".to_string(),
+                summary: String::new(),
+                rows: vec![SemanticMetricRow {
+                    dimension: String::new(),
+                    metric: "会议日期范围".to_string(),
+                    value: "10月22日-10月24日".to_string(),
+                    note: String::new(),
+                    statement: "QCon上海2026的会议日期范围为10月22日-10月24日。".to_string(),
+                    observed_at: Some(2),
+                }],
+                statements: Vec::new(),
+                latest_observed_at: Some(2),
+            }],
+            "Quest Window",
+        );
+
+        assert_eq!(datasets.len(), 1);
         assert_eq!(
             datasets[0].summary,
-            "这批数据汇总“finops-gpu-resource 技能安装量”，涉及finops-gpu-resource，包含安装量，共1行指标。关键数据包括：finops-gpu-resource的安装量为16。"
+            "QCon上海2026大会时间为10月22日-10月24日。"
         );
+        assert!(!datasets[0]
+            .summary
+            .contains("全球软件开发大会暨智能软件开发生态展"));
+        let structured = semantic_view_to_json(datasets[0].clone());
+        assert_eq!(
+            structured["summary_render_version"],
+            DATA_SUMMARY_RENDER_VERSION
+        );
+        assert_eq!(structured["summary_origin"], "automatic");
     }
 
     #[test]
@@ -8349,9 +8702,7 @@ mod tests {
             "MyFlicker",
         );
         assert_eq!(single[0].title, "MyFlicker 技能安装量");
-        assert!(single[0]
-            .summary
-            .contains("这批数据汇总“MyFlicker 技能安装量”"));
+        assert_eq!(single[0].summary, "MyFlicker 技能安装量为23.7k。");
         assert!(!single[0].summary.contains("涉及23.7k"));
 
         let mixed = dataset_semantic_title(
@@ -8485,7 +8836,8 @@ mod tests {
         assert!(structured["summary"]
             .as_str()
             .unwrap()
-            .contains("生成与理解两类合计占比 76%"));
+            .contains("生成与理解两类合计占比"));
+        assert!(structured["summary"].as_str().unwrap().contains("76%"));
         assert_eq!(
             storage
                 .regenerate_historical_data_memories(100)
@@ -9242,10 +9594,14 @@ mod tests {
         assert_eq!(summary.historical_regenerated_count, 0);
         assert_eq!(source.id, 1);
         assert_eq!(snapshot.content_text, shared_statement);
-        assert!(snapshot
-            .structured_data
-            .get("content_render_version")
-            .is_none());
+        assert_eq!(
+            snapshot.structured_data["content_render_version"],
+            DATA_CONTENT_RENDER_VERSION
+        );
+        assert_eq!(
+            snapshot.structured_data["summary_render_version"],
+            DATA_SUMMARY_RENDER_VERSION
+        );
 
         let second = storage.regenerate_historical_data_memories(100).unwrap();
         assert_eq!(second.historical_regenerated_count, 0);
@@ -10569,6 +10925,32 @@ mod tests {
         let (sources, total) = storage.list_data_sources(Some("订单量"), 20, 0).unwrap();
         assert_eq!(total, 1);
         assert_eq!(sources[0].source_kind, "work_memory");
+
+        let idle_after_materialization = storage.extract_data_candidates(100).unwrap();
+        assert_eq!(idle_after_materialization.scanned_count, 0);
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE data_snapshots
+                     SET structured_data = json_set(
+                         structured_data,
+                         '$.summary_render_version',
+                         'data-summary.v1'
+                     )
+                     WHERE source_id = ?1",
+                    [sources[0].id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let render_requeued = storage.extract_data_candidates(100).unwrap();
+        assert_eq!(render_requeued.scanned_count, 1);
+        let refreshed = storage.get_data_source(sources[0].id).unwrap().unwrap();
+        assert_eq!(
+            refreshed.latest_snapshot.unwrap().structured_data["summary_render_version"],
+            DATA_SUMMARY_RENDER_VERSION
+        );
     }
 
     fn seed_discovery_capture(storage: &StorageManager, id: i64, is_sensitive: i64) {
