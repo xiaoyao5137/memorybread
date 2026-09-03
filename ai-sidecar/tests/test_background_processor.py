@@ -1027,7 +1027,7 @@ def test_charging_bake_backlog_uses_short_completion_poll(tmp_path) -> None:
         {"mode": "charging", "bake_interval_secs": 90},
     )()
 
-    assert processor._scheduled_bake_interval_secs(profile, 0, 194) == 2
+    assert processor._scheduled_bake_interval_secs(profile, 0, 194) == 10
     assert processor._scheduled_bake_interval_secs(profile, 0, 0) == 90
 
 
@@ -1079,8 +1079,13 @@ def test_dual_backlog_uses_bounded_work_quanta(tmp_path) -> None:
         224,
     ) == 30.0
 
-    assert processor._capture_group_quantum(19, 224) is None
+    assert processor._capture_group_quantum(19, 224) == 3
     assert processor._capture_group_quantum(135, 19) is None
+    assert processor._capture_group_quantum(19, 99) is None
+    assert processor._capture_group_quantum(27, 224) == 3
+    assert processor._capture_group_quantum(52, 224) == 3
+    assert processor._scheduled_bake_limit(charging_profile, 27) == 10
+    assert processor._scheduled_bake_limit(charging_profile, 52) == 10
     assert processor._bake_burst_run_limit(19, 224) == 3
 
 

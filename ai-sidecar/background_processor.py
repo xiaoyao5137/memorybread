@@ -41,22 +41,26 @@ _CHARGING_CATCHUP_MAX_BATCH_SIZE = 100
 _CHARGING_CATCHUP_SLEEP_SECS = 1
 # 充电且已有可执行 bake 积压时，Core run 完成后快速续批。这里只缩短只读
 # queue-status / run-in-progress 检查，不增加候选数量或模型推理次数。
-_CHARGING_BACKLOG_BAKE_POLL_SECS = 2
+_CHARGING_BACKLOG_BAKE_POLL_SECS = 10
 # 单模型槽下不能只按“批次数”做公平调度：100 条 capture 可能拆成十几个模型
 # 请求，一轮就独占十几分钟。双队列高压时把两侧都切成有界工作片，保证轮转。
 _BAKE_BACKLOG_BURST_THRESHOLD = 100
 # 双队列轮转同样使用正常批量 20 作为 bake 侧低水位；100 只保留为单边
 # bake burst 的启动阈值，避免从 100 降到 99 就重新出现 capture 长批。
 _BAKE_BACKLOG_PRESSURE_THRESHOLD = 20
-# 20 是充电档正常单批上限。高压模式必须持续到 backlog 回到正常单批以内，
-# 不能在 100 处形成阈值悬崖，否则一个大语义组就会让下一轮重新变成长批。
-_CAPTURE_BACKLOG_PRESSURE_THRESHOLD = 20
+# capture 低于 100 时已进入可控水位，优先让 bake 以完整批量连续追赶；
+# 高于该值才进入双队列 6:6 公平轮转，避免少量新采集长期把 bake 限制
+# 在小工作片。
+_CAPTURE_BACKLOG_PRESSURE_THRESHOLD = 100
 _BAKE_BACKLOG_MAX_CONSECUTIVE_RUNS = 3
 _DUAL_BACKLOG_MAX_CONSECUTIVE_BAKE_RUNS = 1
 # 双队列高压时每轮轮到 6 组 capture / 6 条 bake：保持轮转公平，但把
 # 消费速度翻倍，避免 quantum 过小导致创纪录流入日两侧都排不空。
 _DUAL_BACKLOG_CAPTURE_GROUP_QUANTUM = 6
 _DUAL_BACKLOG_BAKE_LIMIT = 6
+# 仅 bake 仍处于大积压时，capture 每次最多处理 3 个语义组；否则一次长批
+# 会跨过交互抢占冷却期，继续让已经可运行的 bake 等待数分钟。
+_BAKE_DOMINANT_CAPTURE_GROUP_QUANTUM = 3
 # capture 优先规则：capture 严重积压且 bake 队列很小时，周期性 bake 让位，
 # 把模型槽全部还给提炼（bake 候选本身来自 timeline 产出）；
 # pending 降回恢复阈值以下后自动恢复 bake 周期触发。
@@ -604,6 +608,11 @@ class BackgroundProcessor:
             actionable_bake_count,
         ):
             return _DUAL_BACKLOG_CAPTURE_GROUP_QUANTUM
+        if (
+            int(pending_capture_count) > 0
+            and int(actionable_bake_count) >= _BAKE_BACKLOG_BURST_THRESHOLD
+        ):
+            return _BAKE_DOMINANT_CAPTURE_GROUP_QUANTUM
         return None
 
     @staticmethod
@@ -3239,6 +3248,8 @@ class BackgroundProcessor:
                 "周期性 bake 已触发: run_id=%s",
                 result.get("run_id"),
             )
+        elif result.get("reason") == "run_in_progress":
+            logger.debug("周期性 bake 仍在运行，等待下一次完成检查")
         else:
             logger.warning("周期性 bake 触发失败: %s", result.get("reason"))
         return result

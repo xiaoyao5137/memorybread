@@ -131,7 +131,10 @@ def test_daily_diary_task_writes_yesterday_diary(tmp_path):
     conn.commit()
     conn.close()
 
-    executor = TaskExecutor(db_path=str(db_path))
+    executor = TaskExecutor(
+        db_path=str(db_path),
+        energy_policy=_EnergyPolicy(True),
+    )
     executor._llm_generate = _fake_llm
     result = executor.execute_task(task_id)
 
@@ -171,7 +174,10 @@ def test_daily_diary_task_only_generates_latest_completed_day(tmp_path, monkeypa
     conn.commit()
     conn.close()
 
-    executor = TaskExecutor(db_path=str(db_path))
+    executor = TaskExecutor(
+        db_path=str(db_path),
+        energy_policy=_EnergyPolicy(True),
+    )
     executor._llm_generate = _fake_llm
     result = executor.execute_task(task_id)
 
@@ -195,7 +201,10 @@ def test_daily_diary_catchup_does_not_overwrite_user_edited_diary(tmp_path, monk
         staticmethod(lambda today=None, days=2: ["2026-07-08", "2026-07-09"]),
     )
 
-    executor = TaskExecutor(db_path=str(db_path))
+    executor = TaskExecutor(
+        db_path=str(db_path),
+        energy_policy=_EnergyPolicy(True),
+    )
     executor._ensure_diaries_table(conn)
     conn.execute(
         """
@@ -237,7 +246,10 @@ def test_idle_diary_backfill_generates_latest_missing_historical_date(tmp_path):
     conn.commit()
     conn.close()
 
-    executor = TaskExecutor(db_path=str(db_path))
+    executor = TaskExecutor(
+        db_path=str(db_path),
+        energy_policy=_EnergyPolicy(True),
+    )
     executor._llm_generate = _fake_llm
     result = executor.execute_idle_diary_backfill_once(
         lookback_days=7,
@@ -270,7 +282,10 @@ def test_idle_diary_backfill_creates_default_daily_task_when_missing(tmp_path):
     conn.commit()
     conn.close()
 
-    executor = TaskExecutor(db_path=str(db_path))
+    executor = TaskExecutor(
+        db_path=str(db_path),
+        energy_policy=_EnergyPolicy(True),
+    )
     executor._llm_generate = _fake_llm
     result = executor.execute_idle_diary_backfill_once(
         lookback_days=7,
@@ -293,7 +308,10 @@ def test_idle_diary_backfill_skips_existing_diaries(tmp_path):
     _create_common_tables(conn)
     _insert_task(conn, "daily_journal", "生成昨日工作日记")
 
-    executor = TaskExecutor(db_path=str(db_path))
+    executor = TaskExecutor(
+        db_path=str(db_path),
+        energy_policy=_EnergyPolicy(True),
+    )
     executor._ensure_diaries_table(conn)
     conn.execute(
         """
@@ -555,7 +573,10 @@ def test_weekly_diary_uses_timelines_as_sources(tmp_path):
     _create_common_tables(conn)
     task_id = _insert_task(conn, "weekly_report", "生成上周工作周记")
 
-    executor = TaskExecutor(db_path=str(db_path))
+    executor = TaskExecutor(
+        db_path=str(db_path),
+        energy_policy=_EnergyPolicy(True),
+    )
     executor._ensure_diaries_table(conn)
     start, end, diary_date = TaskExecutor._resolve_diary_period("weekly")
     start_day = date.fromisoformat(start)
