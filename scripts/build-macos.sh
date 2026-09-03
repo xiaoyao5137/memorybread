@@ -527,6 +527,13 @@ if [ "$MODE" = "dmg" ]; then
   if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] || [ -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]; then
     UPDATER_PRIVATE_KEY_CONFIGURED=1
   fi
+  if [ "$UPDATER_PRIVATE_KEY_CONFIGURED" -eq 1 ] && [ -z "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]; then
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(security find-generic-password -s com.memory-bread.release.updater -w 2>/dev/null || true)"
+    export TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+  fi
+  if [ "$UPDATER_PRIVATE_KEY_CONFIGURED" -eq 1 ] && [ -z "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]; then
+    fail "缺少更新签名密码：请设置 TAURI_SIGNING_PRIVATE_KEY_PASSWORD 或钥匙串条目 com.memory-bread.release.updater"
+  fi
   if [ "$UPDATER_PRIVATE_KEY_CONFIGURED" -eq 0 ] && [ -z "${MEMORY_BREAD_UPDATER_PUBLIC_KEY:-}" ]; then
     TAURI_CONFIG_ARGS+=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
     echo "[macOS build] 未配置更新签名密钥；本次仅生成本机测试 DMG，不生成热更新包"
