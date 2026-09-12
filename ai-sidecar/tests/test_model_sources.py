@@ -25,11 +25,16 @@ def _make_complete_model_dir(target: Path) -> None:
         path.write_text("stub")
 
 
+def _stub_files_complete(target: Path) -> bool:
+    return all((target / name).is_file() for name in model_sources.MODEL_FILES)
+
+
 class TestResolveOfflineFirst:
     def test_app_local_dir_wins(self, tmp_path, monkeypatch):
         model_dir = tmp_path / "models" / "bge-small-zh-v1.5"
         _make_complete_model_dir(model_dir)
         monkeypatch.setenv("MEMORYBREAD_EMBEDDING_MODEL_DIR", str(tmp_path / "models"))
+        monkeypatch.setattr(model_sources, "embedding_model_complete", _stub_files_complete)
 
         called = {}
 
@@ -45,6 +50,7 @@ class TestResolveOfflineFirst:
 
     def test_hf_cache_snapshot_used_when_local_missing(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MEMORYBREAD_EMBEDDING_MODEL_DIR", str(tmp_path / "models"))
+        monkeypatch.setattr(model_sources, "embedding_model_complete", _stub_files_complete)
         snapshot = tmp_path / "snapshot"
         _make_complete_model_dir(snapshot)
         monkeypatch.setattr(model_sources, "_find_hf_cache_snapshot", lambda: snapshot)
@@ -57,6 +63,7 @@ class TestResolveOfflineFirst:
         (model_dir).mkdir(parents=True)
         (model_dir / "config.json").write_text("stub")  # 关键文件不完整
         monkeypatch.setenv("MEMORYBREAD_EMBEDDING_MODEL_DIR", str(tmp_path / "models"))
+        monkeypatch.setattr(model_sources, "embedding_model_complete", _stub_files_complete)
         snapshot = tmp_path / "snapshot"
         _make_complete_model_dir(snapshot)
         monkeypatch.setattr(model_sources, "_find_hf_cache_snapshot", lambda: snapshot)
@@ -70,7 +77,7 @@ class TestMirrorCascade:
         monkeypatch.setenv("MEMORYBREAD_EMBEDDING_SOURCES", "modelscope,hfmirror")
         attempts = []
 
-        def fake_download_file(url, target):
+        def fake_download_file(url, target, _deadline):
             attempts.append(url)
             if url.startswith("https://modelscope.cn"):
                 raise ConnectionError("modelscope unreachable")
@@ -78,34 +85,36 @@ class TestMirrorCascade:
             target.write_text("stub")
 
         monkeypatch.setattr(model_sources, "_download_file", fake_download_file)
+        monkeypatch.setattr(model_sources, "embedding_model_complete", _stub_files_complete)
         errors = model_sources.download_embedding_model(tmp_path / "model")
         assert any("modelscope" in e for e in errors)
         assert any(url.startswith("https://hf-mirror.com") for url in attempts)
-        assert model_sources._is_complete(tmp_path / "model")
+        assert model_sources.embedding_model_complete(tmp_path / "model")
 
     def test_all_sources_failed_returns_errors(self, tmp_path, monkeypatch):
-        def fake_download_file(url, target):
+        def fake_download_file(url, target, _deadline):
             raise ConnectionError("offline")
 
         monkeypatch.setattr(model_sources, "_download_file", fake_download_file)
         errors = model_sources.download_embedding_model(tmp_path / "model")
         assert len(errors) == len(model_sources.DEFAULT_SOURCES)
 
-    def test_skips_existing_files(self, tmp_path, monkeypatch):
+    def test_redownloads_unverified_existing_files(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MEMORYBREAD_EMBEDDING_SOURCES", "modelscope")
         target = tmp_path / "model"
         (target / "modules.json").parent.mkdir(parents=True)
         (target / "modules.json").write_text("already-here")
         urls = []
 
-        def fake_download_file(url, target_path):
+        def fake_download_file(url, target_path, _deadline):
             urls.append(url)
             target_path.parent.mkdir(parents=True, exist_ok=True)
             target_path.write_text("stub")
 
         monkeypatch.setattr(model_sources, "_download_file", fake_download_file)
+        monkeypatch.setattr(model_sources, "embedding_model_complete", _stub_files_complete)
         model_sources.download_embedding_model(target)
-        assert not any(u.endswith("modules.json") for u in urls)
+        assert any(u.endswith("modules.json") for u in urls)
 
     def test_resolve_raises_with_reasons_when_all_failed(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MEMORYBREAD_EMBEDDING_MODEL_DIR", str(tmp_path / "models"))
@@ -123,7 +132,7 @@ class TestMirrorCascade:
 class TestSourceConfiguration:
     def test_default_order_is_domestic_first(self, monkeypatch):
         monkeypatch.delenv("MEMORYBREAD_EMBEDDING_SOURCES", raising=False)
-        assert model_sources._configured_sources()[0] == "modelscope"
+        assert model_sources._configured_sources()[0] == "managed"
 
     def test_env_overrides_order(self, monkeypatch):
         monkeypatch.setenv("MEMORYBREAD_EMBEDDING_SOURCES", "huggingface,hfmirror")

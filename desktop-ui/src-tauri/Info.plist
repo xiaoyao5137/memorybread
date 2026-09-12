@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>记忆面包需要在你授权后读取应用窗口与网页文字，用于构建本机工作记忆。</string>
   <key>ITSAppUsesNonExemptEncryption</key>
   <true/>
 </dict>

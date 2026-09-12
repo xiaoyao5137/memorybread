@@ -36,6 +36,11 @@ impl IntoResponse for ApiError {
         let (status, code, message) = match &self {
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "NOT_FOUND", msg.as_str()),
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "BAD_REQUEST", msg.as_str()),
+            ApiError::Storage(StorageError::DocumentAutomaticWritesPaused { .. }) => (
+                StatusCode::CONFLICT,
+                "DOCUMENT_AUTOMATIC_WRITES_PAUSED",
+                "自动文档写入已暂停，候选内容保留等待恢复",
+            ),
             ApiError::Storage(e) => {
                 tracing::error!("storage error: {e}");
                 (
@@ -56,5 +61,18 @@ impl IntoResponse for ApiError {
             } => (*status, *code, message.as_str()),
         };
         (status, Json(json!({ "error": code, "message": message }))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn automatic_document_pause_is_not_a_database_failure_response() {
+        let response=ApiError::Storage(StorageError::DocumentAutomaticWritesPaused { bucket: 0 }).into_response();
+        assert_eq!(response.status(),StatusCode::CONFLICT);
+        let bytes=axum::body::to_bytes(response.into_body(),4096).await.unwrap();
+        let body:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"],"DOCUMENT_AUTOMATIC_WRITES_PAUSED");
     }
 }

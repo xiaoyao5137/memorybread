@@ -15,6 +15,89 @@ use sha2::{Digest, Sha256};
 
 use crate::storage::models_bake::BakeDocumentRecord;
 
+pub const DOCUMENT_REFRESH_CONFIG_KEY: &str = "runtime.document_source_refresh";
+pub const DOCUMENT_QUALITY_RULE_VERSION: &str = "document-quality.v2";
+
+/// Read for each new task. Disabling scheduling preserves queued observations
+/// and reliable bodies; explicit cancellation remains a separate operation.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DocumentRefreshConfig {
+    pub enabled: bool,
+    pub automatic_enabled: bool,
+    /// Stop source content publication, including already-running collectors.
+    pub source_writes_enabled: bool,
+    pub automatic_document_writes_enabled: bool,
+    pub automatic_document_rollout_percent: u8,
+    pub quality_rule_version: String,
+    /// None enables all documents; an empty list enables no documents.
+    pub rollout_document_ids: Option<Vec<i64>>,
+    pub execution_seconds: u64,
+    pub summary_execution_seconds: u64,
+    pub max_steps: usize,
+    pub poll_seconds: u64,
+    pub max_attempts: i64,
+    pub retry_seconds: Vec<u64>,
+}
+
+impl Default for DocumentRefreshConfig {
+    fn default() -> Self {
+        Self { enabled: true, automatic_enabled: true, source_writes_enabled: true, execution_seconds: 60,
+            summary_execution_seconds: 300,
+            automatic_document_writes_enabled: true, automatic_document_rollout_percent: 100,
+            quality_rule_version: DOCUMENT_QUALITY_RULE_VERSION.into(), rollout_document_ids: None,
+            max_steps: 20, poll_seconds: 15, max_attempts: 3,
+            retry_seconds: vec![30, 120] }
+    }
+}
+
+impl DocumentRefreshConfig {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        let config: Self = serde_json::from_str(value)
+            .map_err(|_| "文档刷新配置必须是已知字段组成的 JSON 对象".to_string())?;
+        if config.quality_rule_version != DOCUMENT_QUALITY_RULE_VERSION {
+            return Err("当前运行版本不支持指定的文档质量规则".into());
+        }
+        if config.automatic_document_rollout_percent > 100 {
+            return Err("自动文档灰度比例须为0至100的整数".into());
+        }
+        if config.rollout_document_ids.as_ref().is_some_and(|ids|
+            ids.len() > 1000 || ids.iter().any(|id| *id <= 0)) {
+            return Err("文档灰度范围须为至多1000个正整数ID".into());
+        }
+        if !(1..=60).contains(&config.execution_seconds)
+            || !(1..=1200).contains(&config.summary_execution_seconds)
+            || !(1..=30).contains(&config.max_steps)
+            || !(1..=300).contains(&config.poll_seconds)
+            || !(1..=5).contains(&config.max_attempts)
+            || config.retry_seconds.is_empty() || config.retry_seconds.len() > 4
+            || config.retry_seconds.iter().any(|value| !(1..=3600).contains(value)) {
+            return Err("文档刷新预算超出允许范围".to_string());
+        }
+        Ok(config)
+    }
+
+    pub fn retry_delay_ms(&self, attempts: i64) -> i64 {
+        let index = attempts.saturating_sub(1).max(0) as usize;
+        self.retry_seconds[index.min(self.retry_seconds.len() - 1)] as i64 * 1000
+    }
+
+    pub fn permits_source_write(&self, document_id: i64) -> bool {
+        self.source_writes_enabled && self.rollout_document_ids.as_ref()
+            .map(|ids| ids.contains(&document_id)).unwrap_or(true)
+    }
+
+    pub fn permits_automatic_document_write(&self, identity: &str) -> bool {
+        self.automatic_document_writes_enabled
+            && automatic_document_rollout_bucket(identity) < self.automatic_document_rollout_percent
+    }
+}
+
+pub fn automatic_document_rollout_bucket(identity: &str) -> u8 {
+    let digest = Sha256::digest(identity.as_bytes());
+    (u32::from_be_bytes([digest[0],digest[1],digest[2],digest[3]]) % 100) as u8
+}
+
 /// 两次浏览器新鲜度检查之间的最小间隔：创作频繁触发召回时，
 /// 不能对同一文档反复打开浏览器。
 pub const DOCUMENT_REFRESH_CHECK_INTERVAL_MS: i64 = 6 * 3600 * 1000;
@@ -224,6 +307,51 @@ pub fn evaluate_document_refresh(
 mod tests {
     use super::*;
     use crate::storage::models_bake::NewBakeDocument;
+
+    #[test]
+    fn document_refresh_config_validates_budgets_and_defaults() {
+        let defaults = DocumentRefreshConfig::parse("{}").unwrap();
+        assert_eq!(defaults.execution_seconds,60);
+        assert!(defaults.source_writes_enabled);
+        assert!(defaults.permits_source_write(953));
+        assert!(!DocumentRefreshConfig::parse(r#"{"rollout_document_ids":[]}"#).unwrap().permits_source_write(953));
+        let scoped = DocumentRefreshConfig::parse(r#"{"rollout_document_ids":[953]}"#).unwrap();
+        assert!(scoped.permits_source_write(953));
+        assert!(!scoped.permits_source_write(16));
+        assert!(!DocumentRefreshConfig::parse(r#"{"source_writes_enabled":false}"#).unwrap().source_writes_enabled);
+        assert_eq!(defaults.retry_delay_ms(1),30_000);
+        assert_eq!(defaults.retry_delay_ms(4),120_000);
+        let changed=DocumentRefreshConfig::parse(r#"{"automatic_enabled":false,"max_steps":8,"retry_seconds":[10]}"#).unwrap();
+        assert!(!changed.automatic_enabled);
+        assert!(changed.enabled);
+        assert_eq!(changed.max_steps,8);
+        assert_eq!(changed.retry_delay_ms(3),10_000);
+        for invalid in ["null", r#"{"quality_rule_version":"unknown"}"#, r#"{"rollout_document_ids":[0]}"#, r#"{"rollout_document_ids":["953"]}"#, r#"{"source_writes_enabled":"false"}"#, r#"{"enabled":"false"}"#, r#"{"max_steps":0}"#,
+            r#"{"execution_seconds":61}"#, r#"{"max_attempts":6}"#, r#"{"retry_seconds":[]}"#,
+            r#"{"retry_seconds":[0]}"#, r#"{"unknown":true}"#] {
+            assert!(DocumentRefreshConfig::parse(invalid).is_err(),"{invalid}");
+        }
+    }
+
+    #[test]
+    fn automatic_document_rollout_is_stable_and_monotonic() {
+        let mut config=DocumentRefreshConfig::default();
+        let identities:Vec<String>=(0..100).map(|id|format!("document:{id}")).collect();
+        assert!(identities.iter().all(|id|config.permits_automatic_document_write(id)));
+        config.automatic_document_rollout_percent=0;
+        assert!(identities.iter().all(|id|!config.permits_automatic_document_write(id)));
+        config.automatic_document_rollout_percent=30;
+        let enabled:Vec<_>=identities.iter().filter(|id|config.permits_automatic_document_write(id)).collect();
+        assert!(!enabled.is_empty() && enabled.len()<identities.len());
+        config.automatic_document_rollout_percent=60;
+        assert!(enabled.iter().all(|id|config.permits_automatic_document_write(id)));
+        config.automatic_document_writes_enabled=false;
+        assert!(identities.iter().all(|id|!config.permits_automatic_document_write(id)));
+        for value in [r#"{"automatic_document_rollout_percent":101}"#,r#"{"automatic_document_rollout_percent":-1}"#,
+            r#"{"automatic_document_rollout_percent":0.5}"#,r#"{"automatic_document_writes_enabled":"false"}"#] {
+            assert!(DocumentRefreshConfig::parse(value).is_err());
+        }
+    }
 
     fn doc_with(policy: &str, source_url: Option<&str>) -> BakeDocumentRecord {
         let new_doc = NewBakeDocument::with_defaults("测试文档".to_string(), "周报".to_string());

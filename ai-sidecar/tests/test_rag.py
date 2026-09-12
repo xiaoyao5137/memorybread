@@ -24,12 +24,18 @@ from rag.llm.ollama  import OllamaBackend
 from rag.pipeline    import (
     RagPipeline,
     RagResult,
+    RelevancePolicy,
     _attach_document_links,
+    _build_relevance_policy,
+    _candidate_relevance,
     _collect_document_links,
+    _extract_query_terms,
     _lookup_baked_mention,
+    _MIN_RELEVANCE_PHRASE_LEN,
     _normalize_doc_title,
+    _VECTOR_RELEVANT_FLOOR,
 )
-from rag.query_planner import build_artifact_query_plan
+from rag.query_planner import ArtifactQueryPlan, PlannedTerm, build_artifact_query_plan
 from rag.retriever   import (
     Fts5Retriever,
     KnowledgeFts5Retriever,
@@ -567,7 +573,7 @@ class TestRagPipeline:
 
         assert len(result.contexts) == 1
         assert result.contexts[0].metadata["source_type"] == "pending_document"
-        assert result.contexts[0].doc_key == "document_url:https://docs.example.com/k/home/example"
+        assert result.contexts[0].doc_key == "document_url:https://docs.example.com/k/home/example?from=search"
         assert deep_keyword in result.contexts[0].text[:800]
 
     def test_linked_knowledge_document_is_promoted_before_context_selection(self):
@@ -742,6 +748,30 @@ class TestRagPipeline:
         pipeline = _make_pipeline(knowledge_chunks=[], vector_chunks=[])
         result = pipeline.query("没有上下文的问题")
         assert result.answer is not None
+
+    def test_system_prompt_self_judges_loose_recall_and_answers_general_knowledge(self):
+        """系统提示须要求自行甄别宽松召回，并对通用知识问题用自身知识作答、不得拒答"""
+        pipeline = _make_pipeline(knowledge_chunks=[], vector_chunks=[])
+        pipeline.query("小米体重计的原理是什么？")
+        system = pipeline._llm.last_system  # type: ignore[attr-defined]
+        assert "宽松召回" in system
+        assert "通用知识" in system
+        assert "为由拒答" in system
+        assert "自行" in system and "判断" in system
+
+    def test_prompt_marks_candidate_memories_as_loose_recall(self):
+        """用户 prompt 的记忆块须标注为宽松召回、可能无关、需自行判断"""
+        pipeline = _make_pipeline(knowledge_chunks=[], vector_chunks=[])
+        pipeline.query("小米体重计的原理是什么？")
+        prompt = pipeline._llm.last_prompt  # type: ignore[attr-defined]
+        assert "候选历史记忆（宽松召回" in prompt
+        assert "可全部忽略" in prompt
+
+    def test_build_context_empty_allows_own_knowledge(self):
+        """0 条召回时文案须允许模型用自身通用知识作答，而非拒答"""
+        context = RagPipeline._build_context([])
+        assert "你自己的通用知识" in context
+        assert "不要因缺少记忆而拒答" in context
 
     def test_llm_called_once(self):
         llm      = MockLlmBackend()
@@ -1376,7 +1406,7 @@ class TestRagPipeline:
             top_k=3,
         )
         pipeline.query("Gemini")
-        first_context_line = llm.last_prompt.splitlines()[1]
+        first_context_line = llm.last_prompt.split("可全部忽略）：\n", 1)[1].splitlines()[0]
         assert "[bake_knowledge]" in first_context_line
 
     def test_query_only_keeps_knowledge_contexts(self):
@@ -1589,6 +1619,60 @@ class TestVectorRetriever:
     def test_lazy_init(self):
         retriever = VectorRetriever()
         assert retriever._client is None
+
+    def _local_retriever_with_stub(self, stub):
+        """本地模式（qdrant_path）检索器：_try_internal_http 用 stub 替换，退避置零免真等待。"""
+        retriever = VectorRetriever(qdrant_path="/nonexistent/qdrant")
+        retriever._INTERNAL_SEARCH_BACKOFF_SECONDS = (0.0, 0.0)
+        retriever._try_internal_http = stub
+        return retriever
+
+    def test_internal_http_retries_transient_failure_then_succeeds(self):
+        # 复现根因：后台索引写入持锁时首次读超时（None），重试后应恢复而非硬失败
+        calls = {"n": 0}
+        payload = [{
+            "capture_id": 1,
+            "text": "小米体重计通过称重传感器（应变片）测量重量",
+            "score": 0.91,
+            "doc_key": "capture:1",
+            "metadata": {"source_type": "capture"},
+        }]
+
+        def stub(query_vector, top_k, score_threshold, filters, timeout=None):
+            calls["n"] += 1
+            return None if calls["n"] == 1 else payload
+
+        retriever = self._local_retriever_with_stub(stub)
+        results = retriever.search([0.1, 0.2, 0.3], top_k=5)
+        assert calls["n"] == 2
+        assert len(results) == 1
+        assert results[0].text.startswith("小米体重计")
+
+    def test_internal_http_empty_result_is_success_not_retried(self):
+        # 空结果是有效响应（非 None），不得被误当作失败而重试
+        calls = {"n": 0}
+
+        def stub(query_vector, top_k, score_threshold, filters, timeout=None):
+            calls["n"] += 1
+            return []
+
+        retriever = self._local_retriever_with_stub(stub)
+        results = retriever.search([0.1, 0.2, 0.3], top_k=5)
+        assert calls["n"] == 1
+        assert results == []
+
+    def test_internal_http_exhausts_retries_then_blocks_keyword_fallback(self):
+        # 持续不可用：重试耗尽后仍按既有策略抛错，不降级到关键词兜底
+        calls = {"n": 0}
+
+        def stub(query_vector, top_k, score_threshold, filters, timeout=None):
+            calls["n"] += 1
+            return None
+
+        retriever = self._local_retriever_with_stub(stub)
+        with pytest.raises(RuntimeError, match="已阻止降级到关键词兜底"):
+            retriever.search([0.1, 0.2, 0.3], top_k=5)
+        assert calls["n"] == VectorRetriever._INTERNAL_SEARCH_ATTEMPTS
 
 
 class TestSqliteRetrievers:
@@ -2257,7 +2341,8 @@ class TestDurableMemoryMaterialization:
         )
 
         assert [chunk.doc_key for chunk in results] == ["bake_knowledge:2467"]
-        assert results[0].score == pytest.approx(0.8)
+        assert results[0].score == 0.0
+        assert results[0].metadata["semantic_source_score"] == pytest.approx(0.8)
         assert results[0].metadata["retrieval_method"] == "timeline_to_bake_knowledge"
         assert results[0].metadata["semantic_source_timeline_id"] == "5341"
 
@@ -2486,3 +2571,428 @@ class TestAttachDocumentLinks:
         result = _attach_document_links(answer, [], db_path=db_path)
         assert "相关文档链接：" in result
         assert "- [[进度日报]智能应急处置归因 - 稳柱产品](https://docs.example.com/d/533)" in result
+
+
+def test_javascript_shell_is_not_document_evidence():
+    from rag.pipeline import _is_noise_chunk
+    shell = RetrievedChunk(capture_id=73137, text='文档：H3模型适配 Meta prompt\nYou need to enable JavaScript to run this app.', score=1, source='document', doc_key='document_url:https://example.com/h3')
+    assert _is_noise_chunk(shell)
+    shell.text = ('This article explains how to debug JavaScript application loading errors and validate a successful recovery. ' * 5) + shell.text
+    assert not _is_noise_chunk(shell)
+
+
+def test_current_document_rejects_unbound_summary_and_its_score(tmp_path):
+    from pathlib import Path
+    db = str(tmp_path / "summary-version.db")
+    body = "缓存配置说明：服务按请求类型选择缓存时间，变更后核对命中率和回源流量。"
+    migrations = Path(__file__).parents[2] / "core-engine/src/storage/migrations"
+    with sqlite3.connect(db) as conn:
+        conn.executescript("""
+            CREATE TABLE bake_documents(id INTEGER PRIMARY KEY,title TEXT,source_url TEXT,deleted_at INTEGER,
+              doc_type TEXT,summary TEXT,full_content TEXT,sections_json TEXT,source_memory_ids TEXT,
+              linked_knowledge_ids TEXT,updated_at INTEGER);
+            CREATE TABLE bake_document_source_heads(document_id INTEGER,snapshot_id INTEGER);
+            CREATE TABLE bake_document_source_snapshots(id INTEGER PRIMARY KEY,document_id INTEGER,
+              content_text TEXT,identity_match INTEGER,completeness_status TEXT);
+        """)
+        conn.execute("INSERT INTO bake_documents VALUES(1,'缓存配置',NULL,NULL,'document','过期优惠券活动摘要',?,'[]','[]','[]',100)", (body,))
+        conn.execute("INSERT INTO bake_document_source_snapshots VALUES(7,1,?,1,'complete')", (body,))
+        conn.execute("INSERT INTO bake_document_source_heads VALUES(1,7)")
+        conn.executescript((migrations / '121_document_source_mismatch_events.sql').read_text())
+        conn.execute("INSERT INTO document_source_mismatch_events(document_id,component,reason,occurrences,observed_at) VALUES(1,'rag','head_invalid',1,1)")
+        conn.executescript((migrations / '124_document_summary_binding.sql').read_text())
+    old = RetrievedChunk(capture_id=0, text="过期优惠券活动摘要", score=999, source="document",
+                         doc_key="document:1", metadata={"source_type": "document", "document_id": 1})
+    resolved = KnowledgeFts5Retriever(db).materialize_documents([old], "缓存配置")
+    assert len(resolved) == 1 and body in resolved[0].text
+    assert "优惠券" not in resolved[0].text
+    assert resolved[0].metadata['summary'] is None
+    assert resolved[0].score != 999
+    assert resolved[0].metadata['source_snapshot_id'] == 7
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM document_source_mismatch_events WHERE reason='head_invalid'").fetchone()[0] == 1
+        assert conn.execute("SELECT occurrences FROM document_source_mismatch_events WHERE reason='summary_version_mismatch'").fetchone()[0] == 1
+        assert conn.execute("SELECT summary FROM bake_documents").fetchone()[0] == '过期优惠券活动摘要'
+        conn.execute("UPDATE bake_documents SET summary='当前缓存配置摘要',summary_source_snapshot_id=7")
+    current = KnowledgeFts5Retriever(db).materialize_documents([old], "缓存配置")
+    assert current[0].metadata['summary'] == '当前缓存配置摘要'
+
+
+def test_document_lookup_excludes_unrelated_vector_hits(tmp_path):
+    db = str(tmp_path / 'lookup.db')
+    with sqlite3.connect(db) as conn:
+        conn.execute('CREATE TABLE bake_documents (id INTEGER, title TEXT, source_url TEXT, deleted_at INTEGER)')
+        conn.execute("INSERT INTO bake_documents VALUES (2, 'SMACT GPU 指标', NULL, NULL)")
+    irrelevant = RetrievedChunk(capture_id=1, text='H3 模型适配 Meta prompt 正文', score=.95, source='vector', doc_key='document:1', metadata={'source_type': 'document'})
+    relevant = RetrievedChunk(capture_id=2, text='GPU 指标采集：smact 的计算公式', score=60, source='document', doc_key='document:2', metadata={'source_type': 'document', 'document_id': 2})
+    pipeline = _make_pipeline(knowledge_chunks=[relevant], vector_chunks=[irrelevant], top_k=10)
+    pipeline._db_path = db
+    result = pipeline.query('SMACT的文档', references_only=True)
+    assert [c.metadata.get('document_id') for c in result.contexts] == [2]
+    # Semantic discovery remains available for a question without an artifact type.
+    assert pipeline.query('模型适配有什么经验', references_only=True).contexts
+
+
+@pytest.mark.parametrize('deleted,shell', [(False, False), (True, False), (False, True)])
+def test_legacy_document_vector_resolves_current_artifact(tmp_path, deleted, shell):
+    db = str(tmp_path / 'documents.db')
+    body = '知识库首页目录 收藏 分享 编辑 全部暂停' if shell else '正式文档正文：SMACT 指标采集与计算方法。'
+    with sqlite3.connect(db) as conn:
+        conn.execute('''CREATE TABLE bake_documents (
+            id INTEGER PRIMARY KEY, title TEXT, source_url TEXT, deleted_at INTEGER,
+            doc_type TEXT, summary TEXT, full_content TEXT, sections_json TEXT,
+            source_memory_ids TEXT, linked_knowledge_ids TEXT, updated_at INTEGER)''')
+        conn.execute('INSERT INTO bake_documents VALUES (945, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (
+            '指标说明', 'https://docs.example.com/d/home/1', 123 if deleted else None,
+            '技术文档', '', body, '[]', '[]', '[]', 1000))
+    old = RetrievedChunk(capture_id=73137, text='旧网页错误摘要', score=.87, source='vector',
+                         doc_key='document_url:https://docs.example.com/d/home/1?section=history',
+                         metadata={'source_type': 'document', 'url': 'https://docs.example.com/d/home/1?section=history'})
+    results = KnowledgeFts5Retriever(db).materialize_documents([old], 'SMACT的文档')
+    if deleted or shell:
+        assert results == []
+    else:
+        assert len(results) == 1
+        assert results[0].metadata['document_id'] == 945
+        assert body in results[0].text
+        assert '旧网页错误摘要' not in results[0].text
+        assert results[0].score == .87
+        assert results[0].capture_id == 0
+        with sqlite3.connect(db) as conn:
+            conn.execute('CREATE TABLE bake_document_source_heads(document_id INTEGER,snapshot_id INTEGER)')
+            conn.execute('INSERT INTO bake_document_source_heads VALUES(945, 7)')
+            conn.execute('CREATE TABLE bake_document_source_snapshots(id INTEGER,document_id INTEGER,content_text TEXT,identity_match INTEGER,completeness_status TEXT)')
+            conn.execute("INSERT INTO bake_document_source_snapshots SELECT 7,id,full_content,1,'complete' FROM bake_documents WHERE id=945")
+            from pathlib import Path
+            conn.executescript((Path(__file__).parents[2] / 'core-engine/src/storage/migrations/121_document_source_mismatch_events.sql').read_text())
+        # A legacy vector cannot transfer stale relevance to an applied source.
+        assert KnowledgeFts5Retriever(db).materialize_documents([old], 'SMACT的文档') == []
+        old.metadata.update(content_origin='bake_document', time=999)
+        assert KnowledgeFts5Retriever(db).materialize_documents([old], 'SMACT的文档') == []
+        old.metadata['time'] = 1000
+        # Timestamp equality alone cannot establish a source version.
+        for source_id in [None, 6, '7', True]:
+            old.metadata['source_snapshot_id'] = source_id
+            assert KnowledgeFts5Retriever(db).materialize_documents([old], 'SMACT的文档') == []
+        old.metadata['source_snapshot_id'] = 7
+        old.metadata['time'] = 1001
+        assert KnowledgeFts5Retriever(db).materialize_documents([old], 'SMACT的文档') == []
+        old.metadata['time'] = 1000
+        current = KnowledgeFts5Retriever(db).materialize_documents([old], 'SMACT的文档')
+        assert len(current) == 1
+        assert current[0].metadata['source_snapshot_id'] == 7
+        with sqlite3.connect(db) as conn:
+            conn.execute("UPDATE bake_document_source_snapshots SET content_text='失配的旧来源正文'")
+        assert KnowledgeFts5Retriever(db).materialize_documents([old], 'SMACT的文档') == []
+        with sqlite3.connect(db) as conn:
+            conn.execute('DELETE FROM bake_document_source_heads')
+        assert KnowledgeFts5Retriever(db).materialize_documents([old], 'SMACT的文档') == []
+        with sqlite3.connect(db) as conn:
+            assert conn.execute('SELECT component, SUM(occurrences) FROM document_source_mismatch_events GROUP BY component').fetchall() == [('rag', 9)]
+    # An unrelated unbaked page remains a capture-backed fragment, never a fake artifact.
+    old.metadata['url'] = 'https://docs.example.com/document/2'
+    old.doc_key = 'document_url:https://docs.example.com/document/2'
+    results = KnowledgeFts5Retriever(db).materialize_documents([old], '文档')
+    assert results[0].metadata['source_type'] == 'pending_document'
+    assert results[0].capture_id == 73137
+
+
+# ── 召回相关性门（变更一/二/三/四）────────────────────────────
+
+def _relevance_fixture_db(db_path: str) -> None:
+    """构造 artifact 语料：36 篇含「原理」的通用文档 + 小米/体重各 2 篇。
+
+    - 「原理」df=36 ≥ _GENERIC_ABS_DF(32) → 降级 generic；
+    - 「小米」「体重」df=2 → 保留 discriminative；
+    - 「小米体重计 / 体重计 / 重计」df=0 → 不进入判别词。
+    复现 #164：真正判别的产品名在库里缺失，泛词「原理」命中大量无关文档。
+    """
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE bake_documents (
+            id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL,
+            doc_type TEXT NOT NULL,
+            summary TEXT,
+            full_content TEXT,
+            sections_json TEXT NOT NULL DEFAULT '[]',
+            source_url TEXT,
+            source_memory_ids TEXT NOT NULL DEFAULT '[]',
+            linked_knowledge_ids TEXT NOT NULL DEFAULT '[]',
+            deleted_at INTEGER,
+            updated_at INTEGER
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO bake_documents (id, title, doc_type, summary, full_content, updated_at) "
+        "VALUES (?, ?, '技术文档', '通用科普', '讲解通用科学原理的文档。', ?)",
+        [(i, f"科学原理科普 {i}", 1000 + i) for i in range(200, 236)],
+    )
+    conn.executemany(
+        "INSERT INTO bake_documents (id, title, doc_type, summary, full_content, updated_at) "
+        "VALUES (?, ?, '技术文档', '产品资料', ?, ?)",
+        [
+            (300, "小米手机影像评测", "小米手机影像系统评测。", 2000),
+            (301, "小米生态链设备盘点", "小米生态链智能设备盘点。", 2001),
+            (302, "体重管理方法综述", "体重管理常见方法综述。", 2002),
+            (303, "健康体重与饮食指南", "健康体重与饮食搭配。", 2003),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
+def _gate_chunk(cid, text, doc_key, source_type="document", score=0.0):
+    return RetrievedChunk(
+        capture_id=cid, text=text, score=score, source="knowledge",
+        doc_key=doc_key, metadata={"source_type": source_type, "doc_key": doc_key},
+    )
+
+
+def test_extract_query_terms_drops_boundary_particle_fragments():
+    """变更一：字符 n-gram 拆词丢弃首/尾为边界助词的跨词碎片。"""
+    terms = _extract_query_terms("小米体重计的原理")
+    for fragment in ("计的", "的原", "的原理"):
+        assert fragment not in terms
+    for keep in ("小米", "体重", "原理"):
+        assert keep in terms
+
+
+def test_artifact_query_plan_demotes_common_short_word_to_generic(tmp_path):
+    """变更二：短中文高频词降级 generic，罕见产品名保持 discriminative，碎片被排除。"""
+    db_path = str(tmp_path / "relevance-plan.db")
+    _relevance_fixture_db(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        # entity_terms 携带边界碎片（计的/的原），验证它们不会绕过校验进入候选
+        plan = build_artifact_query_plan(
+            conn.cursor(), "小米体重计的原理", ["小米", "体重", "重计", "原理", "计的", "的原"],
+        )
+        discriminative = {term.text for term in plan.discriminative_terms}
+        generic = {term.text for term in plan.generic_terms}
+        assert "原理" in generic                       # 常见短词降级
+        assert "原理" not in discriminative
+        assert {"小米", "体重"}.issubset(discriminative)   # 罕见词保留
+        assert plan.generic_terms                       # generic 非空
+        # 边界碎片不进入任何候选
+        assert "计的" not in plan.candidate_terms
+        assert "的原" not in plan.candidate_terms
+    finally:
+        conn.close()
+
+
+def test_build_relevance_policy_derives_phrases_terms_and_scores():
+    """变更三：策略构造——短语（≥3 字/ASCII）、判别词、min_distinct、向量分取最大。"""
+    plan = ArtifactQueryPlan(
+        discriminative_terms=(
+            PlannedTerm(text="体重计", role="discriminative", document_frequency=8, idf=2.0),
+            PlannedTerm(text="小米", role="discriminative", document_frequency=4, idf=3.0),
+            PlannedTerm(text="smact", role="discriminative", document_frequency=1, idf=5.0),
+        ),
+        type_terms=(),
+        generic_terms=(),
+        instruction_terms=(),
+        source_types=frozenset(),
+        corpus_size=100,
+        fallback_terms=(),
+    )
+    vector_results = [
+        RetrievedChunk(capture_id=1, text="x", score=0.50, source="vector", doc_key="document:1"),
+        RetrievedChunk(capture_id=1, text="x", score=0.62, source="vector", doc_key="document:1"),
+        RetrievedChunk(capture_id=2, text="y", score=0.48, source="vector", doc_key="document:2"),
+    ]
+    policy = _build_relevance_policy(plan, vector_results)
+    assert set(policy.discriminative_terms) == {"体重计", "小米", "smact"}
+    # 小米 长度 2 < _MIN_RELEVANCE_PHRASE_LEN 且非 ASCII，不作为强锚点短语
+    assert _MIN_RELEVANCE_PHRASE_LEN == 3
+    assert set(policy.discriminative_phrases) == {"体重计", "smact"}
+    assert policy.min_distinct_terms == 2
+    assert policy.dense_floor == _VECTOR_RELEVANT_FLOOR
+    assert policy.vector_scores["document:1"] == 0.62   # 同 doc_key 取最大 cosine
+    assert policy.vector_scores["document:2"] == 0.48
+
+
+def test_build_relevance_policy_drops_generic_edge_fragments():
+    """「泛词±单字」跨词碎片（计原理）不作锚点，真实复合词（深度学习）保留。"""
+    plan = ArtifactQueryPlan(
+        discriminative_terms=(
+            PlannedTerm(text="计原理", role="discriminative", document_frequency=3, idf=4.0),
+            PlannedTerm(text="深度学习", role="discriminative", document_frequency=5, idf=3.5),
+            PlannedTerm(text="小米", role="discriminative", document_frequency=4, idf=3.0),
+        ),
+        type_terms=(),
+        generic_terms=(
+            PlannedTerm(text="原理", role="generic", document_frequency=189, idf=1.0),
+            PlannedTerm(text="学习", role="generic", document_frequency=200, idf=1.0),
+        ),
+        instruction_terms=(),
+        source_types=frozenset(),
+        corpus_size=13000,
+        fallback_terms=(),
+    )
+    policy = _build_relevance_policy(plan, vector_results=[])
+    # 计原理 = 原理 + 单字「计」→ 跨词碎片，剔除
+    assert "计原理" not in policy.discriminative_terms
+    # 深度学习 = 学习 + 「深度」（≥2 字）→ 真实复合词，保留并作为短语锚点
+    assert "深度学习" in policy.discriminative_terms
+    assert "深度学习" in policy.discriminative_phrases
+    assert "小米" in policy.discriminative_terms
+
+
+def test_candidate_relevance_lexical_and_dense_rules():
+    """变更三：相关性判定——短语/≥2 判别词/向量分达标判相关，泛词或低分判不相关。"""
+    policy = RelevancePolicy(
+        discriminative_terms=("小米", "体重", "重计"),
+        discriminative_phrases=("体重计",),
+        min_distinct_terms=2,
+        dense_floor=0.55,
+        vector_scores={"document:hi": 0.60, "document:lo": 0.50},
+    )
+
+    def chunk(text, doc_key="document:x"):
+        return RetrievedChunk(
+            capture_id=1, text=text, score=0.0, source="knowledge",
+            doc_key=doc_key, metadata={"source_type": "document", "doc_key": doc_key},
+        )
+
+    assert _candidate_relevance(chunk("小米体重计的称重传感器"), policy)      # 命中判别短语
+    assert _candidate_relevance(chunk("小米设备与体重的关系"), policy)        # ≥2 不同判别词
+    assert not _candidate_relevance(chunk("小米手机影像评测"), policy)         # 仅单一判别词
+    assert not _candidate_relevance(chunk("大模型训练的基本原理"), policy)     # 仅命中泛词
+    assert _candidate_relevance(chunk("无关词法但语义相近", "document:hi"), policy)  # 向量分≥floor
+    assert not _candidate_relevance(chunk("无关词法且语义弱", "document:lo"), policy)  # 向量分<floor
+
+
+def test_candidate_relevance_uninformative_policy_passes():
+    """无任何判别依据（无词法锚点、无向量分）时不过滤，保持既有召回。"""
+    empty_policy = RelevancePolicy(
+        discriminative_terms=(), discriminative_phrases=(),
+        min_distinct_terms=1, vector_scores={},
+    )
+    chunk = RetrievedChunk(
+        capture_id=1, text="烘焙周报正文内容", score=0.0, source="knowledge",
+        doc_key="document:582", metadata={"source_type": "document", "doc_key": "document:582"},
+    )
+    assert _candidate_relevance(chunk, empty_policy)
+
+
+def test_select_contexts_relevance_gate_can_return_zero():
+    """变更三：全部候选不过相关性门时返回 0 条，不再硬填满 top_k。"""
+    policy = RelevancePolicy(
+        discriminative_terms=("小米", "体重"), discriminative_phrases=(),
+        min_distinct_terms=2, dense_floor=0.55, vector_scores={},
+    )
+    irrelevant = [
+        _gate_chunk(i, f"大模型与GPU算力的原理 {i}", f"document:{900 + i}")
+        for i in range(5)
+    ]
+    assert RagPipeline._select_contexts(irrelevant, top_k=5, relevance_policy=policy) == []
+
+
+def test_select_contexts_relevance_gate_keeps_relevant_drops_generic_only():
+    """含 ≥2 判别词的候选保留，仅命中泛词的候选被丢。"""
+    policy = RelevancePolicy(
+        discriminative_terms=("小米", "体重"), discriminative_phrases=(),
+        min_distinct_terms=2, dense_floor=0.55, vector_scores={},
+    )
+    relevant = _gate_chunk(1, "小米体重计通过应变片测量体重", "document:1")
+    generic_only = _gate_chunk(2, "大模型训练的基本原理", "document:2")
+    selected = RagPipeline._select_contexts([relevant, generic_only], top_k=5, relevance_policy=policy)
+    assert [c.doc_key for c in selected] == ["document:1"]
+
+
+def test_select_contexts_without_policy_preserves_legacy_fill():
+    """relevance_policy=None 时保持旧行为：按序填满 top_k。"""
+    chunks = [
+        _gate_chunk(i, f"大模型与GPU算力的原理 {i}", f"document:{900 + i}")
+        for i in range(5)
+    ]
+    assert len(RagPipeline._select_contexts(chunks, top_k=5)) == 5
+
+
+def test_query_relevance_gate_zeroes_irrelevant_and_still_answers(tmp_path):
+    """集成：库内只有大模型/GPU 文档时，「小米体重计的原理」召回 0 条无关参考且不拒答。"""
+    db_path = str(tmp_path / "relevance-query.db")
+    _relevance_fixture_db(db_path)
+    irrelevant_texts = [
+        "大模型训练的基本原理与GPU算力调度",
+        "AIGC 内容生成的技术原理与实践",
+        "GPU 集群算力优化的原理分析",
+        "深度学习模型推理加速原理",
+        "分布式算力网络原理概述",
+    ]
+    knowledge = [
+        _gate_chunk(i, text, f"document:{900 + i}", score=12.0 - i)
+        for i, text in enumerate(irrelevant_texts)
+    ]
+    # 向量通道把它们排在前面，cosine 落在 [0.45, 0.55)：越过 kNN 召回阈值但低于置信下限
+    vector = [
+        _gate_chunk(i, text, f"document:{900 + i}", score=0.52 - i * 0.01)
+        for i, text in enumerate(irrelevant_texts)
+    ]
+    pipeline = _make_pipeline(
+        knowledge_chunks=knowledge,
+        vector_chunks=vector,
+        llm_response="小米体重计通过应变片传感器测量体重。",
+        top_k=10,
+    )
+    pipeline._db_path = db_path
+    result = pipeline.query("小米体重计的原理")
+    assert result.contexts == []
+    assert result.answer.strip()
+
+
+def test_query_relevance_gate_keeps_relevant_drops_irrelevant(tmp_path):
+    """集成正控：真含「小米+体重」的候选保留，泛词「原理」无关候选被清零。"""
+    db_path = str(tmp_path / "relevance-query-positive.db")
+    _relevance_fixture_db(db_path)
+    relevant = _gate_chunk(1, "小米体重计通过应变片传感器测量体重的原理", "document:500", score=20.0)
+    irrelevant = _gate_chunk(2, "大模型训练的基本原理与GPU算力调度", "document:901", score=15.0)
+    pipeline = _make_pipeline(
+        knowledge_chunks=[relevant, irrelevant],
+        vector_chunks=[_gate_chunk(2, "大模型训练的基本原理与GPU算力调度", "document:901", score=0.50)],
+        llm_response="小米体重计利用应变片测量体重。",
+        top_k=10,
+    )
+    pipeline._db_path = db_path
+    result = pipeline.query("小米体重计的原理")
+    assert [c.doc_key for c in result.contexts] == ["document:500"]
+
+
+def test_document_materialization_reads_body_and_head_from_one_revision(tmp_path, monkeypatch):
+    db = str(tmp_path / 'source-read-race.db')
+    connect = sqlite3.connect
+    with connect(db) as conn:
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.executescript('''CREATE TABLE bake_documents (
+            id INTEGER PRIMARY KEY, title TEXT, source_url TEXT, deleted_at INTEGER,
+            doc_type TEXT, summary TEXT, full_content TEXT, sections_json TEXT,
+            source_memory_ids TEXT, linked_knowledge_ids TEXT, updated_at INTEGER);
+            INSERT INTO bake_documents VALUES(1,'技术方案','https://example.com/doc/1',NULL,
+                '文档','','旧版本正文：接口返回第一版业务数据。','[]','[]','[]',1000);
+            CREATE TABLE bake_document_source_heads(document_id INTEGER,snapshot_id INTEGER);
+            INSERT INTO bake_document_source_heads VALUES(1,7);
+            CREATE TABLE bake_document_source_snapshots(id INTEGER,document_id INTEGER,content_text TEXT,identity_match INTEGER,completeness_status TEXT);
+            INSERT INTO bake_document_source_snapshots SELECT 7,id,full_content,1,'complete' FROM bake_documents;''')
+    changed = []
+    class RacingConnection(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            if sql == 'SELECT * FROM bake_documents WHERE id=?' and not changed:
+                with connect(db) as writer:
+                    writer.execute("UPDATE bake_documents SET full_content='新版本正文：接口返回第二版业务数据。',updated_at=2000")
+                    writer.execute('UPDATE bake_document_source_heads SET snapshot_id=8')
+                changed.append(True)
+            return super().execute(sql, parameters)
+    monkeypatch.setattr(sqlite3, 'connect', lambda path: connect(path, factory=RacingConnection))
+    chunk = RetrievedChunk(capture_id=0, text='candidate', score=.8, source='vector',
+        doc_key='document:1', metadata={'source_type':'document','document_id':1,
+        'url':'https://example.com/doc/1','content_origin':'bake_document','time':1000,'source_snapshot_id':7})
+    result = KnowledgeFts5Retriever(db).materialize_documents([chunk], '接口业务数据')
+    assert changed
+    assert len(result) == 1
+    assert result[0].metadata['source_snapshot_id'] == 7
+    assert '第一版' in result[0].text and '第二版' not in result[0].text
+    with connect(db) as conn:
+        assert conn.execute('SELECT snapshot_id FROM bake_document_source_heads').fetchone()[0] == 8

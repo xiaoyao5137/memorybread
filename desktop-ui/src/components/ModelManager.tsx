@@ -7,8 +7,9 @@ import { REMOTE_CREATION_MODEL_ID, canUseRemoteCreationModel } from '../utils/mo
 import { toUserFacingError } from '../utils/userFacingError'
 import { useImeCompositionGuard } from '../hooks/useImeCompositionGuard'
 import { useConfirmDialog } from './useConfirmDialog'
+import { getLocalServiceBaseUrl } from '../utils/localServices'
 
-const SIDECAR = 'http://127.0.0.1:7071'
+const SIDECAR = getLocalServiceBaseUrl('model_api')
 const MODEL_LOAD_RETRY_DELAYS_MS = [0, 1_000, 2_000, 4_000]
 
 const wait = (delayMs: number) => new Promise<void>(resolve => window.setTimeout(resolve, delayMs))
@@ -1023,7 +1024,7 @@ const CREATION_MODEL_DEFS = [
   },
 ] as const
 
-const CREATION_SVC = 'http://127.0.0.1:8001'
+const CREATION_SVC = getLocalServiceBaseUrl('creation')
 const LOCAL_CREATION_MODEL_ID = 'mbcd-std-v1'
 
 type CreationChatEntry = { def: typeof CREATION_MODEL_DEFS[number]; cfg: { id: string; apiKey: string; baseUrl?: string } }

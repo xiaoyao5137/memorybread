@@ -1,0 +1,1580 @@
+{
+  "seconds": 27.86,
+  "events": [
+    {
+      "type": "status",
+      "stage": "queued",
+      "message": "咨询任务已接收",
+      "progress": 18
+    },
+    {
+      "type": "status",
+      "stage": "understanding",
+      "message": "正在理解当前问题",
+      "progress": 28
+    },
+    {
+      "type": "status",
+      "stage": "retrieving",
+      "message": "正在召回相关资料",
+      "progress": 42
+    },
+    {
+      "type": "references",
+      "contexts": []
+    },
+    {
+      "type": "status",
+      "stage": "waiting_generation",
+      "message": "资料已就绪，正在等待生成",
+      "progress": 54
+    },
+    {
+      "type": "status",
+      "stage": "answering",
+      "message": "正在生成答案",
+      "progress": 62
+    },
+    {
+      "type": "delta",
+      "text": "##"
+    },
+    {
+      "type": "delta",
+      "text": " 用户"
+    },
+    {
+      "type": "delta",
+      "text": "问题"
+    },
+    {
+      "type": "delta",
+      "text": "理解"
+    },
+    {
+      "type": "delta",
+      "text": "\nS"
+    },
+    {
+      "type": "delta",
+      "text": "MA"
+    },
+    {
+      "type": "delta",
+      "text": "CT"
+    },
+    {
+      "type": "delta",
+      "text": "（"
+    },
+    {
+      "type": "delta",
+      "text": "空"
+    },
+    {
+      "type": "delta",
+      "text": "分"
+    },
+    {
+      "type": "delta",
+      "text": "利用率"
+    },
+    {
+      "type": "delta",
+      "text": "）"
+    },
+    {
+      "type": "delta",
+      "text": "是"
+    },
+    {
+      "type": "delta",
+      "text": "容器"
+    },
+    {
+      "type": "delta",
+      "text": "云"
+    },
+    {
+      "type": "delta",
+      "text": " GPU"
+    },
+    {
+      "type": "delta",
+      "text": " 指标"
+    },
+    {
+      "type": "delta",
+      "text": "采集"
+    },
+    {
+      "type": "delta",
+      "text": "项目"
+    },
+    {
+      "type": "delta",
+      "text": "中的"
+    },
+    {
+      "type": "delta",
+      "text": "核心"
+    },
+    {
+      "type": "delta",
+      "text": "量化"
+    },
+    {
+      "type": "delta",
+      "text": "指标"
+    },
+    {
+      "type": "delta",
+      "text": "，"
+    },
+    {
+      "type": "delta",
+      "text": "用于"
+    },
+    {
+      "type": "delta",
+      "text": "衡量"
+    },
+    {
+      "type": "delta",
+      "text": "采样"
+    },
+    {
+      "type": "delta",
+      "text": "窗口"
+    },
+    {
+      "type": "delta",
+      "text": "内"
+    },
+    {
+      "type": "delta",
+      "text": "每个"
+    },
+    {
+      "type": "delta",
+      "text": " SM"
+    },
+    {
+      "type": "delta",
+      "text": "（"
+    },
+    {
+      "type": "delta",
+      "text": "流"
+    },
+    {
+      "type": "delta",
+      "text": "多"
+    },
+    {
+      "type": "delta",
+      "text": "处理器"
+    },
+    {
+      "type": "delta",
+      "text": "）"
+    },
+    {
+      "type": "delta",
+      "text": "的工作"
+    },
+    {
+      "type": "delta",
+      "text": "时间"
+    },
+    {
+      "type": "delta",
+      "text": "总和"
+    },
+    {
+      "type": "delta",
+      "text": "与"
+    },
+    {
+      "type": "delta",
+      "text": "最大"
+    },
+    {
+      "type": "delta",
+      "text": "并行"
+    },
+    {
+      "type": "delta",
+      "text": "数量的"
+    },
+    {
+      "type": "delta",
+      "text": "比值"
+    },
+    {
+      "type": "delta",
+      "text": "。"
+    },
+    {
+      "type": "delta",
+      "text": "\n\n##"
+    },
+    {
+      "type": "delta",
+      "text": " 回答"
+    },
+    {
+      "type": "delta",
+      "text": "\n-"
+    },
+    {
+      "type": "delta",
+      "text": " **"
+    },
+    {
+      "type": "delta",
+      "text": "结论"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "："
+    },
+    {
+      "type": "delta",
+      "text": "S"
+    },
+    {
+      "type": "delta",
+      "text": "MA"
+    },
+    {
+      "type": "delta",
+      "text": "CT"
+    },
+    {
+      "type": "delta",
+      "text": " 定义为"
+    },
+    {
+      "type": "delta",
+      "text": "“"
+    },
+    {
+      "type": "delta",
+      "text": "采样"
+    },
+    {
+      "type": "delta",
+      "text": "窗口"
+    },
+    {
+      "type": "delta",
+      "text": "内"
+    },
+    {
+      "type": "delta",
+      "text": "每个"
+    },
+    {
+      "type": "delta",
+      "text": "工作时间"
+    },
+    {
+      "type": "delta",
+      "text": "求"
+    },
+    {
+      "type": "delta",
+      "text": "和"
+    },
+    {
+      "type": "delta",
+      "text": "的"
+    },
+    {
+      "type": "delta",
+      "text": "个数"
+    },
+    {
+      "type": "delta",
+      "text": "除以"
+    },
+    {
+      "type": "delta",
+      "text": "最大"
+    },
+    {
+      "type": "delta",
+      "text": "并行"
+    },
+    {
+      "type": "delta",
+      "text": "数量"
+    },
+    {
+      "type": "delta",
+      "text": "”，"
+    },
+    {
+      "type": "delta",
+      "text": "其"
+    },
+    {
+      "type": "delta",
+      "text": "物理"
+    },
+    {
+      "type": "delta",
+      "text": "意义"
+    },
+    {
+      "type": "delta",
+      "text": "是"
+    },
+    {
+      "type": "delta",
+      "text": "评估"
+    },
+    {
+      "type": "delta",
+      "text": " GPU"
+    },
+    {
+      "type": "delta",
+      "text": " 工作"
+    },
+    {
+      "type": "delta",
+      "text": "负载"
+    },
+    {
+      "type": "delta",
+      "text": "的空间"
+    },
+    {
+      "type": "delta",
+      "text": "分布"
+    },
+    {
+      "type": "delta",
+      "text": "情况"
+    },
+    {
+      "type": "delta",
+      "text": "；"
+    },
+    {
+      "type": "delta",
+      "text": "当"
+    },
+    {
+      "type": "delta",
+      "text": " SMA"
+    },
+    {
+      "type": "delta",
+      "text": "CT"
+    },
+    {
+      "type": "delta",
+      "text": " >"
+    },
+    {
+      "type": "delta",
+      "text": " 0"
+    },
+    {
+      "type": "delta",
+      "text": "."
+    },
+    {
+      "type": "delta",
+      "text": "8"
+    },
+    {
+      "type": "delta",
+      "text": "（"
+    },
+    {
+      "type": "delta",
+      "text": "即"
+    },
+    {
+      "type": "delta",
+      "text": ">"
+    },
+    {
+      "type": "delta",
+      "text": "8"
+    },
+    {
+      "type": "delta",
+      "text": "0"
+    },
+    {
+      "type": "delta",
+      "text": "%"
+    },
+    {
+      "type": "delta",
+      "text": "）"
+    },
+    {
+      "type": "delta",
+      "text": "时"
+    },
+    {
+      "type": "delta",
+      "text": "视为"
+    },
+    {
+      "type": "delta",
+      "text": "效率高"
+    },
+    {
+      "type": "delta",
+      "text": "，"
+    },
+    {
+      "type": "delta",
+      "text": "<0"
+    },
+    {
+      "type": "delta",
+      "text": "."
+    },
+    {
+      "type": "delta",
+      "text": "5"
+    },
+    {
+      "type": "delta",
+      "text": " 表示"
+    },
+    {
+      "type": "delta",
+      "text": "不充分"
+    },
+    {
+      "type": "delta",
+      "text": "。"
+    },
+    {
+      "type": "delta",
+      "text": "\n-"
+    },
+    {
+      "type": "delta",
+      "text": " **"
+    },
+    {
+      "type": "delta",
+      "text": "关键"
+    },
+    {
+      "type": "delta",
+      "text": "依据"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "："
+    },
+    {
+      "type": "delta",
+      "text": "\n    -"
+    },
+    {
+      "type": "delta",
+      "text": " "
+    },
+    {
+      "type": "delta",
+      "text": "[记忆4]"
+    },
+    {
+      "type": "delta",
+      "text": " 明确"
+    },
+    {
+      "type": "delta",
+      "text": "定义了"
+    },
+    {
+      "type": "delta",
+      "text": " SMA"
+    },
+    {
+      "type": "delta",
+      "text": "CT"
+    },
+    {
+      "type": "delta",
+      "text": " ("
+    },
+    {
+      "type": "delta",
+      "text": "空"
+    },
+    {
+      "type": "delta",
+      "text": "分"
+    },
+    {
+      "type": "delta",
+      "text": "利用率"
+    },
+    {
+      "type": "delta",
+      "text": ")"
+    },
+    {
+      "type": "delta",
+      "text": "：**"
+    },
+    {
+      "type": "delta",
+      "text": "定义"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "为"
+    },
+    {
+      "type": "delta",
+      "text": "采样"
+    },
+    {
+      "type": "delta",
+      "text": "窗口"
+    },
+    {
+      "type": "delta",
+      "text": "内"
+    },
+    {
+      "type": "delta",
+      "text": "每个"
+    },
+    {
+      "type": "delta",
+      "text": "工作时间"
+    },
+    {
+      "type": "delta",
+      "text": "求"
+    },
+    {
+      "type": "delta",
+      "text": "和"
+    },
+    {
+      "type": "delta",
+      "text": "的"
+    },
+    {
+      "type": "delta",
+      "text": "个数"
+    },
+    {
+      "type": "delta",
+      "text": "除以"
+    },
+    {
+      "type": "delta",
+      "text": "最大"
+    },
+    {
+      "type": "delta",
+      "text": "并行"
+    },
+    {
+      "type": "delta",
+      "text": "数量"
+    },
+    {
+      "type": "delta",
+      "text": "（"
+    },
+    {
+      "type": "delta",
+      "text": "1"
+    },
+    {
+      "type": "delta",
+      "text": "min"
+    },
+    {
+      "type": "delta",
+      "text": "均值"
+    },
+    {
+      "type": "delta",
+      "text": "）。"
+    },
+    {
+      "type": "delta",
+      "text": "\n    -"
+    },
+    {
+      "type": "delta",
+      "text": " "
+    },
+    {
+      "type": "delta",
+      "text": "[记忆4]"
+    },
+    {
+      "type": "delta",
+      "text": " 指出"
+    },
+    {
+      "type": "delta",
+      "text": "阈值"
+    },
+    {
+      "type": "delta",
+      "text": "判断"
+    },
+    {
+      "type": "delta",
+      "text": "标准"
+    },
+    {
+      "type": "delta",
+      "text": "：**"
+    },
+    {
+      "type": "delta",
+      "text": ">"
+    },
+    {
+      "type": "delta",
+      "text": "0"
+    },
+    {
+      "type": "delta",
+      "text": "."
+    },
+    {
+      "type": "delta",
+      "text": "8"
+    },
+    {
+      "type": "delta",
+      "text": " 表示"
+    },
+    {
+      "type": "delta",
+      "text": "效率高"
+    },
+    {
+      "type": "delta",
+      "text": "；"
+    },
+    {
+      "type": "delta",
+      "text": "<0"
+    },
+    {
+      "type": "delta",
+      "text": "."
+    },
+    {
+      "type": "delta",
+      "text": "5"
+    },
+    {
+      "type": "delta",
+      "text": " 表示"
+    },
+    {
+      "type": "delta",
+      "text": "不充分"
+    },
+    {
+      "type": "delta",
+      "text": "**。"
+    },
+    {
+      "type": "delta",
+      "text": "该"
+    },
+    {
+      "type": "delta",
+      "text": "指标"
+    },
+    {
+      "type": "delta",
+      "text": "用于"
+    },
+    {
+      "type": "delta",
+      "text": "评估"
+    },
+    {
+      "type": "delta",
+      "text": " GPU"
+    },
+    {
+      "type": "delta",
+      "text": " 工作"
+    },
+    {
+      "type": "delta",
+      "text": "负载"
+    },
+    {
+      "type": "delta",
+      "text": "的空间"
+    },
+    {
+      "type": "delta",
+      "text": "分布"
+    },
+    {
+      "type": "delta",
+      "text": "情况"
+    },
+    {
+      "type": "delta",
+      "text": "。"
+    },
+    {
+      "type": "delta",
+      "text": "\n    -"
+    },
+    {
+      "type": "delta",
+      "text": " "
+    },
+    {
+      "type": "delta",
+      "text": "[记忆2]"
+    },
+    {
+      "type": "delta",
+      "text": " 提供了"
+    },
+    {
+      "type": "delta",
+      "text": "实际"
+    },
+    {
+      "type": "delta",
+      "text": "数据"
+    },
+    {
+      "type": "delta",
+      "text": "佐证"
+    },
+    {
+      "type": "delta",
+      "text": "，"
+    },
+    {
+      "type": "delta",
+      "text": "例如"
+    },
+    {
+      "type": "delta",
+      "text": " X"
+    },
+    {
+      "type": "delta",
+      "text": "4"
+    },
+    {
+      "type": "delta",
+      "text": "0"
+    },
+    {
+      "type": "delta",
+      "text": " 卡"
+    },
+    {
+      "type": "delta",
+      "text": "型的"
+    },
+    {
+      "type": "delta",
+      "text": " SMA"
+    },
+    {
+      "type": "delta",
+      "text": "CT"
+    },
+    {
+      "type": "delta",
+      "text": "("
+    },
+    {
+      "type": "delta",
+      "text": "峰"
+    },
+    {
+      "type": "delta",
+      "text": "均值"
+    },
+    {
+      "type": "delta",
+      "text": ")"
+    },
+    {
+      "type": "delta",
+      "text": " 为"
+    },
+    {
+      "type": "delta",
+      "text": " **"
+    },
+    {
+      "type": "delta",
+      "text": "3"
+    },
+    {
+      "type": "delta",
+      "text": "2"
+    },
+    {
+      "type": "delta",
+      "text": "."
+    },
+    {
+      "type": "delta",
+      "text": "7"
+    },
+    {
+      "type": "delta",
+      "text": "%**"
+    },
+    {
+      "type": "delta",
+      "text": "（"
+    },
+    {
+      "type": "delta",
+      "text": "即"
+    },
+    {
+      "type": "delta",
+      "text": " 0"
+    },
+    {
+      "type": "delta",
+      "text": "."
+    },
+    {
+      "type": "delta",
+      "text": "3"
+    },
+    {
+      "type": "delta",
+      "text": "2"
+    },
+    {
+      "type": "delta",
+      "text": "7"
+    },
+    {
+      "type": "delta",
+      "text": "），"
+    },
+    {
+      "type": "delta",
+      "text": "远低于"
+    },
+    {
+      "type": "delta",
+      "text": "高效"
+    },
+    {
+      "type": "delta",
+      "text": "阈值"
+    },
+    {
+      "type": "delta",
+      "text": "；"
+    },
+    {
+      "type": "delta",
+      "text": "而"
+    },
+    {
+      "type": "delta",
+      "text": "容器"
+    },
+    {
+      "type": "delta",
+      "text": "部署"
+    },
+    {
+      "type": "delta",
+      "text": "平台的"
+    },
+    {
+      "type": "delta",
+      "text": " GPU"
+    },
+    {
+      "type": "delta",
+      "text": " 配额"
+    },
+    {
+      "type": "delta",
+      "text": "使用"
+    },
+    {
+      "type": "delta",
+      "text": "率"
+    },
+    {
+      "type": "delta",
+      "text": "约为"
+    },
+    {
+      "type": "delta",
+      "text": " **"
+    },
+    {
+      "type": "delta",
+      "text": "8"
+    },
+    {
+      "type": "delta",
+      "text": "2"
+    },
+    {
+      "type": "delta",
+      "text": "."
+    },
+    {
+      "type": "delta",
+      "text": "5"
+    },
+    {
+      "type": "delta",
+      "text": "%**"
+    },
+    {
+      "type": "delta",
+      "text": "，"
+    },
+    {
+      "type": "delta",
+      "text": "但"
+    },
+    {
+      "type": "delta",
+      "text": " SMA"
+    },
+    {
+      "type": "delta",
+      "text": "CT"
+    },
+    {
+      "type": "delta",
+      "text": " 仍"
+    },
+    {
+      "type": "delta",
+      "text": "显示"
+    },
+    {
+      "type": "delta",
+      "text": "存在"
+    },
+    {
+      "type": "delta",
+      "text": "大量"
+    },
+    {
+      "type": "delta",
+      "text": "资源"
+    },
+    {
+      "type": "delta",
+      "text": "闲置"
+    },
+    {
+      "type": "delta",
+      "text": "或未"
+    },
+    {
+      "type": "delta",
+      "text": "充分"
+    },
+    {
+      "type": "delta",
+      "text": "并"
+    },
+    {
+      "type": "delta",
+      "text": "行的"
+    },
+    {
+      "type": "delta",
+      "text": "情况"
+    },
+    {
+      "type": "delta",
+      "text": "。"
+    },
+    {
+      "type": "delta",
+      "text": "\n    -"
+    },
+    {
+      "type": "delta",
+      "text": " "
+    },
+    {
+      "type": "delta",
+      "text": "[记忆1](https://docs.corp.kuaishou.com/d/home/fcAAmNeDmIOF15Y6K80NVq0Wq)"
+    },
+    {
+      "type": "delta",
+      "text": " 和"
+    },
+    {
+      "type": "delta",
+      "text": " "
+    },
+    {
+      "type": "delta",
+      "text": "[记忆10]"
+    },
+    {
+      "type": "delta",
+      "text": " 均"
+    },
+    {
+      "type": "delta",
+      "text": "确认"
+    },
+    {
+      "type": "delta",
+      "text": "了"
+    },
+    {
+      "type": "delta",
+      "text": "该"
+    },
+    {
+      "type": "delta",
+      "text": "指标"
+    },
+    {
+      "type": "delta",
+      "text": "在"
+    },
+    {
+      "type": "delta",
+      "text": "“"
+    },
+    {
+      "type": "delta",
+      "text": "容器"
+    },
+    {
+      "type": "delta",
+      "text": "云"
+    },
+    {
+      "type": "delta",
+      "text": " GPU"
+    },
+    {
+      "type": "delta",
+      "text": " 指标"
+    },
+    {
+      "type": "delta",
+      "text": "采集"
+    },
+    {
+      "type": "delta",
+      "text": "项目"
+    },
+    {
+      "type": "delta",
+      "text": "”"
+    },
+    {
+      "type": "delta",
+      "text": "中的"
+    },
+    {
+      "type": "delta",
+      "text": "核心"
+    },
+    {
+      "type": "delta",
+      "text": "地位"
+    },
+    {
+      "type": "delta",
+      "text": "，"
+    },
+    {
+      "type": "delta",
+      "text": "用于"
+    },
+    {
+      "type": "delta",
+      "text": "解决"
+    },
+    {
+      "type": "delta",
+      "text": "现有"
+    },
+    {
+      "type": "delta",
+      "text": " G"
+    },
+    {
+      "type": "delta",
+      "text": "PUT"
+    },
+    {
+      "type": "delta",
+      "text": "L"
+    },
+    {
+      "type": "delta",
+      "text": "（"
+    },
+    {
+      "type": "delta",
+      "text": "任何"
+    },
+    {
+      "type": "delta",
+      "text": "部件"
+    },
+    {
+      "type": "delta",
+      "text": "被"
+    },
+    {
+      "type": "delta",
+      "text": "使用"
+    },
+    {
+      "type": "delta",
+      "text": "即"
+    },
+    {
+      "type": "delta",
+      "text": "算"
+    },
+    {
+      "type": "delta",
+      "text": "作"
+    },
+    {
+      "type": "delta",
+      "text": "利用"
+    },
+    {
+      "type": "delta",
+      "text": "）"
+    },
+    {
+      "type": "delta",
+      "text": "掩盖"
+    },
+    {
+      "type": "delta",
+      "text": " GPU"
+    },
+    {
+      "type": "delta",
+      "text": " 未被"
+    },
+    {
+      "type": "delta",
+      "text": "充分利用"
+    },
+    {
+      "type": "delta",
+      "text": "事实"
+    },
+    {
+      "type": "delta",
+      "text": "的问题"
+    },
+    {
+      "type": "delta",
+      "text": "。"
+    },
+    {
+      "type": "references",
+      "contexts": [
+        {
+          "capture_id": 0,
+          "doc_key": "document:80",
+          "text": "文档：容器云 GPU 指标采集项目\n类型：技术文档\n摘要：新增何采凡等核心成员的技术决策背景、SMACT/SMOCC的具体计算公式定义及DCGM字段映射细节。\nURL：https://docs.corp.kuaishou.com/d/home/fcAAmNeDmIOF15Y6K80NVq0Wq\n正文：# 容器云 GPU 指标采集项目\n\n## 1. 项目背景\n从现有指标 GPUTL 看，国内的 GPUTL 日均约 **42%**（注：原稿误记为 59%，海外数据仍约为 47%），海外的日均约 47%。由于 GPUTL 的物理意义指的是 GPU 任何部件被使用都算作利用，掩盖了 GPU 未被充分利用的事实。\n\n从海外 GPU 空分灰度数据分析发现：\n- **SMACC**（注：文档中统一指代 SMACT）平均约 **25%**；\n- 英伟达认为达到 **80%** 才算有效利用，因此提升空间巨大。国内情况类似但数据缺失。\n\n### 海外 GPU 利用率对比参考值 | | 日均 (GPUTL) | SMACT/SMACC | SMOCC |\n|---|---|---|---|\n|海外数据参考值|47%|23%-25%|10%-14% |\n|日峰均 |60%|31%|14% |\n|日峰值 |61%|32%|14% |\n\n### 国内 GPU 利用率现状：\n其次，GPU 是比较昂贵的计算设备，充分利用 GPU 能有力助力公司降本增效战略。当前日均 GPUTL 已接近或超过 **59%**（注：此处保留原稿对海外峰值的对比语境，但明确修正了国内基础数据为 42%），而 SMACT/SMACC 仍远低于英伟达定义的“高效利用”阈值（80%），说明存在大量资源闲置或未充分并行的情况。通过引入新指标体系，可以更精准地识别这些低效场景，从而优化调度策略。\n\n## 2. 技术架构 - 指标选择 @何采凡\n过去 GPU 利用率指标 GPUTL 仅基于时间维度，即使 **72** 个 SM（Streaming Multiprocessor）中只有 **1** 个 SM 处于被调度状态，GPU 利用率就被认为是 100％，不能反映整个硅片的充分利用程度。因此有必要引入 SMACT/SMOCC 指标来评估 gpu 工作负载的空间分布情况。\n\n### 项目组成员与决策：\n何采凡、周辉、孙宏亮、王耀等共同制定了本项目文档，确立了以 dynolog 替代 cadvisor 负责 dcgm 指标采集的核心技术决策。针对 SMACC/SMACT 利用率是否需达到 **80%** 才算充分利用的争议点，团队查阅了英伟达官方文档确认标准。\n\n### SMACT/SMOCC 核心定义与计算逻辑：\n**SMACT（SM Activity Count / 空分利用率）**：衡量硅片内不同 SM 的实际活跃程度。其定义为：**采样窗口内每个工作时间求和的个数除以最大并行数量**。高值表示更多 SM 在并行工作；低值则意味着大部分 SM 处于空闲或等待状态。\n- **阈值标准**：大于 **0.8** 表示 GPU 利用效率较高，小于 **0.5** 则表示 GPU 利用不充分（参考英伟达标准）。\n\n**S",
+          "score": 0.023651507139079854,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 80,
+          "document_id": 80,
+          "app_name": null,
+          "win_title": null,
+          "url": "https://docs.corp.kuaishou.com/d/home/fcAAmNeDmIOF15Y6K80NVq0Wq",
+          "source_url": "https://docs.corp.kuaishou.com/d/home/fcAAmNeDmIOF15Y6K80NVq0Wq",
+          "title": "容器云 GPU 指标采集项目",
+          "doc_type": "技术文档",
+          "time": 1785821290253,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "新增何采凡等核心成员的技术决策背景、SMACT/SMOCC的具体计算公式定义及DCGM字段映射细节。",
+          "overview": "新增何采凡等核心成员的技术决策背景、SMACT/SMOCC的具体计算公式定义及DCGM字段映射细节。",
+          "category": "技术文档",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "562",
+            "666",
+            "736",
+            "738",
+            "792",
+            "847",
+            "1079",
+            "1081",
+            "1082",
+            "2450"
+          ],
+          "linked_knowledge_ids": [
+            "229",
+            "280",
+            "316",
+            "318",
+            "350",
+            "381",
+            "482",
+            "483",
+            "485",
+            "1567"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:366",
+          "text": "文档：电商 GPU 使用情况一览 (2026-07-21)\n类型：技术文档\n摘要：基于最新捕获的仪表盘数据，补充了详细的卡型分布（含 X40D/L20/T4/A10/V100/X50/C550/5000-PRO）及更完整的子领域列表，并记录了用户准备向国成汇报 SMACT 指标现状的相关会议背景。\n正文：# 电商 GPU 使用情况一览\n**日期**: 2026-07-21 (数据时效：T-2)\n**更新时间**: 每天 10:30\n\n## 总体概览\n### 按部署平台分布\n| 部署平台 | 卡数 | 占比 | GPU 配额使用率 |\n| :--- | :--- | :--- | :--- |\n| **容器部署** | 879 | 42.5% | ~82.5% |\n| **万擎** | 833 | 40.3% | ~69-100% (部分饱和) |\n| **主机部署** | 220 | 10.6% | 100% (完全饱和) |\n| **KML** | 136 | 6.58% | ~70%\n\n### 按 GPU 卡型分布\n| GPU 型号 | 卡数 | GPU 配额使用率 | UTIL(峰均值) | SMACT(峰均值) | DRAMACT(峰均值) |\n| :--- | :--- | :--- | :--- | :--- | :--- |\n| X40 | 720 | 76.9% | 67.1% | 32.7% | 2.6%\n| 4090 | 527 | 81.9% | 46.2% | 15.3% | 17.3%\n| X40-QUARTER | inf | inf | - | - | - |\n\n### 按子领域分布 (部分)\n| 子领域 | GPU 卡数 |\n| :--- | :--- |\n| 增长运营域 | 459 |\n| 电商智能直播域 | 442 |\n| 商家运营域 | 349 |\n\n## 关键指标说明\n- **UTIL (通用利用率)**: 峰均值约 60%，日均值波动较大（15%-29%）。\n- **SMACT**: 电商整体 SMACT 利用率偏低，峰均值约 39.7%，日均值约 29%。\n- **配额状态**: 万擎和主机部署平台已接近或达到 GPU 配额上限。\n\n- **按 GPU 卡型分布 (补充明细)**\n| GPU 型号 | 卡数 | GPU 配额使用率 | UTIL(峰均值) | SMACT(峰均值) |\n| :--- | :--- | :--- | :--- | :--- |\n| X40D | 307 | 91.5% | 52.5% | 18.5% |\n| L20 | 288 | 74.0% | 37.6% | 10.9% |\n| T4 | 107 | 87.9% | 12.7% | 8.6% |\n| A10 | 47 | 98.9% | 12.7% | 2.3% |\n| V100 | 8 | 100% | - | - |\n| X50 | 8 | 100% | 43.3% | 4.4% |\n| C550 | inf | - | - | - |\n| 5000-PRO | inf | - | - | - |\n\n> **注**：新增卡型数据",
+          "score": 0.023506081438392383,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 366,
+          "document_id": 366,
+          "app_name": null,
+          "win_title": null,
+          "url": null,
+          "source_url": null,
+          "title": "电商 GPU 使用情况一览 (2026-07-21)",
+          "doc_type": "技术文档",
+          "time": 1785060327712,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "基于最新捕获的仪表盘数据，补充了详细的卡型分布（含 X40D/L20/T4/A10/V100/X50/C550/5000-PRO）及更完整的子领域列表，并记录了用户准备向国成汇报 SMACT 指标现状的相关会议背景。",
+          "overview": "基于最新捕获的仪表盘数据，补充了详细的卡型分布（含 X40D/L20/T4/A10/V100/X50/C550/5000-PRO）及更完整的子领域列表，并记录了用户准备向国成汇报 SMACT 指标现状的相关会议背景。",
+          "category": "技术文档",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "1445"
+          ],
+          "linked_knowledge_ids": [
+            "832"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "bake_knowledge:483",
+          "text": "知识：关于容器云 GPU 资源利用效率的三种核心指标及其物理意义和阈值判断标准的知识沉淀。\n摘要：关于容器云 GPU 资源利用效率的三种核心指标及其物理意义和阈值判断标准的知识沉淀。\n详情：# 背景与痛点\n当前依赖的时间维度指标（如 DCGM_FI_PROF_SM_ACTIVE/GPUTL）存在物理意义缺陷：只要 GPU 任何部件被调度即视为使用，无法反映硅片整体未被充分利用的事实。\n- **数据现状**：海外日均 SMACC 约 25%（英伟达认为需>80%），国内情况类似但缺乏有效对比数据。提升空间巨大且对降本增效至关重要。\n\n# 新指标定义与适用场景\n## SMACT (空分利用率)\n- **定义**：采样窗口内每个工作时间求和的个数除以最大并行数量（1min均值）。\n- **阈值判断**：>0.8 表示效率高；<0.5 表示不充分。用于评估 GPU 工作负载的空间分布情况。\n\n## SMOCC (饱和度指标)\n- **定义**：采样窗口内每个并行执行的数量求和的个数除以最大并行数量（1min均值）。\n- **适用场景**：需结合具体瓶颈分析，判断是否存在计算瓶颈导致的 warp 堆积问题。当瓶颈不在计算时，高值表示并行度高；否则可能指示计算瓶颈导致 SM 中无法及时退出全部 warps。\n\n# DCGM 指标清单参考\n| Metric | Definition |\n| :--- | :--- |\n| PROF_GR_ENGINE_ACTIVE (ID:1001) | Graphics Engine Activity，非瞬时值。A value of 0.8 or greater is necessary, but not sufficient for effective use.​|\n| PROF_SM_ACTIVE (ID:1002) | SM Activity，fraction of time at least one warp was active。​|\n| PROF_SM_OCCUPANCY (ID:1003) | SM Occupancy, relative to max concurrent warps.​|\n\n# 证据依据\n- **来源**：容器云 GPU 指标采集项目技术架构文档（更新于 2025 年 2 月 24 日）。\n- **关键决策人**：何采凡主导，周辉、孙宏亮参与讨论。\n\n---\n\n# GPU 利用率指标体系\n## 核心问题\nGPUTL 仅基于时间维度，即使单个 SM 处于调度状态也被视为高利用率，掩盖了硅片整体未被充",
+          "score": 0.019855316757971624,
+          "source": "bake_knowledge",
+          "source_type": "bake_knowledge",
+          "knowledge_id": null,
+          "artifact_id": 483,
+          "document_id": null,
+          "app_name": null,
+          "win_title": null,
+          "url": null,
+          "source_url": null,
+          "title": "关于容器云 GPU 资源利用效率的三种核心指标及其物理意义和阈值判断标准的知识沉淀。",
+          "doc_type": null,
+          "time": 1784787156732,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "关于容器云 GPU 资源利用效率的三种核心指标及其物理意义和阈值判断标准的知识沉淀。",
+          "overview": "关于容器云 GPU 资源利用效率的三种核心指标及其物理意义和阈值判断标准的知识沉淀。",
+          "category": null,
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": 5,
+          "source_timeline_ids": [
+            "1081"
+          ],
+          "linked_knowledge_ids": null
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:109",
+          "text": "文档：容器云 GPU 指标采集项目\n类型：技术文档\n摘要：快手内部关于常驻采集 GPU 利用率指标定义的技术文档，包含 SMACT、SMOCC 等核心公式及 DCGM 指标说明与优化建议。\n正文：# 容器云 GPU 指标采集项\n\n## 常驻采集 GPU 利用率指标定义\n\n### 指标含义\n| 指标 | 含义 |\n| :--- | :--- |\n| **GPU.GPUTL** | 采样窗口内 GPU 任意单元活动时间求和（即采样窗口时间） |\n| **GPU.SMACT** | 采样时间窗口每个 SM 工作时间求和 = GPU 的 SM 个数 × 采样时间窗口 |\n| **GPU.SMOCC** | 采样时间窗口每个 SM 并行执行的 warp 数量求和 = GPU 的 SM 个数 × 每 sm 最大并行 warp 数量 × 采样时间窗口 |\n\n### DCGM 指标清单定义\n| Metric | Graphics Engine Activity Definition |\n| :--- | :--- |\n| **DCGM Field Name (PROF_GR_ENGINE_ACTIVE, ID: 1001)** | The fraction of time any portion of the graphics or compute engines were active. <br>The graphics engine is active if a graphics/compute context is bound and the graphics/compute pipe is busy. The value represents an average over a time interval and is not an instantaneous value. |\n\n### 采样窗口与利用率评判标准\n#### 1. 时分利用率指标（基于前 1 秒或前 1/6 秒均值）\n- **规则**：越高表示利用越充分。\n- **局限**：GPU SM 有数十个，无法说明 SM 是否被充分利用；采样窗口小，无法说明真实的时分利用率。\n\n#### 2. 空分利用率指标（基于 1min 均值）\n- **高效标准**：该值大于 0.8 表示 GPU 利用效率较高。\n- **不充分标准**：小于 0.5 则表示 GPU 利用不充分。\n\n#### 3. 饱和度指标\n- **规则**：需要结合具体瓶颈分析。当瓶颈不在计算时，越高表示并行度越高；否则可能表示计算瓶颈导致 warp 堆积在 SM 中不能及时退出。\n\n---\n\n## DCGM Field Name (DCGM_FL*) and ID PROF_GR_ENGINE_ACTIVE (ID: 1001) Activity**出发，而不是继续追求 GPUTL。下面按 ROI（收益/实施成本）排序给出建议。\n\n### 优化优先级与技术方向预估提升幅度\n| 技术方向 | 具体方案 | 预估提升 |\n| :--- | :-",
+          "score": 101.8060479407375,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 109,
+          "document_id": 109,
+          "app_name": null,
+          "win_title": null,
+          "url": null,
+          "source_url": null,
+          "title": "容器云 GPU 指标采集项目",
+          "doc_type": "技术文档",
+          "time": 1784369081953,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "快手内部关于常驻采集 GPU 利用率指标定义的技术文档，包含 SMACT、SMOCC 等核心公式及 DCGM 指标说明与优化建议。",
+          "overview": "快手内部关于常驻采集 GPU 利用率指标定义的技术文档，包含 SMACT、SMOCC 等核心公式及 DCGM 指标说明与优化建议。",
+          "category": "技术文档",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "737"
+          ],
+          "linked_knowledge_ids": [
+            "317"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "done",
+      "answer": "## 用户问题理解\nSMACT（空分利用率）是容器云 GPU 指标采集项目中的核心量化指标，用于衡量采样窗口内每个 SM（流多处理器）的工作时间总和与最大并行数量的比值。\n\n## 回答\n- **结论**：SMACT 定义为“采样窗口内每个工作时间求和的个数除以最大并行数量”，其物理意义是评估 GPU 工作负载的空间分布情况；当 SMACT > 0.8（即>80%）时视为效率高，<0.5 表示不充分。\n- **关键依据**：\n    - [记忆4] 明确定义了 SMACT (空分利用率)：**定义**为采样窗口内每个工作时间求和的个数除以最大并行数量（1min均值）。\n    - [记忆4] 指出阈值判断标准：**>0.8 表示效率高；<0.5 表示不充分**。该指标用于评估 GPU 工作负载的空间分布情况。\n    - [记忆2] 提供了实际数据佐证，例如 X40 卡型的 SMACT(峰均值) 为 **32.7%**（即 0.327），远低于高效阈值；而容器部署平台的 GPU 配额使用率约为 **82.5%**，但 SMACT 仍显示存在大量资源闲置或未充分并行的情况。\n    - [记忆1](https://docs.corp.kuaishou.com/d/home/fcAAmNeDmIOF15Y6K80NVq0Wq) 和 [记忆10] 均确认了该指标在“容器云 GPU 指标采集项目”中的核心地位，用于解决现有 GPUTL（任何部件被使用即算作利用）掩盖 GPU 未被充分利用事实的问题。",
+      "contexts": [
+        {
+          "capture_id": 0,
+          "doc_key": "floating-assist:1788692540468",
+          "text": "什么是SMACT？",
+          "score": 1.0,
+          "source": "floating_assist",
+          "source_type": "floating_assist",
+          "title": "咨询附件",
+          "screenshot_path": null,
+          "screenshot_width": null,
+          "screenshot_height": null,
+          "attachments": []
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:80",
+          "text": "文档：容器云 GPU 指标采集项目\n类型：技术文档\n摘要：新增何采凡等核心成员的技术决策背景、SMACT/SMOCC的具体计算公式定义及DCGM字段映射细节。\nURL：https://docs.corp.kuaishou.com/d/home/fcAAmNeDmIOF15Y6K80NVq0Wq\n正文：# 容器云 GPU 指标采集项目\n\n## 1. 项目背景\n从现有指标 GPUTL 看，国内的 GPUTL 日均约 **42%**（注：原稿误记为 59%，海外数据仍约为 47%），海外的日均约 47%。由于 GPUTL 的物理意义指的是 GPU 任何部件被使用都算作利用，掩盖了 GPU 未被充分利用的事实。\n\n从海外 GPU 空分灰度数据分析发现：\n- **SMACC**（注：文档中统一指代 SMACT）平均约 **25%**；\n- 英伟达认为达到 **80%** 才算有效利用，因此提升空间巨大。国内情况类似但数据缺失。\n\n### 海外 GPU 利用率对比参考值 | | 日均 (GPUTL) | SMACT/SMACC | SMOCC |\n|---|---|---|---|\n|海外数据参考值|47%|23%-25%|10%-14% |\n|日峰均 |60%|31%|14% |\n|日峰值 |61%|32%|14% |\n\n### 国内 GPU 利用率现状：\n其次，GPU 是比较昂贵的计算设备，充分利用 GPU 能有力助力公司降本增效战略。当前日均 GPUTL 已接近或超过 **59%**（注：此处保留原稿对海外峰值的对比语境，但明确修正了国内基础数据为 42%），而 SMACT/SMACC 仍远低于英伟达定义的“高效利用”阈值（80%），说明存在大量资源闲置或未充分并行的情况。通过引入新指标体系，可以更精准地识别这些低效场景，从而优化调度策略。\n\n## 2. 技术架构 - 指标选择 @何采凡\n过去 GPU 利用率指标 GPUTL 仅基于时间维度，即使 **72** 个 SM（Streaming Multiprocessor）中只有 **1** 个 SM 处于被调度状态，GPU 利用率就被认为是 100％，不能反映整个硅片的充分利用程度。因此有必要引入 SMACT/SMOCC 指标来评估 gpu 工作负载的空间分布情况。\n\n### 项目组成员与决策：\n何采凡、周辉、孙宏亮、王耀等共同制定了本项目文档，确立了以 dynolog 替代 cadvisor 负责 dcgm 指标采集的核心技术决策。针对 SMACC/SMACT 利用率是否需达到 **80%** 才算充分利用的争议点，团队查阅了英伟达官方文档确认标准。\n\n### SMACT/SMOCC 核心定义与计算逻辑：\n**SMACT（SM Activity Count / 空分利用率）**：衡量硅片内不同 SM 的实际活跃程度。其定义为：**采样窗口内每个工作时间求和的个数除以最大并行数量**。高值表示更多 SM 在并行工作；低值则意味着大部分 SM 处于空闲或等待状态。\n- **阈值标准**：大于 **0.8** 表示 GPU 利用效率较高，小于 **0.5** 则表示 GPU 利用不充分（参考英伟达标准）。\n\n**S",
+          "score": 0.023651507139079854,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 80,
+          "document_id": 80,
+          "app_name": null,
+          "win_title": null,
+          "url": "https://docs.corp.kuaishou.com/d/home/fcAAmNeDmIOF15Y6K80NVq0Wq",
+          "source_url": "https://docs.corp.kuaishou.com/d/home/fcAAmNeDmIOF15Y6K80NVq0Wq",
+          "title": "容器云 GPU 指标采集项目",
+          "doc_type": "技术文档",
+          "time": 1785821290253,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "新增何采凡等核心成员的技术决策背景、SMACT/SMOCC的具体计算公式定义及DCGM字段映射细节。",
+          "overview": "新增何采凡等核心成员的技术决策背景、SMACT/SMOCC的具体计算公式定义及DCGM字段映射细节。",
+          "category": "技术文档",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "562",
+            "666",
+            "736",
+            "738",
+            "792",
+            "847",
+            "1079",
+            "1081",
+            "1082",
+            "2450"
+          ],
+          "linked_knowledge_ids": [
+            "229",
+            "280",
+            "316",
+            "318",
+            "350",
+            "381",
+            "482",
+            "483",
+            "485",
+            "1567"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:366",
+          "text": "文档：电商 GPU 使用情况一览 (2026-07-21)\n类型：技术文档\n摘要：基于最新捕获的仪表盘数据，补充了详细的卡型分布（含 X40D/L20/T4/A10/V100/X50/C550/5000-PRO）及更完整的子领域列表，并记录了用户准备向国成汇报 SMACT 指标现状的相关会议背景。\n正文：# 电商 GPU 使用情况一览\n**日期**: 2026-07-21 (数据时效：T-2)\n**更新时间**: 每天 10:30\n\n## 总体概览\n### 按部署平台分布\n| 部署平台 | 卡数 | 占比 | GPU 配额使用率 |\n| :--- | :--- | :--- | :--- |\n| **容器部署** | 879 | 42.5% | ~82.5% |\n| **万擎** | 833 | 40.3% | ~69-100% (部分饱和) |\n| **主机部署** | 220 | 10.6% | 100% (完全饱和) |\n| **KML** | 136 | 6.58% | ~70%\n\n### 按 GPU 卡型分布\n| GPU 型号 | 卡数 | GPU 配额使用率 | UTIL(峰均值) | SMACT(峰均值) | DRAMACT(峰均值) |\n| :--- | :--- | :--- | :--- | :--- | :--- |\n| X40 | 720 | 76.9% | 67.1% | 32.7% | 2.6%\n| 4090 | 527 | 81.9% | 46.2% | 15.3% | 17.3%\n| X40-QUARTER | inf | inf | - | - | - |\n\n### 按子领域分布 (部分)\n| 子领域 | GPU 卡数 |\n| :--- | :--- |\n| 增长运营域 | 459 |\n| 电商智能直播域 | 442 |\n| 商家运营域 | 349 |\n\n## 关键指标说明\n- **UTIL (通用利用率)**: 峰均值约 60%，日均值波动较大（15%-29%）。\n- **SMACT**: 电商整体 SMACT 利用率偏低，峰均值约 39.7%，日均值约 29%。\n- **配额状态**: 万擎和主机部署平台已接近或达到 GPU 配额上限。\n\n- **按 GPU 卡型分布 (补充明细)**\n| GPU 型号 | 卡数 | GPU 配额使用率 | UTIL(峰均值) | SMACT(峰均值) |\n| :--- | :--- | :--- | :--- | :--- |\n| X40D | 307 | 91.5% | 52.5% | 18.5% |\n| L20 | 288 | 74.0% | 37.6% | 10.9% |\n| T4 | 107 | 87.9% | 12.7% | 8.6% |\n| A10 | 47 | 98.9% | 12.7% | 2.3% |\n| V100 | 8 | 100% | - | - |\n| X50 | 8 | 100% | 43.3% | 4.4% |\n| C550 | inf | - | - | - |\n| 5000-PRO | inf | - | - | - |\n\n> **注**：新增卡型数据",
+          "score": 0.023506081438392383,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 366,
+          "document_id": 366,
+          "app_name": null,
+          "win_title": null,
+          "url": null,
+          "source_url": null,
+          "title": "电商 GPU 使用情况一览 (2026-07-21)",
+          "doc_type": "技术文档",
+          "time": 1785060327712,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "基于最新捕获的仪表盘数据，补充了详细的卡型分布（含 X40D/L20/T4/A10/V100/X50/C550/5000-PRO）及更完整的子领域列表，并记录了用户准备向国成汇报 SMACT 指标现状的相关会议背景。",
+          "overview": "基于最新捕获的仪表盘数据，补充了详细的卡型分布（含 X40D/L20/T4/A10/V100/X50/C550/5000-PRO）及更完整的子领域列表，并记录了用户准备向国成汇报 SMACT 指标现状的相关会议背景。",
+          "category": "技术文档",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "1445"
+          ],
+          "linked_knowledge_ids": [
+            "832"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "bake_knowledge:483",
+          "text": "知识：关于容器云 GPU 资源利用效率的三种核心指标及其物理意义和阈值判断标准的知识沉淀。\n摘要：关于容器云 GPU 资源利用效率的三种核心指标及其物理意义和阈值判断标准的知识沉淀。\n详情：# 背景与痛点\n当前依赖的时间维度指标（如 DCGM_FI_PROF_SM_ACTIVE/GPUTL）存在物理意义缺陷：只要 GPU 任何部件被调度即视为使用，无法反映硅片整体未被充分利用的事实。\n- **数据现状**：海外日均 SMACC 约 25%（英伟达认为需>80%），国内情况类似但缺乏有效对比数据。提升空间巨大且对降本增效至关重要。\n\n# 新指标定义与适用场景\n## SMACT (空分利用率)\n- **定义**：采样窗口内每个工作时间求和的个数除以最大并行数量（1min均值）。\n- **阈值判断**：>0.8 表示效率高；<0.5 表示不充分。用于评估 GPU 工作负载的空间分布情况。\n\n## SMOCC (饱和度指标)\n- **定义**：采样窗口内每个并行执行的数量求和的个数除以最大并行数量（1min均值）。\n- **适用场景**：需结合具体瓶颈分析，判断是否存在计算瓶颈导致的 warp 堆积问题。当瓶颈不在计算时，高值表示并行度高；否则可能指示计算瓶颈导致 SM 中无法及时退出全部 warps。\n\n# DCGM 指标清单参考\n| Metric | Definition |\n| :--- | :--- |\n| PROF_GR_ENGINE_ACTIVE (ID:1001) | Graphics Engine Activity，非瞬时值。A value of 0.8 or greater is necessary, but not sufficient for effective use.​|\n| PROF_SM_ACTIVE (ID:1002) | SM Activity，fraction of time at least one warp was active。​|\n| PROF_SM_OCCUPANCY (ID:1003) | SM Occupancy, relative to max concurrent warps.​|\n\n# 证据依据\n- **来源**：容器云 GPU 指标采集项目技术架构文档（更新于 2025 年 2 月 24 日）。\n- **关键决策人**：何采凡主导，周辉、孙宏亮参与讨论。\n\n---\n\n# GPU 利用率指标体系\n## 核心问题\nGPUTL 仅基于时间维度，即使单个 SM 处于调度状态也被视为高利用率，掩盖了硅片整体未被充",
+          "score": 0.019855316757971624,
+          "source": "bake_knowledge",
+          "source_type": "bake_knowledge",
+          "knowledge_id": null,
+          "artifact_id": 483,
+          "document_id": null,
+          "app_name": null,
+          "win_title": null,
+          "url": null,
+          "source_url": null,
+          "title": "关于容器云 GPU 资源利用效率的三种核心指标及其物理意义和阈值判断标准的知识沉淀。",
+          "doc_type": null,
+          "time": 1784787156732,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "关于容器云 GPU 资源利用效率的三种核心指标及其物理意义和阈值判断标准的知识沉淀。",
+          "overview": "关于容器云 GPU 资源利用效率的三种核心指标及其物理意义和阈值判断标准的知识沉淀。",
+          "category": null,
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": 5,
+          "source_timeline_ids": [
+            "1081"
+          ],
+          "linked_knowledge_ids": null
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:109",
+          "text": "文档：容器云 GPU 指标采集项目\n类型：技术文档\n摘要：快手内部关于常驻采集 GPU 利用率指标定义的技术文档，包含 SMACT、SMOCC 等核心公式及 DCGM 指标说明与优化建议。\n正文：# 容器云 GPU 指标采集项\n\n## 常驻采集 GPU 利用率指标定义\n\n### 指标含义\n| 指标 | 含义 |\n| :--- | :--- |\n| **GPU.GPUTL** | 采样窗口内 GPU 任意单元活动时间求和（即采样窗口时间） |\n| **GPU.SMACT** | 采样时间窗口每个 SM 工作时间求和 = GPU 的 SM 个数 × 采样时间窗口 |\n| **GPU.SMOCC** | 采样时间窗口每个 SM 并行执行的 warp 数量求和 = GPU 的 SM 个数 × 每 sm 最大并行 warp 数量 × 采样时间窗口 |\n\n### DCGM 指标清单定义\n| Metric | Graphics Engine Activity Definition |\n| :--- | :--- |\n| **DCGM Field Name (PROF_GR_ENGINE_ACTIVE, ID: 1001)** | The fraction of time any portion of the graphics or compute engines were active. <br>The graphics engine is active if a graphics/compute context is bound and the graphics/compute pipe is busy. The value represents an average over a time interval and is not an instantaneous value. |\n\n### 采样窗口与利用率评判标准\n#### 1. 时分利用率指标（基于前 1 秒或前 1/6 秒均值）\n- **规则**：越高表示利用越充分。\n- **局限**：GPU SM 有数十个，无法说明 SM 是否被充分利用；采样窗口小，无法说明真实的时分利用率。\n\n#### 2. 空分利用率指标（基于 1min 均值）\n- **高效标准**：该值大于 0.8 表示 GPU 利用效率较高。\n- **不充分标准**：小于 0.5 则表示 GPU 利用不充分。\n\n#### 3. 饱和度指标\n- **规则**：需要结合具体瓶颈分析。当瓶颈不在计算时，越高表示并行度越高；否则可能表示计算瓶颈导致 warp 堆积在 SM 中不能及时退出。\n\n---\n\n## DCGM Field Name (DCGM_FL*) and ID PROF_GR_ENGINE_ACTIVE (ID: 1001) Activity**出发，而不是继续追求 GPUTL。下面按 ROI（收益/实施成本）排序给出建议。\n\n### 优化优先级与技术方向预估提升幅度\n| 技术方向 | 具体方案 | 预估提升 |\n| :--- | :-",
+          "score": 101.8060479407375,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 109,
+          "document_id": 109,
+          "app_name": null,
+          "win_title": null,
+          "url": null,
+          "source_url": null,
+          "title": "容器云 GPU 指标采集项目",
+          "doc_type": "技术文档",
+          "time": 1784369081953,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "快手内部关于常驻采集 GPU 利用率指标定义的技术文档，包含 SMACT、SMOCC 等核心公式及 DCGM 指标说明与优化建议。",
+          "overview": "快手内部关于常驻采集 GPU 利用率指标定义的技术文档，包含 SMACT、SMOCC 等核心公式及 DCGM 指标说明与优化建议。",
+          "category": "技术文档",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "737"
+          ],
+          "linked_knowledge_ids": [
+            "317"
+          ]
+        }
+      ],
+      "model": "mbem-v1-local",
+      "done_reason": "stop",
+      "output_truncated": false,
+      "elapsed_ms": 27842,
+      "inference_elapsed_ms": 17603
+    }
+  ]
+}

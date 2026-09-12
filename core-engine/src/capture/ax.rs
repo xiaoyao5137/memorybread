@@ -865,18 +865,26 @@ mod macos_impl {
         let app_name = info.app_name.clone();
         let app_bundle_id = info.app_bundle_id.clone();
         let win_title = info.win_title.clone();
-        if let Some((url, title)) =
-            get_browser_page_metadata(app_bundle_id.as_deref(), app_name.as_deref())
-        {
-            info.url = Some(url);
-            info.webpage_title = Some(title);
-        }
+        let browser_metadata_before =
+            get_browser_page_metadata(app_bundle_id.as_deref(), app_name.as_deref());
         info.extracted_text = extract_ax_text_for_context(
             app_name.as_deref(),
             app_bundle_id.as_deref(),
             win_title.as_deref(),
         )
         .map(|result| result.text);
+        if browser_metadata_before.is_some() {
+            let browser_metadata_after =
+                get_browser_page_metadata(app_bundle_id.as_deref(), app_name.as_deref());
+            if browser_metadata_before != browser_metadata_after {
+                debug!("浏览器标签页在正文提取期间发生变化，丢弃本轮错配上下文");
+                return None;
+            }
+            if let Some((url, title)) = browser_metadata_after {
+                info.url = Some(url);
+                info.webpage_title = Some(title);
+            }
+        }
         Some(info)
     }
 

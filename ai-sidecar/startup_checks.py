@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from model_manager import ModelManager
+from runtime_endpoints import service_base_url
 
 logger = logging.getLogger(__name__)
 _model_manager = ModelManager()
@@ -52,7 +53,7 @@ def check_model_available(model_name: Optional[str] = None) -> bool:
     try:
         import urllib.request
         import json
-        with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=5) as resp:
+        with urllib.request.urlopen(service_base_url("ollama") + "/api/tags", timeout=5) as resp:
             data = json.loads(resp.read().decode())
         for model in data.get('models', []):
             candidate = model.get('model') or model.get('name', '')

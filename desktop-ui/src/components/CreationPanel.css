@@ -318,6 +318,34 @@
   min-width: 0;
 }
 
+.creation-document-header {
+  min-width: 0;
+  gap: 12px;
+}
+
+.creation-document-header__title {
+  min-width: 0;
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.creation-document-header__title > span {
+  flex: 0 0 auto;
+}
+
+.creation-document-header__actions {
+  min-width: 0;
+  flex: 0 1 auto;
+  justify-content: flex-end;
+}
+
+.creation-document-header__actions > button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .creation-document-content {
   cursor: text;
   user-select: text;
@@ -2517,7 +2545,7 @@ h6.creation-latest-change {
     gap: 8px;
   }
 
-  .creation-document-header > div {
+  .creation-document-header__actions {
     min-width: 0;
     flex-wrap: wrap;
     justify-content: flex-end;
@@ -2694,7 +2722,7 @@ h6.creation-latest-change {
     gap: 8px;
   }
 
-  .creation-document-header > div {
+  .creation-document-header__actions {
     min-width: 0;
     flex-wrap: wrap;
     justify-content: flex-end;
@@ -2735,6 +2763,7 @@ h6.creation-latest-change {
   width: 100%;
   min-width: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 4px;
 }
 
@@ -2745,6 +2774,11 @@ h6.creation-latest-change {
 
 .creation-brainstorm-card {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
   gap: 12px;
   margin: 0;
   padding: 16px;
@@ -2774,6 +2808,7 @@ h6.creation-latest-change {
 .creation-brainstorm-card__loading-copy {
   min-width: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 4px;
 }
 
@@ -2791,20 +2826,21 @@ h6.creation-latest-change {
 }
 
 .creation-brainstorm-card > header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "eyebrow actions" "prompt prompt";
+  align-items: center;
+  gap: 5px 12px;
 }
 
 .creation-brainstorm-card > header > div {
-  display: grid;
-  gap: 5px;
+  display: contents;
 }
 
 .creation-brainstorm-card > header > .creation-brainstorm-card__header-actions {
   display: flex;
-  flex: 0 0 auto;
+  grid-area: actions;
+  justify-self: end;
   align-items: center;
   gap: 8px;
 }
@@ -2846,12 +2882,19 @@ h6.creation-latest-change {
 }
 
 .creation-brainstorm-card > header strong {
+  grid-area: prompt;
+  min-width: 0;
   color: var(--mb-text-primary);
   font-size: 15px;
   line-height: 1.5;
 }
 
+.creation-brainstorm-card > header .creation-brainstorm-card__eyebrow {
+  grid-area: eyebrow;
+}
+
 .creation-brainstorm-card__eyebrow {
+  min-width: 0;
   color: #a45d22;
   font-size: 11px;
   font-weight: 700;
@@ -2863,6 +2906,69 @@ h6.creation-latest-change {
   color: var(--mb-text-secondary);
   font-size: 12px;
   line-height: 1.55;
+}
+
+.creation-brainstorm-context {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  overflow-wrap: anywhere;
+}
+
+.creation-brainstorm-prompt {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.creation-brainstorm-copy-toggle {
+  display: block;
+  margin: 4px 0 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--mb-text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+}
+
+.creation-brainstorm-copy-details {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--mb-text-secondary);
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.creation-brainstorm-copy-details > summary {
+  width: fit-content;
+  max-width: 100%;
+  cursor: pointer;
+}
+
+.creation-brainstorm-copy-details > p {
+  margin: 7px 0 0;
+  white-space: pre-wrap;
+}
+
+.creation-brainstorm-choice-details {
+  margin-top: -3px;
+  padding: 0 10px 5px 39px;
+}
+
+.creation-brainstorm-choice-details__label {
+  color: var(--mb-text-primary);
+  font-weight: 600;
+}
+
+.creation-brainstorm-copy-toggle:focus-visible,
+.creation-brainstorm-copy-details > summary:focus-visible {
+  outline: 2px solid var(--mb-brand-strong);
+  outline-offset: 3px;
+  border-radius: 3px;
 }
 
 .creation-inline-brainstorm-card {
@@ -2974,55 +3080,10 @@ h6.creation-latest-change {
   cursor: pointer;
 }
 
-.creation-brainstorm-decisions {
-  display: grid;
-  gap: 5px;
-  padding: 8px;
-  border: 1px solid rgba(164, 93, 34, .14);
-  border-radius: 8px;
-  background: rgba(164, 93, 34, .035);
-}
-
-.creation-brainstorm-decisions > div {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.creation-brainstorm-decisions > div > span {
-  display: grid;
-  min-width: 0;
-  gap: 2px;
-}
-
-.creation-brainstorm-decisions small {
-  color: #a45d22;
-  font-size: 9px;
-  font-weight: 700;
-}
-
-.creation-brainstorm-decisions strong {
-  overflow: hidden;
-  color: var(--mb-text-primary);
-  font-size: 11px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.creation-brainstorm-decisions button {
-  padding: 3px 6px;
-  border: 0;
-  background: transparent;
-  color: #a45d22;
-  font-size: 10px;
-  font-weight: 650;
-  cursor: pointer;
-}
-
 .creation-brainstorm-options {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 7px;
 }
 
@@ -3031,6 +3092,11 @@ h6.creation-latest-change {
   grid-template-columns: 20px minmax(0, 1fr);
   gap: 9px;
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
+  white-space: normal;
   padding: 10px;
   border: 1px solid var(--mb-border-strong);
   border-radius: 8px;
@@ -3068,17 +3134,27 @@ h6.creation-latest-change {
 
 .creation-brainstorm-options > button > span:last-child {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 3px;
 }
 
 .creation-brainstorm-options > button strong {
   display: flex;
-  align-items: center;
+  min-width: 0;
+  align-items: baseline;
   gap: 7px;
   font-size: 13px;
 }
 
+.creation-brainstorm-options > button strong > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .creation-brainstorm-options > button strong small {
+  flex: 0 0 auto;
+  white-space: nowrap;
   padding: 1px 5px;
   border-radius: 4px;
   background: rgba(164, 93, 34, .1);
@@ -3214,6 +3290,28 @@ h6.creation-latest-change {
   line-height: 1.5;
 }
 
+.creation-brainstorm-summary {
+  min-width: 0;
+  flex: 1 1 100%;
+  overflow-wrap: anywhere;
+}
+
+.creation-brainstorm-summary__open {
+  margin-top: 8px;
+  color: var(--mb-text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.creation-brainstorm-summary__open ul {
+  margin: 4px 0 0;
+  padding-left: 20px;
+}
+
+.creation-brainstorm-summary__open li {
+  white-space: pre-wrap;
+}
+
 .creation-brainstorm-ready__actions,
 .creation-brainstorm-continuation__actions {
   display: flex;
@@ -3223,6 +3321,8 @@ h6.creation-latest-change {
 .creation-brainstorm-continuation {
   flex: 1 1 100%;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 10px;
   padding-top: 12px;
   border-top: 1px solid rgba(164, 93, 34, .14);
@@ -3231,6 +3331,8 @@ h6.creation-latest-change {
 
 .creation-brainstorm-continuation__heading {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 3px;
 }
 
@@ -3335,7 +3437,8 @@ h6.creation-latest-change {
   }
 
   .creation-brainstorm-card > header {
-    flex-wrap: wrap;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "eyebrow" "actions" "prompt";
   }
 
   .creation-brainstorm-card > header > .creation-brainstorm-card__header-actions {
@@ -3399,16 +3502,6 @@ h6.creation-latest-change {
   .creation-brainstorm-continuation__actions > button.is-secondary {
     border-color: rgba(255, 255, 255, .1);
     background: #232326;
-  }
-
-  .creation-brainstorm-decisions {
-    border-color: rgba(255, 177, 122, .18);
-    background: rgba(255, 159, 67, .06);
-  }
-
-  .creation-brainstorm-decisions small,
-  .creation-brainstorm-decisions button {
-    color: #ffc48d;
   }
 
   .creation-brainstorm-pagination {
@@ -4136,3 +4229,36 @@ h6.creation-latest-change {
     outline-color: rgba(255, 179, 136, .3);
   }
 }
+
+.creation-brief-editor { min-width: 0; max-width: 960px; margin: 0 auto; color: var(--mb-text-primary); }
+.creation-brief-editor h3, .creation-brief-editor h4 { margin: 0; font-size: 15px; }
+.creation-brief-editor p, .creation-brief-editor small { color: var(--mb-text-secondary); font-size: 12px; line-height: 1.6; }
+.creation-brief-tree { min-width: 0; padding: 14px; border: 1px solid var(--mb-border-strong); border-radius: 10px; background: var(--mb-bg-card); margin-bottom: 24px; }
+.creation-brief-tree__heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.creation-brief-tree__scroll { --creation-brief-tree-depth: 0; overflow: auto; max-height: clamp(180px, 38dvh, 420px); padding: 10px 2px; scrollbar-gutter: stable; }
+.creation-brief-tree__scroll.is-expanded { max-height: none; }
+.creation-brief-tree__scroll ul { list-style: none; padding: 0; margin: 6px 0 0; }
+.creation-brief-tree__scroll li { --creation-brief-tree-indent: min(calc(var(--creation-brief-tree-depth) * 10px), 15%); padding: 4px 0; }
+.creation-brief-tree button { box-sizing: border-box; text-align: left; display: flex; max-width: 100%; gap: 4px; align-items: flex-start; border: 1px solid var(--mb-border-strong); border-radius: 6px; padding: 8px 10px; background: var(--mb-bg-card); color: inherit; cursor: pointer; overflow-wrap: anywhere; white-space: normal; }
+.creation-brief-tree__scroll button { width: 100%; flex-direction: column; }
+.creation-brief-tree__scroll li > button { position: relative; width: calc(100% - var(--creation-brief-tree-indent)); margin-inline-start: var(--creation-brief-tree-indent); }
+.creation-brief-tree__scroll li > button::before { content: ''; position: absolute; top: 16px; inset-inline-start: -9px; width: 7px; height: 7px; border-inline-start: 1px solid var(--mb-border-strong); border-bottom: 1px solid var(--mb-border-strong); }
+.creation-brief-tree button > span, .creation-brief-tree button > small { min-width: 0; max-width: 100%; }
+.creation-brief-tree__heading .creation-brief-tree__toggle { flex-shrink: 0; padding: 4px 8px; font-size: 12px; }
+.creation-brief-tree__footer { display: flex; justify-content: flex-end; margin-top: 8px; }
+.creation-brief-tree__footer button { font-size: 12px; }
+.creation-brief-tree button[aria-pressed="true"] { border-color: #a45d22; background: #fff8f0; }
+.creation-brief-tree__option { font-size: 12px; }
+.creation-brief-tree__branch-status { display: block; margin-inline-start: var(--creation-brief-tree-indent); padding: 2px 10px 0; }
+.creation-brief-tree__scroll:focus-visible { outline: 2px solid #a45d22; outline-offset: 2px; }
+.creation-brief-question { border-top: 1px solid var(--mb-border-strong); padding-top: 16px; margin-top: 12px; overflow-wrap: anywhere; }
+.creation-brief-question__parent { display: grid; gap: 6px; margin: 12px 0; padding: 10px; border-radius: 6px; background: var(--mb-bg-card); color: var(--mb-text-secondary); font-size: 12px; line-height: 1.6; }
+.creation-brief-question__parent dt { font-weight: 600; }
+.creation-brief-question__parent dd { margin: 0; }
+.creation-brief-editor__heading, .creation-brief-editor__save { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.creation-brief-editor__heading span, .creation-brief-editor__save span { color: var(--mb-text-secondary); font-size: 12px; }
+.creation-brief-field { display: flex; flex-direction: column; gap: 8px; margin: 18px 0; font-size: 13px; font-weight: 600; }
+.creation-brief-field textarea { box-sizing: border-box; width: 100%; min-height: 90px; resize: vertical; padding: 12px; border: 1px solid var(--mb-border-strong); border-radius: 8px; background: var(--mb-bg-card); color: inherit; font: inherit; font-weight: 400; line-height: 1.7; }
+.creation-brief-editor__save button { border: 1px solid var(--mb-border-strong); border-radius: 6px; padding: 8px 12px; background: var(--mb-bg-card); color: inherit; cursor: pointer; }
+.creation-brief-editor button:focus-visible, .creation-brief-field textarea:focus-visible { outline: 2px solid #a45d22; outline-offset: 2px; }
+.creation-brief-editor button:disabled { opacity: .5; cursor: default; }

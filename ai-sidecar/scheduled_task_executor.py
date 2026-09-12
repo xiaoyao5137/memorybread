@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 from energy_policy import EnergyPolicy
+from inference_queue import InferencePreemptedError
 
 logger = logging.getLogger(__name__)
 
@@ -253,10 +254,13 @@ class TaskExecutor:
 
     def _get_llm_client(self):
         if self._llm_client is None:
-            from ollama import Client
+            from inference_transport import CancellableOllamaClient
+            from runtime_endpoints import service_base_url
             # Ollama 是固定的本机服务。macOS 系统代理可能被 httpx 自动继承，
             # 导致 127.0.0.1 请求错误地走代理并出现 Connection refused。
-            self._llm_client = Client(host="http://127.0.0.1:11434", trust_env=False)
+            self._llm_client = CancellableOllamaClient(
+                host=service_base_url("ollama"), trust_env=False
+            )
         return self._llm_client
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -315,6 +319,8 @@ class TaskExecutor:
                         creation_result = self._execute_creation_task(task, exec_id)
                         result_text = creation_result["result_text"]
                         creation_history_id = creation_result.get("creation_history_id")
+                    except InferencePreemptedError:
+                        raise
                     except Exception as creation_error:
                         # 创作智能体连接失败或执行失败时，回退现有 knowledge+LLM 咨询路径。
                         logger.warning(
@@ -384,6 +390,17 @@ class TaskExecutor:
                 "result": result_text,
                 "notification_deliveries": notification_deliveries,
             }
+
+        except InferencePreemptedError:
+            completed_at = int(time.time() * 1000)
+            self._update_execution(conn, exec_id, {
+                "status": "deferred",
+                "completed_at": completed_at,
+                "error_message": "INFERENCE_PREEMPTED",
+                "latency_ms": completed_at - started_at,
+            })
+            conn.close()
+            return {"status": "deferred", "reason": "INFERENCE_PREEMPTED", "exec_id": exec_id}
 
         except Exception as e:
             completed_at = int(time.time() * 1000)
@@ -649,6 +666,17 @@ class TaskExecutor:
                 "token_estimate": result["token_estimate"],
                 "exec_id": exec_id,
             }
+        except InferencePreemptedError:
+            completed_at = int(time.time() * 1000)
+            if exec_id is not None:
+                self._update_execution(conn, exec_id, {
+                    "status": "deferred",
+                    "completed_at": completed_at,
+                    "error_message": "INFERENCE_PREEMPTED",
+                    "latency_ms": completed_at - started_at,
+                })
+            conn.close()
+            return {"status": "deferred", "reason": "INFERENCE_PREEMPTED", "diary_date": diary_date}
         except Exception as e:
             completed_at = int(time.time() * 1000)
             if exec_id is not None:
@@ -1761,68 +1789,15 @@ class TaskExecutor:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ]
-            import inference_queue as inference_queue_module
-
-            current_task_preempt_requested = getattr(
-                inference_queue_module,
-                "current_task_preempt_requested",
-                lambda: False,
-            )
-            raise_if_preempted = getattr(
-                inference_queue_module,
-                "raise_if_preempted",
-                lambda: None,
-            )
-            register_current_preempt_callback = getattr(
-                inference_queue_module,
-                "register_current_preempt_callback",
-                lambda _callback: (lambda: None),
-            )
-
             def preemptible_chat(chat_messages: list[dict], options: dict) -> dict:
-                raise_if_preempted()
-                stream = client.chat(
+                # The transport owns an async request from connect through stream
+                # teardown; cancelling an SDK generator cannot interrupt prefill.
+                return client.chat(
                     model=model,
                     messages=chat_messages,
-                    stream=True,
-                    # Qwen 等模型会把内部推理放在 thinking 字段。日记只需要最终正文，
-                    # 显式关闭思考输出，避免英文推理过程被误当成日记保存。
                     think=False,
                     options=options,
                 )
-                chunks = [stream] if isinstance(stream, dict) else stream
-                close_stream = getattr(chunks, "close", lambda: None)
-                unregister = register_current_preempt_callback(close_stream)
-                content_parts: list[str] = []
-                thinking_parts: list[str] = []
-                final: dict = {}
-                try:
-                    for raw_chunk in chunks:
-                        raise_if_preempted()
-                        chunk = (
-                            raw_chunk.model_dump()
-                            if hasattr(raw_chunk, "model_dump")
-                            else dict(raw_chunk)
-                        )
-                        final.update(chunk)
-                        message = chunk.get("message") or {}
-                        if message.get("content"):
-                            content_parts.append(str(message["content"]))
-                        if message.get("thinking"):
-                            thinking_parts.append(str(message["thinking"]))
-                except Exception:
-                    if current_task_preempt_requested():
-                        raise_if_preempted()
-                    raise
-                finally:
-                    unregister()
-                raise_if_preempted()
-                final["message"] = {
-                    **(final.get("message") or {}),
-                    "content": "".join(content_parts),
-                    "thinking": "".join(thinking_parts),
-                }
-                return final
 
             response = preemptible_chat(
                 messages,
@@ -1927,7 +1902,9 @@ class TaskExecutor:
 
     @staticmethod
     def _core_engine_url() -> str:
-        return os.getenv("CORE_ENGINE_URL", "http://127.0.0.1:7070").rstrip("/")
+        from runtime_endpoints import service_base_url
+
+        return service_base_url("core")
 
     def _execute_creation_task(self, task: dict, exec_id: int) -> dict:
         """
@@ -1949,6 +1926,7 @@ class TaskExecutor:
             "conversation": [],
             "selected_skills": selected_skills,
             "model_mode": "local",
+            "execution_origin": "scheduled_task",
             "confirmed": True,
         }
         events, document = self._run_creation_agent_stream(core_url, payload)
@@ -2114,6 +2092,9 @@ class TaskExecutor:
                             completed = True
                             break
                         elif event_type == "run.failed":
+                            failure_data = event.get("data") or {}
+                            if (failure_data.get("error_code") or failure_data.get("code")) == "INFERENCE_PREEMPTED":
+                                raise InferencePreemptedError("后台创作已让出交互任务")
                             raise RuntimeError(
                                 str(event.get("summary") or "创作智能体执行失败")
                             )

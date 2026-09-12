@@ -1,0 +1,71 @@
+{
+  "history_id": 149,
+  "session_id": "creation-1788808463423-0711db4ccc95d8",
+  "checks": {
+    "generated_facts_correct": true,
+    "exact_replacement_preserves_other_bytes": true,
+    "answer_read_only": true,
+    "reload_history_document_and_messages_match": true,
+    "all_3_runs_restored_in_ui": true,
+    "opening_new_session_preserves_completed_history": true
+  },
+  "document": "# 创作验收样例\n\n**会议通知**\n\n*   **时间：** 周三下午\n*   **地点：** 三楼会议室\n*   **议题：** 讨论项目进展\n*   **参与者：** 项目组全体成员",
+  "messages": [
+    {
+      "content": "请生成标题为“创作验收样例”的简短会议通知。仅使用这些已给材料，不检索、不补充事实：周三下午在二楼会议室讨论项目进展，参与者为项目组全体成员。正文清晰呈现时间、地点、议题、参与者。",
+      "createdAt": 1788808463423,
+      "id": "user-1788808463423-682fee90a9e7a8",
+      "role": "user"
+    },
+    {
+      "content": "首版文档已生成。你可以继续提出修改要求，我会基于当前版本继续优化。",
+      "createdAt": 1788808514125,
+      "id": "assistant-1788808514125-f9b78d6f4bd8c8",
+      "role": "assistant",
+      "runId": "run-20eae318-f92f-4b50-a76c-f23870ebee9b"
+    },
+    {
+      "content": "把“二楼会议室”改为“三楼会议室”，其他内容逐字保留。",
+      "createdAt": 1788808548287,
+      "id": "user-1788808548287-48c2f38ccfba68",
+      "role": "user"
+    },
+    {
+      "content": "已完成 1 处文档修改。你可以继续修改。",
+      "createdAt": 1788808556437,
+      "id": "assistant-1788808556437-f7610d541a819",
+      "role": "assistant",
+      "runId": "run-2ffeea6b-de51-4920-9c2f-f6a2b6e96074"
+    },
+    {
+      "content": "只回答会议时间和地点，不要修改正文，不检索。",
+      "createdAt": 1788808593045,
+      "id": "user-1788808593045-e875e127f3a6e8",
+      "role": "user"
+    },
+    {
+      "content": "会议时间：周三下午\n会议地点：三楼会议室",
+      "createdAt": 1788808600632,
+      "id": "assistant-1788808600632-1703fdc5033fd8",
+      "role": "assistant",
+      "runId": "run-7e31156e-5db3-47ac-a016-727aea1934c3"
+    }
+  ],
+  "lifecycle_status": "completed",
+  "progress_epoch": 3,
+  "sha256": "3f5d8ef4cbc02618a7cab071c8fcdcc1f3104e65cfa426c4c108cefb526bc3b9",
+  "final_ui_recheck": {
+    "observed_at": "2026-09-07T21:27:41.930302+00:00",
+    "url": "http://localhost:1420/",
+    "surface": "actual browser accessibility state",
+    "history_session_suffix": "4ccc95d8",
+    "all_three_user_requests_and_assistant_responses_visible": true,
+    "visible_document_facts": [
+      "周三下午",
+      "三楼会议室",
+      "讨论项目进展",
+      "项目组全体成员"
+    ],
+    "note": "Read-only reinspection after final source-scope service reload; did not regenerate the historical sample."
+  }
+}

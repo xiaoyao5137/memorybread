@@ -27,6 +27,7 @@
         "code": {
           "enum": [
             "INFERENCE_PREEMPTED",
+            "INFERENCE_QUEUE_BUSY",
             "MODEL_RATE_LIMITED",
             "MODEL_UNAVAILABLE"
           ]
@@ -42,6 +43,7 @@
             "INFERENCE_TIMEOUT",
             "BAKE_OUTPUT_TRUNCATED",
             "BAKE_OUTPUT_INVALID",
+            "BAKE_DOCUMENT_MERGE_PENDING",
             "BAKE_MODEL_RESPONSE_INVALID",
             "BAKE_MODEL_UPSTREAM_ERROR",
             "BAKE_INTERNAL_ERROR"

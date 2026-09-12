@@ -1,0 +1,18 @@
+{
+  "elapsed_seconds": 22.73,
+  "payload_sha256": "df2064bcf4c6c684e378293e9fa874abb62f76994cde766efe38fa6566fd4daa",
+  "source_builder_sha256": "e781675212c0b304443051503f0e077dbf931c5083774b2a9689e0d6bf938684",
+  "material_anchor_count": 4,
+  "material_min_anchor_matches": 3,
+  "material_measurement_anchor_count": 57,
+  "material_min_measurement_matches": 2,
+  "references_only": true,
+  "llm": null,
+  "answer_model_calls": 0,
+  "sqlite_mode": "ro/query_only",
+  "contexts": [],
+  "candidate_count": 0,
+  "knowledge_310_present": false,
+  "knowledge_3804_present": false,
+  "passed": true
+}

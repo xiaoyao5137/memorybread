@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
 
 use crate::storage::{
     db::current_ts_ms,
@@ -313,14 +314,23 @@ impl StorageManager {
         &self,
         audit: &NewBakeCandidateAudit,
     ) -> Result<(), StorageError> {
+        self.upsert_bake_candidate_audit_with_source(audit,None)
+    }
+
+    pub fn upsert_document_coalesce_audit(&self,audit:&NewBakeCandidateAudit,source_identity:&str)->Result<(),StorageError> {
+        self.upsert_bake_candidate_audit_with_source(audit,Some(source_identity))
+    }
+
+    fn upsert_bake_candidate_audit_with_source(&self,audit:&NewBakeCandidateAudit,source_identity:Option<&str>)->Result<(),StorageError> {
+        let identity_hash=source_identity.map(|value|format!("{:x}",Sha256::digest(value.as_bytes())));
         let now = current_ts_ms();
         self.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO bake_candidate_audits (
                     run_id, timeline_id, lane, source_capture_count,
                     effective_capture_count, sop_eligible, sop_eligibility_state, sop_eligibility_reason,
-                    sop_evidence_mode, persist_status, persist_reason, created_at_ms, updated_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+                    sop_evidence_mode, persist_status, persist_reason, created_at_ms, updated_at_ms,document_source_identity_hash
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12,?13)
                  ON CONFLICT(run_id, timeline_id) DO UPDATE SET
                     lane = excluded.lane,
                     source_capture_count = excluded.source_capture_count,
@@ -331,7 +341,8 @@ impl StorageManager {
                     sop_evidence_mode = excluded.sop_evidence_mode,
                     persist_status = excluded.persist_status,
                     persist_reason = excluded.persist_reason,
-                    updated_at_ms = excluded.updated_at_ms",
+                    updated_at_ms = excluded.updated_at_ms,
+                    document_source_identity_hash=COALESCE(excluded.document_source_identity_hash,bake_candidate_audits.document_source_identity_hash)",
                 params![
                     audit.run_id,
                     audit.timeline_id,
@@ -345,6 +356,7 @@ impl StorageManager {
                     audit.persist_status,
                     audit.persist_reason,
                     now,
+                    identity_hash,
                 ],
             )?;
             Ok(())
@@ -910,6 +922,19 @@ impl StorageManager {
     ///
     /// 退避按错误类型区分；即使 Core 或 Sidecar 重启，也不会把 502/超时候选
     /// 立即重新塞回模型队列。
+    pub fn defer_automatic_document_write(&self, timeline_id: i64, bucket: u8) -> Result<(),StorageError> {
+        self.with_conn(|conn| {
+            conn.execute("INSERT INTO bake_retry_state
+                (timeline_id,failure_count,last_error,last_failed_at_ms,last_error_code,next_retry_at_ms,automatic_document_pause_bucket)
+                VALUES(?1,0,'DOCUMENT_AUTOMATIC_WRITES_PAUSED',0,'DOCUMENT_AUTOMATIC_WRITES_PAUSED',0,?2)
+                ON CONFLICT(timeline_id) DO UPDATE SET
+                last_error='DOCUMENT_AUTOMATIC_WRITES_PAUSED',last_error_code='DOCUMENT_AUTOMATIC_WRITES_PAUSED',
+                next_retry_at_ms=0,automatic_document_pause_bucket=excluded.automatic_document_pause_bucket",
+                params![timeline_id,bucket])?;
+            Ok(())
+        })
+    }
+
     pub fn bump_bake_retry_failure_with_code(
         &self,
         timeline_id: i64,
@@ -1012,6 +1037,11 @@ impl StorageManager {
         max_failures: i64,
     ) -> Result<BakeQueueStatusRecord, StorageError> {
         let now = current_ts_ms();
+        let pause_rollout = self.get_preference_value(crate::services::document_refresh::DOCUMENT_REFRESH_CONFIG_KEY)?
+            .as_deref().map(crate::services::document_refresh::DocumentRefreshConfig::parse).transpose()
+            .map(|config| { let config=config.unwrap_or_default();
+                if config.automatic_document_writes_enabled { config.automatic_document_rollout_percent as i64 } else { 0 }
+            }).unwrap_or(0);
         self.with_conn(|conn| {
             let mut status = conn.query_row(
                 &format!(
@@ -1077,16 +1107,19 @@ impl StorageManager {
                                   ' ', ''), char(10), '')) >= 200
                          )
                       )
-                      AND NOT EXISTS (SELECT 1 FROM bake_knowledge bk WHERE bk.timeline_id = t.id)
-                      AND NOT EXISTS (SELECT 1 FROM bake_sops bs WHERE bs.timeline_id = t.id)
-                      AND CAST(t.id AS TEXT) NOT IN (SELECT tid FROM produced_doc_timelines)
+                      AND (COALESCE(r.last_error_code,'')<>'DOCUMENT_AUTOMATIC_WRITES_PAUSED' OR r.automatic_document_pause_bucket < ?3)
+                      AND (r.last_error_code IN ('BAKE_DOCUMENT_MERGE_PENDING','DOCUMENT_AUTOMATIC_WRITES_PAUSED') OR (
+                          NOT EXISTS (SELECT 1 FROM bake_knowledge bk WHERE bk.timeline_id = t.id)
+                          AND NOT EXISTS (SELECT 1 FROM bake_sops bs WHERE bs.timeline_id = t.id)
+                          AND CAST(t.id AS TEXT) NOT IN (SELECT tid FROM produced_doc_timelines)
+                      ))
                 )
                 SELECT
                     COALESCE(MAX(watermark_ts), 0),
                     MAX(watermark_updated_at_ms),
-                    COALESCE(SUM(failure_count = 0 AND candidate_ts > watermark_ts), 0),
-                    COALESCE(SUM(failure_count > 0 AND failure_count < ?1 AND next_retry_at_ms <= ?2), 0),
-                    COALESCE(SUM(failure_count > 0 AND failure_count < ?1 AND next_retry_at_ms > ?2), 0),
+                    COALESCE(SUM(failure_count = 0 AND last_error_code<>'DOCUMENT_AUTOMATIC_WRITES_PAUSED' AND candidate_ts > watermark_ts), 0),
+                    COALESCE(SUM((failure_count > 0 OR last_error_code='DOCUMENT_AUTOMATIC_WRITES_PAUSED') AND failure_count < ?1 AND next_retry_at_ms <= ?2), 0),
+                    COALESCE(SUM((failure_count > 0 OR last_error_code='DOCUMENT_AUTOMATIC_WRITES_PAUSED') AND failure_count < ?1 AND next_retry_at_ms > ?2), 0),
                     COALESCE(SUM(failure_count >= ?1), 0),
                     COALESCE(SUM(failure_count > 0 AND last_error_code IN ('INFERENCE_TIMEOUT', 'GATEWAY_TIMEOUT')), 0),
                     COALESCE(SUM(failure_count > 0 AND last_error_code IN (
@@ -1095,25 +1128,25 @@ impl StorageManager {
                     COALESCE(SUM(failure_count > 0 AND last_error_code IN (
                         'BAKE_MODEL_UPSTREAM_ERROR', 'BAKE_UNCLASSIFIED_UPSTREAM_ERROR'
                     )), 0),
-                    COALESCE(SUM(failure_count > 0 AND last_error_code NOT IN (
+                    COALESCE(SUM(failure_count > 0 AND last_error_code<>'DOCUMENT_AUTOMATIC_WRITES_PAUSED' AND last_error_code NOT IN (
                         'INFERENCE_TIMEOUT', 'GATEWAY_TIMEOUT', 'BAKE_OUTPUT_TRUNCATED',
                         'BAKE_OUTPUT_INVALID', 'BAKE_MODEL_RESPONSE_INVALID',
                         'BAKE_MODEL_UPSTREAM_ERROR', 'BAKE_UNCLASSIFIED_UPSTREAM_ERROR'
                     )), 0),
-                    MIN(CASE WHEN failure_count = 0 AND candidate_ts > watermark_ts THEN candidate_ts END),
-                    MIN(CASE WHEN failure_count > 0 AND failure_count < ?1
+                    MIN(CASE WHEN failure_count = 0 AND last_error_code<>'DOCUMENT_AUTOMATIC_WRITES_PAUSED' AND candidate_ts > watermark_ts THEN candidate_ts END),
+                    MIN(CASE WHEN (failure_count > 0 OR last_error_code='DOCUMENT_AUTOMATIC_WRITES_PAUSED') AND failure_count < ?1
                         THEN candidate_ts END),
                     MIN(CASE WHEN
-                        (failure_count = 0 AND candidate_ts > watermark_ts)
-                        OR (failure_count > 0 AND failure_count < ?1 AND next_retry_at_ms <= ?2)
+                        (failure_count = 0 AND last_error_code<>'DOCUMENT_AUTOMATIC_WRITES_PAUSED' AND candidate_ts > watermark_ts)
+                        OR ((failure_count > 0 OR last_error_code='DOCUMENT_AUTOMATIC_WRITES_PAUSED') AND failure_count < ?1 AND next_retry_at_ms <= ?2)
                         THEN candidate_ts END),
-                    MIN(CASE WHEN failure_count > 0 AND failure_count < ?1 AND next_retry_at_ms > ?2
+                    MIN(CASE WHEN (failure_count > 0 OR last_error_code='DOCUMENT_AUTOMATIC_WRITES_PAUSED') AND failure_count < ?1 AND next_retry_at_ms > ?2
                         THEN next_retry_at_ms END)
                 FROM queue
                 "#,
                     produced_doc_timelines_cte = PRODUCED_DOC_TIMELINES_CTE
                 ),
-                params![max_failures, now],
+                params![max_failures, now,pause_rollout],
                 |row| {
                     let fresh_count: i64 = row.get(2)?;
                     let retry_ready_count: i64 = row.get(3)?;
@@ -1174,6 +1207,7 @@ impl StorageManager {
                     -- 进不了 fresh lane，而已有文档引用又让它进不了 retry lane，
                     -- 数进 actionable 只会让触发方永远空转（no_op 活锁）。
                     WHERE COALESCE(r.failure_count, 0) = 0
+                      AND COALESCE(r.last_error_code,'')<>'DOCUMENT_AUTOMATIC_WRITES_PAUSED'
                       AND NOT EXISTS (
                           SELECT 1 FROM doc_member_capture dc
                           WHERE dc.doc_id = dm.doc_id
@@ -1201,10 +1235,11 @@ impl StorageManager {
                            'bake_article', 'bake_knowledge', 'bake_sop', 'legacy_bake_candidate'
                        )
                        AND COALESCE(r.failure_count, 0) < ?2
+                       AND (COALESCE(r.last_error_code,'')<>'DOCUMENT_AUTOMATIC_WRITES_PAUSED' OR r.automatic_document_pause_bucket < ?3)
                        AND NOT EXISTS (
                            SELECT 1 FROM bake_sops bs WHERE bs.timeline_id = t.id
                        )",
-                    params![now.saturating_sub(30 * 60 * 1000), max_failures],
+                    params![now.saturating_sub(30 * 60 * 1000), max_failures,pause_rollout],
                     |row| row.get(0),
                 )
                 .unwrap_or(0);
@@ -1518,6 +1553,39 @@ mod tests {
         assert_eq!(funnel.model_accepted_count, 1);
         assert_eq!(funnel.payload_valid_count, 1);
         assert_eq!(funnel.persisted_count, 1);
+    }
+
+    #[test]
+    fn document_prequeue_coalescing_is_idempotent_scoped_and_private() {
+        let mgr=make_mgr();
+        let run=mgr.insert_bake_run(&NewBakeRun{trigger_reason:"test".into(),status:"running".into(),started_at:100}).unwrap();
+        let mut audit=NewBakeCandidateAudit{run_id:run,timeline_id:42,lane:"fresh".into(),
+            source_capture_count:1,effective_capture_count:1,sop_eligible:false,sop_eligibility_state:"rejected".into(),
+            sop_eligibility_reason:None,sop_evidence_mode:None,persist_status:"skipped".into(),
+            persist_reason:Some("document_url_already_queued".into())};
+        let identity="https://docs.example.com/private?token=PRIVATE_SOURCE";
+        let hash=format!("{:x}",Sha256::digest(identity.as_bytes()));
+        mgr.upsert_document_coalesce_audit(&audit,identity).unwrap();
+        mgr.upsert_document_coalesce_audit(&audit,identity).unwrap();
+        audit.timeline_id=43;mgr.upsert_document_coalesce_audit(&audit,identity).unwrap();
+        audit.timeline_id=44;mgr.upsert_document_coalesce_audit(&audit,"https://docs.example.com/other").unwrap();
+        audit.timeline_id=45;mgr.upsert_bake_candidate_audit(&audit).unwrap();
+        audit.timeline_id=46;mgr.upsert_document_coalesce_audit(&audit,identity).unwrap();
+        audit.timeline_id=47;audit.persist_reason=Some("fingerprint_unchanged".into());mgr.upsert_document_coalesce_audit(&audit,identity).unwrap();
+        mgr.with_conn(|c| {
+            c.execute("UPDATE bake_candidate_audits SET updated_at_ms=150",[])?;
+            c.execute("UPDATE bake_candidate_audits SET updated_at_ms=201 WHERE timeline_id=46",[])?;Ok(())
+        }).unwrap();
+        let health=mgr.document_source_health(100,200).unwrap();
+        let group=&health["prequeue_coalescing"];
+        assert_eq!(group["total"],4);
+        let sources=group["sources"].as_array().unwrap();
+        assert_eq!(sources.len(),3);
+        assert_eq!(sources.iter().find(|s|s["source_identity_hash"]==hash).unwrap()["skipped_candidates"],2);
+        assert_eq!(sources.iter().find(|s|s["source_identity_hash"].is_null()).unwrap()["skipped_candidates"],1);
+        assert!(!health.to_string().contains("PRIVATE_SOURCE"));
+        assert!(!health.to_string().contains("docs.example.com"));
+        assert_eq!(mgr.document_source_health(202,300).unwrap()["prequeue_coalescing"]["total"],0);
     }
 
     #[test]

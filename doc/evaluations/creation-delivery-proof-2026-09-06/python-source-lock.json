@@ -1,0 +1,15 @@
+{
+  "python": "3.9.25 (main, Oct 31 2025, 18:40:52) \n[Clang 17.0.0 (clang-1700.6.3.2)]",
+  "files": {
+    "ai-sidecar/creation/delivery_contract.py": "8b6cf1a47d4609d05abe2374b36ec85a55d4ac670b42f758358d39a1c000a383",
+    "ai-sidecar/creation/service.py": "bb7113a968bd8b330246a666ff32a1c1e7573a7e55aefecb492e343861a3e91b",
+    "ai-sidecar/creation/agent_loop.py": "fc6907ad5ffbb0db1617237cf266bc52decfc7b631bf1ea7fad20baf6f17f6bb",
+    "ai-sidecar/creation/operations.py": "1f81e16a639b6c40b5b245be68fbca783ad04872c624c98968024ee1437be7b2",
+    "ai-sidecar/creation/skill_governance.py": "4e06276e25bf486d9befa20b0b42d6e9e62ccafa03ba7fb2882a89dd173624ad",
+    "ai-sidecar/tests/test_creation_delivery_contract.py": "54d7ec9e54dcd225f651edaf88a15f54411bd67e2ccbbb3597c2cd5a3cb6bdc3",
+    "ai-sidecar/tests/test_creation_operations.py": "c7444401c2defb25a342b80f1ec15471facc1aac8440cf0d8f0694cef3a63854",
+    "ai-sidecar/tests/test_creation_agent_loop.py": "fbb14d6b18e8a58fa58d1ec9301d2755104267fb46646e78575907a77d3d83bc",
+    "ai-sidecar/scripts/evaluate_creation_instructions.py": "8efa290f777bf9f4d4fe23e7dba569a77393b701d72968fdbed169722d29ea39",
+    "ai-sidecar/scripts/evaluate_creation_delivery.py": "c87b200eac07d036036082dcd8f56eed953d5efbadc42523ff6f7feb7d781ae2"
+  }
+}

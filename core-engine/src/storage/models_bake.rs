@@ -244,6 +244,7 @@ pub type EpisodicMemoryRecord = TimelineRecord;
 // bake_knowledge 表 - 提炼后的知识
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Default)]
 pub struct NewBakeKnowledge {
     pub timeline_id: i64,
     pub title: String,
@@ -253,6 +254,13 @@ pub struct NewBakeKnowledge {
     pub entities: String,
     pub importance: i64,
     pub source_capture_ids: Option<String>,
+    /// 跨时间线语义身份键，由 Core 对归一化后的 subject_key/predicate_key 取哈希得出。
+    /// 存量行与手工创建路径为 None，不参与近重复匹配。
+    pub dedup_key: Option<String>,
+    /// Core 确定性算出的复用半径得分，便于事后归因门禁结果。
+    pub quality_score: Option<f64>,
+    /// 落库时生效的门禁规则版本。
+    pub gate_rule_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

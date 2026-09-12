@@ -1,16 +1,24 @@
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header, HeaderMap, StatusCode},
     response::{sse::Event, IntoResponse, Response, Sse},
     Json,
 };
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, convert::Infallible, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    convert::Infallible,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tracing::{error, info};
 
 use crate::api::state::AppState;
+
+mod brainstorm_prefetch;
+pub(crate) use brainstorm_prefetch::BrainstormPrefetchCache;
 
 #[derive(Debug, Deserialize)]
 pub struct GenerateRequest {
@@ -72,6 +80,10 @@ pub struct AgentRunRequest {
     #[serde(default)]
     pub run_id: Option<String>,
     #[serde(default)]
+    pub instruction_id: Option<String>,
+    #[serde(default)]
+    pub resume_operation_id: Option<String>,
+    #[serde(default)]
     pub root_request: Option<String>,
     #[serde(default)]
     pub current_document: String,
@@ -79,6 +91,10 @@ pub struct AgentRunRequest {
     pub conversation: Vec<serde_json::Value>,
     #[serde(default)]
     pub selected_skills: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub available_skills: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    pub explicit_skill_ids: Vec<String>,
     #[serde(default = "default_model_mode")]
     pub model_mode: String,
     #[serde(default)]
@@ -87,10 +103,14 @@ pub struct AgentRunRequest {
     pub resume_state: Option<serde_json::Value>,
     #[serde(default)]
     pub model_result: Option<String>,
+    #[serde(default)]
+    pub model_request_id: Option<String>,
     #[serde(default = "default_creation_mode")]
     pub creation_mode: String,
     #[serde(default)]
     pub creation_brief: Option<serde_json::Value>,
+    #[serde(default = "default_execution_origin")]
+    pub execution_origin: String,
 }
 
 const INLINE_EDIT_SCHEMA_VERSION: &str = "creation.inline-edit.v1";
@@ -519,12 +539,17 @@ struct AgentRunPayload {
     current_document: String,
     conversation: Vec<serde_json::Value>,
     selected_skills: Vec<serde_json::Value>,
+    available_skills: Option<Vec<serde_json::Value>>,
+    explicit_skill_ids: Vec<String>,
     model_mode: String,
     confirmed: bool,
     resume_state: Option<serde_json::Value>,
     model_result: Option<String>,
     creation_mode: String,
     creation_brief: Option<serde_json::Value>,
+    execution_origin: String,
+    operation_context: Option<serde_json::Value>,
+    resume_checkpoint: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -549,6 +574,8 @@ pub struct BrainstormOption {
     pub label: String,
     pub description: String,
     #[serde(default)]
+    pub details: String,
+    #[serde(default)]
     pub recommended: bool,
 }
 
@@ -558,11 +585,33 @@ pub struct BrainstormContinuationDirection {
     pub label: String,
     pub description: String,
     #[serde(default)]
+    pub details: String,
+    #[serde(default)]
     pub recommended: bool,
+}
+
+impl From<&BrainstormContinuationDirection> for BrainstormOption {
+    fn from(direction: &BrainstormContinuationDirection) -> Self {
+        Self {
+            id: direction.id.clone(),
+            label: direction.label.clone(),
+            description: direction.description.clone(),
+            details: direction.details.clone(),
+            recommended: direction.recommended,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrainstormQuestion {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exploration_stage: Option<String>,
+    #[serde(default)]
+    pub parent_question_id: Option<String>,
+    #[serde(default)]
+    pub parent_option_id: Option<String>,
+    #[serde(default)]
+    pub single_choice_reason: String,
     pub id: String,
     #[serde(default)]
     pub dimension_id: String,
@@ -571,6 +620,8 @@ pub struct BrainstormQuestion {
     pub question_type: String,
     pub prompt: String,
     pub why_now: String,
+    #[serde(default)]
+    pub context_details: String,
     pub required: bool,
     pub allow_custom: bool,
     #[serde(default)]
@@ -596,6 +647,7 @@ pub struct BrainstormDecision {
     pub dimension: String,
     pub summary: String,
     pub source: String,
+    pub user_inputs: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -605,7 +657,27 @@ pub struct BrainstormTurnHistoryItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainstormArchivedQuestion {
+    question: BrainstormQuestion,
+    answer: Option<BrainstormAnswer>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct BrainstormStoredState {
+    #[serde(default)]
+    pending_extensions: Vec<BrainstormExtensionPlan>,
+    #[serde(default)]
+    prefetch_safe_options: std::collections::BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    branch_parent_revisions: std::collections::BTreeMap<String, i64>,
+    #[serde(default)]
+    memory_brief: String,
+    #[serde(default)]
+    archived_questions: Vec<BrainstormArchivedQuestion>,
+    #[serde(default)]
+    brief_edits: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    user_input_revisions: std::collections::BTreeMap<String, i64>,
     root_request: String,
     #[serde(default)]
     selected_skills: Vec<serde_json::Value>,
@@ -624,13 +696,25 @@ struct BrainstormStoredState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct BrainstormExtensionPlan {
+    id: String,
+    parent_question_id: String,
+    parent_option_id: Option<String>,
+    parent_revision: i64,
+    goal: String,
+    ordinal: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct BrainstormStoredTurn {
     question: BrainstormQuestion,
     answer: BrainstormAnswer,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct BrainstormTurnRequest {
+    #[serde(default)]
+    pub brief_edits: std::collections::BTreeMap<String, String>,
     pub session_id: String,
     pub root_request: String,
     pub action: String,
@@ -649,6 +733,8 @@ pub struct BrainstormTurnRequest {
     #[serde(default)]
     pub continuation_direction_id: String,
     #[serde(default)]
+    pub continuation_direction_ids: Vec<String>,
+    #[serde(default)]
     pub creation_model: Option<String>,
     #[serde(default)]
     pub creation_api_key: Option<String>,
@@ -658,6 +744,10 @@ pub struct BrainstormTurnRequest {
 
 #[derive(Debug, Serialize)]
 pub struct BrainstormTurnResponse {
+    pub archived_questions: Vec<BrainstormArchivedQuestion>,
+    pub root_request: String,
+    pub brief_edits: std::collections::BTreeMap<String, String>,
+    pub user_input_revisions: std::collections::BTreeMap<String, i64>,
     pub session_id: String,
     pub phase: String,
     pub revision: i64,
@@ -868,9 +958,7 @@ pub async fn run_creation_inline_edit(
                 false,
             )
         })?;
-    if history.session_id.as_deref() != Some(req.session_id.trim())
-        || history.revision_no != req.selection.base_revision_no
-        || history.generated_content != req.current_document
+    if !crate::storage::repo::creation_history::matches_document_base(&history, req.session_id.trim(), req.selection.base_revision_no, &req.current_document)
         || sha256_hex(&history.generated_content) != req.selection.base_document_hash
     {
         return Err(fail(
@@ -1682,7 +1770,7 @@ pub async fn generate_document(
 
     let client = reqwest::Client::new();
     let response = client
-        .post("http://127.0.0.1:8001/creation/generate")
+        .post(format!("{}/creation/generate", state.creation_sidecar_url))
         .json(&payload)
         .send()
         .await
@@ -1731,10 +1819,27 @@ pub async fn generate_document(
     ))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UndoOperationRequest { pub session_id: String, pub operation_id: String }
+
+pub async fn undo_creation_operation(State(state): State<Arc<AppState>>, Json(req): Json<UndoOperationRequest>)
+    -> Result<Json<serde_json::Value>, (StatusCode,String)> {
+    let content = state.storage.with_conn(|conn| {
+        crate::storage::repo::creation_operation::undo(conn,&req.session_id,&req.operation_id).map_err(Into::into)
+    }).map_err(|_| (StatusCode::CONFLICT,"CREATION_BASE_CHANGED".to_string()))?;
+    Ok(Json(serde_json::json!({"content":content,"status":"undone"})))
+}
+
 pub async fn run_creation_agent(
     State(state): State<Arc<AppState>>,
     Json(mut req): Json<AgentRunRequest>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
+) -> Result<Sse<futures::stream::BoxStream<'static, Result<Event, Infallible>>>, (StatusCode, String)> {
+    if !matches!(req.execution_origin.as_str(), "interactive" | "scheduled_task") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "execution_origin 只支持 interactive 或 scheduled_task".to_string(),
+        ));
+    }
     if !matches!(req.model_mode.as_str(), "local" | "external") {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -1752,13 +1857,11 @@ pub async fn run_creation_agent(
         req.model_mode,
         req.generation.user_prompt.chars().count()
     );
-    if req.model_mode == "local" {
-        enrich_creation_model_from_preferences(&state, &mut req.generation);
-    } else {
-        req.generation.creation_model = None;
-        req.generation.creation_api_key = None;
-        req.generation.creation_base_url = None;
-    }
+    // Local uses the sidecar's active model; external uses model.request via the
+    // brand gateway. Legacy BYOK preferences must never override either mode.
+    req.generation.creation_model = None;
+    req.generation.creation_api_key = None;
+    req.generation.creation_base_url = None;
 
     let stored_context = if let Some(session_id) = req.session_id.as_deref() {
         state
@@ -1774,7 +1877,7 @@ pub async fn run_creation_agent(
     } else {
         None
     };
-    if let Some(context) = stored_context {
+    if let Some(ref context) = stored_context {
         if req.current_document.trim().is_empty() {
             req.current_document = context.latest.generated_content.clone();
         }
@@ -1819,6 +1922,84 @@ pub async fn run_creation_agent(
         req.run_id = Some(format!("run-{}", uuid::Uuid::new_v4()));
     }
 
+    let mut operation_context = None;
+    let mut resume_checkpoint = None;
+    let mut fresh_input_attempt = false;
+    let mut durable_operation_id = None;
+    if let (Some(session), Some(instruction_id), Some(context)) =
+        (req.session_id.as_deref(), req.instruction_id.as_deref(), stored_context.as_ref()) {
+        let operation_id = req.resume_operation_id.clone().unwrap_or_else(|| {
+            format!("operation-{}", sha256_hex(&format!("{}:{}", session, instruction_id)))
+        });
+        let operation = state.storage.with_conn(|conn| {
+            if req.resume_operation_id.is_none() {
+                crate::storage::repo::creation_operation::seed_legacy_pending(conn, session, instruction_id, &context.latest)?;
+                crate::storage::repo::creation_operation::begin(conn, session, &operation_id,
+                    instruction_id, &req.generation.user_prompt, &context.latest)?;
+            }
+            crate::storage::repo::creation_operation::get_for_resume(conn,session,&operation_id).map_err(Into::into)
+        }).map_err(|err| {
+            if matches!(err, crate::storage::error::StorageError::Sqlite(rusqlite::Error::InvalidQuery)) {
+                return (StatusCode::CONFLICT,"创作指令状态冲突，请重新打开会话后重试".to_string());
+            }
+            // Storage failures are server errors, not invalid user instructions.
+            // Do not expose SQL or user content through the response.
+            error!("创作操作持久化失败: {}", err);
+            (StatusCode::INTERNAL_SERVER_ERROR,"创作记录写入失败，请重启应用完成数据升级后重试".to_string())
+        })?
+          .ok_or((StatusCode::NOT_FOUND,"CREATION_RESUME_MISSING".to_string()))?;
+        if let Some(result) = operation.result.filter(|_| operation.status == "completed") {
+            let events = futures::stream::iter(vec![Ok(Event::default().data(result.to_string()))]);
+            return Ok(Sse::new(Box::pin(events) as futures::stream::BoxStream<'static, Result<Event, Infallible>>));
+        }
+        if !crate::storage::repo::creation_history::matches_document_base(&context.latest, session, operation.base_revision, &operation.base_document) {
+            return Err((StatusCode::CONFLICT,"CREATION_BASE_CHANGED".to_string()));
+        }
+        let pending = state.storage.with_conn(|conn| {
+            crate::storage::repo::creation_operation::pending(conn,session,&operation_id).map_err(Into::into)
+        }).map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR,"读取未完成操作失败".to_string()))?;
+        let undo_candidates = state.storage.with_conn(|conn| {
+            crate::storage::repo::creation_operation::undo_candidates(conn,session,operation.base_revision).map_err(Into::into)
+        }).map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR,"读取撤销记录失败".to_string()))?;
+        operation_context = Some(serde_json::json!({"operation_id":operation_id, "instruction_id": instruction_id,
+            "pending_operations":pending,"undo_candidates":undo_candidates,"base_revision":operation.base_revision}));
+        let changed_inputs = operation.checkpoint.as_ref()
+            .is_some_and(|checkpoint| !creation_checkpoint_inputs_match(&req, checkpoint));
+        if let Some(checkpoint) = operation.checkpoint.filter(|_| !changed_inputs) {
+            req.run_id = checkpoint["run_id"].as_str().map(str::to_string);
+            if req.model_result.is_some() {
+                let expected_request_id = checkpoint["pending_model_step"]["request_id"].as_str();
+                if expected_request_id.is_none() || req.model_request_id.as_deref() != expected_request_id {
+                    return Err((StatusCode::CONFLICT,"CREATION_MODEL_RESULT_STALE".to_string()));
+                }
+                req.resume_state = Some(checkpoint);
+            } else {
+                req.resume_state = None;
+                req.run_id = Some(format!("run-{}", uuid::Uuid::new_v4()));
+                resume_checkpoint = Some(checkpoint);
+            }
+        } else if changed_inputs {
+            // The user revised source inputs without changing the instruction
+            // or document base. Begin a fresh attempt instead of replaying an
+            // old evidence/plan snapshot or accepting its late model result.
+            req.resume_state = None;
+            fresh_input_attempt = true;
+            req.model_result = None;
+            req.model_request_id = None;
+            req.run_id = Some(format!("run-{}", uuid::Uuid::new_v4()));
+            if req.resume_operation_id.is_some() {
+                req.generation.user_prompt = operation.instruction;
+            }
+        } else if req.model_result.is_some() {
+            return Err((StatusCode::CONFLICT,"CREATION_MODEL_RESULT_STALE".to_string()));
+        } else if req.resume_operation_id.is_some() {
+            // An operation persisted before its first model call can still resume its original instruction.
+            req.generation.user_prompt = operation.instruction;
+        }
+        req.current_document = operation.base_document;
+        durable_operation_id = Some(operation_id);
+    }
+
     let templates = state.storage.get_document_templates(Some(5)).map_err(|e| {
         error!("查询文档模板失败: {}", e);
         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
@@ -1842,10 +2023,7 @@ pub async fn run_creation_agent(
         .session_id
         .clone()
         .filter(|value| !value.trim().is_empty());
-    let lease_owner = req
-        .run_id
-        .clone()
-        .unwrap_or_else(|| format!("run-{}", uuid::Uuid::new_v4()));
+    let lease_owner = format!("phase-{}", uuid::Uuid::new_v4());
     if let Some(session_id) = lease_session_id.as_deref() {
         if !acquire_creation_lease(&state, session_id, &lease_owner) {
             return Err((
@@ -1855,6 +2033,12 @@ pub async fn run_creation_agent(
         }
     }
 
+    if let (Some(session), Some(operation_id)) = (lease_session_id.as_deref(), durable_operation_id.as_deref()) {
+        if state.storage.with_conn(|conn| crate::storage::repo::creation_operation::restart_attempt(conn,session,operation_id,resume_checkpoint.is_some() || fresh_input_attempt).map_err(Into::into)).is_err() {
+            release_creation_lease(&state,session,&lease_owner);
+            return Err((StatusCode::INTERNAL_SERVER_ERROR,"恢复操作失败".to_string()));
+        }
+    }
     let generation = req.generation;
     let enabled_tools = normalize_creation_tool_ids(generation.enabled_tools.clone());
     let payload = AgentRunPayload {
@@ -1890,12 +2074,17 @@ pub async fn run_creation_agent(
         current_document: req.current_document,
         conversation: req.conversation,
         selected_skills: req.selected_skills,
+        available_skills: req.available_skills,
+        explicit_skill_ids: req.explicit_skill_ids,
         model_mode: req.model_mode,
         confirmed: req.confirmed,
         resume_state: req.resume_state,
         model_result: req.model_result,
         creation_mode: req.creation_mode,
         creation_brief: req.creation_brief,
+        execution_origin: req.execution_origin,
+        operation_context,
+        resume_checkpoint,
     };
 
     let response = reqwest::Client::new()
@@ -1929,6 +2118,7 @@ pub async fn run_creation_agent(
         ));
     }
 
+    let durable_session_id = lease_session_id.clone();
     let lease_guard = CreationLeaseGuard {
         state: state.clone(),
         session_id: lease_session_id,
@@ -1943,7 +2133,21 @@ pub async fn run_creation_agent(
             match chunk {
                 Ok(bytes) => {
                     for content in append_sse_chunk(&mut buffer, &bytes) {
-                        yield Ok(Event::default().data(content));
+                        let mut event = serde_json::from_str::<serde_json::Value>(&content).unwrap_or(serde_json::Value::Null);
+                        if let (Some(session),Some(operation_id)) = (durable_session_id.as_deref(),durable_operation_id.as_deref()) {
+                            if state.storage.with_conn(|conn| {
+                                crate::storage::repo::creation_operation::record_event(conn,session,operation_id,&mut event).map_err(Into::into)
+                            }).is_err() {
+                                let failure = serde_json::json!({"type":"run.failed","status":"failed",
+                                    "session_id":session,"run_id":event["run_id"],
+                                    "summary":"操作状态保存失败或文档版本已变化，请重新载入后重试",
+                                    "data":{"error_code":"CREATION_BASE_CHANGED","retryable":false}});
+                                yield Ok(Event::default().data(failure.to_string()));
+                                return;
+                            }
+                            if event["type"] == "operation.checkpoint" { continue; }
+                        }
+                        yield Ok(Event::default().data(if event.is_null() { content } else { event.to_string() }));
                     }
                 }
                 Err(e) => {
@@ -1960,11 +2164,19 @@ pub async fn run_creation_agent(
             }
         }
         if let Some(content) = take_sse_tail(&mut buffer) {
-            yield Ok(Event::default().data(content));
+            let mut event = serde_json::from_str::<serde_json::Value>(&content).unwrap_or(serde_json::Value::Null);
+            if let (Some(session),Some(operation_id)) = (durable_session_id.as_deref(),durable_operation_id.as_deref()) {
+                if state.storage.with_conn(|conn| crate::storage::repo::creation_operation::record_event(conn,session,operation_id,&mut event).map_err(Into::into)).is_err() {
+                    yield Ok(Event::default().data(serde_json::json!({"type":"run.failed","status":"failed","summary":"操作提交失败","data":{"error_code":"CREATION_BASE_CHANGED"}}).to_string()));
+                    return;
+                }
+                if event["type"] == "operation.checkpoint" { return; }
+            }
+            yield Ok(Event::default().data(if event.is_null() {content} else {event.to_string()}));
         }
     };
 
-    Ok(Sse::new(stream).keep_alive(
+    Ok(Sse::new(Box::pin(stream) as futures::stream::BoxStream<'static, Result<Event, Infallible>>).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
@@ -1989,7 +2201,14 @@ fn validate_brainstorm_answer(question: &BrainstormQuestion, answer: &Brainstorm
         .selected_option_ids
         .iter()
         .all(|id| question.options.iter().any(|option| option.id == *id));
-    if !selected_valid {
+    if !selected_valid
+        || answer
+            .selected_option_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != answer.selected_option_ids.len()
+    {
         return false;
     }
     let has_selected_options = !answer.selected_option_ids.is_empty();
@@ -2038,16 +2257,107 @@ fn is_enumerated_brainstorm_question(question: &BrainstormQuestion) -> bool {
     recommended_count == 1
 }
 
+fn brainstorm_effective_summary(
+    state: &BrainstormStoredState,
+    turn: &BrainstormStoredTurn,
+) -> String {
+    if turn.answer.source == "user_excluded" {
+        return format!("该方向不重要，禁止展开或写入文档：{}", turn.question.prompt);
+    }
+    state
+        .brief_edits
+        .get(&turn.question.id)
+        .cloned()
+        .unwrap_or_else(|| answer_summary(&turn.question, &turn.answer))
+}
+
+fn brainstorm_question_is_current(state: &BrainstormStoredState, question: &BrainstormQuestion) -> bool {
+    let mut question = question;
+    let mut visited = std::collections::HashSet::new();
+    while visited.insert(question.id.as_str()) {
+        let Some(parent) = question.parent_question_id.as_deref().and_then(|id| {
+            state.turns.iter().find(|turn| turn.question.id == id)
+        }) else {
+            return true;
+        };
+        if state.brief_edits.contains_key(&parent.question.id) {
+            if !state.branch_parent_revisions.get(&question.id)
+                .zip(state.user_input_revisions.get(&parent.question.id))
+                .is_some_and(|(basis, current)| basis >= current)
+            {
+                return false;
+            }
+        } else if parent.answer.source != "user" {
+            return false;
+        }
+        question = &parent.question;
+    }
+    false
+}
+
+fn archive_superseded_brainstorm_turns(state: &mut BrainstormStoredState) -> Vec<String> {
+    let invalidated = state.turns.iter()
+        .filter(|turn| !brainstorm_question_is_current(state, &turn.question))
+        .map(|turn| turn.question.id.clone()).collect::<Vec<_>>();
+    state.pending_extensions.retain(|plan| {
+        !invalidated.contains(&plan.parent_question_id)
+            && state.turns.iter().any(|turn| turn.question.id == plan.parent_question_id)
+            && state.user_input_revisions.get(&plan.parent_question_id).copied().unwrap_or(0) == plan.parent_revision
+    });
+    let turns = std::mem::take(&mut state.turns);
+    for turn in turns {
+        if invalidated.contains(&turn.question.id) {
+            state.brief_edits.remove(&turn.question.id);
+            state.user_input_revisions.remove(&turn.question.id);
+            state.archived_questions.push(BrainstormArchivedQuestion {
+                question: turn.question, answer: Some(turn.answer),
+            });
+        } else {
+            state.turns.push(turn);
+        }
+    }
+    invalidated
+}
+
+fn brainstorm_effective_open_flags(state: &BrainstormStoredState) -> Vec<String> {
+    state
+        .brief_edits
+        .get("open_flags")
+        .map(|value| {
+            value
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_else(|| state.open_flags.clone())
+}
+
 fn brainstorm_brief(state: &BrainstormStoredState) -> String {
     let mut lines = vec![
         "# 创作简报".to_string(),
         String::new(),
-        format!("**原始需求：** {}", state.root_request),
+        format!(
+            "**原始需求：** {}",
+            state
+                .brief_edits
+                .get("root_request")
+                .unwrap_or(&state.root_request)
+        ),
     ];
-    for turn in &state.turns {
+    if !state.memory_brief.is_empty() {
+        lines.push(format!("\n## 历史记忆参考（当前用户修订优先）\n{}", state.memory_brief));
+    }
+    for turn in state.turns.iter().filter(|turn| brainstorm_question_is_current(state, &turn.question)) {
+        if turn.answer.source == "user_excluded" {
+            lines.push(format!("\n- **排除约束（不得写入正文，也不得列为待补充或未展开方向）：** {}", turn.question.prompt));
+            continue;
+        }
         lines.push(String::new());
         lines.push(format!("## {}", turn.question.dimension));
-        let label = if turn.answer.source == "agent_assumption" {
+        let label = if turn.answer.source == "agent_assumption"
+            && !state.brief_edits.contains_key(&turn.question.id)
+        {
             "合理假设"
         } else {
             "已确认"
@@ -2056,14 +2366,21 @@ fn brainstorm_brief(state: &BrainstormStoredState) -> String {
         lines.push(format!(
             "- **{}：** {}",
             label,
-            answer_summary(&turn.question, &turn.answer)
+            state
+                .brief_edits
+                .get(&turn.question.id)
+                .cloned()
+                .unwrap_or_else(|| answer_summary(&turn.question, &turn.answer))
         ));
     }
     let mut open = state.open_flags.clone();
-    if let Some(question) = &state.current_question {
+    if let Some(question) = state.current_question.as_ref().filter(|question| brainstorm_question_is_current(state, question)) {
         if !open.iter().any(|item| item == &question.prompt) {
             open.insert(0, question.prompt.clone());
         }
+    }
+    if let Some(edited) = state.brief_edits.get("open_flags") {
+        open = edited.lines().map(String::from).collect();
     }
     if !open.is_empty() {
         lines.push(String::new());
@@ -2084,12 +2401,18 @@ fn brainstorm_response(
     let decisions = state
         .turns
         .iter()
+        .filter(|turn| brainstorm_question_is_current(state, &turn.question))
         .map(|turn| BrainstormDecision {
             question_id: turn.question.id.clone(),
             dimension_id: turn.question.dimension_id.clone(),
             dimension: turn.question.dimension.clone(),
-            summary: answer_summary(&turn.question, &turn.answer),
-            source: turn.answer.source.clone(),
+            summary: brainstorm_effective_summary(state, turn),
+            user_inputs: brainstorm_user_inputs(state, turn),
+            source: if turn.answer.source != "user_excluded" && state.brief_edits.contains_key(&turn.question.id) {
+                "user".to_string()
+            } else {
+                turn.answer.source.clone()
+            },
         })
         .collect::<Vec<_>>();
     let history = state
@@ -2101,6 +2424,10 @@ fn brainstorm_response(
         })
         .collect::<Vec<_>>();
     BrainstormTurnResponse {
+        archived_questions: state.archived_questions.clone(),
+        root_request: state.root_request.clone(),
+        brief_edits: state.brief_edits.clone(),
+        user_input_revisions: state.user_input_revisions.clone(),
         session_id: session_id.to_string(),
         phase: phase.to_string(),
         revision,
@@ -2108,8 +2435,9 @@ fn brainstorm_response(
         brief_markdown: brainstorm_brief(state),
         answered_count: state.turns.len(),
         depth: state.turns.len(),
-        can_continue_brainstorm: phase == "ready" && !state.continuation_directions.is_empty(),
-        open_flags: state.open_flags.clone(),
+        can_continue_brainstorm: matches!(phase, "ready" | "choosing_direction")
+            && !state.continuation_directions.is_empty(),
+        open_flags: brainstorm_effective_open_flags(state),
         readiness_reason: state.readiness_reason.clone(),
         continuation_directions: state.continuation_directions.clone(),
         invalidated_question_ids: state.invalidated_question_ids.clone(),
@@ -2120,19 +2448,36 @@ fn brainstorm_response(
 
 #[derive(Debug, Serialize)]
 struct DynamicBrainstormRequest {
+    question_batch_limit: usize,
+    extension_goal: String,
+    sibling_question_context: Vec<String>,
+    prefetch: bool,
     root_request: String,
     decisions: Vec<serde_json::Value>,
     brief_markdown: String,
+    brief_edits: std::collections::BTreeMap<String, String>,
+    user_input_revisions: std::collections::BTreeMap<String, i64>,
     selected_skills: Vec<serde_json::Value>,
     force_continue: bool,
+    suggest_directions: bool,
     focus_hint: String,
+    focus_hint_source: String,
+    exploration_stage: String,
     creation_model: Option<String>,
     creation_api_key: Option<String>,
     creation_base_url: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct DynamicBrainstormResult {
+    #[serde(default)]
+    sibling_question_goals: Vec<String>,
+    #[serde(skip)]
+    consumed_extension_id: Option<String>,
+    #[serde(default)]
+    prefetch_safe_option_ids: Vec<String>,
+    #[serde(default)]
+    memory_brief: String,
     status: String,
     #[serde(default)]
     readiness_reason: String,
@@ -2148,6 +2493,7 @@ fn brainstorm_decision_context(state: &BrainstormStoredState) -> Vec<serde_json:
     state
         .turns
         .iter()
+        .filter(|turn| brainstorm_question_is_current(state, &turn.question))
         .map(|turn| {
             let selected_options = turn
                 .answer
@@ -2164,31 +2510,331 @@ fn brainstorm_decision_context(state: &BrainstormStoredState) -> Vec<serde_json:
                 .collect::<Vec<_>>();
             serde_json::json!({
                 "question_id": turn.question.id,
+                "parent_question_id": turn.question.parent_question_id,
+                "parent_option_id": turn.question.parent_option_id,
+                "exploration_stage": brainstorm_exploration_stage(&turn.question),
                 "dimension_id": turn.question.dimension_id,
                 "dimension": turn.question.dimension,
                 "question": turn.question.prompt,
-                "answer": answer_summary(&turn.question, &turn.answer),
-                "answer_source": turn.answer.source,
-                "selected_options": selected_options,
+                "answer": brainstorm_effective_summary(state, turn),
+                "user_inputs": brainstorm_user_inputs(state, turn),
+                "manually_edited": state.brief_edits.contains_key(&turn.question.id),
+                "answer_source": if turn.answer.source != "user_excluded" && state.brief_edits.contains_key(&turn.question.id) { "user" } else { &turn.answer.source },
+                "selected_options": if state.brief_edits.contains_key(&turn.question.id) { Vec::new() } else { selected_options },
             })
         })
         .collect()
 }
 
-async fn generate_dynamic_brainstorm_step(
+fn brainstorm_user_inputs(state: &BrainstormStoredState, turn: &BrainstormStoredTurn) -> Vec<String> {
+    if turn.answer.source == "user_excluded" {
+        return Vec::new();
+    }
+    if let Some(edited) = state.brief_edits.get(&turn.question.id) {
+        return vec![edited.clone()];
+    }
+    if turn.answer.source != "user" {
+        return Vec::new();
+    }
+    let mut inputs = turn.answer.selected_option_ids.iter()
+        .filter_map(|id| turn.question.options.iter().find(|option| &option.id == id))
+        .map(|option| option.label.clone()).collect::<Vec<_>>();
+    if !turn.answer.custom_text.trim().is_empty() {
+        inputs.push(turn.answer.custom_text.trim().to_string());
+    }
+    inputs
+}
+
+fn initialize_brainstorm_input_revisions(stored: &mut BrainstormStoredState, revision: i64) {
+    // Migrate once inside the next ordinary state write. An edited field with
+    // unknown chronology is conservatively current; never refresh it on restore.
+    stored.user_input_revisions.entry("root_request".to_string()).or_insert(
+        if stored.brief_edits.contains_key("root_request") { revision } else { 0 }
+    );
+    for (index, turn) in stored.turns.iter().enumerate() {
+        let inferred = if stored.brief_edits.contains_key(&turn.question.id) {
+            revision
+        } else {
+            ((index + 1) as i64).min(revision)
+        };
+        stored.user_input_revisions.entry(turn.question.id.clone()).or_insert(inferred);
+    }
+    for key in stored.brief_edits.keys() {
+        stored.user_input_revisions.entry(key.clone()).or_insert(revision);
+    }
+}
+
+fn brainstorm_exploration_stage(question: &BrainstormQuestion) -> &str {
+    question.exploration_stage.as_deref().unwrap_or("explore")
+}
+
+fn next_brainstorm_exploration_stage(question: &BrainstormQuestion) -> Option<&'static str> {
+    match brainstorm_exploration_stage(question) {
+        "explore" => Some("solutions"),
+        "solutions" => Some("implementation"),
+        "implementation" => Some("validation"),
+        // A discussed validation plan ends this leaf, without claiming it was executed.
+        "validation" => None,
+        _ => None,
+    }
+}
+
+struct PendingBrainstormBranch<'a> {
+    question: &'a BrainstormQuestion,
+    option: Option<&'a BrainstormOption>,
+    focus: String,
+    exploration_stage: &'static str,
+    extension: Option<&'a BrainstormExtensionPlan>,
+    depth: usize,
+}
+
+fn brainstorm_branch_focus(stored: &BrainstormStoredState, branch: &PendingBrainstormBranch<'_>) -> String {
+    let mut path = vec![branch.focus.clone()];
+    let mut question = branch.question;
+    let mut visited = std::collections::HashSet::new();
+    while visited.insert(question.id.as_str()) {
+        let Some(parent) = question.parent_question_id.as_deref().and_then(|id| {
+            stored.turns.iter().find(|turn| turn.question.id == id)
+        }) else {
+            break;
+        };
+        let input = if let Some(edited) = stored.brief_edits.get(&parent.question.id) {
+            edited.clone()
+        } else if parent.answer.source == "user" {
+            question.parent_option_id.as_deref().and_then(|id| {
+                parent.question.options.iter().find(|option| option.id == id
+                    && parent.answer.selected_option_ids.contains(&option.id))
+            }).map(|option| option.label.clone()).unwrap_or_else(|| parent.answer.custom_text.clone())
+        } else {
+            String::new()
+        };
+        if !input.trim().is_empty() {
+            path.push(input.trim().to_string());
+        }
+        question = &parent.question;
+    }
+    path.reverse();
+    format!("按层逐项展开，当前用户决定路径：{}。本题只讨论当前路径的指定阶段；同层其他已选方向分别讨论后，再进入下一层。", path.join(" → "))
+}
+
+// Traverse each root by breadth, preserving displayed option order. An explicit
+// continuation root takes precedence over older roots without losing ancestry.
+fn pending_brainstorm_branches(stored: &BrainstormStoredState) -> Vec<PendingBrainstormBranch<'_>> {
+    let mut pending = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    for root in stored.turns.iter().rev().filter(|turn| {
+        !stored.turns.iter().any(|parent| {
+            turn.question.parent_question_id.as_deref() == Some(parent.question.id.as_str())
+        })
+    }) {
+        let root_start = pending.len();
+        let mut queue = std::collections::VecDeque::from([(root, 0)]);
+        while let Some((turn, depth)) = queue.pop_front() {
+            if !visited.insert(turn.question.id.as_str())
+                || !brainstorm_question_is_current(stored, &turn.question)
+                || turn.answer.source == "user_excluded" {
+                continue;
+            }
+            let Some(exploration_stage) = next_brainstorm_exploration_stage(&turn.question) else { continue; };
+            let mut branches = Vec::new();
+            if let Some(edited) = stored.brief_edits.get(&turn.question.id) {
+                if !edited.trim().is_empty() { branches.push((None, edited.trim().to_string())); }
+            } else if turn.answer.source == "user" {
+                for option in &turn.question.options {
+                    if turn.answer.selected_option_ids.contains(&option.id) {
+                        branches.push((Some(option), option.label.clone()));
+                    }
+                }
+                if !turn.answer.custom_text.trim().is_empty() {
+                    branches.push((None, turn.answer.custom_text.trim().to_string()));
+                }
+            }
+            for (option, focus) in branches {
+                let option_id = option.map(|option| option.id.as_str());
+                let matches = |question: &BrainstormQuestion| {
+                    question.parent_question_id.as_deref() == Some(turn.question.id.as_str())
+                        && question.parent_option_id.as_deref() == option_id
+                        && brainstorm_question_is_current(stored, question)
+                };
+                let children: Vec<_> = stored.turns.iter().filter(|child| matches(&child.question)).collect();
+                // The visible unanswered question occupies its branch, but its
+                // unknown answers must never create speculative descendants.
+                if children.is_empty() && !stored.current_question.as_ref().is_some_and(matches) {
+                    pending.push(PendingBrainstormBranch {question: &turn.question, option, focus: focus.clone(), exploration_stage, extension: None, depth});
+                }
+                for extension in stored.pending_extensions.iter().filter(|plan| {
+                    plan.parent_question_id == turn.question.id
+                        && plan.parent_option_id.as_deref() == option_id
+                        && stored.user_input_revisions.get(&turn.question.id).copied().unwrap_or(0) == plan.parent_revision
+                }) {
+                    pending.push(PendingBrainstormBranch {
+                        question: &turn.question, option, focus: focus.clone(), exploration_stage,
+                        extension: Some(extension), depth,
+                    });
+                }
+                queue.extend(children.into_iter().map(|child| (child, depth + 1)));
+            }
+        }
+        // Rotate first questions across the entire layer before second/third
+        // independent facets, including facets under different sibling parents.
+        pending[root_start..].sort_by_key(|branch| (branch.depth,
+            branch.extension.map(|plan| plan.ordinal).unwrap_or(0)));
+    }
+    pending
+}
+
+fn pending_brainstorm_branch(stored: &BrainstormStoredState) -> Option<PendingBrainstormBranch<'_>> {
+    pending_brainstorm_branches(stored).into_iter().next()
+}
+
+fn apply_brainstorm_question_stage(
+    question: &mut BrainstormQuestion,
+    branch: Option<&PendingBrainstormBranch<'_>>,
+) -> bool {
+    let expected_stage = branch.map(|branch| branch.exploration_stage);
+    let stage = question.exploration_stage.as_deref().or(expected_stage).unwrap_or("explore");
+    if !matches!(stage, "explore" | "solutions" | "implementation" | "validation")
+        || expected_stage.is_some_and(|expected| expected != stage)
+    {
+        return false;
+    }
+    // Omitted stage is the legacy Sidecar contract. Explicit mismatches above
+    // must fail, rather than relabelling a diagnostic question as a solution.
+    question.exploration_stage = Some(stage.to_string());
+    question.parent_question_id = branch.map(|branch| branch.question.id.clone());
+    question.parent_option_id = branch.and_then(|branch| branch.option.map(|option| option.id.clone()));
+    true
+}
+
+fn brainstorm_log_identifier(value: &str) -> &str {
+    let value = value.trim();
+    if !value.is_empty()
+        && value.len() <= 160
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':')
+        })
+    {
+        value
+    } else {
+        "invalid"
+    }
+}
+
+fn log_brainstorm_stage(req: &BrainstormTurnRequest, stage: &'static str, started: Instant) {
+    info!(
+        session_id = brainstorm_log_identifier(&req.session_id),
+        action = brainstorm_log_action(&req.action),
+        stage,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "creation brainstorm stage"
+    );
+}
+
+fn brainstorm_log_action(action: &str) -> &str {
+    match action {
+        "start" | "edit_brief" | "answer" | "skip" | "exclude" | "reopen"
+        | "revise_answer" | "finish" | "change_direction" | "continue_brainstorm"
+        | "abandon" => action,
+        _ => "invalid",
+    }
+}
+
+struct BrainstormTurnTrace {
+    session_id: String,
+    action: String,
+    started: Instant,
+    finished: bool,
+}
+
+impl Drop for BrainstormTurnTrace {
+    fn drop(&mut self) {
+        if !self.finished {
+            info!(
+                session_id = self.session_id,
+                action = self.action,
+                stage = "cancelled",
+                elapsed_ms = self.started.elapsed().as_millis() as u64,
+                "creation brainstorm stage"
+            );
+        }
+    }
+}
+
+async fn generate_uncached_brainstorm_step(
     state: &AppState,
     stored: &BrainstormStoredState,
     req: &BrainstormTurnRequest,
     force_continue: bool,
+    suggest_directions: bool,
     focus_hint: &str,
+    target_key: Option<&str>,
+    prefetch: bool,
 ) -> Result<DynamicBrainstormResult, (StatusCode, Json<serde_json::Value>)> {
+    with_brainstorm_session_guard(state, req.session_id.trim(), false, |_| Ok(()))?;
+    // Filter the entire effective input snapshot, including manual fields and
+    // permission revisions. Superseded answers remain recoverable in history,
+    // but cannot influence the model while generating their replacements.
+    let mut effective_stored = stored.clone();
+    archive_superseded_brainstorm_turns(&mut effective_stored);
+    let stored = &effective_stored;
+    let started = Instant::now();
+    log_brainstorm_stage(req, "sidecar_started", started);
+    let branch = if !suggest_directions {
+        let mut branches = pending_brainstorm_branches(stored).into_iter();
+        if let Some(key) = target_key {
+            branches.find(|branch| brainstorm_prefetch::branch_key(stored, req, branch) == key)
+        } else { branches.next() }
+    } else {
+        None
+    };
+    if target_key.is_some() && branch.is_none() {
+        return Err(brainstorm_model_error("BRAINSTORM_MODEL_OUTPUT_INVALID"));
+    }
+    let branch_hint = branch.as_ref().map(|branch| brainstorm_branch_focus(stored, branch));
+    let force_continue = force_continue || branch.is_some();
+    let question_batch_limit = if branch.as_ref().is_some_and(|branch| branch.extension.is_none()) {
+        std::env::var("MEMORYBREAD_BRAINSTORM_QUESTION_BATCH_LIMIT").ok()
+            .and_then(|value| value.parse::<usize>().ok()).unwrap_or(3).clamp(1, 8)
+    } else { 1 };
     let payload = DynamicBrainstormRequest {
-        root_request: stored.root_request.clone(),
+        question_batch_limit,
+        extension_goal: branch.as_ref().and_then(|branch| branch.extension)
+            .map(|plan| plan.goal.clone()).unwrap_or_default(),
+        sibling_question_context: branch.as_ref().map(|branch| {
+            let option_id = branch.option.map(|option| option.id.as_str());
+            let mut context: Vec<String> = stored.turns.iter().map(|turn| &turn.question)
+                .chain(stored.current_question.iter()).filter(|question| {
+                    question.parent_question_id.as_deref() == Some(branch.question.id.as_str())
+                        && question.parent_option_id.as_deref() == option_id
+                        && brainstorm_question_is_current(stored, question)
+                }).map(|question| question.prompt.clone()).collect();
+            context.extend(stored.pending_extensions.iter().filter(|plan| {
+                plan.parent_question_id == branch.question.id
+                    && plan.parent_option_id.as_deref() == option_id
+                    && branch.extension.map(|current| &current.id) != Some(&plan.id)
+            }).map(|plan| plan.goal.clone()));
+            context
+        }).unwrap_or_default(),
+        prefetch,
+        root_request: stored
+            .brief_edits
+            .get("root_request")
+            .cloned()
+            .unwrap_or_else(|| stored.root_request.clone()),
         decisions: brainstorm_decision_context(stored),
         brief_markdown: brainstorm_brief(stored),
+        brief_edits: stored.brief_edits.clone(),
+        user_input_revisions: stored.user_input_revisions.clone(),
         selected_skills: stored.selected_skills.clone(),
         force_continue,
-        focus_hint: focus_hint.trim().to_string(),
+        suggest_directions,
+        focus_hint: branch_hint.unwrap_or_else(|| focus_hint.trim().to_string()),
+        focus_hint_source: if branch.is_some() || req.continuation_direction_id != "__custom__" {
+            "confirmed_selection".to_string()
+        } else {
+            "user".to_string()
+        },
+        exploration_stage: branch.as_ref().map(|branch| branch.exploration_stage).unwrap_or("").to_string(),
         creation_model: req.creation_model.clone(),
         creation_api_key: req.creation_api_key.clone(),
         creation_base_url: req.creation_base_url.clone(),
@@ -2203,39 +2849,42 @@ async fn generate_dynamic_brainstorm_step(
         .send()
         .await
         .map_err(|error| {
-            error!("动态脑暴 Sidecar 调用失败: {}", error);
-            brainstorm_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "BRAINSTORM_MODEL_UNAVAILABLE",
-                "脑暴问题生成服务暂时不可用，已保留当前输入，请重试",
-            )
+            let code = if error.is_timeout() {
+                "BRAINSTORM_MODEL_TIMEOUT"
+            } else {
+                "BRAINSTORM_MODEL_UNAVAILABLE"
+            };
+            error!("动态脑暴调用失败: code={}", code);
+            brainstorm_model_error(code)
         })?;
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        error!("动态脑暴 Sidecar 返回错误: {} - {}", status, body);
-        return Err(brainstorm_error(
-            StatusCode::BAD_GATEWAY,
-            "BRAINSTORM_MODEL_OUTPUT_INVALID",
-            "下一步脑暴问题生成失败，请重试",
-        ));
+        let body = response.json::<serde_json::Value>().await.unwrap_or_default();
+        let failure = brainstorm_sidecar_error(
+            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            &body,
+        );
+        // Never log upstream messages: they may contain model output, URLs or credentials.
+        error!("动态脑暴返回错误: status={}, code={}", status, failure.1.0["code"]);
+        return Err(failure);
     }
-    let result = response
+    log_brainstorm_stage(req, "sidecar_succeeded", started);
+    let mut result = response
         .json::<DynamicBrainstormResult>()
         .await
-        .map_err(|error| {
-            error!("动态脑暴响应解析失败: {}", error);
-            brainstorm_error(
-                StatusCode::BAD_GATEWAY,
-                "BRAINSTORM_MODEL_OUTPUT_INVALID",
-                "下一步脑暴问题格式无效，请重试",
-            )
+        .map_err(|_| {
+            log_brainstorm_stage(req, "validation_failed", started);
+            error!("动态脑暴响应解析失败: code=BRAINSTORM_MODEL_OUTPUT_INVALID");
+            brainstorm_model_error("BRAINSTORM_MODEL_OUTPUT_INVALID")
         })?;
     let valid = match result.status.as_str() {
-        "question" => result
-            .question
-            .as_ref()
-            .is_some_and(is_enumerated_brainstorm_question),
+        "question" => {
+            !suggest_directions
+                && result
+                    .question
+                    .as_ref()
+                    .is_some_and(is_enumerated_brainstorm_question)
+        }
         "ready" => {
             result.question.is_none()
                 && !force_continue
@@ -2244,27 +2893,93 @@ async fn generate_dynamic_brainstorm_step(
         _ => false,
     };
     if !valid {
-        return Err(brainstorm_error(
-            StatusCode::BAD_GATEWAY,
-            "BRAINSTORM_MODEL_OUTPUT_INVALID",
-            "下一步脑暴状态无效，请重试",
-        ));
+        log_brainstorm_stage(req, "validation_failed", started);
+        return Err(brainstorm_model_error("BRAINSTORM_MODEL_OUTPUT_INVALID"));
+    }
+    let mut goal_fingerprints = std::collections::HashSet::new();
+    if result.sibling_question_goals.len() >= question_batch_limit
+        || result.sibling_question_goals.iter().any(|goal| {
+            let fingerprint = brainstorm_question_fingerprint(goal);
+            goal.trim().is_empty() || goal.chars().count() > 80 || fingerprint.is_empty()
+                || !goal_fingerprints.insert(fingerprint.clone())
+                || stored.turns.iter().any(|turn| brainstorm_question_fingerprint(&turn.question.prompt) == fingerprint)
+                || result.question.as_ref().is_some_and(|question| brainstorm_question_fingerprint(&question.prompt) == fingerprint)
+                || branch.as_ref().is_some_and(|branch| stored.pending_extensions.iter().any(|plan| {
+                    plan.parent_question_id == branch.question.id
+                        && plan.parent_option_id.as_deref() == branch.option.map(|option| option.id.as_str())
+                        && brainstorm_question_fingerprint(&plan.goal) == fingerprint
+                }))
+        })
+    {
+        return Err(brainstorm_model_error("BRAINSTORM_MODEL_OUTPUT_INVALID"));
+    }
+    result.consumed_extension_id = branch.as_ref().and_then(|branch| branch.extension).map(|plan| plan.id.clone());
+    if let Some(question) = result.question.as_mut() {
+        if result.consumed_extension_id.is_some() || !result.sibling_question_goals.is_empty() {
+            question.id = format!("extension_{}", uuid::Uuid::new_v4());
+        }
+        // Parent links are authoritative Core metadata, never model supplied.
+        if !apply_brainstorm_question_stage(question, branch.as_ref()) {
+            log_brainstorm_stage(req, "validation_failed", started);
+            return Err(brainstorm_model_error("BRAINSTORM_MODEL_OUTPUT_INVALID"));
+        }
     }
     Ok(result)
+}
+
+async fn generate_dynamic_brainstorm_step(
+    state: &AppState, stored: &BrainstormStoredState, req: &BrainstormTurnRequest,
+    force_continue: bool, suggest_directions: bool, focus_hint: &str,
+) -> Result<DynamicBrainstormResult, (StatusCode, Json<serde_json::Value>)> {
+    with_brainstorm_session_guard(state, req.session_id.trim(), false, |_| Ok(()))?;
+    if !suggest_directions {
+        if let Some(step) = brainstorm_prefetch::take(state, stored, req) {
+            return Ok(step);
+        }
+    }
+    // An incomplete speculative request must yield to the demanded P0 turn.
+    brainstorm_prefetch::stop_running(state, req.session_id.trim());
+    generate_uncached_brainstorm_step(state, stored, req, force_continue, suggest_directions, focus_hint, None, false).await
 }
 
 fn apply_dynamic_step(
     stored: &mut BrainstormStoredState,
     result: DynamicBrainstormResult,
 ) -> String {
+    if let Some(question) = result.question.as_ref() {
+        stored.prefetch_safe_options.insert(question.id.clone(), result.prefetch_safe_option_ids.clone());
+    }
     stored.open_flags = result.open_flags;
     stored.readiness_reason = result.readiness_reason;
-    stored.invalidated_question_ids.clear();
+    stored.memory_brief = result.memory_brief;
+    stored.invalidated_question_ids = archive_superseded_brainstorm_turns(stored);
+    if let Some(id) = result.consumed_extension_id.as_ref() {
+        stored.pending_extensions.retain(|plan| &plan.id != id);
+    }
+    if let Some(question) = result.question.as_ref() {
+        if let Some(parent_id) = question.parent_question_id.as_ref() {
+            let parent_revision = stored.user_input_revisions.get(parent_id).copied().unwrap_or(0);
+            for (index, goal) in result.sibling_question_goals.into_iter().enumerate() {
+                stored.pending_extensions.push(BrainstormExtensionPlan {
+                    id: uuid::Uuid::new_v4().to_string(), parent_question_id: parent_id.clone(),
+                    parent_option_id: question.parent_option_id.clone(), parent_revision,
+                    goal, ordinal: index + 1,
+                });
+            }
+        }
+    }
     if result.status == "ready" {
         stored.current_question = None;
         stored.continuation_directions = result.continuation_directions;
         "ready".to_string()
     } else {
+        if let Some(question) = result.question.as_ref() {
+            if let Some(parent_revision) = question.parent_question_id.as_ref()
+                .and_then(|parent_id| stored.user_input_revisions.get(parent_id))
+            {
+                stored.branch_parent_revisions.insert(question.id.clone(), *parent_revision);
+            }
+        }
         stored.current_question = result.question;
         stored.continuation_directions.clear();
         "exploring".to_string()
@@ -2309,6 +3024,44 @@ fn brainstorm_question_fingerprint(prompt: &str) -> String {
         .filter(|character| character.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+// Independent requests cannot see each other's eventual wording. Recheck
+// published siblings at cache consumption, with conservative text similarity.
+fn brainstorm_questions_overlap(left: &BrainstormQuestion, right: &BrainstormQuestion) -> bool {
+    let left_exact = brainstorm_question_fingerprint(&left.prompt);
+    let right_exact = brainstorm_question_fingerprint(&right.prompt);
+    if left_exact == right_exact { return true; }
+    if left.parent_question_id.is_none()
+        || left.parent_question_id != right.parent_question_id
+        || left.parent_option_id != right.parent_option_id
+    { return false; }
+    let normalize = |mut text: String| {
+        for scaffolding in ["如何", "怎样", "怎么", "请问", "设计", "愿意", "能够", "可以", "应该", "才能"] {
+            text = text.replace(scaffolding, "");
+        }
+        text
+    };
+    let left = normalize(left_exact);
+    let right = normalize(right_exact);
+    let a = left.chars().collect::<Vec<_>>();
+    let b = right.chars().collect::<Vec<_>>();
+    let shortest = a.len().min(b.len());
+    let longest = a.len().max(b.len());
+    if shortest >= 6 && shortest * 100 >= longest * 55 && (left.contains(&right) || right.contains(&left)) {
+        return true;
+    }
+    if shortest < 18 || longest > 120 { return false; }
+    let mut previous = vec![0usize; b.len() + 1];
+    for character in &a {
+        let mut row = vec![0usize; b.len() + 1];
+        for (index, other) in b.iter().enumerate() {
+            row[index + 1] = if character == other { previous[index] + 1 }
+                else { row[index].max(previous[index + 1]) };
+        }
+        previous = row;
+    }
+    previous[b.len()] * 200 >= (a.len() + b.len()) * 90
 }
 
 fn discard_duplicate_brainstorm_questions(stored: &mut BrainstormStoredState) {
@@ -2379,12 +3132,17 @@ fn parse_brainstorm_state(state_json: &str) -> Result<BrainstormStoredState, ser
         let (dimension, prompt) = legacy_brainstorm_meta(question_id);
         stored.turns.push(BrainstormStoredTurn {
             question: BrainstormQuestion {
+                exploration_stage: None,
+                parent_question_id: None,
+                parent_option_id: None,
+                single_choice_reason: String::new(),
                 id: question_id.clone(),
                 dimension_id: String::new(),
                 dimension: dimension.to_string(),
                 question_type: "confirm_inference".to_string(),
                 prompt: prompt.to_string(),
                 why_now: "从旧版脑暴记录迁移的已确认决定。".to_string(),
+                context_details: String::new(),
                 required: false,
                 allow_custom: true,
                 options: Vec::new(),
@@ -2408,10 +3166,219 @@ fn brainstorm_error(
     )
 }
 
+fn brainstorm_session_terminated_error() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "code": "BRAINSTORM_SESSION_TERMINATED",
+            "message": "当前会话已终止，请开启新会话",
+            "retryable": false,
+        })),
+    )
+}
+
+fn brainstorm_history_is_terminated(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> rusqlite::Result<bool> {
+    let mut statement = conn.prepare(
+        "SELECT conversation_json FROM creation_history
+         WHERE session_id = ?1 AND conversation_json IS NOT NULL",
+    )?;
+    let histories = statement.query_map([session_id], |row| row.get::<_, String>(0))?;
+    for history in histories {
+        let messages =
+            serde_json::from_str::<Vec<serde_json::Value>>(&history?).unwrap_or_default();
+        // A stopped run remains retryable. Only the explicit session boundary
+        // ends the conversation, regardless of the history lifecycle status.
+        if messages
+            .iter()
+            .any(|message| message["kind"] == "session_end")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn with_brainstorm_session_guard<T>(
+    state: &AppState,
+    session_id: &str,
+    allow_terminated: bool,
+    operation: impl FnOnce(&rusqlite::Connection) -> Result<T, crate::storage::StorageError>,
+) -> Result<T, (StatusCode, Json<serde_json::Value>)> {
+    state
+        .storage
+        .with_conn(|conn| {
+            // Check and write under the same connection lock: a late model result
+            // cannot pass a check before termination and persist after it.
+            if !allow_terminated
+                && (brainstorm_history_is_terminated(conn, session_id)?
+                    || crate::storage::repo::creation_brainstorm::get(conn, session_id)?
+                        .is_some_and(|session| session.phase == "abandoned"))
+            {
+                return Ok(None);
+            }
+            operation(conn).map(Some)
+        })
+        .map_err(|error| {
+            error!("检查或保存脑暴会话失败: {}", error);
+            brainstorm_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "BRAINSTORM_PERSIST_FAILED",
+                "脑暴进度读写失败，请重试",
+            )
+        })?
+        .ok_or_else(brainstorm_session_terminated_error)
+}
+
+fn brainstorm_model_error(code: &str) -> (StatusCode, Json<serde_json::Value>) {
+    let (status, code, message, retryable) = match code {
+        "BRAINSTORM_MODEL_OUTPUT_TRUNCATED" | "CREATION_DOCUMENT_TRUNCATED" => (
+            StatusCode::BAD_GATEWAY,
+            "BRAINSTORM_MODEL_OUTPUT_TRUNCATED",
+            "脑暴问题生成达到长度上限，已保留当前输入，请缩小本轮讨论范围后重试",
+            false,
+        ),
+        "MODEL_ACCESS_DENIED" => (
+            StatusCode::FORBIDDEN,
+            "MODEL_ACCESS_DENIED",
+            "当前模型访问未获授权，请切换可用模型或检查模型权限后重试",
+            false,
+        ),
+        "MODEL_RATE_LIMITED" => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "MODEL_RATE_LIMITED",
+            "模型服务当前繁忙，已保留当前输入，请稍后重试",
+            true,
+        ),
+        "MODEL_REQUEST_FAILED" => (
+            StatusCode::BAD_GATEWAY,
+            "MODEL_REQUEST_FAILED",
+            "模型未能接受脑暴请求，请检查模型配置后重试",
+            false,
+        ),
+        "MODEL_TRANSPORT_UNAVAILABLE" | "MODEL_SERVICE_UNAVAILABLE" | "CREATION_UNAVAILABLE"
+        | "BRAINSTORM_MODEL_UNAVAILABLE" => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "BRAINSTORM_MODEL_UNAVAILABLE",
+            "脑暴问题生成服务暂时不可用，已保留当前输入，请稍后重试",
+            true,
+        ),
+        "BRAINSTORM_MODEL_TIMEOUT" => (
+            StatusCode::GATEWAY_TIMEOUT,
+            "BRAINSTORM_MODEL_TIMEOUT",
+            "脑暴问题生成超时，已保留当前输入，请稍后重试",
+            true,
+        ),
+        _ => (
+            StatusCode::BAD_GATEWAY,
+            "BRAINSTORM_MODEL_OUTPUT_INVALID",
+            "脑暴问题未生成有效结果，已保留当前输入，请重试",
+            false,
+        ),
+    };
+    (
+        status,
+        Json(serde_json::json!({ "code": code, "message": message, "retryable": retryable })),
+    )
+}
+
+fn brainstorm_sidecar_error(
+    status: StatusCode,
+    body: &serde_json::Value,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let code = body.get("detail").unwrap_or(body)
+        .get("code").and_then(serde_json::Value::as_str).unwrap_or("");
+    let failure = brainstorm_model_error(code);
+    if code == "BRAINSTORM_MODEL_OUTPUT_INVALID"
+        || failure.1.0["code"] != "BRAINSTORM_MODEL_OUTPUT_INVALID"
+    {
+        return failure;
+    }
+    // Unknown codes and arbitrary upstream messages are never forwarded.
+    match status {
+        StatusCode::TOO_MANY_REQUESTS => brainstorm_model_error("MODEL_RATE_LIMITED"),
+        StatusCode::SERVICE_UNAVAILABLE => brainstorm_model_error("BRAINSTORM_MODEL_UNAVAILABLE"),
+        StatusCode::GATEWAY_TIMEOUT => brainstorm_model_error("BRAINSTORM_MODEL_TIMEOUT"),
+        _ => failure,
+    }
+}
+
 /// POST /api/creation/brainstorm/turn - 逐答持久化的创作前置脑暴状态机。
 pub async fn run_creation_brainstorm_turn(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<BrainstormTurnRequest>,
+) -> Response {
+    let wants_events = headers.get_all(header::ACCEPT).iter().any(|value| {
+        value.to_str().is_ok_and(|value| {
+            value.split(',').any(|media_type| {
+                let mut parts = media_type.split(';');
+                parts.next().unwrap_or("").trim()
+                    .eq_ignore_ascii_case("text/event-stream")
+                    && parts.all(|parameter| {
+                        let Some((name, value)) = parameter.trim().split_once('=') else {
+                            return true;
+                        };
+                        !name.trim().eq_ignore_ascii_case("q")
+                            || value.trim().parse::<f32>().is_ok_and(|q| q > 0.0 && q <= 1.0)
+                    })
+            })
+        })
+    });
+    if !wants_events {
+        return execute_creation_brainstorm_turn(state, req).await.into_response();
+    }
+
+    // Send headers before entering the inference queue. A JSON-only response can
+    // stay silent longer than WebKit's request timeout even within our 180s budget.
+    // Own the future in the body: dropping the connection still cancels this turn.
+    let stream = async_stream::stream! {
+        yield Ok::<Event, Infallible>(Event::default()
+            .event("brainstorm.started").data("{}"));
+        let (name, data) = match execute_creation_brainstorm_turn(state, req).await {
+            Ok(Json(result)) => ("brainstorm.completed", serde_json::json!({ "state": result })),
+            Err((status, Json(mut failure))) => {
+                failure["status"] = serde_json::json!(status.as_u16());
+                ("brainstorm.failed", failure)
+            }
+        };
+        // The existing state machine validates and persists before returning.
+        yield Ok(Event::default().event(name).data(data.to_string()));
+    };
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(10))
+            .text("keep-alive"),
+    ).into_response()
+}
+
+async fn execute_creation_brainstorm_turn(
+    state: Arc<AppState>,
+    req: BrainstormTurnRequest,
+) -> Result<Json<BrainstormTurnResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let mut trace = BrainstormTurnTrace {
+        session_id: brainstorm_log_identifier(&req.session_id).to_string(),
+        action: brainstorm_log_action(&req.action).to_string(),
+        started: Instant::now(),
+        finished: false,
+    };
+    log_brainstorm_stage(&req, "started", trace.started);
+    let result = run_creation_brainstorm_turn_inner(state, &req, trace.started).await;
+    log_brainstorm_stage(
+        &req,
+        if result.is_ok() { "completed" } else { "failed" },
+        trace.started,
+    );
+    trace.finished = true;
+    result
+}
+
+async fn run_creation_brainstorm_turn_inner(
+    state: Arc<AppState>,
+    req: &BrainstormTurnRequest,
+    started: Instant,
 ) -> Result<Json<BrainstormTurnResponse>, (StatusCode, Json<serde_json::Value>)> {
     let session_id = req.session_id.trim();
     let root_request = req.root_request.trim();
@@ -2424,9 +3391,14 @@ pub async fn run_creation_brainstorm_turn(
     }
 
     use crate::storage::repo::creation_brainstorm;
-    let existing = state
+    let (existing, history_terminated) = state
         .storage
-        .with_conn(|conn| Ok(creation_brainstorm::get(conn, session_id)?))
+        .with_conn(|conn| {
+            Ok((
+                creation_brainstorm::get(conn, session_id)?,
+                brainstorm_history_is_terminated(conn, session_id)?,
+            ))
+        })
         .map_err(|error| {
             error!("读取脑暴会话失败: {}", error);
             brainstorm_error(
@@ -2435,6 +3407,10 @@ pub async fn run_creation_brainstorm_turn(
                 "脑暴进度读取失败，请重试",
             )
         })?;
+
+    if history_terminated && req.action != "abandon" {
+        return Err(brainstorm_session_terminated_error());
+    }
 
     if req.action == "start" {
         if let Some(session) = existing {
@@ -2447,28 +3423,20 @@ pub async fn run_creation_brainstorm_turn(
                 )
             })?;
             if session.phase == "exploring" && stored.current_question.is_none() {
+                initialize_brainstorm_input_revisions(&mut stored, session.revision);
                 let step =
-                    generate_dynamic_brainstorm_step(&state, &stored, &req, false, "").await?;
+                    generate_dynamic_brainstorm_step(&state, &stored, &req, false, false, "")
+                        .await?;
                 let phase = apply_dynamic_step(&mut stored, step);
-                let changed = state
-                    .storage
-                    .with_conn(|conn| {
-                        Ok(creation_brainstorm::update(
-                            conn,
-                            session_id,
-                            session.revision,
-                            &phase,
-                            &serde_json::to_string(&stored)?,
-                        )?)
-                    })
-                    .map_err(|error| {
-                        error!("升级旧版脑暴会话失败: {}", error);
-                        brainstorm_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "BRAINSTORM_PERSIST_FAILED",
-                            "脑暴进度升级失败，请重试",
-                        )
-                    })?;
+                let changed = with_brainstorm_session_guard(&state, session_id, false, |conn| {
+                    Ok(creation_brainstorm::update(
+                        conn,
+                        session_id,
+                        session.revision,
+                        &phase,
+                        &serde_json::to_string(&stored)?,
+                    )?)
+                })?;
                 if !changed {
                     return Err(brainstorm_error(
                         StatusCode::CONFLICT,
@@ -2476,6 +3444,8 @@ pub async fn run_creation_brainstorm_turn(
                         "脑暴内容已更新，请刷新后重试",
                     ));
                 }
+                log_brainstorm_stage(req, "persisted", started);
+                brainstorm_prefetch::schedule(&state, &stored, req, &phase, session.revision + 1);
                 return Ok(Json(brainstorm_response(
                     session_id,
                     &phase,
@@ -2483,6 +3453,7 @@ pub async fn run_creation_brainstorm_turn(
                     &stored,
                 )));
             }
+            brainstorm_prefetch::schedule(&state, &stored, req, &session.phase, session.revision);
             return Ok(Json(brainstorm_response(
                 session_id,
                 &session.phase,
@@ -2491,6 +3462,13 @@ pub async fn run_creation_brainstorm_turn(
             )));
         }
         let mut stored = BrainstormStoredState {
+            pending_extensions: Vec::new(),
+            prefetch_safe_options: Default::default(),
+            branch_parent_revisions: Default::default(),
+            memory_brief: String::new(),
+            archived_questions: Vec::new(),
+            brief_edits: Default::default(),
+            user_input_revisions: [("root_request".to_string(), 0)].into_iter().collect(),
             root_request: root_request.to_string(),
             selected_skills: req.selected_skills.clone(),
             turns: Vec::new(),
@@ -2500,27 +3478,20 @@ pub async fn run_creation_brainstorm_turn(
             continuation_directions: Vec::new(),
             invalidated_question_ids: Vec::new(),
         };
-        let step = generate_dynamic_brainstorm_step(&state, &stored, &req, false, "").await?;
+        let step =
+            generate_dynamic_brainstorm_step(&state, &stored, &req, false, false, "").await?;
         let phase = apply_dynamic_step(&mut stored, step);
-        let session = state
-            .storage
-            .with_conn(|conn| {
-                Ok(creation_brainstorm::create(
-                    conn,
-                    session_id,
-                    root_request,
-                    &phase,
-                    &serde_json::to_string(&stored)?,
-                )?)
-            })
-            .map_err(|error| {
-                error!("创建脑暴会话失败: {}", error);
-                brainstorm_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "BRAINSTORM_PERSIST_FAILED",
-                    "脑暴进度保存失败，请重试",
-                )
-            })?;
+        let session = with_brainstorm_session_guard(&state, session_id, false, |conn| {
+            Ok(creation_brainstorm::create(
+                conn,
+                session_id,
+                root_request,
+                &phase,
+                &serde_json::to_string(&stored)?,
+            )?)
+        })?;
+        log_brainstorm_stage(req, "persisted", started);
+        brainstorm_prefetch::schedule(&state, &stored, req, &phase, session.revision);
         return Ok(Json(brainstorm_response(
             session_id,
             &phase,
@@ -2536,7 +3507,10 @@ pub async fn run_creation_brainstorm_turn(
             "脑暴会话不存在",
         ));
     };
-    if req.revision.unwrap_or(-1) != session.revision {
+    if session.phase == "abandoned" && req.action != "abandon" {
+        return Err(brainstorm_session_terminated_error());
+    }
+    if session.phase != "abandoned" && req.revision.unwrap_or(-1) != session.revision {
         return Err(brainstorm_error(
             StatusCode::CONFLICT,
             "BRAINSTORM_REVISION_CONFLICT",
@@ -2551,14 +3525,53 @@ pub async fn run_creation_brainstorm_turn(
             "已有脑暴进度无法恢复，请重新开始",
         )
     })?;
+    if session.phase == "abandoned" {
+        return Ok(Json(brainstorm_response(
+            session_id,
+            &session.phase,
+            session.revision,
+            &stored,
+        )));
+    }
     // 兼容在章节覆盖能力上线前创建的会话：客户端每轮都会携带当前执行
     // Skill，旧状态只补写一次，之后仍以服务端持久化上下文为准。
     if stored.selected_skills.is_empty() && !req.selected_skills.is_empty() {
         stored.selected_skills = req.selected_skills.clone();
     }
+    initialize_brainstorm_input_revisions(&mut stored, session.revision);
 
+    if !brainstorm_prefetch::answer_preserves_candidates(&stored, req) {
+        brainstorm_prefetch::invalidate_revision(&state, session_id, session.revision);
+    }
+    if !matches!(req.action.as_str(), "answer" | "skip" | "exclude")
+        || (req.action == "answer" && !brainstorm_prefetch::answer_preserves_candidates(&stored, req))
+    {
+        stored.pending_extensions.clear();
+    }
     let next_phase = match req.action.as_str() {
-        "answer" | "skip" => {
+        "edit_brief" => {
+            if req.brief_edits.iter().any(|(key, value)| {
+                value.chars().count() > 12000
+                    || !(key == "root_request"
+                        || key == "open_flags"
+                        || stored.turns.iter().any(|turn| &turn.question.id == key))
+            }) {
+                return Err(brainstorm_error(
+                    StatusCode::BAD_REQUEST,
+                    "BRAINSTORM_INVALID_BRIEF",
+                    "简报字段无效或超过 12000 字",
+                ));
+            }
+            // A manual edit can revoke source permission. Derived references
+            // must not survive while a replacement question is being prepared.
+            stored.memory_brief.clear();
+            stored.brief_edits.extend(req.brief_edits.clone());
+            for key in req.brief_edits.keys() {
+                stored.user_input_revisions.insert(key.clone(), session.revision + 1);
+            }
+            session.phase.clone()
+        }
+        "answer" | "skip" | "exclude" => {
             let Some(question) = stored.current_question.clone() else {
                 return Err(brainstorm_error(
                     StatusCode::CONFLICT,
@@ -2573,7 +3586,13 @@ pub async fn run_creation_brainstorm_turn(
                     "当前问题已变化，请按最新问题回答",
                 ));
             }
-            let answer = if req.action == "skip" {
+            let answer = if req.action == "exclude" {
+                BrainstormAnswer {
+                    selected_option_ids: Vec::new(),
+                    custom_text: "该方向不重要".to_string(),
+                    source: "user_excluded".to_string(),
+                }
+            } else if req.action == "skip" {
                 BrainstormAnswer {
                     selected_option_ids: Vec::new(),
                     custom_text: "暂未确定，生成时由创作 Agent 补充并保留为待核验假设".to_string(),
@@ -2593,9 +3612,11 @@ pub async fn run_creation_brainstorm_turn(
                     ..answer
                 }
             };
+            stored.user_input_revisions.insert(question.id.clone(), session.revision + 1);
             stored.turns.push(BrainstormStoredTurn { question, answer });
             stored.current_question = None;
-            let step = generate_dynamic_brainstorm_step(&state, &stored, &req, false, "").await?;
+            let step =
+                generate_dynamic_brainstorm_step(&state, &stored, &req, false, false, "").await?;
             apply_dynamic_step(&mut stored, step)
         }
         "reopen" => {
@@ -2619,12 +3640,32 @@ pub async fn run_creation_brainstorm_turn(
             };
             let previous_current = stored.current_question.take();
             let removed = stored.turns.split_off(index);
+            for turn in &removed {
+                stored.brief_edits.remove(&turn.question.id);
+                stored.user_input_revisions.remove(&turn.question.id);
+                stored.branch_parent_revisions.remove(&turn.question.id);
+            }
             stored.current_question = removed.first().map(|turn| turn.question.clone());
+            stored
+                .archived_questions
+                .extend(
+                    removed
+                        .iter()
+                        .skip(1)
+                        .map(|turn| BrainstormArchivedQuestion {
+                            question: turn.question.clone(),
+                            answer: Some(turn.answer.clone()),
+                        }),
+                );
             let mut invalidated_question_ids = removed
                 .iter()
                 .map(|turn| turn.question.id.clone())
                 .collect::<Vec<_>>();
             if let Some(question) = previous_current {
+                stored.archived_questions.push(BrainstormArchivedQuestion {
+                    question: question.clone(),
+                    answer: None,
+                });
                 invalidated_question_ids.push(question.id);
             }
             stored.invalidated_question_ids = invalidated_question_ids;
@@ -2665,11 +3706,34 @@ pub async fn run_creation_brainstorm_turn(
                     "答案与当前题型不匹配",
                 ));
             }
-            let invalidated = stored.turns[index + 1..]
+            let mut invalidated = stored.turns[index + 1..]
                 .iter()
                 .map(|turn| turn.question.id.clone())
                 .collect::<Vec<_>>();
+            for turn in &stored.turns[index..] {
+                stored.brief_edits.remove(&turn.question.id);
+                stored.user_input_revisions.remove(&turn.question.id);
+                stored.branch_parent_revisions.remove(&turn.question.id);
+            }
+            stored
+                .archived_questions
+                .extend(
+                    stored.turns[index + 1..]
+                        .iter()
+                        .map(|turn| BrainstormArchivedQuestion {
+                            question: turn.question.clone(),
+                            answer: Some(turn.answer.clone()),
+                        }),
+                );
+            if let Some(question) = stored.current_question.take() {
+                invalidated.push(question.id.clone());
+                stored.archived_questions.push(BrainstormArchivedQuestion {
+                    question,
+                    answer: None,
+                });
+            }
             stored.turns.truncate(index);
+            stored.user_input_revisions.insert(question.id.clone(), session.revision + 1);
             stored.turns.push(BrainstormStoredTurn {
                 question,
                 answer: BrainstormAnswer {
@@ -2678,12 +3742,22 @@ pub async fn run_creation_brainstorm_turn(
                 },
             });
             stored.current_question = None;
-            let step = generate_dynamic_brainstorm_step(&state, &stored, &req, false, "").await?;
+            let step =
+                generate_dynamic_brainstorm_step(&state, &stored, &req, false, false, "").await?;
             let phase = apply_dynamic_step(&mut stored, step);
             stored.invalidated_question_ids = invalidated;
             phase
         }
         "finish" => {
+            let current_superseded = stored.current_question.as_ref()
+                .is_some_and(|question| !brainstorm_question_is_current(&stored, question));
+            stored.invalidated_question_ids = archive_superseded_brainstorm_turns(&mut stored);
+            if current_superseded {
+                if let Some(question) = stored.current_question.take() {
+                    stored.invalidated_question_ids.push(question.id.clone());
+                    stored.archived_questions.push(BrainstormArchivedQuestion {question, answer: None});
+                }
+            }
             if stored
                 .current_question
                 .as_ref()
@@ -2709,42 +3783,158 @@ pub async fn run_creation_brainstorm_turn(
             stored.continuation_directions.clear();
             "ready".to_string()
         }
+        "change_direction" => {
+            let step =
+                generate_dynamic_brainstorm_step(&state, &stored, &req, false, true, "").await?;
+            stored.open_flags = step.open_flags;
+            stored.readiness_reason = step.readiness_reason;
+            stored.memory_brief = step.memory_brief;
+            stored.continuation_directions = step.continuation_directions;
+            stored.invalidated_question_ids.clear();
+            "choosing_direction".to_string()
+        }
         "continue_brainstorm" => {
-            if session.phase != "ready" {
+            if !matches!(session.phase.as_str(), "ready" | "choosing_direction") {
                 return Err(brainstorm_error(
                     StatusCode::CONFLICT,
                     "BRAINSTORM_NOT_READY",
                     "当前脑暴尚未收敛，无需手动选择继续方向",
                 ));
             }
-            let direction_id = req.continuation_direction_id.trim();
-            let focus_hint = if direction_id == "__custom__" {
+            if let Some(question) = stored.current_question.take() {
+                stored.archived_questions.push(BrainstormArchivedQuestion {
+                    question,
+                    answer: None,
+                });
+            }
+            let custom_focus = if req.continuation_direction_id == "__custom__" {
                 let custom = req.focus_hint.trim();
                 if custom.is_empty() || custom.chars().count() > 500 {
-                    return Err(brainstorm_error(
-                        StatusCode::BAD_REQUEST,
-                        "BRAINSTORM_INVALID_CONTINUATION_DIRECTION",
-                        "请输入 1 到 500 字的脑暴方向",
-                    ));
+                    return Err(brainstorm_error(StatusCode::BAD_REQUEST,
+                        "BRAINSTORM_INVALID_CONTINUATION_DIRECTION", "请输入 1 到 500 字的脑暴方向"));
                 }
                 custom.to_string()
             } else {
-                let Some(direction) = stored
-                    .continuation_directions
-                    .iter()
-                    .find(|direction| direction.id == direction_id)
-                else {
+                String::new()
+            };
+            if !req.continuation_direction_ids.is_empty() {
+                let ids = &req.continuation_direction_ids;
+                let unique: std::collections::HashSet<_> = ids.iter().collect();
+                if unique.len() != ids.len()
+                    || ids.iter().any(|id| {
+                        !stored
+                            .continuation_directions
+                            .iter()
+                            .any(|direction| &direction.id == id)
+                    })
+                {
                     return Err(brainstorm_error(
                         StatusCode::BAD_REQUEST,
                         "BRAINSTORM_INVALID_CONTINUATION_DIRECTION",
-                        "请选择模型推荐的脑暴方向，或输入自定义方向",
+                        "请选择有效的脑暴方向",
                     ));
+                }
+                let mut question = BrainstormQuestion {
+                    exploration_stage: Some("explore".to_string()),
+                    id: format!("continuation_{}", session.revision),
+                    parent_question_id: None,
+                    parent_option_id: None,
+                    single_choice_reason: String::new(),
+                    dimension_id: "continuation_directions".to_string(),
+                    dimension: "继续脑暴方向".to_string(),
+                    question_type: "multi_choice".to_string(),
+                    prompt: format!("第 {} 轮继续探索哪些方向？", session.revision + 1),
+                    why_now: "选中的方向将逐个展开讨论。".to_string(),
+                    context_details: String::new(),
+                    required: false,
+                    allow_custom: true,
+                    answer_template: String::new(),
+                    options: stored
+                        .continuation_directions
+                        .iter()
+                        .map(BrainstormOption::from)
+                        .collect(),
                 };
-                format!("{}：{}", direction.label, direction.description)
-            };
-            let step =
-                generate_dynamic_brainstorm_step(&state, &stored, &req, true, &focus_hint).await?;
-            apply_dynamic_step(&mut stored, step)
+                let mut selected_option_ids = ids.clone();
+                if !custom_focus.is_empty() {
+                    let mut custom_id = "__user_custom__".to_string();
+                    while question.options.iter().any(|option| option.id == custom_id) {
+                        custom_id.push('_');
+                    }
+                    question.options.push(BrainstormOption {id: custom_id.clone(),
+                        label: custom_focus.clone(), description: "用户自定义方向".to_string(),
+                        details: String::new(), recommended: false});
+                    selected_option_ids.push(custom_id);
+                }
+                stored.user_input_revisions.insert(question.id.clone(), session.revision + 1);
+                stored.turns.push(BrainstormStoredTurn {
+                    question,
+                    answer: BrainstormAnswer {
+                        selected_option_ids,
+                        custom_text: String::new(),
+                        source: "user".to_string(),
+                    },
+                });
+                let step = generate_dynamic_brainstorm_step(&state, &stored, &req, true, false, "")
+                    .await?;
+                apply_dynamic_step(&mut stored, step)
+            } else {
+                let direction_id = req.continuation_direction_id.trim();
+                let focus_hint = if direction_id == "__custom__" {
+                    custom_focus
+                } else {
+                    let Some(direction) = stored
+                        .continuation_directions
+                        .iter()
+                        .find(|direction| direction.id == direction_id)
+                    else {
+                        return Err(brainstorm_error(
+                            StatusCode::BAD_REQUEST,
+                            "BRAINSTORM_INVALID_CONTINUATION_DIRECTION",
+                            "请选择模型推荐的脑暴方向，或输入自定义方向",
+                        ));
+                    };
+                    // The selected label is persisted below and scheduled by
+                    // the same branch queue as a multi-selection.
+                    let _ = direction;
+                    String::new()
+                };
+                let question = BrainstormQuestion {
+                    exploration_stage: Some("explore".to_string()),
+                    id: format!("continuation_{}", session.revision),
+                    parent_question_id: None,
+                    parent_option_id: None,
+                    single_choice_reason: String::new(),
+                    dimension_id: "continuation_directions".to_string(),
+                    dimension: "继续脑暴方向".to_string(),
+                    question_type: "multi_choice".to_string(),
+                    prompt: "接下来希望探索哪个方向？".to_string(),
+                    why_now: "用户主动继续探索。".to_string(),
+                    context_details: String::new(),
+                    required: false,
+                    allow_custom: true,
+                    answer_template: String::new(),
+                    options: stored.continuation_directions.iter().map(BrainstormOption::from).collect(),
+                };
+                stored.user_input_revisions.insert(question.id.clone(), session.revision + 1);
+                stored.turns.push(BrainstormStoredTurn {
+                    question,
+                    answer: BrainstormAnswer {
+                        selected_option_ids: if direction_id == "__custom__" { Vec::new() } else { vec![direction_id.to_string()] },
+                        custom_text: focus_hint.clone(), source: "user".to_string(),
+                    },
+                });
+                let step = generate_dynamic_brainstorm_step(
+                    &state,
+                    &stored,
+                    &req,
+                    true,
+                    false,
+                    &focus_hint,
+                )
+                .await?;
+                apply_dynamic_step(&mut stored, step)
+            }
         }
         "abandon" => "abandoned".to_string(),
         _ => {
@@ -2756,9 +3946,11 @@ pub async fn run_creation_brainstorm_turn(
         }
     };
 
-    let changed = state
-        .storage
-        .with_conn(|conn| {
+    let changed = with_brainstorm_session_guard(
+        &state,
+        session_id,
+        req.action == "abandon",
+        |conn| {
             Ok(creation_brainstorm::update(
                 conn,
                 session_id,
@@ -2766,15 +3958,8 @@ pub async fn run_creation_brainstorm_turn(
                 &next_phase,
                 &serde_json::to_string(&stored)?,
             )?)
-        })
-        .map_err(|error| {
-            error!("脑暴会话持久化失败: {}", error);
-            brainstorm_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "BRAINSTORM_PERSIST_FAILED",
-                "脑暴进度保存失败，请重试",
-            )
-        })?;
+        },
+    )?;
     if !changed {
         return Err(brainstorm_error(
             StatusCode::CONFLICT,
@@ -2782,6 +3967,8 @@ pub async fn run_creation_brainstorm_turn(
             "脑暴内容已更新，请刷新后重试",
         ));
     }
+    log_brainstorm_stage(req, "persisted", started);
+    brainstorm_prefetch::schedule(&state, &stored, req, &next_phase, session.revision + 1);
     Ok(Json(brainstorm_response(
         session_id,
         &next_phase,
@@ -2791,6 +3978,7 @@ pub async fn run_creation_brainstorm_turn(
 }
 
 pub async fn preview_references(
+    State(state): State<Arc<AppState>>,
     Json(req): Json<GenerateRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let payload = ReferencePayload {
@@ -2810,7 +3998,7 @@ pub async fn preview_references(
 
     let client = reqwest::Client::new();
     let response = client
-        .post("http://127.0.0.1:8001/creation/references")
+        .post(format!("{}/creation/references", state.creation_sidecar_url))
         .json(&payload)
         .send()
         .await
@@ -2912,6 +4100,10 @@ fn default_creation_mode() -> String {
     "direct".to_string()
 }
 
+fn default_execution_origin() -> String {
+    "interactive".to_string()
+}
+
 fn default_brainstorm_answer_source() -> String {
     "user".to_string()
 }
@@ -2954,6 +4146,25 @@ fn normalize_conversation_item(value: &serde_json::Value) -> Option<serde_json::
         "role": role,
         "content": content.chars().take(12_000).collect::<String>(),
     }))
+}
+
+fn creation_checkpoint_inputs_match(req: &AgentRunRequest, checkpoint: &serde_json::Value) -> bool {
+    if let Some(brief) = &req.creation_brief {
+        let saved = &checkpoint["environment"]["creation_brief"];
+        let both_empty = brief.as_object().is_some_and(|value| value.is_empty())
+            && (saved.is_null() || saved.as_object().is_some_and(|value| value.is_empty()));
+        if !both_empty && brief != saved {
+            return false;
+        }
+    }
+    if let (Some(current_root), Some(saved_root)) = (
+        req.root_request.as_deref(), checkpoint["root_request"].as_str(),
+    ) {
+        if current_root.trim() != saved_root.trim() {
+            return false;
+        }
+    }
+    true
 }
 
 fn merge_creation_conversation(
@@ -3254,6 +4465,8 @@ fn enrich_creation_model_from_preferences(state: &Arc<AppState>, req: &mut Gener
 
 #[derive(Debug, Deserialize)]
 pub struct SaveHistoryRequest {
+    #[serde(default)]
+    pub committed_operation_id: Option<String>,
     pub prompt: String,
     pub generated_content: String,
     pub doc_type: Option<String>,
@@ -3312,6 +4525,28 @@ pub async fn save_history(
     let id = state
         .storage
         .with_conn(|conn| {
+            if let (Some(session),Some(operation_id)) = (req.session_id.as_deref(),req.committed_operation_id.as_deref()) {
+                let operation = crate::storage::repo::creation_operation::get(conn,session,operation_id)?
+                    .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                if !matches!(operation.status.as_str(), "completed" | "partial") { return Err(rusqlite::Error::InvalidQuery.into()); }
+                let history = crate::storage::repo::creation_history::get_by_id(conn,operation.history_id)?
+                    .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                let stored = history.conversation_json.as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
+                let conversation = merge_creation_history_conversation(stored,req.conversation.clone(),history.root_request.as_deref());
+                // Acknowledgement may update metadata, never replay an already committed document.
+                conn.execute("UPDATE creation_history SET conversation_json=?2 WHERE id=?1",
+                    rusqlite::params![history.id,serde_json::to_string(&conversation)?])?;
+                if operation.result.as_ref().and_then(|r|r["data"]["revision_no"].as_i64()) == Some(history.revision_no) {
+                    conn.execute("UPDATE creation_history SET references_json=?2,reference_count=?3,
+                        model=?4,latency_ms=?5,evidence_json=?6 WHERE id=?1",
+                        rusqlite::params![history.id,serde_json::to_string(&req.references)?,req.reference_count,
+                            req.model,req.latency_ms,serde_json::to_string(&req.evidence)?])?;
+                    let ids: Vec<String> = req.evidence.iter().filter_map(|e|e["id"].as_str().map(str::to_string)).collect();
+                    crate::storage::repo::creation_evidence::attach_to_history(conn,history.id,&ids)?;
+                }
+                return Ok(history.id);
+            }
             let references_json = serde_json::to_string(&req.references)?;
             let evidence_ids = req
                 .evidence
@@ -3597,8 +4832,10 @@ pub async fn start_history(
                     Some(&context.root_request),
                 );
                 let conversation_json = serde_json::to_string(&merged_conversation)?;
-                let generated_content = if req.generated_content.trim().is_empty()
-                    && !context.latest.generated_content.trim().is_empty()
+                let durable: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM creation_operations WHERE history_id=?1)",
+                    rusqlite::params![context.latest.id], |row| row.get(0))?;
+                let generated_content = if durable || (req.generated_content.trim().is_empty()
+                    && !context.latest.generated_content.trim().is_empty())
                 {
                     context.latest.generated_content.as_str()
                 } else {
@@ -3735,13 +4972,21 @@ pub async fn update_history_progress(
             } else {
                 None
             };
+            let durable: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM creation_operations WHERE history_id=?1)",
+                rusqlite::params![id], |row| row.get(0))?;
+            let terminal_operation: bool = if durable {
+                conn.query_row("SELECT COALESCE((SELECT status IN ('completed','partial') FROM creation_operations WHERE history_id=?1 ORDER BY updated_at DESC,created_at DESC LIMIT 1),0)",rusqlite::params![id],|row|row.get(0))?
+            } else { false };
+            let effective_status = if terminal_operation {
+                existing.as_ref().map(|h|h.lifecycle_status.as_str()).unwrap_or(status)
+            } else {status};
             crate::storage::repo::creation_history::update_progress(
                 conn,
                 id,
-                status,
-                req.generated_content.as_deref(),
+                effective_status,
+                if durable { None } else { req.generated_content.as_deref() },
                 conversation_json.as_deref(),
-                agent_trace_json.as_deref(),
+                if durable { None } else { agent_trace_json.as_deref() },
                 req.latency_ms,
                 req.progress_epoch,
             )
@@ -3859,6 +5104,78 @@ mod tests {
     use super::*;
 
     #[test]
+    fn brainstorm_diagnostics_only_keep_bounded_identifiers_and_known_actions() {
+        assert_eq!(
+            brainstorm_log_identifier("creation-1788802278839-b615a62dd42728"),
+            "creation-1788802278839-b615a62dd42728"
+        );
+        for unsafe_value in [
+            "", "raw user prompt", "https://internal.example.com",
+            "session\nsecret", &"a".repeat(161),
+        ] {
+            assert_eq!(brainstorm_log_identifier(unsafe_value), "invalid");
+        }
+        assert_eq!(brainstorm_log_action("start"), "start");
+        assert_eq!(brainstorm_log_action("raw_user_prompt"), "invalid");
+    }
+
+    #[test]
+    fn brainstorm_sidecar_errors_use_stable_safe_contracts() {
+        let cases = [
+            ("BRAINSTORM_MODEL_OUTPUT_TRUNCATED", "BRAINSTORM_MODEL_OUTPUT_TRUNCATED", StatusCode::BAD_GATEWAY, false),
+            ("CREATION_DOCUMENT_TRUNCATED", "BRAINSTORM_MODEL_OUTPUT_TRUNCATED", StatusCode::BAD_GATEWAY, false),
+            ("BRAINSTORM_MODEL_OUTPUT_INVALID", "BRAINSTORM_MODEL_OUTPUT_INVALID", StatusCode::BAD_GATEWAY, false),
+            ("MODEL_ACCESS_DENIED", "MODEL_ACCESS_DENIED", StatusCode::FORBIDDEN, false),
+            ("MODEL_RATE_LIMITED", "MODEL_RATE_LIMITED", StatusCode::TOO_MANY_REQUESTS, true),
+            ("MODEL_REQUEST_FAILED", "MODEL_REQUEST_FAILED", StatusCode::BAD_GATEWAY, false),
+            ("MODEL_TRANSPORT_UNAVAILABLE", "BRAINSTORM_MODEL_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE, true),
+            ("MODEL_SERVICE_UNAVAILABLE", "BRAINSTORM_MODEL_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE, true),
+            ("CREATION_UNAVAILABLE", "BRAINSTORM_MODEL_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE, true),
+            ("BRAINSTORM_MODEL_UNAVAILABLE", "BRAINSTORM_MODEL_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE, true),
+            ("BRAINSTORM_MODEL_TIMEOUT", "BRAINSTORM_MODEL_TIMEOUT", StatusCode::GATEWAY_TIMEOUT, true),
+        ];
+        for (upstream_code, expected_code, expected_status, retryable) in cases {
+            let detail = serde_json::json!({
+                "code": upstream_code,
+                "message": "provider secret=sk-private at https://internal.example.com; raw user prompt",
+                "retryable": !retryable,
+            });
+            for body in [detail.clone(), serde_json::json!({"detail": detail})] {
+                // The stable category wins even when the old sidecar used 503 for every failure.
+                let (status, Json(body)) = brainstorm_sidecar_error(StatusCode::SERVICE_UNAVAILABLE, &body);
+                assert_eq!(status, expected_status, "{upstream_code}");
+                assert_eq!(body["code"], expected_code);
+                assert_eq!(body["retryable"], retryable);
+                assert!(body["message"].as_str().unwrap().chars().all(|c| !c.is_ascii_alphabetic()));
+                assert!(!body.to_string().contains("sk-private"));
+                assert!(!body.to_string().contains("internal.example.com"));
+                assert!(!body.to_string().contains("raw user prompt"));
+            }
+        }
+    }
+
+    #[test]
+    fn brainstorm_unknown_errors_fall_back_without_exposing_upstream_content() {
+        for body in [
+            serde_json::json!({"detail":{"code":"PROVIDER_SECRET", "message":"private"}}),
+            serde_json::json!({"detail":"provider traceback secret"}),
+            serde_json::Value::Null,
+        ] {
+            for (upstream_status, expected_code) in [
+                (StatusCode::BAD_GATEWAY, "BRAINSTORM_MODEL_OUTPUT_INVALID"),
+                (StatusCode::TOO_MANY_REQUESTS, "MODEL_RATE_LIMITED"),
+                (StatusCode::SERVICE_UNAVAILABLE, "BRAINSTORM_MODEL_UNAVAILABLE"),
+                (StatusCode::GATEWAY_TIMEOUT, "BRAINSTORM_MODEL_TIMEOUT"),
+            ] {
+                let (_, Json(failure)) = brainstorm_sidecar_error(upstream_status, &body);
+                assert_eq!(failure["code"], expected_code);
+                assert!(!failure.to_string().contains("private"));
+                assert!(!failure.to_string().contains("secret"));
+            }
+        }
+    }
+
+    #[test]
     fn inline_user_instruction_keeps_requirement_selection_and_polish_detail() {
         let instruction =
             inline_user_instruction("elaborate", "模型承担主要生产负载，\n占比95%。", "");
@@ -3876,12 +5193,17 @@ mod tests {
 
     fn test_brainstorm_question(question_type: &str, allow_custom: bool) -> BrainstormQuestion {
         BrainstormQuestion {
+            exploration_stage: None,
+            parent_question_id: None,
+            parent_option_id: None,
+            single_choice_reason: String::new(),
             id: "question-1".to_string(),
             dimension_id: "dimension-1".to_string(),
             dimension: "测试维度".to_string(),
             question_type: question_type.to_string(),
             prompt: "请选择答案".to_string(),
             why_now: "用于验证答案契约".to_string(),
+            context_details: String::new(),
             required: true,
             allow_custom,
             options: vec![
@@ -3889,12 +5211,14 @@ mod tests {
                     id: "recommended".to_string(),
                     label: "推荐答案".to_string(),
                     description: "推荐方向的依据与取舍".to_string(),
+                    details: String::new(),
                     recommended: true,
                 },
                 BrainstormOption {
                     id: "alternative".to_string(),
                     label: "备选答案".to_string(),
                     description: "备选方向的依据与取舍".to_string(),
+                    details: String::new(),
                     recommended: false,
                 },
             ],
@@ -3911,6 +5235,64 @@ mod tests {
             custom_text: custom_text.to_string(),
             source: "user".to_string(),
         }
+    }
+
+    #[test]
+    fn brainstorm_legacy_display_fields_restore_without_truncating_original_content() {
+        let mut question = serde_json::to_value(test_brainstorm_question("multi_choice", true)).unwrap();
+        question.as_object_mut().unwrap().remove("context_details");
+        let original_description = "旧会话完整选项和引用资料".repeat(80);
+        for option in question["options"].as_array_mut().unwrap() {
+            option.as_object_mut().unwrap().remove("details");
+            option["description"] = serde_json::json!(original_description);
+        }
+        let stored = parse_brainstorm_state(&serde_json::json!({
+            "root_request": "原始需求", "current_question": question,
+            "continuation_directions": [{"id": "more", "label": "补充", "description": "旧方向说明"}]
+        }).to_string()).unwrap();
+        let restored = stored.current_question.unwrap();
+        assert!(restored.context_details.is_empty());
+        assert!(restored.options.iter().all(|option| option.details.is_empty()));
+        assert_eq!(restored.options[0].description, original_description);
+        assert!(stored.continuation_directions[0].details.is_empty());
+    }
+
+    #[test]
+    fn brainstorm_display_details_roundtrip_in_current_history_archive_and_directions() {
+        let mut question = test_brainstorm_question("multi_choice", true);
+        question.context_details = "本轮已检索历史记忆，来源原文可供核对。".to_string();
+        question.options[0].details = "《项目决定》 · document:1「优先降低审核成本」".to_string();
+        let mut current = question.clone();
+        current.id = "next-question".to_string();
+        current.prompt = "如何安排审核步骤？".to_string();
+        let state_json = serde_json::json!({
+            "root_request": "原始需求", "memory_brief": "创作使用的完整历史证据",
+            "current_question": current,
+            "turns": [{"question": question, "answer": test_brainstorm_answer(&["recommended"], "")}],
+            "archived_questions": [{"question": question, "answer": null}],
+            "continuation_directions": [{"id": "more", "label": "继续", "description": "探索实施节奏",
+                "details": "该方向仍待用户确认。", "recommended": true}]
+        }).to_string();
+        let stored = parse_brainstorm_state(&state_json).unwrap();
+        let restored = parse_brainstorm_state(&serde_json::to_string(&stored).unwrap()).unwrap();
+        assert_eq!(restored.memory_brief, "创作使用的完整历史证据");
+        for restored_question in [
+            restored.current_question.as_ref().unwrap(),
+            &restored.turns[0].question,
+            &restored.archived_questions[0].question,
+        ] {
+            assert_eq!(restored_question.context_details, question.context_details);
+            assert_eq!(restored_question.options[0].details, question.options[0].details);
+            assert_eq!(restored_question.options[0].description, question.options[0].description);
+        }
+        let direction = &restored.continuation_directions[0];
+        let option = BrainstormOption::from(direction);
+        assert_eq!(option.details, "该方向仍待用户确认。");
+        assert_eq!(option.description, direction.description);
+        assert_eq!(option.id, direction.id);
+        assert_eq!(option.label, direction.label);
+        assert_eq!(option.recommended, direction.recommended);
+        assert_eq!(restored.turns[0].answer.selected_option_ids, vec!["recommended"]);
     }
 
     #[test]
@@ -4291,7 +5673,14 @@ mod tests {
         success.dimension_id = "success_criteria".to_string();
 
         let state = BrainstormStoredState {
+            pending_extensions: Vec::new(),
+            prefetch_safe_options: Default::default(),
+            branch_parent_revisions: Default::default(),
+            memory_brief: String::new(),
+            archived_questions: Vec::new(),
+            brief_edits: Default::default(),
             root_request: "设计原创剧本生成方案".to_string(),
+            user_input_revisions: Default::default(),
             selected_skills: Vec::new(),
             turns: vec![
                 BrainstormStoredTurn {
@@ -4322,5 +5711,271 @@ mod tests {
             upgraded.invalidated_question_ids,
             vec!["rollout-question", "success-question"]
         );
+    }
+
+    #[test]
+    fn brainstorm_source_revision_migration_is_persisted_once() {
+        let mut stored: BrainstormStoredState = serde_json::from_value(serde_json::json!({
+            "root_request": "旧目标", "brief_edits": {"root_request": "不检索个人资料", "open_flags": "用户约束"},
+            "turns": [{"question": test_brainstorm_question("multi_choice", true),
+                       "answer": {"selected_option_ids": [], "custom_text": "可以检索个人资料", "source": "user"}}]
+        })).unwrap();
+        let question_id = stored.turns[0].question.id.clone();
+        initialize_brainstorm_input_revisions(&mut stored, 5);
+        assert_eq!(stored.user_input_revisions["root_request"], 5);
+        assert_eq!(stored.user_input_revisions["open_flags"], 5);
+        assert_eq!(stored.user_input_revisions[&question_id], 1);
+        let mut restored = parse_brainstorm_state(&serde_json::to_string(&stored).unwrap()).unwrap();
+        initialize_brainstorm_input_revisions(&mut restored, 9);
+        assert_eq!(restored.user_input_revisions, stored.user_input_revisions);
+        restored.user_input_revisions.insert(question_id.clone(), 10);
+        initialize_brainstorm_input_revisions(&mut restored, 11);
+        assert_eq!(restored.user_input_revisions[&question_id], 10);
+        assert_eq!(restored.user_input_revisions["root_request"], 5);
+    }
+
+    #[test]
+    fn creation_checkpoint_requires_unchanged_explicit_source_inputs() {
+        let brief = serde_json::json!({"revision": 1, "brief_edits": {"root_request": "可以检索个人资料"}});
+        let checkpoint = serde_json::json!({"root_request":"组织读书会", "environment":{"creation_brief":brief}});
+        let mut req: AgentRunRequest = serde_json::from_value(serde_json::json!({
+            "user_prompt":"开始写作", "root_request":"组织读书会", "creation_brief":brief
+        })).unwrap();
+        assert!(creation_checkpoint_inputs_match(&req, &checkpoint));
+        req.creation_brief = Some(serde_json::json!({"revision":2, "brief_edits":{"root_request":"不检索个人资料"}}));
+        assert!(!creation_checkpoint_inputs_match(&req, &checkpoint));
+        req.creation_brief = Some(serde_json::json!({}));
+        assert!(!creation_checkpoint_inputs_match(&req, &checkpoint));
+        assert!(creation_checkpoint_inputs_match(&req, &serde_json::json!({"environment":{}})));
+        assert!(creation_checkpoint_inputs_match(&req, &serde_json::json!({"environment":{"creation_brief":{}}})));
+        req.creation_brief = None;
+        assert!(creation_checkpoint_inputs_match(&req, &checkpoint));
+        req.root_request = Some("用户更改创作目标".to_string());
+        assert!(!creation_checkpoint_inputs_match(&req, &checkpoint));
+    }
+
+    fn answer_pending_brainstorm_branch(
+        stored: &mut BrainstormStoredState,
+        id: &str,
+        selected: &[&str],
+        custom: &str,
+    ) {
+        let branch = pending_brainstorm_branch(stored).unwrap();
+        let mut question = test_brainstorm_question("multi_choice", true);
+        question.id = id.to_string();
+        assert!(apply_brainstorm_question_stage(&mut question, Some(&branch)));
+        if let Some(revision) = stored.user_input_revisions.get(&branch.question.id) {
+            stored.branch_parent_revisions.insert(question.id.clone(), *revision);
+        }
+        stored.turns.push(BrainstormStoredTurn {
+            question,
+            answer: test_brainstorm_answer(selected, custom),
+        });
+    }
+
+    #[test]
+    fn brainstorm_branch_queue_visits_each_layer_before_descendants() {
+        let mut stored: BrainstormStoredState =
+            serde_json::from_value(serde_json::json!({"root_request":"测试"})).unwrap();
+        let root = test_brainstorm_question("multi_choice", true);
+        stored.turns.push(BrainstormStoredTurn {
+            question: root.clone(),
+            answer: test_brainstorm_answer(&["alternative", "recommended"], ""),
+        });
+        let steps = [
+            ("solution-a", root.id.as_str(), "recommended", "solutions", vec!["recommended", "alternative"]),
+            ("solution-b", root.id.as_str(), "alternative", "solutions", vec!["recommended"]),
+            ("delivery-a1", "solution-a", "recommended", "implementation", vec!["recommended"]),
+            ("delivery-a2", "solution-a", "alternative", "implementation", vec!["recommended"]),
+            ("delivery-b", "solution-b", "recommended", "implementation", vec!["recommended"]),
+            ("validation-a1", "delivery-a1", "recommended", "validation", vec!["recommended", "alternative"]),
+            ("validation-a2", "delivery-a2", "recommended", "validation", vec!["recommended"]),
+            ("validation-b", "delivery-b", "recommended", "validation", vec!["recommended"]),
+        ];
+        for (id, parent, option, stage, selected) in steps {
+            let branch = pending_brainstorm_branch(&stored).unwrap();
+            assert_eq!(branch.question.id, parent);
+            assert_eq!(branch.option.unwrap().id, option);
+            assert_eq!(branch.exploration_stage, stage);
+            answer_pending_brainstorm_branch(&mut stored, id, &selected, "");
+        }
+        assert!(pending_brainstorm_branch(&stored).is_none());
+        assert_eq!(stored.turns.len(), 9);
+    }
+
+    #[test]
+    fn brainstorm_parallel_sibling_rewording_is_rechecked_without_merging_different_branches() {
+        let mut first = test_brainstorm_question("multi_choice", true);
+        first.parent_question_id = Some("root".into());
+        first.parent_option_id = Some("chosen".into());
+        first.prompt = "小组交流中如何破冰让新人开口？".into();
+        let mut repeated = first.clone();
+        repeated.prompt = "如何设计破冰让新人愿意开口？".into();
+        assert!(brainstorm_questions_overlap(&first, &repeated));
+        repeated.parent_option_id = Some("another".into());
+        assert!(!brainstorm_questions_overlap(&first, &repeated));
+        repeated.parent_option_id = first.parent_option_id.clone();
+        repeated.prompt = "如何约定分享时的个人隐私边界？".into();
+        assert!(!brainstorm_questions_overlap(&first, &repeated));
+    }
+
+    #[test]
+    fn brainstorm_extensions_rotate_across_different_parents_before_deeper_questions() {
+        let mut stored: BrainstormStoredState =
+            serde_json::from_value(serde_json::json!({"root_request":"测试"})).unwrap();
+        let root = test_brainstorm_question("multi_choice", true);
+        stored.turns.push(BrainstormStoredTurn { question: root,
+            answer: test_brainstorm_answer(&["recommended", "alternative"], "") });
+        answer_pending_brainstorm_branch(&mut stored, "solution-a", &["recommended"], "");
+        answer_pending_brainstorm_branch(&mut stored, "solution-b", &["recommended"], "");
+        answer_pending_brainstorm_branch(&mut stored, "delivery-a", &["recommended"], "");
+        stored.pending_extensions.push(BrainstormExtensionPlan {
+            id: "facet-a".into(), parent_question_id: "solution-a".into(),
+            parent_option_id: Some("recommended".into()), parent_revision: 0,
+            goal: "另一项独立执行决定".into(), ordinal: 1,
+        });
+        let pending = pending_brainstorm_branches(&stored);
+        assert_eq!(pending.iter().map(|branch| branch.question.id.as_str()).collect::<Vec<_>>(),
+            vec!["solution-b", "solution-a", "delivery-a"]);
+        assert_eq!(pending[0].exploration_stage, "implementation");
+        assert_eq!(pending[1].extension.unwrap().id, "facet-a");
+        assert_eq!(pending[2].exploration_stage, "validation");
+    }
+
+    #[test]
+    fn brainstorm_branch_queue_covers_single_choices_and_custom_answers() {
+        for (selected, custom) in [(vec!["recommended"], ""), (vec![], "先办一次小型试演")] {
+            let mut stored: BrainstormStoredState =
+                serde_json::from_value(serde_json::json!({"root_request":"测试"})).unwrap();
+            let root = test_brainstorm_question("single_choice", true);
+            stored.turns.push(BrainstormStoredTurn {question: root.clone(),
+                answer: test_brainstorm_answer(&selected, custom)});
+            let branch = pending_brainstorm_branch(&stored).unwrap();
+            assert_eq!(branch.question.id, root.id);
+            assert_eq!(branch.option.is_some(), !selected.is_empty());
+            answer_pending_brainstorm_branch(&mut stored, "solution", &[], "先做原型");
+            assert_eq!(stored.turns[1].question.parent_question_id.as_deref(), Some(root.id.as_str()));
+            assert_eq!(stored.turns[1].question.parent_option_id.as_deref(), selected.first().copied());
+            answer_pending_brainstorm_branch(&mut stored, "delivery", &[], "下周试演");
+            answer_pending_brainstorm_branch(&mut stored, "validation", &[], "收集参与者反馈");
+            assert!(pending_brainstorm_branch(&stored).is_none());
+        }
+    }
+
+    #[test]
+    fn brainstorm_branch_queue_preserves_skip_exclude_and_current_manual_intent() {
+        let mut stored: BrainstormStoredState =
+            serde_json::from_value(serde_json::json!({"root_request":"测试"})).unwrap();
+        let root = test_brainstorm_question("multi_choice", true);
+        stored.turns.push(BrainstormStoredTurn {question: root.clone(),
+            answer: test_brainstorm_answer(&["recommended"], "")});
+        answer_pending_brainstorm_branch(&mut stored, "old-solution", &["recommended"], "");
+        stored.brief_edits.insert(root.id.clone(), "新的方向".to_string());
+        let branch = pending_brainstorm_branch(&stored).unwrap();
+        assert_eq!(branch.question.id, root.id);
+        assert!(branch.option.is_none());
+        assert_eq!(branch.focus, "新的方向");
+        stored.brief_edits.insert(root.id.clone(), String::new());
+        assert!(pending_brainstorm_branch(&stored).is_none());
+        stored.brief_edits.clear();
+        for source in ["agent_assumption", "user_excluded"] {
+            stored.turns[0].answer.source = source.to_string();
+            // Even a malformed old skipped answer with selected options cannot create choices.
+            assert!(pending_brainstorm_branch(&stored).is_none());
+        }
+    }
+
+    #[test]
+    fn brainstorm_branch_focus_preserves_ancestry_without_cached_option_evidence() {
+        let mut stored: BrainstormStoredState =
+            serde_json::from_value(serde_json::json!({"root_request":"测试"})).unwrap();
+        let mut root = test_brainstorm_question("multi_choice", true);
+        root.options[0].label = "自由交流".to_string();
+        root.options[0].description = "PRIVATE-CACHED-EVIDENCE".to_string();
+        root.options[0].details = "PRIVATE-DETAIL-EVIDENCE".to_string();
+        stored.turns.push(BrainstormStoredTurn {question: root,
+            answer: test_brainstorm_answer(&["recommended"], "")});
+        answer_pending_brainstorm_branch(&mut stored, "solution", &[], "先办小型试演");
+        let branch = pending_brainstorm_branch(&stored).unwrap();
+        let focus = brainstorm_branch_focus(&stored, &branch);
+        assert!(focus.contains("自由交流 → 先办小型试演"));
+        assert!(!focus.contains("PRIVATE-CACHED-EVIDENCE"));
+        assert!(!focus.contains("PRIVATE-DETAIL-EVIDENCE"));
+        let context = brainstorm_decision_context(&stored);
+        assert_eq!(context[1]["parent_question_id"], "question-1");
+        assert_eq!(context[1]["parent_option_id"], "recommended");
+        assert_eq!(context[1]["exploration_stage"], "solutions");
+    }
+
+    #[test]
+    fn brainstorm_custom_summary_edits_do_not_reuse_a_stale_or_late_answered_subtree() {
+        let mut stored: BrainstormStoredState =
+            serde_json::from_value(serde_json::json!({"root_request":"测试"})).unwrap();
+        let root = test_brainstorm_question("multi_choice", true);
+        stored.turns.push(BrainstormStoredTurn {question: root.clone(),
+            answer: test_brainstorm_answer(&[], "原来自定义方向")});
+        stored.user_input_revisions.insert(root.id.clone(), 1);
+        answer_pending_brainstorm_branch(&mut stored, "old-custom-solution", &["recommended"], "");
+        assert_eq!(stored.branch_parent_revisions["old-custom-solution"], 1);
+        stored.brief_edits.insert(root.id.clone(), "新的自定义方向".to_string());
+        stored.user_input_revisions.insert(root.id.clone(), 2);
+        // The old question may be answered after its parent was edited. Its
+        // answer revision cannot make its earlier generation context current.
+        stored.user_input_revisions.insert("old-custom-solution".to_string(), 3);
+        assert_eq!(brainstorm_decision_context(&stored).len(), 1);
+        assert!(!brainstorm_brief(&stored).contains("推荐答案"));
+        let branch = pending_brainstorm_branch(&stored).unwrap();
+        assert_eq!(branch.question.id, root.id);
+        assert_eq!(branch.focus, "新的自定义方向");
+        answer_pending_brainstorm_branch(&mut stored, "new-custom-solution", &[], "新解法");
+        answer_pending_brainstorm_branch(&mut stored, "new-delivery", &[], "新落地步骤");
+        answer_pending_brainstorm_branch(&mut stored, "new-validation", &[], "新的验证计划");
+        assert!(pending_brainstorm_branch(&stored).is_none());
+        stored.brief_edits.insert(root.id.clone(), "再次调整的方向".to_string());
+        stored.user_input_revisions.insert(root.id.clone(), 7);
+        let restored: BrainstormStoredState = serde_json::from_str(&serde_json::to_string(&stored).unwrap()).unwrap();
+        let branch = pending_brainstorm_branch(&restored).unwrap();
+        assert_eq!(branch.question.id, root.id);
+        assert_eq!(branch.focus, "再次调整的方向");
+    }
+
+    #[test]
+    fn brainstorm_question_stage_supports_legacy_and_rejects_explicit_stage_mismatch() {
+        let mut stored: BrainstormStoredState =
+            serde_json::from_value(serde_json::json!({"root_request":"测试"})).unwrap();
+        let question = test_brainstorm_question("multi_choice", true);
+        let encoded = serde_json::to_value(&question).unwrap();
+        assert!(encoded.get("exploration_stage").is_none());
+        let legacy: BrainstormQuestion = serde_json::from_value(encoded).unwrap();
+        assert_eq!(brainstorm_exploration_stage(&legacy), "explore");
+        stored.turns.push(BrainstormStoredTurn {question: legacy,
+            answer: test_brainstorm_answer(&["recommended"], "")});
+        let branch = pending_brainstorm_branch(&stored).unwrap();
+        let mut generated = question.clone();
+        assert!(apply_brainstorm_question_stage(&mut generated, Some(&branch)));
+        assert_eq!(generated.exploration_stage.as_deref(), Some("solutions"));
+        generated.exploration_stage = Some("explore".to_string());
+        assert!(!apply_brainstorm_question_stage(&mut generated, Some(&branch)));
+        generated.exploration_stage = Some("invented".to_string());
+        assert!(!apply_brainstorm_question_stage(&mut generated, None));
+        generated.exploration_stage = Some("implementation".to_string());
+        assert!(apply_brainstorm_question_stage(&mut generated, None));
+    }
+
+    #[test]
+    fn brainstorm_new_continuation_takes_precedence_over_older_roots() {
+        let mut stored: BrainstormStoredState =
+            serde_json::from_value(serde_json::json!({"root_request":"测试"})).unwrap();
+        let root = test_brainstorm_question("multi_choice", true);
+        stored.turns.push(BrainstormStoredTurn {question: root.clone(),
+            answer: test_brainstorm_answer(&["recommended", "alternative"], "")});
+        let mut continuation = root;
+        continuation.id = "continuation".to_string();
+        continuation.dimension_id = "continuation_directions".to_string();
+        stored.turns.push(BrainstormStoredTurn {question: continuation,
+            answer: test_brainstorm_answer(&[], "新增方向")});
+        let branch = pending_brainstorm_branch(&stored).unwrap();
+        assert_eq!(branch.question.id, "continuation");
+        assert_eq!(branch.focus, "新增方向");
     }
 }

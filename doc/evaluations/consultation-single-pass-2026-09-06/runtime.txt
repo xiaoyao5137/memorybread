@@ -1,0 +1,6 @@
+INFO:__main__:咨询检索决策 needs_rag=True reason=recall_by_default intent_source=fallback
+INFO:rag.pipeline:RAG 召回耗时 embedding_ms=68 knowledge_ms=265 pending_document_ms=337 vector_ms=2684 merge_ms=80 total_ms=3435
+INFO:__main__:流式 RAG 阶段耗时 retrieval_ms=3436 generation_queue_wait_ms=4574 generation_prepare_ms=0 inference_ms=9195 total_ms=17207
+INFO:__main__:咨询检索决策 needs_rag=True reason=recall_by_default intent_source=fallback
+INFO:rag.pipeline:RAG 召回耗时 embedding_ms=48 knowledge_ms=635 pending_document_ms=1578 vector_ms=594 merge_ms=40 total_ms=2894
+INFO:__main__:流式 RAG 阶段耗时 retrieval_ms=2895 generation_queue_wait_ms=7386 generation_prepare_ms=0 inference_ms=5824 total_ms=16105

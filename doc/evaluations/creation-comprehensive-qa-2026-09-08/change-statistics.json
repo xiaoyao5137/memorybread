@@ -1,0 +1,226 @@
+[
+  {
+    "path": "ai-sidecar/creation/agent_loop.py",
+    "added": 285,
+    "removed": 42,
+    "baseline_source": "baseline.tar.gz:ai-sidecar/creation/agent_loop.py",
+    "baseline_sha256": "a6ed80335bed1bddfc7adf5130e1149622106ce0611cdb4ff28ef8a877b60703"
+  },
+  {
+    "path": "ai-sidecar/creation/brainstorm.py",
+    "added": 222,
+    "removed": 132,
+    "baseline_source": "baseline.tar.gz:ai-sidecar/creation/brainstorm.py",
+    "baseline_sha256": "2d4c98ddd89318a9ed0054d1c907ba46282600d7ea7d7a64d511e290d4f1c35d"
+  },
+  {
+    "path": "ai-sidecar/creation/delivery_contract.py",
+    "added": 640,
+    "removed": 32,
+    "baseline_source": "baseline.tar.gz:ai-sidecar/creation/delivery_contract.py",
+    "baseline_sha256": "385a785c8735e49264c97931c35ae891ae57953e9b9c5fabad82ba55b759526f"
+  },
+  {
+    "path": "ai-sidecar/creation/operations.py",
+    "added": 144,
+    "removed": 33,
+    "baseline_source": "baseline.tar.gz:ai-sidecar/creation/operations.py",
+    "baseline_sha256": "363904f0babe7df69ad2671363c2427a6faa6a16ed44cc5d5ded5f7c21c91c3b"
+  },
+  {
+    "path": "ai-sidecar/creation/service.py",
+    "added": 8,
+    "removed": 9,
+    "baseline_source": "baseline.tar.gz:ai-sidecar/creation/service.py",
+    "baseline_sha256": "14e749c03def4b21a1a1ad172f323ed5ad802ec7a388b9f41feab1ac65192ad8"
+  },
+  {
+    "path": "ai-sidecar/creation/skill_governance.py",
+    "added": 98,
+    "removed": 30,
+    "baseline_source": "baseline.tar.gz:ai-sidecar/creation/skill_governance.py",
+    "baseline_sha256": "8d7707d337efed0f589b9c0d896756444c7b42a5ccd0257c52bb00e73b9ea024"
+  },
+  {
+    "path": "ai-sidecar/tests/test_creation_brainstorm.py",
+    "added": 281,
+    "removed": 12,
+    "baseline_source": "baseline.tar.gz:ai-sidecar/tests/test_creation_brainstorm.py",
+    "baseline_sha256": "dcca686d1c7fef8c92d952790e57057fa709373c53413c9b8f821a34ffa87d07"
+  },
+  {
+    "path": "ai-sidecar/tests/test_creation_brief_context.py",
+    "added": 137,
+    "removed": 0,
+    "baseline_source": "new file in this task",
+    "baseline_sha256": null
+  },
+  {
+    "path": "ai-sidecar/tests/test_creation_context_contract.py",
+    "added": 876,
+    "removed": 0,
+    "baseline_source": "new file in this task",
+    "baseline_sha256": null
+  },
+  {
+    "path": "ai-sidecar/tests/test_creation_operations.py",
+    "added": 134,
+    "removed": 0,
+    "baseline_source": "baseline.tar.gz:ai-sidecar/tests/test_creation_operations.py",
+    "baseline_sha256": "93b05c600203065a172a27274aa5d573b565f7cc465d9012c22be4fffcecaaae"
+  },
+  {
+    "path": "ai-sidecar/tests/test_creation_resume_boundaries.py",
+    "added": 198,
+    "removed": 0,
+    "baseline_source": "new file in this task",
+    "baseline_sha256": null
+  },
+  {
+    "path": "ai-sidecar/tests/test_creation_skill_governance.py",
+    "added": 146,
+    "removed": 22,
+    "baseline_source": "baseline.tar.gz:ai-sidecar/tests/test_creation_skill_governance.py",
+    "baseline_sha256": "82bc675696d6e057258d079074f1a355e59ef674fda1ae0780b042b72fdcbc22"
+  },
+  {
+    "path": "ai-sidecar/tests/test_evaluate_creation_memory_path.py",
+    "added": 113,
+    "removed": 0,
+    "baseline_source": "new file in this task",
+    "baseline_sha256": null
+  },
+  {
+    "path": "ai-sidecar/scripts/evaluate_creation_delivery.py",
+    "added": 179,
+    "removed": 13,
+    "baseline_source": "baseline.tar.gz:ai-sidecar/scripts/evaluate_creation_delivery.py",
+    "baseline_sha256": "c87b200eac07d036036082dcd8f56eed953d5efbadc42523ff6f7feb7d781ae2"
+  },
+  {
+    "path": "ai-sidecar/scripts/evaluate_creation_memory_path.py",
+    "added": 302,
+    "removed": 0,
+    "baseline_source": "new file in this task",
+    "baseline_sha256": null
+  },
+  {
+    "path": "ai-sidecar/scripts/evaluate_creation_user_paths.py",
+    "added": 167,
+    "removed": 0,
+    "baseline_source": "new file in this task",
+    "baseline_sha256": null
+  },
+  {
+    "path": "desktop-ui/src/components/CreationPanel.tsx",
+    "added": 192,
+    "removed": 58,
+    "baseline_source": "baseline.tar.gz:desktop-ui/src/components/CreationPanel.tsx",
+    "baseline_sha256": "5a684bd0599e9b42c93690f606aeb8c2e9f46c5ac665b9821cbf8b2fa85ec941"
+  },
+  {
+    "path": "desktop-ui/src/components/CreationBriefEditor.tsx",
+    "added": 11,
+    "removed": 5,
+    "baseline_source": "/tmp/mb-creation-qa-20260908/frontend-baseline/src/components/CreationBriefEditor.tsx",
+    "baseline_sha256": "2bd7f9427538121de18bc16ec76f52e02bf36a2644cca4b82736590d0dde17e3"
+  },
+  {
+    "path": "desktop-ui/src/__tests__/CreationBriefEditor.test.tsx",
+    "added": 25,
+    "removed": 1,
+    "baseline_source": "baseline.tar.gz:desktop-ui/src/__tests__/CreationBriefEditor.test.tsx",
+    "baseline_sha256": "c0fa8d8a63acd6c00f0e48446335492410bc76c4c551da5843ef960fac181556"
+  },
+  {
+    "path": "desktop-ui/src/__tests__/CreationPanelSessionIsolation.test.tsx",
+    "added": 321,
+    "removed": 0,
+    "baseline_source": "new file in this task",
+    "baseline_sha256": null
+  },
+  {
+    "path": "core-engine/src/api/handlers/creation.rs",
+    "added": 222,
+    "removed": 17,
+    "baseline_source": "baseline.tar.gz:core-engine/src/api/handlers/creation.rs",
+    "baseline_sha256": "ef72c3dcf20efb1ae3a1b0c69e57e71839ecf1f3b32c5ea7f742e13e6b4b3cd1"
+  },
+  {
+    "path": "core-engine/src/storage/repo/creation_history.rs",
+    "added": 102,
+    "removed": 7,
+    "baseline_source": "baseline.tar.gz:core-engine/src/storage/repo/creation_history.rs",
+    "baseline_sha256": "5fe4c925fbcb969e7dfa25f84def9d778dbb44bb28a200780e99ea20fa5cd9b4"
+  },
+  {
+    "path": "core-engine/tests/api_tests.rs",
+    "added": 108,
+    "removed": 2,
+    "baseline_source": "baseline.tar.gz:core-engine/tests/api_tests.rs",
+    "baseline_sha256": "bbede49d3d6936d1a3fea3e0392954f194b0f77010f5dd9b3361aa38caf3fe3d"
+  },
+  {
+    "path": "ai-sidecar/tests/test_brainstorm_recovery.py",
+    "added": 1,
+    "removed": 1,
+    "baseline_source": "baseline.tar.gz:ai-sidecar/tests/test_brainstorm_recovery.py",
+    "baseline_sha256": "14b01b10e9cc0027fc01f649bd4d39b404da1bbb855eacbbf29c7b333cc781ad"
+  },
+  {
+    "path": "ai-sidecar/tests/test_brainstorm_transport.py",
+    "added": 1,
+    "removed": 1,
+    "baseline_source": "baseline.tar.gz:ai-sidecar/tests/test_brainstorm_transport.py",
+    "baseline_sha256": "72202153cda210aa040463f1d882a462bd3acb0a2c1c9d3f5c689411bfd9f6fb"
+  },
+  {
+    "path": "ai-sidecar/scripts/evaluate_creation_intent.py",
+    "added": 109,
+    "removed": 0,
+    "baseline_source": "new file in this task",
+    "baseline_sha256": null
+  },
+  {
+    "path": "ai-sidecar/creation/app.py",
+    "added": 6,
+    "removed": 0,
+    "baseline_source": "baseline.tar.gz:ai-sidecar/creation/app.py",
+    "baseline_sha256": "96f0584f6a0ad8193d21350b4a0cb6932f1d300f4a774dff433bbc271f4ed64b"
+  },
+  {
+    "path": "ai-sidecar/tests/test_creation_delivery_contract.py",
+    "added": 869,
+    "removed": 9,
+    "baseline_source": "baseline.tar.gz:ai-sidecar/tests/test_creation_delivery_contract.py",
+    "baseline_sha256": "71c0b2b73f36999c8b6bcf2e9c2e20e89573d1d3585cc86515eafa853fab0bd4"
+  },
+  {
+    "path": "ai-sidecar/creation/prompt_evidence.py",
+    "added": 1,
+    "removed": 1,
+    "baseline_source": "baseline.tar.gz:ai-sidecar/creation/prompt_evidence.py",
+    "baseline_sha256": "dd269ea9f17efc61f8b74a7594f9f681656125a67ac73623ad792886ed9032c6"
+  },
+  {
+    "path": "core-engine/tests/creation_operation_tests.rs",
+    "added": 61,
+    "removed": 0,
+    "baseline_source": "baseline.tar.gz:core-engine/tests/creation_operation_tests.rs",
+    "baseline_sha256": "8ace7c5520942c863b84fcf334b5b5a689fce1492f8876d0d654e1d6ef01c60e"
+  },
+  {
+    "path": "ai-sidecar/tests/fixtures/creation_calendar_review_v21.json",
+    "added": 374,
+    "removed": 0,
+    "baseline_source": "new file in this task",
+    "baseline_sha256": null
+  },
+  {
+    "path": "ai-sidecar/tests/fixtures/creation_review_consistency_v22.json",
+    "added": 672,
+    "removed": 0,
+    "baseline_source": "new file in this task",
+    "baseline_sha256": null
+  }
+]

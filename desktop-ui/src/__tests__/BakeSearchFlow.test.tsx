@@ -81,6 +81,63 @@ describe('显式搜索交互', () => {
     useAppStore.getState().setApiBaseUrl('http://localhost:7070')
   })
 
+  it('刷新失败后打开的详情展示本次原因并保留可靠正文', async () => {
+    useAppStore.setState({ debugModeEnabled: true })
+    let refreshed = false
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/models')) return jsonResponse({ ollama: true, llm: true, embedding: true })
+      if (url.includes('/api/bake/overview')) return jsonResponse(overviewResponse)
+      if (url.endsWith('/api/bake/documents/953/refresh')) {
+        refreshed = true
+        return jsonResponse({ status: 'failed', reason: 'BROWSER_EXTENSION_TIMEOUT', document: null })
+      }
+      if (url.includes('/api/bake/documents?')) return jsonResponse({
+        items: [{ ...documentItem(953, '刷新验收文档'), source_url: 'https://example.com/document',
+          full_content: '可靠正文始终保留。', last_refresh_status: 'historical_only',
+          last_refresh_error: refreshed ? 'BROWSER_EXTENSION_TIMEOUT' : 'SOURCE_REFRESH_CANCELLED',
+          last_refresh_checked_at_ms: refreshed ? 2000 : 1000 }], total: 1, limit: 20, offset: 0,
+      })
+      if (url.includes('/api/knowledge')) return jsonResponse({ entries: [], total: 0 })
+      throw new Error(`unexpected url: ${url}`)
+    }))
+    useAppStore.setState({ bakeTab: 'templates' })
+    render(<BakePanel />)
+    fireEvent.click(await screen.findByRole('button', { name: '查看文档「刷新验收文档」详情' }))
+    fireEvent.click(screen.getByRole('button', { name: '立即刷新' }))
+    await waitFor(() => expect(screen.getByText('读取页面超时，可稍后重试')).toBeInTheDocument())
+    expect(screen.getAllByText('可靠正文始终保留。').length).toBeGreaterThan(0)
+    expect(screen.queryByText('本次刷新已取消，原正文保留')).not.toBeInTheDocument()
+  })
+
+  it('相同筛选条件再次搜索文档会读取后台更新后的状态', async () => {
+    useAppStore.setState({ debugModeEnabled: true })
+    let updated = false
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/models')) return jsonResponse({ ollama: true, llm: true, embedding: true })
+      if (url.includes('/api/bake/overview')) return jsonResponse(overviewResponse)
+      if (url.includes('/api/bake/documents?')) return jsonResponse({
+        items: [{ ...documentItem(953, '后台更新文档'), full_content: '完整正文保留。',
+          last_refresh_error: updated ? 'SCRAPE_TIMEOUT' : 'SOURCE_REFRESH_CANCELLED' }],
+        total: 1, limit: 20, offset: 0,
+      })
+      if (url.includes('/api/knowledge')) return jsonResponse({ entries: [], total: 0 })
+      throw new Error(`unexpected url: ${url}`)
+    }))
+    useAppStore.setState({ bakeTab: 'templates' })
+    render(<BakePanel />)
+    fireEvent.click(await screen.findByRole('button', { name: '查看文档「后台更新文档」详情' }))
+    expect(screen.getByText('本次刷新已取消，原正文保留')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '关闭文档详情' }))
+    updated = true
+    fireEvent.click(screen.getByRole('button', { name: '搜索' }))
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes('/api/bake/documents?')).length).toBe(2))
+    fireEvent.click(screen.getByRole('button', { name: '查看文档「后台更新文档」详情' }))
+    await waitFor(() => expect(screen.getByText('页面读取已达到时间预算')).toBeInTheDocument())
+    expect(screen.queryByText('本次刷新已取消，原正文保留')).not.toBeInTheDocument()
+  })
+
   it('文档翻页后不会被上一页的迟到响应覆盖', async () => {
     const firstPage = deferred<Response>()
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {

@@ -1,0 +1,28 @@
+{
+  "incident_replay": {
+    "history_id": 131,
+    "characters": 13686,
+    "sha256": "97a515dc696a4bb7a88c2dbc6a534e801efdab0bf9ca40a6043a3861e0ee2762",
+    "risk_labels": 54,
+    "problems": [
+      "repeated_content"
+    ],
+    "commit_gate_error": "CREATION_DOCUMENT_INVALID",
+    "document_unchanged": true
+  },
+  "live_generation": {
+    "characters": 590,
+    "problems": [],
+    "risk_labels": 0,
+    "headings": [
+      "## 一、目标",
+      "## 二、执行",
+      "## 三、验收"
+    ]
+  },
+  "live_polish": {
+    "characters": 530,
+    "problems": [],
+    "risk_labels": 0
+  }
+}

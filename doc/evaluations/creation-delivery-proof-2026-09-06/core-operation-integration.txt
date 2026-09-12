@@ -1,0 +1,188 @@
+warning: unused import: `http::StatusCode`
+ --> src/api/handlers/privacy.rs:6:5
+  |
+6 |     http::StatusCode,
+  |     ^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Instant`
+   --> src/capture/ax.rs:585:35
+    |
+585 |         use std::time::{Duration, Instant};
+    |                                   ^^^^^^^
+
+warning: unused import: `OnceLock`
+   --> src/capture/ax.rs:704:23
+    |
+704 |         sync::{Mutex, OnceLock},
+    |                       ^^^^^^^^
+
+warning: unused import: `Key`
+   --> src/executor/executor.rs:220:39
+    |
+220 |         use enigo::{Direction, Enigo, Key, Keyboard, Settings}; // type: ignore
+    |                                       ^^^
+
+warning: unused import: `Connection`
+ --> src/storage/repo/preferences.rs:3:24
+  |
+3 | use rusqlite::{params, Connection};
+  |                        ^^^^^^^^^^
+
+warning: unused import: `NewPrivacyFilter`
+ --> src/storage/repo/privacy.rs:8:46
+  |
+8 |         AppBlacklistRecord, NewAppBlacklist, NewPrivacyFilter, PrivacyBlockStat,
+  |                                              ^^^^^^^^^^^^^^^^
+
+warning: unused import: `Weekday`
+  --> src/storage/repo/privacy.rs:18:45
+   |
+18 |     use chrono::{Datelike, Duration, Local, Weekday};
+   |                                             ^^^^^^^
+
+warning: variable does not need to be mutable
+   --> src/capture/ax.rs:897:19
+    |
+897 |         if let Ok(mut cache_guard) = cache.lock() {
+    |                   ----^^^^^^^^^^^
+    |                   |
+    |                   help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable `pages_compressed` is assigned to, but never used
+   --> src/monitor.rs:229:9
+    |
+229 |     let mut pages_compressed = 0u64;
+    |         ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: consider using `_pages_compressed` instead
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `pages_compressed` is never read
+   --> src/monitor.rs:239:13
+    |
+239 |             pages_compressed = parse_vm_value(line);
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `request`
+   --> src/scheduler/profile_task.rs:147:38
+    |
+147 |     async fn send_ipc_request(&self, request: IpcRequest) -> anyhow::Result<IpcResponse> {
+    |                                      ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request`
+
+warning: associated function `err` is never used
+  --> src/api/handlers/privacy.rs:77:8
+   |
+68 | impl<T> ApiResponse<T> {
+   | ---------------------- associated function in this implementation
+...
+77 |     fn err(error: String) -> Self {
+   |        ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `sanitize_extracted_text` is never used
+   --> src/capture/ax.rs:467:4
+    |
+467 | fn sanitize_extracted_text(raw: &str, win_title: Option<&str>) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `process_event_with_ax_info` is never used
+   --> src/capture/engine.rs:942:14
+    |
+738 | impl CaptureEngine {
+    | ------------------ method in this implementation
+...
+942 |     async fn process_event_with_ax_info(
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `trigger_embedding` is never used
+    --> src/capture/engine.rs:2074:14
+     |
+2067 | impl CaptureEngine {
+     | ------------------ associated function in this implementation
+...
+2074 |     async fn trigger_embedding(
+     |              ^^^^^^^^^^^^^^^^^
+
+warning: field `id` is never read
+  --> src/ipc.rs:61:5
+   |
+60 | struct IpcResponse {
+   |        ----------- field in this struct
+61 |     id: String,
+   |     ^^
+   |
+   = note: `IpcResponse` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: function `parse_json_value` is never used
+    --> src/services/bake_service.rs:7356:4
+     |
+7356 | fn parse_json_value<T>(value: &str) -> Vec<T>
+     |    ^^^^^^^^^^^^^^^^
+
+warning: function `first_or_default` is never used
+    --> src/services/bake_service.rs:7400:4
+     |
+7400 | fn first_or_default(values: &[String], default: &str) -> String {
+     |    ^^^^^^^^^^^^^^^^
+
+warning: function `insert_timeline_entry_inner` is never used
+    --> src/storage/repo/knowledge.rs:2241:4
+     |
+2241 | fn insert_timeline_entry_inner(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `EXCLUDED_TABLES` is never used
+  --> src/storage/snapshot.rs:56:7
+   |
+56 | const EXCLUDED_TABLES: &[&str] = &[
+   |       ^^^^^^^^^^^^^^^
+
+warning: field `identity_columns` is never read
+   --> src/storage/snapshot.rs:106:5
+    |
+104 | struct AssetTableSpec {
+    |        -------------- field in this struct
+105 |     name: &'static str,
+106 |     identity_columns: &'static [&'static str],
+    |     ^^^^^^^^^^^^^^^^
+    |
+    = note: `AssetTableSpec` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `export_capture_refs` is never used
+    --> src/storage/snapshot.rs:1525:4
+     |
+1525 | fn export_capture_refs(conn: &Connection) -> Result<Vec<JsonRow>, StorageError> {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `export_table` is never used
+    --> src/storage/snapshot.rs:1559:4
+     |
+1559 | fn export_table(conn: &Connection, spec: &AssetTableSpec) -> Result<TableSnapshot, StorageError> {
+     |    ^^^^^^^^^^^^
+
+warning: `memory-bread-core` (lib) generated 23 warnings (run `cargo fix --lib -p memory-bread-core` to apply 9 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.06s
+     Running tests/creation_model_boundary_tests.rs (target/debug/deps/creation_model_boundary_tests-9f73c6260585bc42)
+
+running 1 test
+test creation_agent_modes_ignore_legacy_cloud_preferences_and_request_credentials ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.73s
+
+     Running tests/creation_operation_tests.rs (target/debug/deps/creation_operation_tests-1fbe123d2e19f753)
+
+running 3 tests
+test creation_storage_failure_is_not_reported_as_an_invalid_instruction ... ok
+test skill_catalog_and_explicit_selection_reach_sidecar_separately ... ok
+test durable_operation_survives_handoff_resume_replay_acknowledgement_and_undo ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.03s
+

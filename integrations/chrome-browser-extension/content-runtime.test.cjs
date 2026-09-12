@@ -778,3 +778,181 @@ test('分页当前页可由复合 active 类名稳定识别', () => {
   assert.equal(state.page_key, '2')
   assert.equal(state.current_control, controls[2])
 })
+
+test('文档正文保留段落表格代码并排除导航控件及隐藏提示', () => {
+  const {context} = loadRuntime('')
+  const text = value => ({nodeType: 3, textContent: value})
+  const element = (tagName, children, attrs = {}) => ({
+    nodeType: 1, tagName, childNodes: children, hidden: false,
+    getAttribute(name) { return attrs[name] || null },
+  })
+  const root = element('MAIN', [
+    element('NAV', [text('知识库目录')]),
+    element('DIV', [text('字体工具栏')], {role: 'toolbar'}),
+    element('DIV', [text('You need to enable JavaScript')], {'aria-hidden': 'true'}),
+    element('H1', [text('账号矩阵方案')]),
+    element('P', [text('商家账号运营保留完整业务正文。')]),
+    element('TABLE', [element('TR', [element('TD', [text('方案甲')]), element('TD', [text('可行')])])]),
+    element('PRE', [text('const total = 1;')]),
+    element('FOOTER', [text('全文评论')]),
+  ])
+  const statistics = {excluded_block_count: 0}
+  const result = context.documentBodyText(root, statistics)
+  assert.match(result, /账号矩阵方案\n商家账号运营保留完整业务正文。/)
+  assert.match(result, /方案甲\t可行/)
+  assert.match(result, /const total = 1;/)
+  assert.doesNotMatch(result, /知识库目录|字体工具栏|enable JavaScript|全文评论/)
+  assert.equal(statistics.excluded_block_count, 4)
+})
+
+test('正文选择优先内容适配器并在缺失正文时不回退整页', () => {
+  const root = {innerText: '文档正文', contains() { return false }}
+  const {context} = loadRuntime('侧栏目录与工具栏', selector => selector === '.vodka-paginateddocumentplugin' ? [root] : [])
+  assert.equal(context.findDocumentRoot().root, root)
+  assert.equal(context.findDocumentRoot().adapter, 'paginated_editor')
+  assert.equal(loadRuntime('仅有页面外围文字').context.findDocumentRoot(), null)
+})
+
+test('累积懒加载需要最终单份正文覆盖全部片段而非拼接后冒充完整', () => {
+  const {context} = loadRuntime('')
+  assert.equal(context.documentSnapshotCoversSegments('标题\n第一节正文\n第二节正文', ['标题\n第一节正文', '第二节正文']), true)
+  assert.equal(context.documentSnapshotCoversSegments('第二节正文', ['第一节正文', '第二节正文']), false)
+  assert.equal(context.documentSnapshotCoversSegments('方案预算已取消', ['方案预算已批准']), false)
+  assert.equal(context.documentSnapshotCoversSegments('面向 L0 商家的商品', ['面向\u200b L0\u200b 商家的商\n品']), true)
+  assert.equal(context.documentSnapshotCoversSegments('第一节正文', ['第一节正文\n第二节正文']), false)
+  assert.equal(context.documentSnapshotCoversSegments('notapproved', ['not approved']), false)
+})
+
+test('文档采集完整异步路径区分稳定全文、虚拟化与分页预览', async () => {
+  for (const [virtualized,paginated] of [[false,false],[true,false],[false,true]]) {
+    const root = {
+      nodeType: 1, tagName: 'ARTICLE', innerText: '短文正文。',
+      childNodes: [{nodeType: 3, textContent: '短文正文。'}],
+      scrollHeight: 100, clientHeight: 100, scrollTop: 0,
+      contains() { return false }, getAttribute() { return null },
+      querySelectorAll() { return [] },
+      querySelector() { return virtualized ? {} : null },
+    }
+    const {context} = loadRuntime('侧栏', selector => selector === (paginated ? '.vodka-paginateddocumentplugin' : 'article') ? [root] : [])
+    context.document.title = '短文'
+    context.location = {href: 'https://example.test/document/1'}
+    context.globalThis.getComputedStyle = () => ({overflowY: 'visible'})
+    context.setTimeout = callback => setTimeout(callback, 0)
+    const result = await context.extractPage({content_kind: 'document'})
+    assert.equal(result.content_text, '短文正文。')
+    assert.equal(result.status, virtualized || paginated ? 'partial' : 'complete')
+    assert.equal(result.completeness.status, result.status)
+    assert.equal(result.completeness.truncated, false)
+    assert.equal(result.structured_data.document_body.final_snapshot_covers_observed, true)
+    assert.equal(result.completeness.stable_passes, 2)
+  }
+})
+
+test('先冻结完整正文再恢复滚动位置，恢复引发卸载不得丢掉末尾', async () => {
+  const root = {
+    nodeType: 1, tagName: 'ARTICLE', scrollHeight: 200, clientHeight: 100, scrollTop: 0,
+    get innerText() { return this.scrollTop >= 100 ? '第一节正文\n末尾引用' : '第一节正文' },
+    get childNodes() { return [{nodeType: 3, textContent: this.innerText}] },
+    contains() { return false }, getAttribute() { return null },
+    querySelectorAll() { return [] }, querySelector() { return null },
+  }
+  const {context} = loadRuntime('侧栏', selector => selector === 'article' ? [root] : [])
+  context.document.title = '正文'
+  context.location = {href: 'https://example.test/document/1'}
+  context.globalThis.getComputedStyle = () => ({overflowY: 'auto'})
+  context.setTimeout = callback => setTimeout(callback, 0)
+  const result = await context.extractPage({content_kind: 'document'})
+  assert.equal(result.status, 'complete')
+  assert.equal(result.content_text, '第一节正文\n末尾引用')
+  assert.equal(root.scrollTop, 0)
+  assert.equal(root.innerText, '第一节正文')
+})
+
+test('虚拟正文块要求相邻视口重叠且同一位置内容不变', () => {
+  const {context} = loadRuntime('')
+  const a = {key:'0:10:0',type:'paragraph',text:'第一节'}
+  const b = {key:'0:20:0',type:'paragraph',text:'第二节'}
+  const c = {key:'0:30:0',type:'paragraph',text:'末尾引用'}
+  const known = new Map()
+  assert.equal(context.mergePositionedDocumentBlocks(known,[],[a,b]),true)
+  assert.equal(context.mergePositionedDocumentBlocks(known,[a,b],[b,c]),true)
+  assert.equal(known.size,3)
+  assert.equal(context.mergePositionedDocumentBlocks(new Map(),[a],[c]),false)
+  assert.equal(context.mergePositionedDocumentBlocks(known,[b,c],[{...b,text:'修订后的第二节'},c]),false)
+})
+
+test('两次有重叠的虚拟滚动覆盖才完整，修订变化和跳块保持 partial', async () => {
+  for (const mode of ['complete', 'revision_changed', 'gap', 'unsupported_block']) {
+    let top = 0
+    let pass = 0
+    const scroll = {scrollHeight:200,clientHeight:100,parentElement:null,
+      get scrollTop() { return top }, set scrollTop(value) { top=value; if (value===0) pass+=1 }}
+    const root = {innerText:'正文',parentElement:scroll,contains() { return false }}
+    const {context} = loadRuntime('', selector => selector === '.vodka-paginateddocumentplugin' ? [root] : [])
+    context.document.title = '文档'
+    context.location = {href:'https://example.test/document/1'}
+    context.globalThis.getComputedStyle = () => ({overflowY:'auto'})
+    context.setTimeout = callback => setTimeout(callback,0)
+    context.positionedDocumentBlocks = () => {
+      const first = Math.floor(top/50)
+      return [first,first+1].map(index => ({key:String(mode==='gap' ? index+first*10 : index),
+        page:0,top:index*50,left:0,type:'paragraph',text:`段落${index}${mode==='revision_changed' && pass===2 ? '新版本' : ''}`}))
+    }
+    if (mode==='unsupported_block') context.documentBodyText = () => '遗漏的表格文字'
+    const result = await context.extractPositionedDocument({root,adapter:'paginated_editor'}, {}, Date.now()+10000,80000,20)
+    assert.equal(result.status,mode==='complete' ? 'complete' : 'partial')
+    assert.equal(result.structured_data.document_body.version,'document-body.v3')
+    assert.ok(result.structured_data.document_body.blocks.length > 0)
+    assert.equal(result.structured_data.document_body.blocks[0].type,'paragraph')
+    assert.equal(result.structured_data.document_body.blocks[0].page,0)
+    if (mode==='complete') assert.equal(result.content_text,'段落0\n\n段落1\n\n段落2\n\n段落3')
+    assert.equal(scroll.scrollTop,0)
+  }
+})
+
+test('定位块同时覆盖段落和 data-block-type 表格且不重复嵌套段落', () => {
+  const {context} = loadRuntime('')
+  const page = {querySelectorAll() { return [table,cell,paragraph] }}
+  const block = (kind,top,text,parent,attribute) => ({
+    nodeType:1,tagName:'DIV',parentElement:parent,childNodes:[{nodeType:3,textContent:text}],
+    closest() { return page }, hasAttribute(name) { return name===attribute },
+    getAttribute(name) { return name===attribute ? kind : null },
+    computed:{position:'absolute',top:String(top),left:'76'},
+  })
+  const table = block('table',10,'表头\t数据',page,'data-block-type')
+  const cell = block('paragraph',0,'数据',table,'data-type')
+  const paragraph = block('paragraph',90,'下一段',page,'data-type')
+  context.globalThis.getComputedStyle = node => node.computed || {}
+  const result = context.positionedDocumentBlocks({querySelectorAll() { return [page] }})
+  assert.deepEqual(Array.from(result, b => b.type),['table','paragraph'])
+  assert.deepEqual(Array.from(result, b => b.text),['表头\t数据','下一段'])
+})
+
+test('表格按行列还原，虚拟卸载的单元格不覆盖已经观察到的值', () => {
+  const {context}=loadRuntime('')
+  const cell=(row,column,text)=>({key:`cell:${row}:${column}`,page:0,top:10,left:10,type:'table_cell',row,column,columns:3,text})
+  const header=[cell(0,0,'问题'),cell(0,1,'原声'),cell(0,2,'解法')]
+  const first=cell(1,0,'质量')
+  const last=cell(2,0,'一致性')
+  const known=new Map()
+  assert.equal(context.mergePositionedDocumentBlocks(known,[],[...header,first]),true)
+  assert.equal(context.mergePositionedDocumentBlocks(known,[...header,first],[first,last]),true)
+  const blocks=Array.from(known.values()).sort(context.comparePositionedBlocks)
+  assert.equal(context.positionedDocumentText(blocks),'问题\t原声\t解法\n质量\t\t\n一致性\t\t')
+})
+
+test('通用正文块保留标题列表代码表格与路径，排除导航子树', () => {
+  const {context}=loadRuntime('')
+  context.globalThis.getComputedStyle = () => ({display:'block',visibility:'visible'})
+  const text = value => ({nodeType:3,textContent:value})
+  const node = (tag,...children) => ({nodeType:1,tagName:tag,childNodes:children,getAttribute() { return null }})
+  const root = node('ARTICLE',node('NAV',node('P',text('目录导航'))),node('H2',text('标题')),
+    node('P',text('正文'),node('STRONG',text('加粗部分'))),node('UL',node('LI',text('列表'))),
+    node('PRE',text('const x = 1')),node('TABLE',node('TR',node('TD',text('单元格')))))
+  const blocks = context.semanticDocumentBlocks(root)
+  assert.equal(JSON.stringify(blocks.map(b=>b.type)),JSON.stringify(['heading','paragraph','list','code','table']))
+  assert.equal(blocks[0].level,2)
+  assert.equal(JSON.stringify(blocks[0].dom_path),'[1]')
+  assert.ok(!blocks.some(b=>b.text.includes('目录导航')))
+  assert.equal(blocks[1].text,'正文加粗部分')
+})

@@ -170,7 +170,7 @@ def test_generate_segments_filters_discarded_segments(monkeypatch) -> None:
         {'id': 102, 'ts': 2000, 'app_name': 'Qoder',
          'window_title': 'Quest', 'ocr_text': '真实工作内容'},
     ]
-    segments, discarded_ids, _ = extractor._generate_segments(captures)
+    segments, discarded_ids, _, _ = extractor._generate_segments(captures)
 
     assert discarded_ids == [101]
     assert [s['capture_ids'] for s in segments] == [[102]]
@@ -191,7 +191,7 @@ def test_generate_segments_keeps_all_when_no_discard(monkeypatch) -> None:
         {'id': 202, 'ts': 2000, 'app_name': 'Qoder',
          'window_title': 'Quest', 'ocr_text': '内容 B'},
     ]
-    segments, discarded_ids, _ = extractor._generate_segments(captures)
+    segments, discarded_ids, _, _ = extractor._generate_segments(captures)
 
     assert discarded_ids == []
     assert [s['capture_ids'] for s in segments] == [[201, 202]]

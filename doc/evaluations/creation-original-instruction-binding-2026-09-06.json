@@ -1,0 +1,162 @@
+{
+  "model": "qwen3.5:4b",
+  "endpoint": "http://127.0.0.1:50256",
+  "scope": "real routing and input assessment; synthetic documents; no external retrieval",
+  "cases": [
+    {
+      "id": "append-literal",
+      "instruction": "在附录末尾追加这句话：请提前准备材料。其余内容原样保留。",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "insert",
+              "target": {
+                "text": "旧说明。",
+                "occurrence": 1
+              },
+              "content": "请提前准备材料。",
+              "position": "after"
+            }
+          ]
+        },
+        "reasoning": "用户要求追加一句话到附录末尾，属于局部编辑。根据操作类别约束，目标位置和动作需严格遵循用户请求。当前文档中附录节点为 node-ed551755df2ffa06，其内容位于该节点范围内。需将文本'请提前准备材料。'插入到该节点末尾。由于是精确的追加操作，不涉及全文生成、数据检索或复杂分析，无需调用任何工具或 Agent。",
+        "source": "model"
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "insert",
+              "target": {
+                "text": "旧说明。",
+                "occurrence": 1
+              },
+              "content": "请提前准备材料。",
+              "position": "after"
+            }
+          ]
+        },
+        "reasoning": "用户要求追加一句话到附录末尾，属于局部编辑。根据操作类别约束，目标位置和动作需严格遵循用户请求。当前文档中附录节点为 node-ed551755df2ffa06，其内容位于该节点范围内。需将文本'请提前准备材料。'插入到该节点末尾。由于是精确的追加操作，不涉及全文生成、数据检索或复杂分析，无需调用任何工具或 Agent。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "literal_added": true
+      },
+      "passed": true,
+      "seconds": 5.15
+    },
+    {
+      "id": "append-local",
+      "instruction": "在会议安排末尾补充一句邀请大家参与讨论的话，不增加任何新事实，其他内容原样保留。",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "text": "请联系项目组。",
+              "occurrence": 1
+            }
+          ]
+        },
+        "reasoning": "用户要求在文档末尾补充一句邀请讨论的话，属于局部文本修改。根据操作类别约束，目标位置和内容必须严格遵循用户请求原文。文档末尾的正文节点是'联系方式'章节（node-1dad7ff27377868f），其内容'请联系项目组。'即为需要修改的精确片段。由于是局部改写而非全文生成或结构重组，且无需检索外部资料或运行复杂技能，因此选择 transform 操作，仅针对该精确文本片段进行替换。",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "# 会议说明\n\n## 会议安排\n周一上午讨论项目进展。\n\n## 附录\n旧说明。\n\n## 联系方式\n请联系项目组。\n\n欢迎大家参与讨论。",
+        "self_contained_reason": "本轮任务仅涉及对已提供文档内容的局部编辑（追加一句通用邀请语），不依赖任何外部事实、私有背景或业务数据，属于自足操作。",
+        "acceptance": [
+          {
+            "id": "append_invitation",
+            "criterion": "在文档末尾（'请联系项目组。'之后）追加一句邀请大家参与讨论的话。"
+          },
+          {
+            "id": "preserve_content",
+            "criterion": "除追加内容外，文档原有所有内容和结构原样保留。"
+          },
+          {
+            "id": "no_new_facts",
+            "criterion": "不增加任何新事实或外部信息。"
+          }
+        ],
+        "inputs": []
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "text": "请联系项目组。",
+              "occurrence": 1
+            }
+          ]
+        },
+        "reasoning": "用户要求在文档末尾补充一句邀请讨论的话，属于局部文本修改。根据操作类别约束，目标位置和内容必须严格遵循用户请求原文。文档末尾的正文节点是'联系方式'章节（node-1dad7ff27377868f），其内容'请联系项目组。'即为需要修改的精确片段。由于是局部改写而非全文生成或结构重组，且无需检索外部资料或运行复杂技能，因此选择 transform 操作，仅针对该精确文本片段进行替换。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "authorized_scope": false
+      },
+      "passed": false,
+      "model_replies": [
+        "{\n  \"action\": \"edit\",\n  \"deliverable\": \"修改后的文档\",\n  \"primary_goal\": \"在现有文档末尾补充一句邀请讨论的话，保持其他内容不变\"\n}",
+        "{\"reasoning\":\"用户要求在文档末尾补充一句邀请讨论的话，属于局部文本修改。根据操作类别约束，目标位置和内容必须严格遵循用户请求原文。文档末尾的正文节点是'联系方式'章节（node-1dad7ff27377868f），其内容'请联系项目组。'即为需要修改的精确片段。由于是局部改写而非全文生成或结构重组，且无需检索外部资料或运行复杂技能，因此选择 transform 操作，仅针对该精确文本片段进行替换。\", \"operation\": {\"kind\": \"transform\", \"targets\": [{\"text\": \"请联系项目组。\", \"occurrence\": 1}]}, \"tools\": [], \"agents\": []}",
+        "{\n  \"deliverable\": \"# 会议说明\\n\\n## 会议安排\\n周一上午讨论项目进展。\\n\\n## 附录\\n旧说明。\\n\\n## 联系方式\\n请联系项目组。\\n\\n欢迎大家参与讨论。\",\n  \"requirements_by_source\": {\n    \"work_context\": {\n      \"state\": \"not_needed\",\n      \"evidence\": \"\",\n      \"need\": \"\",\n      \"reason\": \"任务仅要求对现有文本进行局部追加，不涉及项目背景、历史决策或私有术语的检索。\",\n      \"query\": \"\"\n    },\n    \"business_data\": {\n      \"state\": \"not_needed\",\n      \"evidence\": \"\",\n      \"need\": \"\",\n      \"reason\": \"任务不涉及任何业务指标、基线或历史表现的分析，仅涉及文本编辑。\",\n      \"query\": \"\"\n    },\n    \"public_facts\": {\n      \"state\": \"not_needed\",\n      \"evidence\": \"\",\n      \"need\": \"\",\n      \"reason\": \"任务要求不增加任何新事实，且所需内容（邀请语）为通用表达，无需查询公开产品能力或最新事实。\",\n      \"query\": \"\"\n    }\n  },\n  \"self_contained_reason\": \"本轮任务仅涉及对已提供文档内容的局部编辑（追加一句通用邀请语），不依赖任何外部事实、私有背景或业务数据，属于自足操作。\",\n  \"acceptance\": [\n    {\n      \"id\": \"append_invitation\",\n      \"criterion\": \"在文档末尾（'请联系项目组。'之后）追加一句邀请大家参与讨论的话。\"\n    },\n    {\n      \"id\": \"preserve_content\",\n      \"criterion\": \"除追加内容外，文档原有所有内容和结构原样保留。\"\n    },\n    {\n      \"id\": \"no_new_facts\",\n      \"criterion\": \"不增加任何新事实或外部信息。\"\n    }\n  ]\n}"
+      ],
+      "seconds": 13.63
+    },
+    {
+      "id": "compound-delete-research",
+      "instruction": "移除附录，然后检索最新公开会议工具信息，在联系方式后补充一段工具推荐，其他原文保留。",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "source": "fallback",
+        "operation": {
+          "kind": "respond",
+          "response": "本轮操作解析失败，请重试当前指令。"
+        },
+        "reasoning": "CREATION_OPERATION_INVALID"
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "source": "fallback",
+        "operation": {
+          "kind": "respond",
+          "response": "本轮操作解析失败，请重试当前指令。"
+        },
+        "reasoning": "CREATION_OPERATION_INVALID"
+      },
+      "checks": {
+        "model_route": false,
+        "operation": false,
+        "resources": false,
+        "no_full_workflow": true
+      },
+      "passed": false,
+      "model_replies": [
+        "{\n  \"action\": \"edit\",\n  \"deliverable\": \"修改后的文档\",\n  \"primary_goal\": \"移除附录，检索最新公开会议工具信息并在联系方式后补充工具推荐\"\n}"
+      ],
+      "seconds": 73.27
+    }
+  ]
+}

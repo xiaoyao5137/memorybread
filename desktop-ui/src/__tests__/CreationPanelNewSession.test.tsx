@@ -138,7 +138,7 @@ describe('创作新会话', () => {
     expect(terminateButton).toBeDisabled()
     expect(terminateButton).toHaveTextContent('已终止')
     expect(screen.getByPlaceholderText(/继续告诉 Agent/)).toBeDisabled()
-    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '提交' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '开启新会话' })).toBeEnabled()
     expect(screen.getByText('当前文档')).toBeInTheDocument()
 

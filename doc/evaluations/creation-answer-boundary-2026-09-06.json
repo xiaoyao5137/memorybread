@@ -1,0 +1,70 @@
+{
+  "model": "qwen3.5:4b",
+  "scope": "real routing and input assessment; synthetic documents; no external retrieval",
+  "cases": [
+    {
+      "id": "answer-only",
+      "instruction": "查一下最近的公开会议软件动态，只回答问题，不要修改文档",
+      "candidate": {
+        "tools": [
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "answer",
+          "skill_assessments": []
+        },
+        "reasoning": "用户明确要求回答关于会议软件的最新公开动态，且禁止修改文档。当前文档为会议安排说明，与查询外部公开信息无关。根据操作上下文，pending_operations为空，无需继续任务。该请求属于获取最新外部事实，需调用互联网检索工具。主目标为生成答案，故选择answer操作。",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "仅回答关于最近公开会议软件动态的问题，不修改任何文档内容。",
+        "self_contained_reason": "",
+        "acceptance": [
+          {
+            "id": "acc_001",
+            "criterion": "回答内容必须基于检索到的最新公开会议软件动态事实，不能包含未经验证的内部推测。"
+          },
+          {
+            "id": "acc_002",
+            "criterion": "回答内容不得包含任何对输入文档（会议说明）的修改、增删或格式调整。"
+          },
+          {
+            "id": "acc_003",
+            "criterion": "回答应聚焦于'动态'（如新功能发布、市场变化、技术趋势等），而非重复文档中已有的静态会议安排信息。"
+          }
+        ],
+        "inputs": [
+          {
+            "id": "pf_001",
+            "need": "missing",
+            "source": "public_facts",
+            "state": "missing",
+            "evidence": "",
+            "query": "检索最近（如过去3-6个月）关于主流会议软件（如 Zoom, Teams, Google Meet, 腾讯会议等）的公开动态、更新、行业趋势或重大事件。",
+            "reason": "用户明确要求回答'最近的公开会议软件动态'，这需要基于最新的公开事实（public_facts）来回答。当前输入文档仅包含内部会议安排和联系方式，不包含任何关于外部会议软件行业动态的信息。因此，必须依赖 public_facts 来源获取最新行业事实。"
+          }
+        ]
+      },
+      "effective": {
+        "tools": [
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "answer",
+          "skill_assessments": []
+        },
+        "reasoning": "用户明确要求回答关于会议软件的最新公开动态，且禁止修改文档。当前文档为会议安排说明，与查询外部公开信息无关。根据操作上下文，pending_operations为空，无需继续任务。该请求属于获取最新外部事实，需调用互联网检索工具。主目标为生成答案，故选择answer操作。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true
+      },
+      "passed": true,
+      "seconds": 24.43
+    }
+  ]
+}

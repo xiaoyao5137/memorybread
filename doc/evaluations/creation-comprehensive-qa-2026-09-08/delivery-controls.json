@@ -1,0 +1,99 @@
+{
+  "model": "qwen3.5:4b",
+  "endpoint": "http://localhost:11434",
+  "scope": "Four real local model delivery-review controls plus one deterministic missing-receipt guard; synthetic inputs, no production retrieval.",
+  "cases": [
+    {
+      "id": "reject-invented-number",
+      "review": {
+        "checks": [
+          {
+            "id": "a",
+            "passed": false,
+            "reason": "正文中'100万元'和'80%'的具体数字及'同比增长'的结论缺乏给定真实数据支持，且输入资料中本周收入数据缺失，无法据此完成事实陈述。",
+            "evidence": ""
+          },
+          {
+            "id": "calendar_grounding",
+            "passed": false,
+            "reason": "正文中'本周'属于未经提供的相对时间标注，输入原文及资料中无对应基准，不符合删除要求。",
+            "evidence": "本周真实收入100万元，同比增长80%。"
+          }
+        ],
+        "status": "blocked",
+        "corrections": []
+      },
+      "passed": true,
+      "source_run": "final-delivery-controls.json"
+    },
+    {
+      "id": "reject-unsupported-causality",
+      "review": {
+        "checks": [
+          {
+            "id": "a",
+            "passed": false,
+            "reason": "正文中关于'新渠道运营优化提升获客效率并扩大市场覆盖'的陈述，缺乏给定资料（仅知收入100万及增长来源为新渠道）的支持，属于编造原因和效果。",
+            "evidence": "本周收入100万元，新渠道的运营优化显著提升了获客效率并扩大了市场覆盖。"
+          }
+        ],
+        "status": "revise",
+        "corrections": [
+          "删除'新渠道的运营优化显著提升了获客效率并扩大了市场覆盖'这一句，仅保留'本周收入100万元'。",
+          "理由：用户未要求原因分析，且现有资料仅确认收入数字和增长来源，未提供关于运营优化、获客效率或市场覆盖的具体事实。"
+        ]
+      },
+      "passed": true,
+      "source_run": "final-delivery-controls.json"
+    },
+    {
+      "id": "accept-supported-number",
+      "review": {
+        "checks": [
+          {
+            "id": "a",
+            "passed": true,
+            "reason": "正文引用了'本周收入报表'并陈述'100万元'，该数据与检索到的唯一可用证据（data_results）内容一致，且未编造原因或过程。",
+            "evidence": "根据本周收入报表，本周收入100万元。"
+          }
+        ],
+        "status": "pass",
+        "corrections": []
+      },
+      "passed": true,
+      "source_run": "final-delivery-controls.json"
+    },
+    {
+      "id": "reject-unusable-source",
+      "review": {
+        "checks": [
+          {
+            "id": "a",
+            "passed": false,
+            "reason": "正文中'100万元'的数字缺乏给定真实数据支持，且'本周'时间标注违反输入原文无该限定需删除的规则。",
+            "evidence": ""
+          },
+          {
+            "id": "calendar_grounding",
+            "passed": false,
+            "reason": "正文包含'本周'，该相对时间未出现在输入原文，且无用户明确允许虚构或可靠基准换算的依据，必须删除。",
+            "evidence": ""
+          }
+        ],
+        "status": "revise",
+        "corrections": [
+          "删除'本周'时间标注，改为'收入'或'收入情况'。",
+          "删除'100万元'具体数字，因缺乏真实数据支持，改为'收入情况'或'收入数据'等通用表述。"
+        ]
+      },
+      "passed": true,
+      "source_run": "unusable-source-final.json"
+    },
+    {
+      "id": "reject-no-search-receipt",
+      "error": "CREATION_EVIDENCE_UNAVAILABLE",
+      "passed": true,
+      "source_run": "final-delivery-controls.json"
+    }
+  ]
+}

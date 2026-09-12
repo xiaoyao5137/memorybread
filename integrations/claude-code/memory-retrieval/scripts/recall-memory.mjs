@@ -3,7 +3,7 @@
 import process from "node:process";
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:7070";
-const DEFAULT_TOP_K = 5;
+const DEFAULT_TOP_K = 10;
 const DEFAULT_MAX_CHARS = 3000;
 const DEFAULT_TIMEOUT_MS = 90_000;
 const MAX_QUERY_CHARS = 2000;
@@ -22,12 +22,12 @@ function usage() {
   return `MemoryBread 记忆检索
 
 Usage:
-  node recall-memory.mjs --query "<focused query>" [--top-k 5]
+  node recall-memory.mjs --query "<focused query>" [--top-k 10]
   node recall-memory.mjs --check
 
 Options:
   -q, --query <text>       Focused recall query. Reads stdin when omitted.
-      --top-k <1-10>       Maximum memories to return. Default: 5.
+      --top-k <1-10>       Maximum memories to return. Default: 10.
       --max-chars <200-8000>
                            Maximum text characters per result. Default: 3000.
       --timeout-ms <1000-120000>

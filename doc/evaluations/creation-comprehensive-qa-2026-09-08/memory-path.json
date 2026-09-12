@@ -1,0 +1,735 @@
+{
+  "model": "qwen3.5:4b",
+  "endpoint": "http://127.0.0.1:11434",
+  "mode": "real_local_model_end_to_end",
+  "source_fixture": {
+    "source_type": "document",
+    "source_id": 61001,
+    "title": "青禾项目验收材料",
+    "full_content": "青禾项目验收材料：已完成3项；待办2项；负责人林舟。",
+    "source_url": null
+  },
+  "instruction": "请使用记忆搜索读取本地的《青禾项目验收材料》，据该文档写一小段项目小结。只复述其中的已完成项数、待办项数和负责人，并注明资料标题；不加编号、日期、比例、合计、原因、效果或建议。只用该本地文档，不联网、不查询看板，未取得文档就明确失败，不猜测内容。",
+  "passed": true,
+  "end_to_end_passed": true,
+  "checks": {
+    "document_present": true,
+    "completed_count": true,
+    "pending_count": true,
+    "owner": true,
+    "source_title": true,
+    "no_added_numbers": true,
+    "no_causal_language": true,
+    "completed": true,
+    "delivery_accepted": true,
+    "memory_tool_executed": true,
+    "real_sqlite_reference": true,
+    "source_reached_output": true,
+    "vector_recall_disabled": true,
+    "isolation_enforced": true,
+    "fixture_unchanged": true
+  },
+  "manual_review": "Inspect document and retained model/source provenance for semantic accuracy.",
+  "isolation": {
+    "sqlite_opens": [
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite",
+      "/tmp/mb-creation-memory-6venrd6n/fixture.sqlite"
+    ],
+    "network_connects": [
+      [
+        "127.0.0.1",
+        11434
+      ],
+      [
+        "127.0.0.1",
+        11434
+      ],
+      [
+        "127.0.0.1",
+        11434
+      ],
+      [
+        "127.0.0.1",
+        11434
+      ],
+      [
+        "127.0.0.1",
+        11434
+      ],
+      [
+        "127.0.0.1",
+        11434
+      ],
+      [
+        "127.0.0.1",
+        11434
+      ]
+    ],
+    "blocked": []
+  },
+  "fixture_sha256": "cb75191116f81f47f4bee6b61a1ddb1ed7ef5bc2369ba20bf23ca95505473ba1",
+  "document": "# 《青禾项目验收材料》\n\n**资料标题：** 青禾项目验收材料  \n已完成项数：3 项  \n待办项数：2 项  \n负责人：林舟",
+  "delivery_review": {
+    "checks": [
+      {
+        "id": "doc_access",
+        "passed": true,
+        "reason": "通过 memory_search 工具成功检索到《青禾项目验收材料》（ID: 61001），内容明确包含已完成项数、待办项数和负责人。",
+        "evidence": "已完成项数：3 项  "
+      },
+      {
+        "id": "content_format",
+        "passed": true,
+        "reason": "输出仅包含资料标题、已完成项数、待办项数、负责人，未包含编号、日期、比例、合计、原因、效果或建议。",
+        "evidence": "**资料标题：** 青禾项目验收材料  "
+      },
+      {
+        "id": "source_restriction",
+        "passed": true,
+        "reason": "仅使用了检索到的《青禾项目验收材料》内容，未联网、未查询看板，也未猜测内容。",
+        "evidence": "待办项数：2 项  "
+      }
+    ],
+    "status": "pass",
+    "corrections": []
+  },
+  "retrieval_calls": [
+    {
+      "query": "读取本地《青禾项目验收材料》",
+      "requirement": {
+        "topic": "青禾项目验收材料",
+        "doc_type": "通用文档",
+        "audience": "业务与技术相关人员",
+        "keywords": [
+          "读取本地",
+          "青禾项目验收材料"
+        ],
+        "retrieval_context_terms": [],
+        "style": "专业清晰",
+        "entity_context": {
+          "primary_entities": [],
+          "candidate_entities": [
+            "读取本地",
+            "青禾项目验收材料"
+          ],
+          "candidate_statistics": [
+            {
+              "name": "读取本地",
+              "normalized": "读取本地",
+              "document_frequency": 0,
+              "document_frequency_ratio": 0.0,
+              "corpus_size": 1,
+              "is_high_df_generic": false
+            },
+            {
+              "name": "青禾项目验收材料",
+              "normalized": "青禾项目验收材料",
+              "document_frequency": 1,
+              "document_frequency_ratio": 1.0,
+              "corpus_size": 1,
+              "is_high_df_generic": false
+            }
+          ],
+          "has_high_confidence_entity": false
+        },
+        "retrieval_plan": {
+          "schema_version": "creation-query-plan.v1",
+          "mode": "topic",
+          "primary_target": "青禾项目",
+          "targets": [],
+          "facets": [],
+          "components": [
+            "青禾项目",
+            "读取本地",
+            "青禾项目验收材料"
+          ],
+          "relations": [],
+          "candidate_terms": [
+            "青禾项目",
+            "禾项目验",
+            "项目验收",
+            "目验收材",
+            "验收材料",
+            "读取本地",
+            "青禾项目验收材料"
+          ],
+          "term_weights": {
+            "青禾项目": 1.0,
+            "禾项目验": 1.0,
+            "项目验收": 1.0,
+            "目验收材": 1.0,
+            "验收材料": 1.0,
+            "读取本地": 0.35,
+            "青禾项目验收材料": 0.35
+          },
+          "terms": [
+            {
+              "text": "青禾项目",
+              "role": "discriminative",
+              "document_frequency": 1,
+              "idf": 1.0,
+              "weight": 1.0
+            },
+            {
+              "text": "禾项目验",
+              "role": "discriminative",
+              "document_frequency": 1,
+              "idf": 1.0,
+              "weight": 1.0
+            },
+            {
+              "text": "项目验收",
+              "role": "discriminative",
+              "document_frequency": 1,
+              "idf": 1.0,
+              "weight": 1.0
+            },
+            {
+              "text": "目验收材",
+              "role": "discriminative",
+              "document_frequency": 1,
+              "idf": 1.0,
+              "weight": 1.0
+            },
+            {
+              "text": "验收材料",
+              "role": "discriminative",
+              "document_frequency": 1,
+              "idf": 1.0,
+              "weight": 1.0
+            }
+          ],
+          "corpus_size": 1,
+          "hard_entity_gate": false
+        },
+        "coverage_contract": null,
+        "needs_latest": false,
+        "needs_images": false,
+        "time_context": {
+          "has_relative_time": false,
+          "period_kind": "",
+          "timezone": "CST",
+          "current_date": "2026-09-08",
+          "iso_year": 2026,
+          "iso_week": 37,
+          "current_iso_year": 2026,
+          "current_iso_week": 37,
+          "period_start": "2026-09-08",
+          "period_end": "2026-09-08",
+          "period_start_ms": 1788796800000,
+          "period_end_ms": 1788883199999,
+          "display": "2026-09-08 至 2026-09-08"
+        },
+        "retrieval_diagnostics": {
+          "candidate_count": 1,
+          "eligible_count": 1,
+          "selected_count": 1,
+          "filter_counts": {}
+        }
+      },
+      "references": [
+        {
+          "id": 61001,
+          "title": "青禾项目验收材料",
+          "doc_type": "项目记录",
+          "summary": "青禾项目验收材料：已完成3项；待办2项；负责人林舟。",
+          "full_content": "青禾项目验收材料：已完成3项；待办2项；负责人林舟。",
+          "sections_json": "[]",
+          "style_phrases": "[]",
+          "prompt_hint": "",
+          "usage_count": 0,
+          "review_status": "auto_created",
+          "updated_at": 1788812754093,
+          "source_url": null,
+          "relevance_score": 0.979122807017544,
+          "quality_score": 0.94,
+          "completeness_score": 0.45,
+          "usage_score": 0.0,
+          "format_score": 0.2,
+          "freshness_score": 0.999998351978691,
+          "final_weight": 0.7191051807568293,
+          "reason": "检索模式：主题匹配；主目标：青禾项目；命中组件：青禾项目、青禾项目验收材料；命中关键词：青禾项目、禾项目验、项目验收、目验收材、验收材料；召回路径：关键词召回；资料质量较高",
+          "source_type": "document",
+          "source_id": 61001,
+          "observed_at": 1788812754093,
+          "retrieval_tier": "general",
+          "retrieval_paths": [
+            "keyword"
+          ],
+          "matched_keywords": [
+            "青禾项目",
+            "禾项目验",
+            "项目验收",
+            "目验收材",
+            "验收材料",
+            "青禾项目验收材料"
+          ],
+          "matched_entities": [],
+          "lexical_score": 0.979122807017544,
+          "semantic_score": 0.0,
+          "entity_score": 0.0,
+          "retrieval_mode": "topic",
+          "primary_target": "青禾项目",
+          "matched_components": [
+            "青禾项目",
+            "青禾项目验收材料"
+          ],
+          "matched_relations": [],
+          "relation_score": 0.0,
+          "selection_reasons": [
+            "global_rank"
+          ],
+          "refresh_status": "historical_only",
+          "refresh_completeness": "unverified",
+          "refresh_collected_at": null,
+          "refresh_truncated": false
+        }
+      ]
+    }
+  ],
+  "seconds": 168.95,
+  "source_run": "/tmp/mb-creation-qa-20260908/memory-path-live.json",
+  "model_call_count": 7,
+  "events": [
+    {
+      "type": "run.started",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "创作 Agent 已接管目标"
+    },
+    {
+      "type": "goal.updated",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "已建立创作目标与验收条件"
+    },
+    {
+      "type": "thinking.started",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "深度思考中：理解本轮要求"
+    },
+    {
+      "type": "intent.pending",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "正在解释本轮指令"
+    },
+    {
+      "type": "thinking.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "深度思考完成：理解本轮要求"
+    },
+    {
+      "type": "thinking.started",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "深度思考中：决定执行链路"
+    },
+    {
+      "type": "document.identity",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "已确定文档标题来源"
+    },
+    {
+      "type": "inputs.assessed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "已核对本轮交付物需要的资料与已有证据"
+    },
+    {
+      "type": "intent.interpreted",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "用户指令明确要求使用记忆搜索读取本地文档《青禾项目验收材料》，并基于该文档生成特定格式的项目小结。当前上下文显示 nodes 为空，说明文档内容尚未加载。因此，必须首先调用 memory_search 工具以获取文档内容。获取内容后，根据用户严格的格式约束（仅复述已完成项数、待办项数、负责人、资料标题，禁止其他信息）进行文本生成。由于用户未指定具体技能 ID，且任务本质是检索后生成，故不执行 ex"
+    },
+    {
+      "type": "agent.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "本轮操作选择的执行能力：记忆搜索 Tool、文档撰写 Agent、核对本轮交付条件"
+    },
+    {
+      "type": "thinking.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "深度思考完成：决定执行链路"
+    },
+    {
+      "type": "agent.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "已根据目标规划 3 个执行步骤"
+    },
+    {
+      "type": "thinking.started",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "深度思考中：规划下一步"
+    },
+    {
+      "type": "thinking.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "深度思考完成：规划下一步"
+    },
+    {
+      "type": "phase.started",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "检索本地记忆资料"
+    },
+    {
+      "type": "tool.started",
+      "actor": {
+        "kind": "tool",
+        "id": "memory_search",
+        "name": "记忆搜索 Tool"
+      },
+      "summary": "记忆搜索 Tool 开始执行"
+    },
+    {
+      "type": "tool.completed",
+      "actor": {
+        "kind": "tool",
+        "id": "memory_search",
+        "name": "记忆搜索 Tool"
+      },
+      "summary": "记忆搜索完成，召回 1 条本地资料"
+    },
+    {
+      "type": "phase.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "检索本地记忆资料"
+    },
+    {
+      "type": "phase.started",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "生成文档内容"
+    },
+    {
+      "type": "agent.started",
+      "actor": {
+        "kind": "agent",
+        "id": "document_writer_agent",
+        "name": "文档撰写 Agent"
+      },
+      "summary": "文档撰写 Agent 开始执行"
+    },
+    {
+      "type": "thinking.started",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "深度思考中：生成文档内容"
+    },
+    {
+      "type": "document.preview",
+      "actor": {
+        "kind": "agent",
+        "id": "document_writer_agent",
+        "name": "文档撰写 Agent"
+      },
+      "summary": "文档撰写 Agent正在更新文档"
+    },
+    {
+      "type": "document.replaced",
+      "actor": {
+        "kind": "agent",
+        "id": "document_writer_agent",
+        "name": "文档撰写 Agent"
+      },
+      "summary": "文档撰写 Agent 已提交完整文档版本"
+    },
+    {
+      "type": "agent.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "document_writer_agent",
+        "name": "文档撰写 Agent"
+      },
+      "summary": "文档撰写 Agent 已完成，并把结果写回创作环境"
+    },
+    {
+      "type": "thinking.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "深度思考完成：生成文档内容"
+    },
+    {
+      "type": "phase.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "生成文档内容"
+    },
+    {
+      "type": "phase.started",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "处理当前步骤"
+    },
+    {
+      "type": "agent.started",
+      "actor": {
+        "kind": "agent",
+        "id": "delivery_validation",
+        "name": "核对本轮交付条件"
+      },
+      "summary": "核对本轮交付条件 开始执行"
+    },
+    {
+      "type": "delivery.checked",
+      "actor": {
+        "kind": "agent",
+        "id": "delivery_validation",
+        "name": "核对本轮交付条件"
+      },
+      "summary": "已逐项核对本轮交付条件"
+    },
+    {
+      "type": "agent.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "delivery_validation",
+        "name": "核对本轮交付条件"
+      },
+      "summary": "已完成本轮交付核验"
+    },
+    {
+      "type": "phase.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "处理当前步骤"
+    },
+    {
+      "type": "phase.started",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "处理当前步骤"
+    },
+    {
+      "type": "agent.started",
+      "actor": {
+        "kind": "agent",
+        "id": "delivery_repair",
+        "name": "修正已发现的交付问题"
+      },
+      "summary": "修正已发现的交付问题 开始执行"
+    },
+    {
+      "type": "document.patch.planned",
+      "actor": {
+        "kind": "agent",
+        "id": "delivery_repair",
+        "name": "修正已发现的交付问题"
+      },
+      "summary": "修正已发现的交付问题将按质检问题局部润色相关细节，未涉及章节保持原样"
+    },
+    {
+      "type": "thinking.started",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "深度思考中：生成文档内容"
+    },
+    {
+      "type": "document.patch.applied",
+      "actor": {
+        "kind": "agent",
+        "id": "delivery_repair",
+        "name": "修正已发现的交付问题"
+      },
+      "summary": "修正已发现的交付问题已应用：已按本轮指令完成 1 处调整，涉及标题与导语"
+    },
+    {
+      "type": "agent.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "delivery_repair",
+        "name": "修正已发现的交付问题"
+      },
+      "summary": "修正已发现的交付问题 已完成，并把结果写回创作环境"
+    },
+    {
+      "type": "thinking.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "深度思考完成：生成文档内容"
+    },
+    {
+      "type": "phase.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "处理当前步骤"
+    },
+    {
+      "type": "phase.started",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "处理当前步骤"
+    },
+    {
+      "type": "agent.started",
+      "actor": {
+        "kind": "agent",
+        "id": "delivery_validation",
+        "name": "核对本轮交付条件"
+      },
+      "summary": "核对本轮交付条件 开始执行"
+    },
+    {
+      "type": "delivery.checked",
+      "actor": {
+        "kind": "agent",
+        "id": "delivery_validation",
+        "name": "核对本轮交付条件"
+      },
+      "summary": "已逐项核对本轮交付条件"
+    },
+    {
+      "type": "agent.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "delivery_validation",
+        "name": "核对本轮交付条件"
+      },
+      "summary": "已完成本轮交付核验"
+    },
+    {
+      "type": "phase.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "处理当前步骤"
+    },
+    {
+      "type": "goal.updated",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "已生成满足当前验收条件的文档"
+    },
+    {
+      "type": "run.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      },
+      "summary": "本轮创作完成，可以继续对话优化文档"
+    }
+  ],
+  "independent_semantic_review": "PASS; see memory-review.md; initial draft revised once before final acceptance"
+}

@@ -1,0 +1,167 @@
+{
+  "model": "qwen3.5:4b",
+  "instruction": "精简时间安排中的重复措辞，保留时间和议题，其他部分原样保留。",
+  "input_document": "# 会议通知\n\n## 时间安排\n本次会议的具体时间已经确定，会议将于周一上午举行。请参会人员在周一上午按时参加本次会议。会议的主要内容为讨论当前的项目进展情况。\n\n## 联系方式\n请联系项目组。\n",
+  "checks": {
+    "completed": true,
+    "shorter": true,
+    "preserved_outside": true,
+    "kept_facts": true,
+    "no_resources": true
+  },
+  "document": "# 会议通知\n\n## 时间安排\n请参会人员于周一上午准时参加。会议的主要内容为讨论当前的项目进展情况。\n\n## 联系方式\n请联系项目组。\n",
+  "events": [
+    {
+      "type": "run.started",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      }
+    },
+    {
+      "type": "goal.updated",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      }
+    },
+    {
+      "type": "thinking.started",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      }
+    },
+    {
+      "type": "intent.pending",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      }
+    },
+    {
+      "type": "thinking.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      }
+    },
+    {
+      "type": "thinking.started",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      }
+    },
+    {
+      "type": "intent.interpreted",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      }
+    },
+    {
+      "type": "agent.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      }
+    },
+    {
+      "type": "thinking.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      }
+    },
+    {
+      "type": "agent.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      }
+    },
+    {
+      "type": "thinking.started",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      }
+    },
+    {
+      "type": "thinking.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      }
+    },
+    {
+      "type": "phase.started",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      }
+    },
+    {
+      "type": "agent.started",
+      "actor": {
+        "kind": "agent",
+        "id": "document_transform",
+        "name": "修改指定内容"
+      }
+    },
+    {
+      "type": "thinking.started",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      }
+    },
+    {
+      "type": "document.patch.applied",
+      "actor": {
+        "kind": "agent",
+        "id": "document_transform",
+        "name": "修改指定内容"
+      }
+    },
+    {
+      "type": "thinking.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      }
+    },
+    {
+      "type": "phase.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      }
+    },
+    {
+      "type": "run.completed",
+      "actor": {
+        "kind": "agent",
+        "id": "creation_main_agent",
+        "name": "创作 Agent"
+      }
+    }
+  ]
+}

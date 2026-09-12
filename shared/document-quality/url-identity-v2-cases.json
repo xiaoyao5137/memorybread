@@ -1,0 +1,62 @@
+[
+  {
+    "left": "https://docs.example.com/d/home/AbC",
+    "right": "https://docs.example.com/d/home/AbC?ro=false#comment",
+    "equal": true
+  },
+  {
+    "left": "https://docs.example.com/d/home/AbC",
+    "right": "https://docs.example.com/d/home/AbC?section=part2",
+    "equal": true
+  },
+  {
+    "left": "https://docs.example.com/d/home/AbC",
+    "right": "https://DOCS.EXAMPLE.COM/d/home/AbC",
+    "equal": true
+  },
+  {
+    "left": "https://docs.example.com/d/home/AbC",
+    "right": "https://docs.example.com:443/d/home/AbC",
+    "equal": true
+  },
+  {
+    "left": "https://docs.example.com/d/home/AbC",
+    "right": "https://docs.example.com/d/home/abc",
+    "equal": false
+  },
+  {
+    "left": "https://docs.example.com/d/home/AbC",
+    "right": "http://docs.example.com/d/home/AbC",
+    "equal": false
+  },
+  {
+    "left": "https://docs.example.com/d/home/AbC",
+    "right": "https://docs.example.com/d/home/AbC?tenant=a",
+    "equal": false
+  },
+  {
+    "left": "https://docs.example.com/d/home/AbC",
+    "right": "https://docs.example.com/d/home/AbC/",
+    "equal": false
+  },
+  {
+    "left": "https://docs.example.com/d/home/AbC",
+    "right": "https://docs.example.com/d/home/AbC?ro=custom",
+    "equal": false
+  },
+  {
+    "left": "https://docs.example.com/d/home/AbC",
+    "right": "https://docs.example.com/d/home/AbC?section=part2&tenant=a",
+    "equal": false
+  },
+  {
+    "left": "https://docs.example.com/d/home/AbC?tenant=a&ro=true",
+    "right": "https://docs.example.com/d/home/AbC?tenant=a",
+    "equal": true
+  },
+  {
+    "left": "https://docs.example.com/d/home/AbC?tenant=a",
+    "right": "https://docs.example.com/d/home/AbC?tenant=b",
+    "equal": false
+  }
+]

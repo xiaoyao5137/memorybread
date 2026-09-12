@@ -1,5 +1,7 @@
 import React from 'react'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import { prepareBakeMarkdown } from '../../utils/bakeMarkdown'
 import './BakePanel.css'
 
 export const BakeCard: React.FC<React.PropsWithChildren<{ className?: string }>> = ({ className = '', children }) => (
@@ -55,7 +57,16 @@ export const BakeMarkdown: React.FC<{ content?: string | null }> = ({ content })
   if (!trimmed) return <div className="bake-muted">暂无详细内容</div>
   return (
     <div className="bake-markdown">
-      <ReactMarkdown>{trimmed}</ReactMarkdown>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          table: ({ node: _node, ...props }) => (
+            <div className="bake-markdown__table-scroll" role="region" aria-label="表格，可横向滚动" tabIndex={0}>
+              <table {...props} />
+            </div>
+          ),
+        }}
+      >{prepareBakeMarkdown(trimmed)}</ReactMarkdown>
     </div>
   )
 }

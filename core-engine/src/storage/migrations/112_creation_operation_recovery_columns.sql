@@ -1,0 +1,4 @@
+-- Implemented atomically in StorageManager::run_migrations using column checks.
+-- Version 111 exists in three installed forms: original, undo support, and retry support.
+-- Add missing original_document and retry_checkpoint_json without replacing existing values.
+-- Backfill a newly added original_document from base_document; never rewrite an existing one.

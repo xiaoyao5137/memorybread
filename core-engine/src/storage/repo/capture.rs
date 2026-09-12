@@ -11,16 +11,54 @@ use crate::storage::{
         CaptureActivityAggregate, CaptureRecord, NewCapture, WorkCategoryTotals,
         WorkImCaptureSample,
     },
+    search::split_search_terms,
     StorageManager,
 };
 
 fn keyword_terms(query: &str) -> Vec<String> {
-    query
-        .split(|ch: char| ch.is_whitespace() || ch.is_ascii_punctuation())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-        .collect()
+    split_search_terms(query)
+}
+
+fn append_capture_relevance_order(
+    sql: &mut String,
+    query: &str,
+    terms: &[String],
+    bind_values: &mut Vec<Box<dyn rusqlite::ToSql>>,
+) {
+    let title_terms = terms
+        .iter()
+        .map(|_| "(COALESCE(c.win_title, '') LIKE ? OR COALESCE(c.webpage_title, '') LIKE ?)")
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let title_metadata_terms = terms
+        .iter()
+        .map(|_| {
+            "(COALESCE(c.win_title, '') LIKE ? OR COALESCE(c.webpage_title, '') LIKE ? OR COALESCE(c.url, '') LIKE ? OR COALESCE(c.app_name, '') LIKE ? OR COALESCE(c.event_type, '') LIKE ?)"
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    sql.push_str(
+        " ORDER BY CASE WHEN (COALESCE(c.win_title, '') LIKE ? OR COALESCE(c.webpage_title, '') LIKE ?) THEN 3 WHEN (",
+    );
+    sql.push_str(&title_terms);
+    sql.push_str(") THEN 2 WHEN (");
+    sql.push_str(&title_metadata_terms);
+    sql.push_str(") THEN 1 ELSE 0 END DESC, c.ts DESC, c.id DESC");
+
+    let phrase = format!("%{}%", query.trim());
+    bind_values.push(Box::new(phrase.clone()));
+    bind_values.push(Box::new(phrase));
+    for term in terms {
+        let pattern = format!("%{}%", term);
+        bind_values.push(Box::new(pattern.clone()));
+        bind_values.push(Box::new(pattern));
+    }
+    for term in terms {
+        let pattern = format!("%{}%", term);
+        for _ in 0..5 {
+            bind_values.push(Box::new(pattern.clone()));
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -451,7 +489,7 @@ impl StorageManager {
             if !query_terms.is_empty() {
                 let query_clause = query_terms
                     .iter()
-                    .map(|_| "(COALESCE(c.win_title, '') LIKE ? OR COALESCE(c.webpage_title, '') LIKE ? OR COALESCE(c.url, '') LIKE ? OR COALESCE(c.ax_text, '') LIKE ? OR COALESCE(c.ocr_text, '') LIKE ? OR COALESCE(c.input_text, '') LIKE ? OR COALESCE(c.audio_text, '') LIKE ?)".to_string())
+                    .map(|_| "(COALESCE(c.win_title, '') LIKE ? OR COALESCE(c.webpage_title, '') LIKE ? OR COALESCE(c.url, '') LIKE ? OR COALESCE(c.app_name, '') LIKE ? OR COALESCE(c.event_type, '') LIKE ? OR COALESCE(c.ax_text, '') LIKE ? OR COALESCE(c.ocr_text, '') LIKE ? OR COALESCE(c.input_text, '') LIKE ? OR COALESCE(c.audio_text, '') LIKE ?)".to_string())
                     .collect::<Vec<_>>()
                     .join(" AND ");
                 wheres.push(format!("({})", query_clause));
@@ -471,13 +509,10 @@ impl StorageManager {
 
             let where_clause = if wheres.is_empty() { "1=1".to_string() } else { wheres.join(" AND ") };
             sql.push_str(&where_clause);
-            sql.push_str(" ORDER BY c.ts DESC LIMIT ? OFFSET ?");
-
-            let mut stmt = conn.prepare(&sql)?;
             let mut bind_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
             for term in &query_terms {
                 let pattern = format!("%{}%", term);
-                for _ in 0..7 {
+                for _ in 0..9 {
                     bind_values.push(Box::new(pattern.clone()));
                 }
             }
@@ -485,9 +520,21 @@ impl StorageManager {
             if let Some(v) = filter.to_ts { bind_values.push(Box::new(v)); }
             if let Some(ref v) = filter.app_name { bind_values.push(Box::new(v.clone())); }
             if let Some(v) = filter.capture_id { bind_values.push(Box::new(v)); }
+            if !query_terms.is_empty() {
+                append_capture_relevance_order(
+                    &mut sql,
+                    filter.query.as_deref().unwrap_or_default(),
+                    &query_terms,
+                    &mut bind_values,
+                );
+            } else {
+                sql.push_str(" ORDER BY c.ts DESC, c.id DESC");
+            }
+            sql.push_str(" LIMIT ? OFFSET ?");
             bind_values.push(Box::new(filter.limit as i64));
             bind_values.push(Box::new(filter.offset as i64));
 
+            let mut stmt = conn.prepare(&sql)?;
             let params: Vec<&dyn rusqlite::ToSql> = bind_values.iter().map(|b| b.as_ref()).collect();
             let rows = stmt.query_map(params.as_slice(), |row| {
                 Ok(row_to_capture(row).map_err(|_| rusqlite::Error::InvalidQuery)?)
@@ -507,7 +554,7 @@ impl StorageManager {
             if !query_terms.is_empty() {
                 let query_clause = query_terms
                     .iter()
-                    .map(|_| "(COALESCE(c.win_title, '') LIKE ? OR COALESCE(c.webpage_title, '') LIKE ? OR COALESCE(c.url, '') LIKE ? OR COALESCE(c.ax_text, '') LIKE ? OR COALESCE(c.ocr_text, '') LIKE ? OR COALESCE(c.input_text, '') LIKE ? OR COALESCE(c.audio_text, '') LIKE ?)".to_string())
+                    .map(|_| "(COALESCE(c.win_title, '') LIKE ? OR COALESCE(c.webpage_title, '') LIKE ? OR COALESCE(c.url, '') LIKE ? OR COALESCE(c.app_name, '') LIKE ? OR COALESCE(c.event_type, '') LIKE ? OR COALESCE(c.ax_text, '') LIKE ? OR COALESCE(c.ocr_text, '') LIKE ? OR COALESCE(c.input_text, '') LIKE ? OR COALESCE(c.audio_text, '') LIKE ?)".to_string())
                     .collect::<Vec<_>>()
                     .join(" AND ");
                 wheres.push(format!("({})", query_clause));
@@ -532,7 +579,7 @@ impl StorageManager {
             let mut bind_values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
             for term in &query_terms {
                 let pattern = format!("%{}%", term);
-                for _ in 0..7 {
+                for _ in 0..9 {
                     bind_values.push(Box::new(pattern.clone()));
                 }
             }
@@ -1021,6 +1068,31 @@ mod tests {
         let filter = CaptureFilter::new();
         let list = mgr.list_captures(&filter).unwrap();
         assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn test_list_captures_matches_all_keywords_without_requiring_adjacency() {
+        let mgr = make_mgr();
+        let mut target = sample_capture();
+        target.win_title = Some("AIGC 图生视频 RPC 接入文档".into());
+        let target_id = mgr.insert_capture(&target).unwrap();
+        let mut unrelated = sample_capture();
+        unrelated.win_title = Some("AIGC 图生视频 RPC 说明".into());
+        unrelated.ax_text = Some("无关内容".into());
+        mgr.insert_capture(&unrelated).unwrap();
+        let mut distributed = sample_capture();
+        distributed.ts += 10_000;
+        distributed.win_title = Some("AIGC".into());
+        distributed.ax_text = Some("图生视频 接入文档".into());
+        mgr.insert_capture(&distributed).unwrap();
+
+        let mut filter = CaptureFilter::new();
+        filter.query = Some("AIGC 图生视频 接入文档".into());
+        let list = mgr.list_captures(&filter).unwrap();
+
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, target_id);
+        assert_eq!(mgr.count_captures(&filter).unwrap(), 2);
     }
 
     #[test]

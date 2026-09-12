@@ -60,6 +60,11 @@ cleanup_port() {
     return 0
 }
 
+# This fixture owns only its fake runtime; never sweep the developer's live model.
+sweep_managed_runtime_processes() {
+    return 0
+}
+
 wait_for_http() {
     local _url=$1
     local _label=$2
@@ -83,5 +88,41 @@ MANAGED_PID=$(tr -d '[:space:]' < "$OLLAMA_PID_FILE")
 [ "$(sed -n '2p' "$MANAGED_OLLAMA_TEST_CAPTURE")" = "$REAL_MODELS_ROOT" ]
 [ "$(sed -n '3p' "$MANAGED_OLLAMA_TEST_CAPTURE")" = "1" ]
 [ "$(sed -n '4p' "$MANAGED_OLLAMA_TEST_CAPTURE")" = "1" ]
+
+"$PROJECT_ROOT/ai-sidecar/.venv/bin/python" - "$MANAGED_OLLAMA_MARKER" "$MANAGED_PID" <<'PY'
+import json
+import sys
+
+import psutil
+
+marker = json.load(open(sys.argv[1], encoding="utf-8"))
+pid = int(sys.argv[2])
+assert marker["pid"] == pid
+assert abs(float(marker["create_time"]) - psutil.Process(pid).create_time()) <= 0.01
+assert marker["port"] == 11434
+PY
+
+# 健康进程的 PID 变化时必须刷新初始化器使用的身份登记，不能仅凭端口健康
+# 直接返回，否则严格所有权校验会把自己的运行时误判成第三方进程。
+RECORDED_REUSE="$TEST_ROOT/recorded-reuse"
+is_ollama_ready() { return 0; }
+managed_ollama_listener_pid() {
+    [ "$1" = "$REAL_FAKE_RUNTIME" ]
+    printf '%s\n' "$MANAGED_PID"
+}
+record_managed_ollama_process() {
+    printf '%s\n%s\n%s\n' "$1" "$2" "$3" > "$RECORDED_REUSE"
+}
+cleanup_port() {
+    echo "healthy managed runtime was unexpectedly cleaned" >&2
+    return 1
+}
+
+ensure_ollama_running
+
+[ "$(sed -n '1p' "$RECORDED_REUSE")" = "$MANAGED_PID" ]
+[ "$(sed -n '2p' "$RECORDED_REUSE")" = "$REAL_FAKE_RUNTIME" ]
+[ "$(sed -n '3p' "$RECORDED_REUSE")" = "$REAL_MODELS_ROOT" ]
+[ "$(tr -d '[:space:]' < "$OLLAMA_PID_FILE")" = "$MANAGED_PID" ]
 
 echo "managed Ollama restart checks passed"

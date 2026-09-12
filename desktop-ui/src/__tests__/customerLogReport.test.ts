@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { invoke } from '@tauri-apps/api/core'
 import type { AppMetadata } from '../utils/appMetadata'
 import {
   getCustomerLogInstallationId,
@@ -6,6 +7,8 @@ import {
   scrubDiagnosticLog,
 } from '../utils/customerLogReport'
 import { useAppStore } from '../store/useAppStore'
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 
 const metadata: AppMetadata = {
   product_name: '记忆面包',
@@ -23,7 +26,12 @@ const jsonResponse = (body: unknown, status = 200) => new Response(JSON.stringif
 })
 
 describe('customer log privacy', () => {
-  beforeEach(() => window.localStorage.clear())
+  beforeEach(() => {
+    window.localStorage.clear()
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
+    vi.mocked(invoke).mockReset()
+    vi.stubEnv('DEV', false)
+  })
 
   it('scrubs common credentials and personal identifiers', () => {
     const source = [
@@ -63,7 +71,8 @@ describe('customer log privacy', () => {
     expect(first).toMatch(/^[0-9a-f-]{36}$/)
   })
 
-  it('uploads the core log-files response envelope and completes the report', async () => {
+  it.each([false, true])('uploads and completes the report, browser development=%s', async (development) => {
+    vi.stubEnv('DEV', development)
     useAppStore.setState({ serviceEnvironment: 'production' })
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({
@@ -113,10 +122,18 @@ describe('customer log privacy', () => {
     expect(fetchMock).toHaveBeenCalledTimes(5)
     expect(fetchMock.mock.calls[0][0]).toBe('http://127.0.0.1:7070/api/debug/log-files')
     expect(fetchMock.mock.calls[2][0]).toBe('https://memorybread.cn/v1/customer-logs/upload-url')
-    expect(fetchMock.mock.calls[3][1]).toMatchObject({
-      method: 'PUT',
-      headers: { 'content-type': 'application/zip' },
-    })
+    if (development) {
+      expect(fetchMock.mock.calls[3][0]).toBe('/__memorybread/diagnostics/upload')
+      expect(fetchMock.mock.calls[3][1].method).toBe('POST')
+      expect(JSON.parse(fetchMock.mock.calls[3][1].body)).toMatchObject({
+        uploadUrl: 'https://example-bucket.oss.example.com/report.zip',
+        contentBase64: expect.any(String),
+      })
+    } else {
+      expect(fetchMock.mock.calls[3][1]).toMatchObject({
+        method: 'PUT', headers: { 'content-type': 'application/zip' },
+      })
+    }
     expect(fetchMock.mock.calls[4][0]).toBe('https://memorybread.cn/v1/customer-logs')
     expect(fetchMock.mock.calls[4][1]).toMatchObject({ method: 'POST' })
     expect(JSON.parse(String(fetchMock.mock.calls[4][1]?.body))).toMatchObject({
@@ -177,5 +194,58 @@ describe('customer log privacy', () => {
       installation_id: '018f0000-0000-7000-8000-000000000010',
       initialization_report_id: '018f0000-0000-7000-8000-000000000011',
     })
+  })
+
+  it.each([false, true])('uses native upload and resumes pending initialization logs from settings: %s', async (hasPending) => {
+    vi.stubEnv('DEV', true)
+    const pendingKey = 'memorybread.pending-initialization-log:production:https://memorybread.cn'
+    if (hasPending) localStorage.setItem(pendingKey, JSON.stringify({ reportId: 'pending-report', installationId: 'pending-installation' }))
+    useAppStore.setState({ serviceEnvironment: 'production' })
+    ;(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {}
+    vi.mocked(invoke).mockResolvedValue(undefined)
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        items: [{ key: 'core', label: '核心服务日志', exists: true, size_bytes: 16, modified_at: 1 }],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        key: 'core', label: '核心服务日志', content: 'startup failed', truncated: false,
+        total_size_bytes: 14, returned_bytes: 14, modified_at: 1,
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        data: {
+          upload_id: '018f0000-0000-7000-8000-000000000012',
+          oss_object_key: 'customer-logs/production/2026/09/05/report.zip',
+          upload_url: 'https://memory-bread.oss-cn-beijing.aliyuncs.com/report.zip',
+          required_headers: { 'content-type': 'application/zip' },
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        data: {
+          log_id: '018f0000-0000-7000-8000-000000000012',
+          received_at: '2026-09-05T05:00:00Z',
+          duplicate: false,
+        },
+      }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await reportCustomerLogs({
+      adminApiBaseUrl: 'https://memorybread.cn',
+      localApiBaseUrl: 'http://127.0.0.1:7070',
+      metadata,
+    })
+
+    expect(invoke).toHaveBeenCalledWith('upload_customer_log_archive', expect.objectContaining({
+      uploadUrl: 'https://memory-bread.oss-cn-beijing.aliyuncs.com/report.zip',
+      requiredHeaders: { 'content-type': 'application/zip' },
+      contentBase64: expect.any(String),
+    }))
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    if (hasPending) {
+      const body = JSON.parse(fetchMock.mock.calls[3][1].body)
+      expect(body.initialization_report_id).toBe('pending-report')
+      expect(body.installation_id).toBe('pending-installation')
+      expect(localStorage.getItem(pendingKey)).toBeNull()
+    }
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('aliyuncs.com'))).toBe(false)
   })
 })

@@ -1,10 +1,15 @@
+import { useInteractiveOcrActivity } from '../hooks/useInteractiveOcrActivity'
+import { useConsultationReadiness } from '../hooks/useConsultationReadiness'
+import { ConsultationImageInput } from './ConsultationImageInput'
+import { ConsultationAttachments, ConsultationImagePreview } from './ConsultationAttachments'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import ReactMarkdown from 'react-markdown'
+import ReactMarkdown, { type Components } from 'react-markdown'
 import { ChevronDown, ChevronUp, EyeOff, Home, Loader2, MessageSquare, Sparkles, X } from 'lucide-react'
 import { listen } from '@tauri-apps/api/event'
 import {
   RAG_REFERENCE_LIMIT,
+  saveConsultationHistory,
   runGatewayRagQueryStream,
   runRagQueryStream,
   type RagStreamCallbacks,
@@ -13,7 +18,7 @@ import {
 import { useImeCompositionGuard } from '../hooks/useImeCompositionGuard'
 import { useAppStore } from '../store/useAppStore'
 import type { BreadcrumbDefinition, RagContext } from '../types'
-import { buildAttachmentMetadata, buildAttachmentPrompt, filesToAttachments, formatAttachmentSize, type UserAttachment } from '../utils/attachments'
+import { nameConsultationImages, buildConsultationAttachmentMetadata, buildConsultationOcrText, buildAttachmentPrompt, filesToAttachments, persistConsultationAttachments, type UserAttachment } from '../utils/attachments'
 import { fetchBillingBalance } from '../utils/authApi'
 import { BREADCRUMBS_CHANGED_KEY, fetchBreadcrumbProfile } from '../utils/breadcrumbApi'
 import { createOptionalCloudRequestSignal, optionalCloudIsReachable } from '../utils/optionalCloud'
@@ -268,6 +273,7 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
   const creationModelConfigs = useAppStore((s) => s.creationModelConfigs)
   const [phase, setPhase] = useState<AssistPhase>(debugPhase ?? 'idle')
   const [answer, setAnswer] = useState(debugAnswer ?? '')
+  const capability = useConsultationReadiness()
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   const [revealing, setRevealing] = useState(false)
@@ -279,12 +285,16 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
   const [inferenceElapsedMs, setInferenceElapsedMs] = useState<number | null>(null)
   const [streamStatus, setStreamStatus] = useState('')
   const [previewOpen, setPreviewOpen] = useState(false)
+  const [attachmentPreview, setAttachmentPreview] = useState<string | null>(null)
+  const closeAttachmentPreview = useCallback(() => { setAttachmentPreview(null); setPreviewOpen(false) }, [])
+  const [attachmentsLoading, setAttachmentsLoading] = useState(false)
   const [canvasOpen, setCanvasOpen] = useState(false)
   const [contextMenuOpen, setContextMenuOpen] = useState(false)
   const [nativeHovering, setNativeHovering] = useState(false)
   const [ambientAnimating, setAmbientAnimating] = useState(false)
   const [manualInstruction, setManualInstruction] = useState('')
   const manualInputImeGuard = useImeCompositionGuard<HTMLTextAreaElement>()
+  const imageNumberRef = useRef(0)
   const [attachments, setAttachments] = useState<UserAttachment[]>([])
   const [attachmentError, setAttachmentError] = useState<string | null>(null)
   const [floatingBadge, setFloatingBadge] = useState<BreadcrumbDefinition | null>(null)
@@ -301,6 +311,7 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
   const lastUserInteractionAtRef = useRef(Date.now())
   const seenAutoTasksRef = useRef<Map<string, number>>(new Map())
   const activeAssistTaskRef = useRef(false)
+  const lastAssistModeRef = useRef<'manual' | 'screen'>('screen')
   const abortRef = useRef<AbortController | null>(null)
   const runAssistRef = useRef<() => Promise<void>>(async () => {})
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -371,7 +382,21 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
     startProgress(status.progress, Math.max(status.progress, plan.target), plan.durationMs)
   }
 
-  const runFloatingAssistQuery = async (
+  const runFloatingAssistQuery = async (query: string, metadata: Record<string, unknown>, signal: AbortSignal, callbacks: RagStreamCallbacks) => {
+    const id = await saveConsultationHistory(apiBaseUrl, query, metadata, '本次咨询已提交；若长时间没有更新，可能已中断，请重新提问。')
+    let result
+    try {
+      result = await generateFloatingAssistQuery(query, { ...metadata, history_id: id }, signal, callbacks)
+    } catch (err) {
+      const message = signal.aborted ? '本次咨询已中止，可重新提问。' : toUserFacingError(err, '本次咨询未完成，请重试。')
+      try { await saveConsultationHistory(apiBaseUrl, query, metadata, message, [], id) } catch { /* The accepted record remains durable. */ }
+      throw err
+    }
+    await saveConsultationHistory(apiBaseUrl, query, metadata, result.answer, result.contexts, id, result.model, result.inference_elapsed_ms ?? result.elapsed_ms)
+    return result
+  }
+
+  const generateFloatingAssistQuery = async (
     query: string,
     metadata: Record<string, unknown>,
     signal: AbortSignal,
@@ -399,7 +424,7 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
         query,
         currentUser.id,
         signal,
-        { source: 'floating_assist', metadata },
+        { source: 'floating_assist', metadata, managedHistory: true },
         callbacks,
       )
     } catch (cloudError) {
@@ -444,6 +469,7 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
 
   const hasCanvas = canvasOpen
   const busy = phase === 'receiving' || phase === 'capturing' || phase === 'answering'
+  useInteractiveOcrActivity(busy)
   const hasGeneratedAnswer = answer.trim().length > 0
   const hasStreamingAnswer = phase === 'answering' && hasGeneratedAnswer
   const remoteModelAllowed = canUseRemoteCreationModel(currentUser, cloudBalance)
@@ -452,6 +478,7 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
     setCanvasOpen(false)
     setContextMenuOpen(false)
     setPreviewOpen(false)
+    setAttachmentPreview(null)
   }
   const canvasHeight = phase === 'answering' || phase === 'done' || (phase === 'idle' && hasGeneratedAnswer)
     ? Math.min(
@@ -464,7 +491,7 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
     : phase === 'error'
       ? 370
       : phase === 'idle'
-        ? pendingAutoTask ? 330 : 220
+        ? pendingAutoTask ? 330 : 220 + Math.min(attachments.length, 3) * 34
         : screenshot
           ? 414
           : 330
@@ -774,8 +801,10 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
     setInferenceElapsedMs(null)
     setStreamStatus('')
     setPreviewOpen(false)
+    setAttachmentPreview(null)
     setManualInstruction('')
     setAttachments([])
+    imageNumberRef.current = 0
     setAttachmentError(null)
     setPendingAutoTask(null)
     followStreamingAnswerRef.current = true
@@ -792,19 +821,25 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
   }
 
   const addFiles = async (files: Iterable<File>) => {
+    if (attachmentsLoading || busy) return
     setAttachmentError(null)
+    setAttachmentsLoading(true)
     try {
       const next = await filesToAttachments(files, attachments.length)
-      setAttachments(prev => [...prev, ...next])
+      const named = nameConsultationImages(next, imageNumberRef.current)
+      imageNumberRef.current += named.filter(item => item.type.startsWith('image/')).length
+      setAttachments(prev => [...prev, ...named].slice(0, 6))
     } catch (err) {
       setAttachmentError(toUserFacingError(err, '附件读取失败'))
-    }
+    } finally { setAttachmentsLoading(false) }
   }
 
   const runAssistWithOcr = async (preparedOcr?: FloatingAssistOcrResult, options: RunAssistOptions = {}) => {
     if (!options.automatic && suppressClickRef.current) return false
     if (activeAssistTaskRef.current || busy) return false
+    if (!capability.ready || !(await capability.refresh())) { setCanvasOpen(true); return false }
     activeAssistTaskRef.current = true
+    lastAssistModeRef.current = 'screen'
     setPendingAutoTask(null)
     clearDoneIdleTimer()
     setContextMenuOpen(false)
@@ -825,6 +860,7 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
     setInferenceElapsedMs(null)
     setStreamStatus('')
     setPreviewOpen(false)
+    setAttachmentPreview(null)
     followStreamingAnswerRef.current = true
     const controller = new AbortController()
     abortRef.current = controller
@@ -855,7 +891,12 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
       setPhase('answering')
       startProgress(35, 92, 60000)
       await waitForPaint()
-      const attachmentPrompt = buildAttachmentPrompt(attachments)
+      const savedAttachments = await persistConsultationAttachments(attachments)
+      setAttachments(savedAttachments)
+      if (savedAttachments.some(item => item.type.startsWith('image/') && !item.ocrText?.trim())) {
+        throw new Error('部分图片未识别到文字，暂时无法可靠理解图片内容。请补充图片中的文字说明，或移除该图片后重试。')
+      }
+      const attachmentPrompt = buildAttachmentPrompt(savedAttachments)
       const query = buildFloatingAssistQuery(text)
       const queryWithAttachments = attachmentPrompt ? `${query}\n\n${attachmentPrompt}` : query
       const metadata = {
@@ -867,7 +908,7 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
         app_bundle_id: ocr.app_bundle_id,
         app_name: ocr.app_name,
         window_title: ocr.window_title,
-        ocr_text: text,
+        ocr_text: buildConsultationOcrText(savedAttachments, text),
         trigger: options.automatic ? 'auto_task_detection' : 'screen_recognition',
         auto_task_detection: options.detection
           ? {
@@ -878,7 +919,7 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
             requires_confirmation: options.detection.requiresConfirmation,
           }
           : undefined,
-        attachments: buildAttachmentMetadata(attachments),
+        attachments: buildConsultationAttachmentMetadata(savedAttachments),
       }
       const streamCallbacks: RagStreamCallbacks = {
         onStatus: status => {
@@ -907,8 +948,10 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
       stopProgress()
       setProgress(100)
       setPhase('done')
+      setAttachments([])
+      setAttachmentError(null)
       setRevealing(false)
-      setAnswer(result.answer?.trim() || '本次没有生成咨询输出，请重试。')
+      setAnswer(result.answer?.trim() || '本次没有生成咨询结果，请重试。')
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return true
       stopProgress()
@@ -959,6 +1002,7 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
     clearDoneIdleTimer()
     setContextMenuOpen(false)
     setPreviewOpen(false)
+    setAttachmentPreview(null)
     setCanvasOpen(true)
     setPhase('idle')
     setError(null)
@@ -990,10 +1034,11 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
     setScreenshot(null)
     setScreenshotSrc('')
     setPreviewOpen(false)
+    setAttachmentPreview(null)
   }
 
   useEffect(() => {
-    if (!autoTaskConfig.enabled) return
+    if (!autoTaskConfig.enabled || !capability.ready) return
 
     let cancelled = false
     const scanForTask = async () => {
@@ -1017,7 +1062,7 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
 
       autoTaskScanInFlightRef.current = true
       try {
-        const ocr = await invoke<FloatingAssistOcrResult>('capture_screen_ocr_for_floating_assist')
+        const ocr = await invoke<FloatingAssistOcrResult>('capture_screen_ocr_for_floating_assist', { background: true })
         if (cancelled) return
         const detection = detectFloatingAssistTaskFromOcr(ocr.text, {
           requireImWindow: true,
@@ -1071,6 +1116,7 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
     apiBaseUrl,
     attachments,
     autoTaskConfig,
+    capability.ready,
     busy,
     canvasOpen,
     contextMenuOpen,
@@ -1086,9 +1132,11 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
   ])
 
   const runManualAssist = async () => {
-    const instruction = manualInstruction.trim()
-    if (!instruction || activeAssistTaskRef.current || busy) return
+    const instruction = manualInstruction.trim() || (attachments.length ? '请分析附上的图片。' : '')
+    if (!capability.ready || !instruction || activeAssistTaskRef.current || busy || attachmentsLoading) return
+    if (!(await capability.refresh()) || activeAssistTaskRef.current) return
     activeAssistTaskRef.current = true
+    lastAssistModeRef.current = 'manual'
     setPendingAutoTask(null)
     clearDoneIdleTimer()
     setContextMenuOpen(false)
@@ -1107,6 +1155,7 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
     setInferenceElapsedMs(null)
     setStreamStatus('')
     setPreviewOpen(false)
+    setAttachmentPreview(null)
     followStreamingAnswerRef.current = true
     const controller = new AbortController()
     abortRef.current = controller
@@ -1117,7 +1166,12 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
       setPhase('answering')
       startProgress(18, 92, 60000)
       await waitForPaint()
-      const attachmentPrompt = buildAttachmentPrompt(attachments)
+      const savedAttachments = await persistConsultationAttachments(attachments)
+      setAttachments(savedAttachments)
+      if (savedAttachments.some(item => item.type.startsWith('image/') && !item.ocrText?.trim())) {
+        throw new Error('部分图片未识别到文字，暂时无法可靠理解图片内容。请补充图片中的文字说明，或移除该图片后重试。')
+      }
+      const attachmentPrompt = buildAttachmentPrompt(savedAttachments)
       const query = buildManualFloatingAssistQuery(instruction, screenshot?.text)
       const queryWithAttachments = attachmentPrompt ? `${query}\n\n${attachmentPrompt}` : query
       const metadata = screenshot ? {
@@ -1125,13 +1179,14 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
         screenshot_path: screenshot.screenshot_path,
         screenshot_width: screenshot.width,
         screenshot_height: screenshot.height,
-        ocr_text: screenshot.text,
+        ocr_text: buildConsultationOcrText(savedAttachments, screenshot.text),
         manual_instruction: instruction,
-        attachments: buildAttachmentMetadata(attachments),
+        attachments: buildConsultationAttachmentMetadata(savedAttachments),
       } : {
         source: 'floating_assist',
+        ocr_text: buildConsultationOcrText(savedAttachments),
         manual_instruction: instruction,
-        attachments: buildAttachmentMetadata(attachments),
+        attachments: buildConsultationAttachmentMetadata(savedAttachments),
       }
       const streamCallbacks: RagStreamCallbacks = {
         onStatus: status => {
@@ -1161,8 +1216,10 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
       setProgress(100)
       setPhase('done')
       setManualInstruction('')
+      setAttachments([])
+      setAttachmentError(null)
       setRevealing(false)
-      setAnswer(result.answer?.trim() || '本次没有生成咨询输出，请重试。')
+      setAnswer(result.answer?.trim() || '本次没有生成咨询结果，请重试。')
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return
       stopProgress()
@@ -1373,11 +1430,13 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
         artifactId: item.artifact_id,
         documentId: item.document_id,
         docKey: item.doc_key,
+        sourceUrl: item.source_url || item.url,
       },
     }).catch(() => {})
   }
 
   const visibleReferences = references.filter(item => (item.source_type || item.source) !== 'floating_assist')
+  const adoptedReferenceCount = visibleReferences.filter(item => item.cited).length
   const displayedReferences = referencesExpanded
     ? visibleReferences
     : visibleReferences.slice(0, DEFAULT_VISIBLE_REFERENCE_COUNT)
@@ -1515,7 +1574,7 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
               <button
                 className="system-floating-assist__small-btn"
                 type="button"
-                onClick={runAssist}
+                onClick={() => { void (lastAssistModeRef.current === 'manual' ? runManualAssist() : runAssist()) }}
                 disabled={busy}
               >
                 <BreadToolIcon name="retry" size={16} />
@@ -1554,6 +1613,7 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
                       setScreenshot(null)
                       setScreenshotSrc('')
                       setPreviewOpen(false)
+    setAttachmentPreview(null)
                     }}
                     aria-label="移除本次截屏"
                     title="移除本次截屏"
@@ -1613,7 +1673,7 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
             {showAnswer && (
               <div className={`system-floating-assist__answer${phase === 'answering' ? ' system-floating-assist__answer--streaming' : ''}`}>
                 <div className="system-floating-assist__output-title">
-                  <span>咨询输出{phase === 'answering' ? ' · 正在生成' : ''}</span>
+                  <span>咨询结果{phase === 'answering' ? ' · 正在生成' : ''}</span>
                   {phase === 'done' && inferenceElapsedMs != null && (
                     <small>推理耗时 {formatElapsed(inferenceElapsedMs)}</small>
                   )}
@@ -1633,9 +1693,17 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
             )}
           </div>
 
+          {!capability.ready && <div className="system-floating-assist__error" role="status">
+            {capability.loading ? '正在检查本地 AI 状态…' : capability.status.message}
+            {capability.status.action === 'retry'
+              ? <button type="button" onClick={() => void capability.refresh()}>重新检查</button>
+              : <button type="button" onClick={() => { useAppStore.getState().setWindowMode('models'); openMainPanel() }}>继续初始化 / 修复</button>}
+          </div>}
           <form className="system-floating-assist__manual" onSubmit={handleManualSubmit}>
             <div className="system-floating-assist__manual-main">
-              <textarea
+              <ConsultationImageInput
+                images={attachments}
+                onValueChange={setManualInstruction}
                 value={manualInstruction}
                 onChange={(event) => setManualInstruction(event.target.value)}
                 onWheel={handleManualWheel}
@@ -1660,25 +1728,8 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
                   }
                 }}
               />
-              {attachments.length > 0 && (
-                <div className="system-floating-assist__attachments">
-                  {attachments.map(item => (
-                    <span className="system-floating-assist__attachment" key={item.id}>
-                      <BreadToolIcon name="attach" size={12} framed={false} />
-                      <span>{item.name}</span>
-                      <small>{formatAttachmentSize(item.size)}</small>
-                      <button
-                        type="button"
-                        onClick={() => setAttachments(prev => prev.filter(existing => existing.id !== item.id))}
-                        disabled={busy}
-                        aria-label={`移除 ${item.name}`}
-                      >
-                        <X size={12} />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              )}
+              <ConsultationAttachments items={attachments} disabled={busy} onRemove={id => setAttachments(prev => prev.filter(item => item.id !== id))} onPreview={src => { setAttachmentPreview(src); setPreviewOpen(true) }} />
+              {attachmentsLoading && <span role="status">正在读取附件…</span>}
               {attachmentError && <div className="system-floating-assist__attachment-error">{attachmentError}</div>}
             </div>
             <input
@@ -1705,7 +1756,7 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
             <button
               className="system-floating-assist__manual-submit"
               type="submit"
-              disabled={busy || !manualInstruction.trim()}
+              disabled={!capability.ready || busy || attachmentsLoading || (!manualInstruction.trim() && !attachments.length)}
               aria-label="发送手工咨询"
               title="发送手工咨询"
             >
@@ -1715,7 +1766,21 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
 
           {visibleReferences.length > 0 && (
             <div className="system-floating-assist__refs">
-              <div className="system-floating-assist__refs-title">参考资料（{visibleReferences.length}）</div>
+              <div className="system-floating-assist__refs-title">
+                参考资料（{visibleReferences.length}）
+                {phase === 'done' && (
+                  adoptedReferenceCount > 0 ? (
+                    <span className="system-floating-assist__refs-adopted">答案采用 {adoptedReferenceCount} 条</span>
+                  ) : (
+                    <span
+                      className="system-floating-assist__refs-adopted"
+                      title="已召回的记忆经模型判断与本次问题无关，答案未采用"
+                    >
+                      答案未采用
+                    </span>
+                  )
+                )}
+              </div>
               {displayedReferences.map((item, index) => {
                 const referenceType = referenceTypeMeta(item)
                 return (
@@ -1724,12 +1789,14 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
                     type="button"
                     onClick={() => openReference(item)}
                     key={`${item.doc_key || item.capture_id}-${index}`}
+                    title={item.cited ? '本次答案采用了这条记忆' : '已召回，本次答案未标注采用'}
                   >
                     <span className={`system-floating-assist__ref-type system-floating-assist__ref-type--${referenceType.kind}`}>
                       {referenceType.label}
                     </span>
-                    <span className="system-floating-assist__ref-index">R{index + 1}</span>
+                    <span className="system-floating-assist__ref-index">{referenceIndexLabel(item, index)}</span>
                     <strong>{referenceTitle(item)}</strong>
+                    {item.cited && <span className="system-floating-assist__ref-adopted">已采用</span>}
                   </button>
                 )
               })}
@@ -1750,17 +1817,18 @@ const SystemFloatingAssist: React.FC<SystemFloatingAssistProps> = ({
         </section>
       )}
 
-      {previewOpen && screenshotSrc && (
-        <div className="system-floating-assist__preview" onClick={() => setPreviewOpen(false)}>
-          <img src={screenshotSrc} alt="本次截屏预览" />
-        </div>
-      )}
+      {attachmentPreview && <ConsultationImagePreview src={attachmentPreview} onClose={closeAttachmentPreview} />}
+      {previewOpen && !attachmentPreview && screenshotSrc && <ConsultationImagePreview src={screenshotSrc} onClose={closeAttachmentPreview} />}
     </div>
   )
 }
 
 const referenceTitle = (item: RagContext) =>
   item.title || item.overview || item.summary || item.win_title || item.app_name || item.text?.slice(0, 48) || '参考资料'
+
+// 召回序号与答案里的 [记忆N] 一一对应，便于用户核对答案依据。
+const referenceIndexLabel = (item: RagContext, index: number) =>
+  item.recall_index ? `M${item.recall_index}` : `R${index + 1}`
 
 const formatElapsed = (elapsedMs: number) => {
   if (elapsedMs < 1000) return `${Math.max(1, Math.round(elapsedMs))} ms`
@@ -1772,13 +1840,24 @@ type FloatingReferenceType = 'knowledge' | 'document' | 'operation' | 'timeline'
 const referenceTypeMeta = (item: RagContext): { kind: FloatingReferenceType; label: string } => {
   const sourceType = item.source_type || item.source
   if (sourceType === 'bake_knowledge') return { kind: 'knowledge', label: '知识' }
+  if (sourceType === 'pending_document') return { kind: 'document', label: '文档片段' }
   if (sourceType === 'document') return { kind: 'document', label: '文档' }
   if (sourceType === 'operation' || sourceType === 'action') return { kind: 'operation', label: '操作' }
   return { kind: 'timeline', label: '时间线' }
 }
 
+// The Tauri shell plugin intercepts _blank links and opens the system browser.
+const floatingMarkdownComponents: Components = {
+  a: ({ node: _node, href, children, ...props }) => (
+    <a {...props} href={href} target={href?.startsWith('#') ? undefined : '_blank'} rel="noopener noreferrer">
+      {children}
+    </a>
+  ),
+}
+
 const MarkdownContent = ({ content }: { content: string }) => {
   const inlineComponents = {
+    ...floatingMarkdownComponents,
     p: ({ children }: any) => <>{children}</>,
   }
 
@@ -1786,7 +1865,7 @@ const MarkdownContent = ({ content }: { content: string }) => {
     <>
       {parseMarkdownBlocks(content).map((block, index) => {
         if (block.type === 'markdown') {
-          return <ReactMarkdown key={`markdown-${index}`}>{block.content}</ReactMarkdown>
+          return <ReactMarkdown key={`markdown-${index}`} components={floatingMarkdownComponents}>{block.content}</ReactMarkdown>
         }
 
         return (

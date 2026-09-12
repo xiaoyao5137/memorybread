@@ -1,0 +1,35 @@
+{
+  "model": "qwen3.5:4b",
+  "cases": [
+    {
+      "case": "technical_architecture",
+      "checks": {
+        "model_decision": true,
+        "operation": true,
+        "positive_admission": true,
+        "no_wrong_workflow": true
+      },
+      "details": {
+        "initial_kind": "generate",
+        "kind": "generate",
+        "identity": {
+          "title": "视频生成平台技术架构评审",
+          "source": "generated",
+          "evidence_hash": "35d1b2734f8e3db6"
+        },
+        "admission": [],
+        "positive_admission": [
+          {
+            "skill_id": "creation-skill-general-solution-review-doc",
+            "fingerprint": "dd4dfc305d59e819bd9852737bae32114fcecc3dd420fe1f9ad5a02083d680ec",
+            "source": "automatic",
+            "admitted": true,
+            "code": "applicable"
+          }
+        ]
+      },
+      "seconds": 115.26,
+      "passed": true
+    }
+  ]
+}

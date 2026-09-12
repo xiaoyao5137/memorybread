@@ -1,0 +1,14 @@
+{
+  "surface": "CUA in-app browser http://localhost:1420",
+  "history_id": 182,
+  "observed_time_label": "2026/9/8 03:43:22",
+  "observed_duration_label": "21 秒",
+  "observed_memory_recall_count": 0,
+  "answer_opened_and_checked": true,
+  "reference_panel_count": 1,
+  "reference_panel_only_item": "悬浮截屏 · 咨询附件",
+  "knowledge_310_visible": false,
+  "attachments_count": 2,
+  "native_attachment_preview_verified": false,
+  "preview_boundary": "Browser lacks native attachment preview; original files and foreground OCR were independently verified."
+}

@@ -1,0 +1,672 @@
+[
+  {
+    "id": "reject-unprovided-audience",
+    "candidate_document": "# 会议通知\n\n**会议时间：** 周三下午  \n**会议地点：** 二楼会议室  \n\n各位同事，会议定于周三下午在二楼会议室举行，请准时参加。",
+    "provided_materials": {
+      "user_instruction_and_supplied_facts": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+      "original_document": "",
+      "root_request": "",
+      "conversation": [
+        {
+          "role": "user",
+          "content": "会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。"
+        }
+      ],
+      "creation_brief": "",
+      "retrieved_evidence": {
+        "references": [],
+        "data_results": [],
+        "web_results": [],
+        "tool_results": [],
+        "source_view": {
+          "excerpted": true,
+          "counts": {
+            "references": {
+              "available": 0,
+              "included": 0
+            },
+            "data_results": {
+              "available": 0,
+              "included": 0
+            },
+            "web_results": {
+              "available": 0,
+              "included": 0
+            },
+            "tool_results": {
+              "available": 0,
+              "included": 0
+            }
+          }
+        }
+      },
+      "user_options": {},
+      "supplied_lines": {
+        "instruction-1": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+        "conversation-0-1": "会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。"
+      }
+    },
+    "contract": {
+      "deliverable": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+      "self_contained_reason": "所有必要事实（时间、地点）及约束条件（不检索、不补充）已在用户指令和对话记录中明确提供，无需外部或历史输入",
+      "acceptance": [
+        {
+          "id": "source_scope_grounding",
+          "criterion": "独立核对本轮新增或修改的称谓、受众身份、人物关系、组织归属和适用范围，是否在已给事件或参与行为以外附加了外部既存身份或关系。称谓词义本身仅表示阅读本文或参加当前活动时，可以中性指称而不要求名单。共同工作、家庭、职业、组织关系或管理职责是外部限定，不因收件人会阅读或参加而变为中性，必须有用户材料、显式user_options或可用原文支持，不能从场景常见性推定。没有新增外部限定、已有依据或获用户虚构授权时通过；否则删除该限定或中性改写，不用其他事实正确抵消，也不因非必要称谓而blocked。局部编辑不审查未改动的旧内容。"
+        },
+        {
+          "id": "source_attributes_grounding",
+          "criterion": "独立核对本轮新增或修改的事件性质、周期、对象类别、状态、角色是否存在及其职责。格式引导语不免检：其内部的性质或周期限定仍是事实，不能把整个引导句都当作格式。每项实质限定须由输入必然支持，或处于用户明确授权的方案设计/虚构范围；常见合理不等于有依据。一处无依据即本项失败，删除多余限定即可，不因缺少非必要内容而blocked。虚构角色、地点、事件及拟人只核对用户明确设定，不要求现实依据；未改动旧内容免审。"
+        },
+        {
+          "id": "source_obligations_grounding",
+          "criterion": "独立核对本轮向现实读者新增的规则、办理流程、前置条件、条件触发步骤或行为义务。邀请参加已给事件可以中性表达；附加条件下要求办理另一动作或联系某角色则新增了要求，即使是常见、礼貌或不具名的流程，也须由输入规则或明确的方案设计授权支持。没有新增步骤或已有依据时通过；一处无依据就本项失败，删除额外要求即可。虚构角色在故事内部的行为属于情节，不是现实读者义务；不审查未改动旧内容。"
+        },
+        {
+          "id": "provide_time",
+          "criterion": "明确输出会议时间（周三下午）"
+        },
+        {
+          "id": "generate_notice",
+          "criterion": "生成一段可直接发出的通知文本"
+        },
+        {
+          "id": "no_external_lookup",
+          "criterion": "通知内容仅基于提供的材料，未检索或补充新事实"
+        }
+      ],
+      "inputs": [
+        {
+          "state": "provided",
+          "evidence": "会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。",
+          "need": "会议时间、地点及约束条件",
+          "reason": "用户指令中已明确会议时间（周三下午）、地点（二楼会议室）及约束（不检索、不补充新事实），无需额外输入",
+          "query": "",
+          "id": "work_context",
+          "source": "work_context"
+        }
+      ]
+    },
+    "user_prompt": "{\"candidate_source_segments\": {\"span-0-8\": [\"# 会议通知\\n\\n\"], \"span-8-25\": [\"**会议时间：** 周三下午  \\n\"], \"span-25-44\": [\"**会议地点：** 二楼会议室  \\n\\n\"], \"span-44-49\": [\"各位同事，\"], \"span-49-66\": [\"会议定于周三下午在二楼会议室举行，\"], \"span-66-72\": [\"请准时参加。\"]}, \"source_catalog\": {\"user_instruction_and_supplied_facts\": {\"text\": \"请先告诉我会议时间，再据此写一段可以直接发出的通知。\", \"user_authorization\": true}, \"conversation-user-0\": {\"text\": \"会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。\", \"user_authorization\": true}}, \"required_check_ids\": [\"source_scope_grounding\", \"source_attributes_grounding\", \"source_obligations_grounding\", \"provide_time\", \"generate_notice\", \"no_external_lookup\"], \"contract\": {\"deliverable\": \"请先告诉我会议时间，再据此写一段可以直接发出的通知。\", \"self_contained_reason\": \"所有必要事实（时间、地点）及约束条件（不检索、不补充）已在用户指令和对话记录中明确提供，无需外部或历史输入\", \"acceptance\": [{\"id\": \"source_scope_grounding\", \"criterion\": \"独立核对本轮新增或修改的称谓、受众身份、人物关系、组织归属和适用范围，是否在已给事件或参与行为以外附加了外部既存身份或关系。称谓词义本身仅表示阅读本文或参加当前活动时，可以中性指称而不要求名单。共同工作、家庭、职业、组织关系或管理职责是外部限定，不因收件人会阅读或参加而变为中性，必须有用户材料、显式user_options或可用原文支持，不能从场景常见性推定。没有新增外部限定、已有依据或获用户虚构授权时通过；否则删除该限定或中性改写，不用其他事实正确抵消，也不因非必要称谓而blocked。局部编辑不审查未改动的旧内容。\"}, {\"id\": \"source_attributes_grounding\", \"criterion\": \"独立核对本轮新增或修改的事件性质、周期、对象类别、状态、角色是否存在及其职责。格式引导语不免检：其内部的性质或周期限定仍是事实，不能把整个引导句都当作格式。每项实质限定须由输入必然支持，或处于用户明确授权的方案设计/虚构范围；常见合理不等于有依据。一处无依据即本项失败，删除多余限定即可，不因缺少非必要内容而blocked。虚构角色、地点、事件及拟人只核对用户明确设定，不要求现实依据；未改动旧内容免审。\"}, {\"id\": \"source_obligations_grounding\", \"criterion\": \"独立核对本轮向现实读者新增的规则、办理流程、前置条件、条件触发步骤或行为义务。邀请参加已给事件可以中性表达；附加条件下要求办理另一动作或联系某角色则新增了要求，即使是常见、礼貌或不具名的流程，也须由输入规则或明确的方案设计授权支持。没有新增步骤或已有依据时通过；一处无依据就本项失败，删除额外要求即可。虚构角色在故事内部的行为属于情节，不是现实读者义务；不审查未改动旧内容。\"}, {\"id\": \"provide_time\", \"criterion\": \"明确输出会议时间（周三下午）\"}, {\"id\": \"generate_notice\", \"criterion\": \"生成一段可直接发出的通知文本\"}, {\"id\": \"no_external_lookup\", \"criterion\": \"通知内容仅基于提供的材料，未检索或补充新事实\"}], \"inputs\": [{\"state\": \"provided\", \"evidence\": \"会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。\", \"need\": \"会议时间、地点及约束条件\", \"reason\": \"用户指令中已明确会议时间（周三下午）、地点（二楼会议室）及约束（不检索、不补充新事实），无需额外输入\", \"query\": \"\", \"id\": \"work_context\", \"source\": \"work_context\"}]}, \"source_receipts\": {}, \"provided_materials\": {\"user_instruction_and_supplied_facts\": \"请先告诉我会议时间，再据此写一段可以直接发出的通知。\", \"original_document\": \"\", \"root_request\": \"\", \"conversation\": [{\"role\": \"user\", \"content\": \"会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。\"}], \"creation_brief\": \"\", \"retrieved_evidence\": {\"references\": [], \"data_results\": [], \"web_results\": [], \"tool_results\": [], \"source_view\": {\"excerpted\": true, \"counts\": {\"references\": {\"available\": 0, \"included\": 0}, \"data_results\": {\"available\": 0, \"included\": 0}, \"web_results\": {\"available\": 0, \"included\": 0}, \"tool_results\": {\"available\": 0, \"included\": 0}}}}, \"user_options\": {}, \"supplied_lines\": {\"instruction-1\": \"请先告诉我会议时间，再据此写一段可以直接发出的通知。\", \"conversation-0-1\": \"会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。\"}}, \"candidate_document\": \"# 会议通知\\n\\n**会议时间：** 周三下午  \\n**会议地点：** 二楼会议室  \\n\\n各位同事，会议定于周三下午在二楼会议室举行，请准时参加。\", \"candidate_metrics\": {\"body_cjk_characters\": 42, \"body_non_whitespace_characters_including_markup\": 55, \"body_latin_words\": 0}, \"candidate_document_lines\": {\"line-1\": \"# 会议通知\", \"line-3\": \"**会议时间：** 周三下午  \", \"line-4\": \"**会议地点：** 二楼会议室  \", \"line-6\": \"各位同事，会议定于周三下午在二楼会议室举行，请准时参加。\"}}",
+    "raw_review": {
+      "source_audit": {
+        "span-0-8": {
+          "text": "# 会议通知\n\n",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "用户指令要求生成可直接发出的通知文本",
+          "kind": "neutral",
+          "basis": "neutral_expression"
+        },
+        "span-8-25": {
+          "text": "**会议时间：** 周三下午  \n",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "会议时间限定为周三下午",
+          "kind": "attribute",
+          "basis": "source_supported"
+        },
+        "span-25-44": {
+          "text": "**会议地点：** 二楼会议室  \n\n",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "会议地点限定为二楼会议室",
+          "kind": "attribute",
+          "basis": "source_supported"
+        },
+        "span-44-49": {
+          "text": "各位同事，",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "通知受众为各位同事",
+          "kind": "identity",
+          "basis": "unsupported"
+        },
+        "span-49-66": {
+          "text": "会议定于周三下午在二楼会议室举行，",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "会议定于周三下午在二楼会议室举行",
+          "kind": "attribute",
+          "basis": "source_supported"
+        },
+        "span-66-72": {
+          "text": "请准时参加。",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "要求受众准时参加",
+          "kind": "obligation",
+          "basis": "unsupported"
+        }
+      },
+      "checks": {
+        "source_scope_grounding": {
+          "evidence": "line-6",
+          "reason": "称谓“各位同事”将受众身份从“阅读本文或参加当前活动”扩展为“共同工作关系”，属于外部限定，但用户指令和对话记录中未提供同事关系或共同工作的依据，且无虚构授权。",
+          "passed": false
+        },
+        "source_attributes_grounding": {
+          "evidence": "line-3",
+          "reason": "时间限定“周三下午”在用户指令中明确给出，但地点限定“二楼会议室”虽在指令中提及，却未在后续正文中作为既定事实保留，而是作为通知内容的一部分，未违反属性核对规则，此处通过。",
+          "passed": true
+        },
+        "source_obligations_grounding": {
+          "evidence": "line-6",
+          "reason": "要求“请准时参加”是通知正文中陈述会议安排的自然结果，未新增现实读者需办理的另一动作或联系某角色的流程，属于中性表达，此处通过。",
+          "passed": true
+        },
+        "provide_time": {
+          "evidence": "line-3",
+          "reason": "正文明确输出了会议时间“周三下午”，符合用户指令要求。",
+          "passed": true
+        },
+        "generate_notice": {
+          "evidence": "line-6",
+          "reason": "正文生成了一段包含时间、地点和要求的完整通知文本，符合用户指令要求。",
+          "passed": true
+        },
+        "no_external_lookup": {
+          "evidence": "line-3",
+          "reason": "通知内容中的时间、地点及约束条件均源自用户指令和对话记录，未检索或补充任何新事实。",
+          "passed": true
+        }
+      },
+      "status": "revise",
+      "corrections": []
+    }
+  },
+  {
+    "id": "accept-explicit-audience-option",
+    "candidate_document": "# 会议通知\n\n**会议时间：** 周三下午  \n**会议地点：** 二楼会议室  \n\n各位同事，会议定于周三下午在二楼会议室举行，请准时参加。",
+    "provided_materials": {
+      "user_instruction_and_supplied_facts": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+      "original_document": "",
+      "root_request": "",
+      "conversation": [
+        {
+          "role": "user",
+          "content": "会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。"
+        }
+      ],
+      "creation_brief": "",
+      "retrieved_evidence": {
+        "references": [],
+        "data_results": [],
+        "web_results": [],
+        "tool_results": [],
+        "source_view": {
+          "excerpted": true,
+          "counts": {
+            "references": {
+              "available": 0,
+              "included": 0
+            },
+            "data_results": {
+              "available": 0,
+              "included": 0
+            },
+            "web_results": {
+              "available": 0,
+              "included": 0
+            },
+            "tool_results": {
+              "available": 0,
+              "included": 0
+            }
+          }
+        }
+      },
+      "user_options": {
+        "audience": "同事"
+      },
+      "supplied_lines": {
+        "instruction-1": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+        "conversation-0-1": "会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。",
+        "user-options-audience-1": "同事"
+      }
+    },
+    "contract": {
+      "deliverable": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+      "self_contained_reason": "所有必要事实（时间、地点）及约束条件（不检索、不补充）已在用户指令和对话记录中明确提供，无需外部或历史输入",
+      "acceptance": [
+        {
+          "id": "source_scope_grounding",
+          "criterion": "独立核对本轮新增或修改的称谓、受众身份、人物关系、组织归属和适用范围，是否在已给事件或参与行为以外附加了外部既存身份或关系。称谓词义本身仅表示阅读本文或参加当前活动时，可以中性指称而不要求名单。共同工作、家庭、职业、组织关系或管理职责是外部限定，不因收件人会阅读或参加而变为中性，必须有用户材料、显式user_options或可用原文支持，不能从场景常见性推定。没有新增外部限定、已有依据或获用户虚构授权时通过；否则删除该限定或中性改写，不用其他事实正确抵消，也不因非必要称谓而blocked。局部编辑不审查未改动的旧内容。"
+        },
+        {
+          "id": "source_attributes_grounding",
+          "criterion": "独立核对本轮新增或修改的事件性质、周期、对象类别、状态、角色是否存在及其职责。格式引导语不免检：其内部的性质或周期限定仍是事实，不能把整个引导句都当作格式。每项实质限定须由输入必然支持，或处于用户明确授权的方案设计/虚构范围；常见合理不等于有依据。一处无依据即本项失败，删除多余限定即可，不因缺少非必要内容而blocked。虚构角色、地点、事件及拟人只核对用户明确设定，不要求现实依据；未改动旧内容免审。"
+        },
+        {
+          "id": "source_obligations_grounding",
+          "criterion": "独立核对本轮向现实读者新增的规则、办理流程、前置条件、条件触发步骤或行为义务。邀请参加已给事件可以中性表达；附加条件下要求办理另一动作或联系某角色则新增了要求，即使是常见、礼貌或不具名的流程，也须由输入规则或明确的方案设计授权支持。没有新增步骤或已有依据时通过；一处无依据就本项失败，删除额外要求即可。虚构角色在故事内部的行为属于情节，不是现实读者义务；不审查未改动旧内容。"
+        },
+        {
+          "id": "provide_time",
+          "criterion": "明确输出会议时间（周三下午）"
+        },
+        {
+          "id": "generate_notice",
+          "criterion": "生成一段可直接发出的通知文本"
+        },
+        {
+          "id": "no_external_lookup",
+          "criterion": "通知内容仅基于提供的材料，未检索或补充新事实"
+        }
+      ],
+      "inputs": [
+        {
+          "state": "provided",
+          "evidence": "会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。",
+          "need": "会议时间、地点及约束条件",
+          "reason": "用户指令中已明确会议时间（周三下午）、地点（二楼会议室）及约束（不检索、不补充新事实），无需额外输入",
+          "query": "",
+          "id": "work_context",
+          "source": "work_context"
+        }
+      ]
+    },
+    "user_prompt": "{\"candidate_source_segments\": {\"span-0-8\": [\"# 会议通知\\n\\n\"], \"span-8-25\": [\"**会议时间：** 周三下午  \\n\"], \"span-25-44\": [\"**会议地点：** 二楼会议室  \\n\\n\"], \"span-44-49\": [\"各位同事，\"], \"span-49-66\": [\"会议定于周三下午在二楼会议室举行，\"], \"span-66-72\": [\"请准时参加。\"]}, \"source_catalog\": {\"user_instruction_and_supplied_facts\": {\"text\": \"请先告诉我会议时间，再据此写一段可以直接发出的通知。\", \"user_authorization\": true}, \"user_options\": {\"text\": \"{\\\"audience\\\": \\\"同事\\\"}\", \"user_authorization\": true}, \"conversation-user-0\": {\"text\": \"会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。\", \"user_authorization\": true}}, \"required_check_ids\": [\"source_scope_grounding\", \"source_attributes_grounding\", \"source_obligations_grounding\", \"provide_time\", \"generate_notice\", \"no_external_lookup\"], \"contract\": {\"deliverable\": \"请先告诉我会议时间，再据此写一段可以直接发出的通知。\", \"self_contained_reason\": \"所有必要事实（时间、地点）及约束条件（不检索、不补充）已在用户指令和对话记录中明确提供，无需外部或历史输入\", \"acceptance\": [{\"id\": \"source_scope_grounding\", \"criterion\": \"独立核对本轮新增或修改的称谓、受众身份、人物关系、组织归属和适用范围，是否在已给事件或参与行为以外附加了外部既存身份或关系。称谓词义本身仅表示阅读本文或参加当前活动时，可以中性指称而不要求名单。共同工作、家庭、职业、组织关系或管理职责是外部限定，不因收件人会阅读或参加而变为中性，必须有用户材料、显式user_options或可用原文支持，不能从场景常见性推定。没有新增外部限定、已有依据或获用户虚构授权时通过；否则删除该限定或中性改写，不用其他事实正确抵消，也不因非必要称谓而blocked。局部编辑不审查未改动的旧内容。\"}, {\"id\": \"source_attributes_grounding\", \"criterion\": \"独立核对本轮新增或修改的事件性质、周期、对象类别、状态、角色是否存在及其职责。格式引导语不免检：其内部的性质或周期限定仍是事实，不能把整个引导句都当作格式。每项实质限定须由输入必然支持，或处于用户明确授权的方案设计/虚构范围；常见合理不等于有依据。一处无依据即本项失败，删除多余限定即可，不因缺少非必要内容而blocked。虚构角色、地点、事件及拟人只核对用户明确设定，不要求现实依据；未改动旧内容免审。\"}, {\"id\": \"source_obligations_grounding\", \"criterion\": \"独立核对本轮向现实读者新增的规则、办理流程、前置条件、条件触发步骤或行为义务。邀请参加已给事件可以中性表达；附加条件下要求办理另一动作或联系某角色则新增了要求，即使是常见、礼貌或不具名的流程，也须由输入规则或明确的方案设计授权支持。没有新增步骤或已有依据时通过；一处无依据就本项失败，删除额外要求即可。虚构角色在故事内部的行为属于情节，不是现实读者义务；不审查未改动旧内容。\"}, {\"id\": \"provide_time\", \"criterion\": \"明确输出会议时间（周三下午）\"}, {\"id\": \"generate_notice\", \"criterion\": \"生成一段可直接发出的通知文本\"}, {\"id\": \"no_external_lookup\", \"criterion\": \"通知内容仅基于提供的材料，未检索或补充新事实\"}], \"inputs\": [{\"state\": \"provided\", \"evidence\": \"会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。\", \"need\": \"会议时间、地点及约束条件\", \"reason\": \"用户指令中已明确会议时间（周三下午）、地点（二楼会议室）及约束（不检索、不补充新事实），无需额外输入\", \"query\": \"\", \"id\": \"work_context\", \"source\": \"work_context\"}]}, \"source_receipts\": {}, \"provided_materials\": {\"user_instruction_and_supplied_facts\": \"请先告诉我会议时间，再据此写一段可以直接发出的通知。\", \"original_document\": \"\", \"root_request\": \"\", \"conversation\": [{\"role\": \"user\", \"content\": \"会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。\"}], \"creation_brief\": \"\", \"retrieved_evidence\": {\"references\": [], \"data_results\": [], \"web_results\": [], \"tool_results\": [], \"source_view\": {\"excerpted\": true, \"counts\": {\"references\": {\"available\": 0, \"included\": 0}, \"data_results\": {\"available\": 0, \"included\": 0}, \"web_results\": {\"available\": 0, \"included\": 0}, \"tool_results\": {\"available\": 0, \"included\": 0}}}}, \"user_options\": {\"audience\": \"同事\"}, \"supplied_lines\": {\"instruction-1\": \"请先告诉我会议时间，再据此写一段可以直接发出的通知。\", \"conversation-0-1\": \"会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。\", \"user-options-audience-1\": \"同事\"}}, \"candidate_document\": \"# 会议通知\\n\\n**会议时间：** 周三下午  \\n**会议地点：** 二楼会议室  \\n\\n各位同事，会议定于周三下午在二楼会议室举行，请准时参加。\", \"candidate_metrics\": {\"body_cjk_characters\": 42, \"body_non_whitespace_characters_including_markup\": 55, \"body_latin_words\": 0}, \"candidate_document_lines\": {\"line-1\": \"# 会议通知\", \"line-3\": \"**会议时间：** 周三下午  \", \"line-4\": \"**会议地点：** 二楼会议室  \", \"line-6\": \"各位同事，会议定于周三下午在二楼会议室举行，请准时参加。\"}}",
+    "raw_review": {
+      "source_audit": {
+        "span-0-8": {
+          "text": "# 会议通知\n\n",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "用户指令要求生成可直接发出的通知文本",
+          "kind": "neutral",
+          "basis": "neutral_expression"
+        },
+        "span-8-25": {
+          "text": "**会议时间：** 周三下午  \n",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "会议时间限定为周三下午",
+          "kind": "attribute",
+          "basis": "source_supported"
+        },
+        "span-25-44": {
+          "text": "**会议地点：** 二楼会议室  \n\n",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "会议地点限定为二楼会议室",
+          "kind": "attribute",
+          "basis": "source_supported"
+        },
+        "span-44-49": {
+          "text": "各位同事，",
+          "source_id": "user_options",
+          "meaning": "受众身份为同事",
+          "kind": "identity",
+          "basis": "source_supported"
+        },
+        "span-49-66": {
+          "text": "会议定于周三下午在二楼会议室举行，",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "会议行为是定于周三下午在二楼会议室举行",
+          "kind": "attribute",
+          "basis": "source_supported"
+        },
+        "span-66-72": {
+          "text": "请准时参加。",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "要求受众准时参加",
+          "kind": "obligation",
+          "basis": "source_supported"
+        }
+      },
+      "checks": {
+        "source_scope_grounding": {
+          "evidence": "line-6",
+          "reason": "称谓“各位同事”基于 user_options 中的受众设定，属于已给事实，未新增外部关系",
+          "passed": true
+        },
+        "source_attributes_grounding": {
+          "evidence": "line-3",
+          "reason": "时间“周三下午”和地点“二楼会议室”均直接来自用户指令中的既定事实，无新增限定",
+          "passed": true
+        },
+        "source_obligations_grounding": {
+          "evidence": "line-6",
+          "reason": "要求“准时参加”是对会议行为本身的描述，未新增现实读者需办理的其他步骤或规则",
+          "passed": true
+        },
+        "provide_time": {
+          "evidence": "line-3",
+          "reason": "正文明确输出会议时间为周三下午",
+          "passed": true
+        },
+        "generate_notice": {
+          "evidence": "line-6",
+          "reason": "正文构成一段完整的、可直接发出的通知文本",
+          "passed": true
+        },
+        "no_external_lookup": {
+          "evidence": "line-3",
+          "reason": "通知内容中的时间、地点及受众均源自用户指令和选项，未检索或补充任何新事实",
+          "passed": true
+        }
+      },
+      "status": "pass",
+      "corrections": []
+    }
+  },
+  {
+    "id": "accept-authorized-fictional-relationships",
+    "candidate_document": "雾城里，小松鼠是面包师的学徒。一天烤炉熄了火，小松鼠请萤火虫帮忙引燃炉火，终于把热面包送到朋友手里。",
+    "provided_materials": {
+      "user_instruction_and_supplied_facts": "写一个虚构故事，可以自由设定人物、身份与关系。故事要有起因、行动和结局。",
+      "original_document": "",
+      "root_request": "",
+      "conversation": [],
+      "creation_brief": "",
+      "retrieved_evidence": {
+        "references": [],
+        "data_results": [],
+        "web_results": [],
+        "tool_results": [],
+        "source_view": {
+          "excerpted": true,
+          "counts": {
+            "references": {
+              "available": 0,
+              "included": 0
+            },
+            "data_results": {
+              "available": 0,
+              "included": 0
+            },
+            "web_results": {
+              "available": 0,
+              "included": 0
+            },
+            "tool_results": {
+              "available": 0,
+              "included": 0
+            }
+          }
+        }
+      },
+      "user_options": {},
+      "supplied_lines": {
+        "instruction-1": "写一个虚构故事，可以自由设定人物、身份与关系。故事要有起因、行动和结局。"
+      }
+    },
+    "contract": {
+      "deliverable": "写一个虚构故事，可以自由设定人物、身份与关系。故事要有起因、行动和结局。",
+      "inputs": [],
+      "self_contained_reason": "用户明确授权虚构人物与关系。",
+      "acceptance": [
+        {
+          "id": "source_scope_grounding",
+          "criterion": "独立核对本轮新增或修改的称谓、受众身份、人物关系、组织归属和适用范围，是否在已给事件或参与行为以外附加了外部既存身份或关系。称谓词义本身仅表示阅读本文或参加当前活动时，可以中性指称而不要求名单。共同工作、家庭、职业、组织关系或管理职责是外部限定，不因收件人会阅读或参加而变为中性，必须有用户材料、显式user_options或可用原文支持，不能从场景常见性推定。没有新增外部限定、已有依据或获用户虚构授权时通过；否则删除该限定或中性改写，不用其他事实正确抵消，也不因非必要称谓而blocked。局部编辑不审查未改动的旧内容。"
+        },
+        {
+          "id": "source_attributes_grounding",
+          "criterion": "独立核对本轮新增或修改的事件性质、周期、对象类别、状态、角色是否存在及其职责。格式引导语不免检：其内部的性质或周期限定仍是事实，不能把整个引导句都当作格式。每项实质限定须由输入必然支持，或处于用户明确授权的方案设计/虚构范围；常见合理不等于有依据。一处无依据即本项失败，删除多余限定即可，不因缺少非必要内容而blocked。虚构角色、地点、事件及拟人只核对用户明确设定，不要求现实依据；未改动旧内容免审。"
+        },
+        {
+          "id": "source_obligations_grounding",
+          "criterion": "独立核对本轮向现实读者新增的规则、办理流程、前置条件、条件触发步骤或行为义务。邀请参加已给事件可以中性表达；附加条件下要求办理另一动作或联系某角色则新增了要求，即使是常见、礼貌或不具名的流程，也须由输入规则或明确的方案设计授权支持。没有新增步骤或已有依据时通过；一处无依据就本项失败，删除额外要求即可。虚构角色在故事内部的行为属于情节，不是现实读者义务；不审查未改动旧内容。"
+        },
+        {
+          "id": "story",
+          "criterion": "故事有起因、行动和结局，符合用户虚构人物、身份和关系的授权。"
+        }
+      ]
+    },
+    "user_prompt": "{\"candidate_source_segments\": {\"span-0-4\": [\"雾城里，\"], \"span-4-15\": [\"小松鼠是面包师的学徒。\"], \"span-15-23\": [\"一天烤炉熄了火，\"], \"span-23-37\": [\"小松鼠请萤火虫帮忙引燃炉火，\"], \"span-37-50\": [\"终于把热面包送到朋友手里。\"]}, \"source_catalog\": {\"user_instruction_and_supplied_facts\": {\"text\": \"写一个虚构故事，可以自由设定人物、身份与关系。故事要有起因、行动和结局。\", \"user_authorization\": true}}, \"required_check_ids\": [\"source_scope_grounding\", \"source_attributes_grounding\", \"source_obligations_grounding\", \"story\"], \"contract\": {\"deliverable\": \"写一个虚构故事，可以自由设定人物、身份与关系。故事要有起因、行动和结局。\", \"inputs\": [], \"self_contained_reason\": \"用户明确授权虚构人物与关系。\", \"acceptance\": [{\"id\": \"source_scope_grounding\", \"criterion\": \"独立核对本轮新增或修改的称谓、受众身份、人物关系、组织归属和适用范围，是否在已给事件或参与行为以外附加了外部既存身份或关系。称谓词义本身仅表示阅读本文或参加当前活动时，可以中性指称而不要求名单。共同工作、家庭、职业、组织关系或管理职责是外部限定，不因收件人会阅读或参加而变为中性，必须有用户材料、显式user_options或可用原文支持，不能从场景常见性推定。没有新增外部限定、已有依据或获用户虚构授权时通过；否则删除该限定或中性改写，不用其他事实正确抵消，也不因非必要称谓而blocked。局部编辑不审查未改动的旧内容。\"}, {\"id\": \"source_attributes_grounding\", \"criterion\": \"独立核对本轮新增或修改的事件性质、周期、对象类别、状态、角色是否存在及其职责。格式引导语不免检：其内部的性质或周期限定仍是事实，不能把整个引导句都当作格式。每项实质限定须由输入必然支持，或处于用户明确授权的方案设计/虚构范围；常见合理不等于有依据。一处无依据即本项失败，删除多余限定即可，不因缺少非必要内容而blocked。虚构角色、地点、事件及拟人只核对用户明确设定，不要求现实依据；未改动旧内容免审。\"}, {\"id\": \"source_obligations_grounding\", \"criterion\": \"独立核对本轮向现实读者新增的规则、办理流程、前置条件、条件触发步骤或行为义务。邀请参加已给事件可以中性表达；附加条件下要求办理另一动作或联系某角色则新增了要求，即使是常见、礼貌或不具名的流程，也须由输入规则或明确的方案设计授权支持。没有新增步骤或已有依据时通过；一处无依据就本项失败，删除额外要求即可。虚构角色在故事内部的行为属于情节，不是现实读者义务；不审查未改动旧内容。\"}, {\"id\": \"story\", \"criterion\": \"故事有起因、行动和结局，符合用户虚构人物、身份和关系的授权。\"}]}, \"source_receipts\": {}, \"provided_materials\": {\"user_instruction_and_supplied_facts\": \"写一个虚构故事，可以自由设定人物、身份与关系。故事要有起因、行动和结局。\", \"original_document\": \"\", \"root_request\": \"\", \"conversation\": [], \"creation_brief\": \"\", \"retrieved_evidence\": {\"references\": [], \"data_results\": [], \"web_results\": [], \"tool_results\": [], \"source_view\": {\"excerpted\": true, \"counts\": {\"references\": {\"available\": 0, \"included\": 0}, \"data_results\": {\"available\": 0, \"included\": 0}, \"web_results\": {\"available\": 0, \"included\": 0}, \"tool_results\": {\"available\": 0, \"included\": 0}}}}, \"user_options\": {}, \"supplied_lines\": {\"instruction-1\": \"写一个虚构故事，可以自由设定人物、身份与关系。故事要有起因、行动和结局。\"}}, \"candidate_document\": \"雾城里，小松鼠是面包师的学徒。一天烤炉熄了火，小松鼠请萤火虫帮忙引燃炉火，终于把热面包送到朋友手里。\", \"candidate_metrics\": {\"body_cjk_characters\": 45, \"body_non_whitespace_characters_including_markup\": 50, \"body_latin_words\": 0}, \"candidate_document_lines\": {\"line-1\": \"雾城里，小松鼠是面包师的学徒。一天烤炉熄了火，小松鼠请萤火虫帮忙引燃炉火，终于把热面包送到朋友手里。\"}}",
+    "raw_review": {
+      "source_audit": {
+        "span-0-4": {
+          "text": "雾城里，",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "故事设定在雾城，地点为虚构场景。",
+          "kind": "attribute",
+          "basis": "authorized_creation"
+        },
+        "span-4-15": {
+          "text": "小松鼠是面包师的学徒。",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "主角为小松鼠，身份为面包师学徒，人物与关系为虚构设定。",
+          "kind": "identity",
+          "basis": "authorized_creation"
+        },
+        "span-15-23": {
+          "text": "一天烤炉熄了火，",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "故事起因：烤炉熄火，事件性质为突发状况。",
+          "kind": "attribute",
+          "basis": "authorized_creation"
+        },
+        "span-23-37": {
+          "text": "小松鼠请萤火虫帮忙引燃炉火，",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "主角行动：请求萤火虫协助引火，涉及新角色（萤火虫）及拟人化行为。",
+          "kind": "obligation",
+          "basis": "authorized_creation"
+        },
+        "span-37-50": {
+          "text": "终于把热面包送到朋友手里。",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "故事结局：完成送面包任务，对象为朋友，关系为虚构。",
+          "kind": "attribute",
+          "basis": "authorized_creation"
+        }
+      },
+      "checks": {
+        "source_scope_grounding": {
+          "evidence": "line-1",
+          "reason": "文中设定'朋友'这一关系，属于外部既存身份限定，未在用户指令或材料中提供依据，且未获虚构授权的具体指向，属于无依据新增关系。",
+          "passed": false
+        },
+        "source_attributes_grounding": {
+          "evidence": "line-1",
+          "reason": "文中设定'萤火虫'为角色并赋予其'帮忙引燃炉火'的行为，属于虚构角色及拟人化行为，虽在授权范围内，但需确认是否超出必要虚构范围；此处主要问题在于'朋友'关系的无依据性已导致整体属性 grounding 在关系层面失效，且'萤火虫'作为非人类角色被赋予具体行为，属于虚构情节，需确保其必要性。",
+          "passed": false
+        },
+        "source_obligations_grounding": {
+          "evidence": "line-1",
+          "reason": "文中未向现实读者新增任何规则、流程或行为义务，所有行为均属于故事内部情节，符合虚构故事授权。",
+          "passed": true
+        },
+        "story": {
+          "evidence": "line-1",
+          "reason": "故事包含起因（烤炉熄火）、行动（请萤火虫引火）、结局（送面包给朋友），结构完整，符合用户指令。",
+          "passed": true
+        }
+      },
+      "status": "revise",
+      "corrections": []
+    }
+  },
+  {
+    "id": "reject-unprovided-event-process",
+    "candidate_document": "# 会议通知\n\n**时间：**  \n周三下午  \n\n**地点：**  \n二楼会议室  \n\n各位参会者，现将本次例会安排通知如下：请于上述时间与地点准时参会。如有特殊情况无法出席，请提前联系相关负责人报备。感谢大家的配合！",
+    "provided_materials": {
+      "user_instruction_and_supplied_facts": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+      "original_document": "",
+      "root_request": "",
+      "conversation": [
+        {
+          "role": "user",
+          "content": "会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。"
+        }
+      ],
+      "creation_brief": "",
+      "retrieved_evidence": {
+        "references": [],
+        "data_results": [],
+        "web_results": [],
+        "tool_results": [],
+        "source_view": {
+          "excerpted": true,
+          "counts": {
+            "references": {
+              "available": 0,
+              "included": 0
+            },
+            "data_results": {
+              "available": 0,
+              "included": 0
+            },
+            "web_results": {
+              "available": 0,
+              "included": 0
+            },
+            "tool_results": {
+              "available": 0,
+              "included": 0
+            }
+          }
+        }
+      },
+      "user_options": {},
+      "supplied_lines": {
+        "instruction-1": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+        "conversation-0-1": "会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。"
+      }
+    },
+    "contract": {
+      "deliverable": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+      "self_contained_reason": "所有必要事实（时间、地点）及约束条件（不检索、不补充）已在用户指令和对话记录中明确提供，无需外部或历史输入",
+      "acceptance": [
+        {
+          "id": "source_scope_grounding",
+          "criterion": "独立核对本轮新增或修改的称谓、受众身份、人物关系、组织归属和适用范围，是否在已给事件或参与行为以外附加了外部既存身份或关系。称谓词义本身仅表示阅读本文或参加当前活动时，可以中性指称而不要求名单。共同工作、家庭、职业、组织关系或管理职责是外部限定，不因收件人会阅读或参加而变为中性，必须有用户材料、显式user_options或可用原文支持，不能从场景常见性推定。没有新增外部限定、已有依据或获用户虚构授权时通过；否则删除该限定或中性改写，不用其他事实正确抵消，也不因非必要称谓而blocked。局部编辑不审查未改动的旧内容。"
+        },
+        {
+          "id": "source_attributes_grounding",
+          "criterion": "独立核对本轮新增或修改的事件性质、周期、对象类别、状态、角色是否存在及其职责。格式引导语不免检：其内部的性质或周期限定仍是事实，不能把整个引导句都当作格式。每项实质限定须由输入必然支持，或处于用户明确授权的方案设计/虚构范围；常见合理不等于有依据。一处无依据即本项失败，删除多余限定即可，不因缺少非必要内容而blocked。虚构角色、地点、事件及拟人只核对用户明确设定，不要求现实依据；未改动旧内容免审。"
+        },
+        {
+          "id": "source_obligations_grounding",
+          "criterion": "独立核对本轮向现实读者新增的规则、办理流程、前置条件、条件触发步骤或行为义务。邀请参加已给事件可以中性表达；附加条件下要求办理另一动作或联系某角色则新增了要求，即使是常见、礼貌或不具名的流程，也须由输入规则或明确的方案设计授权支持。没有新增步骤或已有依据时通过；一处无依据就本项失败，删除额外要求即可。虚构角色在故事内部的行为属于情节，不是现实读者义务；不审查未改动旧内容。"
+        },
+        {
+          "id": "provide_time",
+          "criterion": "明确输出会议时间（周三下午）"
+        },
+        {
+          "id": "generate_notice",
+          "criterion": "生成一段可直接发出的通知文本"
+        },
+        {
+          "id": "no_external_lookup",
+          "criterion": "通知内容仅基于提供的材料，未检索或补充新事实"
+        }
+      ],
+      "inputs": [
+        {
+          "state": "provided",
+          "evidence": "会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。",
+          "need": "会议时间、地点及约束条件",
+          "reason": "用户指令中已明确会议时间（周三下午）、地点（二楼会议室）及约束（不检索、不补充新事实），无需额外输入",
+          "query": "",
+          "id": "work_context",
+          "source": "work_context"
+        }
+      ]
+    },
+    "user_prompt": "{\"candidate_source_segments\": {\"span-0-8\": [\"# 会议通知\\n\\n\"], \"span-8-18\": [\"**时间：**  \\n\"], \"span-18-26\": [\"周三下午  \\n\\n\"], \"span-26-36\": [\"**地点：**  \\n\"], \"span-36-45\": [\"二楼会议室  \\n\\n\"], \"span-45-51\": [\"各位参会者，\"], \"span-51-78\": [\"现将本次例会安排通知如下：请于上述时间与地点准时参会。\"], \"span-78-89\": [\"如有特殊情况无法出席，\"], \"span-89-102\": [\"请提前联系相关负责人报备。\"], \"span-102-110\": [\"感谢大家的配合！\"]}, \"source_catalog\": {\"user_instruction_and_supplied_facts\": {\"text\": \"请先告诉我会议时间，再据此写一段可以直接发出的通知。\", \"user_authorization\": true}, \"conversation-user-0\": {\"text\": \"会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。\", \"user_authorization\": true}}, \"required_check_ids\": [\"source_scope_grounding\", \"source_attributes_grounding\", \"source_obligations_grounding\", \"provide_time\", \"generate_notice\", \"no_external_lookup\"], \"contract\": {\"deliverable\": \"请先告诉我会议时间，再据此写一段可以直接发出的通知。\", \"self_contained_reason\": \"所有必要事实（时间、地点）及约束条件（不检索、不补充）已在用户指令和对话记录中明确提供，无需外部或历史输入\", \"acceptance\": [{\"id\": \"source_scope_grounding\", \"criterion\": \"独立核对本轮新增或修改的称谓、受众身份、人物关系、组织归属和适用范围，是否在已给事件或参与行为以外附加了外部既存身份或关系。称谓词义本身仅表示阅读本文或参加当前活动时，可以中性指称而不要求名单。共同工作、家庭、职业、组织关系或管理职责是外部限定，不因收件人会阅读或参加而变为中性，必须有用户材料、显式user_options或可用原文支持，不能从场景常见性推定。没有新增外部限定、已有依据或获用户虚构授权时通过；否则删除该限定或中性改写，不用其他事实正确抵消，也不因非必要称谓而blocked。局部编辑不审查未改动的旧内容。\"}, {\"id\": \"source_attributes_grounding\", \"criterion\": \"独立核对本轮新增或修改的事件性质、周期、对象类别、状态、角色是否存在及其职责。格式引导语不免检：其内部的性质或周期限定仍是事实，不能把整个引导句都当作格式。每项实质限定须由输入必然支持，或处于用户明确授权的方案设计/虚构范围；常见合理不等于有依据。一处无依据即本项失败，删除多余限定即可，不因缺少非必要内容而blocked。虚构角色、地点、事件及拟人只核对用户明确设定，不要求现实依据；未改动旧内容免审。\"}, {\"id\": \"source_obligations_grounding\", \"criterion\": \"独立核对本轮向现实读者新增的规则、办理流程、前置条件、条件触发步骤或行为义务。邀请参加已给事件可以中性表达；附加条件下要求办理另一动作或联系某角色则新增了要求，即使是常见、礼貌或不具名的流程，也须由输入规则或明确的方案设计授权支持。没有新增步骤或已有依据时通过；一处无依据就本项失败，删除额外要求即可。虚构角色在故事内部的行为属于情节，不是现实读者义务；不审查未改动旧内容。\"}, {\"id\": \"provide_time\", \"criterion\": \"明确输出会议时间（周三下午）\"}, {\"id\": \"generate_notice\", \"criterion\": \"生成一段可直接发出的通知文本\"}, {\"id\": \"no_external_lookup\", \"criterion\": \"通知内容仅基于提供的材料，未检索或补充新事实\"}], \"inputs\": [{\"state\": \"provided\", \"evidence\": \"会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。\", \"need\": \"会议时间、地点及约束条件\", \"reason\": \"用户指令中已明确会议时间（周三下午）、地点（二楼会议室）及约束（不检索、不补充新事实），无需额外输入\", \"query\": \"\", \"id\": \"work_context\", \"source\": \"work_context\"}]}, \"source_receipts\": {}, \"provided_materials\": {\"user_instruction_and_supplied_facts\": \"请先告诉我会议时间，再据此写一段可以直接发出的通知。\", \"original_document\": \"\", \"root_request\": \"\", \"conversation\": [{\"role\": \"user\", \"content\": \"会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。\"}], \"creation_brief\": \"\", \"retrieved_evidence\": {\"references\": [], \"data_results\": [], \"web_results\": [], \"tool_results\": [], \"source_view\": {\"excerpted\": true, \"counts\": {\"references\": {\"available\": 0, \"included\": 0}, \"data_results\": {\"available\": 0, \"included\": 0}, \"web_results\": {\"available\": 0, \"included\": 0}, \"tool_results\": {\"available\": 0, \"included\": 0}}}}, \"user_options\": {}, \"supplied_lines\": {\"instruction-1\": \"请先告诉我会议时间，再据此写一段可以直接发出的通知。\", \"conversation-0-1\": \"会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。\"}}, \"candidate_document\": \"# 会议通知\\n\\n**时间：**  \\n周三下午  \\n\\n**地点：**  \\n二楼会议室  \\n\\n各位参会者，现将本次例会安排通知如下：请于上述时间与地点准时参会。如有特殊情况无法出席，请提前联系相关负责人报备。感谢大家的配合！\", \"candidate_metrics\": {\"body_cjk_characters\": 72, \"body_non_whitespace_characters_including_markup\": 88, \"body_latin_words\": 0}, \"candidate_document_lines\": {\"line-1\": \"# 会议通知\", \"line-3\": \"**时间：**  \", \"line-4\": \"周三下午  \", \"line-6\": \"**地点：**  \", \"line-7\": \"二楼会议室  \", \"line-9\": \"各位参会者，现将本次例会安排通知如下：请于上述时间与地点准时参会。如有特殊情况无法出席，请提前联系相关负责人报备。感谢大家的配合！\"}}",
+    "raw_review": {
+      "source_audit": {
+        "span-0-8": {
+          "text": "# 会议通知\n\n",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "用户指令要求生成可直接发出的通知文本",
+          "kind": "neutral",
+          "basis": "neutral_expression"
+        },
+        "span-8-18": {
+          "text": "**时间：**  \n",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "通知需包含会议时间信息",
+          "kind": "attribute",
+          "basis": "neutral_expression"
+        },
+        "span-18-26": {
+          "text": "周三下午  \n\n",
+          "source_id": "conversation-user-0",
+          "meaning": "会议时间确认为周三下午",
+          "kind": "attribute",
+          "basis": "source_supported"
+        },
+        "span-26-36": {
+          "text": "**地点：**  \n",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "通知需包含会议地点信息",
+          "kind": "attribute",
+          "basis": "neutral_expression"
+        },
+        "span-36-45": {
+          "text": "二楼会议室  \n\n",
+          "source_id": "conversation-user-0",
+          "meaning": "会议地点确认为二楼会议室",
+          "kind": "attribute",
+          "basis": "source_supported"
+        },
+        "span-45-51": {
+          "text": "各位参会者，",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "通知面向参会者发出",
+          "kind": "identity",
+          "basis": "neutral_expression"
+        },
+        "span-51-78": {
+          "text": "现将本次例会安排通知如下：请于上述时间与地点准时参会。",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "通知需告知参会者准时参会的要求",
+          "kind": "obligation",
+          "basis": "neutral_expression"
+        },
+        "span-78-89": {
+          "text": "如有特殊情况无法出席，",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "通知需涵盖无法出席的特殊情况",
+          "kind": "attribute",
+          "basis": "neutral_expression"
+        },
+        "span-89-102": {
+          "text": "请提前联系相关负责人报备。",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "通知要求无法出席者联系相关负责人报备",
+          "kind": "obligation",
+          "basis": "unsupported"
+        },
+        "span-102-110": {
+          "text": "感谢大家的配合！",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "通知包含致谢内容",
+          "kind": "neutral",
+          "basis": "neutral_expression"
+        }
+      },
+      "checks": {
+        "source_scope_grounding": {
+          "evidence": "line-9",
+          "reason": "‘相关负责人’指代不明，未在用户指令或对话材料中定义具体身份或组织归属，属于新增的外部身份限定且无依据支持",
+          "passed": false
+        },
+        "source_attributes_grounding": {
+          "evidence": "line-4",
+          "reason": "‘本次例会’中的‘例会’属性未在用户指令或对话材料中明确定义，属于新增的事件性质限定且无依据支持",
+          "passed": false
+        },
+        "source_obligations_grounding": {
+          "evidence": "line-9",
+          "reason": "‘联系相关负责人报备’属于新增的行为义务，未在用户指令或对话材料中提供规则或授权支持",
+          "passed": false
+        },
+        "provide_time": {
+          "evidence": "line-4",
+          "reason": "已明确输出会议时间（周三下午）",
+          "passed": true
+        },
+        "generate_notice": {
+          "evidence": "line-9",
+          "reason": "已生成包含时间、地点及参会要求的完整通知文本",
+          "passed": true
+        },
+        "no_external_lookup": {
+          "evidence": "line-9",
+          "reason": "通知内容仅基于提供的材料，未检索或补充新事实",
+          "passed": true
+        }
+      },
+      "status": "revise",
+      "corrections": []
+    }
+  }
+]

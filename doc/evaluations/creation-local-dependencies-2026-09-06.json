@@ -1,0 +1,237 @@
+{
+  "model": "qwen3.5:4b",
+  "endpoint": "http://127.0.0.1:50256",
+  "scope": "real routing and input assessment; synthetic documents; no external retrieval",
+  "cases": [
+    {
+      "id": "append-metrics",
+      "instruction": "查一下本周真实项目经营数据，在附录补充本周收入，其他内容原样保留。",
+      "candidate": {
+        "tools": [
+          "data_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "id": "node-5100a636854871de"
+            }
+          ]
+        },
+        "reasoning": "用户要求补充本周真实项目经营数据（收入），这需要查询用户自有业务数据。当前文档中附录内容为'旧说明'，需要替换为具体的收入数据。根据操作规则，当需要获取当前上下文未包含的数值（本周收入）时，应调用 data_search 工具。由于用户未指定具体技能，且主目标为数据补充而非全文创作或复杂分析，故不选择 execute_skill 或 generate，而是通过工具获取数据后执行 transform",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "在文档附录部分补充本周真实项目经营数据（收入），其余内容保持不变。",
+        "self_contained_reason": "任务依赖真实业务数据（本周收入），该数据未在提供的文档或指令中给出，必须通过外部查询获取。",
+        "acceptance": [
+          {
+            "id": "append_income_data",
+            "criterion": "在文档的'附录'部分（document-6 之后）准确补充本周真实项目收入数据。"
+          },
+          {
+            "id": "preserve_original_content",
+            "criterion": "除补充收入数据外，文档其他所有内容（包括标题、旧说明、联系方式等）保持原样。"
+          }
+        ],
+        "inputs": [
+          {
+            "need": "项目背景、术语及过往决策",
+            "reason": "需确认'星禾项目'的具体定义及'本周'的时间范围，以确保数据准确性。",
+            "state": "missing",
+            "evidence": "",
+            "query": "检索星禾项目的定义、当前时间范围及过往经营数据格式",
+            "id": "work_context",
+            "source": "work_context"
+          },
+          {
+            "need": "本周真实项目经营数据（收入）",
+            "reason": "用户指令明确要求补充'本周真实项目经营数据'，这是核心事实需求。",
+            "state": "missing",
+            "evidence": "",
+            "query": "查询星禾项目本周的实际收入数据",
+            "id": "business_data",
+            "source": "business_data"
+          }
+        ]
+      },
+      "effective": {
+        "tools": [
+          "memory_search",
+          "data_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "id": "node-5100a636854871de"
+            }
+          ]
+        },
+        "reasoning": "已按本轮资料需求校正检索依赖；必要查询见各输入缺口与工具步骤。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": false,
+        "no_full_workflow": true,
+        "authorized_scope": true
+      },
+      "passed": false,
+      "model_replies": [
+        "{\n  \"deliverable\": \"更新后的文档，其中已补充本周真实项目经营数据（收入部分），其他内容保持不变。\",\n  \"primary_goal\": \"在现有文档的附录中补充本周收入数据，完成文档的实质性修改。\",\n  \"action\": \"edit\"\n}",
+        "{\"reasoning\":\"用户要求补充本周真实项目经营数据（收入），这需要查询用户自有业务数据。当前文档中附录内容为'旧说明'，需要替换为具体的收入数据。根据操作规则，当需要获取当前上下文未包含的数值（本周收入）时，应调用 data_search 工具。由于用户未指定具体技能，且主目标为数据补充而非全文创作或复杂分析，故不选择 execute_skill 或 generate，而是通过工具获取数据后执行 transform 操作。\", \"operation\":{\"kind\":\"transform\",\"targets\":[{\"id\":\"node-5100a636854871de\"}]},\"tools\":[\"data_search\"],\"agents\":[]}",
+        "{\n  \"deliverable\": \"在文档附录部分补充本周真实项目经营数据（收入），其余内容保持不变。\",\n  \"requirements_by_source\": {\n    \"work_context\": {\n      \"need\": \"项目背景、术语及过往决策\",\n      \"reason\": \"需确认'星禾项目'的具体定义及'本周'的时间范围，以确保数据准确性。\",\n      \"state\": \"missing\",\n      \"evidence\": \"\",\n      \"query\": \"检索星禾项目的定义、当前时间范围及过往经营数据格式\"\n    },\n    \"business_data\": {\n      \"need\": \"本周真实项目经营数据（收入）\",\n      \"reason\": \"用户指令明确要求补充'本周真实项目经营数据'，这是核心事实需求。\",\n      \"state\": \"missing\",\n      \"evidence\": \"\",\n      \"query\": \"查询星禾项目本周的实际收入数据\"\n    },\n    \"public_facts\": {\n      \"need\": \"公开产品、技术能力和最新事实\",\n      \"reason\": \"无需依赖，任务不涉及虚构或通用原理，仅处理真实业务数据。\",\n      \"state\": \"not_needed\",\n      \"evidence\": \"\",\n      \"query\": \"\"\n    }\n  },\n  \"self_contained_reason\": \"任务依赖真实业务数据（本周收入），该数据未在提供的文档或指令中给出，必须通过外部查询获取。\",\n  \"acceptance\": [\n    {\n      \"id\": \"append_income_data\",\n      \"criterion\": \"在文档的'附录'部分（document-6 之后）准确补充本周真实项目收入数据。\"\n    },\n    {\n      \"id\": \"preserve_original_content\",\n      \"criterion\": \"除补充收入数据外，文档其他所有内容（包括标题、旧说明、联系方式等）保持原样。\"\n    }\n  ]\n}"
+      ],
+      "seconds": 24.0
+    },
+    {
+      "id": "transform-no-search",
+      "instruction": "把会议安排写得更简洁，不增加新事实，其他部分保持原样",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "id": "node-a57eb929ed387502"
+            }
+          ]
+        },
+        "reasoning": "用户要求将会议安排部分写得更简洁，不增加新事实。当前文档中“会议安排”节点（node-a57eb929ed387502）内容为“周一上午讨论项目进展。”，该文本已非常简洁，无需进一步压缩。其他部分（会议说明、附录、联系方式）保持不变。由于无需检索外部资料或调用复杂技能，且目标仅为局部文本优化，故选择 transform 操作，针对“会议安排”节点进行改写（此处实际内容为原样，故改写后内容不变，仅执",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "把会议安排写得更简洁，不增加新事实，其他部分保持原样",
+        "self_contained_reason": "本轮任务仅要求对已提供的文档内容进行‘简洁化’改写，且明确禁止增加新事实。由于原文中关于会议安排的具体事实（如时间、地点、议程等）缺失，无法执行‘精简’操作而不改变原意或增加虚构内容。因此，该任务在当前提供的材料下无法完成，必须依赖外部事实才能执行。",
+        "acceptance": [
+          {
+            "id": "conciseness",
+            "criterion": "改写后的会议安排部分比原文更简洁，且未引入任何原文不存在的新事实。"
+          },
+          {
+            "id": "fidelity",
+            "criterion": "除会议安排部分的精简外，其他部分保持原样。"
+          }
+        ],
+        "inputs": [
+          {
+            "need": "会议安排的具体内容（时间、主题、地点等）",
+            "reason": "用户要求‘写得更简洁’，必须基于原文中已有的会议安排事实进行删减或重组，无法凭空创造新事实。",
+            "state": "missing",
+            "evidence": "",
+            "query": "检索文档中关于会议安排的具体事实（如时间、地点、参会人员、议程等）",
+            "id": "work_context",
+            "source": "work_context"
+          }
+        ]
+      },
+      "effective": {
+        "tools": [
+          "memory_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "id": "node-a57eb929ed387502"
+            }
+          ]
+        },
+        "reasoning": "已按本轮资料需求校正检索依赖；必要查询见各输入缺口与工具步骤。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": false,
+        "no_full_workflow": true,
+        "authorized_scope": true
+      },
+      "passed": false,
+      "model_replies": [
+        "{\n  \"deliverable\": \"修改后的会议安排文档，仅优化语言简洁度，未新增事实内容\",\n  \"primary_goal\": \"提升文档表达效率，保持信息完整性\",\n  \"action\": \"edit\"\n}",
+        "{\"reasoning\":\"用户要求将会议安排部分写得更简洁，不增加新事实。当前文档中“会议安排”节点（node-a57eb929ed387502）内容为“周一上午讨论项目进展。”，该文本已非常简洁，无需进一步压缩。其他部分（会议说明、附录、联系方式）保持不变。由于无需检索外部资料或调用复杂技能，且目标仅为局部文本优化，故选择 transform 操作，针对“会议安排”节点进行改写（此处实际内容为原样，故改写后内容不变，仅执行操作以响应请求）。\", \"operation\": {\"kind\": \"transform\", \"targets\": [{\"id\": \"node-a57eb929ed387502\"}]}, \"tools\": [], \"agents\": []}",
+        "{\n  \"deliverable\": \"把会议安排写得更简洁，不增加新事实，其他部分保持原样\",\n  \"requirements_by_source\": {\n    \"work_context\": {\n      \"need\": \"会议安排的具体内容（时间、主题、地点等）\",\n      \"reason\": \"用户要求‘写得更简洁’，必须基于原文中已有的会议安排事实进行删减或重组，无法凭空创造新事实。\",\n      \"state\": \"missing\",\n      \"evidence\": \"\",\n      \"query\": \"检索文档中关于会议安排的具体事实（如时间、地点、参会人员、议程等）\"\n    },\n    \"business_data\": {\n      \"need\": \"无\",\n      \"reason\": \"任务仅涉及文本风格的调整（简洁化），不涉及业务指标、基线或历史表现的分析。\",\n      \"state\": \"not_needed\",\n      \"evidence\": \"\",\n      \"query\": \"\"\n    },\n    \"public_facts\": {\n      \"need\": \"无\",\n      \"reason\": \"任务明确‘不增加新事实’，且仅针对提供的文档内容进行编辑，无需引入外部公开产品或技术事实。\",\n      \"state\": \"not_needed\",\n      \"evidence\": \"\",\n      \"query\": \"\"\n    }\n  },\n  \"self_contained_reason\": \"本轮任务仅要求对已提供的文档内容进行‘简洁化’改写，且明确禁止增加新事实。由于原文中关于会议安排的具体事实（如时间、地点、议程等）缺失，无法执行‘精简’操作而不改变原意或增加虚构内容。因此，该任务在当前提供的材料下无法完成，必须依赖外部事实才能执行。\",\n  \"acceptance\": [\n    {\n      \"id\": \"conciseness\",\n      \"criterion\": \"改写后的会议安排部分比原文更简洁，且未引入任何原文不存在的新事实。\"\n    },\n    {\n      \"id\": \"fidelity\",\n      \"criterion\": \"除会议安排部分的精简外，其他部分保持原样。\"\n    }\n  ]\n}"
+      ],
+      "seconds": 14.71
+    },
+    {
+      "id": "append-metrics-ambiguous-project",
+      "instruction": "查一下本周真实项目经营数据，在附录补充本周收入，其他内容原样保留。",
+      "candidate": {
+        "tools": [
+          "data_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "text": "旧说明。",
+              "occurrence": 1
+            }
+          ]
+        },
+        "reasoning": "用户要求补充本周真实项目经营数据（收入），当前文档附录中仅有旧说明，缺乏具体数值。根据操作规范，补充真实业务数据需先通过数据检索工具获取，再执行文档修改。因此需调用 data_search 获取数据，并使用 transform 操作替换或补充附录内容。",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "在文档附录部分补充本周真实项目经营数据（收入），其余内容保持不变。",
+        "self_contained_reason": "本轮任务仅依赖业务数据中的本周收入事实，该事实未在输入材料中提供，需通过查询获取。",
+        "acceptance": [
+          {
+            "id": "append_income_data",
+            "criterion": "在文档的附录部分（document-6 之后）补充本周真实项目经营数据中的收入数值。"
+          },
+          {
+            "id": "preserve_original_content",
+            "criterion": "除补充收入数据外，文档其他内容（如会议说明、安排、联系方式等）保持原样。"
+          }
+        ],
+        "inputs": [
+          {
+            "need": "本周真实项目经营数据（具体收入数值）",
+            "reason": "判断依据：用户指令明确要求‘查一下本周真实项目经营数据’并‘补充本周收入’，这是执行任务的核心事实依据。",
+            "state": "missing",
+            "evidence": "",
+            "query": "查询本周真实项目经营数据中的收入指标",
+            "id": "business_data",
+            "source": "business_data"
+          }
+        ]
+      },
+      "effective": {
+        "tools": [
+          "data_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "text": "旧说明。",
+              "occurrence": 1
+            }
+          ]
+        },
+        "reasoning": "用户要求补充本周真实项目经营数据（收入），当前文档附录中仅有旧说明，缺乏具体数值。根据操作规范，补充真实业务数据需先通过数据检索工具获取，再执行文档修改。因此需调用 data_search 获取数据，并使用 transform 操作替换或补充附录内容。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "authorized_scope": true
+      },
+      "passed": true,
+      "seconds": 13.36
+    }
+  ]
+}

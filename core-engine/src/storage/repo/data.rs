@@ -7,11 +7,11 @@ use sha2::{Digest, Sha256};
 use crate::storage::{
     db::current_ts_ms,
     error::StorageError,
-    fts::{build_fts_or_query, split_query_terms, DEFAULT_FTS_CANDIDATE_CAP},
     models_data::{
         DataExtractionSummary, DataSearchResult, DataSnapshotRecord, DataSourceRecord,
         DiscoveredSourceOutcome,
     },
+    search::{search_match_score, split_search_terms},
     StorageManager,
 };
 
@@ -212,29 +212,10 @@ impl StorageManager {
             if let Some(id) = exact_id {
                 candidates.retain(|source| source.id == id);
             }
-            // FTS5 预筛：data_snapshots_fts 命中快照对应的 source_id 可用时，
-            // 在加载快照文本前先收窄候选（source 级字段命中的候选保留）；
-            // FTS 不可用时返回 None，回退原有全量校验。
-            let fts_source_ids = if exact_id.is_some() {
-                None
-            } else {
-                query
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .and_then(|q| data_snapshot_fts_source_ids(conn, q))
-            };
             for record in &mut candidates {
-                let passes_prefilter = match &fts_source_ids {
-                    Some(ids) => {
-                        ids.contains(&record.id)
-                            || data_source_base_fields_match(record, query.unwrap_or_default())
-                    }
-                    None => true,
-                };
-                if passes_prefilter {
-                    let latest = latest_snapshot(conn, record)?;
-                    record.latest_snapshot = latest;
-                }
+                // 列表搜索必须保持中文子串完整性。默认 FTS tokenizer 不能保证任意
+                // 中文子串都进入候选集，因此这里加载最新快照后再执行统一 AND 校验。
+                record.latest_snapshot = latest_snapshot(conn, record)?;
             }
             candidates.retain(is_presentable_data_source);
             if let Some(source_kind) = source_kind.map(str::trim).filter(|value| !value.is_empty())
@@ -255,13 +236,24 @@ impl StorageManager {
                     candidates.retain(|source| data_source_matches_query(source, query));
                 }
             }
-            // 数据表格统一按创建时间逆序展示，与页面创建时间列保持一致。
-            candidates.sort_by(|left, right| {
-                right
-                    .created_at
-                    .cmp(&left.created_at)
-                    .then_with(|| right.id.cmp(&left.id))
-            });
+            if exact_id.is_none() {
+                if let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) {
+                    let terms = split_search_terms(query);
+                    candidates.sort_by(|left, right| {
+                        data_source_search_score(right, query, &terms)
+                            .cmp(&data_source_search_score(left, query, &terms))
+                            .then_with(|| right.created_at.cmp(&left.created_at))
+                            .then_with(|| right.id.cmp(&left.id))
+                    });
+                } else {
+                    candidates.sort_by(|left, right| {
+                        right
+                            .created_at
+                            .cmp(&left.created_at)
+                            .then_with(|| right.id.cmp(&left.id))
+                    });
+                }
+            }
             let total = candidates.len() as i64;
             let records = candidates.into_iter().skip(offset).take(limit).collect();
             Ok((records, total))
@@ -294,7 +286,14 @@ impl StorageManager {
             if let Some(id) = exact_id {
                 pending.retain(|source| source.id == id);
             } else if let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) {
+                let terms = split_search_terms(query);
                 pending.retain(|source| data_source_matches_query(source, query));
+                pending.sort_by(|left, right| {
+                    data_source_search_score(right, query, &terms)
+                        .cmp(&data_source_search_score(left, query, &terms))
+                        .then_with(|| right.created_at.cmp(&left.created_at))
+                        .then_with(|| right.id.cmp(&left.id))
+                });
             }
             let total = pending.len() as i64;
             pending.truncate(limit.clamp(1, 5000));
@@ -2454,82 +2453,40 @@ fn is_presentable_data_source(source: &DataSourceRecord) -> bool {
         .is_some_and(|rows| !rows.is_empty())
 }
 
-/// FTS5 预筛：返回 data_snapshots_fts 命中快照对应的 source_id 集合。
-///
-/// 返回 `None` 表示 FTS 不可用或候选不可靠（表缺失/查询失败/空命中/被上限截断），
-/// 调用方应回退原有全量过滤路径。
-fn data_snapshot_fts_source_ids(conn: &Connection, query: &str) -> Option<HashSet<i64>> {
-    let terms = split_query_terms(query);
-    let fts_query = build_fts_or_query(&terms)?;
-    let snapshot_ids: Vec<i64> = conn
-        .query_row(
-            "SELECT (SELECT GROUP_CONCAT(rowid) FROM data_snapshots_fts WHERE data_snapshots_fts MATCH ?1)",
-            params![fts_query],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .ok()
-        .flatten()
-        .map(|joined| {
-            joined
-                .split(',')
-                .filter_map(|part| part.trim().parse::<i64>().ok())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if snapshot_ids.is_empty() || snapshot_ids.len() >= DEFAULT_FTS_CANDIDATE_CAP {
-        return None;
-    }
-    let placeholders = vec!["?"; snapshot_ids.len()].join(",");
-    let sql = format!("SELECT DISTINCT source_id FROM data_snapshots WHERE id IN ({placeholders})");
-    let mut stmt = conn.prepare(&sql).ok()?;
-    let binds: Vec<&dyn rusqlite::ToSql> = snapshot_ids
-        .iter()
-        .map(|id| id as &dyn rusqlite::ToSql)
-        .collect();
-    let ids = stmt
-        .query_map(binds.as_slice(), |row| row.get::<_, i64>(0))
-        .ok()?
-        .collect::<Result<HashSet<_>, _>>()
-        .ok()?;
-    Some(ids)
-}
-
-/// 仅校验数据源自身字段（标题/URL/应用名）是否包含关键词，
-/// 用于 FTS 预筛时保留未被快照索引覆盖但 source 级字段命中的候选。
-fn data_source_base_fields_match(source: &DataSourceRecord, query: &str) -> bool {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return true;
-    }
-    format!(
-        "{}\n{}\n{}",
-        source.title,
-        source.source_url.as_deref().unwrap_or_default(),
-        source.source_app_name.as_deref().unwrap_or_default()
-    )
-    .to_lowercase()
-    .contains(&query)
-}
-
 fn data_source_matches_query(source: &DataSourceRecord, query: &str) -> bool {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return true;
-    }
-    let snapshot_text = source
+    let terms = split_search_terms(query);
+    data_source_search_score(source, query, &terms).is_some()
+}
+
+fn data_source_search_score(
+    source: &DataSourceRecord,
+    query: &str,
+    terms: &[String],
+) -> Option<i64> {
+    let tags = source.tags.join("\n");
+    let snapshot_content = source
         .latest_snapshot
         .as_ref()
-        .map(|snapshot| format!("{}\n{}", snapshot.content_text, snapshot.structured_data))
+        .map(|snapshot| snapshot.content_text.as_str())
         .unwrap_or_default();
-    format!(
-        "{}\n{}\n{}\n{}",
-        source.title,
-        source.source_url.as_deref().unwrap_or_default(),
-        source.source_app_name.as_deref().unwrap_or_default(),
-        snapshot_text
+    let snapshot_structured = source
+        .latest_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.structured_data.to_string())
+        .unwrap_or_default();
+    search_match_score(
+        query,
+        terms,
+        &[source.title.as_str()],
+        &[
+            source.source_kind.as_str(),
+            source.source_url.as_deref().unwrap_or_default(),
+            source.source_app_name.as_deref().unwrap_or_default(),
+            source.source_window_title.as_deref().unwrap_or_default(),
+            tags.as_str(),
+        ],
+        &[snapshot_content, snapshot_structured.as_str()],
     )
-    .to_lowercase()
-    .contains(&query)
 }
 
 fn parse_exact_data_source_id(query: &str) -> Option<i64> {
@@ -7816,6 +7773,12 @@ mod tests {
             .unwrap();
         assert_eq!(total, 1);
         assert_eq!(items[0].id, 2);
+
+        let (multi_term_items, multi_term_total) = storage
+            .list_data_sources_filtered(Some("实时 订单量"), None, None, None, None, 20, 0)
+            .unwrap();
+        assert_eq!(multi_term_total, 1);
+        assert_eq!(multi_term_items[0].id, 2);
     }
 
     #[test]

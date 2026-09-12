@@ -1,0 +1,75 @@
+{
+  "python_creation": {
+    "log": "/tmp/mb-skill-python-final-tests.log",
+    "sha256": "3bc3d410da6fd6e108937b48654bb2c78173d0e4569386f02651dd3d1b7bfe37",
+    "summary": [
+      "454 passed in 9.69s"
+    ]
+  },
+  "core_creation": {
+    "log": "/tmp/mb-skill-core-final-tests.log",
+    "sha256": "3ed88f440b09fee6d2a8665b0a86b08abfb73ccd4520d904cba57ad0715cf5f2",
+    "summary": [
+      "77 |     fn err(error: String) -> Self {",
+      "test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 482 filtered out; finished in 13.18s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s",
+      "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 9.16s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.63s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.37s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s"
+    ]
+  },
+  "core_operations": {
+    "log": "/tmp/mb-skill-core-operation-tests.log",
+    "sha256": "537b385d3f36952f7692e8b73084f9b001e7ff3f43a835f9de6c04580db04bc6",
+    "summary": [
+      "77 |     fn err(error: String) -> Self {",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.22s"
+    ]
+  },
+  "ui_creation": {
+    "log": "/tmp/mb-skill-ui-final-tests.log",
+    "sha256": "35308654c00130f50a6a34bec2ce0ea4488a28bfeb33e4ddec1f1745d0d31c0e",
+    "summary": [
+      " Test Files  4 passed (4)",
+      "      Tests  69 passed (69)"
+    ]
+  },
+  "ui_editor": {
+    "log": "/tmp/mb-skill-ui-editor-final.log",
+    "sha256": "63e165acb9be77eba2ef4099d4be73720ccf4426ca1c599cea4d335e584f0a2c",
+    "summary": [
+      " Test Files  1 passed (1)",
+      "      Tests  4 passed (4)"
+    ]
+  },
+  "ui_build": {
+    "log": "/tmp/mb-skill-ui-build.log",
+    "sha256": "ba9b1a57cdbb97088221607c721f699870ca08573ee87f224dc7491944ce6734",
+    "summary": [
+      "✓ built in 8.15s"
+    ]
+  },
+  "core_release_build": {
+    "log": "/tmp/mb-skill-core-build.log",
+    "sha256": "13d9020055f2d4d95ac2c43347b45ba4ad1ab453f086d75c9546216694050988",
+    "summary": [
+      "77 |     fn err(error: String) -> Self {"
+    ]
+  },
+  "python_compatibility": "7 changed runtime/evaluation files parsed with Python 3.9 grammar; creation tests executed using Python 3.9.25.",
+  "original_history": {
+    "id": 135,
+    "chars": 10699,
+    "sha256": "e890349cd695d0fbaebb77606b6c4fa9e5879913150a1d67c8228768221bd0f0"
+  },
+  "live_acceptance": {
+    "business_history_id": 138,
+    "explicit_history_id": 137,
+    "business": "creation-skill-runtime-final-2026-09-06/business-result.json",
+    "explicit": "creation-skill-runtime-resumed-2026-09-06/explicit-result.json",
+    "ui": "Reloaded histories and visually confirmed both independent document titles and completed explicit workflow."
+  }
+}

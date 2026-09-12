@@ -130,10 +130,12 @@ async fn main() -> anyhow::Result<()> {
 
     // 初始化存储
     tracing::info!("初始化数据库: {}", db_path.display());
-    let storage = StorageManager::open(&db_path)?;
+    let storage = StorageManager::open_observed(&db_path)?;
 
     // 创建应用状态
     let state = AppState::new(storage.clone());
+    tokio::spawn(memory_bread_core::api::handlers::bake::run_document_refresh_worker(state.clone()));
+    tokio::spawn(memory_bread_core::api::handlers::bake::run_document_summary_worker(state.clone()));
     let bridge_socket = start_browser_bridge_server(state.browser_extension.clone())?;
     tracing::info!(path = %bridge_socket.display(), "Chrome Native Messaging Bridge 已启动");
 

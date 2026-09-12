@@ -31,9 +31,10 @@ import type {
   SopCandidate,
   WritingStyleConfig,
 } from '../types'
+import { getLocalServiceBaseUrl } from '../utils/localServices'
 
-const LOCAL_CORE_API = 'http://127.0.0.1:7070'
-const LOCAL_MODEL_API = 'http://127.0.0.1:7071'
+const LOCAL_CORE_API = getLocalServiceBaseUrl('core')
+const LOCAL_MODEL_API = getLocalServiceBaseUrl('model_api')
 export const RAG_REFERENCE_LIMIT = 10
 
 export const normalizeLocalApiBaseUrl = (baseUrl: string) =>
@@ -336,6 +337,7 @@ async function fetchRagReferences(apiBaseUrl: string, query: string, signal?: Ab
 }
 
 interface GatewayRagHistoryOptions {
+  managedHistory?: boolean
   source?: string
   metadata?: Record<string, unknown>
 }
@@ -346,7 +348,7 @@ const optionalNumber = (value: unknown): number | null => {
 }
 
 const buildFloatingAssistHistoryContext = (metadata?: Record<string, unknown>): RagContext | null => {
-  if (metadata?.source !== 'floating_assist') return null
+  if (metadata?.source !== 'floating_assist' && !Array.isArray(metadata?.attachments)) return null
   return {
     capture_id: 0,
     doc_key: `floating-assist:${Date.now()}`,
@@ -357,7 +359,21 @@ const buildFloatingAssistHistoryContext = (metadata?: Record<string, unknown>): 
     screenshot_path: typeof metadata.screenshot_path === 'string' ? metadata.screenshot_path : null,
     screenshot_width: optionalNumber(metadata.screenshot_width),
     screenshot_height: optionalNumber(metadata.screenshot_height),
+    attachments: Array.isArray(metadata.attachments) ? metadata.attachments : [],
   }
+}
+
+export async function saveConsultationHistory(apiBaseUrl: string, query: string, metadata: Record<string, unknown>, answer: string, contexts: RagContext[] = [], id?: number, model?: string, latencyMs?: number): Promise<number> {
+  const floating = buildFloatingAssistHistoryContext(metadata)
+  const response = await fetchWithLocalhostFallback(`${normalizeLocalApiBaseUrl(apiBaseUrl)}/api/rag/history`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, query: metadata.manual_instruction || query, answer, model, latency_ms: latencyMs, source: metadata.source,
+      contexts: floating ? [floating, ...contexts.filter(item => item.source_type !== 'floating_assist')] : contexts }),
+  })
+  if (!response.ok) throw new Error('咨询记录保存失败，请检查本地存储后重试')
+  const data = await response.json()
+  if (!Number.isSafeInteger(data.id) || data.id <= 0) throw new Error('咨询记录保存失败：记录编号无效')
+  return data.id
 }
 
 export async function runGatewayRagQuery(
@@ -412,6 +428,7 @@ export async function runGatewayRagQuery(
     contexts,
     model: REMOTE_CREATION_MODEL_ID,
   }
+  if (historyOptions?.managedHistory) return result
   const normalizedApiBaseUrl = normalizeLocalApiBaseUrl(apiBaseUrl)
   const floatingContext = buildFloatingAssistHistoryContext(historyOptions?.metadata)
   const historyContexts = floatingContext ? [floatingContext, ...contexts] : contexts
@@ -491,6 +508,7 @@ export async function runGatewayRagQueryStream(
     elapsed_ms: streamed.elapsed_ms ?? Date.now() - startedAt,
   }
 
+  if (historyOptions?.managedHistory) return result
   const normalizedApiBaseUrl = normalizeLocalApiBaseUrl(apiBaseUrl)
   const floatingContext = buildFloatingAssistHistoryContext(historyOptions?.metadata)
   const historyContexts = floatingContext ? [floatingContext, ...contexts] : contexts
@@ -605,10 +623,20 @@ export function useRagQuery() {
     try {
       const remoteAllowed = Boolean(currentUser) && Number(cloudBalance?.available ?? 0) > 0
       const activeModelId = getEffectiveCreationModelId(creationModelConfigs, remoteAllowed)
-      const data = activeModelId === REMOTE_CREATION_MODEL_ID
-        ? await runGatewayRagQuery(apiBaseUrl, gatewayApiBaseUrl, query, currentUser?.id, signal)
-        : await runRagQueryJob(apiBaseUrl, creationModelConfigs, query, topK, extraPayload, remoteAllowed, signal)
-      setResult(data.answer, data.contexts ?? [])
+      const hasAttachments = Array.isArray(extraPayload.attachments) && extraPayload.attachments.length > 0
+      const historyId = hasAttachments ? await saveConsultationHistory(apiBaseUrl, query, extraPayload, '本次咨询已提交，正在生成答案。') : undefined
+      let data: RagQueryResponse
+      try {
+        data = activeModelId === REMOTE_CREATION_MODEL_ID
+          ? await runGatewayRagQuery(apiBaseUrl, gatewayApiBaseUrl, query, currentUser?.id, signal, hasAttachments ? { managedHistory: true, metadata: extraPayload } : undefined)
+          : await runRagQueryJob(apiBaseUrl, creationModelConfigs, query, topK, { ...extraPayload, ...(historyId ? { history_id: historyId } : {}) }, remoteAllowed, signal)
+      } catch (error) {
+        if (historyId) await saveConsultationHistory(apiBaseUrl, query, extraPayload, signal?.aborted ? '本次咨询已中止。' : '本次咨询未完成，请重试。', [], historyId).catch(() => undefined)
+        throw error
+      }
+      if (historyId) await saveConsultationHistory(apiBaseUrl, query, extraPayload, data.answer, data.contexts, historyId, data.model)
+      const attachmentContext = hasAttachments ? buildFloatingAssistHistoryContext(extraPayload) : null
+      setResult(data.answer, attachmentContext ? [attachmentContext, ...(data.contexts ?? [])] : data.contexts ?? [])
       return data
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
@@ -1453,7 +1481,7 @@ export function useRefreshBakeDocument() {
     const resp = await fetch(`${apiBaseUrl}/api/bake/documents/${encodeURIComponent(id)}/refresh`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ manual: true }),
     })
     if (!resp.ok) throw new Error(`refresh bake document failed: ${resp.status}`)
     const data = await resp.json()
@@ -1478,6 +1506,31 @@ export function useRefreshBakeDocument() {
         collectedAt: Number(data.source_snapshot.collected_at || 0),
       } : undefined,
     }
+  }, [apiBaseUrl])
+}
+
+export function useRetryBakeDocumentSummary() {
+  const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
+  return useCallback(async (id: string, expectedRevision?: number): Promise<boolean> => {
+    const action = expectedRevision === undefined ? 'retry' : 'regenerate'
+    const response = await fetch(`${apiBaseUrl}/api/bake/documents/${encodeURIComponent(id)}/summary/${action}`, {
+      method: 'POST',
+      ...(expectedRevision === undefined ? {} : {
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expected_updated_at: expectedRevision }),
+      }),
+    })
+    if (!response.ok) throw new Error(`summary request failed: ${response.status}`)
+    return (await response.json()).queued === true
+  }, [apiBaseUrl])
+}
+
+export function useCancelBakeDocumentRefresh() {
+  const apiBaseUrl = useAppStore((s) => s.apiBaseUrl)
+  return useCallback(async (id: string): Promise<'cancelled' | 'finishing' | 'idle'> => {
+    const response = await fetch(`${apiBaseUrl}/api/bake/documents/${encodeURIComponent(id)}/refresh/cancel`, { method: 'POST' })
+    if (!response.ok) throw new Error(`cancel document refresh failed: ${response.status}`)
+    return (await response.json()).status
   }, [apiBaseUrl])
 }
 
@@ -1823,6 +1876,7 @@ function mapBakeTemplate(item: any): ArticleTemplate {
     replacementRules: item.replacement_rules ?? [],
     summary: item.summary,
     fullContent: item.full_content,
+    contentFormat: item.generation_version === 'document-source-v2' ? 'plain_text' : 'markdown',
     sourceUrl: item.source_url,
     promptHint: item.prompt_hint,
     diagramCode: item.diagram_code,
@@ -1833,6 +1887,8 @@ function mapBakeTemplate(item: any): ArticleTemplate {
     matchLevel: item.match_level ?? undefined,
     refreshPolicy: item.refresh_policy ?? undefined,
     lastRefreshCheckedAtMs: typeof item.last_refresh_checked_at_ms === 'number' ? item.last_refresh_checked_at_ms : undefined,
+    sourceCollection: item.source_collection ?? undefined,
+    summaryStatus: item.summary_status ?? undefined,
     lastRefreshError: item.last_refresh_error ?? undefined,
     lastRefreshSuccessAtMs: typeof item.last_refresh_success_at_ms === 'number' ? item.last_refresh_success_at_ms : undefined,
     lastRefreshStatus: item.last_refresh_status ?? undefined,

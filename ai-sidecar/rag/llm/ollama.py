@@ -2,24 +2,22 @@
 Ollama 本地 LLM 后端
 
 通过 Ollama HTTP API（localhost:11434）调用本地模型，
-默认模型：qwen2.5:7b。不依赖任何 Python SDK，使用标准库 urllib。
+生成请求走统一可取消 HTTP 传输；可用性检查使用标准库 urllib。
 """
 
 from __future__ import annotations
 
 import json
-import http.client
 import logging
 import urllib.request
 import urllib.error
-import urllib.parse
 from typing import Callable, Optional
 
-from inference_queue import (
-    current_task_preempt_requested,
-    raise_if_preempted,
-    register_current_preempt_callback,
-)
+import httpx
+
+from inference_queue import raise_if_preempted
+from inference_transport import stream_inference_json
+from runtime_endpoints import service_base_url
 
 from .base import LlmBackend, LlmResponse
 
@@ -32,12 +30,12 @@ class OllamaBackend(LlmBackend):
     def __init__(
         self,
         model:       str = "qwen2.5:7b",
-        base_url:    str = "http://localhost:11434",
+        base_url:    Optional[str] = None,
         timeout:     int = 60,
         num_predict: int = 1024,
     ) -> None:
         self._model       = model
-        self._base_url    = base_url.rstrip("/")
+        self._base_url    = (base_url or service_base_url("ollama")).rstrip("/")
         self._timeout     = timeout
         self._num_predict = num_predict
 
@@ -94,58 +92,26 @@ class OllamaBackend(LlmBackend):
         model = self._model
         tokens = 0
         done_reason = None
-        parsed_url = urllib.parse.urlparse(url)
-        connection_class = (
-            http.client.HTTPSConnection
-            if parsed_url.scheme == "https"
-            else http.client.HTTPConnection
-        )
-        connection = connection_class(
-            parsed_url.hostname,
-            parsed_url.port,
-            timeout=self._timeout,
-        )
-        unregister = register_current_preempt_callback(connection.close)
+        def collect(payload: dict) -> None:
+            nonlocal model, tokens, done_reason
+            delta = payload.get("response", "")
+            if delta:
+                parts.append(delta)
+                if on_delta:
+                    on_delta(delta)
+            model = payload.get("model", model)
+            if payload.get("done"):
+                tokens = payload.get("eval_count", 0)
+                done_reason = payload.get("done_reason") or payload.get("finish_reason")
+
         try:
-            connection.request(
-                "POST",
-                parsed_url.path or "/api/generate",
-                body=json.dumps(body).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-            )
-            response = connection.getresponse()
-            if response.status >= 400:
-                detail = response.read().decode("utf-8", errors="replace")
-                raise RuntimeError(
-                    f"Ollama 请求失败 ({response.status}): {detail[:500]}"
-                )
-            for raw_line in response:
-                raise_if_preempted()
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                payload = json.loads(line)
-                delta = payload.get("response", "")
-                if delta:
-                    parts.append(delta)
-                    if on_delta:
-                        on_delta(delta)
-                model = payload.get("model", model)
-                if payload.get("done"):
-                    tokens = payload.get("eval_count", 0)
-                    done_reason = payload.get("done_reason") or payload.get("finish_reason")
-            raise_if_preempted()
-        except (OSError, TimeoutError, http.client.HTTPException) as exc:
-            if current_task_preempt_requested():
-                raise_if_preempted()
-            raise RuntimeError(f"Ollama 服务不可达: {exc}") from exc
-        except Exception:
-            if current_task_preempt_requested():
-                raise_if_preempted()
-            raise
-        finally:
-            unregister()
-            connection.close()
+            stream_inference_json(url, body, timeout=self._timeout, on_chunk=collect)
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(
+                f"本地模型请求失败 ({exc.response.status_code})"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeError("本地模型服务不可达") from exc
 
         if not done_reason and tokens >= int(options.get("num_predict", 0) or 0):
             done_reason = "length"

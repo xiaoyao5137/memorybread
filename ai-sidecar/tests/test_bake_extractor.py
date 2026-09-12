@@ -13,7 +13,9 @@ from knowledge.extractor_v2 import (
     BAKE_COMPACT_BUNDLE_RESPONSE_SCHEMA,
     BAKE_CONTEXT_WINDOW_TOKENS,
     BAKE_INPUT_TOKEN_BUDGET,
+    BAKE_KNOWLEDGE_PAYLOAD_SCHEMA,
     BAKE_KNOWLEDGE_PROMPT,
+    BAKE_MISMATCH_MAX_SCORE,
     BAKE_NUM_PREDICT,
     BAKE_RETRY_NUM_PREDICT,
     BAKE_RETRY_REPEAT_PENALTY,
@@ -22,6 +24,10 @@ from knowledge.extractor_v2 import (
     BAKE_TIMEOUT_RETRY_NUM_PREDICT,
     BAKE_TIMEOUT_RETRY_REPEAT_PENALTY,
     BAKE_RESPONSE_SCHEMA,
+    KNOWLEDGE_IRREPLACEABILITY_VALUES,
+    KNOWLEDGE_REUSE_AUDIENCE_VALUES,
+    KNOWLEDGE_SOURCE_PUBLICITY_VALUES,
+    KNOWLEDGE_VALIDITY_HORIZON_VALUES,
     BakeModelRequestError,
     BakeOutputTruncatedError,
     KnowledgeExtractorV2,
@@ -213,7 +219,16 @@ def test_ollama_compatible_format_removes_grammar_expanding_string_limits():
     assert compatible is not BAKE_BUNDLE_RESPONSE_SCHEMA
     assert _schema_contains_key(BAKE_BUNDLE_RESPONSE_SCHEMA, "maxLength") is True
     assert _schema_contains_key(compatible, "maxLength") is False
-    assert _schema_contains_key(compatible, "maxItems") is True
+    def check_compact(node):
+        if isinstance(node, dict):
+            assert node.get("maxItems", 0) <= 1
+            for value in node.values():
+                check_compact(value)
+        elif isinstance(node, list):
+            for value in node:
+                check_compact(value)
+    check_compact(compatible)
+    assert _schema_contains_key(BAKE_BUNDLE_RESPONSE_SCHEMA, "maxItems") is True
     assert compatible["required"] == ["document", "knowledge", "sop", "classification"]
 
 
@@ -745,6 +760,245 @@ def test_bake_prompts_classify_progress_results_and_conclusions_as_knowledge_fac
     assert BAKE_BUNDLE_PROMPT in BAKE_COMPACT_BUNDLE_PROMPT
 
 
+def test_knowledge_prompt_drops_numeric_score_anchors():
+    """发布分数改由 Core 确定性计算，提示词不得再留自算分数的锚点。"""
+    for anchor in (
+        "match_score",
+        "match_level",
+        "0.62",
+        "0.77",
+        "0.78",
+        "发布区间",
+        "事实具体性",
+        "未来复用价值 30%",
+        "证据强度 20%",
+    ):
+        assert anchor not in BAKE_KNOWLEDGE_PROMPT
+    assert "最终发布门槛由 Core 统一裁决" in BAKE_KNOWLEDGE_PROMPT
+
+
+def test_knowledge_prompt_puts_irreplaceability_test_first():
+    """不可替代性测试必须先于接受判据，否则模型会先接受再补理由。"""
+    irreplaceability_test = BAKE_KNOWLEDGE_PROMPT.index("第一步必须先做不可替代性测试")
+    accept_criteria = BAKE_KNOWLEDGE_PROMPT.index("应当 accepted=true 的开放语义判据")
+    assert irreplaceability_test < accept_criteria
+
+    assert "如果这条知识彻底丢失" in BAKE_KNOWLEDGE_PROMPT
+    # 判定依据是信息自身冗余度，不得退化成类目/活动类型/关键词分支。
+    assert "不是内容属于什么类目、活动类型或关键词" in BAKE_KNOWLEDGE_PROMPT
+    assert "代码仓库、commit 历史、构建/测试日志" in BAKE_KNOWLEDGE_PROMPT
+    assert "不构成 knowledge 的拒绝理由" in BAKE_KNOWLEDGE_PROMPT
+    assert "同一件编码工作的两种结论必须区分开" in BAKE_KNOWLEDGE_PROMPT
+    assert "298 项测试通过，已提交 main 分支" in BAKE_KNOWLEDGE_PROMPT
+    assert "示例非穷举" in BAKE_KNOWLEDGE_PROMPT
+
+
+def test_knowledge_prompt_covers_recallable_facts_and_external_science():
+    """可回溯咨询的关键事实与外部学术/技术/科学知识必须明确纳入 knowledge。"""
+    assert "将来可能被用户回溯咨询" in BAKE_KNOWLEDGE_PROMPT
+    assert "重要学术、理论、技术、科学知识" in BAKE_KNOWLEDGE_PROMPT
+    assert "核心结论与作用机制" in BAKE_KNOWLEDGE_PROMPT
+    assert "可迁移根因与解法" in BAKE_KNOWLEDGE_PROMPT
+
+    # 外部公共资料原文可查回，但复原结论需重新通读与重新推导，不算用户自己的冗余副本。
+    assert "只针对“用户自己产出" in BAKE_KNOWLEDGE_PROMPT
+    assert "必须按知识沉淀，不得判 `authoritative_elsewhere`" in BAKE_KNOWLEDGE_PROMPT
+    assert "需重新通读与重新推导" in BAKE_KNOWLEDGE_PROMPT
+    assert "通常取 `anyone_same_domain`" in BAKE_KNOWLEDGE_PROMPT
+    assert "已定责的复盘结论取 `months_or_more`" in BAKE_KNOWLEDGE_PROMPT
+
+    # 一次性 bundle 提炼走同一套边界，不得只在独立 knowledge 提示词里生效。
+    assert "不可替代性边界" in BAKE_BUNDLE_PROMPT
+    assert "重要学术、理论、技术、科学知识" in BAKE_BUNDLE_PROMPT
+    assert "将来可能被用户回溯咨询的关键事实" in BAKE_BUNDLE_PROMPT
+    assert "不得据此拒绝 knowledge" in BAKE_BUNDLE_PROMPT
+
+
+def test_knowledge_prompt_blocks_partially_recoverable_as_loophole():
+    """离线回放实测：模型会把提示词里的示例句当模板照抄，绕开硬否决。
+
+    7 条种子回放里有两条把「原文虽在（GitHub commit）」这类用户自己的产出判成
+    `partially_recoverable`，从而绕过 `authoritative_elsewhere` 硬否决并误发布；
+    因此提示词必须要求点名载体归属与具体缺口，而不是给一句可套用的理由。
+    """
+    assert '那个“原文”是谁的产出' in BAKE_KNOWLEDGE_PROMPT
+    assert "不是信息缺口" in BAKE_KNOWLEDGE_PROMPT
+    assert "具体缺了哪一部分" in BAKE_KNOWLEDGE_PROMPT
+    # 显式禁止把提示词里的示例句当作现成答案抄回 irreplaceability_reason。
+    assert "禁止照抄本提示词里的任何示例句" in BAKE_KNOWLEDGE_PROMPT
+
+    # 第二道自检：缺的是「结论」还是「过程叙述」。回放实测模型会以
+    # “调试细节无法从 commit 还原”为由，把用户自己的产出降级为 partially_recoverable。
+    assert '缺的那部分是“结论”还是“过程叙述”' in BAKE_KNOWLEDGE_PROMPT
+    assert "调试细节、推导过程、交互步骤无法从 commit 还原" in BAKE_KNOWLEDGE_PROMPT
+
+    # bundle 路径是生产主路径，同一条自检必须一并生效。
+    assert '那个“原文”是谁的产出' in BAKE_BUNDLE_PROMPT
+    assert "不是信息缺口" in BAKE_BUNDLE_PROMPT
+
+
+def test_knowledge_prompt_gives_discriminating_rules_for_audience_and_horizon():
+    """回放实测：`reuse_audience` 6/7 判 `me_later`、`validity_horizon` 7/7 判 `months_or_more`，
+    两个维度都失去区分力，导致关键事实被埋进影子池。"""
+    # 受众要落到「将来谁需要这条结论」这个可判别的问题上，并说明 me_later 不是默认档。
+    assert "将来谁需要这条结论" in BAKE_KNOWLEDGE_PROMPT
+    assert "`me_later` 不是默认档" in BAKE_KNOWLEDGE_PROMPT
+    assert "会让本该发布的关键事实掉进影子池" in BAKE_KNOWLEDGE_PROMPT
+
+    # 有效期不得因为载体长期存在就顶格，否则会退化成常量。
+    assert "不得因为代码、文档或仓库会长期存在就判" in BAKE_KNOWLEDGE_PROMPT
+    assert "只到 `hours` 或 `days`" in BAKE_KNOWLEDGE_PROMPT
+
+    # 判据用「示例非穷举」措辞，保持开放语义原则（FR-008），不构成类目关键词黑名单。
+    assert "示例非穷举" in BAKE_KNOWLEDGE_PROMPT
+
+
+def test_knowledge_prompt_declares_closed_value_sets_for_reuse_dimensions():
+    """本地 Ollama 实测不执行 `format` 里的 schema，enum 无法靠 grammar 强制。
+
+    探针结果：同一 schema 以 dict / 字符串 / `json` / OpenAI 包装 / 不传五种方式下发，
+    输出完全相同且键名与取值均不符合 schema；回放中模型也因此自创了
+    `weeks_or_more`。既然 grammar 不可依赖，取值集合必须在提示词里显式声明。
+    """
+    assert "封闭集合" in BAKE_KNOWLEDGE_PROMPT
+    assert "不得自创 `weeks_or_more`" in BAKE_KNOWLEDGE_PROMPT
+    assert "本地推理不保证按 schema 约束输出" in BAKE_KNOWLEDGE_PROMPT
+
+    # `weeks` 原本从未在提示词里出现，模型只能自创近似值，四个取值必须列全。
+    for field, values in (
+        ("irreplaceability", KNOWLEDGE_IRREPLACEABILITY_VALUES),
+        ("reuse_audience", KNOWLEDGE_REUSE_AUDIENCE_VALUES),
+        ("validity_horizon", KNOWLEDGE_VALIDITY_HORIZON_VALUES),
+        ("source_publicity", KNOWLEDGE_SOURCE_PUBLICITY_VALUES),
+    ):
+        for value in values:
+            assert "`%s`" % value in BAKE_KNOWLEDGE_PROMPT, "%s.%s 未在提示词中声明" % (
+                field,
+                value,
+            )
+
+    # 出处冗余必须由 Core 裁决，不得让模型直接 reject：一旦模型自己拒了，审计里就
+    # 不会有 redundant_public_reference 这条记录，整个否决层又变成不可观测的死代码。
+    assert "不要求你直接 reject" in BAKE_KNOWLEDGE_PROMPT
+    # 两个维度必须是两条独立的轴，否则又会塌回 `irreplaceability` 一轴二选一。
+    assert "source_publicity` 与 `irreplaceability` 是两条互不相同的轴" in BAKE_KNOWLEDGE_PROMPT
+
+    # 已提交并验收通过的修复过程是用户自己的产出，不得顶格到 months_or_more。
+    assert "已经改完并提交、验收通过的修复过程属于最后一类" in BAKE_KNOWLEDGE_PROMPT
+
+
+def test_knowledge_payload_schema_declares_reuse_radius_dimensions():
+    """四个复用半径维度必须是不可弃权的枚举，取值与常量保持单一来源。"""
+    assert BAKE_KNOWLEDGE_PAYLOAD_SCHEMA["additionalProperties"] is False
+    # 回放实测模型会发明 `weeks_or_more` 这类枚举外取值，Core 只能降级 shadow，
+    # 因此把四个维度声明为必填，让 grammar 强制从 enum 里选。
+    # 注：grammar 在本地 Ollama 上不生效，真正兜底的是提示词里的封闭取值声明
+    # 与 Core 侧的 fail-open 宽容降级，本处 `required` 主要是契约声明。
+    assert BAKE_KNOWLEDGE_PAYLOAD_SCHEMA["required"] == [
+        "irreplaceability",
+        "reuse_audience",
+        "validity_horizon",
+        "source_publicity",
+    ]
+    properties = BAKE_KNOWLEDGE_PAYLOAD_SCHEMA["properties"]
+
+    expected = {
+        "irreplaceability": KNOWLEDGE_IRREPLACEABILITY_VALUES,
+        "reuse_audience": KNOWLEDGE_REUSE_AUDIENCE_VALUES,
+        "validity_horizon": KNOWLEDGE_VALIDITY_HORIZON_VALUES,
+        "source_publicity": KNOWLEDGE_SOURCE_PUBLICITY_VALUES,
+    }
+    for field, values in expected.items():
+        node = properties[field]
+        assert node["enum"] == values
+        # 维度弃权会让 Core 只能降级 shadow，等于丢掉这条知识，因此不允许 null。
+        assert node["type"] == "string"
+        assert None not in node["enum"]
+
+    # 理由与语义身份键允许为空，由 Core 判语义完整性；match_score 保留给应急回退口径。
+    assert properties["irreplaceability_reason"]["type"] == ["string", "null"]
+    assert properties["subject_key"]["type"] == ["string", "null"]
+    assert properties["predicate_key"]["type"] == ["string", "null"]
+    assert properties["match_score"]["type"] == ["number", "null"]
+
+
+def test_reuse_dimensions_survive_all_derived_bake_schemas():
+    """紧凑重试与超时降级 schema 只收紧长度，不得丢失或改写复用半径维度。"""
+    expected = {
+        "irreplaceability": KNOWLEDGE_IRREPLACEABILITY_VALUES,
+        "reuse_audience": KNOWLEDGE_REUSE_AUDIENCE_VALUES,
+        "validity_horizon": KNOWLEDGE_VALIDITY_HORIZON_VALUES,
+        "source_publicity": KNOWLEDGE_SOURCE_PUBLICITY_VALUES,
+    }
+    optional_fields = ("irreplaceability_reason", "subject_key", "predicate_key")
+    schemas = {
+        "bundle": BAKE_BUNDLE_RESPONSE_SCHEMA,
+        "compact": BAKE_COMPACT_BUNDLE_RESPONSE_SCHEMA,
+        "timeout": BAKE_TIMEOUT_BUNDLE_RESPONSE_SCHEMA,
+    }
+
+    for name, schema in schemas.items():
+        properties = schema["properties"]["knowledge"]["properties"]["payload"]["properties"]
+        for field, values in expected.items():
+            assert properties[field]["enum"] == values, f"{name}.{field}"
+        for field in optional_fields:
+            assert field in properties, f"{name}.{field}"
+
+        # Ollama 压缩 grammar 时枚举必须原样保留，否则小模型会自由发挥取值。
+        compatible = _ollama_compatible_format(schema)
+        compatible_properties = compatible["properties"]["knowledge"]["properties"]["payload"]["properties"]
+        for field, values in expected.items():
+            assert compatible_properties[field]["enum"] == values, f"{name}.ollama.{field}"
+
+
+def test_compact_retry_prompt_still_requires_all_reuse_dimensions():
+    """重试提示词必须继续要求全部维度，否则重试产物只能落 shadow。"""
+    for field in (
+        "irreplaceability",
+        "irreplaceability_reason",
+        "reuse_audience",
+        "validity_horizon",
+        "subject_key",
+        "predicate_key",
+    ):
+        assert field in BAKE_COMPACT_BUNDLE_PROMPT
+
+
+def test_knowledge_mismatch_guard_also_reduces_reuse_dimensions():
+    """模板/步骤错配守卫必须落到复用半径维度，新门禁已不再读 match_score。"""
+    extractor = make_raw_extractor()
+    payload = {
+        "summary": "接口联调流程",
+        "details": "先执行 A，再执行 B，最后执行 C",
+        "match_score": 0.91,
+        "evidence_summary": "来源记录了完整操作步骤",
+    }
+
+    template_guard = extractor._downgrade_mismatch_payload("knowledge", payload, "template_like_content")
+    assert template_guard["irreplaceability"] == "authoritative_elsewhere"
+    assert "成型模板" in template_guard["irreplaceability_reason"]
+    assert "design" in template_guard["irreplaceability_reason"]
+    assert "mismatch_guard=template_like_content" in template_guard["irreplaceability_reason"]
+    assert "mismatch_guard=template_like_content" in template_guard["evidence_summary"]
+    # 压低分数仍保留：bake.knowledge_gate_enabled=false 时应急回退口径依赖它。
+    assert template_guard["match_score"] == BAKE_MISMATCH_MAX_SCORE
+
+    sop_guard = extractor._downgrade_mismatch_payload("knowledge", payload, "sop_like_content")
+    assert sop_guard["irreplaceability"] == "authoritative_elsewhere"
+    assert "多步操作路线" in sop_guard["irreplaceability_reason"]
+    assert "sop" in sop_guard["irreplaceability_reason"]
+    assert "mismatch_guard=sop_like_content" in sop_guard["irreplaceability_reason"]
+
+    # 其他资产类型没有复用半径维度，守卫只压低分数，不得写入 knowledge 专属字段。
+    design_guard = extractor._downgrade_mismatch_payload("design", payload, "sop_like_content")
+    assert "irreplaceability" not in design_guard
+    assert design_guard["match_level"] == "low"
+
+    # 守卫返回副本，原始 payload 不受污染。
+    assert payload["match_score"] == 0.91
+    assert "irreplaceability" not in payload
+
+
 def test_bundle_prompt_requires_independent_checks_before_final_classification():
     document_check = BAKE_BUNDLE_PROMPT.index("1. `document`")
     knowledge_check = BAKE_BUNDLE_PROMPT.index("2. `knowledge`")
@@ -954,12 +1208,34 @@ def test_document_evidence_fallback_accepts_real_browser_document():
         "capture_win_title": "AIGC 剧本创作规范 - 云文档",
         "capture_webpage_title": "AIGC 剧本创作规范 - 云文档",
         "capture_url": "https://docs.example.com/d/home/document-id",
-        "capture_ax_text": "文档正文" * 80,
+        "capture_ax_text": (
+            "# AIGC 剧本创作规范\n本文说明创作目标和适用范围。\n"
+            "第一阶段完成素材准备。\n第二阶段完成质量验收。"
+        ) * 12,
     })
 
     assert evidence["kind"] == "document_url"
     assert evidence["source_surface"] == "browser"
     assert evidence["allows_auto_create"] is True
+
+
+def test_document_evidence_fallback_rejects_generic_data_page():
+    extractor = make_raw_extractor()
+    evidence = extractor._resolve_document_evidence({
+        **SAMPLE_CANDIDATE,
+        "capture_app_name": "Google Chrome",
+        "capture_win_title": "数据资产平台",
+        "capture_webpage_title": "数据资产平台",
+        "capture_url": "https://example.com/aigc-assets/video-samples?assetId=1009",
+        "capture_ax_text": "视频样本数 8435 一级类目 54 数据分布 列表 筛选 导出" * 40,
+        "document_evidence": None,
+    })
+
+    assert evidence["has_document_url"] is False
+    assert evidence["has_document_page_title"] is False
+    assert evidence["has_substantive_document_body"] is True
+    assert evidence["kind"] == "insufficient"
+    assert evidence["allows_auto_create"] is False
 
 
 def test_document_evidence_fallback_rejects_chat_with_document_link_but_no_document_view():
@@ -973,11 +1249,33 @@ def test_document_evidence_fallback_rejects_chat_with_document_link_but_no_docum
         "capture_ax_text": "聊天中分享了一份云文档，请大家看一下。" * 40,
     })
 
-    assert evidence["source_surface"] == "chat"
-    assert evidence["has_document_url"] is True
+    assert evidence["source_surface"] == "other"
+    assert evidence["has_document_url"] is False
     assert evidence["has_substantive_document_body"] is True
     assert evidence["kind"] == "insufficient"
     assert evidence["allows_auto_create"] is False
+
+
+def test_document_evidence_fallback_accepts_unknown_platform_from_structure():
+    extractor = make_raw_extractor()
+    evidence = extractor._resolve_document_evidence({
+        **SAMPLE_CANDIDATE,
+        "capture_app_name": "Unknown Browser",
+        "capture_webpage_title": "季度复盘 | Workspace",
+        "capture_url": "https://unknown.example/workspace/asset-42",
+        "capture_ax_text": (
+            "# 季度复盘\n本季度完成了核心链路改造。\n"
+            "风险项已经明确负责人。\n下一阶段将复核验收结果。"
+        ) * 10,
+        "document_evidence": None,
+    })
+
+    assert evidence["source_surface"] == "browser"
+    assert evidence["has_document_url"] is True
+    assert evidence["has_document_page_title"] is True
+    assert evidence["has_substantive_document_body"] is True
+    assert evidence["kind"] == "document_url"
+    assert evidence["allows_auto_create"] is True
 
 
 def test_bake_bundle_prompt_estimate_includes_schema_and_candidate():
@@ -1668,7 +1966,7 @@ def test_merge_document_no_change_keeps_existing_title_when_model_omits_it():
     assert result == {"no_change": True, "title": "已有文档标题"}
 
 
-def test_merge_document_no_change_cannot_drop_wenz_product_alias():
+def test_merge_document_no_change_cannot_drop_wenz_product_alias(caplog):
     extractor = make_raw_extractor()
     extractor._call_bake_llm = types.MethodType(
         lambda self, caller_id, system_prompt, user_prompt, response_schema: (
@@ -1706,6 +2004,8 @@ def test_merge_document_no_change_cannot_drop_wenz_product_alias():
     assert "## 产品、项目与别名" in result["full_content"]
     assert "- 稳柱" in result["full_content"]
     assert "稳柱" in result["evidence_summary"]
+    assert "DOCUMENT_IDENTITIES_RESTORED" in caplog.text
+    assert "稳柱" not in caplog.text
 
 
 def test_document_identity_extraction_covers_product_project_and_alias_fields():

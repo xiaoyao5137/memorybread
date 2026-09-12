@@ -16,6 +16,8 @@ from __future__ import annotations
 import logging
 import os
 import platform
+from typing import Optional
+from .control import OcrDeferred, current_control
 
 from .backends.base   import OcrBackend, OcrOutput
 from .backends.paddle import PaddleBackend
@@ -85,6 +87,10 @@ class OcrEngine:
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"截图文件不存在: {image_path}")
 
+        control = current_control()
+        if control:
+            control.check()
+
         # 尝试 primary 后端
         if self._primary and self._primary.is_available():
             try:
@@ -94,9 +100,13 @@ class OcrEngine:
                     len(output.boxes), output.confidence,
                 )
                 return output
+            except OcrDeferred:
+                raise
             except Exception as exc:
                 logger.warning("primary OCR 失败，尝试 fallback: %s", exc)
 
+        if control:
+            control.check()
         # 尝试 fallback 后端
         if self._fallback and self._fallback.is_available():
             try:
@@ -106,6 +116,8 @@ class OcrEngine:
                     len(output.boxes), output.confidence,
                 )
                 return output
+            except OcrDeferred:
+                raise
             except Exception as exc:
                 logger.error("fallback OCR 也失败: %s", exc)
                 raise RuntimeError(f"所有 OCR 后端均失败: {exc}") from exc

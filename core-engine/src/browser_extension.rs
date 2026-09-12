@@ -187,6 +187,9 @@ pub struct BrowserExtensionJob {
     pub max_segments: usize,
     pub deadline_ms: i64,
     pub focus_policy: &'static str,
+    pub content_kind: &'static str,
+    #[serde(skip)]
+    pub cancellation_scope: Option<String>,
 }
 
 impl BrowserExtensionJob {
@@ -211,6 +214,8 @@ impl BrowserExtensionJob {
             max_segments: 20,
             deadline_ms: now_ms() + timeout.as_millis() as i64,
             focus_policy: "never",
+            content_kind: "report",
+            cancellation_scope: None,
         }
     }
 
@@ -295,6 +300,8 @@ pub struct BrowserBridgeMessage {
 #[derive(Debug, Serialize)]
 pub struct BrowserBridgeResponse {
     pub ok: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cancelled_job_ids: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job: Option<BrowserExtensionJob>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -311,6 +318,7 @@ pub enum BrowserExtensionError {
 }
 
 struct BrokerState {
+    cancelled_scopes: HashMap<String,i64>,
     queue: VecDeque<BrowserExtensionJob>,
     pending: HashMap<String, oneshot::Sender<BrowserExtensionResult>>,
     extension_version: Option<String>,
@@ -319,6 +327,7 @@ struct BrokerState {
 }
 
 struct BrowserLiveJob {
+    cancellation_scope: Option<String>,
     view: BrowserLiveJobView,
     preview_mime_type: Option<String>,
     preview_bytes: Option<Vec<u8>>,
@@ -333,6 +342,7 @@ impl BrowserExtensionBroker {
     pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(BrokerState {
+                cancelled_scopes: HashMap::new(),
                 queue: VecDeque::new(),
                 pending: HashMap::new(),
                 extension_version: None,
@@ -423,6 +433,7 @@ impl BrowserExtensionBroker {
         let Some(job) = state.live_jobs.get_mut(&progress.browser_job_id) else {
             return false;
         };
+        if job.view.status == "cancelled" { return false; }
         if !progress.status.trim().is_empty() {
             job.view.status = progress.status.trim().to_string();
         }
@@ -465,6 +476,7 @@ impl BrowserExtensionBroker {
         self.heartbeat(None);
         let sender = self.state.lock().ok().and_then(|mut state| {
             if let Some(job) = state.live_jobs.get_mut(&result.browser_job_id) {
+                if job.view.status == "cancelled" { return None; }
                 job.view.status = if matches!(result.status.as_str(), "complete" | "partial") {
                     "completed".to_string()
                 } else {
@@ -488,29 +500,67 @@ impl BrowserExtensionBroker {
         sender.is_some_and(|sender| sender.send(result).is_ok())
     }
 
+    pub fn cancel_job(&self, job_id: &str) -> bool {
+        let Ok(mut state)=self.state.lock() else { return false; };
+        if !state.pending.contains_key(job_id) { return false; }
+        state.queue.retain(|job| job.browser_job_id != job_id);
+        if let Some(job)=state.live_jobs.get_mut(job_id) {
+            job.view.status="cancelled".to_string();
+            job.view.stage="cancelled".to_string();
+            job.view.updated_at=now_ms();
+            job.preview_bytes=None;
+            job.preview_mime_type=None;
+            job.view.has_preview=false;
+        }
+        if let Some(sender)=state.pending.remove(job_id) {
+            let _=sender.send(BrowserExtensionResult {
+                browser_job_id:job_id.to_string(),status:"failed".to_string(),
+                title:String::new(),url:String::new(),content_text:String::new(),
+                structured_data:Value::Null,completeness:Value::Null,
+                error_code:Some("SOURCE_REFRESH_CANCELLED".to_string()),
+                error_message:Some("页面读取已取消".to_string()),
+            });
+        }
+        true
+    }
+
+    pub fn cancel_scope(&self, scope: &str) {
+        let ids = if let Ok(mut state)=self.state.lock() {
+            state.cancelled_scopes.retain(|_,at| now_ms()-*at < 180_000);
+            state.cancelled_scopes.insert(scope.to_string(),now_ms());
+            state.live_jobs.iter().filter(|(_,job)|job.cancellation_scope.as_deref()==Some(scope))
+                .map(|(id,_)|id.clone()).collect::<Vec<_>>()
+        } else {return;};
+        for id in ids {self.cancel_job(&id);}
+    }
+
     pub fn handle_bridge_message(&self, message: BrowserBridgeMessage) -> BrowserBridgeResponse {
-        match message.message_type.as_str() {
+        let mut response = match message.message_type.as_str() {
             "heartbeat" => {
                 self.heartbeat(message.extension_version);
                 BrowserBridgeResponse {
                     ok: true,
+                    cancelled_job_ids: Vec::new(),
                     job: None,
                     error: None,
                 }
             }
             "poll" => BrowserBridgeResponse {
                 ok: true,
+                    cancelled_job_ids: Vec::new(),
                 job: self.poll(message.extension_version),
                 error: None,
             },
             "result" => match message.result {
                 Some(result) => BrowserBridgeResponse {
                     ok: self.complete(result),
+                    cancelled_job_ids: Vec::new(),
                     job: None,
                     error: None,
                 },
                 None => BrowserBridgeResponse {
                     ok: false,
+                    cancelled_job_ids: Vec::new(),
                     job: None,
                     error: Some("RESULT_REQUIRED"),
                 },
@@ -518,21 +568,28 @@ impl BrowserExtensionBroker {
             "progress" => match message.progress {
                 Some(progress) => BrowserBridgeResponse {
                     ok: self.progress(progress),
+                    cancelled_job_ids: Vec::new(),
                     job: None,
                     error: None,
                 },
                 None => BrowserBridgeResponse {
                     ok: false,
+                    cancelled_job_ids: Vec::new(),
                     job: None,
                     error: Some("PROGRESS_REQUIRED"),
                 },
             },
             _ => BrowserBridgeResponse {
                 ok: false,
+                    cancelled_job_ids: Vec::new(),
                 job: None,
                 error: Some("MESSAGE_TYPE_UNSUPPORTED"),
             },
-        }
+        };
+        response.cancelled_job_ids = self.state.lock().map(|state| state.live_jobs.iter()
+            .filter(|(_,job)| job.view.status == "cancelled")
+            .map(|(id,_)| id.clone()).collect()).unwrap_or_default();
+        response
     }
 
     pub async fn submit(
@@ -560,10 +617,15 @@ impl BrowserExtensionBroker {
                 .state
                 .lock()
                 .map_err(|_| BrowserExtensionError::Internal)?;
+            state.cancelled_scopes.retain(|_,at| now_ms()-*at < 180_000);
+            if job.cancellation_scope.as_ref().is_some_and(|scope|state.cancelled_scopes.contains_key(scope)) {
+                return Err(BrowserExtensionError::Failed("SOURCE_REFRESH_CANCELLED".into(),"页面读取已取消".into()));
+            }
             state.pending.insert(job_id.clone(), sender);
             state.live_jobs.insert(
                 job_id.clone(),
                 BrowserLiveJob {
+                    cancellation_scope: job.cancellation_scope.clone(),
                     view: BrowserLiveJobView {
                         browser_job_id: job_id.clone(),
                         url: display_url(&job.url),
@@ -582,35 +644,45 @@ impl BrowserExtensionBroker {
         }
         let started_at = tokio::time::Instant::now();
         let mut receiver = receiver;
-        let first_wait = tokio::time::timeout(timeout.min(claim_timeout), &mut receiver).await;
-        let result = match first_wait {
-            Ok(result) => Ok(result),
-            Err(_) => {
-                let still_queued = {
-                    let mut state = self
-                        .state
-                        .lock()
-                        .map_err(|_| BrowserExtensionError::Internal)?;
-                    let still_queued = state
-                        .live_jobs
-                        .get(&job_id)
-                        .is_some_and(|job| job.view.status == "queued");
-                    if still_queued {
-                        state.queue.retain(|queued| queued.browser_job_id != job_id);
+        let mut idle_since = Some(started_at);
+        let result = loop {
+            let (queued, occupied) = {
+                let state = self.state.lock().map_err(|_| BrowserExtensionError::Internal)?;
+                let queued = state.queue.iter().any(|job| job.browser_job_id == job_id);
+                // Pending jobs already removed from the queue own the extension.
+                // Their execution time must not count as an idle claim failure.
+                let occupied = state.pending.keys().any(|id| id != &job_id
+                    && !state.queue.iter().any(|job| &job.browser_job_id == id));
+                (queued, occupied)
+            };
+            let remaining = timeout.saturating_sub(started_at.elapsed());
+            if !queued || remaining.is_zero() {
+                break tokio::time::timeout(remaining, &mut receiver).await;
+            }
+            if occupied {
+                idle_since = None;
+            } else {
+                let since = idle_since.get_or_insert_with(tokio::time::Instant::now);
+                if since.elapsed() >= claim_timeout {
+                    let mut state = self.state.lock().map_err(|_| BrowserExtensionError::Internal)?;
+                    // A poll may have claimed this task since the observation.
+                    if state.queue.iter().any(|job| job.browser_job_id == job_id) {
+                        state.queue.retain(|job| job.browser_job_id != job_id);
                         state.pending.remove(&job_id);
                         if let Some(job) = state.live_jobs.get_mut(&job_id) {
-                            job.view.status = "failed".to_string();
-                            job.view.stage = "unresponsive".to_string();
+                            job.view.status = "failed".into();
+                            job.view.stage = "unresponsive".into();
                             job.view.updated_at = now_ms();
                         }
+                        return Err(BrowserExtensionError::Unresponsive);
                     }
-                    still_queued
-                };
-                if still_queued {
-                    return Err(BrowserExtensionError::Unresponsive);
                 }
-                let remaining = timeout.saturating_sub(started_at.elapsed());
-                tokio::time::timeout(remaining, receiver).await
+            }
+            let tick = remaining.min(claim_timeout).min(Duration::from_millis(100));
+            match tokio::time::timeout(tick, &mut receiver).await {
+                Ok(result) => break Ok(result),
+                Err(error) if started_at.elapsed() >= timeout => break Err(error),
+                Err(_) => {}
             }
         };
         let mut state = self
@@ -725,6 +797,7 @@ pub fn start_browser_bridge_server(broker: BrowserExtensionBroker) -> std::io::R
                     let response = match serde_json::from_slice::<BrowserBridgeMessage>(&bytes) {
                         Ok(message) => broker.handle_bridge_message(message),
                         Err(_) => BrowserBridgeResponse {
+                            cancelled_job_ids: Vec::new(),
                             ok: false,
                             job: None,
                             error: Some("MESSAGE_INVALID"),
@@ -850,6 +923,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn document_queued_behind_active_read_keeps_its_budget_and_can_be_cancelled() {
+        for cancel in [false, true] {
+            let broker=BrowserExtensionBroker::new();
+            broker.heartbeat(None);
+            let first=BrowserExtensionJob::new("https://example.com/first".into(),None,vec![],None,None,Duration::from_secs(2));
+            let first_id=first.browser_job_id.clone();
+            let first_task={let broker=broker.clone();tokio::spawn(async move {broker.submit(first,Duration::from_secs(2)).await})};
+            tokio::task::yield_now().await;
+            assert_eq!(broker.poll(None).unwrap().browser_job_id,first_id);
+            let second=BrowserExtensionJob::new("https://example.com/second".into(),None,vec![],None,None,Duration::from_secs(1));
+            let second_id=second.browser_job_id.clone();
+            let second_task={let broker=broker.clone();tokio::spawn(async move {
+                broker.submit_with_claim_timeout(second,Duration::from_secs(1),Duration::from_millis(20)).await
+            })};
+            tokio::time::sleep(Duration::from_millis(70)).await;
+            assert!(!second_task.is_finished(),"busy time must not become unresponsive");
+            assert_eq!(broker.status().queued_job_count,1);
+            if cancel {
+                assert!(broker.cancel_job(&second_id));
+                assert!(matches!(second_task.await.unwrap(),Err(BrowserExtensionError::Failed(code,_)) if code=="SOURCE_REFRESH_CANCELLED"));
+            } else {
+                assert!(broker.cancel_job(&first_id));
+                assert_eq!(broker.poll(None).unwrap().browser_job_id,second_id);
+                assert!(broker.complete(BrowserExtensionResult {
+                    browser_job_id:second_id,status:"complete".into(),title:String::new(),url:String::new(),
+                    content_text:"verified body".into(),structured_data:Value::Null,completeness:Value::Null,
+                    error_code:None,error_message:None,
+                }));
+                assert!(second_task.await.unwrap().is_ok());
+            }
+            broker.cancel_job(&first_id);
+            let _=first_task.await.unwrap();
+            assert_eq!(broker.status().active_job_count,0);
+            assert_eq!(broker.status().queued_job_count,0);
+        }
+    }
+
+    #[tokio::test]
+    async fn document_busy_queue_still_obeys_total_timeout() {
+        let broker=BrowserExtensionBroker::new();broker.heartbeat(None);
+        let first=BrowserExtensionJob::new("https://example.com/first".into(),None,vec![],None,None,Duration::from_secs(2));
+        let first_id=first.browser_job_id.clone();
+        let first_task={let broker=broker.clone();tokio::spawn(async move {broker.submit(first,Duration::from_secs(2)).await})};
+        tokio::task::yield_now().await;broker.poll(None).unwrap();
+        let second=BrowserExtensionJob::new("https://example.com/second".into(),None,vec![],None,None,Duration::from_millis(80));
+        let result=broker.submit_with_claim_timeout(second,Duration::from_millis(80),Duration::from_millis(20)).await;
+        assert!(matches!(result,Err(BrowserExtensionError::Timeout)));
+        assert_eq!(broker.status().queued_job_count,0);
+        assert_eq!(broker.status().active_job_count,1);
+        broker.cancel_job(&first_id);let _=first_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_scope_blocks_late_registration_without_leaking_scope() {
+        let broker=BrowserExtensionBroker::new();
+        broker.heartbeat(None);
+        let mut job=BrowserExtensionJob::new("https://example.com/document".into(),None,vec![],None,None,Duration::from_secs(5));
+        job.cancellation_scope=Some("private-request-scope".into());
+        assert!(!serde_json::to_string(&job).unwrap().contains("private-request-scope"));
+        broker.cancel_scope("private-request-scope");
+        assert!(matches!(broker.submit(job,Duration::from_secs(5)).await,
+            Err(BrowserExtensionError::Failed(code,_)) if code=="SOURCE_REFRESH_CANCELLED"));
+        assert!(broker.poll(None).is_none());
+    }
+
+    #[tokio::test]
+    async fn cancellation_rejects_late_results_and_notifies_extension() {
+        for claimed in [false,true] {
+            let broker=BrowserExtensionBroker::new();
+            broker.heartbeat(None);
+            let job=BrowserExtensionJob::new("https://example.com/document".into(),None,vec![],None,None,Duration::from_secs(5));
+            let id=job.browser_job_id.clone();
+            let copy=broker.clone();
+            let task=tokio::spawn(async move {copy.submit(job,Duration::from_secs(5)).await});
+            tokio::task::yield_now().await;
+            if claimed { assert!(broker.poll(None).is_some()); }
+            assert!(broker.cancel_job(&id));
+            assert!(!broker.cancel_job(&id));
+            assert!(matches!(task.await.unwrap(),Err(BrowserExtensionError::Failed(code,_)) if code=="SOURCE_REFRESH_CANCELLED"));
+            assert!(broker.poll(None).is_none());
+            let late:BrowserExtensionResult=serde_json::from_value(serde_json::json!({"browser_job_id":id,"status":"complete","content_text":"late body"})).unwrap();
+            assert!(!broker.complete(late));
+            let response=broker.handle_bridge_message(serde_json::from_value(serde_json::json!({"type":"heartbeat"})).unwrap());
+            assert_eq!(response.cancelled_job_ids,vec![id]);
+            assert_eq!(broker.status().jobs[0].status,"cancelled");
+        }
+    }
+
+    #[tokio::test]
     async fn polled_result_resolves_matching_job() {
         let broker = BrowserExtensionBroker::new();
         broker.heartbeat(Some("0.1.0".to_string()));
@@ -939,6 +1101,7 @@ mod tests {
         broker.state.lock().unwrap().live_jobs.insert(
             "orphan".to_string(),
             BrowserLiveJob {
+                cancellation_scope: None,
                 view: BrowserLiveJobView {
                     browser_job_id: "orphan".to_string(),
                     url: "https://example.com/report".to_string(),

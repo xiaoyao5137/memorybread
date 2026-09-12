@@ -124,6 +124,78 @@ describe('创作 Agent 多轮 Loop', () => {
     vi.unstubAllGlobals()
   })
 
+  it('普通指令携带稳定身份，按恢复操作续跑且不提前执行 Skill 匹配', async () => {
+    useAppStore.getState().setCreationDraft({ sessionId: 'session-agent-test', creationMode: 'direct',
+      generatedContent: '## 原文\n保留内容。', rootRequest: '最初的方案需求' })
+    const payloads: Record<string, any>[] = []
+    const saves: Record<string, any>[] = []
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname
+      if (path === '/api/creation/skills') return Response.json([installedStyleSkill])
+      if (path === '/api/creation/history/start') return Response.json({ id: 95, progress_epoch: 1 })
+      if (path.endsWith('/progress')) return new Response(null, { status: 204 })
+      if (path === '/api/creation/history' && init?.method === 'POST') {
+        saves.push(JSON.parse(String(init.body))); return Response.json({ id: 95 })
+      }
+      if (path === '/api/creation/history') return Response.json({ items: [], total: 0 })
+      if (path === '/api/creation/agent/run') {
+        payloads.push(JSON.parse(String(init?.body)))
+        if (payloads.length === 1) return sse([
+          event('run.started', 1, '解释本轮操作'),
+          event('operation.resume.requested', 2, '恢复未完成操作', undefined, { operation_id: 'saved-operation' }),
+        ])
+        return sse([event('run.completed', 20, '已恢复', undefined, {
+          document: '## 原文\n修改后的内容。', response: '已完成上次未完成的修改。',
+          committed_operation_id: 'saved-operation', revision_no: 2,
+        })])
+      }
+      return Response.json({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<CreationPanel />)
+    const input = screen.getByPlaceholderText(/继续告诉 Agent 如何修改当前文档/)
+    fireEvent.change(input, { target: { value: '接着完成上次的修改' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(saves).toHaveLength(1))
+    expect(payloads).toHaveLength(2)
+    expect(payloads[0].instruction_id).toBeTruthy()
+    expect(payloads[1].instruction_id).toBe(payloads[0].instruction_id)
+    expect(payloads[1].resume_operation_id).toBe('saved-operation')
+    expect(saves[0].committed_operation_id).toBe('saved-operation')
+    expect(fetchMock.mock.calls.some(([url]) => new URL(String(url)).pathname.includes('/skills/match'))).toBe(false)
+    expect(useAppStore.getState().creationDraft.conversation.slice(-1)[0]?.content).toBe('已完成上次未完成的修改。')
+  })
+
+  it('删除全部内容允许空文档提交，并展示直接回应', async () => {
+    useAppStore.getState().setCreationDraft({ sessionId: 'session-agent-test', creationMode: 'direct',
+      generatedContent: '## 临时说明\n待删除。' })
+    const saves: Record<string, any>[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname
+      if (path === '/api/creation/skills') return Response.json([])
+      if (path === '/api/creation/history/start') return Response.json({ id: 96, progress_epoch: 1 })
+      if (path.endsWith('/progress')) return new Response(null, { status: 204 })
+      if (path === '/api/creation/history' && init?.method === 'POST') {
+        saves.push(JSON.parse(String(init.body))); return Response.json({ id: 96 })
+      }
+      if (path === '/api/creation/history') return Response.json({ items: [], total: 0 })
+      if (path === '/api/creation/agent/run') return sse([
+        event('document.patch.applied', 3, '已删除内容', undefined, { content: '', patch: { operation: 'document_patch' } }),
+        event('run.completed', 4, '已删除', undefined, { document: '', response: '已删除临时说明。',
+          committed_operation_id: 'delete-operation', revision_no: 2 }),
+      ])
+      return Response.json({})
+    }))
+    render(<CreationPanel />)
+    const input = screen.getByPlaceholderText(/继续告诉 Agent 如何修改当前文档/)
+    fireEvent.change(input, { target: { value: '删除临时说明' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(saves).toHaveLength(1))
+    expect(saves[0].generated_content).toBe('')
+    expect(useAppStore.getState().creationDraft.generatedContent).toBe('')
+    expect(useAppStore.getState().creationDraft.conversation.slice(-1)[0]?.content).toBe('已删除临时说明。')
+  })
+
   it('隐藏数据风险说明的内部边界标记并保留用户可读内容', async () => {
     const documentWithMarkers = [
       '# 数据周报',
@@ -795,9 +867,11 @@ describe('创作 Agent 多轮 Loop', () => {
     await screen.findByRole('heading', { name: 'Agent 架构方案' })
     expect(screen.getByLabelText('用户消息')).toHaveTextContent('设计创作功能')
     expect(screen.getByLabelText('Agent 执行情况')).toHaveTextContent('架构方案模板 Skill')
-    expect(screen.getByLabelText('Agent 执行情况')).toHaveTextContent('方案设计 Agent')
+    expect(screen.getByLabelText('Agent 执行情况')).toHaveTextContent('设计落地方案')
+    expect(screen.getByLabelText('Agent 执行情况')).not.toHaveTextContent('方案设计 Agent')
     // 细节默认折叠，展开全部后才可见能力描述、判断摘要等详情。
     fireEvent.click(screen.getByRole('button', { name: '展开全部' }))
+    expect(screen.getByLabelText('Agent 执行情况')).toHaveTextContent('方案设计 Agent')
     const capabilities = Array.from(
       screen.getByLabelText('Agent 执行情况').querySelectorAll('.creation-agent-event__capability'),
     )
@@ -857,11 +931,14 @@ describe('创作 Agent 多轮 Loop', () => {
 
     const followUp = screen.getByPlaceholderText(/继续告诉 Agent 如何修改当前文档/)
     fireEvent.change(followUp, { target: { value: '补充质量门禁和多轮测试' } })
-    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    fireEvent.click(screen.getByRole('button', { name: '提交' }))
     expect(followUp).toHaveValue('')
 
     await waitFor(() => expect(agentPayloads).toHaveLength(2))
-    expect(agentPayloads[0].selected_skills[0]).toMatchObject({
+    expect(agentPayloads[0].selected_skills).toEqual([])
+    expect(agentPayloads[0].explicit_skill_ids).toEqual(['agent-architecture-style'])
+    expect(agentPayloads[1].explicit_skill_ids).toEqual([])
+    expect(agentPayloads[0].available_skills[0]).toMatchObject({
       workflowRole: 'primary',
       strictStructure: true,
       titleDesignStyle: installedStyleSkill.common_titles,
@@ -873,8 +950,8 @@ describe('创作 Agent 多轮 Loop', () => {
         voiceStyle: installedStyleSkill.field_examples.writing_guidelines,
       },
     })
-    expect(agentPayloads[0].selected_skills[0].skillInstructions).toContain('## 执行工作流')
-    expect(agentPayloads[0].selected_skills[0]).not.toHaveProperty('exampleDocument')
+    expect(agentPayloads[0].available_skills[0].skillInstructions).toContain('## 执行工作流')
+    expect(agentPayloads[0].available_skills[0]).not.toHaveProperty('exampleDocument')
     expect(agentPayloads[1].current_document).toContain('动态调用能力')
     expect(agentPayloads[1].root_request).toBe('设计创作功能的 Agent 架构方案')
     expect(agentPayloads[1].conversation.map((item: any) => item.role)).toEqual([
@@ -1766,6 +1843,66 @@ describe('创作 Agent 多轮 Loop', () => {
     expect(storedPause.data).toEqual({ reason: 'external_model' })
   })
 
+  it.each(['runIds', 'runId', 'assistant'] as const)('恢复历史时无轨迹的旧消息不能抢走新消息的执行过程：%s', (link) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 404 })))
+    useAppStore.getState().setCreationDraft({
+      conversation: [
+        { id: 'old', role: 'user', content: '重复指令', createdAt: 1 },
+        { id: 'new', role: 'user', content: '重复指令', createdAt: 2,
+          ...(link === 'runIds' ? { runIds: ['run-1'] } : link === 'runId' ? { runId: 'run-1' } : {}) },
+        ...(link === 'assistant' ? [{ id: 'reply', role: 'assistant' as const, content: '执行回复', createdAt: 3, runId: 'run-1' }] : []),
+      ],
+      agentEvents: [event('tool.completed', 1, '新指令执行记录')],
+    })
+    render(<CreationPanel />)
+    const messages = screen.getAllByLabelText('用户消息')
+    const trace = screen.getByLabelText('Agent 执行情况')
+    expect(messages[1].compareDocumentPosition(trace) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(trace).toHaveTextContent('新指令执行记录')
+  })
+
+  it('首轮在返回事件前失败，再次输入相同指令时流式执行过程显示在新消息下面', async () => {
+    let attempts = 0
+    let finishStream: (() => void) | undefined
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history') return Response.json({ items: [], total: 0 })
+      if (url.pathname === '/api/creation/history/start') return Response.json({ id: 1 })
+      if (url.pathname.endsWith('/progress')) return new Response(null, { status: 204 })
+      if (url.pathname === '/api/creation/agent/run') {
+        attempts += 1
+        if (attempts === 1) return Response.json({ message: '首轮请求失败' }, { status: 500 })
+        return new Response(new ReadableStream({ start(controller) {
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event('tool.completed', 1, '重提指令执行记录'))}\n\n`))
+          finishStream = () => {
+            controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event('run.failed', 2, '测试执行结束'))}\n\n`))
+            controller.close()
+          }
+        } }), { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+    const view = render(<CreationPanel />)
+    const input = screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/)
+    fireEvent.change(input, { target: { value: '生成一份技术方案' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
+    await screen.findByText('首轮请求失败')
+    fireEvent.change(input, { target: { value: '生成一份技术方案' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
+    await screen.findByText('重提指令执行记录')
+    const assertOrder = () => {
+      const messages = screen.getAllByLabelText('用户消息')
+      expect(messages).toHaveLength(2)
+      expect(messages[1].compareDocumentPosition(screen.getByLabelText('Agent 执行情况')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    }
+    assertOrder()
+    await act(async () => { finishStream!() })
+    view.unmount()
+    render(<CreationPanel />)
+    assertOrder()
+  })
+
   it('暂停后的品牌模型调用失败时终止运行轨迹并停止呼吸灯', async () => {
     const progressPayloads: any[] = []
     const fallbackHistories: any[] = []
@@ -1994,6 +2131,92 @@ describe('创作 Agent 多轮 Loop', () => {
     expect(JSON.stringify(failedProgress.agent_trace)).not.toContain('CLIENT_EXECUTION_FAILED')
   })
 
+  it('验收中断保存正文并保留具体原因，不把未验收产物标为完成', async () => {
+    const document = '# 已生成方案\n\n正文内容。'
+    const reason = '交付验收输出达到长度上限，自动重试后仍未完成，可从已保存断点重试验收'
+    const saved: any[] = []
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history' && (!init?.method || init.method === 'GET')) {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.pathname === '/api/creation/history' && init?.method === 'POST') {
+        saved.push(JSON.parse(String(init.body || '{}')))
+        return Response.json({ id: 1 })
+      }
+      if (url.pathname === '/api/creation/agent/run') return sse([
+        event('run.started', 1, '开始执行'),
+        event('document.replaced', 2, '正文生成完成', undefined, { content: document }),
+        { ...event('run.failed', 3, reason, undefined, { error_code: 'CREATION_DELIVERY_UNVERIFIED' }), status: 'failed' },
+      ])
+      return new Response('{}', { status: 404 })
+    }))
+    render(<CreationPanel />)
+    fireEvent.change(screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/), { target: { value: '写方案' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
+    expect(await screen.findByText(`${reason}；已保存已生成内容`)).toBeInTheDocument()
+    expect(saved[saved.length - 1].generated_content).toBe(document)
+    expect(saved[saved.length - 1].lifecycle_status).toBe('failed')
+  })
+
+  it('确定性验收失败不再喊“可重试继续”', async () => {
+    const document = '# 已生成方案\n\n正文内容。'
+    const deterministicReason = '自动修正 2 次后仍未通过验收：补全缺少的数据来源。已保留当前正文，可补充该资料或指出待改段落，我会重新修正并验收'
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.pathname === '/api/creation/agent/run') return sse([
+        event('run.started', 1, '开始执行'),
+        event('document.replaced', 2, '正文生成完成', undefined, { content: document }),
+        {
+          ...event(
+            'run.failed', 3, deterministicReason, undefined,
+            { error_code: 'CREATION_DELIVERY_INCOMPLETE', retryable: false },
+          ),
+          status: 'failed',
+        },
+      ])
+      return new Response('{}', { status: 404 })
+    }))
+    render(<CreationPanel />)
+    fireEvent.change(screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/), { target: { value: '写方案' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
+    // 原因里的具体缺口必须完整展示，不能被敏感词过滤吞成兜底文案。
+    expect(await screen.findByText(deterministicReason + '；已保存已生成内容')).toBeInTheDocument()
+    // 确定性失败再喊“重试”只会让用户对着同一个结果原地打转。
+    expect(screen.queryByText(/可重试继续/)).not.toBeInTheDocument()
+  })
+
+  it('服务端标为可重试的失败仍提示重试继续', async () => {
+    const document = '# 已生成方案\n\n正文内容。'
+    const reason = '模型服务连接中断，已重试仍未恢复，可稍后重试'
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
+      }
+      if (url.pathname === '/api/creation/agent/run') return sse([
+        event('run.started', 1, '开始执行'),
+        event('document.replaced', 2, '正文生成完成', undefined, { content: document }),
+        {
+          ...event('run.failed', 3, reason, undefined,
+            { error_code: 'MODEL_TRANSPORT_UNAVAILABLE', retryable: true }),
+          status: 'failed',
+        },
+      ])
+      return new Response('{}', { status: 404 })
+    }))
+    render(<CreationPanel />)
+    fireEvent.change(screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/), { target: { value: '写方案' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
+    expect(await screen.findByText(`${reason}；已保存已生成内容，可重试继续`)).toBeInTheDocument()
+  })
+
   it('完成事件可恢复最终文档，避免中间文档事件缺失后误报失败', async () => {
     const completedDocument = '# 行业调研方案\n\n## 背景\n\n补充行业现状。\n\n## 调研结论\n\n形成可核验结论。\n\n## 后续动作\n\n持续更新数据。'
     const savedHistories: any[] = []
@@ -2141,7 +2364,7 @@ describe('创作 Agent 多轮 Loop', () => {
     render(<CreationPanel />)
     const input = screen.getByPlaceholderText(/继续告诉 Agent 如何修改当前文档/)
     fireEvent.change(input, { target: { value: '参考示例公司员工周年礼物方案' } })
-    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    fireEvent.click(screen.getByRole('button', { name: '提交' }))
 
     const intermediateText = await screen.findByText('中间版本内容。')
     expect(screen.queryByLabelText('本轮改动')).not.toBeInTheDocument()

@@ -137,7 +137,7 @@ def test_extract_merged_returns_split_signal_before_persistence(monkeypatch):
     extractor = KnowledgeExtractorV2.__new__(KnowledgeExtractorV2)
     extractor.model = "mock-model"
     extractor.user_identity = ""
-    extractor._generate_segments = lambda captures: ([], [], [])
+    extractor._generate_segments = lambda captures: ([], [], [], [])
     extractor._ollama_chat = lambda **kwargs: {
         "message": {
             "content": json.dumps({
@@ -234,7 +234,7 @@ def _init_db(db_path):
 
 
 class _ImmediateQueue:
-    def submit_sync(self, _priority, fn, timeout=None, lane=None):
+    def submit_sync(self, _priority, fn, timeout=None, lane=None, queue_timeout=None):
         return fn()
 
 

@@ -8,17 +8,10 @@ EmbeddingModel — Embedding 编排器
 from __future__ import annotations
 
 import logging
-import os
-
 from .base import EmbeddingBackend, EmbeddingVector
-from .ollama import OllamaEmbeddingBackend
 from .sentence_transformers_backend import SentenceTransformersBackend
 
 logger = logging.getLogger(__name__)
-
-# 允许通过环境变量强制指定后端（"st" / "ollama"）；默认 st。
-_EMBEDDING_BACKEND_ENV = "MEMORYBREAD_EMBEDDING_BACKEND"
-
 
 class EmbeddingModel:
     """
@@ -37,24 +30,14 @@ class EmbeddingModel:
     def create_default(cls) -> "EmbeddingModel":
         """创建默认配置的 EmbeddingModel。
 
-        优先 sentence-transformers：进程内推理不占用推理运行时，避免
-        Ollama 额外拉起一个 embedding 专用 llama-server（全局只允许存在
-        一个 llama-server，防止模型驻留内存翻倍与孤儿进程泄漏）。
-        ST 不可用时才降级到 Ollama 后端。
+        向量能力只使用 sentence-transformers CPU 后端。初始化负责下载并
+        校验唯一的固定版本，不再回退到 Ollama 的第二套向量模型。
         """
-        forced = os.environ.get(_EMBEDDING_BACKEND_ENV, "").strip().lower()
-        if forced == "ollama":
-            logger.info(
-                "按 %s=ollama 强制使用 Ollama embedding 后端", _EMBEDDING_BACKEND_ENV
-            )
-            return cls(backend=OllamaEmbeddingBackend())
-
         st = SentenceTransformersBackend()
-        if st.is_available():
-            logger.info("使用 sentence-transformers 本地 embedding 后端")
-            return cls(backend=st)
-        logger.warning("sentence-transformers 不可用，降级到 Ollama embedding 后端")
-        return cls(backend=OllamaEmbeddingBackend())
+        if not st.is_available():
+            raise RuntimeError("内置向量运行时不可用，请重新安装最新版应用")
+        logger.info("使用唯一的 sentence-transformers CPU embedding 后端")
+        return cls(backend=st)
 
     # ── 公共接口 ──────────────────────────────────────────────────────────────
 
@@ -70,7 +53,7 @@ class EmbeddingModel:
         if not self._backend.is_available():
             raise RuntimeError(
                 f"Embedding 后端 {self._backend.model_name!r} 不可用"
-                "（请确认 Ollama 正在运行，且该 embedding 模型已安装）"
+                "（请确认内置向量组件完整）"
             )
         return self._backend.encode(texts)
 

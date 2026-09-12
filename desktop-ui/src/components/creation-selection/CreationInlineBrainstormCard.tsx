@@ -1,4 +1,6 @@
 import React from 'react'
+import { BrainstormChoice, BrainstormContext, BrainstormPrompt } from '../CreationBrainstormCopy'
+import CreationBrainstormBranch from '../CreationBrainstormBranch'
 import { Check, Loader2, RotateCcw, Sparkles } from 'lucide-react'
 import type { CreationBrainstormState } from '../../store/useAppStore'
 
@@ -76,10 +78,12 @@ const CreationInlineBrainstormCard: React.FC<Props> = ({
             <header>
               <div>
                 <span className="creation-brainstorm-card__eyebrow">{question.dimension} · 第 {state!.depth + 1} 轮</span>
-                <strong>{question.prompt}</strong>
+                <BrainstormPrompt text={question.prompt} />
               </div>
             </header>
-            {question.why_now && <p className="creation-brainstorm-card__why">{question.why_now}</p>}
+            <CreationBrainstormBranch state={state!} question={question} />
+            <BrainstormContext text={question.why_now} details={question.context_details} />
+            {!singleChoice && <p className="creation-brainstorm-card__why">可多选 · 先逐一讨论同层方向，再展开下一层</p>}
             <div
               className="creation-brainstorm-options"
               role={singleChoice ? 'radiogroup' : 'group'}
@@ -88,7 +92,7 @@ const CreationInlineBrainstormCard: React.FC<Props> = ({
               {question.options.map(option => {
                 const selected = !customSelected && selectedOptionIds.includes(option.id)
                 return (
-                  <button
+                  <BrainstormChoice
                     key={option.id}
                     type="button"
                     role={singleChoice ? 'radio' : 'checkbox'}
@@ -96,13 +100,8 @@ const CreationInlineBrainstormCard: React.FC<Props> = ({
                     className={selected ? 'is-selected' : ''}
                     disabled={loading}
                     onClick={() => onOptionToggle(option.id, singleChoice)}
-                  >
-                    <span className="creation-brainstorm-options__mark">{selected && <Check size={12} />}</span>
-                    <span>
-                      <strong>{option.label}{option.recommended && <small>推荐</small>}</strong>
-                      <small>{option.description}</small>
-                    </span>
-                  </button>
+                    option={option}
+                  />
                 )
               })}
               {question.allow_custom && (
@@ -159,17 +158,15 @@ const CreationInlineBrainstormCard: React.FC<Props> = ({
                 <span>还想继续探索？</span>
                 <div className="creation-brainstorm-options creation-brainstorm-options--continuation" role="radiogroup" aria-label="继续局部脑暴方向">
                   {state.continuation_directions.map(direction => (
-                    <button
+                    <BrainstormChoice
                       key={direction.id}
                       type="button"
                       role="radio"
                       aria-checked={continuationDirectionId === direction.id}
                       className={continuationDirectionId === direction.id ? 'is-selected' : ''}
                       onClick={() => onContinuationDirectionChange(direction.id)}
-                    >
-                      <span className="creation-brainstorm-options__mark">{continuationDirectionId === direction.id && <Check size={12} />}</span>
-                      <span><strong>{direction.label}{direction.recommended && <small>推荐</small>}</strong><small>{direction.description}</small></span>
-                    </button>
+                      option={direction}
+                    />
                   ))}
                   <button
                     type="button"

@@ -1,3 +1,5 @@
+import { getLocalServiceBaseUrl } from './localServices'
+
 export const LOCAL_NICKNAME_KEY = 'memory-bread_local_nickname_v1'
 
 const FALLBACK_NICKNAMES = [
@@ -41,7 +43,7 @@ const fallbackNickname = (): string => {
 }
 
 export const ensureLocalNickname = async (
-  sidecarBaseUrl = 'http://127.0.0.1:7071',
+  sidecarBaseUrl = getLocalServiceBaseUrl('model_api'),
 ): Promise<string> => {
   const existing = readStoredNickname()
   if (existing) return existing

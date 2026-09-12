@@ -1,0 +1,32 @@
+{
+  "history_id": 148,
+  "session_id": "creation-1788802278839-b615a62dd42728",
+  "root_request_sha256": "8c3651cfe927c9ea2b99837b09b68a24a441988b6023f9b59f4b3885c5814a88",
+  "phase": "exploring",
+  "revision": 0,
+  "question_id": "q_295a9cb896ac",
+  "question_type": "multi_choice",
+  "option_count": 3,
+  "unique_option_ids": true,
+  "answered_turns": 0,
+  "document_chars": 0,
+  "memory_unverified": false,
+  "core_elapsed_ms": 54213,
+  "queue_wait_ms": 103,
+  "execution_ms": 54099,
+  "stages_ms": {
+    "memory_retrieval": 13488,
+    "memory_assessment": 16289,
+    "question_generation": 24319
+  },
+  "memory_attempts": 1,
+  "question_attempts": 1,
+  "after_reload": {
+    "creation_pid": 57340,
+    "core_pid": 45441,
+    "same_question_restored": true,
+    "brief_restored": true,
+    "no_model_regeneration": true,
+    "answer_pending": true
+  }
+}

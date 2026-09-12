@@ -121,7 +121,7 @@ def test_database_stage_requests_owned_core_restart_and_recovers(monkeypatch, tm
     monkeypatch.setenv("MEMORY_BREAD_PACKAGED", "1")
     monkeypatch.setattr(manager, "_core_healthy", lambda: False)
     monkeypatch.setattr(manager, "_wait_for_core_health", lambda _timeout: False)
-    monkeypatch.setattr(manager, "_validate_database", lambda _path: None)
+    monkeypatch.setattr(manager, "_validate_database", lambda _path, **_kwargs: None)
 
     def acknowledge_repair(request_path, _timeout):
         assert request_path.is_file()
@@ -152,7 +152,7 @@ def test_database_repair_does_not_delete_existing_data_on_failure(monkeypatch, t
     with pytest.raises(InitializationFailure) as caught:
         manager._stage_database("normal", manager._new_state("normal"))
 
-    assert caught.value.code == "DATABASE_INITIALIZATION_FAILED"
+    assert caught.value.code == "DATABASE_CORRUPT"
     assert database.read_bytes() == b"existing-user-data"
 
 
@@ -292,6 +292,66 @@ def test_interrupted_state_recovers_when_components_become_valid_again(monkeypat
     assert persisted["state"] == "completed"
 
 
+def test_completed_state_restarts_installed_managed_runtime(monkeypatch, tmp_path):
+    manager = InitializationManager(base_dir=tmp_path)
+    completed = manager._new_state("normal")
+    completed.update({"state": "completed", "progress": 100})
+    completed["quality_gate"]["passed"] = True
+    manager._save_state(completed)
+    executable = tmp_path / "initialization" / "runtime" / "ollama" / "managed" / "ollama"
+    started = []
+
+    monkeypatch.setattr(manager, "_ollama_healthy", lambda _url: bool(started))
+    monkeypatch.setattr(manager, "_managed_ollama_executable", lambda _mode: executable)
+    monkeypatch.setattr(manager, "_port_in_use", lambda _port: False)
+    monkeypatch.setattr(manager, "_start_ollama", lambda mode, path: started.append((mode, path)))
+    monkeypatch.setattr(manager, "_installed_model_names", lambda _url: [
+        "qwen3.5:4b",
+        "qllama/bge-small-zh-v1.5:q4_k_m",
+    ])
+    monkeypatch.setattr(manager, "_validate_database", lambda _path, **_kwargs: None)
+    monkeypatch.setattr(manager, "_ollama_gui_running", lambda: False)
+    monkeypatch.setattr(manager, "_managed_ollama_process_owned", lambda _mode: bool(started))
+    monkeypatch.setattr(manager, "_embedding_ready", lambda _mode: True)
+
+    state = manager.get_status()
+
+    assert started == [("normal", executable)]
+    assert state["state"] == "completed"
+
+
+def test_completed_state_does_not_race_external_backend_start(monkeypatch, tmp_path):
+    manager = InitializationManager(base_dir=tmp_path)
+    completed = manager._new_state("normal")
+    completed.update({"state": "completed", "progress": 100})
+    completed["quality_gate"]["passed"] = True
+    manager._save_state(completed)
+    started = []
+
+    monkeypatch.setattr(manager, "_external_backend_start_in_progress", lambda: True)
+    monkeypatch.setattr(manager, "_ollama_healthy", lambda _url: False)
+    monkeypatch.setattr(manager, "_start_ollama", lambda mode, path: started.append((mode, path)))
+    monkeypatch.setattr(manager, "_components_genuinely_missing", lambda _mode: False)
+
+    state = manager.get_status()
+
+    assert started == []
+    assert state["state"] == "completed"
+
+
+def test_normal_initialization_rejects_unmanaged_cli_runtime(monkeypatch, tmp_path):
+    manager = InitializationManager(base_dir=tmp_path)
+    monkeypatch.setattr(manager, "_ollama_healthy", lambda _url: True)
+    monkeypatch.setattr(manager, "_ollama_gui_running", lambda: False)
+    monkeypatch.setattr(manager, "_managed_ollama_process_owned", lambda _mode: False)
+
+    with pytest.raises(InitializationFailure) as caught:
+        manager._stage_inference_engine("normal", manager._new_state("normal"))
+
+    assert caught.value.code == "RUNTIME_START_FAILED"
+    assert "非记忆面包托管" in str(caught.value)
+
+
 def test_normal_initialization_migrates_gui_runtime_to_managed_cli(monkeypatch, tmp_path):
     manager = InitializationManager(base_dir=tmp_path)
     running = {"value": True}
@@ -329,6 +389,15 @@ def test_completed_state_reopens_gate_when_gui_runtime_returns(monkeypatch, tmp_
     manager = InitializationManager(base_dir=tmp_path)
     monkeypatch.setattr(manager, "_ollama_healthy", lambda _url: True)
     monkeypatch.setattr(manager, "_ollama_gui_running", lambda: True)
+
+    assert manager._completed_state_still_valid("normal") is False
+
+
+def test_completed_state_reopens_gate_for_unmanaged_cli_runtime(monkeypatch, tmp_path):
+    manager = InitializationManager(base_dir=tmp_path)
+    monkeypatch.setattr(manager, "_ollama_healthy", lambda _url: True)
+    monkeypatch.setattr(manager, "_ollama_gui_running", lambda: False)
+    monkeypatch.setattr(manager, "_managed_ollama_process_owned", lambda _mode: False)
 
     assert manager._completed_state_still_valid("normal") is False
 
@@ -390,3 +459,160 @@ def test_local_nickname_requires_completed_normal_initialization(monkeypatch, tm
         manager.generate_local_nickname()
 
     assert caught.value.code == "LOCAL_MODEL_NOT_READY"
+
+
+@pytest.mark.parametrize('initialized,runtime,owned,models,pipeline,expected', [
+    (False, True, True, True, True, False),
+    (True, False, True, True, True, False),
+    (True, True, False, True, True, False),
+    (True, True, True, False, True, False),
+    (True, True, True, True, False, False),
+    (True, True, True, True, True, True),
+])
+def test_consultation_readiness_requires_initialized_managed_models(
+        tmp_path, monkeypatch, initialized, runtime, owned, models, pipeline, expected):
+    manager = InitializationManager(base_dir=tmp_path)
+    monkeypatch.setattr(manager, 'get_status', lambda: {
+        'mode': 'normal', 'state': 'completed' if initialized else 'failed',
+        'quality_gate': {'passed': initialized}, 'error_code': None,
+    })
+    monkeypatch.setattr(manager, '_ollama_healthy', lambda _: runtime)
+    monkeypatch.setattr(manager, '_managed_ollama_process_owned', lambda _: owned)
+    monkeypatch.setattr(manager, '_installed_model_names', lambda _: set())
+    monkeypatch.setattr(manager, '_model_present', lambda *_: models)
+    monkeypatch.setattr(manager, '_embedding_ready', lambda _mode: models)
+    status = manager.consultation_readiness(pipeline)
+    assert status['ready'] == expected
+    warming = initialized and runtime and owned and models and not pipeline
+    assert status['action'] == ('retry' if warming else 'models' if initialized else 'initialization')
+    if warming:
+        assert status['error_code'] == 'LOCAL_AI_WARMING_UP'
+        assert '自动恢复' in status['message']
+    assert 'ollama' not in json.dumps(status).lower()
+
+
+def test_completed_status_uses_lightweight_database_probe(tmp_path, monkeypatch):
+    manager = InitializationManager(base_dir=tmp_path)
+    state = manager._new_state('normal')
+    state.update(state='completed', progress=100, quality_gate={'passed': True})
+    manager._save_state(state)
+    monkeypatch.setattr(manager, '_try_restart_managed_ollama', lambda _: None)
+    monkeypatch.setattr(manager, '_ollama_healthy', lambda _: True)
+    monkeypatch.setattr(manager, '_ollama_gui_running', lambda: False)
+    monkeypatch.setattr(manager, '_managed_ollama_process_owned', lambda _: True)
+    monkeypatch.setattr(manager, '_installed_model_names', lambda _: [])
+    monkeypatch.setattr(manager, '_model_present', lambda *_: True)
+    monkeypatch.setattr(manager, '_embedding_ready', lambda _mode: True)
+    checks = []
+    def probe(_path, **options):
+        checks.append(options)
+        assert options == {'check_write': False, 'check_integrity': False}
+    monkeypatch.setattr(manager, '_validate_database', probe)
+    for _ in range(3):
+        assert manager.get_status()['state'] == 'completed'
+        assert manager.consultation_readiness(True)['ready'] is True
+    assert len(checks) == 6
+
+
+def test_vector_stage_uses_local_cpu_model_without_ollama_pull(tmp_path, monkeypatch):
+    manager = InitializationManager(base_dir=tmp_path)
+    readiness = iter([False, True])
+    downloaded = []
+    probed = []
+    monkeypatch.setattr(manager, '_embedding_ready', lambda _mode: next(readiness))
+    monkeypatch.setattr(manager, '_probe_local_embedding', lambda mode: probed.append(mode))
+    monkeypatch.setattr(
+        'embedding.model_sources.download_embedding_model',
+        lambda target: downloaded.append(target) or [],
+    )
+    monkeypatch.setattr(
+        manager,
+        '_ensure_model',
+        lambda *_args: (_ for _ in ()).throw(AssertionError('must not pull via Ollama')),
+    )
+
+    skipped, detail = manager._stage_vector_model('normal', {})
+
+    assert skipped is False
+    assert downloaded == [tmp_path / 'models' / 'bge-small-zh-v1.5']
+    assert probed == ['normal']
+    assert 'CPU' in detail
+
+
+def test_capture_model_installer_uses_managed_then_official_verified_sources(
+        tmp_path, monkeypatch):
+    import initialization_manager as module
+
+    manager = InitializationManager(base_dir=tmp_path)
+    attempts = []
+
+    class FakeDownloader:
+        def __init__(self, root, expected_sha, _progress, **_kwargs):
+            self.root = root
+            self.expected_sha = expected_sha
+
+        def download(self, urls):
+            attempts.append((self.expected_sha, urls))
+            expected_size = next(
+                size for digest, size, _kind in module._CAPTURE_MODEL_BLOBS
+                if digest == self.expected_sha
+            )
+            self.root.mkdir(parents=True, exist_ok=True)
+            artifact = self.root / 'verified.part'
+            with artifact.open('wb') as output:
+                output.truncate(expected_size)
+            return artifact
+
+    monkeypatch.setattr(module, 'RuntimeDownloader', FakeDownloader)
+
+    manager._install_pinned_capture_model('normal')
+
+    assert len(attempts) == len(module._CAPTURE_MODEL_BLOBS)
+    assert all(urls[0].startswith('https://memorybread.cn/downloads/') for _, urls in attempts)
+    assert all(urls[1].startswith('https://registry.ollama.ai/') for _, urls in attempts)
+    manifest_path = (
+        tmp_path / 'initialization' / 'models' / 'manifests' /
+        'registry.ollama.ai' / 'library' / 'qwen3.5' / '4b'
+    )
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest['config']['digest'].startswith('sha256:')
+    assert len(manifest['layers']) == 3
+
+
+def test_packaged_dynamic_runtime_does_not_modify_user_ollama(
+        tmp_path, monkeypatch):
+    manager = InitializationManager(base_dir=tmp_path)
+    monkeypatch.setenv('OLLAMA_HOST', '127.0.0.1:43123')
+    monkeypatch.setattr(manager, '_ollama_healthy', lambda _url: True)
+    monkeypatch.setattr(manager, '_managed_ollama_process_owned', lambda _mode: True)
+    monkeypatch.setattr(manager, '_ollama_gui_running', lambda: True)
+    monkeypatch.setattr(
+        manager,
+        '_stop_ollama_gui',
+        lambda: (_ for _ in ()).throw(AssertionError('must not stop user Ollama')),
+    )
+    state = manager._new_state('normal')
+
+    skipped, _detail = manager._stage_inference_engine('normal', state)
+
+    assert skipped is True
+    assert manager._ollama_port('normal') == 43123
+
+
+def test_download_attempts_use_existing_report_summary_not_new_check_ids(tmp_path):
+    import initialization_manager as module
+    manager = InitializationManager(base_dir=tmp_path)
+    state = manager._new_state('normal')
+    state.update({'state': 'failed', 'current_stage': 'inference_engine',
+                  'error_code': 'RUNTIME_TLS_FAILED', 'message': '下载安全连接失败'})
+    manager._save_state(state)
+    folder = manager._runtime_root('normal') / ('v' + module.MANAGED_OLLAMA_VERSION) / 'downloads'
+    folder.mkdir(parents=True)
+    (folder / 'download-diagnostics.json').write_text(json.dumps([
+        {'id': 'runtime.source_1.attempt_1', 'error_code': 'RUNTIME_TLS_FAILED'},
+        {'id': 'https://private.example/token', 'error_code': 'RUNTIME_HTTP_FAILED'},
+    ]))
+    report = manager.get_report_bundle()
+    assert 'runtime.source_1.attempt_1:RUNTIME_TLS_FAILED' in report['summary']
+    assert 'private.example' not in json.dumps(report)
+    assert all(not check['id'].startswith('runtime.') for check in report['checks'])

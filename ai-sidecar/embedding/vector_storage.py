@@ -7,11 +7,13 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 import sqlite3
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Union
 from pathlib import Path
+from embedding.document_source_audit import audit_source_mismatches, record_source_mismatch
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +53,9 @@ class VectorStorage:
                 from qdrant_client import QdrantClient
                 from qdrant_client.models import Distance, VectorParams
 
-                # 使用统一的 Qdrant 本地路径
-                qdrant_path = Path.home() / ".qdrant"
+                # Honor an explicit isolated store; ordinary runtime keeps its
+                # existing default directory.
+                qdrant_path = Path(self.qdrant_path) if self.qdrant_path is not None else Path.home() / ".qdrant"
                 qdrant_path.mkdir(parents=True, exist_ok=True)
 
                 logger.info(f"使用 Qdrant 本地模式: {qdrant_path}")
@@ -77,7 +80,7 @@ class VectorStorage:
                 
                 logger.info("Qdrant 客户端已连接")
             except Exception as e:
-                logger.error(f"连接 Qdrant 失败: {e}")
+                logger.error("连接 Qdrant 失败 code=QDRANT_CONNECT_FAILED")
                 self._qdrant_client = None
         
         return self._qdrant_client
@@ -133,7 +136,7 @@ class VectorStorage:
                 return False
             return True
         except sqlite3.Error as exc:
-            logger.warning("检查文档向量版本失败: doc_key=%s error=%s", doc_key, exc)
+            logger.warning("检查文档向量版本失败 code=VECTOR_VERSION_CHECK_FAILED")
             return False
 
     def artifact_document_version_exists(
@@ -183,19 +186,18 @@ class VectorStorage:
             return {str(point.id) for point in points} == expected
         except sqlite3.Error as exc:
             logger.warning(
-                "检查持久文档向量版本失败: document_id=%s error=%s",
+                "检查持久文档向量版本失败: document_id=%s code=VECTOR_VERSION_CHECK_FAILED",
                 document_id,
-                exc,
             )
             return False
         except Exception as exc:
             logger.warning(
-                "核验 Qdrant 持久文档向量失败，标记为待修复: document_id=%s error=%s",
+                "核验 Qdrant 持久文档向量失败，标记为待修复: document_id=%s code=VECTOR_VERSION_CHECK_FAILED",
                 document_id,
-                exc,
             )
             return False
 
+    @audit_source_mismatches("vector_write")
     def store_artifact_document_vectors(
         self,
         document_id: int,
@@ -219,6 +221,42 @@ class VectorStorage:
         if not doc_key or not content_hash:
             logger.error("持久文档向量缺少稳定键: document_id=%s", document_id)
             return False
+        indexed_at = int(metadata.get("updated_at") or time.time() * 1000)
+        source_snapshot_id = metadata.get("source_snapshot_id")
+
+        def source_current(conn):
+            if metadata.get("updated_at") is None:
+                record_source_mismatch(document_id, "index_version_mismatch", observed=source_snapshot_id)
+                return False
+            row = conn.execute("""SELECT updated_at,full_content FROM bake_documents
+                WHERE id=? AND deleted_at IS NULL""", (document_id,)).fetchone()
+            if not row or row[0] != indexed_at:
+                record_source_mismatch(document_id, "document_missing" if not row else "index_version_mismatch", observed=source_snapshot_id)
+                return False
+            expected_body_hash = metadata.get("source_body_hash")
+            if expected_body_hash is not None and hashlib.sha256(str(row[1] or "").encode("utf-8")).hexdigest() != expected_body_hash:
+                record_source_mismatch(document_id, "body_mismatch", observed=source_snapshot_id)
+                return False
+            has_heads = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='bake_document_source_heads'").fetchone()
+            head = conn.execute("SELECT snapshot_id FROM bake_document_source_heads WHERE document_id=?", (document_id,)).fetchone() if has_heads else None
+            if source_snapshot_id is None:
+                if head is not None:
+                    record_source_mismatch(document_id, "snapshot_mismatch", expected=head[0])
+                return head is None
+            if type(source_snapshot_id) is not int or head != (source_snapshot_id,):
+                record_source_mismatch(document_id, "snapshot_mismatch", expected=head[0] if head else None, observed=source_snapshot_id)
+                return False
+            from embedding.document_source import source_snapshot_select
+            valid_head = conn.execute("SELECT " + source_snapshot_select(conn) +
+                                      " FROM bake_documents d WHERE d.id=?", (document_id,)).fetchone()
+            if valid_head != (source_snapshot_id,):
+                record_source_mismatch(document_id, "head_invalid", expected=head[0], observed=source_snapshot_id)
+                return False
+            return True
+
+        with sqlite3.connect(self.db_path) as conn:
+            if not source_current(conn):
+                return False
         if self.artifact_document_version_exists(
             document_id,
             doc_key,
@@ -232,13 +270,13 @@ class VectorStorage:
             self._artifact_document_point_id(document_id, content_hash, index)
             for index in range(len(chunks))
         ]
-        indexed_at = int(metadata.get("updated_at") or time.time() * 1000)
         payloads = [
             {
                 "doc_key": doc_key,
                 "source_type": "document",
                 "capture_id": 0,
                 "document_id": document_id,
+                "source_snapshot_id": source_snapshot_id,
                 "knowledge_id": None,
                 "time": indexed_at,
                 "ts": indexed_at,
@@ -280,6 +318,14 @@ class VectorStorage:
             )
 
             with sqlite3.connect(self.db_path) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if not source_current(conn):
+                    conn.executemany("""INSERT OR IGNORE INTO vector_deletion_queue
+                        (qdrant_point_id,source_type,reason,enqueued_at)
+                        SELECT ?,'document','source_changed_during_embedding',?
+                        WHERE NOT EXISTS(SELECT 1 FROM artifact_vector_index WHERE qdrant_point_id=?)""",
+                        [(point_id, int(time.time() * 1000), point_id) for point_id in point_ids])
+                    return False
                 conn.execute(
                     "DELETE FROM artifact_vector_index WHERE document_id = ?",
                     (document_id,),
@@ -314,20 +360,16 @@ class VectorStorage:
                 )
 
             logger.info(
-                "✅ 持久文档分块向量完成: document_id=%s doc_key=%s chunks=%s",
+                "✅ 持久文档分块向量完成: document_id=%s chunks=%s",
                 document_id,
-                doc_key,
                 len(chunks),
             )
             return True
         except Exception as exc:
             # point id 稳定；若 Qdrant 成功而 SQLite 失败，下次重试会幂等覆盖。
             logger.error(
-                "❌ 持久文档向量存储失败: document_id=%s doc_key=%s error=%s",
+                "❌ 持久文档向量存储失败: document_id=%s code=VECTOR_WRITE_FAILED",
                 document_id,
-                doc_key,
-                exc,
-                exc_info=True,
             )
             return False
 
@@ -398,17 +440,17 @@ class VectorStorage:
                         WHERE qdrant_point_id = ?
                         """,
                         [
-                            (str(exc)[:500], retry_at, str(row[0]))
+                            ("VECTOR_DELETE_FAILED", retry_at, str(row[0]))
                             for row in locals().get("rows", [])
                         ],
                     )
             except sqlite3.Error:
                 pass
-            logger.warning("Qdrant 删除队列消费失败: %s", exc)
+            logger.warning("Qdrant 删除队列消费失败 code=VECTOR_DELETE_FAILED")
             return {
                 "selected_count": len(locals().get("point_ids", [])),
                 "deleted_count": 0,
-                "error": str(exc),
+                "error": "VECTOR_DELETE_FAILED",
             }
 
     def audit_qdrant_consistency(
@@ -458,6 +500,35 @@ class VectorStorage:
         if qdrant_client is None:
             return {"available": False, "expected_count": len(expected)}
 
+        # 缺失检测改为按 expected 直接分批 retrieve：可靠性只取决于账本条目数，
+        # 不再受集合总点数 / scroll 截断影响。旧实现先 scroll 全表再 expected-actual，
+        # 一旦集合大于 max_points 就 scan_truncated=True、把 missing 强行清零，导致大
+        # 集合上“账本说已索引、Qdrant 实际丢点”的漂移永远检不出来，也就永远不会被修复。
+        missing: set[str] = set()
+        expected_ids = sorted(expected)
+        for start in range(0, len(expected_ids), 256):
+            batch = expected_ids[start : start + 256]
+            try:
+                found = qdrant_client.retrieve(
+                    collection_name=self._collection_name,
+                    ids=batch,
+                    with_payload=False,
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                # 保守处理：retrieve 失败时不臆测缺失（否则会把正常账本行误删并触发大规模
+                # 重建），整体标记不可用，交给下一轮重试。
+                logger.warning(
+                    "向量一致性审计 retrieve 批次失败 code=VECTOR_RETRIEVE_FAILED"
+                )
+                return {"available": False, "expected_count": len(expected)}
+            found_ids = {str(point.id) for point in found}
+            missing.update(
+                point_id for point_id in batch if point_id not in found_ids
+            )
+
+        # 孤儿扫描必须遍历整个集合，仅供报告，保留有界 scroll；即便被 max_points
+        # 截断也只影响 orphan 计数，不再影响上面已经可靠算出的 missing。
         actual: set[str] = set()
         offset = None
         while len(actual) < max_points:
@@ -468,14 +539,13 @@ class VectorStorage:
                 with_payload=False,
                 with_vectors=False,
             )
+            if not points:
+                break
             actual.update(str(point.id) for point in points)
-            if offset is None or not points:
+            if offset is None:
                 break
 
         scan_truncated = len(actual) >= max_points and offset is not None
-        # A partial scroll can prove an orphan exists, but cannot prove an
-        # expected point is missing.
-        missing = set() if scan_truncated else expected.difference(actual)
         orphans = actual.difference(expected)
         missing_artifacts = missing.intersection(artifact_expected)
         marked_missing_artifacts = 0
@@ -552,7 +622,7 @@ class VectorStorage:
             len(chunks),
             metadata.get("model_name"),
         ):
-            logger.debug("文档向量未变化，跳过重写: doc_key=%s", doc_key)
+            logger.debug("文档向量未变化，跳过重写: capture_id=%s", capture_id)
             return True
 
         time_value = metadata.get("ts") or metadata.get("timestamp")
@@ -678,22 +748,18 @@ class VectorStorage:
                         points_selector=PointIdsList(points=list(stale_ids)),
                     )
                 except Exception as exc:
-                    logger.warning("清理旧文档向量失败，后续检索仍会按 URL 折叠: %s", exc)
+                    logger.warning("清理旧文档向量失败 code=VECTOR_DELETE_FAILED")
 
             logger.info(
-                "✅ 文档分块向量完成: capture_id=%s doc_key=%s chunks=%s",
+                "✅ 文档分块向量完成: capture_id=%s chunks=%s",
                 capture_id,
-                doc_key,
                 len(chunks),
             )
             return True
         except Exception as exc:
             logger.error(
-                "❌ 文档分块向量存储失败: capture_id=%s doc_key=%s error=%s",
+                "❌ 文档分块向量存储失败: capture_id=%s code=VECTOR_WRITE_FAILED",
                 capture_id,
-                doc_key,
-                exc,
-                exc_info=True,
             )
             return False
     
@@ -820,16 +886,14 @@ class VectorStorage:
             conn.close()
 
             logger.info(
-                "✅ 向量存储完成: capture_id=%s, doc_key=%s, source_type=%s, point_id=%s",
+                "✅ 向量存储完成: capture_id=%s, point_id=%s",
                 capture_id,
-                doc_key,
-                source_type,
                 point_id,
             )
             return True
 
         except Exception as e:
-            logger.error(f"❌ 向量存储失败: {e}", exc_info=True)
+            logger.error("❌ 向量存储失败 code=VECTOR_WRITE_FAILED")
             return False
 
 

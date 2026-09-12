@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Any, Optional
 from openai import OpenAI
+from runtime_endpoints import service_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,7 @@ class LLMClient:
     
     def __init__(
         self,
-        base_url: str = "http://localhost:11434/v1",  # Ollama 默认地址
+        base_url: Optional[str] = None,
         api_key: str = "ollama",  # Ollama 不需要真实 key
         model: str = "qwen2.5:7b",
     ):
@@ -30,6 +31,7 @@ class LLMClient:
             api_key: API 密钥
             model: 模型名称
         """
+        base_url = base_url or (service_base_url("ollama") + "/v1")
         self.base_url = base_url
         self.model = model
         self.client = OpenAI(base_url=base_url, api_key=api_key)

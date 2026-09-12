@@ -1,0 +1,26 @@
+........................................................................ [ 40%]
+........................................................................ [ 81%]
+..............................F.                                         [100%]
+=================================== FAILURES ===================================
+________________ test_javascript_shell_is_not_document_evidence ________________
+
+    def test_javascript_shell_is_not_document_evidence():
+        from rag.pipeline import _is_noise_chunk
+        shell = RetrievedChunk(capture_id=73137, text='文档：H3模型适配 Meta prompt\nYou need to enable JavaScript to run this app.', score=1, source='document', doc_key='document_url:https://example.com/h3')
+        assert _is_noise_chunk(shell)
+        shell.text = 'Troubleshooting JavaScript: ' * 20 + shell.text
+>       assert not _is_noise_chunk(shell)
+E       AssertionError: assert not True
+E        +  where True = <function _is_noise_chunk at 0x107efef70>(RetrievedChunk(capture_id=73137, text='Troubleshooting JavaScript: Troubleshooting JavaScript: Troubleshooting JavaScr...'document', metadata={'doc_key': 'document_url:https://example.com/h3'}, doc_key='document_url:https://example.com/h3'))
+
+tests/test_rag.py:2496: AssertionError
+=============================== warnings summary ===============================
+tests/test_rag.py::TestVectorRetriever::test_is_available_returns_bool
+tests/test_rag.py::TestVectorRetriever::test_search_returns_empty_when_unavailable
+  /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/ai-sidecar/rag/retriever.py:539: UserWarning: Failed to obtain server version. Unable to check client-server compatibility. Set check_compatibility=False to skip version check.
+    client = QdrantClient(host=self.host or "localhost", port=self.port or 6333)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_rag.py::test_javascript_shell_is_not_document_evidence - As...
+1 failed, 175 passed, 2 warnings in 1.63s

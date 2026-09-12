@@ -12,7 +12,324 @@ if (!globalThis.__memorybreadContentRuntimeInstalled) {
   })
 }
 
+// Adapter selection describes editor structure, never document/business terms.
+const DOCUMENT_ROOT_ADAPTERS = [
+  {name: 'paginated_editor', selector: '.vodka-paginateddocumentplugin'},
+  {name: 'semantic_document', selector: '[role="document"]'},
+  {name: 'article', selector: 'article'},
+  {name: 'main', selector: 'main'},
+]
+
+function findDocumentRoot() {
+  for (const adapter of DOCUMENT_ROOT_ADAPTERS) {
+    const roots = Array.from(document.querySelectorAll(adapter.selector))
+      .filter(node => elementUsable(node) && String(node.innerText || '').trim())
+    // Prefer the innermost semantic root to avoid including outer application UI.
+    const root = roots.find(node => !roots.some(other => other !== node && node.contains(other)))
+    if (root) return {root, adapter: adapter.name}
+  }
+  return null
+}
+
+function documentBodyText(root, statistics) {
+  const excludedTags = new Set(['NAV', 'HEADER', 'FOOTER', 'ASIDE', 'SCRIPT', 'STYLE', 'NOSCRIPT', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'])
+  const excludedRoles = new Set(['navigation', 'toolbar', 'menu', 'menubar', 'dialog', 'complementary'])
+  const blockTags = new Set(['P', 'DIV', 'SECTION', 'ARTICLE', 'MAIN', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'PRE', 'TR', 'TABLE', 'BR'])
+  const exclude = () => { if (statistics) statistics.excluded_block_count = (statistics.excluded_block_count || 0) + 1; return '' }
+  function read(node) {
+    if (node.nodeType === 3) return node.textContent || ''
+    if (node.nodeType !== 1) return ''
+    if (excludedTags.has(node.tagName) || excludedRoles.has(node.getAttribute('role'))
+      || node.hidden || node.getAttribute('aria-hidden') === 'true') return exclude()
+    const style = globalThis.getComputedStyle?.(node)
+    if (style && (style.display === 'none' || style.visibility === 'hidden')) return exclude()
+    const content = Array.from(node.childNodes || []).map(read).join('')
+    return content + (node.tagName === 'TD' || node.tagName === 'TH' ? '\t' : blockTags.has(node.tagName) ? '\n' : '')
+  }
+  return read(root).replace(/[\u0000\u200b\ufeff]/g, '').replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n').trim()
+}
+
+function semanticDocumentBlocks(root) {
+  const kinds = {P:'paragraph',LI:'list',PRE:'code',TABLE:'table',H1:'heading',H2:'heading',H3:'heading',H4:'heading',H5:'heading',H6:'heading'}
+  const blocks = []
+  function visit(node, path) {
+    const text = documentBodyText(node)
+    if (!text) return // The same visibility/navigation exclusions apply to whole subtrees.
+    const type = kinds[node.tagName] || (node.nodeType === 3 ? 'text' : null)
+    if (type) {
+      const block = {type,text,dom_path:path,ordinal:blocks.length}
+      if (type === 'heading') block.level = Number(node.tagName.slice(1))
+      blocks.push(block)
+      return
+    }
+    Array.from(node.childNodes || []).forEach((child,index) => visit(child,[...path,index]))
+  }
+  visit(root,[])
+  return blocks
+}
+
+function documentSnapshotCoversSegments(finalText, segments) {
+  // Editors replace temporary text with line-layout DOM after loading. Ignore
+  // zero-width separators and CJK soft wraps without conflating Latin words.
+  const normalizeBlock = value => value.replace(/[\u200b\ufeff]/g, '')
+    .replace(/\s+/g, ' ').replace(/([\u3400-\u9fff]) +(?=[\u3400-\u9fff])/g, '$1').trim()
+  const finalNormalized = normalizeBlock(finalText)
+  return segments.every(text => text.split(/\n+/).map(normalizeBlock)
+    .filter(Boolean).every(block => finalNormalized.includes(block)))
+}
+
+function positionedDocumentBlocks(root) {
+  const pages = Array.from(root.querySelectorAll('.vodka-page'))
+  const blocks = []
+  for (const [pageIndex, page] of pages.entries()) {
+    for (const node of page.querySelectorAll('[data-type], [data-block-type]')) {
+      if (node.closest('.vodka-page') !== page) continue
+      const style = globalThis.getComputedStyle(node)
+      if (style.position !== 'absolute') continue
+      let ancestor = node.parentElement
+      let nested = false
+      while (ancestor && ancestor !== page) {
+        if ((ancestor.hasAttribute('data-type') || ancestor.hasAttribute('data-block-type'))
+          && globalThis.getComputedStyle(ancestor).position === 'absolute') nested = true
+        ancestor = ancestor.parentElement
+      }
+      if (nested) continue
+      const top = Number.parseFloat(style.top)
+      const left = Number.parseFloat(style.left)
+      if (!Number.isFinite(top) || !Number.isFinite(left)) continue
+      if (node.getAttribute('data-block-type') === 'table') {
+        const table = node.querySelector?.('table')
+        if (table) {
+          for (const [row, tr] of Array.from(table.rows).entries()) {
+            for (const [column, cell] of Array.from(tr.cells).entries()) {
+              const text = documentBodyText(cell)
+              if (text) blocks.push({key:`${pageIndex}:${top}:${left}:cell:${row}:${column}`,
+                page:pageIndex,top,left,type:'table_cell',row,column,columns:tr.cells.length,
+                row_span:cell.rowSpan || 1,column_span:cell.colSpan || 1,text})
+            }
+          }
+          continue
+        }
+      }
+      const text = documentBodyText(node)
+      if (!text) continue
+      blocks.push({key: `${pageIndex}:${top}:${left}`, page: pageIndex, top, left,
+        type: node.getAttribute('data-type') || node.getAttribute('data-block-type'), text})
+    }
+  }
+  return blocks.sort(comparePositionedBlocks)
+}
+
+function comparePositionedBlocks(a,b) {
+  return a.page-b.page || a.top-b.top || a.left-b.left || (a.row||0)-(b.row||0) || (a.column||0)-(b.column||0)
+}
+
+function positionedDocumentText(blocks) {
+  const parts = []
+  for (let i=0;i<blocks.length;) {
+    const first=blocks[i]
+    if (first.type !== 'table_cell') { parts.push(first.text);i+=1;continue }
+    const rows = new Map()
+    while (i<blocks.length && blocks[i].type==='table_cell' && blocks[i].page===first.page
+      && blocks[i].top===first.top && blocks[i].left===first.left) {
+      const block=blocks[i++]
+      if (!rows.has(block.row)) rows.set(block.row,Array(block.columns).fill(''))
+      rows.get(block.row)[block.column]=block.text
+    }
+    parts.push(Array.from(rows.values()).map(row=>row.join('\t')).join('\n'))
+  }
+  return parts.join('\n\n')
+}
+
+function mergePositionedDocumentBlocks(known, previous, current) {
+  let consistent = true
+  if (previous.length && current.length && !previous.some(a => current.some(b => a.key === b.key))) consistent = false
+  for (const block of current) {
+    const old = known.get(block.key)
+    if (old && JSON.stringify(old) !== JSON.stringify(block)) consistent = false
+    known.set(block.key, block)
+  }
+  return consistent
+}
+
+async function extractPositionedDocument(selected, job, deadline, maximum, maxSteps) {
+  if (selected.adapter !== 'paginated_editor' || !positionedDocumentBlocks(selected.root).length) return null
+  let scroll = selected.root.parentElement
+  while (scroll && !(scroll.scrollHeight > scroll.clientHeight + 3
+    && /^(auto|scroll|overlay)$/.test(globalThis.getComputedStyle(scroll).overflowY))) scroll = scroll.parentElement
+  if (!scroll) return null
+  const originalTop = scroll.scrollTop
+  const passes = []
+  let steps = 0
+  try {
+    for (let passIndex = 0; passIndex < 2; passIndex += 1) {
+      scroll.scrollTop = 0
+      const known = new Map()
+      let previous = []
+      let consistent = true
+      let reachedEnd = false
+      let allStable = true
+      const height = scroll.scrollHeight
+      while (Date.now() < deadline && steps < maxSteps) {
+        steps += 1
+        let blocks = positionedDocumentBlocks(selected.root)
+        let signature = JSON.stringify(blocks)
+        let stable = 0
+        const settleDeadline = Math.min(deadline, Date.now() + 3000)
+        while (stable < 2 && Date.now() + 220 < settleDeadline) {
+          await delay(220)
+          const currentRoot = findDocumentRoot()
+          if (!currentRoot || currentRoot.adapter !== selected.adapter) break
+          selected = currentRoot
+          blocks = positionedDocumentBlocks(selected.root)
+          const next = JSON.stringify(blocks)
+          stable = blocks.length && signature === next ? stable + 1 : 0
+          signature = next
+        }
+        allStable = allStable && stable >= 2
+        // Every visible textual block must be represented, including tables
+        // and future editor block types; stable omission is still omission.
+        allStable = allStable && documentSnapshotCoversSegments(
+          blocks.map(block => block.text).join('\n\n'), [documentBodyText(selected.root)])
+        consistent = mergePositionedDocumentBlocks(known, previous, blocks) && consistent
+        if (!blocks.length) consistent = false
+        previous = blocks
+        const end = Math.max(0, scroll.scrollHeight - scroll.clientHeight)
+        if (scroll.scrollTop >= end - 3) { reachedEnd = true; break }
+        scroll.scrollTop = Math.min(end, scroll.scrollTop + Math.max(1, Math.floor(scroll.clientHeight * .5)))
+      }
+      const blocks = Array.from(known.values()).sort(comparePositionedBlocks)
+      passes.push({blocks, reachedEnd, valid: consistent && allStable && height === scroll.scrollHeight})
+      if (!reachedEnd || Date.now() >= deadline || steps >= maxSteps) break
+    }
+    const last = passes[passes.length - 1]
+    const matching = passes.length === 2 && passes.every(pass => pass.valid && pass.reachedEnd)
+      && JSON.stringify(passes[0].blocks) === JSON.stringify(last.blocks)
+    const text = positionedDocumentText(last.blocks)
+    const truncated = text.length > maximum || !last.reachedEnd
+    const complete = matching && !truncated && Boolean(text)
+    const excluded = {excluded_block_count: 0, exclusion_scope: 'final_body_root'}
+    documentBodyText(selected.root, excluded)
+    return {status: complete ? 'complete' : 'partial', title: document.title || '', url: location.href,
+      content_text: text.slice(0, maximum),
+      structured_data: {document_body: {version: 'document-body.v3', adapter: selected.adapter,
+        quality: text ? 'substantive' : 'unknown', ...excluded, block_count: last.blocks.length, blocks: last.blocks,
+        coverage_method: 'repeated_positioned_blocks', matching_passes: matching ? 2 : 0,
+        final_snapshot_covers_observed: matching, virtualized_or_changed: !matching, final_stable_passes: matching ? 2 : 0},
+        page_state: {stable_passes: matching ? 2 : 0, readiness_timed_out: !last.valid}},
+      completeness: {status: complete ? 'complete' : 'partial', reached_end: last.reachedEnd,
+        stable_passes: matching ? 2 : 0, segment_count: steps, truncated}}
+  } finally {
+    scroll.scrollTop = originalTop
+  }
+}
+
+async function extractDocumentPage(job) {
+  const deadline = Math.min(Number(job.deadline_ms || Date.now() + 60000), Date.now() + 60000)
+  const maximum = Math.max(1000, Math.min(Number(job.max_characters || 80000), 120000))
+  const maxSteps = Math.max(1, Math.min(Number(job.max_segments || 20), 30))
+  let selected = null
+  let previous = ''
+  let stable = 0
+  while (Date.now() < deadline) {
+    selected = findDocumentRoot()
+    const text = selected ? documentBodyText(selected.root) : ''
+    const loading = selected && Array.from(selected.root.querySelectorAll('[aria-busy="true"], [role="progressbar"]')).some(elementUsable)
+    const shellOnly = /^(loading[. …]*|加载中[. …]*|正在加载[. …]*)$/i.test(text.trim())
+    stable = text && !loading && !shellOnly && text === previous ? stable + 1 : 0
+    previous = text
+    if (stable >= 2) break
+    await delay(220)
+  }
+  if (!selected || !previous) throw extractionError('BODY_NOT_FOUND', '尚未取得文档正文')
+  // Paginated editors may first expose a stable, truncated preview DOM.
+  // Wait for their positioned layout rather than certifying that preview.
+  if (selected.adapter === 'paginated_editor') {
+    const layoutDeadline = Math.min(deadline, Date.now() + 5000)
+    while (!positionedDocumentBlocks(selected.root).length && Date.now() + 220 < layoutDeadline) {
+      await delay(220)
+      const current = findDocumentRoot()
+      if (!current || current.adapter !== selected.adapter) break
+      selected = current
+    }
+  }
+  const positioned = await extractPositionedDocument(selected, job, deadline, maximum, maxSteps)
+  if (positioned) return positioned
+  const segments = [previous]
+  const nodes = [selected.root, ...Array.from(selected.root.querySelectorAll('*'))]
+  let parent = selected.root.parentElement
+  while (parent && parent !== document.body) { nodes.push(parent); parent = parent.parentElement }
+  const scrollables = [...new Set(nodes)].filter(node => {
+    const style = globalThis.getComputedStyle?.(node)
+    return Number(node.scrollHeight) > Number(node.clientHeight) + 3
+      && style && /^(auto|scroll|overlay)$/.test(style.overflowY)
+  })
+  const positions = scrollables.map(node => [node, node.scrollTop])
+  let reachedEnd = true
+  let steps = 0
+  try {
+    for (const node of scrollables) {
+      node.scrollTop = 0
+      while (true) {
+        if (Date.now() >= deadline || steps >= maxSteps) { reachedEnd = false; break }
+        await delay(180)
+        steps += 1
+        const text = documentBodyText(selected.root)
+        if (text && !segments.includes(text)) segments.push(text)
+        const end = Math.max(0, node.scrollHeight - node.clientHeight)
+        if (node.scrollTop >= end - 3) break
+        node.scrollTop = Math.min(end, node.scrollTop + Math.max(1, Math.floor(node.clientHeight * .85)))
+      }
+      if (!reachedEnd) break
+    }
+  // Cumulative lazy rendering can finish in one authoritative DOM snapshot.
+  // A union of different viewport-only snapshots is never proof of completeness.
+  let finalText = documentBodyText(selected.root)
+  let finalStablePasses = 0
+  const settleDeadline = Math.min(deadline, Date.now() + 5000)
+  while (Date.now() + 220 < settleDeadline && finalStablePasses < 2) {
+    await delay(220)
+    const current = findDocumentRoot()
+    if (!current || current.adapter !== selected.adapter) { finalStablePasses = 0; break }
+    selected = current
+    const currentText = documentBodyText(selected.root)
+    finalStablePasses = currentText && currentText === finalText ? finalStablePasses + 1 : 0
+    finalText = currentText
+  }
+  const observedBlocksCovered = documentSnapshotCoversSegments(finalText, segments)
+  const virtualized = !observedBlocksCovered || Boolean(selected.root.querySelector('[data-virtualized="true"], [data-virtual="true"]'))
+  // Keep one observed version even when coverage is partial. A union can mix
+  // temporary layout, earlier revisions and stale paragraphs into fake source.
+  const content = finalText || segments[segments.length - 1]
+  const truncated = content.length > maximum || !reachedEnd
+  const complete = selected.adapter !== 'paginated_editor'
+    && !truncated && !virtualized && finalStablePasses >= 2 && stable >= 2
+  const blocks = semanticDocumentBlocks(selected.root)
+  const excluded = {excluded_block_count: 0, exclusion_scope: 'final_body_root'}
+  documentBodyText(selected.root, excluded)
+  return {
+    status: complete ? 'complete' : 'partial', title: document.title || '', url: location.href,
+    content_text: content.slice(0, maximum),
+    structured_data: {
+      document_body: {version: 'document-body.v2', adapter: selected.adapter,
+        quality: 'substantive', ...excluded, block_count: blocks.length, blocks,
+        virtualized_or_changed: virtualized, final_snapshot_covers_observed: observedBlocksCovered,
+        final_stable_passes: finalStablePasses},
+      page_state: {stable_passes: stable, readiness_timed_out: stable < 2},
+    },
+    completeness: {status: complete ? 'complete' : 'partial', reached_end: reachedEnd,
+      stable_passes: Math.min(stable, finalStablePasses), segment_count: segments.length, truncated},
+  }
+  } finally {
+    // Freeze and validate the captured result before restoring the viewport.
+    // Restoring can legitimately unmount lazy-rendered tail blocks.
+    for (const [node, top] of positions) node.scrollTop = top
+  }
+}
+
 async function extractPage(job) {
+  if (job.content_kind === 'document') return extractDocumentPage(job)
   const maxCharacters = Math.max(1000, Math.min(Number(job.max_characters || 80000), 120000))
   const maxSegments = Math.max(1, Math.min(Number(job.max_segments || 20), 30))
   const deadline = Math.min(Number(job.deadline_ms || Date.now() + 60000), Date.now() + 70000)

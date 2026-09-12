@@ -3,24 +3,34 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+from functools import wraps
 import queue
 import threading
 import time
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 import logging
 
 import httpx
 
-from inference_queue import LANE_P0_CREATION, Priority, get_global_queue
+from inference_queue import (
+    LANE_P0_CREATION, LANE_P2_CREATION, InferencePreemptedError, Priority, get_global_queue,
+    raise_if_preempted, register_current_preempt_callback,
+)
+from inference_transport import run_preemptible_async
+from local_auth import install_fastapi_guard
 
 from .agent_loop import CreationAgentLoop
-from .brainstorm import BrainstormCoordinator, BrainstormGenerationError
+from .operations import OperationError
+from .brainstorm import (
+    BrainstormCoordinator, BrainstormGenerationError, BrainstormGenerationTimeout,
+)
 from .inline_edit import (
     InlineEditValidationError,
     build_inline_edit_prompts,
@@ -45,13 +55,145 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+install_fastapi_guard(app)
 creation_service = CreationService()
 creation_agent_loop = CreationAgentLoop(creation_service)
 brainstorm_coordinator = BrainstormCoordinator(creation_service)
 
 
+class _InteractiveCreationCancellation:
+    """Bridge request cancellation to the actual task owning the model socket."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._loop = None
+        self._task = None
+
+    def cancel(self):
+        with self._lock:
+            # Repeated cancellation must not interrupt HTTP cleanup after the
+            # first cancellation has already unwound the model coroutine.
+            if self._cancelled:
+                return
+            self._cancelled = True
+            loop, task = self._loop, self._task
+        if loop is not None and task is not None:
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                # Completion can clear/close the loop just after we copied it.
+                pass
+
+    def run(self, operation, *, preemptible=False):
+        async def execute():
+            with self._lock:
+                self._loop = asyncio.get_running_loop()
+                self._task = asyncio.current_task()
+                cancelled = self._cancelled
+            unregister = (
+                register_current_preempt_callback(self.cancel)
+                if preemptible else lambda: None
+            )
+            try:
+                if preemptible:
+                    raise_if_preempted()
+                # Also covers cancellation after admission but before the
+                # worker's event loop registered the actual operation task.
+                if cancelled:
+                    raise asyncio.CancelledError()
+                result = await operation()
+                if preemptible:
+                    raise_if_preempted()
+                return result
+            except asyncio.CancelledError as exc:
+                # Queue workers catch Exception, whereas asyncio cancellation
+                # is a BaseException. Settle the Future only after cleanup.
+                if preemptible:
+                    raise_if_preempted()
+                raise concurrent.futures.CancelledError("创作请求已取消") from exc
+            finally:
+                unregister()
+                with self._lock:
+                    self._loop = None
+                    self._task = None
+
+        return asyncio.run(execute())
+
+
+def _interactive_creation_endpoint(handler):
+    """Assign online priority at the HTTP boundary; shared services stay neutral."""
+    @wraps(handler)
+    async def scheduled(*args, **kwargs):
+        cancellation = _InteractiveCreationCancellation()
+        future = get_global_queue().submit(
+            Priority.P0,
+            lambda: cancellation.run(lambda: handler(*args, **kwargs)),
+            lane=LANE_P0_CREATION,
+        )
+        try:
+            return await asyncio.wrap_future(future)
+        finally:
+            cancellation.cancel()
+            # A disconnected request must not start later if it is still queued.
+            future.cancel()
+    return scheduled
+
+
+async def _interactive_creation_chunks(stream_factory):
+    """Keep the model iterator in the P0 worker for its entire lifetime."""
+    chunks: queue.Queue = queue.Queue()
+    finished = object()
+    cancelled = threading.Event()
+    cancellation = _InteractiveCreationCancellation()
+
+    def run_stream():
+        async def produce():
+            stream = stream_factory()
+            try:
+                async for chunk in stream:
+                    if cancelled.is_set():
+                        break
+                    chunks.put(chunk)
+            finally:
+                await stream.aclose()
+        return cancellation.run(produce)
+
+    future = get_global_queue().submit(
+        Priority.P0, run_stream, lane=LANE_P0_CREATION,
+    )
+    # Eviction/cancellation before admission must also wake the HTTP consumer.
+    future.add_done_callback(lambda _future: chunks.put(finished))
+
+    def cancel_model(_request_task=None):
+        cancelled.set()
+        cancellation.cancel()
+        future.cancel()
+
+    # The response task can be cancelled while sending a chunk, when this
+    # iterator is suspended at yield and its finally has not been entered.
+    request_task = asyncio.current_task()
+    if request_task is not None:
+        request_task.add_done_callback(cancel_model)
+    try:
+        while True:
+            item = await asyncio.to_thread(chunks.get)
+            if item is finished:
+                break
+            yield item
+        await asyncio.wrap_future(future)
+    finally:
+        if request_task is not None:
+            request_task.remove_done_callback(cancel_model)
+        cancel_model()
+
+
 def _creation_failure_details(exc: Exception) -> tuple[str, str, bool]:
     """把内部异常收敛为不泄露供应商信息的稳定错误契约。"""
+    if isinstance(exc, InferencePreemptedError):
+        return "INFERENCE_PREEMPTED", "后台创作已让出模型资源，稍后自动重试", True
+    if isinstance(exc, OperationError):
+        return exc.code, str(exc), False
     if isinstance(exc, httpx.TransportError):
         return (
             "MODEL_TRANSPORT_UNAVAILABLE",
@@ -59,6 +201,12 @@ def _creation_failure_details(exc: Exception) -> tuple[str, str, bool]:
             True,
         )
     if isinstance(exc, CloudModelRequestError):
+        if exc.status_code in {401, 403}:
+            return (
+                "MODEL_ACCESS_DENIED",
+                "当前模型访问未获授权，请切换可用模型或检查模型权限后重试",
+                False,
+            )
         if exc.status_code == 429:
             return (
                 "MODEL_RATE_LIMITED",
@@ -71,6 +219,11 @@ def _creation_failure_details(exc: Exception) -> tuple[str, str, bool]:
                 "模型服务暂时不可用，自动重试后仍未恢复，请稍后重试",
                 True,
             )
+        return (
+            "MODEL_REQUEST_FAILED",
+            "模型服务未能接受请求，请检查模型配置后重试",
+            False,
+        )
     message = str(exc).strip()
     return (
         "CREATION_AGENT_FAILED",
@@ -137,18 +290,23 @@ class MatchCreationSkillsRequest(BaseModel):
 class AgentRunRequest(GenerateRequest):
     """创作 Agent Loop 的启动或恢复请求。"""
 
+    execution_origin: Literal["interactive", "scheduled_task"] = "interactive"
     session_id: Optional[str] = None
     run_id: Optional[str] = None
     root_request: Optional[str] = None
     current_document: str = ""
     conversation: list[dict[str, str]] = Field(default_factory=list)
     selected_skills: list[dict[str, Any]] = Field(default_factory=list)
+    available_skills: Optional[list[dict[str, Any]]] = None
+    explicit_skill_ids: list[str] = Field(default_factory=list)
     model_mode: str = "local"
     confirmed: bool = False
     resume_state: Optional[dict[str, Any]] = None
     model_result: Optional[str] = None
     creation_mode: str = "direct"
     creation_brief: Optional[dict[str, Any]] = None
+    operation_context: Optional[dict[str, Any]] = None
+    resume_checkpoint: Optional[dict[str, Any]] = None
 
 
 class InlineEditConstraints(BaseModel):
@@ -179,59 +337,214 @@ class BrainstormNextRequest(BaseModel):
     brief_markdown: str = ""
     selected_skills: list[dict[str, Any]] = Field(default_factory=list)
     force_continue: bool = False
+    prefetch: bool = False
+    suggest_directions: bool = False
     focus_hint: str = ""
+    focus_hint_source: str = "legacy"
+    exploration_stage: str = ""
+    question_batch_limit: int = Field(default=1, ge=1, le=8)
+    extension_goal: str = Field(default="", max_length=80)
+    sibling_question_context: list[str] = Field(default_factory=list, max_length=32)
+    brief_edits: dict[str, str] = Field(default_factory=dict)
+    user_input_revisions: dict[str, int] = Field(default_factory=dict)
     creation_model: Optional[str] = None
     creation_api_key: Optional[str] = None
     creation_base_url: Optional[str] = None
 
 
 @app.post("/creation/brainstorm/next")
-async def next_brainstorm_step(request: BrainstormNextRequest):
-    """根据完整选择路径动态生成一个下一问题，或判断当前已收敛。"""
+async def next_brainstorm_step(request: BrainstormNextRequest, http_request: Request = None):
+    """生成当前题及按需规划的同层待问主题，或判断当前已收敛。"""
     if not request.root_request.strip():
         raise HTTPException(status_code=400, detail="root_request 不能为空")
 
-    def run_brainstorm() -> dict[str, Any]:
-        return asyncio.run(
-            brainstorm_coordinator.next_step(
-                root_request=request.root_request,
-                decisions=request.decisions,
-                brief_markdown=request.brief_markdown,
-                selected_skills=request.selected_skills,
-                force_continue=request.force_continue,
-                focus_hint=request.focus_hint,
-                creation_model=request.creation_model,
-                creation_api_key=request.creation_api_key,
-                creation_base_url=request.creation_base_url,
+    # 排队和模型执行共享同一预算；晚获准的任务不能重新获得完整 150 秒。
+    deadline = time.monotonic() + brainstorm_coordinator.MAX_TURN_SECONDS
+    timeout_message = "本轮脑暴生成等待超时，已保留当前输入和已确认进度，请稍后重试"
+    cancellation = _InteractiveCreationCancellation()
+
+    async def run_with_deadline() -> dict[str, Any]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BrainstormGenerationTimeout(timeout_message)
+        try:
+            # Future.cancel() 无法终止已运行的线程；由任务自己的事件循环
+            # 取消模型请求，退出流上下文并释放推理槽。
+            return await asyncio.wait_for(
+                brainstorm_coordinator.next_step(
+                    root_request=request.root_request,
+                    decisions=request.decisions,
+                    brief_markdown=request.brief_markdown,
+                    selected_skills=request.selected_skills,
+                    force_continue=request.force_continue,
+                    prefetch=request.prefetch,
+                    suggest_directions=request.suggest_directions,
+                    focus_hint=request.focus_hint,
+                    focus_hint_source=request.focus_hint_source,
+                    exploration_stage=request.exploration_stage,
+                    question_batch_limit=request.question_batch_limit,
+                    extension_goal=request.extension_goal,
+                    sibling_question_context=request.sibling_question_context,
+                    brief_edits=request.brief_edits,
+                    user_input_revisions=request.user_input_revisions,
+                    creation_model=request.creation_model,
+                    creation_api_key=request.creation_api_key,
+                    creation_base_url=request.creation_base_url,
+                ),
+                timeout=remaining,
             )
-        )
+        except asyncio.TimeoutError as exc:
+            raise BrainstormGenerationTimeout(timeout_message) from exc
+
+    def run_brainstorm() -> dict[str, Any]:
+        if time.monotonic() >= deadline:
+            raise BrainstormGenerationTimeout(timeout_message)
+        try:
+            return cancellation.run(run_with_deadline, preemptible=request.prefetch)
+        except concurrent.futures.CancelledError as exc:
+            if time.monotonic() >= deadline:
+                raise BrainstormGenerationTimeout(timeout_message) from exc
+            raise
 
     future = get_global_queue().submit(
-        Priority.P0,
+        Priority.P2 if request.prefetch else Priority.P0,
         run_brainstorm,
-        lane=LANE_P0_CREATION,
+        lane=LANE_P2_CREATION if request.prefetch else LANE_P0_CREATION,
     )
+
+    async def await_result():
+        wrapped = asyncio.wrap_future(future)
+        if http_request is None:
+            return await wrapped
+        stop_watching = asyncio.Event()
+
+        async def wait_disconnect():
+            # A non-streaming ASGI handler is not cancelled automatically when
+            # Core drops its HTTP request after a branch becomes obsolete.
+            while not stop_watching.is_set():
+                if await http_request.is_disconnected():
+                    raise asyncio.CancelledError()
+                await asyncio.sleep(0.05)
+
+        disconnected = asyncio.create_task(wait_disconnect())
+        try:
+            done, _ = await asyncio.wait(
+                (wrapped, disconnected), return_when=asyncio.FIRST_COMPLETED,
+            )
+            if disconnected in done:
+                await disconnected
+            return await wrapped
+        finally:
+            stop_watching.set()
+            disconnected.cancel()
+            await asyncio.gather(disconnected, return_exceptions=True)
+            wrapped.cancel()
+
     try:
-        return await asyncio.to_thread(future.result)
+        try:
+            result = await asyncio.wait_for(
+                await_result(),
+                timeout=max(0.0, deadline - time.monotonic()),
+            )
+            # This gate is computed from validated option labels, never from a
+            # model-authored promise that a future answer cannot alter sources.
+            result["prefetch_safe_option_ids"] = [
+                option["id"] for option in (result.get("question") or {}).get("options", [])
+                if isinstance(option.get("id"), str) and option["id"]
+                and brainstorm_coordinator._source_directive(str(option.get("label") or "")) == 0
+            ]
+            return result
+        except asyncio.TimeoutError as exc:
+            # 尚未运行的任务必须撤销，不能在请求已返回后又启动生成。
+            # 已运行的任务由 run_with_deadline 使用同一时限取消。
+            future.cancel()
+            raise BrainstormGenerationTimeout(timeout_message) from exc
+    except InferencePreemptedError as exc:
+        raise HTTPException(status_code=503, detail={
+            "code": "INFERENCE_PREEMPTED",
+            "message": "后台脑暴预生成已让出模型资源，稍后自动重试",
+            "retryable": True,
+        }) from exc
     except BrainstormGenerationError as exc:
         raise HTTPException(
-            status_code=502,
+            status_code=504 if exc.code == "BRAINSTORM_MODEL_TIMEOUT" else 502,
             detail={
-                "code": "BRAINSTORM_MODEL_OUTPUT_INVALID",
+                "code": exc.code,
                 "message": str(exc),
+                "retryable": exc.code == "BRAINSTORM_MODEL_TIMEOUT",
             },
         ) from exc
     except Exception as exc:
-        logger.exception("Dynamic brainstorm generation failed")
-        error_code, message, retryable = _creation_failure_details(exc)
+        # These failures can contain provider URLs, credentials and response
+        # bodies. Keep the exhausted-retry boundary specific to brainstorm;
+        # neither exception text nor a traceback belongs in its public contract.
+        error_code = "BRAINSTORM_MODEL_OUTPUT_INVALID"
+        upstream_status = None
+        if isinstance(exc, httpx.HTTPStatusError):
+            upstream_status = exc.response.status_code
+        elif isinstance(exc, CloudModelRequestError):
+            upstream_status = exc.status_code
+        if isinstance(exc, (asyncio.TimeoutError, httpx.TimeoutException)):
+            error_code = "BRAINSTORM_MODEL_TIMEOUT"
+        elif upstream_status is not None:
+            if upstream_status in {408, 504}:
+                error_code = "BRAINSTORM_MODEL_TIMEOUT"
+            elif upstream_status == 429:
+                error_code = "MODEL_RATE_LIMITED"
+            elif upstream_status in {401, 403}:
+                error_code = "MODEL_ACCESS_DENIED"
+            elif upstream_status >= 500:
+                error_code = "MODEL_SERVICE_UNAVAILABLE"
+            else:
+                error_code = "MODEL_REQUEST_FAILED"
+        elif isinstance(exc, httpx.TransportError):
+            error_code = "MODEL_SERVICE_UNAVAILABLE"
+        elif isinstance(exc, OperationError):
+            error_code = {
+                "MODEL_TIMEOUT": "BRAINSTORM_MODEL_TIMEOUT",
+                "BRAINSTORM_MODEL_TIMEOUT": "BRAINSTORM_MODEL_TIMEOUT",
+                "MODEL_RATE_LIMITED": "MODEL_RATE_LIMITED",
+                "MODEL_UNAVAILABLE": "MODEL_SERVICE_UNAVAILABLE",
+                "MODEL_SERVICE_UNAVAILABLE": "MODEL_SERVICE_UNAVAILABLE",
+                "MODEL_TRANSPORT_UNAVAILABLE": "MODEL_SERVICE_UNAVAILABLE",
+                "MODEL_ACCESS_DENIED": "MODEL_ACCESS_DENIED",
+                "MODEL_REQUEST_FAILED": "MODEL_REQUEST_FAILED",
+            }.get(exc.code, error_code)
+        status_code, message, retryable = {
+            "BRAINSTORM_MODEL_TIMEOUT": (
+                504, "脑暴问题生成超时，已保留当前输入，请稍后重试", True,
+            ),
+            "MODEL_RATE_LIMITED": (
+                429, "模型服务当前繁忙，已保留当前输入，请稍后重试", True,
+            ),
+            "MODEL_SERVICE_UNAVAILABLE": (
+                503, "脑暴问题生成服务暂时不可用，已保留当前输入，请稍后重试", True,
+            ),
+            "MODEL_ACCESS_DENIED": (
+                403, "当前模型访问未获授权，请切换可用模型或检查模型权限后重试", False,
+            ),
+            "MODEL_REQUEST_FAILED": (
+                502, "模型未能接受脑暴请求，请检查模型配置后重试", False,
+            ),
+            "BRAINSTORM_MODEL_OUTPUT_INVALID": (
+                502, "脑暴问题未生成有效结果，已保留当前输入，请重试", False,
+            ),
+        }[error_code]
+        logger.warning(
+            "Dynamic brainstorm generation failed: type=%s code=%s",
+            type(exc).__name__, error_code,
+        )
         raise HTTPException(
-            status_code=503,
+            status_code=status_code,
             detail={
                 "code": error_code,
                 "message": message,
                 "retryable": retryable,
             },
         ) from exc
+    finally:
+        cancellation.cancel()
+        future.cancel()
 
 
 @app.post("/creation/generate")
@@ -307,6 +620,9 @@ async def run_creation_agent(request: AgentRunRequest):
             detail="creation_mode 只支持 direct 或 brainstorm",
         )
     options = _options_from_request(request)
+    background = request.execution_origin == "scheduled_task"
+    inference_priority = Priority.P2 if background else Priority.P0
+    inference_lane = LANE_P2_CREATION if background else LANE_P0_CREATION
     resume_state = request.resume_state or {}
     resolved_session_id = (
         request.session_id
@@ -335,6 +651,9 @@ async def run_creation_agent(request: AgentRunRequest):
                     current_document=request.current_document,
                     conversation=request.conversation,
                     selected_skills=request.selected_skills,
+                    governance_required=True,
+                    available_skills=request.available_skills,
+                    explicit_skill_ids=request.explicit_skill_ids,
                     options=options,
                     model_mode=request.model_mode,
                     session_id=resolved_session_id,
@@ -347,6 +666,8 @@ async def run_creation_agent(request: AgentRunRequest):
                     creation_base_url=request.creation_base_url,
                     creation_mode=request.creation_mode,
                     creation_brief=request.creation_brief,
+                    operation_context=request.operation_context,
+                    resume_checkpoint=request.resume_checkpoint,
                 ):
                     if cancelled.is_set():
                         break
@@ -361,42 +682,7 @@ async def run_creation_agent(request: AgentRunRequest):
                     )
                     event_queue.put(event)
 
-            try:
-                asyncio.run(produce())
-            except Exception as exc:
-                logger.exception("Creation agent loop failed")
-                error_code, failure_summary, retryable = _creation_failure_details(exc)
-                event_queue.put(
-                    {
-                        "schema_version": "creation.agent.v1",
-                        "event_id": f"event-{uuid4()}",
-                        "session_id": runtime_identity["session_id"],
-                        "run_id": runtime_identity["run_id"],
-                        "sequence": runtime_identity["sequence"] + 1,
-                        "timestamp": int(time.time() * 1000),
-                        "type": "run.failed",
-                        "status": "failed",
-                        "actor": {
-                            "kind": "agent",
-                            "id": "creation_main_agent",
-                            "name": "创作主 Agent",
-                        },
-                        "summary": failure_summary,
-                        "goal": {
-                            "status": "failed",
-                            "revision": 0,
-                            "remaining_steps": [],
-                            "outcome": failure_summary,
-                        },
-                        "environment_patch": {},
-                        "data": {
-                            "error_code": error_code,
-                            "retryable": retryable,
-                        },
-                    }
-                )
-            finally:
-                event_queue.put(finished)
+            run_preemptible_async(produce)
 
         if not request.resume_state:
             queued_event = {
@@ -421,15 +707,16 @@ async def run_creation_agent(request: AgentRunRequest):
                     "outcome": "",
                 },
                 "environment_patch": {},
-                "data": {"lane": "interactive_creation"},
+                "data": {"lane": "background_creation" if background else "interactive_creation"},
             }
             yield f"data: {json.dumps(queued_event, ensure_ascii=False)}\n\n"
 
         future = get_global_queue().submit(
-            Priority.P0,
+            inference_priority,
             run_loop,
-            lane=LANE_P0_CREATION,
+            lane=inference_lane,
         )
+        future.add_done_callback(lambda _future: event_queue.put(finished))
         try:
             while True:
                 item = await asyncio.to_thread(event_queue.get)
@@ -437,6 +724,37 @@ async def run_creation_agent(request: AgentRunRequest):
                     break
                 yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
             await asyncio.to_thread(future.result)
+        except Exception as exc:
+            logger.error("Creation agent loop failed: %s", type(exc).__name__)
+            error_code, failure_summary, retryable = _creation_failure_details(exc)
+            failure_event = {
+                "schema_version": "creation.agent.v1",
+                "event_id": f"event-{uuid4()}",
+                "session_id": runtime_identity["session_id"],
+                "run_id": runtime_identity["run_id"],
+                "sequence": runtime_identity["sequence"] + 1,
+                "timestamp": int(time.time() * 1000),
+                "type": "run.failed",
+                "status": "failed",
+                "actor": {
+                    "kind": "agent",
+                    "id": "creation_main_agent",
+                    "name": "创作主 Agent",
+                },
+                "summary": failure_summary,
+                "goal": {
+                    "status": "failed",
+                    "revision": 0,
+                    "remaining_steps": [],
+                    "outcome": failure_summary,
+                },
+                "environment_patch": {},
+                "data": {
+                    "error_code": error_code,
+                    "retryable": retryable,
+                },
+            }
+            yield f"data: {json.dumps(failure_event, ensure_ascii=False)}\n\n"
         finally:
             cancelled.set()
             future.cancel()
@@ -539,6 +857,8 @@ async def run_creation_inline_edit(request: InlineEditRequest):
                     "retryable": retryable,
                 },
             ) from exc
+        finally:
+            future.cancel()
 
     return {
         "schema_version": "creation.inline-edit.v1",
@@ -563,6 +883,7 @@ async def creation_inline_edit_capabilities():
 
 
 @app.post("/creation/references")
+@_interactive_creation_endpoint
 async def preview_references(request: ReferenceRequest):
     """预览本次创作会优先使用的参考资料及权重。"""
     try:
@@ -605,6 +926,8 @@ async def preview_references(request: ReferenceRequest):
                     "selection_reasons": list(ref.selection_reasons),
                     "reason": ref.reason,
                     "summary": ref.summary,
+                    "source_snapshot_id": ref.source_snapshot_id,
+                    "source_body_hash": ref.source_body_hash,
                     "source_url": ref.source_url,
                     "observed_at": ref.observed_at,
                 }
@@ -617,6 +940,7 @@ async def preview_references(request: ReferenceRequest):
 
 
 @app.post("/creation/skills/analyze")
+@_interactive_creation_endpoint
 async def analyze_creation_skill(request: AnalyzeCreationSkillRequest):
     """在本地从既有文档提炼可编辑的技能。"""
     try:
@@ -632,7 +956,15 @@ async def analyze_creation_skill(request: AnalyzeCreationSkillRequest):
         raise HTTPException(status_code=500, detail="本地技能分析失败")
 
 
+@app.post("/creation/skills/review")
+@_interactive_creation_endpoint
+async def review_creation_skill(request: dict[str, Any]):
+    from .skill_governance import review_skill
+    return await review_skill(creation_service, request)
+
+
 @app.post("/creation/skills/match")
+@_interactive_creation_endpoint
 async def match_creation_skills(request: MatchCreationSkillsRequest):
     """创作提交后由模型路由决定执行时引入哪个 Skill；失败时返回空召回。"""
     try:
@@ -659,6 +991,7 @@ class TestModelRequest(BaseModel):
 
 
 @app.post("/creation/test_model")
+@_interactive_creation_endpoint
 async def test_creation_model(request: TestModelRequest):
     """验证创作模型连通性"""
     try:
@@ -688,8 +1021,10 @@ async def chat_with_model(request: ChatRequest):
     import json as _json
     async def event_stream():
         try:
-            async for chunk in creation_service._chat_cloud(
-                request.messages, request.model, request.api_key, request.base_url or ""
+            async for chunk in _interactive_creation_chunks(
+                lambda: creation_service._chat_cloud(
+                    request.messages, request.model, request.api_key, request.base_url or ""
+                )
             ):
                 yield f"data: {_json.dumps({'content': chunk})}\n\n"
             yield f"data: {_json.dumps({'done': True})}\n\n"

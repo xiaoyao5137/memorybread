@@ -1,6 +1,14 @@
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
 
+/// Shared optimistic-concurrency guard for conversational and selection edits.
+/// Call again inside the transaction immediately before committing a result.
+pub fn matches_document_base(history: &CreationHistory, session: &str, revision: i64, document: &str) -> bool {
+    history.session_id.as_deref() == Some(session)
+        && history.revision_no == revision
+        && history.generated_content == document
+}
+
 const HISTORY_SELECT: &str = "SELECT id, prompt, generated_content, doc_type, audience,
     reference_count, references_json, model, latency_ms, session_id, conversation_json,
     agent_trace_json, goal_json, root_request, parent_history_id, revision_no,
@@ -410,17 +418,17 @@ pub fn update_progress(
     let changed = conn.execute(
         "UPDATE creation_history
          SET lifecycle_status = ?2,
-             generated_content = COALESCE(?3, generated_content),
+             generated_content = CASE
+                 WHEN lifecycle_status IN ('completed', 'failed', 'cancelled') THEN generated_content
+                 ELSE COALESCE(?3, generated_content) END,
              conversation_json = COALESCE(?4, conversation_json),
              agent_trace_json = COALESCE(?5, agent_trace_json),
              latency_ms = COALESCE(?6, latency_ms),
              updated_at = ?7
          WHERE id = ?1
-           AND (?8 IS NULL OR progress_epoch = ?8)
-           AND NOT (
-             ?2 = 'running'
-             AND lifecycle_status IN ('completed', 'failed', 'cancelled')
-           )",
+           AND progress_epoch = COALESCE(?8, 0)
+           AND (lifecycle_status = ?2
+                OR lifecycle_status NOT IN ('completed', 'failed', 'cancelled'))",
         params![
             history_id,
             lifecycle_status,
@@ -436,7 +444,7 @@ pub fn update_progress(
         return Ok(true);
     }
 
-    // A late in-flight snapshot is an accepted no-op after a terminal write. Return true so the
+    // A stale epoch or late conflicting terminal snapshot is an accepted no-op. Return true so the
     // API does not misreport an existing record as missing, while preserving the terminal state,
     // document, conversation and trace atomically.
     let exists = conn
@@ -864,6 +872,101 @@ mod tests {
         let (items, total) = list_page(&conn, None, 20, 0).unwrap();
         assert_eq!(total, 1);
         assert_eq!(items[0].source_kind, "scheduled_task");
+    }
+
+    #[test]
+    fn progress_without_epoch_cannot_overwrite_a_restarted_run() {
+        let conn = connection();
+        conn.execute("INSERT INTO creation_history (prompt,generated_content,created_at,updated_at) VALUES ('test','saved',0,0)", []).unwrap();
+        let id = conn.last_insert_rowid();
+        let epoch = start_progress(&conn, id, None, None).unwrap().unwrap();
+        for stale_epoch in [None, Some(epoch - 1)] {
+            for status in ["running", "failed", "cancelled", "completed"] {
+                assert!(update_progress(
+                    &conn,
+                    id,
+                    status,
+                    Some("stale"),
+                    None,
+                    None,
+                    None,
+                    stale_epoch
+                )
+                .unwrap());
+                let history = get_by_id(&conn, id).unwrap().unwrap();
+                assert_eq!(history.lifecycle_status, "running");
+                assert_eq!(history.generated_content, "saved");
+            }
+        }
+        assert!(update_progress(
+            &conn,
+            id,
+            "completed",
+            Some("new"),
+            None,
+            None,
+            None,
+            Some(epoch)
+        )
+        .unwrap());
+        assert_eq!(
+            get_by_id(&conn, id).unwrap().unwrap().generated_content,
+            "new"
+        );
+    }
+
+    #[test]
+    fn terminal_progress_cannot_be_replaced_by_late_failure_or_completion() {
+        let conn = connection();
+        for terminal in ["completed", "failed", "cancelled"] {
+            conn.execute("INSERT INTO creation_history (prompt,generated_content,lifecycle_status,created_at,updated_at) VALUES ('test','saved',?1,0,0)", params![terminal]).unwrap();
+            let id = conn.last_insert_rowid();
+            for late_status in ["running", "failed", "cancelled", "completed"] {
+                assert!(update_progress(
+                    &conn,
+                    id,
+                    late_status,
+                    Some("stale"),
+                    None,
+                    None,
+                    None,
+                    None
+                )
+                .unwrap());
+                let history = get_by_id(&conn, id).unwrap().unwrap();
+                assert_eq!(history.lifecycle_status, terminal);
+                assert_eq!(history.generated_content, "saved");
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_progress_still_accepts_same_epoch_conversation_metadata() {
+        let conn = connection();
+        conn.execute("INSERT INTO creation_history (prompt,generated_content,lifecycle_status,progress_epoch,created_at,updated_at) VALUES ('test','saved','completed',2,0,0)", []).unwrap();
+        let id = conn.last_insert_rowid();
+        assert!(update_progress(
+            &conn,
+            id,
+            "completed",
+            Some("stale"),
+            Some("[\"final message\"]"),
+            Some("[\"final trace\"]"),
+            Some(1500),
+            Some(2)
+        )
+        .unwrap());
+        let history = get_by_id(&conn, id).unwrap().unwrap();
+        assert_eq!(history.generated_content, "saved");
+        assert_eq!(
+            history.conversation_json.as_deref(),
+            Some("[\"final message\"]")
+        );
+        assert_eq!(
+            history.agent_trace_json.as_deref(),
+            Some("[\"final trace\"]")
+        );
+        assert_eq!(history.latency_ms, Some(1500));
     }
 
     #[test]

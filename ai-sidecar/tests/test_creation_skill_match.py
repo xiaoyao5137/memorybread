@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -42,6 +43,12 @@ class SkillMatchService:
             await asyncio.sleep(self.completion_delay)
         if self.completion_error is not None:
             raise self.completion_error
+        if kwargs.get("json_schema", {}).get("properties", {}).get("metadata_consistent"):
+            instruction = json.loads(kwargs["user_prompt"])["instruction"]
+            yield json.dumps({"requested_deliverable": "目标文档", "actual_workflow_deliverable": "目标文档",
+                              "metadata_consistent": True, "applicable": True, "request_evidence": instruction,
+                              "conflicts": [], "missing_inputs": []})
+            return
         yield self.completion_text
 
 
@@ -209,7 +216,7 @@ async def test_model_decision_is_returned_when_intent_present():
 
     assert result["skill_ids"] == [27]
     assert result["source"] == "model"
-    assert len(service.model_calls) == 1
+    assert len(service.model_calls) == 2
     assert service.model_calls[0]["disable_thinking"] is False
     assert service.model_calls[0]["num_predict"] == 768
 
@@ -292,4 +299,4 @@ async def test_plan_template_is_recalled_when_purpose_aligns():
 
     assert result["skill_ids"] == [52]
     assert result["source"] == "model"
-    assert len(service.model_calls) == 1
+    assert len(service.model_calls) == 2

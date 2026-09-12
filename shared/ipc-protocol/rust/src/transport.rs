@@ -242,6 +242,7 @@ impl TaskRequest {
         match self {
             TaskRequest::Ping => "ping",
             TaskRequest::Ocr(_) => "ocr",
+            TaskRequest::InteractiveOcrActivity { .. } => "interactive_ocr_activity",
             TaskRequest::Asr(_) => "asr",
             TaskRequest::Vlm(_) => "vlm",
             TaskRequest::Embed(_) => "embed",
@@ -265,6 +266,7 @@ mod tests {
         let req = IpcRequest::new(TaskRequest::Ocr(OcrRequest {
             capture_id: 1,
             screenshot_path: "/tmp/shot.jpg".into(),
+            priority: Default::default(),
         }));
 
         let frame = encode_request(&req).unwrap();
@@ -285,6 +287,7 @@ mod tests {
         let req = IpcRequest::new(TaskRequest::Ocr(OcrRequest {
             capture_id: 1,
             screenshot_path: huge_text,
+            priority: Default::default(),
         }));
         let result = encode_request(&req);
         assert!(matches!(result, Err(IpcError::MessageTooLarge { .. })));

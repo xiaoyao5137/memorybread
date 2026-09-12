@@ -1,3 +1,8 @@
+import { useConsultationReadiness } from '../hooks/useConsultationReadiness'
+import { useInteractiveOcrActivity } from '../hooks/useInteractiveOcrActivity'
+import { ConsultationImageInput } from './ConsultationImageInput'
+import { nameConsultationImages, filesToAttachments, persistConsultationAttachments, buildConsultationAttachmentMetadata, buildConsultationOcrText, buildAttachmentPrompt, type UserAttachment } from '../utils/attachments'
+import { ConsultationAttachments, ConsultationImagePreview, consultationImages } from './ConsultationAttachments'
 /**
  * RagPanel v2 — 记忆面包面板（优化版）
  *
@@ -15,7 +20,7 @@ import ReactMarkdown from 'react-markdown'
 import { invoke } from '@tauri-apps/api/core'
 import { ChevronDown, ExternalLink, Loader2 } from 'lucide-react'
 import { useAppStore } from '../store/useAppStore'
-import { useFetchRagHistory, useModelStatus, useRagQuery } from '../hooks/useApi'
+import { useFetchRagHistory, useRagQuery } from '../hooks/useApi'
 import { useImeCompositionGuard } from '../hooks/useImeCompositionGuard'
 import { fetchBillingBalance } from '../utils/authApi'
 import { createOptionalCloudRequestSignal, optionalCloudIsReachable } from '../utils/optionalCloud'
@@ -174,11 +179,13 @@ const HistoryScreenshotThumbnail = ({
 }) => {
   const [src, setSrc] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
+  const [missing, setMissing] = useState(false)
 
   useEffect(() => {
     let cancelled = false
     setSrc(null)
     setFailed(false)
+    setMissing(false)
 
     invoke<string>('read_floating_assist_image_data_url', { path: screenshotPath })
       .then((dataUrl) => {
@@ -189,8 +196,11 @@ const HistoryScreenshotThumbnail = ({
           setFailed(true)
         }
       })
-      .catch(() => {
-        if (!cancelled) setFailed(true)
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setFailed(true)
+          setMissing(String(error).includes('SCREENSHOT_NOT_FOUND'))
+        }
       })
 
     return () => {
@@ -216,14 +226,15 @@ const HistoryScreenshotThumbnail = ({
           openPreview(event)
         }
       }}
-      aria-label={src ? '查看悬浮球截屏' : failed ? '悬浮球截屏暂不可用' : '正在加载悬浮球截屏'}
+      title={missing ? '原截图文件已丢失，咨询文字和参考资料仍可查看' : undefined}
+      aria-label={src ? '查看悬浮球截屏' : missing ? '原截图已丢失' : failed ? '悬浮球截屏暂不可用' : '正在加载悬浮球截屏'}
       aria-disabled={!src}
     >
       {src ? (
         <img src={src} alt="悬浮球截屏缩略图" />
       ) : (
         <span className="rag-panel__history-shot-placeholder" aria-hidden="true">
-          {failed ? '截屏暂不可用' : '加载中'}
+          {missing ? '原截图已丢失' : failed ? '截屏暂不可用' : '加载中'}
         </span>
       )}
     </span>
@@ -239,6 +250,7 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
     ragError,
     setRagQuery,
     setRagResult,
+    setWindowMode,
     setRagError,
     setRagLoading,
     adminApiBaseUrl,
@@ -250,7 +262,13 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
     setCreationModelConfig,
   } = useAppStore()
 
+  const [attachments, setAttachments] = useState<UserAttachment[]>([])
+  const [attachmentsLoading, setAttachmentsLoading] = useState(false)
+  const imageNumberRef = useRef(0)
+  const attachmentInputRef = useRef<HTMLInputElement>(null)
+  const attachmentBusyRef = useRef(false)
   const [inputValue, setInputValue] = useState(ragQuery)
+  const [inputExpanded, setInputExpanded] = useState(false)
   const [topTab, setTopTab] = useState<'consult' | 'history'>('consult')
   const [activeBottomTab, setActiveBottomTab] = useState<'references' | 'templates' | null>(null)
   const [ragHistory, setRagHistory] = useState<RagHistoryItem[]>([])
@@ -263,13 +281,15 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
   const [copySuccess, setCopySuccess] = useState(false)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [screenshotPreview, setScreenshotPreview] = useState<string | null>(null)
+  const closeImagePreview = useCallback(() => setScreenshotPreview(null), [])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const answerRef = useRef<HTMLDivElement>(null)
   const queryAbortRef = useRef<AbortController | null>(null)
   const queryImeGuard = useImeCompositionGuard<HTMLTextAreaElement>()
+  useInteractiveOcrActivity(ragLoading || attachmentsLoading)
   const doQuery = useRagQuery()
   const fetchRagHistory = useFetchRagHistory()
-  const { status: modelStatus, ready: modelsReady, loading: modelStatusLoading } = useModelStatus()
+  const { status: modelStatus, ready: modelsReady, loading: modelStatusLoading, refresh: refreshReadiness } = useConsultationReadiness()
   const remoteModelAllowed = canUseRemoteCreationModel(currentUser, cloudBalance)
   const activeModelId = getEffectiveCreationModelId(creationModelConfigs, remoteModelAllowed)
 
@@ -319,19 +339,21 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
     }
   }, [creationModelConfigs, remoteModelAllowed, setCreationModelConfig])
 
-  // 内容变化时自动调整高度
+  // 收起时始终使用 rows 定义的初始高度；仅展开时按完整内容撑高。
   const adjustHeight = useCallback((el: HTMLTextAreaElement) => {
-    const maxHeight = 220
     el.style.height = 'auto'
-    const nextHeight = Math.min(el.scrollHeight, maxHeight)
-    el.style.height = `${nextHeight}px`
-    el.style.overflowY = el.scrollHeight > maxHeight ? 'auto' : 'hidden'
-  }, [])
+    if (!inputExpanded) {
+      el.style.overflowY = 'auto'
+      return
+    }
+    el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`
+    el.style.overflowY = 'hidden'
+  }, [inputExpanded])
 
   // inputValue 变化时（含模板填入、外部更新）同步高度
   useEffect(() => {
     if (textareaRef.current) adjustHeight(textareaRef.current)
-  }, [inputValue, adjustHeight])
+  }, [inputValue, adjustHeight, topTab])
 
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInputValue(e.target.value)
@@ -376,30 +398,52 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
     }
   }, [debouncedHistorySearch, fetchRagHistory, historyPage])
 
+  const addFiles = async (files: Iterable<File>) => {
+    if (attachmentBusyRef.current || ragLoading) return
+    attachmentBusyRef.current = true
+    setAttachmentsLoading(true)
+    try {
+      const next = nameConsultationImages(await filesToAttachments(files, attachments.length), imageNumberRef.current)
+      imageNumberRef.current += next.filter(item => item.type.startsWith('image/')).length
+      setAttachments(prev => [...prev, ...next])
+    } catch (error) { setRagError(error instanceof Error ? error.message : '附件读取失败') }
+    finally { attachmentBusyRef.current = false; setAttachmentsLoading(false) }
+  }
+
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault()
-      if (queryImeGuard.shouldBlockSubmit()) return
-      const q = inputValue.trim()
+      if (queryImeGuard.shouldBlockSubmit() || attachmentsLoading || ragLoading) return
+      const q = inputValue.trim() || (attachments.length ? '请分析附上的图片。' : '')
       if (!q) return
+      if (!modelsReady || !(await refreshReadiness())) return
       setRagQuery(q)
       const controller = new AbortController()
       queryAbortRef.current = controller
+      setRagLoading(true)
       try {
-        await doQuery(q, undefined, {}, controller.signal)
+        const saved = await persistConsultationAttachments(attachments)
+        if (controller.signal.aborted) return
+        setAttachments(saved)
+        const prompt = buildAttachmentPrompt(saved)
+        await doQuery(prompt ? `${q}\n\n${prompt}` : q, undefined, saved.length ? {
+          source: 'consultation', manual_instruction: q,
+          attachments: buildConsultationAttachmentMetadata(saved),
+          ocr_text: buildConsultationOcrText(saved),
+        } : {}, controller.signal)
         // 参考资料不再随提问自动弹出，由用户点击标签按需查看
         if (historyPage === 1) {
           void refreshHistory()
         } else {
           setHistoryPage(1)
         }
-      } catch {
-        // error is set in store by useRagQuery
+      } catch (error) {
+        if (!controller.signal.aborted) setRagError(error instanceof Error ? error.message : '咨询失败')
       } finally {
         if (queryAbortRef.current === controller) queryAbortRef.current = null
       }
     },
-    [inputValue, setRagQuery, doQuery, historyPage, refreshHistory, queryImeGuard]
+    [modelsReady, refreshReadiness, inputValue, attachments, attachmentsLoading, ragLoading, setRagError, setRagQuery, doQuery, historyPage, refreshHistory, queryImeGuard]
   )
 
   // 清空当前会话：中断进行中的咨询，重置指令、输出与参考资料，回到全新会话状态
@@ -407,6 +451,9 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
     queryAbortRef.current?.abort()
     queryAbortRef.current = null
     setInputValue('')
+    setAttachments([])
+    imageNumberRef.current = 0
+    setInputExpanded(false)
     setRagQuery('')
     setRagResult('', [])
     setRagError(null)
@@ -486,6 +533,7 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
         artifactId: item.artifact_id,
         documentId: item.document_id,
         docKey: item.doc_key,
+        sourceUrl: item.source_url || item.url,
       },
     }))
   }
@@ -493,9 +541,10 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
   const handleRestoreHistory = (item: RagHistoryItem) => {
     setRagQuery(item.query)
     setInputValue(item.query)
+    setInputExpanded(false)
     useAppStore.getState().setRagResult(sanitizeRagAnswer(item.answer), item.contexts ?? [])
     setTopTab('consult')
-    setActiveBottomTab('references')
+    setActiveBottomTab(null)
     setTimeout(() => answerRef.current?.scrollTo({ top: 0, behavior: 'smooth' }), 100)
   }
 
@@ -546,21 +595,26 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
         {ragHistory.map((item) => {
           const shot = historyScreenshot(item)
           const shotPath = shot?.screenshot_path || ''
+          // 悬浮截屏/附件占位不是记忆，统计召回与采用数量时须排除。
+          const memoryContexts = (item.contexts || [])
+            .filter(context => (context.source_type || context.source) !== 'floating_assist')
+          const adoptedCount = memoryContexts.filter(context => context.cited).length
           return (
-            <button key={item.id} className="rag-panel__history-item" onClick={() => handleRestoreHistory(item)}>
+            <div key={item.id} className="rag-panel__history-item">
               {shotPath && (
                 <HistoryScreenshotThumbnail
                   screenshotPath={shotPath}
                   onPreview={setScreenshotPreview}
                 />
               )}
-              <span className="rag-panel__history-main">
+              <button type="button" style={{ border: 0, background: 'transparent', textAlign: 'left', cursor: 'pointer' }} onClick={() => handleRestoreHistory(item)} className="rag-panel__history-main">
                 <span className="rag-panel__history-query">{item.query}</span>
                 <span className="rag-panel__history-meta">
-                  {formatTs(item.ts)} · 模型：{getModelDisplayName(item.model)} · 推理耗时：{formatInferenceLatency(item.latency_ms)} · {shotPath ? '悬浮截屏 · ' : ''}{item.context_count} 条参考
+                  {formatTs(item.ts)} · 模型：{getModelDisplayName(item.model)} · 推理耗时：{formatInferenceLatency(item.latency_ms)} · {shotPath ? '悬浮截屏 · ' : ''}召回 {memoryContexts.length} 条记忆{adoptedCount > 0 ? ` · 采用 ${adoptedCount} 条` : ''}
                 </span>
-              </span>
-            </button>
+              </button>
+              <ConsultationAttachments items={(item.contexts || []).flatMap(context => context.attachments || [])} onPreview={setScreenshotPreview} />
+            </div>
           )
         })}
       </div>
@@ -633,7 +687,7 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
             {!modelStatus.embedding && '语义索引尚未加载。'}
           </div>
           <div style={{ fontSize: 12 }}>
-            请前往「AI 能力」检查状态。
+            <button type="button" onClick={() => setWindowMode('models')}>继续初始化 / 修复</button>
           </div>
         </div>
       )}
@@ -644,7 +698,11 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
         onSubmit={handleSubmit}
         data-testid="rag-panel-form"
       >
-        <textarea
+        <ConsultationImageInput
+          images={attachments}
+          onValueChange={setInputValue}
+          onPaste={event => { if (event.clipboardData.files.length) void addFiles(event.clipboardData.files) }}
+          id="rag-panel-query"
           ref={textareaRef}
           className="rag-panel__input"
           data-testid="rag-panel-input"
@@ -666,10 +724,24 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
             }
           }}
           rows={3}
-          style={{ resize: 'none' }}
-          disabled={ragLoading || !modelsReady}
+          style={{ resize: 'none', flex: 'none', maxHeight: inputExpanded ? 'none' : 220 }}
+          disabled={ragLoading}
         />
+        <ConsultationAttachments items={attachments} onPreview={setScreenshotPreview} disabled={ragLoading || attachmentsLoading} onRemove={id => setAttachments(prev => prev.filter(item => item.id !== id))} />
+        <input ref={attachmentInputRef} type="file" accept="image/*" multiple hidden aria-label="选择咨询图片" onChange={event => { if (event.target.files) void addFiles(event.target.files); event.target.value = '' }} />
+        <button type="button" style={{ ...compactButtonStyle, alignSelf: 'flex-start' }} disabled={ragLoading || attachmentsLoading} onClick={() => attachmentInputRef.current?.click()}>上传图片</button>
+        {attachmentsLoading && <span role="status">正在读取附件…</span>}
+
         <div className="rag-panel__input-toolbar">
+          <button
+            type="button"
+            className="rag-panel__top-tab"
+            aria-expanded={inputExpanded}
+            aria-controls="rag-panel-query"
+            onClick={() => setInputExpanded(expanded => !expanded)}
+          >
+            {inputExpanded ? '收起' : '展开全部'}
+          </button>
           <ModelSelect
             label="模型"
             value={activeModelId}
@@ -698,7 +770,7 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
             className="rag-panel__submit"
             data-testid="rag-panel-submit"
             style={{ marginLeft: 0 }}
-            disabled={ragLoading || !inputValue.trim() || !modelsReady}
+            disabled={ragLoading || attachmentsLoading || (!inputValue.trim() && !attachments.length) || !modelsReady}
           >
             {ragLoading ? '思考中...' : '提问'}
           </button>
@@ -739,7 +811,7 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
 
       <section className="rag-panel__document" data-testid="rag-panel-answer">
         <div className="rag-panel__document-header">
-          <span className="rag-panel__document-title"><BreadAppIcon name="consult" size={20} />咨询输出</span>
+          <span className="rag-panel__document-title"><BreadAppIcon name="consult" size={20} />咨询结果</span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             {ragLoading && (
               <span style={{ fontSize: 12, color: '#0f766e', fontWeight: 650 }}>
@@ -753,6 +825,7 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
           </div>
         </div>
         <div ref={answerRef} className="rag-panel__document-body">
+          <ConsultationAttachments items={consultationImages(ragContexts)} onPreview={setScreenshotPreview} />
           {ragAnswer ? (
             <MarkdownContent content={sanitizeRagAnswer(ragAnswer)} components={markdownComponents} />
           ) : ragLoading ? (
@@ -769,7 +842,7 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
               </div>
             </div>
           ) : (
-            <div className="rag-panel__document-empty">选择模板或输入问题后，咨询输出会在这里呈现。</div>
+            <div className="rag-panel__document-empty">选择模板或输入问题后，咨询结果会在这里呈现。</div>
           )}
         </div>
       </section>
@@ -837,11 +910,7 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
         </>
       )}
 
-      {screenshotPreview && (
-        <div className="rag-panel__screenshot-preview" onClick={() => setScreenshotPreview(null)}>
-          <img src={screenshotPreview} alt="悬浮球截屏预览" />
-        </div>
-      )}
+      {screenshotPreview && <ConsultationImagePreview src={screenshotPreview} onClose={closeImagePreview} />}
     </div>
   )
 }
@@ -940,7 +1009,10 @@ const ReferenceRow = ({ item, index, onOpenReference }: { item: RagContext; inde
     <div className="rag-panel__reference-item" data-testid={`context-item-${index}`}>
       <div className="rag-panel__reference-head">
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="rag-panel__reference-title">R#{index + 1} · {label} · {referenceTitle(item)}</div>
+          <div className="rag-panel__reference-title">
+            {item.recall_index ? `M#${item.recall_index}` : `R#${index + 1}`} · {label} · {referenceTitle(item)}
+            {item.cited ? ' · 答案已采用' : ''}
+          </div>
           <div className="rag-panel__reference-meta">
             {item.app_name ? `${item.app_name} · ` : ''}{item.win_title ? `${item.win_title} · ` : ''}{formatTs(primaryTime)}
             {item.score ? ` · 相关 ${Math.round(item.score * 100)}%` : ''}

@@ -115,6 +115,7 @@ pub struct CreationSessionLease {
 #[derive(Clone)]
 pub struct AppState {
     pub storage: StorageManager,
+    pub database_path: String,
     pub sidecar_url: String,
     pub creation_sidecar_url: String,
     pub debug_log_specs: Vec<DebugLogSpec>,
@@ -122,6 +123,7 @@ pub struct AppState {
     pub rag_job_seq: Arc<AtomicU64>,
     pub creation_skill_analysis_jobs: Arc<Mutex<HashMap<String, CreationSkillAnalysisJobRecord>>>,
     pub creation_skill_analysis_job_seq: Arc<AtomicU64>,
+    pub(crate) brainstorm_prefetch: Arc<Mutex<crate::api::handlers::creation::BrainstormPrefetchCache>>,
     pub creation_session_leases: Arc<Mutex<HashMap<String, CreationSessionLease>>>,
     pub capture_enabled: Arc<AtomicBool>,
     pub keyboard_signal_enabled: Arc<AtomicBool>,
@@ -210,6 +212,7 @@ impl AppState {
             .unwrap_or(true);
 
         Arc::new(Self {
+            database_path: storage.db_path(),
             storage,
             sidecar_url,
             creation_sidecar_url,
@@ -218,6 +221,7 @@ impl AppState {
             rag_job_seq: Arc::new(AtomicU64::new(1)),
             creation_skill_analysis_jobs: Arc::new(Mutex::new(HashMap::new())),
             creation_skill_analysis_job_seq: Arc::new(AtomicU64::new(1)),
+            brainstorm_prefetch: Arc::new(Mutex::new(Default::default())),
             creation_session_leases: Arc::new(Mutex::new(HashMap::new())),
             capture_enabled: Arc::new(AtomicBool::new(capture_enabled)),
             keyboard_signal_enabled: Arc::new(AtomicBool::new(keyboard_signal_enabled)),

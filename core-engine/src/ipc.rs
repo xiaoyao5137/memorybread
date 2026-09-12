@@ -48,6 +48,7 @@ enum Task {
     Ocr {
         capture_id: i64,
         screenshot_path: String,
+        priority: &'static str,
     },
     Embed {
         capture_id: i64,
@@ -137,6 +138,7 @@ impl IpcClient {
             task: Task::Ocr {
                 capture_id,
                 screenshot_path: screenshot_path.to_string(),
+                priority: "background",
             },
         };
 

@@ -1,14 +1,17 @@
+mod floating_screenshots;
+mod local_services;
+
 #[cfg(not(debug_assertions))]
 use std::fs::OpenOptions;
 #[cfg(not(feature = "app-store"))]
-use std::sync::{atomic::AtomicU64, Arc};
+use std::sync::Arc;
 use std::{
     fs,
     io::{Read, Write},
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
         Mutex, OnceLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -16,6 +19,7 @@ use std::{
 
 use base64::{engine::general_purpose, Engine as _};
 use image::{codecs::jpeg::JpegEncoder, imageops, DynamicImage, Rgba, RgbaImage};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 #[cfg(not(feature = "app-store"))]
 use sha2::{Digest, Sha256};
@@ -48,6 +52,7 @@ use objc2_app_kit::{
 #[cfg(target_os = "macos")]
 use objc2_foundation::NSData;
 
+static FLOATING_ASSIST_READY: AtomicBool = AtomicBool::new(false);
 static QUITTING: AtomicBool = AtomicBool::new(false);
 static BACKEND_SUPERVISOR_STARTED: AtomicBool = AtomicBool::new(false);
 #[cfg(debug_assertions)]
@@ -75,6 +80,7 @@ const CHROME_NATIVE_HOST_NAME: &str = "cn.memorybread.browser_bridge";
 const DOCK_ICON_SCALE: f64 = 1.0;
 #[cfg(target_os = "macos")]
 const MACOS_APP_ICON_BYTES: &[u8] = include_bytes!("../icons/icon.icns");
+const MAX_CUSTOMER_LOG_ARCHIVE_BYTES: usize = 10 * 1024 * 1024;
 
 #[cfg(target_os = "macos")]
 static FLOATING_ASSIST_HOVER_OWNER_KEY: u8 = 0;
@@ -252,6 +258,8 @@ struct BundledBackendProcess {
     child: Child,
 }
 
+use local_services::{LocalServiceEndpointsResponse, LocalServiceRegistry};
+
 #[cfg(any(not(debug_assertions), test))]
 fn backend_repair_request_path(runtime_home: &PathBuf, name: &str) -> Option<PathBuf> {
     if !matches!(name, "core" | "sidecar" | "model_api" | "creation") {
@@ -265,9 +273,22 @@ fn backend_repair_request_path(runtime_home: &PathBuf, name: &str) -> Option<Pat
     )
 }
 
-#[derive(Default)]
 struct BundledBackendState {
     children: Mutex<Vec<BundledBackendProcess>>,
+    registry: Mutex<Option<LocalServiceRegistry>>,
+    auth_token: Mutex<Option<String>>,
+    generation: AtomicU64,
+}
+
+impl Default for BundledBackendState {
+    fn default() -> Self {
+        Self {
+            children: Mutex::new(Vec::new()),
+            registry: Mutex::new(None),
+            auth_token: Mutex::new(None),
+            generation: AtomicU64::new(0),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -309,9 +330,11 @@ struct IpcRequest {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum IpcTask {
+    InteractiveOcrActivity { activity_id: String, active: bool },
     Ocr {
         capture_id: i64,
         screenshot_path: String,
+        priority: &'static str,
     },
 }
 
@@ -414,6 +437,9 @@ fn app_instance_identifier(base_identifier: &str, development: bool) -> String {
 }
 
 fn ensure_floating_assist_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
+    if !FLOATING_ASSIST_READY.load(Ordering::SeqCst) {
+        return Err("客户端初始化尚未完成".to_string());
+    }
     if let Some(window) = app.get_webview_window(FLOATING_ASSIST_LABEL) {
         configure_floating_assist_macos_window(&window);
         return Ok(window);
@@ -671,43 +697,13 @@ fn now_ms() -> i64 {
 
 fn cleanup_floating_assist_temp_files() -> Result<(usize, u64), String> {
     let dir = floating_assist_temp_dir()?;
-    let now = SystemTime::now();
-    let keep_duration = Duration::from_secs(FLOATING_ASSIST_TEMP_KEEP_SECS);
-    let entries = fs::read_dir(&dir).map_err(|error| error.to_string())?;
-    let mut deleted_count = 0usize;
-    let mut freed_bytes = 0u64;
-
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
-        let metadata = match entry.metadata() {
-            Ok(metadata) => metadata,
-            Err(_) => continue,
-        };
-        if !metadata.is_file() {
-            continue;
-        }
-        let Ok(modified) = metadata.modified() else {
-            continue;
-        };
-        let Ok(age) = now.duration_since(modified) else {
-            continue;
-        };
-        if age < keep_duration {
-            continue;
-        }
-
-        let path = entry.path();
-        let size = metadata.len();
-        if fs::remove_file(&path).is_ok() {
-            deleted_count += 1;
-            freed_bytes += size;
-        }
-    }
-
-    Ok((deleted_count, freed_bytes))
+    let database = memory_bread_home()?.join(".memory-bread/memory-bread.db");
+    floating_screenshots::cleanup_unreferenced(
+        &dir,
+        &database,
+        SystemTime::now(),
+        Duration::from_secs(FLOATING_ASSIST_TEMP_KEEP_SECS),
+    )
 }
 
 fn schedule_floating_assist_temp_cleanup(force: bool) {
@@ -891,7 +887,7 @@ fn capture_screen_for_floating_assist() -> Result<FloatingAssistScreenCapture, S
         .or_else(|_| capture_all_screens_for_floating_assist())
 }
 
-fn run_floating_assist_ocr(paths: &[PathBuf]) -> Result<IpcOcrResult, String> {
+fn run_floating_assist_ocr(paths: &[PathBuf], priority: &'static str) -> Result<IpcOcrResult, String> {
     let mut parts = Vec::new();
     let mut confidence_sum = 0.0;
     let mut confidence_count = 0usize;
@@ -899,7 +895,7 @@ fn run_floating_assist_ocr(paths: &[PathBuf]) -> Result<IpcOcrResult, String> {
 
     for (index, path) in paths.iter().enumerate() {
         let path_text = path.to_string_lossy().to_string();
-        match send_sidecar_ocr(&path_text) {
+        match send_sidecar_ocr(&path_text, priority) {
             Ok(result) => {
                 let text = result.text.trim();
                 if !text.is_empty() {
@@ -1015,13 +1011,14 @@ fn format_ocr_ipc_read_error(error: std::io::Error) -> String {
     error.to_string()
 }
 
-fn send_sidecar_ocr(path: &str) -> Result<IpcOcrResult, String> {
+fn send_sidecar_ocr(path: &str, priority: &'static str) -> Result<IpcOcrResult, String> {
     let request = IpcRequest {
         id: uuid::Uuid::new_v4().to_string(),
         ts: now_ms(),
         task: IpcTask::Ocr {
             capture_id: 0,
             screenshot_path: path.to_string(),
+            priority,
         },
     };
     let payload = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
@@ -1079,7 +1076,9 @@ fn bundled_helper_path(name: &str) -> Result<PathBuf, String> {
         candidates
             .into_iter()
             .find(|path| path.is_file())
-            .ok_or_else(|| format!("未找到 {name}，尝试了 Contents/Helpers 和 Contents/Resources/binaries"))?
+            .ok_or_else(|| {
+                format!("未找到 {name}，尝试了 Contents/Helpers 和 Contents/Resources/binaries")
+            })?
     } else {
         directory.join(name)
     };
@@ -1099,6 +1098,9 @@ fn spawn_bundled_backend(
     log_dir: &PathBuf,
     ipc_socket_path: &PathBuf,
     client_version: &str,
+    registry: &LocalServiceRegistry,
+    registry_path: &PathBuf,
+    token_path: &PathBuf,
 ) -> Result<BundledBackendProcess, String> {
     let log_path = log_dir.join(format!("{name}.log"));
     let log = OpenOptions::new()
@@ -1110,20 +1112,106 @@ fn spawn_bundled_backend(
     let working_directory = executable
         .parent()
         .ok_or_else(|| format!("无法定位 {name} 工作目录"))?;
-    let child = Command::new(executable)
+    let core = registry.service("core")?;
+    let model_api = registry.service("model_api")?;
+    let creation = registry.service("creation")?;
+    let vector_search = registry.service("vector_search")?;
+    let ollama = registry.service("ollama")?;
+    let mut command = Command::new(executable);
+    command
         .args(args)
         .current_dir(working_directory)
         .env("HOME", runtime_home)
         .env("MEMORY_BREAD_PACKAGED", "1")
         .env("MEMORY_BREAD_CLIENT_VERSION", client_version)
+        .env("MEMORY_BREAD_INSTANCE_ID", &registry.instance_id)
+        .env("MEMORY_BREAD_ENDPOINT_REGISTRY", registry_path)
+        .env("MEMORY_BREAD_LOCAL_AUTH_TOKEN_FILE", token_path)
+        .env("MEMORY_BREAD_CORE_BIND", core.bind_address())
+        .env("MEMORY_BREAD_MODEL_API_BIND", model_api.bind_address())
+        .env("MEMORY_BREAD_CREATION_BIND", creation.bind_address())
+        .env(
+            "MEMORY_BREAD_VECTOR_SEARCH_BIND",
+            vector_search.bind_address(),
+        )
+        .env("CORE_ENGINE_URL", core.base_url())
+        .env("MEMORY_BREAD_MODEL_API_URL", model_api.base_url())
+        .env("SIDECAR_URL", model_api.base_url())
+        .env("CREATION_SIDECAR_URL", creation.base_url())
+        .env("OLLAMA_HOST", ollama.bind_address())
         .env(IPC_SOCKET_ENV, ipc_socket_path)
+        // 本地服务之间的回环请求不能经过系统 HTTP 代理；否则代理开启时，
+        // 127.0.0.1/localhost 的健康检查可能被错误转换为 502。
+        .env("NO_PROXY", "localhost,127.0.0.1,::1")
+        .env("no_proxy", "localhost,127.0.0.1,::1")
         .env("PYTHONUNBUFFERED", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
-        .stderr(Stdio::from(stderr))
+        .stderr(Stdio::from(stderr));
+    let child = command
         .spawn()
         .map_err(|error| format!("启动内置服务 {name} 失败: {error}"))?;
     Ok(BundledBackendProcess { name, child })
+}
+
+#[cfg(any(not(debug_assertions), test))]
+fn ensure_local_service_registry(
+    app: &AppHandle,
+    runtime_home: &PathBuf,
+    state: &BundledBackendState,
+) -> Result<(LocalServiceRegistry, String), String> {
+    let mut registry_guard = state
+        .registry
+        .lock()
+        .map_err(|_| "本机服务注册表状态锁已损坏".to_string())?;
+    let mut token_guard = state
+        .auth_token
+        .lock()
+        .map_err(|_| "本机服务会话状态锁已损坏".to_string())?;
+    if let (Some(registry), Some(token)) = (registry_guard.as_ref(), token_guard.as_ref()) {
+        return Ok((registry.clone(), token.clone()));
+    }
+    let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let registry = local_services::allocate_registry(generation)?;
+    let token = local_services::new_auth_token();
+    local_services::persist_registry(runtime_home, &registry, &token)?;
+    *registry_guard = Some(registry.clone());
+    *token_guard = Some(token.clone());
+    let _ = app.emit("local-services-changed", &registry);
+    Ok((registry, token))
+}
+
+#[tauri::command]
+fn get_local_service_endpoints(
+    app: AppHandle,
+    state: tauri::State<'_, BundledBackendState>,
+) -> Result<LocalServiceEndpointsResponse, String> {
+    if let (Ok(registry), Ok(token)) = (state.registry.lock(), state.auth_token.lock()) {
+        if let (Some(registry), Some(token)) = (registry.as_ref(), token.as_ref()) {
+            return Ok(LocalServiceEndpointsResponse {
+                registry: registry.clone(),
+                auth_token: token.clone(),
+            });
+        }
+    }
+    let runtime_home = memory_bread_home()?;
+    match (
+        local_services::load_registry(&runtime_home),
+        local_services::load_auth_token(&runtime_home),
+    ) {
+        (Ok(registry), Ok(auth_token)) => Ok(LocalServiceEndpointsResponse {
+            registry,
+            auth_token,
+        }),
+        _ if cfg!(debug_assertions) => Ok(LocalServiceEndpointsResponse {
+            registry: local_services::legacy_development_registry(),
+            auth_token: String::new(),
+        }),
+        _ => Err(format!(
+            "本机服务端点尚未就绪，请稍候后重试（{}）",
+            app.package_info().version
+        )),
+    }
 }
 
 #[cfg(not(debug_assertions))]
@@ -1144,6 +1232,7 @@ fn start_bundled_backends(app: &AppHandle) -> Result<(), String> {
         .map_err(|_| "内置服务状态锁已损坏".to_string())?;
     let mut running_names = Vec::new();
     let mut alive = Vec::with_capacity(children.len());
+    let mut child_exited = false;
     for mut process in children.drain(..) {
         if process.name == "core" && core_repair_request.is_some() {
             eprintln!("收到本机初始化修复请求，正在重启内置 Core 服务");
@@ -1163,6 +1252,7 @@ fn start_bundled_backends(app: &AppHandle) -> Result<(), String> {
             }
             Ok(Some(status)) => {
                 eprintln!("内置服务 {} 已退出（{status}），准备自动恢复", process.name);
+                child_exited = true;
             }
             Err(error) => {
                 // 无法读取状态不代表进程已经退出。保留句柄，避免重复启动同一服务。
@@ -1173,6 +1263,32 @@ fn start_bundled_backends(app: &AppHandle) -> Result<(), String> {
         }
     }
     *children = alive;
+
+    // A child that loses the short allocate/spawn race commonly exits because
+    // its assigned port was claimed. Rotate the whole generation so every
+    // process and every consumer keeps one coherent endpoint snapshot.
+    if child_exited {
+        for process in children.iter_mut().rev() {
+            if process.child.try_wait().ok().flatten().is_none() {
+                let _ = process.child.kill();
+            }
+            let _ = process.child.wait();
+        }
+        children.clear();
+        running_names.clear();
+        *state
+            .registry
+            .lock()
+            .map_err(|_| "本机服务注册表状态锁已损坏".to_string())? = None;
+        *state
+            .auth_token
+            .lock()
+            .map_err(|_| "本机服务会话状态锁已损坏".to_string())? = None;
+    }
+
+    let (registry, _auth_token) = ensure_local_service_registry(app, &runtime_home, &state)?;
+    let registry_path = local_services::registry_path(&runtime_home);
+    let token_path = local_services::token_path(&runtime_home);
 
     let _ = PACKAGED_RUNTIME_HOME.set(runtime_home.clone());
     #[cfg(unix)]
@@ -1206,6 +1322,9 @@ fn start_bundled_backends(app: &AppHandle) -> Result<(), String> {
             &log_dir,
             &ipc_socket_path,
             &client_version,
+            &registry,
+            &registry_path,
+            &token_path,
         ) {
             Ok(child) => children.push(child),
             Err(error) => {
@@ -1673,7 +1792,10 @@ fn chrome_bridge_path() -> Option<PathBuf> {
 fn chrome_extension_store_url() -> Option<String> {
     option_env!("MEMORYBREAD_CHROME_EXTENSION_STORE_URL")
         .map(str::trim)
-        .filter(|value| value.starts_with("https://chromewebstore.google.com/") || value.starts_with("https://chrome.google.com/webstore/"))
+        .filter(|value| {
+            value.starts_with("https://chromewebstore.google.com/")
+                || value.starts_with("https://chrome.google.com/webstore/")
+        })
         .map(ToString::to_string)
 }
 
@@ -1700,8 +1822,9 @@ fn prepare_chrome_browser_integration(
     if cfg!(feature = "app-store") || !cfg!(target_os = "macos") {
         return Err("当前发行版本暂不支持安装 Chrome 浏览器集成".to_string());
     }
-    let bridge = chrome_bridge_path()
-        .ok_or_else(|| "未找到 Chrome Native Messaging Bridge，请重新安装 MemoryBread".to_string())?;
+    let bridge = chrome_bridge_path().ok_or_else(|| {
+        "未找到 Chrome Native Messaging Bridge，请重新安装 MemoryBread".to_string()
+    })?;
     let manifest_path = chrome_native_host_manifest_path()?;
     let manifest_dir = manifest_path
         .parent()
@@ -1737,6 +1860,31 @@ fn prepare_chrome_browser_integration(
     get_chrome_browser_integration_install_status(app)
 }
 
+// Readiness changes must not overwrite the user's persisted floating-assist preferences.
+#[tauri::command]
+fn set_floating_assist_readiness(
+    app: AppHandle,
+    ready: bool,
+    enabled: bool,
+    auto_task_enabled: bool,
+) -> Result<(), String> {
+    FLOATING_ASSIST_READY.store(ready, Ordering::SeqCst);
+    let menu_state = app.state::<TrayMenuState>();
+    menu_state.floating_assist.set_enabled(ready).map_err(|error| error.to_string())?;
+    if !ready {
+        if let Some(window) = app.get_webview_window(FLOATING_ASSIST_LABEL) {
+            window.destroy().map_err(|error| error.to_string())?;
+        }
+        menu_state.floating_assist.set_checked(enabled).map_err(|error| error.to_string())?;
+        menu_state.floating_assist_auto_task.set_enabled(false).map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    if enabled {
+        set_floating_assist_visible_inner(&app, true)?;
+    }
+    set_floating_assist_auto_task_menu_state(app, auto_task_enabled, enabled)
+}
+
 #[tauri::command]
 fn set_floating_assist_menu_state(app: AppHandle, enabled: bool) -> Result<(), String> {
     let menu_state = app.state::<TrayMenuState>();
@@ -1746,7 +1894,7 @@ fn set_floating_assist_menu_state(app: AppHandle, enabled: bool) -> Result<(), S
         .map_err(|error| error.to_string())?;
     menu_state
         .floating_assist_auto_task
-        .set_enabled(enabled)
+        .set_enabled(enabled && FLOATING_ASSIST_READY.load(Ordering::SeqCst))
         .map_err(|error| error.to_string())?;
     if !enabled {
         menu_state
@@ -1767,7 +1915,7 @@ fn set_floating_assist_auto_task_menu_state(
     let menu_state = app.state::<TrayMenuState>();
     menu_state
         .floating_assist_auto_task
-        .set_enabled(enabled)
+        .set_enabled(enabled && FLOATING_ASSIST_READY.load(Ordering::SeqCst))
         .map_err(|error| error.to_string())?;
     menu_state
         .floating_assist_auto_task
@@ -1878,10 +2026,57 @@ fn set_floating_assist_size(app: AppHandle, width: f64, height: f64) -> Result<(
 }
 
 #[tauri::command]
+async fn set_interactive_ocr_activity(activity_id: String, active: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let request = IpcRequest { id: uuid::Uuid::new_v4().to_string(), ts: now_ms(),
+            task: IpcTask::InteractiveOcrActivity { activity_id, active } };
+        let payload = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
+        let response = send_ipc_payload(&payload)?;
+        if response.status == "ok" { Ok(()) }
+        else { Err(response.error.unwrap_or_else(|| "OCR activity unavailable".to_string())) }
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn save_consultation_attachment(data_url: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (header, encoded) = data_url.split_once(",").ok_or("附件格式无效")?;
+        if !header.starts_with("data:") || !header.ends_with(";base64") || encoded.len() > 12 * 1024 * 1024 {
+            return Err("附件格式无效或超过 8MB".to_string());
+        }
+        let bytes = general_purpose::STANDARD.decode(encoded).map_err(|_| "附件编码无效")?;
+        if bytes.len() > 8 * 1024 * 1024 { return Err("附件超过 8MB".to_string()); }
+        let extension = match header {
+            "data:image/png;base64" => "png",
+            "data:image/jpeg;base64" => "jpg",
+            "data:image/webp;base64" => "webp",
+            "data:image/gif;base64" => "gif",
+            _ => "bin",
+        };
+        let path = floating_assist_temp_dir()?.join(format!("attachment-{}.{}", uuid::Uuid::new_v4(), extension));
+        fs::write(&path, bytes).map_err(|e| format!("保存附件失败：{e}"))?;
+        let ocr_text = if extension != "bin" {
+            send_sidecar_ocr(&path.to_string_lossy(), "foreground")
+                .map_err(|error| format!("图片已保存，但文字识别失败：{error}"))?.text
+        } else { String::new() };
+        Ok(serde_json::json!({ "path": path.to_string_lossy(), "ocr_text": ocr_text }))
+    }).await.map_err(|e| format!("保存附件失败：{e}"))?
+}
+
+#[tauri::command]
 fn read_floating_assist_image_data_url(path: String) -> Result<String, String> {
-    let bytes = fs::read(&path).map_err(|error| format!("读取截屏失败：{error}"))?;
+    let bytes = fs::read(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            "SCREENSHOT_NOT_FOUND".to_string()
+        } else {
+            format!("读取截屏失败：{error}")
+        }
+    })?;
     let encoded = general_purpose::STANDARD.encode(bytes);
-    Ok(format!("data:image/jpeg;base64,{encoded}"))
+    let mime = match PathBuf::from(&path).extension().and_then(|e| e.to_str()) {
+        Some("png") => "image/png", Some("webp") => "image/webp", Some("gif") => "image/gif", _ => "image/jpeg",
+    };
+    Ok(format!("data:{mime};base64,{encoded}"))
 }
 
 #[tauri::command]
@@ -1921,7 +2116,11 @@ fn pick_local_directory() -> Option<String> {
 #[tauri::command]
 fn pick_download_path(title: String, default_file_name: String) -> Option<String> {
     rfd::FileDialog::new()
-        .set_title(if title.trim().is_empty() { "选择下载保存位置" } else { title.trim() })
+        .set_title(if title.trim().is_empty() {
+            "选择下载保存位置"
+        } else {
+            title.trim()
+        })
         .set_file_name(default_file_name.trim())
         .save_file()
         .map(|path| path.to_string_lossy().into_owned())
@@ -1938,12 +2137,68 @@ fn save_downloaded_file(path: String, content_base64: String) -> Result<String, 
         .map_err(|error| format!("解析下载内容失败：{error}"))?;
     if let Some(parent) = target.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("创建保存目录失败：{error}"))?;
+            fs::create_dir_all(parent).map_err(|error| format!("创建保存目录失败：{error}"))?;
         }
     }
     fs::write(&target, &bytes).map_err(|error| format!("保存下载文件失败：{error}"))?;
     Ok(target.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+async fn upload_customer_log_archive(
+    upload_url: String,
+    required_headers: std::collections::HashMap<String, String>,
+    content_base64: String,
+) -> Result<(), String> {
+    let url =
+        reqwest::Url::parse(&upload_url).map_err(|_| "日志上传地址无效，请重新上报".to_string())?;
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    if url.scheme() != "https" || !(host == "aliyuncs.com" || host.ends_with(".aliyuncs.com")) {
+        return Err("日志上传地址不受信任，请重新上报".to_string());
+    }
+
+    let archive = general_purpose::STANDARD
+        .decode(content_base64)
+        .map_err(|_| "诊断日志包无效，请重新上报".to_string())?;
+    if archive.is_empty() || archive.len() > MAX_CUSTOMER_LOG_ARCHIVE_BYTES {
+        return Err("诊断日志包大小无效，请重新上报".to_string());
+    }
+
+    let mut headers = HeaderMap::new();
+    for (name, value) in required_headers {
+        let normalized = name.to_ascii_lowercase();
+        if normalized != "content-type"
+            && normalized != "content-md5"
+            && !normalized.starts_with("x-oss-")
+        {
+            return Err("日志上传请求包含不支持的请求头".to_string());
+        }
+        let header_name = HeaderName::from_bytes(normalized.as_bytes())
+            .map_err(|_| "日志上传请求头无效".to_string())?;
+        let header_value =
+            HeaderValue::from_str(&value).map_err(|_| "日志上传请求头值无效".to_string())?;
+        headers.insert(header_name, header_value);
+    }
+
+    let response = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|_| "无法准备原生日志上传".to_string())?
+        .put(url)
+        .headers(headers)
+        .body(archive)
+        .send()
+        .await
+        .map_err(|_| "诊断日志上传失败，请检查网络后重试".to_string())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "诊断日志上传失败（HTTP {}），请稍后重试",
+            response.status().as_u16()
+        ));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1981,8 +2236,10 @@ fn open_downloaded_file(app: AppHandle, path: String) -> Result<(), String> {
 async fn capture_screen_ocr_for_floating_assist(
     app: AppHandle,
     hide_floating_window: Option<bool>,
+    background: Option<bool>,
 ) -> Result<FloatingAssistOcrResult, String> {
     schedule_floating_assist_temp_cleanup(false);
+    let priority = if background.unwrap_or(false) { "background" } else { "foreground" };
 
     let floating_window = app.get_webview_window(FLOATING_ASSIST_LABEL);
     if let Some(window) = floating_window.as_ref() {
@@ -2014,7 +2271,7 @@ async fn capture_screen_ocr_for_floating_assist(
         let capture = capture_result??;
         let ocr_paths = capture.ocr_paths.clone();
         let result =
-            tauri::async_runtime::spawn_blocking(move || run_floating_assist_ocr(&ocr_paths))
+            tauri::async_runtime::spawn_blocking(move || run_floating_assist_ocr(&ocr_paths, priority))
                 .await
                 .map_err(|error| format!("悬浮球 OCR 任务失败：{error}"))??;
         let screenshot_path = capture.preview_path.to_string_lossy().to_string();
@@ -2031,9 +2288,9 @@ async fn capture_screen_ocr_for_floating_assist(
         });
     }
 
-    let (capture, result) = tauri::async_runtime::spawn_blocking(|| {
+    let (capture, result) = tauri::async_runtime::spawn_blocking(move || {
         let capture = capture_screen_for_floating_assist()?;
-        let result = run_floating_assist_ocr(&capture.ocr_paths)?;
+        let result = run_floating_assist_ocr(&capture.ocr_paths, priority)?;
         Ok::<_, String>((capture, result))
     })
     .await
@@ -2087,6 +2344,7 @@ pub fn run() {
     builder
         .invoke_handler(tauri::generate_handler![
             get_app_metadata,
+            get_local_service_endpoints,
             restart_application,
             #[cfg(not(feature = "app-store"))]
             prepare_software_update,
@@ -2098,6 +2356,7 @@ pub fn run() {
             set_capture_menu_state,
             set_floating_assist_menu_state,
             set_floating_assist_auto_task_menu_state,
+            set_floating_assist_readiness,
             set_floating_assist_visible,
             show_main_panel_from_floating_assist,
             trigger_floating_assist_action,
@@ -2107,11 +2366,14 @@ pub fn run() {
             update_floating_assist_drag,
             set_floating_assist_size,
             read_floating_assist_image_data_url,
+            save_consultation_attachment,
+            set_interactive_ocr_activity,
             open_floating_assist_reference,
             open_export_folder,
             pick_local_directory,
             pick_download_path,
             save_downloaded_file,
+            upload_customer_log_archive,
             reveal_downloaded_file,
             open_downloaded_file,
             capture_screen_ocr_for_floating_assist,
@@ -2133,7 +2395,7 @@ pub fn run() {
                 app,
                 "floating-assist",
                 "启用悬浮球",
-                true,
+                false,
                 false,
                 None::<&str>,
             )?;
@@ -2317,6 +2579,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn diagnostic_upload_rejects_invalid_inputs_before_network() {
+        let run = |url: &str, headers, content: &str| {
+            tauri::async_runtime::block_on(upload_customer_log_archive(
+                url.to_string(), headers, content.to_string(),
+            ))
+        };
+        assert!(run("http://bucket.aliyuncs.com/log", Default::default(), "eA==").unwrap_err().contains("不受信任"));
+        assert!(run("https://aliyuncs.com.attacker.invalid/log", Default::default(), "eA==").unwrap_err().contains("不受信任"));
+        assert!(run("https://bucket.aliyuncs.com/log", Default::default(), "").unwrap_err().contains("大小无效"));
+        let headers = std::collections::HashMap::from([("authorization".to_string(), "test".to_string())]);
+        assert!(run("https://bucket.aliyuncs.com/log", headers, "eA==").unwrap_err().contains("不支持"));
+    }
+
+    #[test]
     fn backend_repair_requests_are_scoped_to_known_bundled_services() {
         let runtime_home = PathBuf::from("/tmp/memorybread-runtime-test");
         assert_eq!(
@@ -2405,4 +2681,22 @@ mod tests {
         assert_eq!(target, current_position);
         assert_eq!(expand_origin, None);
     }
+    // Explicit local acceptance: exercises the exact command used by the WebView.
+    #[test]
+    #[ignore = "requires a running local OCR sidecar and MB_OCR_ACCEPTANCE_IMAGE"]
+    fn consultation_attachment_command_live_ocr() {
+        let image_path = std::env::var("MB_OCR_ACCEPTANCE_IMAGE").expect("image fixture path");
+        let data_url = format!("data:image/png;base64,{}", general_purpose::STANDARD.encode(fs::read(image_path).unwrap()));
+        let result = tauri::async_runtime::block_on(save_consultation_attachment(data_url)).expect("attachment OCR command");
+        let path = result["path"].as_str().unwrap();
+        let text = result["ocr_text"].as_str().unwrap();
+        // Only the new acceptance copy is removed; never modify the user's original.
+        fs::remove_file(path).unwrap();
+        assert!(!text.trim().is_empty());
+        if let Ok(expected) = std::env::var("MB_OCR_ACCEPTANCE_EXPECTED") {
+            assert!(text.contains(&expected));
+        }
+        println!("live attachment OCR returned {} characters", text.chars().count());
+    }
+
 }

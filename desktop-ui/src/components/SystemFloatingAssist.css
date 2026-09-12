@@ -1395,6 +1395,28 @@
   font-weight: 800;
 }
 
+.system-floating-assist__refs-adopted {
+  margin-left: 6px;
+  color: #52663d;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.system-floating-assist__ref-adopted {
+  height: 18px;
+  box-sizing: border-box;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(92, 112, 65, 0.13);
+  color: #52663d;
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  flex: 0 0 auto;
+}
+
 .system-floating-assist__ref {
   width: 100%;
   padding: 0;
@@ -2227,6 +2249,15 @@
 
   .system-floating-assist__refs-title {
     color: #E8A25C;
+  }
+
+  .system-floating-assist__refs-adopted {
+    color: #6EE7A0;
+  }
+
+  .system-floating-assist__ref-adopted {
+    background: rgba(52, 199, 89, 0.14);
+    color: #6EE7A0;
   }
 
   .system-floating-assist__ref {

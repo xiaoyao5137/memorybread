@@ -1,0 +1,238 @@
+warning: unused import: `http::StatusCode`
+ --> src/api/handlers/privacy.rs:6:5
+  |
+6 |     http::StatusCode,
+  |     ^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Key`
+   --> src/executor/executor.rs:220:39
+    |
+220 |         use enigo::{Direction, Enigo, Key, Keyboard, Settings}; // type: ignore
+    |                                       ^^^
+
+warning: unused import: `Connection`
+ --> src/storage/repo/preferences.rs:3:24
+  |
+3 | use rusqlite::{params, Connection};
+  |                        ^^^^^^^^^^
+
+warning: unused import: `NewPrivacyFilter`
+ --> src/storage/repo/privacy.rs:8:46
+  |
+8 |         AppBlacklistRecord, NewAppBlacklist, NewPrivacyFilter, PrivacyBlockStat,
+  |                                              ^^^^^^^^^^^^^^^^
+
+warning: unused import: `Weekday`
+  --> src/storage/repo/privacy.rs:18:45
+   |
+18 |     use chrono::{Datelike, Duration, Local, Weekday};
+   |                                             ^^^^^^^
+
+warning: use of deprecated function `capture::ax::get_frontmost_info`: 使用 get_frontmost_info_async 替代
+    --> src/capture/ax.rs:1501:22
+     |
+1501 |         let result = get_frontmost_info();
+     |                      ^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(deprecated)]` on by default
+
+warning: variable `pages_compressed` is assigned to, but never used
+   --> src/monitor.rs:229:9
+    |
+229 |     let mut pages_compressed = 0u64;
+    |         ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: consider using `_pages_compressed` instead
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `pages_compressed` is never read
+   --> src/monitor.rs:239:13
+    |
+239 |             pages_compressed = parse_vm_value(line);
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `request`
+   --> src/scheduler/profile_task.rs:147:38
+    |
+147 |     async fn send_ipc_request(&self, request: IpcRequest) -> anyhow::Result<IpcResponse> {
+    |                                      ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_request`
+
+warning: associated function `err` is never used
+  --> src/api/handlers/privacy.rs:77:8
+   |
+68 | impl<T> ApiResponse<T> {
+   | ---------------------- associated function in this implementation
+...
+77 |     fn err(error: String) -> Self {
+   |        ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `GENERIC_FOCUS_MIN_CHARS` is never used
+  --> src/capture/ax.rs:14:7
+   |
+14 | const GENERIC_FOCUS_MIN_CHARS: usize = 24;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GENERIC_WINDOW_MIN_CHARS` is never used
+  --> src/capture/ax.rs:15:7
+   |
+15 | const GENERIC_WINDOW_MIN_CHARS: usize = 48;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GENERIC_STATIC_ITEM_LIMIT` is never used
+  --> src/capture/ax.rs:16:7
+   |
+16 | const GENERIC_STATIC_ITEM_LIMIT: usize = 80;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GENERIC_ALL_UI_ITEM_LIMIT` is never used
+  --> src/capture/ax.rs:17:7
+   |
+17 | const GENERIC_ALL_UI_ITEM_LIMIT: usize = 140;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `AX_CACHE_TTL_SECS` is never used
+  --> src/capture/ax.rs:24:7
+   |
+24 | const AX_CACHE_TTL_SECS: u64 = 3600; // AX 支持缓存 1 小时
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: static `AX_SUPPORT_CACHE` is never used
+  --> src/capture/ax.rs:27:8
+   |
+27 | static AX_SUPPORT_CACHE: OnceLock<Mutex<HashMap<String, (bool, Instant)>>> = OnceLock::new();
+   |        ^^^^^^^^^^^^^^^^
+
+warning: variant `Generic` is never constructed
+   --> src/capture/ax.rs:323:5
+    |
+322 | enum TextExtractor {
+    |      ------------- variant in this enum
+323 |     Generic,
+    |     ^^^^^^^
+    |
+    = note: `TextExtractor` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `as_str` is never used
+   --> src/capture/ax.rs:330:8
+    |
+329 | impl TextExtractor {
+    | ------------------ method in this implementation
+330 |     fn as_str(self) -> &'static str {
+    |        ^^^^^^
+
+warning: struct `ExtractedText` is never constructed
+   --> src/capture/ax.rs:341:8
+    |
+341 | struct ExtractedText {
+    |        ^^^^^^^^^^^^^
+
+warning: associated function `trigger_embedding` is never used
+    --> src/capture/engine.rs:2074:14
+     |
+2067 | impl CaptureEngine {
+     | ------------------ associated function in this implementation
+...
+2074 |     async fn trigger_embedding(
+     |              ^^^^^^^^^^^^^^^^^
+
+warning: field `id` is never read
+  --> src/ipc.rs:61:5
+   |
+60 | struct IpcResponse {
+   |        ----------- field in this struct
+61 |     id: String,
+   |     ^^
+   |
+   = note: `IpcResponse` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: function `parse_json_value` is never used
+    --> src/services/bake_service.rs:7356:4
+     |
+7356 | fn parse_json_value<T>(value: &str) -> Vec<T>
+     |    ^^^^^^^^^^^^^^^^
+
+warning: function `first_or_default` is never used
+    --> src/services/bake_service.rs:7400:4
+     |
+7400 | fn first_or_default(values: &[String], default: &str) -> String {
+     |    ^^^^^^^^^^^^^^^^
+
+warning: function `insert_timeline_entry_inner` is never used
+    --> src/storage/repo/knowledge.rs:2241:4
+     |
+2241 | fn insert_timeline_entry_inner(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `memory-bread-core` (lib test) generated 24 warnings (run `cargo fix --lib -p memory-bread-core --tests` to apply 6 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.07s
+     Running unittests src/lib.rs (target/debug/deps/memory_bread_core-cd001a01c759f5ae)
+
+running 58 tests
+test api::handlers::creation::tests::preserves_multi_section_revision_operation_for_history ... ok
+test api::handlers::creation::tests::history_trace_merge_keeps_earlier_events_when_snapshot_only_has_latest_run ... ok
+test api::handlers::creation::tests::relays_sse_when_a_chinese_character_crosses_network_chunks ... ok
+test api::handlers::creation::tests::choice_answers_require_options_or_custom_text_but_never_both ... ok
+test api::handlers::creation::tests::legacy_confirm_inference_answers_reject_option_ids ... ok
+test api::handlers::creation::tests::inline_user_instruction_keeps_requirement_selection_and_polish_detail ... ok
+test api::handlers::creation::tests::generated_questions_require_enumerated_options_and_custom_entry ... ok
+test api::handlers::creation::tests::creation_tool_contract_enables_mermaid_only_for_default_requests ... ok
+test api::handlers::creation::tests::preserves_a_repeated_instruction_when_it_is_a_new_occurrence ... ok
+test api::handlers::creation::tests::creation_tool_contract_keeps_required_tools_enabled ... ok
+test api::handlers::creation::tests::merges_persisted_root_with_latest_conversation_without_duplicates ... ok
+test api::handlers::creation::tests::keeps_root_and_recent_turns_when_conversation_is_large ... ok
+test api::handlers::creation::tests::brainstorm_branch_queue_visits_siblings_before_recursive_children ... ok
+test api::handlers::creation::tests::history_merge_keeps_repeated_current_instruction_occurrences ... ok
+test api::handlers::creation::tests::history_merge_preserves_message_metadata_and_restores_a_missing_turn ... ok
+test api::handlers::creation::tests::removes_legacy_free_text_current_question_for_regeneration ... ok
+test api::handlers::creation::tests::start_history_request_accepts_ready_brainstorm_metadata ... ok
+test api::handlers::creation_skill::tests::only_allows_known_document_sources ... ok
+test api::handlers::creation_skill::tests::rejects_published_skill_without_cloud_reference ... ok
+test api::handlers::creation::tests::removes_questions_reused_under_different_dimension_ids ... ok
+test ipc::tests::test_ipc_client_creation ... ok
+test api::handlers::creation_skill::tests::limits_each_skill_step_to_four_agent_and_tool_resources ... ok
+test api::handlers::creation::tests::upgrades_fixed_question_state_into_dynamic_decision_path ... ok
+test api::handlers::creation_skill::tests::accepts_codex_skill_package_with_required_frontmatter ... ok
+test services::bake_service::tests::test_inventory_trend_counts_data_sources_by_creation_time ... ok
+test services::bake_service::tests::test_inventory_trend_counts_each_new_asset_once_on_creation_day ... ok
+test storage::repo::creation_brainstorm::tests::update_uses_optimistic_revision ... ok
+test storage::repo::creation_history::tests::set_source_marks_history_as_scheduled_task ... ok
+test storage::repo::creation_history::tests::persists_brainstorm_mode_brief_and_consumed_revision ... ok
+test storage::repo::creation_history::tests::persists_agent_session_conversation_and_trace ... ok
+test storage::repo::creation_history::tests::restores_root_request_and_latest_revision_for_session ... ok
+test storage::repo::creation_history::tests::tracks_running_progress_and_terminal_status_on_the_same_record ... ok
+test storage::repo::creation_history::tests::search_and_paginate_history ... ok
+test storage::repo::creation_history::tests::updates_the_same_history_row_for_a_complete_session ... ok
+test storage::repo::creation_inline_edit::tests::persists_and_reads_running_request_without_prompt_fields ... ok
+test storage::repo::creation_inline_edit::tests::commits_and_undoes_document_with_revision_compare_and_swap ... ok
+test storage::repo::creation_inline_edit::tests::cancels_stale_precommit_runs_without_touching_fresh_or_committing_runs ... ok
+test storage::repo::creation_skill::tests::execution_step_defaults_to_retaining_webpage_screenshot ... ok
+test storage::db::tests::creation_skill_structure_migration_drops_hidden_legacy_data ... ok
+test storage::db::tests::open_repairs_creation_history_schema_when_old_migration_was_marked_applied ... ok
+test scheduler::repo::tests::list_executions_returns_creation_history_id ... ok
+test storage::repo::creation_operation::tests::completion_is_atomic_idempotent_and_conditionally_undoable ... ok
+test storage::repo::creation_skill::tests::filters_skills_by_source_and_installation ... ok
+test storage::repo::creation_operation::tests::legacy_pending_is_derived_from_unanswered_turns_without_command_keywords ... ok
+test storage::repo::creation_operation::tests::changed_base_rolls_back_result_and_remains_resumable ... ok
+test storage::repo::creation_operation::tests::checkpoint_roundtrip_keeps_completed_nodes_and_rejects_stale_delivery ... ok
+test storage::repo::creation_skill::tests::local_skill_upsert_is_idempotent ... ok
+test storage::repo::creation_operation::tests::model_handoff_checkpoint_is_durable_and_not_copied_into_trace ... ok
+test storage::repo::creation_evidence::tests::persists_and_validates_creation_owned_evidence ... ok
+test storage::repo::creation_operation::tests::partial_result_resumes_at_first_failed_node_and_keeps_original_undo_base ... ok
+test services::bake_service::tests::test_document_date_filter_uses_creation_time_instead_of_update_time ... ok
+test api::handlers::creation_skill::tests::analysis_job_returns_before_slow_model_and_keeps_result_for_polling ... ok
+test storage::repo::creation_skill::tests::skill_scope_and_output_roles_round_trip_and_reject_unknown_versions ... ok
+test storage::repo::creation_skill::tests::stores_imported_codex_skill_files ... ok
+test storage::repo::creation_skill::tests::stores_market_skill_as_an_installed_local_copy ... ok
+test storage::repo::creation_skill::tests::stores_skill_with_empty_recipe_and_example_document ... ok
+test storage::repo::data::tests::list_data_sources_filters_type_and_creation_range ... ok
+test storage::db::tests::creation_operation_upgrade_preserves_existing_state_and_is_idempotent ... ok
+
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 482 filtered out; finished in 15.27s
+

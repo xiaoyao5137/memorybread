@@ -1,0 +1,2185 @@
+{
+  "generated_at_ms": 1788730901432,
+  "mode": "replay",
+  "db": "/Users/xianjiaqi/.memory-bread/memory-bread.db",
+  "scope": "只读回放，未写回用户数据库；连接串 mode=ro，脚本不含任何 DDL/DML",
+  "mode_notes": "replay：payload 由当前 BAKE_BUNDLE_PROMPT 重新提炼，验收线以本模式为准",
+  "gate_config": {
+    "enabled": true,
+    "publish_score": 0.72,
+    "shadow_score": 0.5,
+    "dedup_window_days": 14
+  },
+  "gate_rule_versions": {
+    "legacy": "knowledge-open-semantic-v1",
+    "reuse": "knowledge-reuse-radius-v2"
+  },
+  "score_table": {
+    "irreplaceability": {
+      "only_here": 1.0,
+      "partially_recoverable": 0.62,
+      "authoritative_elsewhere": 0.0
+    },
+    "reuse_audience": {
+      "anyone_same_domain": 1.0,
+      "team_or_stakeholders": 0.85,
+      "me_later": 0.5,
+      "only_me_this_session": 0.0
+    },
+    "validity_horizon": {
+      "months_or_more": 1.0,
+      "weeks": 0.8,
+      "days": 0.5,
+      "hours": 0.15
+    },
+    "weights": {
+      "scope": 0.4,
+      "audience": 0.25,
+      "horizon": 0.2,
+      "importance": 0.15
+    }
+  },
+  "baseline": {
+    "window_days": 60,
+    "decided_total": 2925,
+    "published_total": 1124,
+    "publish_rate": 0.3843,
+    "states": {
+      "shadow": 1754,
+      "published": 1124,
+      "timeline_only": 47
+    },
+    "reason_codes": {
+      "below_publish_threshold": 1723,
+      "publish_threshold_met": 1124,
+      "below_shadow_threshold": 47,
+      "open_semantic_evidence_incomplete": 20,
+      "quality_score_missing": 11
+    },
+    "rule_versions": {
+      "knowledge-open-semantic-v1": 2925
+    },
+    "category_publish_rate": {
+      "文档": 0.3235,
+      "代码": 0.6512,
+      "其他": 0.3465,
+      "聊天": 0.2768,
+      "会议": 0.3014,
+      "学习": 0.5349,
+      "阅读": 0.75,
+      "chat": 0.0,
+      "会议|文档": 1.0,
+      "coding": 1.0,
+      "代码|其他": 1.0,
+      "代码|聊天": 1.0,
+      "会议 | 文档 | 代码 | 聊天 | 其他": 0.0,
+      "会议 | 聊天": 0.0,
+      "会议|代码": 0.0,
+      "会议|其他": 1.0,
+      "招聘": 0.0,
+      "数据平台": 0.0,
+      "数据页面": 0.0,
+      "监控": 0.0,
+      "聊天|代码": 0.0
+    },
+    "category_total": {
+      "文档": 1793,
+      "代码": 516,
+      "其他": 303,
+      "聊天": 177,
+      "会议": 73,
+      "学习": 43,
+      "阅读": 4,
+      "chat": 2,
+      "会议|文档": 2,
+      "coding": 1,
+      "代码|其他": 1,
+      "代码|聊天": 1,
+      "会议 | 文档 | 代码 | 聊天 | 其他": 1,
+      "会议 | 聊天": 1,
+      "会议|代码": 1,
+      "会议|其他": 1,
+      "招聘": 1,
+      "数据平台": 1,
+      "数据页面": 1,
+      "监控": 1,
+      "聊天|代码": 1
+    },
+    "code_category_not_outlier": false
+  },
+  "summary": {
+    "mode": "replay",
+    "total": 46,
+    "faithful_total": 38,
+    "legacy_publish_rate": 0.0,
+    "reuse_publish_rate": 0.6316,
+    "state_shift": {
+      "shadow->published": 24,
+      "shadow->shadow": 14
+    },
+    "reuse_reason_codes": {
+      "publish_score_met": 24,
+      "below_publish_score": 14,
+      "reuse_semantics_incomplete": 8
+    },
+    "category_publish_rate": {
+      "代码": 0.7059,
+      "其他": 0.125,
+      "文档": 1.0,
+      "聊天": 1.0,
+      "学习": 0.6667,
+      "会议": 1.0,
+      "阅读": 0.0
+    },
+    "category_total": {
+      "代码": 17,
+      "其他": 8,
+      "文档": 5,
+      "聊天": 3,
+      "学习": 3,
+      "会议": 1,
+      "阅读": 1
+    },
+    "near_duplicate_groups": {},
+    "seed_verdicts": {
+      "total": 7,
+      "pass": 4,
+      "fail": [
+        {
+          "knowledge_id": 4273,
+          "expectation": "block",
+          "reuse_state": "published",
+          "reason_code": "publish_score_met"
+        },
+        {
+          "knowledge_id": 4274,
+          "expectation": "block",
+          "reuse_state": "published",
+          "reason_code": "publish_score_met"
+        },
+        {
+          "knowledge_id": 4275,
+          "expectation": "block",
+          "reuse_state": "published",
+          "reason_code": "publish_score_met"
+        }
+      ],
+      "not_evaluable": []
+    },
+    "replay_errors": 4,
+    "acceptance": {
+      "seed_annotations_all_pass": false,
+      "publish_rate": 0.6316,
+      "publish_rate_in_target_band": false,
+      "code_category_not_outlier": null,
+      "evaluable_samples": 38
+    }
+  },
+  "elapsed_seconds": 3515.38,
+  "samples": [
+    {
+      "knowledge_id": 1206,
+      "timeline_id": 1908,
+      "category": "会议",
+      "title": "记录了因老版本SDK BUG导致预期5万流量实际触发150万QPS，进而拖垮共享集群服务的技术故障复盘及恢复过程。",
+      "summary": "记录了因老版本SDK BUG导致预期5万流量实际触发150万QPS，进而拖垮共享集群服务的技术故障复盘及恢复过程。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": null,
+        "quality_score": null,
+        "reason_code": null,
+        "rule_version": null,
+        "persist_status": null
+      },
+      "is_stock_row": true,
+      "expectation": "keep",
+      "verdict": "pass",
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "only_here",
+        "irreplaceability_reason": "该故障复盘的具体细节（如150万qps触发、reco关注页收入下降、宋琪和杨硕的责任）仅存在于本次会议沟通记录中，代码仓库和工单系统无法提供同等颗粒度的事件描述。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "weeks",
+        "subject_key": "联盟切流故障 kwaibase 拖垮",
+        "predicate_key": "根因SDK BUG 150w qps 责任人宋琪杨硕"
+      },
+      "dedup_key": "c836751714b95046cde05f31d3161a01",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.885,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 3804,
+      "timeline_id": 9209,
+      "category": "文档",
+      "title": "截至 9 月 1 日，购物助手性能优化已进入多方案并行验证阶段。模型侧 TTFT 降至约 2.02 秒，业务侧次均回复耗时从 19.49 秒降至 9.49 秒。多项优化工作（如 DFlash2、KVCache Bug 修复）正在推进或待确认。",
+      "summary": "截至 9 月 1 日，购物助手性能优化已进入多方案并行验证阶段。模型侧 TTFT 降至约 2.02 秒，业务侧次均回复耗时从 19.49 秒降至 9.49 秒。多项优化工作（如 DFlash2、KVCache Bug 修复）正在推进或待确认。",
+      "timeline_importance": 5,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.78,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": "keep",
+      "verdict": "pass",
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "外部公共资料（云文档）原文虽在，但其中的‘待确认’状态、具体责任人及各项优化的收益门槛细节需结合上下文重新通读与理解才能复原结论，且该信息具有时效性。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "weeks",
+        "subject_key": "购物助手性能优化专项",
+        "predicate_key": "核心指标改善、多项优化收益待确认、责任人明确"
+      },
+      "dedup_key": "92f495da113945e6f8101ce310f3b13b",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.7705,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4196,
+      "timeline_id": 9983,
+      "category": "文档",
+      "title": "在AGI项目进度同步中，团队因未带来GMV增长面临质疑。经讨论，确立了向老板（赵洪文）汇报的核心策略：不讲技术本质，而是强调商业逻辑和GMV归因。",
+      "summary": "在AGI项目进度同步中，团队因未带来GMV增长面临质疑。经讨论，确立了向老板（赵洪文）汇报的核心策略：不讲技术本质，而是强调商业逻辑和GMV归因。",
+      "timeline_importance": 3,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.85,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": "keep",
+      "verdict": "pass",
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "only_here",
+        "irreplaceability_reason": "该共识仅存在于本次群聊讨论中，无其他权威载体记录。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "weeks",
+        "subject_key": "AGI项目汇报策略",
+        "predicate_key": "必须归因到GMV提升"
+      },
+      "dedup_key": "010822a4eced6148819c597d501770b7",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.8475,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4270,
+      "timeline_id": 10201,
+      "category": "其他",
+      "title": "记录了多个项目任务的完成状态、部署方案制定、架构设计、问题排查及修复结果等事实信息。",
+      "summary": "记录了多个项目任务的完成状态、部署方案制定、架构设计、问题排查及修复结果等事实信息。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.78,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": "block",
+      "verdict": "pass",
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "虽然部分任务（如部署方案）可能已有相关文档记录，但GPU成本异常的具体原因、悬浮球问题的根治方案、分支节点质检机制的实现细节等关键信息仅存在于本次工作记录中，需要重新通读或拼接才能复原。",
+        "reuse_audience": "me_later",
+        "validity_horizon": "weeks",
+        "subject_key": "AIGC项目多任务推进",
+        "predicate_key": "完成关键任务与问题解决"
+      },
+      "dedup_key": "f167cf100ff119009b96cfc8029b1a39",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": 0.6455,
+        "reason_code": "below_publish_score",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4273,
+      "timeline_id": 10243,
+      "category": "聊天",
+      "title": "开发者在 vedio-aigc 项目中修复了人物资产命中后新拆出的结果分支未继承跳过条件的缺陷，并验证了首轮视频生成任务的执行状态。",
+      "summary": "开发者在 vedio-aigc 项目中修复了人物资产命中后新拆出的结果分支未继承跳过条件的缺陷，并验证了首轮视频生成任务的执行状态。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.78,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": "block",
+      "verdict": "fail",
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "该知识涉及的具体缺陷表现和修复方案散落在聊天对话中，虽然问题类型通用，但具体实现细节（如绕过归档和首帧判断进入参考生视频节点）需要结合上下文理解。用户自己的操作过程未被权威载体完整记录此细节，因此属于部分可恢复。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "weeks",
+        "subject_key": "分支条件继承缺陷",
+        "predicate_key": "补上条件继承逻辑使页面越过归档和首帧判断进入第一次循环参考生视频节点"
+      },
+      "dedup_key": "e2daab5db6bec484ad5e4fa6de15950c",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.733,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4274,
+      "timeline_id": 10244,
+      "category": "代码",
+      "title": "用户正在调试 opencc-js 项目的 vedio-aigc 工作流，已完成模拟环境测试及首轮真实任务验证，发现并修复了分支条件继承缺陷，目前等待最终全流程验收通过。",
+      "summary": "用户正在调试 opencc-js 项目的 vedio-aigc 工作流，已完成模拟环境测试及首轮真实任务验证，发现并修复了分支条件继承缺陷，目前等待最终全流程验收通过。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.78,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": "block",
+      "verdict": "fail",
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "用户自身产出（commit 与 CI 报告）仅记录了‘修复完成’的结果，未包含根因分析与调试过程；需重新通读本次对话记录才能复原完整结论。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "weeks",
+        "subject_key": "视频生成工作流逻辑缺陷",
+        "predicate_key": "分支条件继承缺失与校验分流错误已修复"
+      },
+      "dedup_key": "0a532a0559316636c284c8716bc9f910",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.733,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4275,
+      "timeline_id": 10247,
+      "category": "代码",
+      "title": "用户排查并修复了审核误判导致的分支跳过问题，优化了初始化引导权限设置，完成多轮测试验证并提交代码。",
+      "summary": "用户排查并修复了审核误判导致的分支跳过问题，优化了初始化引导权限设置，完成多轮测试验证并提交代码。",
+      "timeline_importance": 5,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.85,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": "block",
+      "verdict": "fail",
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "GitHub commit 记录包含修复代码和测试通过状态，但缺乏对话中描述的详细故障根因分析（如‘卷宗’关键词触发审核拒绝的具体逻辑）及调试过程细节，需重新通读原文才能复原。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "months_or_more",
+        "subject_key": "视频生成工作流校验分流缺陷",
+        "predicate_key": "修复完成并通过 298 项测试验证"
+      },
+      "dedup_key": "ee9c0da0534bec24da68358e46f1fd92",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.8105,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4293,
+      "timeline_id": 10203,
+      "category": "代码",
+      "title": "三国短剧工作流在‘内容验收与重试’环节因缺少逐人动作审核证据而触发异常复核上限（maxAttempts=2）导致执行失败。",
+      "summary": "三国短剧工作流在‘内容验收与重试’环节因缺少逐人动作审核证据而触发异常复核上限（maxAttempts=2）导致执行失败。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.85,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "虽然错误日志（REVIEW_RESULT_INVALID）和参数配置界面在系统内可见，但完整的故障复盘结论（错误原因 + 触发条件 + 具体修复步骤）仅存在于本次执行记录中。若丢失，需重新运行工作流或查阅历史执行日志才能复原，无法从代码仓库或静态文档直接获取。",
+        "reuse_audience": "me_later",
+        "validity_horizon": "weeks",
+        "subject_key": "vedio-aigc 工作流异常复核失败",
+        "predicate_key": "修改 maxAttempts 参数重试"
+      },
+      "dedup_key": "9d666cd851e0d9488741c35e6754c7c0",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": 0.6455,
+        "reason_code": "below_publish_score",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4283,
+      "timeline_id": 10265,
+      "category": "代码",
+      "title": "用户通过 ChatGPT 辅助开发 mb-all 项目中的三国短剧功能，执行了剧本审计和质量检查，发现了史实错误、戏剧构思缺失及跨段节拍重复等技术问题，并记录了当前的修复进展和测试状态。",
+      "summary": "用户通过 ChatGPT 辅助开发 mb-all 项目中的三国短剧功能，执行了剧本审计和质量检查，发现了史实错误、戏剧构思缺失及跨段节拍重复等技术问题，并记录了当前的修复进展和测试状态。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.78,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "reused_or_merged"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "代码仓库和 commit 记录了文件修改行为（如 sed、rg 命令执行），但无法还原真实模型样例中具体的错误文本内容（'周福、房植本人决定联络同道'）、技术约束产生的原因分析（绑定原尾帧续拍导致反打受限）以及详细的测试覆盖列表（337 项，含反打、沉默表演等场景）。这些细节需从对话记录中重新拼接和推导。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "weeks",
+        "subject_key": "vedio-aigc 三国短剧优化",
+        "predicate_key": "发现历史记载错误、技术约束及当前测试状态"
+      },
+      "dedup_key": "95d94e643b4a8951955248c8df1f1ebe",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.733,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10289,
+      "category": "文档",
+      "title": "用户在18:08左右通过搜索功能在即时通讯软件中查看关于资产超期归还提醒和线上问题反…",
+      "summary": "用户在18:08左右通过搜索功能在即时通讯软件中查看关于资产超期归还提醒和线上问题反馈的历史群聊记录。采集显示用户检索了办公资产平台的逾期通知以及电商技术支持群的各类告警信息，内容涵盖多个业务场景的通知详情。",
+      "timeline_importance": 2,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": false,
+      "missing_semantic_fields": [
+        "evidence_summary"
+      ],
+      "recorded": {
+        "decision_state": "timeline_only",
+        "quality_score": 0.58,
+        "reason_code": "below_shadow_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "timeline_only"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "only_here",
+        "irreplaceability_reason": "该通知内容的具体细节（如超期天数、特定商品ID列表、限流解除指引）仅存在于18:01的历史群聊记录中，代码仓库和工单系统无此历史消息副本。",
+        "reuse_audience": "me_later",
+        "validity_horizon": "days",
+        "subject_key": "办公资产平台通知及电商技术支持群告警",
+        "predicate_key": "18:01收到关于资产超期、架构问题、Kafka限流等通知"
+      },
+      "dedup_key": "3a0ef2360415782915086425f62826a3",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "reuse_semantics_incomplete",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10233,
+      "category": "代码",
+      "title": "用户在ChatGPT中设计视频AIGC项目的GPU集群可观测方案和RCA Agent…",
+      "summary": "用户在ChatGPT中设计视频AIGC项目的GPU集群可观测方案和RCA Agent架构，计划补充模型效率数据。期间系统提示启用快速模式以节省时间，用户确认了相关项目目标。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.72,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "only_here",
+        "irreplaceability_reason": "该知识仅存在于本次ChatGPT会话的界面记录和对话中。项目具体的待办事项列表和关于快速模式节省时间的具体数值（8小时38分钟）并未提交到代码仓库、CI报告或工单系统中，无法从其他权威载体原样查回。",
+        "reuse_audience": "me_later",
+        "validity_horizon": "weeks",
+        "subject_key": "vedio-aigc项目规划",
+        "predicate_key": "设计GPU集群可观测方案、补充效率计算结果；启用快速模式节省8小时38分钟"
+      },
+      "dedup_key": "9947764b951146b72faea451248b8320",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.7975,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10287,
+      "category": "学习",
+      "title": "用户在知乎上浏览关于 OpenAI 发布 GPT-6 Astra 模型的价格与性能讨…",
+      "summary": "用户在知乎上浏览关于 OpenAI 发布 GPT-6 Astra 模型的价格与性能讨论。用户关注该模型相比上一代旗舰价格翻倍的现象，并对比不同回答中关于计费模式、上下文窗口优势以及实际成本效益的分析内容。",
+      "timeline_importance": 3,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.7,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "知乎原文虽在，但需重新通读全文及推导计费逻辑才能复原具体结论；该知识适用于未来同类模型成本评估，具有复用价值。",
+        "reuse_audience": "anyone_same_domain",
+        "validity_horizon": "months_or_more",
+        "subject_key": "GPT-6 Astra long context billing",
+        "predicate_key": "no doubling penalty, lower total cost vs Sol High"
+      },
+      "dedup_key": "504237231b0af6f88378e0fc935dadd2",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.773,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4292,
+      "timeline_id": 10286,
+      "category": "代码",
+      "title": "用户在 MemoryBread 项目中推进核心改造工作，已完成文件读取、命令运行及基线测试，当前处于并行实现逻辑并进行回归验证阶段。",
+      "summary": "用户在 MemoryBread 项目中推进核心改造工作，已完成文件读取、命令运行及基线测试，当前处于并行实现逻辑并进行回归验证阶段。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.78,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "权威载体（commit/CI报告）中仅记录了文件变更和测试通过等宏观状态，缺失具体的并行逻辑细节、字段保留策略及当前正在执行的验证步骤。需结合聊天对话中的描述进行还原。",
+        "reuse_audience": "me_later",
+        "validity_horizon": "weeks",
+        "subject_key": "MemoryBread project development",
+        "predicate_key": "parallel implementation of Cinema/Drama/Quality modules with specific field retention strategy"
+      },
+      "dedup_key": "5f607bd7eb6c38091f5d3e7fe8834ee6",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": 0.6455,
+        "reason_code": "below_publish_score",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10285,
+      "category": "文档",
+      "title": "用户在18:02左右通过即时通讯工具浏览多个工作群组和技术文档，内容涉及商业化系统告…",
+      "summary": "用户在18:02左右通过即时通讯工具浏览多个工作群组和技术文档，内容涉及商业化系统告警、直播预约问题以及AI视频生成工具的交互反馈与性能投诉。",
+      "timeline_importance": 3,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.68,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "only_here",
+        "irreplaceability_reason": "该反馈仅存在于本次即时通讯聊天会话中，未被提交到代码仓库、CI报告或正式文档中。未来无法从任何权威载体原样查回此具体的用户反馈细节。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "weeks",
+        "subject_key": "AI视频生成工具交互缺陷",
+        "predicate_key": "缺少脚本/分镜确认步骤导致直接生成长视频且速度慢"
+      },
+      "dedup_key": "cab43aea3f1df2e95c319aefeeee7660",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.8475,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4291,
+      "timeline_id": 10283,
+      "category": "阅读",
+      "title": "基于知乎问答页面采集的 GPT-6 Astra 定价、上下文规格及性能实测数据。",
+      "summary": "基于知乎问答页面采集的 GPT-6 Astra 定价、上下文规格及性能实测数据。",
+      "timeline_importance": 2,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.78,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "权威载体为知乎问答页面（外部公共资料），虽可访问但需重新通读全文及多位回答才能复原具体的定价数值、计费规则细节及性能对比结论，无法直接原样查回。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "months_or_more",
+        "subject_key": "GPT-6 Astra pricing vs Sol",
+        "predicate_key": "Price 2.5x higher but better performance for long context"
+      },
+      "dedup_key": "a80a028fd490b8ae0cc46720742aa9e2",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": 0.698,
+        "reason_code": "below_publish_score",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4290,
+      "timeline_id": 10280,
+      "category": "代码",
+      "title": "用户并行推进三个实现分支的代码更新，基线测试通过，配置已备份，并制定了后续实施步骤。",
+      "summary": "用户并行推进三个实现分支的代码更新，基线测试通过，配置已备份，并制定了后续实施步骤。",
+      "timeline_importance": 4,
+      "payload_source": "knowledge_content",
+      "payload_semantics_complete": false,
+      "missing_semantic_fields": [
+        "future_question",
+        "decision_reason",
+        "irreplaceability_reason",
+        "subject_key",
+        "predicate_key"
+      ],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.78,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": "knowledge_payload_absent(accepted=False)",
+      "dimensions": {
+        "irreplaceability": null,
+        "irreplaceability_reason": null,
+        "reuse_audience": null,
+        "validity_horizon": null,
+        "subject_key": null,
+        "predicate_key": null
+      },
+      "dedup_key": null,
+      "legacy": {
+        "state": "shadow",
+        "score": 0.78,
+        "reason_code": "open_semantic_evidence_incomplete",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "reuse_semantics_incomplete",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10212,
+      "category": "代码",
+      "title": "用户在 vedio-aigc 平台调试三国短剧生成工作流，通过拖拽连线构建包含史料检…",
+      "summary": "用户在 vedio-aigc 平台调试三国短剧生成工作流，通过拖拽连线构建包含史料检索、文本推理、图片生成分支判断的复杂流程。系统显示画布适配率变化及执行循环次数为0次，用户正在验证节点逻辑与分支条件配置。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.85,
+        "reason_code": "open_semantic_evidence_incomplete",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "虽然工作流可能已保存至系统，但具体的节点连接逻辑、分支判断条件（如异常/结果分支的具体触发值）以及验收标准等细节存在于用户的操作界面快照中，无法从代码仓库或CI报告中原样查回。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "weeks",
+        "subject_key": "vedio-aigc short剧生成工作流",
+        "predicate_key": "包含多轮内容验收与重试机制的38步流程配置"
+      },
+      "dedup_key": "30991480791ed9f254d2c370de85393a",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.733,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4289,
+      "timeline_id": 10279,
+      "category": "代码",
+      "title": "记录三国短剧影视化表达项目在并行实现三个模块（Drama、Cinema、Quality）时的当前状态及后续执行计划。",
+      "summary": "记录三国短剧影视化表达项目在并行实现三个模块（Drama、Cinema、Quality）时的当前状态及后续执行计划。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.85,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "用户自己的产出（代码修改与测试报告）已记录了修复过程，但对话中关于问题发现的具体细节、临时策略及决策依据无法从权威载体原样查回，需重新通读对话才能复原。",
+        "reuse_audience": "me_later",
+        "validity_horizon": "weeks",
+        "subject_key": "三国短剧影视化表达项目",
+        "predicate_key": "历史人物关系改写问题及跨节拍ID重复判定规则"
+      },
+      "dedup_key": "d7c144a766a7f6818171f2ddf218fbfe",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": 0.6455,
+        "reason_code": "below_publish_score",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4288,
+      "timeline_id": 10278,
+      "category": "学习",
+      "title": "用户通过Google Gemini查询了万亿参数模型的分布式训练实现原理，获取了关于多维并行策略、显存压缩技术及集群架构的系统级知识。",
+      "summary": "用户通过Google Gemini查询了万亿参数模型的分布式训练实现原理，获取了关于多维并行策略、显存压缩技术及集群架构的系统级知识。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.85,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "该知识来源于 Google Gemini 的对话输出，属于外部公共资料。虽然原文（对话记录）存在，但若要复原所有技术细节（如 ZeRO-3 的具体通信机制、FlashAttention-3 的异步 TMA 原理），仍需重新通读全文进行理解与推导，无法直接从代码或工单中查回。",
+        "reuse_audience": "anyone_same_domain",
+        "validity_horizon": "months_or_more",
+        "subject_key": "万亿参数模型分布式训练",
+        "predicate_key": "依赖多维并行、ZeRO 压缩及集群容灾架构"
+      },
+      "dedup_key": "a2780c3e6789cd3ab2e2027283c863c2",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.8105,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10242,
+      "category": "其他",
+      "title": "用户正在规划官网部署方案并处理多个技术任务，包括排查GPU成本、修复悬浮球初始化问题…",
+      "summary": "用户正在规划官网部署方案并处理多个技术任务，包括排查GPU成本、修复悬浮球初始化问题及优化工作流执行耗时等.",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.72,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "代码仓库与 CI 报告仅能证明\"301项测试通过\"和\"87项变更\"等宏观结果，无法还原本次聊天中用户执行的具体操作顺序、命令细节及时间线上下文。",
+        "reuse_audience": "me_later",
+        "validity_horizon": "weeks",
+        "subject_key": "官网部署方案执行验证",
+        "predicate_key": "测试通过且配置备份完成"
+      },
+      "dedup_key": "3a1ba7f7ccc90215aa556dec467840ee",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": 0.6455,
+        "reason_code": "below_publish_score",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4287,
+      "timeline_id": 10277,
+      "category": "其他",
+      "title": "用户基于三国短剧影视化提案推进多模块并行开发，已完成基线测试并启动三个核心实现模块。",
+      "summary": "用户基于三国短剧影视化提案推进多模块并行开发，已完成基线测试并启动三个核心实现模块。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.78,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "虽然项目相关的代码变更可能存在于 Git 历史中，但对话中记录的‘并行启动三个模块’的具体决策过程、‘检查与设计但未修改生产实现’的状态确认以及具体的下一步承诺（如部署方案细节），属于执行层面的事实与沟通结论，无法从代码仓库原样查回。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "weeks",
+        "subject_key": "三国短剧影视化项目",
+        "predicate_key": "并行开发模块已启动，检查与设计完成，计划推进同场切镜与部署方案"
+      },
+      "dedup_key": "6b463fa3517e41d2fdf000c37635cf81",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.733,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4286,
+      "timeline_id": 10231,
+      "category": "文档",
+      "title": "因原文与引文字形简繁差异被判定为不存在而触发告警的问题，通过修改 opencc-js 逻辑兼容转换后修复。",
+      "summary": "因原文与引文字形简繁差异被判定为不存在而触发告警的问题，通过修改 opencc-js 逻辑兼容转换后修复。",
+      "timeline_importance": 5,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.85,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "commit 历史仅包含修复后的代码变更，无法还原当时的排查过程、具体的错误现象描述（原文与引文简繁差异）以及验证细节。需重新通读本文档才能复原完整的故障处理逻辑。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "months_or_more",
+        "subject_key": "视频生成工作流引文校验误报",
+        "predicate_key": "根因为简繁字形差异导致误判，修复方案为兼容简繁转换"
+      },
+      "dedup_key": "1833cf83b82e818d1b01a20c37ba4bd2",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.8105,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10276,
+      "category": "其他",
+      "title": "用户在 ChatGPT 中制定并执行三国短剧影视化项目的部署方案，通过并行实现剧情、…",
+      "summary": "用户在 ChatGPT 中制定并执行三国短剧影视化项目的部署方案，通过并行实现剧情、切镜和审核三个模块，完成基线测试验证及配置备份后交付成果。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.75,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "权威载体是用户自己的操作过程（ChatGPT 对话与日志），但具体的执行逻辑、决策细节和验证机制并未在 commit 或构建报告中完整记录，需要重新拼接对话内容才能复原。",
+        "reuse_audience": "me_later",
+        "validity_horizon": "weeks",
+        "subject_key": "三国短剧影视化项目部署方案",
+        "predicate_key": "并行模块更新策略与验证结果"
+      },
+      "dedup_key": "546e0079e03fbeefdde5f3432232d587",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": 0.6455,
+        "reason_code": "below_publish_score",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4285,
+      "timeline_id": 10275,
+      "category": "学习",
+      "title": "用户通过 Google Gemini 获取了关于万亿参数模型分布式训练的详细技术解答，涵盖并行策略、显存优化及集群容灾机制。",
+      "summary": "用户通过 Google Gemini 获取了关于万亿参数模型分布式训练的详细技术解答，涵盖并行策略、显存优化及集群容灾机制。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.85,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "该知识来源于AI助手的详细解答，虽然相关技术文档在外部公共资料中可查，但此处提供的具体解释（如针对1000B模型的显存计算细节、特定调度策略的适用性）需要重新通读原文才能完全复原，且属于用户主动获取的知识。",
+        "reuse_audience": "me_later",
+        "validity_horizon": "months_or_more",
+        "subject_key": "万亿参数模型分布式训练",
+        "predicate_key": "依赖多维并行、显存压缩及集群容灾架构"
+      },
+      "dedup_key": "febbec42bb86bbc0a5c7e7089d7a140d",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": 0.6855,
+        "reason_code": "below_publish_score",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10273,
+      "category": "代码",
+      "title": "用户基于 ChatGPT 生成的三国短剧影视化优化方案进行落地执行，确认了剧情结构、…",
+      "summary": "用户基于 ChatGPT 生成的三国短剧影视化优化方案进行落地执行，确认了剧情结构、人物行为设计及镜头语言的具体实施方案，并查看了账户余额以保障资源充足。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.7,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "only_here",
+        "irreplaceability_reason": "该信息仅存在于本次用户与 ChatGPT 的对话及账户界面快照中。项目进度和资源状态是动态变化的，且用户未将其提交到代码仓库、工单系统或生成正式文档存档，因此无法从其他权威载体原样查回。",
+        "reuse_audience": "me_later",
+        "validity_horizon": "days",
+        "subject_key": "三国短剧影视化优化项目",
+        "predicate_key": "执行进度为进行中，资源余额为0"
+      },
+      "dedup_key": "c48b156d6d7005e1d80ca83dc46673d6",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.7375,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10272,
+      "category": "聊天",
+      "title": "用户在 Google Gemini 中询问超过1000B模型的分布式训练实现原理",
+      "summary": "用户在 Google Gemini 中询问超过1000B模型的分布式训练实现原理。AI详细解释了多维并行切分（张量、流水线、序列、专家）、显存压缩技术（ZeRO/FSDP）以及万卡集群通信与容灾架构，并提供了具体的参数计算和硬件配置细节。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.75,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "该知识来源于 Google Gemini 的对话记录（外部公共资料），原文虽可访问但需重新通读全文及理解推导才能复原所有技术细节与参数计算，属于部分可恢复。",
+        "reuse_audience": "anyone_same_domain",
+        "validity_horizon": "months_or_more",
+        "subject_key": "万亿模型分布式训练架构",
+        "predicate_key": "多维并行 +ZeRO+FP8+万卡容灾"
+      },
+      "dedup_key": "4c3605056e9935e52e8be9516f8eb6fa",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.8105,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4284,
+      "timeline_id": 10230,
+      "category": "代码",
+      "title": "记忆面包初始化引导权限优化测试结果与经验总结：解决了简繁体字形导致的引文校验误报问题；测试通过294项验证并修复了核心功能。",
+      "summary": "记忆面包初始化引导权限优化测试结果与经验总结：解决了简繁体字形导致的引文校验误报问题；测试通过294项验证并修复了核心功能。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.78,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "代码仓库和CI报告记录了\"41项前端、95项后端测试通过\"的结果，但无法还原本次会话中关于\"移除截图验证步骤\"的具体决策过程和对话确认细节。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "weeks",
+        "subject_key": "记忆面包初始化引导权限优化",
+        "predicate_key": "测试通过且修复引文校验误报"
+      },
+      "dedup_key": "e5d09cb739b46ce0dc13957b6d0af278",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.733,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10270,
+      "category": "聊天",
+      "title": "用户通过Google Gemini应用界面发起关于超过1000B模型分布式训练实现方…",
+      "summary": "用户通过Google Gemini应用界面发起关于超过1000B模型分布式训练实现方法的咨询对话",
+      "timeline_importance": 4,
+      "payload_source": "audit_shadow_payload",
+      "payload_semantics_complete": false,
+      "missing_semantic_fields": [
+        "irreplaceability_reason",
+        "subject_key",
+        "predicate_key"
+      ],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.65,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": "knowledge_payload_absent(accepted=False)",
+      "dimensions": {
+        "irreplaceability": null,
+        "irreplaceability_reason": null,
+        "reuse_audience": null,
+        "validity_horizon": null,
+        "subject_key": null,
+        "predicate_key": null
+      },
+      "dedup_key": null,
+      "legacy": {
+        "state": "shadow",
+        "score": 0.65,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "reuse_semantics_incomplete",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10269,
+      "category": "聊天",
+      "title": "用户在 ChatGPT 中制定了一套针对三国短剧的影视化表达优化方案，包含叙事结构、…",
+      "summary": "用户在 ChatGPT 中制定了一套针对三国短剧的影视化表达优化方案，包含叙事结构、角色行为设计及镜头语言等具体指导。经双方讨论确认后，决定按此提案实施并自测交付。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.75,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "only_here",
+        "irreplaceability_reason": "该方案为特定项目（三国短剧）的定制化设计，结论仅存在于本次ChatGPT对话中，无代码、文档或工单等权威载体可原样查回。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "weeks",
+        "subject_key": "三国短剧影视化表达优化",
+        "predicate_key": "五大核心维度及实施策略已确认"
+      },
+      "dedup_key": "f4015a01196c38d88cd6019046462db4",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.885,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10268,
+      "category": "文档",
+      "title": "用户在工作群中讨论数字员工平台的技术方案、UI交互逻辑及视频生成性能问题，并同步了项…",
+      "summary": "用户在工作群中讨论数字员工平台的技术方案、UI交互逻辑及视频生成性能问题，并同步了项目进度与告警信息。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": false,
+      "missing_semantic_fields": [
+        "evidence_summary"
+      ],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.72,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "外部公共资料（工作群聊天记录）原文虽在，但需重新通读与重新推导才能复原结论，且该记录为一次性沟通现场产物，无其他权威载体可原样查回。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "weeks",
+        "subject_key": "数字员工平台技术方案与性能问题",
+        "predicate_key": "选中态实现逻辑确认；UI交互优化建议；视频生成性能瓶颈；告警处理流程"
+      },
+      "dedup_key": "544cd524d16312bd4f12c5e62eb92ca4",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "reuse_semantics_incomplete",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10267,
+      "category": "代码",
+      "title": "用户向 ChatGPT咨询并获取了关于优化三国短剧影视化表达的详细方案",
+      "summary": "用户向 ChatGPT咨询并获取了关于优化三国短剧影视化表达的详细方案。分析指出当前人物冲突不足、镜头叙事受限等问题，建议从剧情结构、行为设计、镜头语言及审核机制四方面进行改进。最终确认将设计方案写入文档并按计划执行落地与自测交付。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.72,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "虽然方案已写入 `sanguo-cinematic-drama-proposal.md` 文档，但对话中提供的具体场景示例（如《甘陵党议》的交锋细节）和 ChatGPT 的分析逻辑需要结合上下文才能完整复原，且部分细节在文档中可能未完全展开。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "weeks",
+        "subject_key": "三国短剧生成流程优化",
+        "predicate_key": "人物冲突与镜头叙事缺失问题"
+      },
+      "dedup_key": "bbcc6656ed51fc0be4e65074e6963f3d",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.733,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10266,
+      "category": "聊天",
+      "title": "用户在 Google Gemini 界面中询问超过1000B模型的分布式训练实现方式…",
+      "summary": "用户在 Google Gemini 界面中询问超过1000B模型的分布式训练实现方式，浏览了不同的对话选项和系统提示词状态，正在进行技术知识查询互动。",
+      "timeline_importance": 2,
+      "payload_source": "audit_shadow_payload",
+      "payload_semantics_complete": false,
+      "missing_semantic_fields": [
+        "irreplaceability_reason",
+        "subject_key",
+        "predicate_key"
+      ],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.65,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": "knowledge_payload_absent(accepted=False)",
+      "dimensions": {
+        "irreplaceability": null,
+        "irreplaceability_reason": null,
+        "reuse_audience": null,
+        "validity_horizon": null,
+        "subject_key": null,
+        "predicate_key": null
+      },
+      "dedup_key": null,
+      "legacy": {
+        "state": "shadow",
+        "score": 0.65,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "reuse_semantics_incomplete",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10129,
+      "category": "其他",
+      "title": "用户重启了名为 vedio-aigc 的应用程序，该应用依赖 PostgreSQL…",
+      "summary": "用户重启了名为 vedio-aigc 的应用程序，该应用依赖 PostgreSQL 数据库服务运行，并成功在本地启动后通过浏览器打开访问页面。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.75,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "终端日志已记录部分命令和状态，但完整的交互式判断逻辑（如自动检测服务状态并触发 brew 重启）需结合上下文理解，且无代码仓库或工单系统记录此特定运维决策。",
+        "reuse_audience": "me_later",
+        "validity_horizon": "weeks",
+        "subject_key": "vedio-aigc restart",
+        "predicate_key": "brew services restart postgresql@16 then start app"
+      },
+      "dedup_key": "db9e77c6bb84c9ca717b0ab2bb833c28",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": 0.6455,
+        "reason_code": "below_publish_score",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10262,
+      "category": "代码",
+      "title": "在终端环境中重启视频AIGC应用服务并验证PostgreSQL数据库状态",
+      "summary": "在终端环境中重启视频AIGC应用服务并验证PostgreSQL数据库状态",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.72,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "only_here",
+        "irreplaceability_reason": "该操作细节仅存在于本次终端会话的日志中，无其他权威载体（如commit、CI报告）记录此执行过程。",
+        "reuse_audience": "me_later",
+        "validity_horizon": "weeks",
+        "subject_key": "vedio-aigc服务重启流程",
+        "predicate_key": "PostgreSQL就绪后启动应用成功"
+      },
+      "dedup_key": "0150856b08eb6ceac6a77593a38a1259",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.7975,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4240,
+      "timeline_id": 10130,
+      "category": "代码",
+      "title": "用户在 Mac 终端执行 ./start.sh restart 命令重启视频 AIGC 应用，系统自动检测并重启 PostgreSQL 服务，最终成功启动前端应用。",
+      "summary": "用户在 Mac 终端执行 ./start.sh restart 命令重启视频 AIGC 应用，系统自动检测并重启 PostgreSQL 服务，最终成功启动前端应用。",
+      "timeline_importance": 3,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.78,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "reused_or_merged"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "用户自己的操作过程（commit/CI报告）已记录重启动作，但日志中显示的‘检测服务已启动’及‘自动执行 brew services restart’的具体行为细节需重新通读才能复原结论。",
+        "reuse_audience": "me_later",
+        "validity_horizon": "weeks",
+        "subject_key": "vedio-aigc 应用启动流程",
+        "predicate_key": "自动检测 PostgreSQL 服务并执行 brew restart"
+      },
+      "dedup_key": "8e585c4275398a9e0a4cccd9677745ac",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": 0.608,
+        "reason_code": "below_publish_score",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10261,
+      "category": "代码",
+      "title": "用户向 AI 助手咨询 MemoryBread 项目的发布部署方案，包括官网、网关及…",
+      "summary": "用户向 AI 助手咨询 MemoryBread 项目的发布部署方案，包括官网、网关及客户端 DMG 包上架的具体步骤。随后审查了项目版本更新记录（v0.2.1/v0.3.1），确认本地测试通过但未上线，并根据反馈修正了文案表述后刷新预览内容。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.72,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "only_here",
+        "irreplaceability_reason": "该信息仅存在于本次 ChatGPT 对话交互中，没有代码仓库、commit 历史或工单系统等权威载体可原样查回。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "weeks",
+        "subject_key": "MemoryBread 项目发布部署状态",
+        "predicate_key": "本地测试通过但未上线，文案已修正为新增脑暴创作模式"
+      },
+      "dedup_key": "a26184affda5073cdf0dde907c761485",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.885,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4282,
+      "timeline_id": 10260,
+      "category": "文档",
+      "title": "用户在 Kim - Kim 群中处理生产环境异常和 Bug 排查事宜。主要关注‘灵机独立站’项目中的 UI 交互问题（鼠标移开不保持选中），并查看了关于 Token 配额用尽的预警消息及相关的技术告警通知，等待开发同事反馈修复进度。",
+      "summary": "用户在 Kim - Kim 群中处理生产环境异常和 Bug 排查事宜。主要关注‘灵机独立站’项目中的 UI 交互问题（鼠标移开不保持选中），并查看了关于 Token 配额用尽的预警消息及相关的技术告警通知，等待开发同事反馈修复进度。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.78,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "only_here",
+        "irreplaceability_reason": "该信息仅存在于本次群聊对话中，涉及具体的沟通对象（谢志洋）、待确认方案及实时状态，代码仓库、工单系统或其他文档中无此完整上下文记录。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "days",
+        "subject_key": "灵机独立站UI Bug与Token配额风险",
+        "predicate_key": "Bug待确认方案，配额2026-09-06停用"
+      },
+      "dedup_key": "19de60221d7278374f3cc31c71caf4d0",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.825,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10259,
+      "category": "文档",
+      "title": "记录了商业化事业部在2026年9月6日因模型Token配额耗尽导致服务被拒绝的情况及…",
+      "summary": "记录了商业化事业部在2026年9月6日因模型Token配额耗尽导致服务被拒绝的情况及应急同步会议信息",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": false,
+      "missing_semantic_fields": [
+        "evidence_summary"
+      ],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.75,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "only_here",
+        "irreplaceability_reason": "该信息仅存在于本次聊天/消息记录中，无法从代码仓库、CI报告或外部文档中直接还原。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "weeks",
+        "subject_key": "Qwen2.5-72B-Instruct模型配额耗尽事件",
+        "predicate_key": "服务被拒绝，进行了应急同步会议讨论架构与告警机制"
+      },
+      "dedup_key": "e971e5be29df16a2136ceadd21e1164e",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "reuse_semantics_incomplete",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10258,
+      "category": "代码",
+      "title": "用户正在通过 ChatGPT 审查并优化记忆面包的官网版本更新记录文案",
+      "summary": "用户正在通过 ChatGPT 审查并优化记忆面包的官网版本更新记录文案。已确认六个版本的更新内容经过精简，移除了冗余信息和负面表述，63项测试、构建及SOP审计均已通过本地预览验证，目前尚未部署上线。同时讨论了三国短剧工作流的影视化表达需求。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.72,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "该工作事实（测试通过、SOP更新、待上线状态）虽由用户产出，但未被代码仓库或工单系统完整记录。若丢失，需重新查阅本次对话记录才能复原具体结论。",
+        "reuse_audience": "me_later",
+        "validity_horizon": "weeks",
+        "subject_key": "记忆面包官网版本更新记录优化",
+        "predicate_key": "测试通过且SOP已更新，待部署上线"
+      },
+      "dedup_key": "483230a42a128bd1a6b17f96be56591b",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": 0.6455,
+        "reason_code": "below_publish_score",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10217,
+      "category": "其他",
+      "title": "用户回顾了多个 Codex 修复任务的状态并执行了相关的验证、测试及文档迁移操作",
+      "summary": "用户回顾了多个 Codex 修复任务的状态并执行了相关的验证、测试及文档迁移操作",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.65,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "虽然Codex修复记录可能包含部分技术细节，但聊天中关于具体任务状态、执行动作和验证结果的描述提供了上下文和确认信息，且无法从外部完全复原所有细节（如具体的UI清理请求内容）。",
+        "reuse_audience": "me_later",
+        "validity_horizon": "weeks",
+        "subject_key": "Codex修复任务状态回顾",
+        "predicate_key": "已完成验证、测试及文档迁移操作"
+      },
+      "dedup_key": "8095a5a4dbad3387a16136ada2cbe0ec",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": 0.6455,
+        "reason_code": "below_publish_score",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10257,
+      "category": "聊天",
+      "title": "用户在与 ChatGPT 对话中探讨 vedio-aigc 项目的优化方向，包括如何…",
+      "summary": "用户在与 ChatGPT 对话中探讨 vedio-aigc 项目的优化方向，包括如何融入影视色彩、排查 GPU 成本异常以及构建模型效率计算结果，旨在提升用户体验和系统稳定性。",
+      "timeline_importance": 4,
+      "payload_source": "audit_shadow_payload",
+      "payload_semantics_complete": false,
+      "missing_semantic_fields": [
+        "irreplaceability_reason",
+        "subject_key",
+        "predicate_key"
+      ],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.72,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": "knowledge_payload_absent(accepted=False)",
+      "dimensions": {
+        "irreplaceability": null,
+        "irreplaceability_reason": null,
+        "reuse_audience": null,
+        "validity_horizon": null,
+        "subject_key": null,
+        "predicate_key": null
+      },
+      "dedup_key": null,
+      "legacy": {
+        "state": "shadow",
+        "score": 0.72,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "reuse_semantics_incomplete",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4281,
+      "timeline_id": 10256,
+      "category": "代码",
+      "title": "用户针对视频生成工作中角色自报生硬和信息覆盖不全的问题制定了四步优化方案，并完成了场景大纲节点的改造；同时排查并修复了分支回跳轮次显示逻辑及数据库迁移相关错误。",
+      "summary": "用户针对视频生成工作中角色自报生硬和信息覆盖不全的问题制定了四步优化方案，并完成了场景大纲节点的改造；同时排查并修复了分支回跳轮次显示逻辑及数据库迁移相关错误。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": false,
+      "missing_semantic_fields": [
+        "evidence_summary"
+      ],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.85,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "该知识的具体根因分析和四步优化逻辑未在 commit 中完整保留，需重新查阅原文。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "months_or_more",
+        "subject_key": "视频生成工作流优化",
+        "predicate_key": "四步优化方案（规划、检查、审核、验收）"
+      },
+      "dedup_key": "070496e35de84c4b3fe7991a6e8c9528",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "reuse_semantics_incomplete",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10255,
+      "category": "代码",
+      "title": "用户通过 ChatGPT 调试 MemoryBread 项目中的模拟错误上报功能，解…",
+      "summary": "用户通过 ChatGPT 调试 MemoryBread 项目中的模拟错误上报功能，解决了浏览器直传 OSS 的跨域拒绝问题。同时优化了视频大纲生成的 AI 提示词，修正了模型将整条剧情线误判为同一场戏的逻辑缺陷，确保开场能清晰交代人物关系与事件起因。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.75,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "根因与优化策略虽可推测，但具体调试过程、多轮迭代细节及最终提示词调整无法从 commit 或构建日志中直接还原，需重新通读对话记录才能复原。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "weeks",
+        "subject_key": "错误上报根因、视频大纲生成逻辑",
+        "predicate_key": "跨域预检导致失败、需区分剧情线与单场戏概念"
+      },
+      "dedup_key": "6616a7adf8ac511a1a77d649351a392d",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.733,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": null,
+      "timeline_id": 10216,
+      "category": "其他",
+      "title": "完成了悬浮球初始化时机的修复工作，并通过了前端、Rust及TypeScript代码检…",
+      "summary": "完成了悬浮球初始化时机的修复工作，并通过了前端、Rust及TypeScript代码检查，等待重启客户端进行最终验收。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "shadow",
+        "quality_score": 0.72,
+        "reason_code": "below_publish_threshold",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "shadow"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "核心结论（修复完成、测试通过）虽可能隐含在commit或CI报告中，但具体的执行细节（排查根因、优化逻辑、排除风险的具体内容）及当前待办状态（尚未重启验收）仅存在于本次聊天记录中。若丢失，需重新查阅代码提交历史以确认具体改动，且无法从现有载体得知‘尚未重启’这一进度事实。",
+        "reuse_audience": "me_later",
+        "validity_horizon": "weeks",
+        "subject_key": "悬浮球初始化时机修复",
+        "predicate_key": "代码检查通过，待客户端重启验收"
+      },
+      "dedup_key": "4121ae0bfd753be06714819a3df99e6e",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": 0.6455,
+        "reason_code": "below_publish_score",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4280,
+      "timeline_id": 10254,
+      "category": "其他",
+      "title": "用户制定了针对官网更新记录的文案优化规则，旨在从吸引用户角度而非暴露缺陷的角度撰写功能介绍和质量修复说明，并计划将此规则纳入发布部署 SOP。",
+      "summary": "用户制定了针对官网更新记录的文案优化规则，旨在从吸引用户角度而非暴露缺陷的角度撰写功能介绍和质量修复说明，并计划将此规则纳入发布部署 SOP。",
+      "timeline_importance": 4,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.78,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "ChatGPT 提供了执行计划，但用户提出的具体文案原则（如‘笼统表达修复’）是本次交互中产生的关键事实，无法从外部权威载体原样查回。",
+        "reuse_audience": "me_later",
+        "validity_horizon": "weeks",
+        "subject_key": "官网更新记录描述原则",
+        "predicate_key": "突出用户价值、笼统表达修复问题"
+      },
+      "dedup_key": "e9ea9579fc326a844f4c08947f029795",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "shadow",
+        "score": 0.6455,
+        "reason_code": "below_publish_score",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    },
+    {
+      "knowledge_id": 4279,
+      "timeline_id": 10253,
+      "category": "代码",
+      "title": "用户在 vedio-aigc 系统中调试‘三国原著史料短剧-生产工作流’，当前处于第27/254步的‘参考生视频’阶段，涉及大纲史料与剧情推理节点的异常重试逻辑验证。",
+      "summary": "用户在 vedio-aigc 系统中调试‘三国原著史料短剧-生产工作流’，当前处于第27/254步的‘参考生视频’阶段，涉及大纲史料与剧情推理节点的异常重试逻辑验证。",
+      "timeline_importance": 5,
+      "payload_source": "llm_replay",
+      "payload_semantics_complete": true,
+      "missing_semantic_fields": [],
+      "recorded": {
+        "decision_state": "published",
+        "quality_score": 0.85,
+        "reason_code": "publish_threshold_met",
+        "rule_version": "knowledge-open-semantic-v1",
+        "persist_status": "created"
+      },
+      "is_stock_row": true,
+      "expectation": null,
+      "verdict": null,
+      "replay_error": null,
+      "dimensions": {
+        "irreplaceability": "partially_recoverable",
+        "irreplaceability_reason": "虽然工作流执行日志已记录部分状态，但具体的调试判断逻辑、重试策略细节及 JSON 约束的完整上下文需结合现场操作记录才能复原，无法仅从代码仓库原样查回。",
+        "reuse_audience": "team_or_stakeholders",
+        "validity_horizon": "weeks",
+        "subject_key": "vedio-aigc-workflow-debugging",
+        "predicate_key": "node-retry-logic-and-json-specs"
+      },
+      "dedup_key": "55057b55728955aa0d5f6aac23cb1477",
+      "legacy": {
+        "state": "shadow",
+        "score": null,
+        "reason_code": "quality_score_missing",
+        "rule_version": "knowledge-open-semantic-v1"
+      },
+      "reuse": {
+        "state": "published",
+        "score": 0.7705,
+        "reason_code": "publish_score_met",
+        "rule_version": "knowledge-reuse-radius-v2"
+      }
+    }
+  ]
+}

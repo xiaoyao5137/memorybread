@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import type { DataSnapshot, DataSource, MemoryFavoriteFilter } from '../../types'
 import { BakeFavoriteButton, BakeFavoriteFilterControl } from './BakeFavoriteControls'
 import { BakeDetailDrawer, BakeRecordTable, BakeTableActionButton, type BakeRecordColumn } from './BakeRecordTable'
-import { BakeButton } from './BakeShared'
+import { BakeButton, BakeMarkdown } from './BakeShared'
 
 type DataMetricRow = {
   dimension: string
@@ -561,7 +561,7 @@ const BakeDataTab: React.FC<{
             </section>
             <details className="bake-data-disclosure">
               <summary>完整采集内容</summary>
-              <div className="bake-data-content">{selected.latest_snapshot.content_text || '暂无完整采集内容'}</div>
+              <div className="bake-data-content"><BakeMarkdown content={selected.latest_snapshot.content_text || '暂无完整采集内容'} /></div>
             </details>
           </div>
         ))}

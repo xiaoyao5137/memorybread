@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 import sys
+from contextlib import nullcontext
+from ..control import current_control
 
 from .base import OcrBackend, OcrBox, OcrOutput
 
@@ -107,7 +109,9 @@ class AppleVisionBackend(OcrBackend):
         )
 
         # 执行识别
-        success, error = handler.performRequests_error_([request], None)
+        control = current_control()
+        with control.native_request(request.cancel) if control else nullcontext():
+            success, error = handler.performRequests_error_([request], None)
 
         if not success or error:
             error_msg = str(error) if error else "未知错误"

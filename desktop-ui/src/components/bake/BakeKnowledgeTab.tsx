@@ -20,6 +20,7 @@ const formatCreatedTime = (item: Pick<BakeKnowledgeItem, 'createdAt' | 'createdA
 
 const BakeKnowledgeTab: React.FC<{
   items: BakeKnowledgeItem[]
+  loading?: boolean
   total: number
   limit: number
   offset: number
@@ -50,6 +51,7 @@ const BakeKnowledgeTab: React.FC<{
   focusId?: string | null
 }> = ({
   items,
+  loading = false,
   total,
   limit,
   offset,
@@ -226,6 +228,7 @@ const BakeKnowledgeTab: React.FC<{
 
       <BakeRecordTable
         items={items}
+        loading={loading}
         total={total}
         limit={limit}
         offset={offset}

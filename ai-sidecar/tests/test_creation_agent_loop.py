@@ -11,7 +11,8 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from creation.agent_loop import CreationAgentLoop
+from creation.agent_loop import CreationAgentLoop, GoalState, LoopState, MAX_DELIVERY_REPAIR_CYCLES
+from creation.operations import OperationError
 from creation.service import (
     CreationOptions,
     CreationService,
@@ -25,6 +26,51 @@ from creation.tools import (
     fallback_routing_decision,
     validate_routing_decision,
 )
+
+
+def generation_fixture_decision(query, requirement, skills=(), decision=None, enabled_tool_ids=None):
+    """Explicit model fixtures for executor tests, not production routing policy.
+
+    Executor tests select their resources; operation tests independently verify
+    that an empty decision never receives mandatory research or writing stages.
+    """
+    from creation import tools as capabilities
+    if decision is None:
+        selected_tools = ["memory_search"]
+        for tool_id, selected in [
+            ("internet_search", capabilities.should_use_internet_search(query, requirement)),
+            ("github_search", capabilities.should_use_github_search(query)),
+            ("plantuml_diagram", capabilities.should_use_plantuml(query, requirement)),
+            ("mermaid_diagram", capabilities.should_use_mermaid(query, requirement)),
+            ("data_search", capabilities.should_use_data_tools(query, requirement)),
+        ]:
+            if selected:
+                selected_tools.append(tool_id)
+        agents = ["solution_design_agent"]
+        if "data_search" in selected_tools:
+            agents.append("data_analysis_agent")
+        if "internet_search" in selected_tools:
+            agents.append("industry_research_agent")
+        decision = {"tools": selected_tools, "agents": agents}
+    result = {**decision, "source": "model"}
+    explicit = [item for item in skills if "@" + str(item.get("title") or "") in query]
+    primary = explicit or [item for item in skills if item.get("workflowRole", item.get("workflow_role", "primary")) != "support"]
+    if "operation" not in result:
+        result["operation"] = ({"kind": "execute_skill", "skill_ids": [str(item.get("id") or item.get("clientSkillKey")) for item in primary]}
+            if skills else {"kind": "generate"})
+    if result["operation"]["kind"] == "execute_skill":
+        result["operation"]["skill_assessments"] = [
+            {"skill_id": selected, "metadata_consistent": True, "applicable": True,
+             "request_evidence": query, "conflicts": [], "missing_inputs": []}
+            for selected in result["operation"]["skill_ids"]]
+    if not skills and result["operation"]["kind"] == "generate":
+        result["agents"] = list(result.get("agents", []))
+        for agent in ("chapter_design_agent", "document_writer_agent", "quality_review_agent"):
+            if agent not in result["agents"]:
+                result["agents"].append(agent)
+    if enabled_tool_ids is not None:
+        result["tools"] = [item for item in result.get("tools", []) if item in enabled_tool_ids]
+    return result
 
 
 class FakeCreationService:
@@ -113,14 +159,13 @@ class FakeCreationService:
 
     def parse_routing_decision(self, text):
         parsed = json.loads(text)
-        decision = validate_routing_decision(parsed)
+        decision = validate_routing_decision(generation_fixture_decision("", {}, decision=parsed))
         decision["reasoning"] = str(parsed.get("reasoning") or "")[:200]
         return decision
 
     async def route_capabilities(self, **kwargs):
-        if self.routing_decision is not None:
-            return dict(self.routing_decision)
-        return fallback_routing_decision(kwargs["query"], kwargs["requirement"])
+        return generation_fixture_decision(kwargs["query"], kwargs["requirement"],
+            kwargs.get("selected_skills", []), self.routing_decision, kwargs.get("enabled_tool_ids"))
 
     async def stream_agent_document(self, **_kwargs):
         yield "# Agent 架构方案\n\n"
@@ -143,11 +188,9 @@ async def collect_events(iterator):
 
 def resolve_planned(loop, state, decision=None):
     """同步解析路由决策并重建计划，供单测直接断言计划结构。"""
-    if decision is None:
-        decision = fallback_routing_decision(
-            str(state.environment.get("context_query") or state.user_message),
-            state.environment.get("requirement", {}),
-        )
+    from creation.tools import normalize_creation_tool_ids
+    decision = generation_fixture_decision(state.user_message, state.environment.get("requirement", {}),
+        state.selected_skills, decision, normalize_creation_tool_ids(state.options.get("enabled_tools")) if decision is None else None)
     state.environment["routing_decision"] = dict(decision)
     state.plan = loop._compose_plan_from_decision(state, decision)
     return state.plan
@@ -300,8 +343,12 @@ async def test_brainstorm_brief_enters_external_routing_model_prompt():
             }
         ],
     }
+    service = FakeCreationService()
+    # Exercise the real prompt boundary: brief constraints now live separately
+    # from query, which contains only the current user instruction.
+    service.build_routing_prompts = CreationService.__new__(CreationService).build_routing_prompts
     events = await collect_events(
-        CreationAgentLoop(FakeCreationService()).run(
+        CreationAgentLoop(service).run(
             user_message="设计数据治理平台建设方案",
             current_document="",
             conversation=[],
@@ -321,9 +368,47 @@ async def test_brainstorm_brief_enters_external_routing_model_prompt():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("current_document", ["", "# 现有分享会方案\n保留已有安排。"])
+async def test_exploring_brainstorm_draft_routes_current_generation_request(current_document):
+    root_request = "先脑暴跨团队分享会的方案，逐个问题帮助我确定方向。"
+    instruction = (
+        "先生成一版。请基于原始创作要求和当前创作简报中已提交的回答，生成一版文档。"
+        "尚未回答的问题、未确认的选项和待补充事项不能当作用户决定；缺失内容标注待确认，不编造事实。"
+    )
+    brief = {
+        "phase": "exploring", "revision": 1, "root_request": root_request,
+        "decisions": [{"question_id": "q-format", "dimension": "形式", "summary": "圆桌讨论", "source": "user"}],
+        "open_flags": ["预算尚未确定"],
+        "current_question": {"id": "q-budget", "prompt": "预算是多少？", "required": True,
+                             "options": [{"id": "option", "label": "尚未确认的候选预算"}]},
+    }
+    service = FakeCreationService()
+    service.build_routing_prompts = CreationService.__new__(CreationService).build_routing_prompts
+    events = await collect_events(CreationAgentLoop(service).run(
+        user_message=instruction, root_request=root_request,
+        current_document=current_document,
+        conversation=[{"role": "user", "content": root_request}], selected_skills=[],
+        options=CreationOptions(enable_rag=False), model_mode="external",
+        creation_mode="brainstorm", creation_brief=brief,
+    ))
+    request = next(event for event in events if event["type"] == "model.request")
+    user_prompt = next(item["content"] for item in request["data"]["messages"] if item["role"] == "user")
+    assert user_prompt.endswith("本轮用户原始指令（执行目标与位置以此为准）：" + instruction)
+    system_prompt = next(item["content"] for item in request["data"]["messages"] if item["role"] == "system")
+    assert "不能从其中另抽历史动作覆盖本轮操作类别" in system_prompt
+    assert root_request in user_prompt
+    assert "圆桌讨论" in user_prompt and "预算尚未确定" in user_prompt
+    assert "尚未确认的候选预算" not in user_prompt
+    assert brief["phase"] == "exploring" and brief["revision"] == 1
+    assert brief["current_question"]["id"] == "q-budget"
+    if current_document:
+        assert "现有分享会方案" in user_prompt
+
+
+@pytest.mark.asyncio
 async def test_agent_passes_configured_result_limits_to_memory_and_data_search():
     service = FakeCreationService()
-    service.routing_decision = {"tools": ["data_search"], "agents": []}
+    service.routing_decision = {"tools": ["memory_search", "data_search"], "agents": []}
 
     events = await collect_events(
         CreationAgentLoop(service).run(
@@ -375,9 +460,11 @@ def test_routing_prompt_loads_every_capability_self_description():
     for capability in ROUTING_CAPABILITIES:
         assert capability["id"] in system
         assert capability["description"] in system
-    assert "市场进入方案 Skill (Skill 上下文)" in system
+    assert "市场进入方案 Skill" in system
+    assert "实际步骤均须一致" in system
     assert "判断机会、约束与进入路径" in system
-    assert "用户请求：查看看板实时数据" in user
+    assert user.endswith("查看看板实时数据")
+    assert user.count("查看看板实时数据") == 1
     # 白名单与能力自描述注册表保持同源。
     assert set(ROUTABLE_TOOL_IDS) == {
         item["id"] for item in ROUTING_CAPABILITIES if item["kind"] == "tool"
@@ -385,6 +472,29 @@ def test_routing_prompt_loads_every_capability_self_description():
     assert set(ROUTABLE_AGENT_IDS) == {
         item["id"] for item in ROUTING_CAPABILITIES if item["kind"] == "agent"
     }
+
+
+def test_routing_prompt_discloses_retrieval_scope_beyond_facts():
+    # 修复：记忆/互联网检索的自描述需覆盖“复用历史成果/写作口径”与
+    # “方法论/最佳实践/参考范例/灵感”，不能只声明“缺失的事实”。
+    class PromptAssemblyService:
+        build_routing_prompts = CreationService.build_routing_prompts
+        _skill_description_lines = staticmethod(
+            CreationService._skill_description_lines
+        )
+
+    system, _ = PromptAssemblyService().build_routing_prompts(
+        "增加剧本设计章节",
+        {"topic": "", "doc_type": "", "audience": ""},
+        selected_skills=[],
+        enabled_tool_ids=None,
+    )
+    # 记忆搜索：复用用户历史成果与写作口径/风格
+    assert "复用其历史成果" in system
+    assert "写作风格" in system
+    # 互联网检索：方法论/最佳实践与参考范例/灵感思路
+    assert "最佳实践" in system
+    assert "灵感思路" in system
 
 
 def test_routing_prompt_only_discloses_enabled_optional_tools():
@@ -457,8 +567,8 @@ def test_fallback_routing_decision_respects_enabled_tools():
             "mermaid_diagram",
         ),
     )
-    assert "mermaid_diagram" in enabled["tools"]
-    assert "plantuml_diagram" not in enabled["tools"]
+    assert enabled["tools"] == disabled["tools"] == []
+    assert enabled["agents"] == disabled["agents"] == []
 
 
 def test_mermaid_is_default_but_explicit_empty_tool_list_keeps_it_disabled():
@@ -500,7 +610,7 @@ def test_model_routing_decision_overrides_keyword_heuristics():
 
 
 @pytest.mark.asyncio
-async def test_routing_falls_back_when_model_output_is_unparseable():
+async def test_routing_fails_without_guessing_when_model_output_is_unparseable():
     class BrokenRoutingService(FakeCreationService):
         def parse_routing_decision(self, text):
             raise ValueError("无法解析路由决策")
@@ -518,21 +628,41 @@ async def test_routing_falls_back_when_model_output_is_unparseable():
         run_id="run-route-broken",
     )
     step = next(item for item in state.plan if item.get("action") == "route")
-    events = [
-        event
-        async for event in loop._complete_model_step(state, step, "不是合法 JSON")
-    ]
-    # 路由决策公告后由 thinking.completed 收尾，展示层据此关闭思考卡片。
-    assert events[-1]["type"] == "thinking.completed"
-    assert any(item["type"] == "agent.completed" for item in events)
-    assert state.environment["routing_decision"]["source"] == "fallback"
-    plan_ids = [step_item["id"] for step_item in state.plan]
-    assert "internet_search" in plan_ids
-    assert "memory_search" in plan_ids
+    with pytest.raises(OperationError) as error:
+        _ = [event async for event in loop._complete_model_step(state, step, "不是合法 JSON")]
+    assert error.value.code == "CREATION_OPERATION_INVALID"
+    assert "routing_decision" not in state.environment
 
 
 @pytest.mark.asyncio
-async def test_local_route_failure_degrades_to_fallback_and_run_completes():
+async def test_external_routing_keeps_structured_rejection_instead_of_parse_failure():
+    # 品牌模型路径同样不能把带错误码的契约拒绝改写成“本轮操作解析失败”。
+    class RejectingRoutingService(FakeCreationService):
+        def parse_routing_decision(self, text):
+            raise OperationError("CREATION_CAPABILITY_UNAVAILABLE", "操作计划包含不可用的能力标识")
+
+    loop = CreationAgentLoop(RejectingRoutingService())
+    state = loop._new_state(
+        user_message="检索最新行业政策并写调研方案",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        selected_skills=[],
+        options=CreationOptions(enabled_tools=()),
+        model_mode="local",
+        session_id="session-route-rejected",
+        run_id="run-route-rejected",
+    )
+    step = next(item for item in state.plan if item.get("action") == "route")
+    with pytest.raises(OperationError) as error:
+        _ = [event async for event in loop._complete_model_step(state, step, "{}")]
+    assert error.value.code == "CREATION_CAPABILITY_UNAVAILABLE"
+    assert "操作计划包含不可用的能力标识" in str(error.value)
+    assert "routing_decision" not in state.environment
+
+
+@pytest.mark.asyncio
+async def test_local_route_failure_does_not_invent_a_generation_plan():
     class RaisingRouteService(FakeCreationService):
         async def route_capabilities(self, **_kwargs):
             return fallback_routing_decision(
@@ -540,17 +670,11 @@ async def test_local_route_failure_degrades_to_fallback_and_run_completes():
                 _kwargs["requirement"],
             )
 
-    events = [
-        event
-        async for event in CreationAgentLoop(RaisingRouteService()).run(
-            user_message="输出一份项目复盘方案",
-            current_document="",
-            conversation=[],
-            selected_skills=[],
-            options=CreationOptions(),
-        )
-    ]
-    assert events[-1]["type"] == "run.completed"
+    with pytest.raises(OperationError) as error:
+        _ = [event async for event in CreationAgentLoop(RaisingRouteService()).run(
+            user_message="输出一份项目复盘方案", current_document="", conversation=[],
+            selected_skills=[], options=CreationOptions())]
+    assert error.value.code == "CREATION_OPERATION_INVALID"
 
 
 @pytest.mark.asyncio
@@ -577,7 +701,7 @@ async def test_thinking_events_wrap_intent_routing_and_planning():
     types = [event["type"] for event in events]
 
     # 意图理解：thinking 对包裹 intent.interpreted，completed 携带推理摘要。
-    intent_index = types.index("intent.interpreted")
+    intent_index = types.index("intent.pending")
     intent_started = [
         event
         for event in events[:intent_index]
@@ -681,7 +805,7 @@ async def test_thinking_events_wrap_intent_routing_and_planning():
     ]
     assert plan_phases
     assert any(
-        event["data"]["phase_title"] == "检索本地记忆资料"
+        event["data"]["phase_title"] == "检索数据来源"
         for event in plan_phases
     )
     assert any(
@@ -752,12 +876,12 @@ async def test_external_route_step_pauses_for_routing_decision_then_resumes():
             model_mode="external",
         )
     )
-    assert first[-2]["type"] == "model.request"
+    assert [e for e in first if e["type"] != "operation.checkpoint"][-2]["type"] == "model.request"
     assert first[-1]["type"] == "run.paused"
     assert first[-2]["actor"]["id"] == "creation_main_agent"
     assert any(
         "执行链路" in message["content"]
-        for message in first[-2]["data"]["messages"]
+        for message in next(e for e in first if e["type"] == "model.request")["data"]["messages"]
     )
     first_state = first[-1]["data"]["continuation"]
 
@@ -773,9 +897,9 @@ async def test_external_route_step_pauses_for_routing_decision_then_resumes():
             '"reasoning": "架构方案需要先设计方案"}',
         )
     )
-    assert second[-2]["type"] == "model.request"
+    assert [e for e in second if e["type"] != "operation.checkpoint"][-2]["type"] == "model.request"
     assert second[-1]["type"] == "run.paused"
-    assert second[-2]["actor"]["id"] == "solution_design_agent"
+    assert [e for e in second if e["type"] != "operation.checkpoint"][-2]["actor"]["id"] == "solution_design_agent"
 
 
 def test_tool_plan_enforces_required_tools_and_invokes_internet_by_intent():
@@ -832,6 +956,66 @@ def test_weekly_report_starts_with_peer_evidence_probes_not_a_fixed_data_pipelin
     assert "webpage_scrape" not in step_ids
     assert "data_analysis_agent" not in step_ids
     assert step_ids.index("data_search") < step_ids.index("document_writer_agent")
+
+
+def test_step_retrieval_text_never_carries_the_skill_mention():
+    # 复现创作记录 #146：@技能名 作为“业务主题”进入检索词后，会以它做实体
+    # 识别与关键词召回，技能自己声明的取数对象反而被同名通用词条稀释。
+    loop = CreationAgentLoop(FakeCreationService())
+    state = loop._new_state(
+        user_message="@GPU成本优化周报模板 请生成GPU成本优化的周报",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        selected_skills=[
+            {
+                "id": "gpu-weekly",
+                "title": "GPU成本优化周报模板",
+                "summary": "用于每周更新大模型性能成本优化周报。",
+                "executionSteps": [],
+            }
+        ],
+        options=CreationOptions(enabled_tools=("memory_search",)),
+        model_mode="local",
+        session_id="session-mention-free-retrieval",
+        run_id="run-mention-free-retrieval",
+    )
+
+    query = loop._step_context_query(state, {"id": "memory_search"})
+
+    assert "@" not in query
+    assert "GPU成本优化周报模板" not in query
+    assert "成本优化" in query
+    assert state.environment["requirement"]["topic"] == "请生成GPU成本优化的周报"
+
+
+def test_step_retrieval_text_strips_skill_title_containing_spaces():
+    # 技能标题带空格时，只能靠本轮目录里的实际名称剪掉，正则只会吃掉前半段。
+    loop = CreationAgentLoop(FakeCreationService())
+    state = loop._new_state(
+        user_message="@Agent Skills 风格 请整理这份技术评审材料",
+        root_request=None,
+        current_document="",
+        conversation=[],
+        selected_skills=[
+            {
+                "id": "agent-style",
+                "title": "Agent Skills 风格",
+                "summary": "按团队既定行文风格整理材料。",
+                "executionSteps": [],
+            }
+        ],
+        options=CreationOptions(enabled_tools=("memory_search",)),
+        model_mode="local",
+        session_id="session-spaced-mention",
+        run_id="run-spaced-mention",
+    )
+
+    query = loop._step_context_query(state, {"id": "memory_search"})
+
+    assert "@" not in query
+    assert "Skills 风格" not in query
+    assert "技术评审材料" in query
 
 
 def test_metric_governance_uses_report_reference_as_a_data_probe():
@@ -1152,8 +1336,8 @@ def test_qualified_data_survives_merge_prompt_and_final_risk_guard():
     )
     assert reference["data_use_policy"] == "qualified_snapshot_available"
     assert reference["content"] == ""
-    # 模型即使省略了所有数值/备注，确定性输出也必须保留可供用户核验的值。
-    original = "## 用量\n\n说明。\n\n## 后续\n\n行动。"
+    # 只对正文实际采用的指标统一披露，不强行插入无关数值。
+    original = "## 用量\n\n" + "；".join(str(r["label"]) + "：" + str(r["value"]) for r in validation["data_risks"]) + "。\n\n## 后续\n\n行动。"
     rendered, audit = CreationAgentLoop._apply_data_risk_disclosures(original, results)
     assert "100亿" in rendered and "| 0 |" in rendered
     assert "2026-08-26" in rendered and "2026-08-17" in rendered
@@ -1184,7 +1368,7 @@ def test_requested_metrics_strip_task_prefix_and_ignore_interaction_clause():
 
 
 @pytest.mark.asyncio
-async def test_full_creation_loop_discloses_qualified_values_even_when_writer_omits_them():
+async def test_full_creation_loop_does_not_inject_unused_qualified_values():
     _, _, validation = qualified_metric_fixture()
     evidence = {"validation_status": "verified", "validation": validation}
     payload = {"content_text": "来源事实", "structured_data": {}, "title": "容量看板", "url": "https://bi.example/report"}
@@ -1201,10 +1385,10 @@ async def test_full_creation_loop_discloses_qualified_values_even_when_writer_om
         ]}], options=CreationOptions(doc_type="周报"),
     ))
     assert events[-1]["type"] == "run.completed"
-    assert any(event["type"] == "document.data_risks.applied" for event in events)
+    assert not any(event["type"] == "document.data_risks.applied" for event in events)
     document = events[-1]["data"]["document"]
-    assert "100亿" in document and "| 0 |" in document
-    assert "数据风险说明" in document and "2026-08-26" in document
+    assert "100亿" not in document
+    assert "数据风险说明" not in document
 
 
 def test_generic_page_interaction_plan_normalizes_tab_period_and_collection():
@@ -4143,7 +4327,7 @@ async def test_selected_skill_quality_gate_does_not_activate_unrelated_agents():
     )
 
     assert decision["reason_code"] == "quality_gate_passed"
-    assert [step["id"] for step in state.plan].count("quality_review_agent") == 1
+    assert [step["id"] for step in state.plan].count("quality_review_agent") == 0
     assert "anti_ai_style_agent" not in [step["id"] for step in state.plan]
 
 
@@ -5143,15 +5327,9 @@ def test_primary_skill_workflow_drives_agent_tool_order_and_step_context():
         "document_writer_agent",
         "quality_review_agent",
         "market-entry-skill:design-entry",
-        "document_unify_polisher",
-        "quality_review_agent",
     ]
-    assert skill_plan[-1]["quality_issue_codes"] == [
-        "data_query_result_incomplete",
-        "emphasis_needs_polish",
-        "unsupported_page_absence_claim",
-        "subsection_requirements_incomplete",
-    ]
+    assert "document_unify_polisher" not in [step["id"] for step in skill_plan]
+
     assert "chapter_design_agent" not in [step["id"] for step in skill_plan]
     research_step = next(
         step for step in skill_plan if step["id"] == "industry_research_agent"
@@ -5405,7 +5583,7 @@ def test_strict_skill_document_keeps_gpu_and_token_steps_separate():
 
     document = loop._assemble_strict_skill_document(state)
 
-    assert document.startswith("# GPU成本优化周报")
+    assert document.startswith("# 创作结果")  # Legacy checkpoint has no document identity; never copy the skill name.
     assert [
         line.removeprefix("## ")
         for line in document.splitlines()
@@ -5748,16 +5926,9 @@ def test_selected_skill_without_structured_steps_still_never_adds_hidden_agents(
         "creation_main_agent",
         "imported-skill",
         "creation_main_agent",
-        "quality_review_agent",
     ]
-    assert plan[-1]["quality_issue_codes"] == [
-        "data_query_result_incomplete",
-        "emphasis_needs_polish",
-        "unsupported_page_absence_claim",
-        "subsection_requirements_incomplete",
-    ]
-    assert plan[-2]["action"] == "skill_step"
-    assert plan[-2]["skill_step_id"] == "execute-skill"
+    assert plan[-1]["action"] == "skill_step"
+    assert plan[-1]["skill_step_id"] == "execute-skill"
 
 
 def test_explicit_skill_mention_drops_legacy_automatic_template_expansion():
@@ -5857,31 +6028,9 @@ def test_explicit_skill_mention_drops_legacy_automatic_template_expansion():
         for step in plan
         if step.get("action") == "skill_step"
     ] == ["meeting", "aigc", "gpu", "token"]
-    # 四个独立推理步骤后先整合全文，再执行通用数据完整性与强调检查。
-    assert len(plan) == 12
-    assert plan[-2]["id"] == "document_unify_polisher"
-    assert plan[-1]["id"] == "quality_review_agent"
-    assert plan[-1]["quality_issue_codes"] == [
-        "data_query_result_incomplete",
-        "emphasis_needs_polish",
-        "unsupported_page_absence_claim",
-        "subsection_requirements_incomplete",
-    ]
-    unify_system, _ = loop._model_prompts(state, plan[-2])
-    assert "只处理全文结构、术语和表达一致性" in unify_system
-    assert "只处理质检分派给你的问题" not in unify_system
-    assert "保持 Skill 声明的二级章节标题、数量与顺序不变" in unify_system
-    assert "最多两级的父子列表" in unify_system
-    assert "只对关键判断、关键数字、风险和行动项的最短完整词组加粗" in unify_system
-    assert "不得虚构归属" in unify_system
-    assert {step["id"] for step in plan}.isdisjoint(
-        {
-            "generic-weekly",
-            "stage-update",
-            "solution_design_agent",
-            "document_writer_agent",
-        }
-    )
+    # Only declared steps run; there is no automatic whole-document polishing.
+    assert len(plan) == 10
+    assert not {"document_unify_polisher", "quality_review_agent"}.intersection(step["id"] for step in plan)
 
 
 def test_support_skill_is_loaded_without_expanding_its_workflow():
@@ -6131,13 +6280,7 @@ async def test_reference_a889436d_four_step_workflow_order_and_output_structure(
         "data_analysis_agent",
         "webpage_scrape",
     })
-    assert plan[-1]["id"] == "quality_review_agent"
-    assert plan[-1]["quality_issue_codes"] == [
-        "data_query_result_incomplete",
-        "emphasis_needs_polish",
-        "unsupported_page_absence_claim",
-        "subsection_requirements_incomplete",
-    ]
+    assert "quality_review_agent" not in [step["id"] for step in plan]
     data_tool_step = next(step for step in plan if step["id"] == "data_search")
     assert data_tool_step["skill_step_id"] == "build-metrics-table"
     assert data_tool_step["name"] == "GPU算力数据 · 数据检索 Tool"
@@ -6155,9 +6298,9 @@ async def test_reference_a889436d_four_step_workflow_order_and_output_structure(
     # 事件（意图 + 每次内容生成大模型调用各一对）与顶层阶段事件（四个 Skill
     # 步骤各一对 phase 事件）后同一流程约 71 个。保留少量实现波动空间，
     # 但不能再回到错误版本的 119 个事件和三套模板长链。
-    assert len(events) <= 90
+    assert len([e for e in events if e["type"] != "operation.checkpoint"]) <= 90
     # 顶层阶段：四个 Skill 步骤按顺序形成四个阶段，phase 事件成对包裹；
-    # 最后追加全文整合润色，以及不改变业务结构的强调质量检查。
+    # 不追加未选择的整合和审查。
     phase_started = [event for event in events if event["type"] == "phase.started"]
     phase_completed = [
         event for event in events if event["type"] == "phase.completed"
@@ -6167,18 +6310,12 @@ async def test_reference_a889436d_four_step_workflow_order_and_output_structure(
         "AIGC进度总结",
         "GPU算力数据",
         "Token数据",
-        "全文整合润色",
-        "质量审校",
     ]
     assert all(
         event["data"]["phase_kind"] == "skill_step"
-        for event in phase_started[:-2]
+        for event in phase_started
     )
-    assert all(
-        event["data"]["phase_kind"] == "plan_step"
-        for event in phase_started[-2:]
-    )
-    assert len(phase_started) == len(phase_completed) == 6
+    assert len(phase_started) == len(phase_completed) == 4
     # 阶段内的工具摘要要表达调用目的，而不只是结果数量。
     memory_summaries = [
         event["summary"]
@@ -6232,9 +6369,11 @@ async def test_reference_a889436d_four_step_workflow_order_and_output_structure(
     assert service.data_queries[1].startswith("当前步骤：Token数据")
     assert service.reference_queries[1].startswith("当前步骤：AIGC进度总结")
     assert "AIGC 项目进度" in service.reference_queries[1]
-    assert service.reference_queries[1].endswith(
-        "整体创作背景：请使用@GPU成本优化周报创作法 创作下本周的周报"
-    )
+    # @技能名 只是本轮选择执行能力的标记，不能当作“整体创作背景”里的业务主题
+    # 混进记忆检索词；只剩真正的创作诉求。
+    assert "@" not in service.reference_queries[1]
+    assert "GPU成本优化周报创作法" not in service.reference_queries[1]
+    assert service.reference_queries[1].endswith("整体创作背景：请使用 创作下本周的周报")
     assert "电商GPU信息平台" in service.data_queries[0]
     assert "LangBridge" in service.data_queries[1]
     assert "创作下本周的周报" not in service.data_queries[0]
@@ -6307,7 +6446,7 @@ async def test_reference_a889436d_four_step_workflow_order_and_output_structure(
         for event in reversed(events)
         if event["type"] == "run.completed"
     )
-    assert final_document.startswith("# GPU成本优化周报")
+    assert final_document.startswith("# 创作结果")  # This legacy fixture has no title contract.
     assert [
         line.removeprefix("## ")
         for line in final_document.splitlines()
@@ -6573,13 +6712,7 @@ async def test_loop_updates_goal_after_agent_tool_and_skill_results():
     assert skill_completed["summary"] == "已应用 架构方案模板"
     assert "写入环境" not in skill_completed["summary"]
 
-    unify_planned = next(
-        event
-        for event in events
-        if event["type"] == "document.patch.planned"
-        and event["actor"]["id"] == "document_unify_polisher"
-    )
-    assert unify_planned["summary"] == "正在统一全文结构与表达，保留既有章节和事实"
+    assert not any(event["actor"]["id"] == "document_unify_polisher" for event in events)
 
     completed = [
         event
@@ -6610,7 +6743,7 @@ async def test_external_model_can_pause_and_resume_each_dynamic_agent_step():
             model_mode="external",
         )
     )
-    assert first[-2]["type"] == "model.request"
+    assert [e for e in first if e["type"] != "operation.checkpoint"][-2]["type"] == "model.request"
     assert first[-1]["type"] == "run.paused"
     first_state = first[-1]["data"]["continuation"]
 
@@ -6626,7 +6759,7 @@ async def test_external_model_can_pause_and_resume_each_dynamic_agent_step():
             '"reasoning": "方案文档"}',
         )
     )
-    assert second[-2]["type"] == "model.request"
+    assert [e for e in second if e["type"] != "operation.checkpoint"][-2]["type"] == "model.request"
     assert second[-1]["type"] == "run.paused"
     second_state = second[-1]["data"]["continuation"]
 
@@ -6641,7 +6774,7 @@ async def test_external_model_can_pause_and_resume_each_dynamic_agent_step():
             model_result="已明确组件边界、数据流和验证方式。",
         )
     )
-    assert third[-2]["type"] == "model.request"
+    assert [e for e in third if e["type"] != "operation.checkpoint"][-2]["type"] == "model.request"
     assert third[-1]["type"] == "run.paused"
     third_state = third[-1]["data"]["continuation"]
 
@@ -6656,7 +6789,7 @@ async def test_external_model_can_pause_and_resume_each_dynamic_agent_step():
             model_result="章节蓝图：目标、总体架构、实施与验证。",
         )
     )
-    assert fourth[-2]["type"] == "model.request"
+    assert [e for e in fourth if e["type"] != "operation.checkpoint"][-2]["type"] == "model.request"
     assert fourth[-1]["type"] == "run.paused"
     fourth_state = fourth[-1]["data"]["continuation"]
 
@@ -6693,7 +6826,7 @@ async def test_external_model_can_pause_and_resume_each_dynamic_agent_step():
 
 
 @pytest.mark.asyncio
-async def test_short_initial_goal_requests_user_confirmation():
+async def test_short_input_is_not_forced_into_confirmation_by_length():
     loop = CreationAgentLoop(FakeCreationService())
     events = await collect_events(
         loop.run(
@@ -6704,9 +6837,8 @@ async def test_short_initial_goal_requests_user_confirmation():
             options=CreationOptions(enable_rag=False),
         )
     )
-    assert events[-2]["type"] == "confirmation.required"
-    assert events[-2]["goal"]["status"] == "waiting_user"
-    assert events[-1]["type"] == "run.paused"
+    assert events[-1]["type"] == "run.completed"
+    assert not any(e["type"] == "confirmation.required" for e in events)
 
 
 @pytest.mark.asyncio
@@ -6778,9 +6910,8 @@ async def test_follow_up_revises_full_document_and_places_new_section_logically(
     )
 
     intent = next(event for event in events if event["type"] == "intent.interpreted")
-    assert intent["data"]["operation"] == "revise_document"
-    assert intent["data"]["target_sections"] == ["行业调研"]
-    assert intent["data"]["root_request"].startswith("为集团管理层")
+    assert intent["data"]["operation"] == "rewrite_document"
+    assert intent["data"]["target_sections"] == []
 
     patch_event = next(
         event for event in events if event["type"] == "document.patch.applied"
@@ -6789,8 +6920,8 @@ async def test_follow_up_revises_full_document_and_places_new_section_logically(
     assert "## 行业调研" in updated
     assert "## 总体架构\n\n平台由采集、治理、指标和应用四层组成" in updated
     assert updated.index("## 行业调研") < updated.index("## 总体架构")
-    assert patch_event["data"]["patch"]["preserved_untouched"] is True
-    assert patch_event["data"]["patch"]["operation"] == "revise_document"
+    assert patch_event["data"]["patch"]["preserved_untouched"] is False
+    assert patch_event["data"]["patch"]["operation"] == "rewrite_document"
     assert patch_event["data"]["patch"]["change_count"] >= 3
     assert {
         change["section_title"]
@@ -6798,7 +6929,7 @@ async def test_follow_up_revises_full_document_and_places_new_section_logically(
     } >= {"行业调研", "实施计划", "风险与验证"}
     assert not any(event["type"] == "document.replaced" for event in events)
     assert events[-1]["data"]["document"] == updated
-    assert "新能源数据平台建设方案" in service.reference_queries[0]
+    assert "新能源数据平台建设方案" not in service.reference_queries[0]
     assert "补充下行业调研" in service.reference_queries[0]
 
 
@@ -6832,7 +6963,7 @@ def test_context_window_keeps_original_request_and_recent_turns():
     assert state.root_request == "最初的完整行业方案需求"
     assert state.conversation[0]["content"] == "最初的完整行业方案需求"
     assert state.conversation[-1]["content"] == "第 69 轮补充"
-    assert "最初的完整行业方案需求" in state.environment["context_query"]
+    assert state.environment["context_query"] == "再补充行业调研"
     assert "再补充行业调研" in state.goal.objective
 
 
@@ -6906,10 +7037,10 @@ async def test_soft_quality_warning_does_not_regenerate_an_already_complete_revi
     )
     assert service.writer_calls == 1
     assert sum(event["type"] == "document.patch.applied" for event in events) == 1
-    assert quality_event["environment_patch"]["quality_review"]["preserves_structure"] is False
-    assert "保留当前完整版本" in quality_event["summary"]
+    assert quality_event["environment_patch"]["quality_review"]["preserves_structure"] is True
+    assert quality_event["summary"] == "质量检查通过"
     assert events[-1]["type"] == "run.completed"
-    assert "质量风险" in events[-1]["goal"]["outcome"]
+    assert events[-1]["goal"]["status"] == "complete"
 
 
 def test_replace_and_delete_section_patches_preserve_other_sections():
@@ -6979,7 +7110,7 @@ def test_replace_and_delete_section_patches_preserve_other_sections():
         current_document=original,
         mode="revision",
     )
-    assert global_change.operation == "revise_document"
+    assert global_change.operation == "pending"
 
 
 def test_revision_patch_tracks_added_modified_and_deleted_ranges():
@@ -7477,7 +7608,7 @@ def test_strict_skill_workflow_does_not_duplicate_declared_diagram_tool():
     assert [step["id"] for step in plan].count("mermaid_diagram") == 1
 
 
-def test_strict_skill_workflow_ignores_unenabled_diagram_decision():
+def test_strict_skill_workflow_rejects_unenabled_diagram_decision():
     # 未启用的画图工具即使出现在决策里也不得进入计划（与披露契约一致）。
     loop = CreationAgentLoop(FakeCreationService())
     state = _strict_diagram_state(loop, step_tools=[])
@@ -7489,18 +7620,9 @@ def test_strict_skill_workflow_ignores_unenabled_diagram_decision():
         "webpage_scrape",
     )
 
-    plan = resolve_planned(
-        loop,
-        state,
-        decision={
-            "tools": ["mermaid_diagram"],
-            "agents": [],
-            "source": "model",
-            "reasoning": "用户明确要架构图",
-        },
-    )
-
-    assert "mermaid_diagram" not in [step["id"] for step in plan]
+    with pytest.raises(OperationError) as error:
+        resolve_planned(loop,state,decision={"tools":["mermaid_diagram"],"agents":[],"source":"model"})
+    assert error.value.code == "CREATION_CAPABILITY_UNAVAILABLE"
 
 
 def _flaky_stream_skill():
@@ -7576,8 +7698,7 @@ async def test_strict_skill_step_retries_midstream_transport_drop_and_keeps_sing
 
 @pytest.mark.asyncio
 async def test_strict_skill_step_skips_node_after_retry_budget_exhausted():
-    # 持续断流时最多重试一次；重试耗尽后不再上抛中止整轮，
-    # 而是把该节点标记为失败并继续收尾。
+    # 持续断流时最多重试一次；失败节点无可用正文时，整轮不能虚报成功。
     class AlwaysDroppingStreamService(FakeCreationService):
         def __init__(self):
             super().__init__()
@@ -7591,15 +7712,14 @@ async def test_strict_skill_step_skips_node_after_retry_budget_exhausted():
     service = AlwaysDroppingStreamService()
     service.routing_decision = {"tools": [], "agents": []}
 
-    events = await collect_events(
-        CreationAgentLoop(service).run(
+    events = []
+    with pytest.raises(RuntimeError, match="模型未生成文档正文"):
+        async for event in CreationAgentLoop(service).run(
             user_message="使用断流重试创作法生成章节",
-            current_document="",
-            conversation=[],
-            selected_skills=[_flaky_stream_skill()],
-            options=CreationOptions(),
-        )
-    )
+            current_document="", conversation=[],
+            selected_skills=[_flaky_stream_skill()], options=CreationOptions(),
+        ):
+            events.append(event)
 
     assert service.stream_calls == 2
     failed_events = [event for event in events if event["type"] == "agent.failed"]
@@ -7608,8 +7728,7 @@ async def test_strict_skill_step_skips_node_after_retry_budget_exhausted():
     assert failed_events[0]["data"]["error_code"] == "MODEL_TRANSPORT_UNAVAILABLE"
     assert not any(event["type"] == "run.failed" for event in events)
     completed = [event for event in events if event["type"] == "run.completed"]
-    assert completed
-    assert "1 个节点失败已跳过" in completed[0]["summary"]
+    assert not completed
 
 
 @pytest.mark.asyncio
@@ -7681,7 +7800,7 @@ class FaultToleranceStreamService(FakeCreationService):
         )
         if title in self.failing_titles:
             yield "部分输出"
-            raise httpx.RemoteProtocolError("peer closed connection")
+            raise httpx.RemoteProtocolError(getattr(self, "failure_error", "peer closed connection"))
         yield f"{title}的完整章节内容。"
 
     async def stream_agent_document(self, **kwargs):
@@ -7697,9 +7816,10 @@ class FaultToleranceStreamService(FakeCreationService):
 
 
 @pytest.mark.asyncio
-async def test_model_step_failure_skips_node_and_continues():
+async def test_model_step_failure_skips_node_and_continues(caplog):
     # 单节点模型推理失败只在该节点标记失败并跳过，后续节点继续执行，整轮不中断。
     service = FaultToleranceStreamService({"背景梳理"})
+    service.failure_error = "PRIVATE_BODY https://private.invalid/doc?token=SECRET"
     service.routing_decision = {"tools": [], "agents": []}
 
     events = await collect_events(
@@ -7732,12 +7852,17 @@ async def test_model_step_failure_skips_node_and_continues():
     assert service.stream_calls_by_title["背景梳理"] == 2
     assert service.stream_calls_by_title["数据分析"] == 1
 
+    assert "CREATION_NODE_FAILED" in caplog.text
+    for value in ["PRIVATE_BODY", "private.invalid", "SECRET"]:
+        assert value not in caplog.text
+
 
 @pytest.mark.asyncio
-async def test_consecutive_failures_beyond_budget_abort_run():
+async def test_consecutive_failures_beyond_budget_abort_run(caplog):
     # 连续失败超过熔断阈值时中止整轮：异常上抛由上层转 run.failed。
     titles = ["步骤一", "步骤二", "步骤三", "步骤四"]
     service = FaultToleranceStreamService(set(titles))
+    service.failure_error = "PRIVATE_BODY https://private.invalid/doc?token=SECRET"
     service.routing_decision = {"tools": [], "agents": []}
 
     with pytest.raises(httpx.RemoteProtocolError):
@@ -7753,6 +7878,10 @@ async def test_consecutive_failures_beyond_budget_abort_run():
 
     # 前三个失败节点被跳过，第四个连续失败触发熔断，每步各重试一次。
     assert service.stream_calls_by_title["步骤四"] == 2
+
+    assert "CREATION_FAILURE_BUDGET_EXCEEDED" in caplog.text
+    for value in ["PRIVATE_BODY", "private.invalid", "SECRET"]:
+        assert value not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -7779,3 +7908,486 @@ async def test_failed_step_recovery_resets_failure_budget():
     assert "3 个节点失败已跳过" in completed[0]["summary"]
     document = str(completed[0]["data"]["document"])
     assert "步骤二的完整章节内容。" in document
+
+
+def test_brainstorm_manual_edits_override_old_decisions_and_open_flags():
+    context = CreationAgentLoop._brainstorm_prompt_context({
+        "brief_edits": {"root_request": "用户新的创作目标", "q1": "人工确认的新方案", "q2": "", "open_flags": ""},
+        "decisions": [
+            {"question_id": "q1", "dimension": "方向", "summary": "过期方案", "source": "agent_assumption"},
+            {"question_id": "q2", "dimension": "范围", "summary": "应当清空的内容", "source": "user"},
+        ],
+        "open_flags": ["过期开放问题"],
+    })
+    assert "人工确认的新方案" in context
+    assert "用户新的创作目标" in context
+    assert "已确认决策：\n- 方向：人工确认的新方案" in context
+    assert "过期方案" not in context
+    assert "应当清空的内容" not in context
+    assert "过期开放问题" not in context
+
+
+def test_excluded_brainstorm_direction_is_constraint_not_fact_or_retrieval():
+    brief = {"decisions": [
+        {"question_id": "cost", "dimension": "成本", "summary": "不要展开采购预算", "source": "user_excluded"},
+        {"question_id": "flow", "dimension": "流程", "summary": "人工审核", "source": "user"},
+    ], "brief_edits": {"cost": "旧的预算答案"}}
+    context = CreationAgentLoop._brainstorm_prompt_context(brief)
+    assert "用户明确排除的范围" in context
+    assert "不要展开采购预算" in context
+    assert "旧的预算答案" not in context
+    assert "已确认决策：\n- 流程：人工审核" in context
+    assert CreationAgentLoop._brainstorm_retrieval_context_terms(brief) == ["人工审核"]
+
+
+def test_old_exclusions_survive_generation_decision_window():
+    brief = {"decisions": [{"dimension": "成本", "summary": "禁止讨论采购预算", "source": "user_excluded"}] + [
+        {"dimension": "流程", "summary": "人工审核", "source": "user"}
+    ] * 100}
+    assert "禁止讨论采购预算" in CreationAgentLoop._brainstorm_prompt_context(brief)
+
+
+@pytest.mark.asyncio
+async def test_access_denied_aborts_instead_of_skipping_specialist_nodes():
+    from creation.service import CloudModelRequestError
+
+    class DeniedService(FakeCreationService):
+        calls = 0
+
+        async def stream_specialist_agent(self, **kwargs):
+            self.calls += 1
+            raise CloudModelRequestError(403, "private provider detail")
+            yield ""
+
+    service = DeniedService()
+    service.routing_decision = {"tools": [], "agents": []}
+    with pytest.raises(CloudModelRequestError):
+        await collect_events(CreationAgentLoop(service).run(
+            user_message="使用断流重试创作法生成章节", current_document="", conversation=[],
+            selected_skills=[_flaky_stream_skill()], options=CreationOptions()))
+    assert service.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_document_cannot_be_reported_as_completed():
+    class EmptyService(FakeCreationService):
+        async def stream_specialist_agent(self, **kwargs):
+            raise RuntimeError("未返回分析结果")
+            yield ""
+
+    service = EmptyService()
+    service.routing_decision = {"tools": [], "agents": []}
+    events = []
+    with pytest.raises(RuntimeError, match="模型未生成文档正文"):
+        async for event in CreationAgentLoop(service).run(
+            user_message="使用断流重试创作法生成章节", current_document="", conversation=[],
+            selected_skills=[_flaky_stream_skill()], options=CreationOptions()):
+            events.append(event)
+    assert not any(event["type"] == "run.completed" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_delivery_check_allows_multiple_repair_cycles_before_giving_up():
+    """delivery_check should allow up to MAX_DELIVERY_REPAIR_CYCLES repair
+    attempts before raising CREATION_DELIVERY_INCOMPLETE."""
+
+    class DeliveryReviewService(FakeCreationService):
+        def __init__(self):
+            super().__init__()
+            self.review_count = 0
+
+        async def review_creation_delivery(self, instruction, document, contract, environment):
+            self.review_count += 1
+            # Always return "revise" to exercise the repair budget.
+            return {
+                "checks": [],
+                "status": "revise",
+                "corrections": ["需要补充验收条件 A 的证据"],
+            }
+
+    service = DeliveryReviewService()
+    loop = CreationAgentLoop(service)
+    state = loop._new_state(
+        user_message="补充验收条件",
+        root_request="创建一份方案文档",
+        current_document="# 方案\n\n## 验收条件\n\n- 条件 A",
+        conversation=[],
+        selected_skills=[],
+        options=CreationOptions(enabled_tools=()),
+        model_mode="local",
+        session_id="repair-test",
+        run_id="repair-test",
+    )
+    state.environment["input_contract"] = {
+        "deliverable": "方案文档",
+        "inputs": [],
+        "self_contained_reason": "自足",
+        "acceptance": [{"id": "a1", "criterion": "验收条件 A"}],
+    }
+    state.environment["operation"] = {"kind": "transform", "targets": ["验收条件"]}
+    state.environment["document"] = state.current_document
+
+    step = {
+        "kind": "agent",
+        "id": "delivery_check",
+        "name": "交付验收",
+        "action": "delivery_check",
+    }
+
+    async def run_check():
+        return [
+            event
+            async for event in loop._execute_step(
+                state, step,
+                creation_model=None, creation_api_key=None, creation_base_url=None,
+            )
+        ]
+
+    def commit_repair(suffix: str) -> None:
+        """模拟一次真正改动了正文的修复：只有正文变了，重跑验收才有意义。"""
+        updated = state.environment["document"] + "\n\n补充说明 " + suffix + "。"
+        state.current_document = updated
+        state.environment["document"] = updated
+
+    # First delivery_check: should insert repair step, not raise.
+    await run_check()
+    assert state.environment.get("delivery_repair_count") == 1
+    # A repair step and a re-check should have been inserted at the cursor.
+    inserted = state.plan[state.cursor:state.cursor + 2]
+    assert len(inserted) == 2
+    assert inserted[0]["id"] == "delivery_repair"
+    assert inserted[0].get("delivery_repair") is True
+    assert inserted[1]["action"] == "delivery_check"
+
+    # Advance cursor past the repair and re-check steps so we can call
+    # delivery_check again.
+    state.cursor += 2
+
+    # Second delivery_check: 正文确实被修过了，仍在预算内，应再插入一轮修复。
+    commit_repair("一")
+    await run_check()
+    assert state.environment.get("delivery_repair_count") == 2
+    inserted = state.plan[state.cursor:state.cursor + 2]
+    assert len(inserted) == 2
+    assert inserted[0]["id"] == "delivery_repair"
+
+    state.cursor += 2
+
+    # Third delivery_check: budget exhausted, should raise.
+    commit_repair("二")
+    with pytest.raises(OperationError) as exc_info:
+        await run_check()
+    assert exc_info.value.code == "CREATION_DELIVERY_INCOMPLETE"
+    assert str(MAX_DELIVERY_REPAIR_CYCLES) in str(exc_info.value)
+    assert service.review_count == 3
+
+
+@pytest.mark.asyncio
+async def test_delivery_check_stops_at_once_when_repair_changed_nothing():
+    """修正未产生正文变化时不得再跑一次相同验收，也不能让用户自己重试。"""
+
+    class AlwaysReviseService(FakeCreationService):
+        def __init__(self):
+            super().__init__()
+            self.review_count = 0
+
+        async def review_creation_delivery(self, instruction, document, contract, environment):
+            self.review_count += 1
+            return {
+                "checks": [{"id": "a1", "passed": False, "reason": "正文缺少条件 A", "evidence": ""}],
+                "status": "revise",
+                "corrections": ["删除无法验证的数值并补回条件 A 的依据"],
+            }
+
+    service = AlwaysReviseService()
+    loop = CreationAgentLoop(service)
+    state = loop._new_state(
+        user_message="补充验收条件", root_request="创建方案文档",
+        current_document="# 方案\n\n## 验收条件\n\n- 条件 A",
+        conversation=[], selected_skills=[], options=CreationOptions(enabled_tools=()),
+        model_mode="local", session_id="stall-test", run_id="stall-test",
+    )
+    state.environment["input_contract"] = {
+        "deliverable": "方案文档", "inputs": [], "self_contained_reason": "自足",
+        "acceptance": [{"id": "a1", "criterion": "验收条件 A"}],
+    }
+    state.environment["operation"] = {"kind": "transform", "targets": ["验收条件"]}
+    state.environment["document"] = state.current_document
+    step = {"kind": "agent", "id": "delivery_check", "name": "交付验收", "action": "delivery_check"}
+
+    async def run_check():
+        return [
+            event
+            async for event in loop._execute_step(
+                state, step,
+                creation_model=None, creation_api_key=None, creation_base_url=None,
+            )
+        ]
+
+    await run_check()
+    assert state.environment.get("delivery_repair_count") == 1
+    # 候选稿被完整性守卫整份丢弃：正文一字未改，上一轮插入的修复是空转。
+    state.cursor += 2
+    with pytest.raises(OperationError) as exc_info:
+        await run_check()
+    error = exc_info.value
+    assert error.code == "CREATION_DELIVERY_INCOMPLETE"
+    # 空转就收尾：不再消耗剩下的修正预算。
+    assert state.environment.get("delivery_repair_count") == 1
+    assert service.review_count == 2
+    # 原因必须直接给出验收的具体缺口，而不是一句“可重试继续”。
+    assert "删除无法验证的数值并补回条件 A 的依据" in str(error)
+    assert "重试" not in str(error)
+    assert len(str(error)) <= 160
+
+
+@pytest.mark.asyncio
+async def test_delivery_repair_budget_is_shared_between_in_loop_and_post_loop():
+    """delivery_repair_count is tracked globally; if in-loop already consumed
+    the full budget, post-loop should not attempt further repairs."""
+    assert MAX_DELIVERY_REPAIR_CYCLES >= 2, (
+        "修复预算至少为 2 次，确保 in-loop 和 post-loop 都有机会修复"
+    )
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["writer", "polisher"])
+async def test_document_steps_repair_emphasis_before_publishing(action):
+    loop = CreationAgentLoop(FakeCreationService())
+    state = loop._new_state(
+        user_message="写一段方案", root_request=None, current_document="",
+        conversation=[], selected_skills=[], options=CreationOptions(enabled_tools=()),
+        model_mode="local", session_id="format-test", run_id="format-test",
+    )
+    step = {"id": "typography_polish_agent" if action == "polisher" else "document_writer",
+            "name": "格式测试", "action": action}
+    events = [event async for event in loop._complete_model_step(
+        state, step, "- **- **方案**：正文。\n- **维度：**通过验证。"
+    )]
+    assert state.current_document == "- **方案**：正文。\n- **维度**：通过验证。"
+    published = [event["data"]["content"] for event in events
+                 if isinstance(event.get("data"), dict) and "content" in event["data"]]
+    assert state.current_document in published
+
+
+@pytest.mark.parametrize("agent_id", [
+    "industry_research_agent", "data_analysis_agent", "data_query_planner",
+    "solution_design_agent", "chapter_design_agent", "document_writer_agent",
+    "anti_ai_style_agent", "detail_polish_agent", "table_polish_agent",
+    "typography_polish_agent", "image_polish_agent", "quality_review_agent",
+])
+def test_agent_phase_titles_describe_actions_and_preserve_actor(agent_id):
+    step = CreationAgentLoop._agent_plan_step(agent_id)
+    original_name = step["name"]
+    phase = CreationAgentLoop._phase_of_step(step)
+    assert phase[1] == CreationAgentLoop.FRIENDLY_PHASE_TITLES[agent_id]
+    assert "Agent" not in phase[1]
+    assert step["name"] == original_name
+    step.update(skill_step_id="custom", skill_step_title="梳理业务边界")
+    assert CreationAgentLoop._phase_of_step(step)[1] == "梳理业务边界"
+
+
+def test_unknown_agent_phase_uses_objective_or_generic_action():
+    step = {"kind": "agent", "id": "custom_agent", "name": "自定义 Agent"}
+    assert CreationAgentLoop._friendly_phase_title(step) == "处理当前步骤"
+    step["objective"] = "核对业务边界"
+    assert CreationAgentLoop._friendly_phase_title(step) == "核对业务边界"
+
+
+def test_delivery_phase_explains_validation_instead_of_generic_step():
+    step = {"kind": "agent", "id": "delivery_validation", "name": "核对本轮交付条件"}
+    assert CreationAgentLoop._phase_of_step(step)[1] == "核对交付结果"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", ["", "\n", " \n\t"])
+async def test_document_stream_accepts_empty_or_whitespace_prefix(prefix):
+    class PrefixedService(FakeCreationService):
+        async def stream_agent_document(self, **kwargs):
+            yield prefix
+            async for chunk in super().stream_agent_document(**kwargs):
+                yield chunk
+
+    events = await collect_events(CreationAgentLoop(PrefixedService()).run(
+        user_message="创建一份方案文档", current_document="", conversation=[],
+        selected_skills=[], options=CreationOptions(enabled_tools=())))
+    completed = next(event for event in events if event["type"] == "run.completed")
+    assert "# Agent 架构方案" in completed["data"]["document"]
+    assert "按契约、运行时、页面和测试分步实施" in completed["data"]["document"]
+
+
+@pytest.mark.asyncio
+async def test_whitespace_only_document_stream_is_rejected_at_completion():
+    class EmptyStreamService(FakeCreationService):
+        async def stream_agent_document(self, **kwargs):
+            yield ""
+            yield "\n \t"
+
+    events = []
+    with pytest.raises(OperationError, match="empty_document"):
+        async for event in CreationAgentLoop(EmptyStreamService()).run(
+            user_message="创建一份方案文档", current_document="", conversation=[],
+            selected_skills=[], options=CreationOptions(enabled_tools=())):
+            events.append(event)
+    assert not any(event["type"] == "run.completed" for event in events)
+
+
+def _verified_live_report_item(source_id):
+    """本轮即时刷新成功、且已通过结构校验的数据条目。"""
+    return {
+        "source_id": source_id,
+        "source_kind": "report_url",
+        "source_url": "https://bi.example.com/report",
+        "title": "GPU 看板",
+        "refresh_required": False,
+        "can_use": True,
+        "freshness_class": "fresh",
+        "evidence_status": "verified",
+        "data_usage_status": "verified",
+        "content_excerpt": "GPU 配额使用率 85.0%",
+        "structured_data": {"verified_claims": [{"label": "配额使用率", "value": "85.0%"}]},
+        "creation_evidence": {
+            "validation_status": "verified",
+            "validation": {
+                "data_usage_status": "verified",
+                "verified_claims": [
+                    {"label": "配额使用率", "value": "85.0%", "statement": "GPU 配额使用率 85.0%"},
+                ],
+            },
+        },
+    }
+
+
+def test_later_refresh_failure_retains_verified_capture_from_this_run():
+    """同一来源本轮已校验成功的事实，不得被之后的重复刷新失败整体降级。
+
+    一旦被整块标为不可用，正文里的真实数值会从写作与验收两侧的有界证据视图
+    同时消失，验收只能把它判成“虚构数据”，形成无法收敛的死锁。
+    """
+    merged = CreationService._merge_scrape_results(
+        [_verified_live_report_item(7)], {}, {}, {7}, db_path="", time_context={},
+    )
+    assert merged[0]["can_use"] is True
+    assert merged[0]["content_excerpt"] == "GPU 配额使用率 85.0%"
+    assert merged[0]["refresh_required"] is True
+    assert merged[0]["refresh_limited"]["reason"] == "later_refresh_failed_verified_capture_retained"
+    CreationAgentLoop._enforce_report_evidence_policy(merged)
+    compact = CreationAgentLoop._prompt_data_results(merged)
+    assert compact[0]["can_use"] is True
+    assert "85.0%" in json.dumps(compact, ensure_ascii=False)
+
+
+def test_unrecoverable_refresh_clears_contradictory_verified_markers():
+    """确实没有可用快照时，条目不得同时保留“已校验”的旧标记。"""
+    item = {**_verified_live_report_item(7), "freshness_class": "unverified"}
+    merged = CreationService._merge_scrape_results(
+        [item], {}, {}, {7}, db_path="", time_context={},
+    )
+    assert merged[0]["can_use"] is False
+    assert merged[0]["unavailable_reason"] == "refresh_failed"
+    assert "creation_evidence" not in merged[0]
+    assert merged[0]["stale_creation_evidence"]["validation_status"] == "verified"
+    assert "data_usage_status" not in merged[0]
+    assert merged[0]["content_excerpt"] is None
+    assert merged[0]["structured_data"] is None
+
+
+def test_evidence_policy_keeps_accepted_stale_snapshot():
+    results = [{
+        "source_id": 7,
+        "source_kind": "report_url",
+        "can_use": True,
+        "freshness_class": "stale",
+        "evidence_status": "failed",
+        "content_excerpt": "在用项目数 102",
+        "structured_data": {"verified_claims": [{"value": "102"}]},
+        "stale_fallback": {
+            "reason": "refresh_failed_recent_snapshot",
+            "snapshot_collected_at": 1,
+        },
+    }]
+
+    CreationAgentLoop._enforce_report_evidence_policy(results)
+
+    assert results[0]["can_use"] is True
+    assert results[0]["content_excerpt"] == "在用项目数 102"
+    assert results[0]["data_usage_status"] == "snapshot_only"
+
+
+def test_evidence_policy_downgrade_leaves_self_consistent_record():
+    results = [{
+        "source_id": 8,
+        "source_kind": "report_url",
+        "can_use": True,
+        "content_excerpt": "未经校验的数值 88",
+        "data_usage_status": "verified",
+        "creation_evidence": {"validation_status": "rejected"},
+    }]
+
+    CreationAgentLoop._enforce_report_evidence_policy(results)
+
+    assert results[0]["can_use"] is False
+    assert results[0]["content_excerpt"] is None
+    assert results[0]["unavailable_reason"] == "evidence_not_verified"
+    assert "data_usage_status" not in results[0]
+    assert results[0]["stale_data_usage_status"] == "verified"
+
+
+@pytest.mark.asyncio
+async def test_document_stream_reports_usage_for_later_diagnosis():
+    """撰写/润色与验收调用必须留用量印记，否则事后无从区分“写不长”与“被挤短”。"""
+    from creation.service import CreationService
+
+    class RecordingService(CreationService):
+        def __init__(self):
+            self.records = []
+            self.model = "local-test-model"
+            self.db_path = ""
+
+        def _log_creation_usage(self, **kwargs):
+            self.records.append(kwargs)
+
+        async def _stream_direct_completion(self, **kwargs):
+            yield "正文片段"
+
+    service = RecordingService()
+    chunks = [chunk async for chunk in service._stream_complete_agent_output(
+        system_prompt="系统", user_prompt="写完整文档", creation_model=None,
+        creation_api_key=None, creation_base_url=None, num_predict=100, temperature=0.55,
+    )]
+    assert chunks == ["正文片段"]
+    assert service.records[0]["status"] == "success"
+    assert service.records[0]["model_name"] == "local-test-model"
+    assert "写完整文档" in service.records[0]["prompt_text"]
+
+
+@pytest.mark.asyncio
+async def test_truncated_document_stream_reports_failed_usage_with_budget():
+    from creation.service import CreationService
+    from creation.operations import OperationError
+
+    class RecordingService(CreationService):
+        def __init__(self):
+            self.records = []
+            self.model = "local-test-model"
+            self.db_path = ""
+
+        def _log_creation_usage(self, **kwargs):
+            self.records.append(kwargs)
+
+        async def _stream_direct_completion(self, **kwargs):
+            self.calls = getattr(self, "calls", 0) + 1
+            yield "半截"
+            raise OperationError("CREATION_DOCUMENT_TRUNCATED", "输出达到长度上限")
+
+    service = RecordingService()
+    with pytest.raises(OperationError):
+        async for _ in service._stream_complete_agent_output(
+            system_prompt="系统", user_prompt="写完整文档", creation_model=None,
+            creation_api_key="", creation_base_url=None, num_predict=16384, temperature=0.55,
+        ):
+            pass
+    assert service.records[-1]["status"] == "failed"
+    assert "CREATION_DOCUMENT_TRUNCATED" in service.records[-1]["error_msg"]
+    assert "budget=16384" in service.records[-1]["error_msg"]

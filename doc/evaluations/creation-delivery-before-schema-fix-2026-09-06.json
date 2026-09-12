@@ -1,0 +1,53 @@
+{
+  "model": "qwen3.5:4b",
+  "scope": "real routing, writing and acceptance; synthetic documents and supplied evidence; no production session mutation",
+  "cases": [
+    {
+      "id": "provided-document",
+      "passed": false,
+      "error": "无法核验最终交付结果"
+    },
+    {
+      "id": "local-append",
+      "passed": false,
+      "error": "文档操作字段缺失或不受支持"
+    },
+    {
+      "id": "reject-invented-number",
+      "review": {
+        "checks": [
+          {
+            "id": "a",
+            "passed": false,
+            "reason": "输入数据中'本周真实收入'的状态为'missing'，且source_evidence中无任何数据检索结果（data_results为空），无法提供支撑收入数值（100万元）或增长率（80%）的原始证据。根据合同要求，收入必须依据给定真实数据，不能编造。",
+            "evidence": ""
+          }
+        ],
+        "status": "blocked",
+        "corrections": []
+      },
+      "passed": true
+    },
+    {
+      "id": "accept-supported-number",
+      "review": {
+        "checks": [
+          {
+            "id": "a",
+            "passed": true,
+            "reason": "文档内容'本周收入100万元'与数据检索结果'本周收入100万元'完全一致，且数据检索状态为'completed'，满足依据真实数据的要求。",
+            "evidence": "本周收入100万元。"
+          }
+        ],
+        "status": "pass",
+        "corrections": []
+      },
+      "passed": true
+    },
+    {
+      "id": "reject-no-search-receipt",
+      "error": "CREATION_EVIDENCE_UNAVAILABLE",
+      "passed": true
+    }
+  ]
+}

@@ -19,8 +19,9 @@ import {
   type FloatingAssistAutoTaskAppTarget,
   type FloatingAssistAutoTaskConfig,
 } from '../utils/floatingAssistAutoTask'
+import { getLocalServiceBaseUrl } from '../utils/localServices'
 
-const API = 'http://localhost:7070'
+const API = getLocalServiceBaseUrl('core')
 
 type TaskForm = {
   name: string

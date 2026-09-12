@@ -1,0 +1,3148 @@
+{
+  "seconds": 79.46,
+  "events": [
+    {
+      "type": "status",
+      "stage": "queued",
+      "message": "咨询任务已接收",
+      "progress": 18
+    },
+    {
+      "type": "status",
+      "stage": "understanding",
+      "message": "正在理解当前问题",
+      "progress": 28
+    },
+    {
+      "type": "status",
+      "stage": "retrieving",
+      "message": "正在召回相关资料",
+      "progress": 42
+    },
+    {
+      "type": "references",
+      "contexts": [
+        {
+          "capture_id": 0,
+          "doc_key": "document:550",
+          "text": "文档：灵机商家版登录协议及图生视频流程内部评审纪要\n类型：会议纪要\n摘要：记录2026-7-29关于灵机登录、图生视频及Agent架构的内部评审共识，明确功能边界与技术约束。\n正文：# 会议概览\n**核心议题**：灵机商家版登录与协议、图生视频流程及 Agent 架构改造与人力。\n\n## 已有共识\n- **范围界定**：本轮仅做内部评审，范围为排线及商详一键下单（含评论），不含主谓金特/智能体模块开发。\n- **协议系统**：灵机将独立部署协议系统；首次未签署用户需强制弹窗提示；签署与版本信息须完整存储于统一中台（目前尚待调研）。\n- **视频流程**：图生视频阶段优先完全复用小店现有长链路流程；Agent改造和前端交互需单独评审并预留人力。\n\n## 下一步行动\n1. **参数对齐**：与商家端对齐登录参数和权限复用方案，评估复用成本（含自建及接天启）。\n2. **技术验证**：验证未登录访问灵机首页与独立 BIS 登录页的可行性。 \n3. **中台调研**：调研公司统一协议中台接入方式以规避业务自存风险。\n4. **架构排期**：明确 Agent 架构改造方案、前后端改动成本及人力排期，避免反复返工。\n\n## 会议详情与参会情况\n- **参会范围**：本次为内部评审，暂不邀请商家技术及测试人员参与。后续若有明确需求再单独沟通。\n- **前端协同**：当前仅杨哥在场，计划拉入俊姐（金姐）共同讨论 Agent 架构改造方案。\n- **排期预估**：Agent 架构预计两周内完成改造；前端尚无具体排期，需单独评审工作量。",
+          "score": 0.022379032258064514,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 550,
+          "document_id": 550,
+          "app_name": null,
+          "win_title": null,
+          "url": null,
+          "source_url": null,
+          "title": "灵机商家版登录协议及图生视频流程内部评审纪要",
+          "doc_type": "会议纪要",
+          "time": 1785327526101,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "记录2026-7-29关于灵机登录、图生视频及Agent架构的内部评审共识，明确功能边界与技术约束。",
+          "overview": "记录2026-7-29关于灵机登录、图生视频及Agent架构的内部评审共识，明确功能边界与技术约束。",
+          "category": "会议纪要",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "1922"
+          ],
+          "linked_knowledge_ids": [
+            "1218"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:592",
+          "text": "文档：灵机商家版登录与图生视频流程评审纪要\n类型：会议纪要\n摘要：记录2026-07-29关于灵机登录协议、图生视频复用及Agent改造的内部评审决策，明确范围边界与技术约束。\n正文：# 智能会议纪要 - 我与王凯茜的会议\n**主持人**：赵婷婷 | **时长**：19:15～20:00 | **参会人数**：24人\n\n## 📋 会议概览\n- **核心议题**：灵机商家版登录与协议、图生视频流程及Agent架构改造与人力。\n\n---\n\n### ✅ 已有共识（决策点）\n1. **评审范围界定**\n   - 本轮仅做内部评审，范围为排线及商详一键购流程（含评论）。\n   - **排除项**：主谓金特、智能体模块本期不纳入。\n2. **协议架构策略**\n   - 灵机与小店共用一套主/子协议。\n3. **登录交互机制**\n   - 采用灵机独立协议，首次登录未签署时强制弹窗。\n   - 签署及版本信息需完整存储。\n4. **中台接入状态**\n   - 统一协议中台尚待调研（存在业务自存风险）。\n5. **图生视频流程策略**\n   - 阶段一：完全复用小店现有长链路流程。\n6. **Agent改造规划**\n   - Agent改造和前端交互需单独评审并预留人力。",
+          "score": 0.022211044042029955,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 592,
+          "document_id": 592,
+          "app_name": null,
+          "win_title": null,
+          "url": null,
+          "source_url": null,
+          "title": "灵机商家版登录与图生视频流程评审纪要",
+          "doc_type": "会议纪要",
+          "time": 1785391491236,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "记录2026-07-29关于灵机登录协议、图生视频复用及Agent改造的内部评审决策，明确范围边界与技术约束。",
+          "overview": "记录2026-07-29关于灵机登录协议、图生视频复用及Agent改造的内部评审决策，明确范围边界与技术约束。",
+          "category": "会议纪要",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "1921"
+          ],
+          "linked_knowledge_ids": [
+            "1217"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:150",
+          "text": "文档：智能体团队自评报告\n类型：汇报\n摘要：新增高梦洁在 AIGC 机审体系从 0 到 1 建设中的具体量化成果（如裸体检测拦截率、商业模型自部署成本优化）及王柯杰在大模型基础架构优化与数字员工规模化落地方面的详细数据。\nURL：https://docs.corp.kuaishou.com/d/home/fcAAoxSDoOMfbrhHWdqRcd35D\n正文：# 智能体团队自评报告\n## C3/C4 可编辑马达/管理员更新于 7 月 13 日 (新内容补充)\n*注：原文档存在多人在线冲突提示（在线阅读人数较多），已切换为只读模式展示最新捕获的 2026H1 绩效自评详情。文档由 C4 管理员马达于 7 月 13 日更新，记录了王柯杰、高梦洁等多位同事的工作内容。*\n\n---\n\n## 目录\n智能体团队自评 - 2026H1 核心项目复盘与规划\n- **综合绩效等级**：A (快手派 A)\n- **核心人员覆盖范围**：王柯杰、高梦洁等。\n- **核心项目覆盖范围**：灵机商品成片 Agent、图生视频工程链路及行业探索。 \n\n---\n\n## 1. 重点工作成果更新（新增章节）\n*基于 2026H1 最新捕获内容补充，原文档中关于分销诊断与电商 AIGC 工作流的描述保留作为团队整体背景。*\n\n### 1. **灵机商品成片 Agent 项目** (王柯杰负责)\n   - **负责人**：王柯杰。\n   - **负责领域**：面向商家的 AIGC 商品成片全链路技术开发。\n     - **核心定位**：支持脚本对话/编辑能力、持久化/异步执行能力，旨在降低商家成片门槛并保证商品一致性。提供从\"被动接受\"到\"参与创作\"的 Wizard-then-Agent 体验。\n   - **具体工作内容：**\n     - **主导全流程开发**：负责评审方案制定、技术方案设计、工程实现及完整联调。覆盖创建会话、选品/选图、模板确认、LLM 生成脚本、脚本改稿、配置提交、结果轮询等主链路，以及跨步骤换商品/换图/换模板/改配置并重新生成的复杂业务逻辑。\n     - **关键贡献**：主导底层 Agent 工程链路的方案设计和实现，主动推动上下游联调测试。截至 7 月 9 日底，项目整体进度达**90%**，计划于 7 月 13 日发布结果产出（完成技术评审、设计、实施及协调）。\n     - **新增亮点**：引入 LLM 驱动的多轮对话能力与 Wizard-then-Agent 设计。商家可通过自然语言交互完成\"换商品/图/模板/风格并重新生成\"，将单条视频生成成功率提升至**70%**以上。\n\n### 2. **灵机图生视频离线任务规模化工程链路建设** (王柯杰负责)\n   - **负责人**：王柯杰。\n   - **负责领域**：电商「商品成片」+「直播引流」的图生视频能力从在线向离线的规模化迁移与保障。目标为支撑每日 30w 级别生产量，完成商家端灵机图生视频提测交付及服饰工作流迁移。\n     *(注：高梦洁等同事也参与了相关工作)*\n   - **具体工作内容：**\n     - **工程链路搭建**：主导完成支持每日 30w 级别生产的工程链路，支撑规模化产能提升。将 AIGC 服务接入新架构链路并具备切流能力",
+          "score": 0.021869802803516275,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 150,
+          "document_id": 150,
+          "app_name": null,
+          "win_title": null,
+          "url": "https://docs.corp.kuaishou.com/d/home/fcAAoxSDoOMfbrhHWdqRcd35D",
+          "source_url": "https://docs.corp.kuaishou.com/d/home/fcAAoxSDoOMfbrhHWdqRcd35D",
+          "title": "智能体团队自评报告",
+          "doc_type": "汇报",
+          "time": 1785762615320,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "新增高梦洁在 AIGC 机审体系从 0 到 1 建设中的具体量化成果（如裸体检测拦截率、商业模型自部署成本优化）及王柯杰在大模型基础架构优化与数字员工规模化落地方面的详细数据。",
+          "overview": "新增高梦洁在 AIGC 机审体系从 0 到 1 建设中的具体量化成果（如裸体检测拦截率、商业模型自部署成本优化）及王柯杰在大模型基础架构优化与数字员工规模化落地方面的详细数据。",
+          "category": "汇报",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "923",
+            "1113",
+            "955",
+            "956",
+            "954",
+            "1136",
+            "1153",
+            "1155",
+            "2337"
+          ],
+          "linked_knowledge_ids": [
+            "1494",
+            "404",
+            "417",
+            "418",
+            "507",
+            "592",
+            "618",
+            "631",
+            "633"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:547",
+          "text": "文档：【PRD】商家版灵机平台一期 - 云文档\n类型：需求说明\n摘要：基于最新捕获内容，补充了项目背景中的具体需求依据、详细的收益指标（含 GMV）、上线时间表及综合描述中各功能模块的优先级与逻辑说明。\nURL：https://docs.corp.kuaishou.com/k/home/VfNIKMQ65Xwg/fcACPQwBXXPa-ntnPJQ_NwJNB\n正文：# 【PRD】商家版灵机平台一期\n\n## 零：基本信息和修改记录\n### 1. 基本信息\n- **重要性**：【高】\n- **紧迫性**：【高】\n- **PRD 拟制人**：赵婷婷、王凯茜、郑媛元、郑佳仪\n\n### 2. PRD 修改记录\n| 版本 | 动作 | 内容 | 变更来源 | 日期 |\n| :--- | :--- | :--- | :--- | :--- |\n| 1.0 | 创建【第一版】 | / | - | 2026.7.23 |\n> *注：PRD 提交评审之前的修改也可以记录下来。*\n\n### 3. 沟通记录\n**时间**：2026.7.24<br>**参会人员**：<br>- **商家账户登录打通沟通**<br>灵机侧：赵婷婷、弯勇辉、谢志洋<br>电商商家侧：刘胜川、茹挺进、苑仁坤、夏俊\n\n#### 核心结论和 Todo\n1. **登录模块**\n   - ① 灵机平台使用单独的 biz，biz 用途仅是区分登录页，支持配置灵机的文案、LOGO、背景及扫码下载二维码。\n   - ② 灵机独立站申请三级域名后，并将测试、PRT 和线上域名发给 @茹挺进 做 SID 加白 cc @弯勇辉([已过滤])\n   - ③ 登录页可屏蔽子 [已过滤]\n\n---\n\n## 一：项目背景\n- **需求背景**：（内容缺失）<br>- **目标收益**：（内容缺失）\n\n## 二：综合描述\n### 产品总体逻辑<br>（内容缺失）\n### 需求清单及优先级<br>对其他产品的影响<br>（内容缺失）\n### 产品上线方式：<small>小流量/全流量</small>\n\n## 三：详细描述\n1. **3.1 账户登录** @赵婷婷\n2. **3.2 菜单导航&功能权限** @赵婷婷\n3. **3.3 签署协议** @郑佳仪\n4. **3.4 视频生成** @郑媛元\n5. **3.5 商品上新** @王凯茜\n6. **3.6 资产** @郑媛元\n\n## 四：产品运营计划<br>（内容缺失）\n\n## 五：效果评估方式和监控统计需求\n### 1. 定性评估<br>（内容缺失）<br>\n### 2. 定量评估埋点需求<br>统计需求<br>（内容缺失）\n\n# 一：项目背景\n- **需求背景**<br>在【快手电商 AIGC 内容经营】专项大背景下，需要搭建独立的灵机平台，作为统一对外品牌和 AIGC 内容经营平台，承接商家视频、图片、文案等内容生产需求。<br><br>**立项文档参考**：「灵机」 | 快手电商 AIGC 内容经营平台 - 立项文档\n- **目标收益**<br>1. **用户规模**：日均使用商家数 10w+，其中图生视频目标 5w+。<br>2. **内容规模**：AIGC 内容发布量 50w/日；商品图能力完成建设并初步跑通。<br>3. **交易规模",
+          "score": 0.021153846153846155,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 547,
+          "document_id": 547,
+          "app_name": null,
+          "win_title": null,
+          "url": "https://docs.corp.kuaishou.com/k/home/VfNIKMQ65Xwg/fcACPQwBXXPa-ntnPJQ_NwJNB",
+          "source_url": "https://docs.corp.kuaishou.com/k/home/VfNIKMQ65Xwg/fcACPQwBXXPa-ntnPJQ_NwJNB",
+          "title": "【PRD】商家版灵机平台一期 - 云文档",
+          "doc_type": "需求说明",
+          "time": 1785682254486,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "基于最新捕获内容，补充了项目背景中的具体需求依据、详细的收益指标（含 GMV）、上线时间表及综合描述中各功能模块的优先级与逻辑说明。",
+          "overview": "基于最新捕获内容，补充了项目背景中的具体需求依据、详细的收益指标（含 GMV）、上线时间表及综合描述中各功能模块的优先级与逻辑说明。",
+          "category": "需求说明",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "1915",
+            "1917"
+          ],
+          "linked_knowledge_ids": [
+            "1212",
+            "1213"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:116",
+          "text": "文档：灵机专项双日会 - 云文档\n类型：会议纪要\n摘要：新增图生视频模型幻觉问题详解（动作/保真）、Agent 交互具体验证方案及 Loop 数字员工形态设计，并补充了法务合规待办清单。\nURL：https://docs.corp.kuaishou.com/d/home/fcADwrgzZADJvmjK7gCpxTs5v\n正文：# 灵机专项双日会\n## 7.21 (最新)\n### 零、上次 todo\n- [ ] **平台权限开通**。由郑佳仪提单，朱欢欢跟进。涉及法务合规隐式标识设计对齐王琦。\n- [ ] **模型对话理解效果调测决定右侧对话框隐藏逻辑**。需确认具体执行方案。\n- [ ] **剧本创作规范沟通任务分配给鲜嘉麒**。\n- [ ] **选品与 TTS 性别不一致的 case 探查由石山跟进**。（补充：崔力此前已分享图文套图链路设计，此处重点在于 Case 探查）\n- [ ] **显性标识设计对齐王琦**。需明确具体标准并执行。 \n\n### 一、核心数据 @李鑫@郑媛元\n每次更新近 7 日数据 + wow。\n新增模块从 0 开始写。\n1. **产能提升成果**：通过扩卡及资源调配，通用视频日产量已达 **36 万+**（其他 AI 视频约 4.8 万+）。\n2. **类目模板优化**：涉及主图套图链路策略调整。 \n\n### 二、基模进展 @石山@鲜嘉麒\n汇报 FP8 VLM 大模型上线带来的成本降低与产能增长，以及复杂动作采样策略优化进展。\n1. **性能优化成果（王琦）**\n   - **FP8 VLM 上线**：VLM 推理/训练成本降低 **50%**（节省约 8 卡算力）。\n2. **产能提升详情**\n   - **扩卡策略**：视频日产量提升至 36 万+。\n   - **成本效益分析**：按日均 4 万产量估算，每日可节省成本约 **2876 元**。\n\n### 三、图生视频进展 @李鑫@王凯茜@张西蒙 (新增章节)\n*注：根据最新会议议程调整，将原“产品功能”与部分新议题整合或独立为图生视频专项讨论。*\n1. **选品策略规划（存���内容提质提效）**\n   - **现状分析**：在 9 万授权商家及资源有限的情况下，如何提升条均 GMV。\n     - **核心问题**：人为规则强拍导致低效商家（曝光为 0）和素材持续生产；高效商家选品量级不足且存在重复选品。候选池内新品/新商家未覆盖，被选择商品多来自有动销品。\n   - **规划目标**：解决选不准、覆盖率低的问题，优化 quota 分配机制。\n2. **一键商详能力与功能架构设计（刘俊涵）**\n   - **任务入口创建及业务接入层设计**。 \n3. **智能选品冷启追爆机制（王柯杰）**\n   - 灵机 Agent 二期联调进度正常推进中，重点开发此机制。\n4. **通用视频素材库方案**\n   - 基于规则与 LLM 的通用视频素材库设计方案已完成梳理。 \n\n### 四、一键商详能力 @王凯茜 (新增章节)\n*注：根据最新会议议程调整，将原“产品功能”中的部分独立议题单独列出或合并至图生视频进展中（此处保留为独立小节以清晰展示新重点）。*\n1. **商品文案生成与填充**\n   - 推进自动化文",
+          "score": 0.020805207328833175,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 116,
+          "document_id": 116,
+          "app_name": null,
+          "win_title": null,
+          "url": "https://docs.corp.kuaishou.com/d/home/fcADwrgzZADJvmjK7gCpxTs5v",
+          "source_url": "https://docs.corp.kuaishou.com/d/home/fcADwrgzZADJvmjK7gCpxTs5v",
+          "title": "灵机专项双日会 - 云文档",
+          "doc_type": "会议纪要",
+          "time": 1785050876673,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "新增图生视频模型幻觉问题详解（动作/保真）、Agent 交互具体验证方案及 Loop 数字员工形态设计，并补充了法务合规待办清单。",
+          "overview": "新增图生视频模型幻觉问题详解（动作/保真）、Agent 交互具体验证方案及 Loop 数字员工形态设计，并补充了法务合规待办清单。",
+          "category": "会议纪要",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "760",
+            "762",
+            "761",
+            "1185",
+            "1189"
+          ],
+          "linked_knowledge_ids": [
+            "329",
+            "331",
+            "332",
+            "660",
+            "664"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:277",
+          "text": "文档：灵机 OKR 对齐 -26 年 (快手电商 AIGC 内容经营平台)\n类型：会议纪要\n摘要：明确快手灵机 Q3 北极星指标（日均 GMV100w+、发布量50w/日）及四大方向 OKR，含组织分工与合规治理方案。\nURL：https://docs.corp.kuaishou.com/d/home/fcAAK1Q75X74ckGmQFD7Ld7lB\n正文：# 灵机 OKR 对齐 -26 年\n## C3 可评论 | 李鑫更新于7月20日 21:23\n\n### 一、基于 KO 的北极星指标和分工拆解\n#### 1. 立项目标\n**「灵机」| 快手电商 AIGC 内容经营平台 - 立项文档**\n- **用户目标**：商家可以围绕一个商品，低成本完成内容创作（视频、文案、图片）、商品挂车和一键发布，用户对灵机有品牌心智。\n- **业务目标 (H2)**:\n    - ●使用规模：平台日均使用商家数10w+，其中图生视频目标5w+\n    - ●内容规模：AIGC 内容发布量50w/日，商品图能力完成建设并初步跑通\n    - ●交易规模：AIGC 生成式视频内容贡献 Q3 做到 GMV 100万+/日均，年底300万 /日均成本目标模型 ROI：单条内容生成成本、模型调用成本和综合ROI打正\n#### 2. 组织阵型和分工\n灵机平台需要大横向产运 cover，中台架构按照业务纵向做工思路。\n具体方向核心分工 Q3 人力分配以业务视角拆纵向中台:\n- **视频方向**\n    - 1、能力建设：优化图生视频 Agent 和 workflow\n    - 2、商家拓展：与行业合作、灵顺协同，拓展商家\n    - 3、质量迭代：视频相关横向需求承接与赋能\n    - *负责人*：李鑫, 郑媛元 (agent), 王凯茜-选品（0.5人力）, 张西蒙-生产链路中台\n- **商品方向**\n    - 1、能力建设：商品图/商品套图、一键上架、商详优化、商品图填充；2、需求承接：承接商城、C 端商品 AIGC 等商品场景需求；3、组件沉淀：沉淀商品图、商详填充等组件\n    - *负责人*：王凯茜（0.5）-从0到1搭建中台\n- **直播方向**\n    - 1、能力迭代：直播切片、直播高光识别、短直联动、直播预热/复盘素材生成；2、外部价值探索：包括与直播的联动和内循环协同\n    - *负责人*：王凯茜-cover\n- **平台产品 (大横向)**\n    - 1、负责灵机对外平台整体的设计和建设，并优化灵机小二版的设计，并实现前后台贯通\n    - 2、统一任务流、素材和数据资产\n    - 3、与内循环等部门的跨场域协作机制\n    - *负责人*：赵婷婷, 李鑫, 郑媛元 (agent)\n- **平台产运**\n    - 1、负责与行业、小二的内部对接\n    - 2、灵机内外平台的推广和政策设计\n    - *负责人*：郑佳仪（实习生）-横向对接（合规），左智-政策 + 模型评估机制\n#### 3. 评测机制\n- **平台级治理**\n    - 1、建设标准化的模型评测和准入体系\n    - 2、沉淀追踪问题、归因、和修复结果的 Bad Case 库\n    *负责人*：左智\n### 二、Q3目标拆解和 OKR\n##",
+          "score": 0.018945068664169788,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 277,
+          "document_id": 277,
+          "app_name": null,
+          "win_title": null,
+          "url": "https://docs.corp.kuaishou.com/d/home/fcAAK1Q75X74ckGmQFD7Ld7lB",
+          "source_url": "https://docs.corp.kuaishou.com/d/home/fcAAK1Q75X74ckGmQFD7Ld7lB",
+          "title": "灵机 OKR 对齐 -26 年 (快手电商 AIGC 内容经营平台)",
+          "doc_type": "会议纪要",
+          "time": 1784803239419,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "明确快手灵机 Q3 北极星指标（日均 GMV100w+、发布量50w/日）及四大方向 OKR，含组织分工与合规治理方案。",
+          "overview": "明确快手灵机 Q3 北极星指标（日均 GMV100w+、发布量50w/日）及四大方向 OKR，含组织分工与合规治理方案。",
+          "category": "会议纪要",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "1177"
+          ],
+          "linked_knowledge_ids": [
+            "655"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:296",
+          "text": "文档：渠道大会 - 灵机部分的物料需求清单\n类型：会议纪要/资料参考\n摘要：新增关于系统原理图素材的具体补充链路要求，明确需按‘商品输入到反哺生成策略’的闭环逻辑完善真实模块名称。\n正文：# 渠道大会 - 灵机部分的物料\n## Q+A：第一页：流量团队如何从分发机制视角做⋯\n**请提供：**\n1. **灵机在流量团队视角下的定位说明**\n   *   核心目标是什么？\n   *   和 B 端/普通 AIGC 商品成片工具的区别是…\n   *   为什么说灵机是以“获取流量”为目标的内容生.\n2. **灵机和内容分发机制的关系**\n   *   推荐/分发系统如何理解商品视频？\n   *   哪些内容要素会影响视频获取流量？\n3. **灵机在生成时如何针对这些要素做设计？**\n4. **商品变成内容资产的完整链路**\n   *   输入什么商品信息？\n   *   如何理解商品卖点、人群、场景？\n5. **如何生成脚本、分镜、口播、字幕、视频？**\n6. **生成后如何进入投放/素材库/数据反馈？**\n\n## Q+A：第二页：微改 vs 灵机生成式视频＋爆款。\n**第三页：灵机在哪里用，UI 是什么样**\n\n### 正文要求规范*Arial•19.5*\n*   **插入、五**（推测为操作指令）\n    *   渠道大会 - 灵×众：Q+A\n    *   At 助手 • 我&李鑫0王柯杰 Q蔡一超Q\n\n### 修改逻辑说明\n现在的讲述逻辑是灵机系统是怎么把一个商品变成一套内容资产。\n需要调整成，流量团队是如何从**流量获取、内容分发、内容理解视角**，来做灵机（vsB 端做灵机的区别就在于以获取流\n量为目的），所以要重展示如何跟内容分发机制相关联，做出这样的设计。\n\n- **第三页：系统原理图素材**\n  *   **任务描述**：请按以下链路补充真实模块名称和实际情况。\n  *   **完整链路要求**：`商品输入 → 商品理解 → 内容策略 → 视频生成 → 内容资产 - 流量反馈 → 反哺生成策略`\n\n---\n\n### 修改逻辑说明（新增/修正部分）\n*   **当前讲述逻辑问题**：现有描述仅侧重于‘灵机系统如何把一个商品变成一套内容资产’。\n*   **调整方向**：需调整为从**流量获取、内容分发、内容理解视角**阐述灵机的运作机制。\n    *   核心区别点（vs B 端）：强调灵机是以'**获取流量**'为目标的生成系统。\n    *   展示重点：必须重新展示如何与**内容分发机制**相关联，并据此做出相应的设计决策。",
+          "score": 0.018838416612589226,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 296,
+          "document_id": 296,
+          "app_name": null,
+          "win_title": null,
+          "url": null,
+          "source_url": null,
+          "title": "渠道大会 - 灵机部分的物料需求清单",
+          "doc_type": "会议纪要/资料参考",
+          "time": 1785052024590,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "新增关于系统原理图素材的具体补充链路要求，明确需按‘商品输入到反哺生成策略’的闭环逻辑完善真实模块名称。",
+          "overview": "新增关于系统原理图素材的具体补充链路要求，明确需按‘商品输入到反哺生成策略’的闭环逻辑完善真实模块名称。",
+          "category": "会议纪要/资料参考",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "1225"
+          ],
+          "linked_knowledge_ids": [
+            "687"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:299",
+          "text": "文档：渠道大会 - 灵机物料说明\n类型：资料参考\n摘要：新增第三页关于‘灵机在哪里用’的具体使用场景清单，并补充了第二页中爆款复制与微改对比的展示形式及数据验证要求。\n正文：# 渠道大会 - 灵机物料说明\n## 第一页：流量团队如何从分发机制视角做...\n### 1. 定位与区别\n*   **核心目标**：为什么说灵机是以“获取流量”为目标的内容生成？\n*   **关系定义**：灵机和内容分发机制的关系是什么？推荐/分发系统如何理解商品视频？哪些内容要素会影响视频获取流量？\n*   **设计策略**：灵机在生成时如何针对这些要素做设计？\n\n### 2. B端与普通 AIGC工具的区别\n*   和B端/普通AIGC商品成片工具的区别是什么？\n*   为什么说灵机不是简单换皮，而是更有机会获取流量？\n\n## 第二页：微改 vs 生成式视频 + 爆款...\n### 1. 差异说明\n*   **微改主要改了什么？**\n*   **灵机生成主要重构了什么？**\n*   **为什么灵机生成不是简单换皮？**\n*   **为什么它更有机会获取流量？**\n\n## 第三页：商品变成内容资产的完整链路\n1.  **输入什么商品信息？**\n2.  **如何理解商品卖点、人群、场景？**\n3.  **如何生成脚本、分镜、口播、字幕、视频？**\n4.  **生成后如何进入投放/素材库/数据反馈？**\n\n# 第三页：灵机在哪里用\n## UI 呈现形式\n*   **视频生成 & 图片生成能力全景**\n    *   展现同一个视频的两种不同来源/处理方式。\n    *   Demo A: 使用微改工具生成的视频（展示高度重复问题）。\n    *   Demo B: 使用灵机生成式视频生成的视频。\n*   **爆款复制流程解析**\n    *   主题：讲清微改与我们的生成有什么区别，获取流量能力更强。\n    *   内容结构：①用微改改出的视频 demo；②用生成改出的视频 demo；③为什么生成更能获取流量的文字介绍；④两个视频获取流量的对比数据。\n\n## 灵机当前使用场景清单\n*   **商品成片**\n*   **爆款复制**（针对已有高流量内容进行复刻）\n*   **新商品冷启动**（帮助新品快速获得初始曝光）\n*   **老素材再生产**（对存量优质视频进行二次创作以延长生命周期）\n*   **类目批量生成**（支持大规模、标准化的内容产出）\n*   **大促/活动素材生产**（针对特定营销节点的高效物料制作）",
+          "score": 0.0184048178613396,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 299,
+          "document_id": 299,
+          "app_name": null,
+          "win_title": null,
+          "url": null,
+          "source_url": null,
+          "title": "渠道大会 - 灵机物料说明",
+          "doc_type": "资料参考",
+          "time": 1785052412482,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "新增第三页关于‘灵机在哪里用’的具体使用场景清单，并补充了第二页中爆款复制与微改对比的展示形式及数据验证要求。",
+          "overview": "新增第三页关于‘灵机在哪里用’的具体使用场景清单，并补充了第二页中爆款复制与微改对比的展示形式及数据验证要求。",
+          "category": "资料参考",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "1228"
+          ],
+          "linked_knowledge_ids": [
+            "690"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document_url:https://docs.corp.kuaishou.com/d/home/fcACZF-5CMqsOvghsfOq-1pBz",
+          "text": "文档：AIGC人员名单整理\n类型：资料参考\n摘要：新增谢欣然负责行业剧本创作，补充石山在热点复刻中的具体分工及模型表现细节（商业模型可行但 tianmu-video 不可行），并修正机审后台负责人信息。\nURL：https://docs.corp.kuaishou.com/d/home/fcACZF-5CMqsOvghsfOq-1pBz\n正文：# AIGC 项目人力投入\n## 1. AI基座-Agent模型配置\n### Agent层 -对话式AIGC生成\n- **负责人**: 曾子涵、林兆龙、王琦 (占比0.3)\n- **技术现状分析**: 与竞品 Flova 相比，当前在对话式生成及 Workflow 编排方面的智能化程度差距较大，需加强建设。\n### Agent层-workflow编排\n- **负责人**: 张振忠 (占比0.5)、王柯杰\n- **备注**: 原文档仅提及王柯杰，新内容确认了张振忠的加入及其投入比例。\n### Agent层 -剧本库/选品工作\n- **负责人**: 饶星、郝景运\n- **职责补充**: 涉及灵机智能选品的部分逻辑梳理（注：具体选品功能由徐益顺和彭海芮承担，此处主要指Agent层的剧本生成与配置）。\n## 2. 前台业务团队与服务端缺口\n### 短视频团队 (8人)\n- **负责人**: 弯勇辉\n- **涉及模块**: 商品视频生成、图片生成、内容信息生成、直播切片预估。\n- **服务端缺口**: 存在**两个**服务端缺口（原记录未明确具体数量）。\n### AI基座-Agent模型配置 (14人)\n*(注：此处主要指Agent层建设，详见第3节详细分工)*\n## 3. 运营增长与智能选品体系\n### 灵机独立站/商家端/离线托管\n- **前台 - 灵机独立站**: \n    - *负责人*: 弯勇辉 (已合并至短视频团队)\n- **前台 - 灵机商家端 **(PC&移动): \n    - *负责人*: 杨亚民\n    - *服务端缺口*: 存在**一个**服务端缺口。\n- **前台 - 离线托管**: \n    - *负责人*: 朱欢欢 (占比0.5)、吕松\n### 智能选品与热点追爆\n- **灵机智能选品功能**: \n    - *负责人*: 徐益顺、彭海芮 (占比0.5)\n- **热点视频追爆任务**: \n    - *负责人*: 朱欢欢 (占比0.5)\n    - *技术现状与缺口*: 存在**一个预估缺口**。目前依赖商业模型（可灵、seedance）实现复刻效果，tianmu-video 模型表现不佳且需人工介入。行业剧本创作对比 flova，指出智能化程度差距大。\n- **爆品视频站外爬取**: \n    - *负责人*: 王占康\n### Agent层建设重点方向 (补充)\n- **对话式AIGC生成**: 曾子涵、林兆龙、王琦。因与 flova 对��智能化程度差距大，需大力投入。\n- **Workflow编排**: 张振忠（0.5）、王柯杰。\n## 4. 其他关键人员与技术分工\n### 剧本库选品工作 (Agent层) & 热点复刻\n- **负责人**: 饶星、郝景运\n- **爆品视频热点复刻**: \n    - *负责人*: 张振忠（0.5）、石",
+          "score": 71.91827379841284,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 328,
+          "document_id": 328,
+          "app_name": null,
+          "win_title": null,
+          "url": "https://docs.corp.kuaishou.com/d/home/fcACZF-5CMqsOvghsfOq-1pBz",
+          "source_url": "https://docs.corp.kuaishou.com/d/home/fcACZF-5CMqsOvghsfOq-1pBz",
+          "title": "AIGC人员名单整理",
+          "doc_type": "资料参考",
+          "time": 1785056086719,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "新增谢欣然负责行业剧本创作，补充石山在热点复刻中的具体分工及模型表现细节（商业模型可行但 tianmu-video 不可行），并修正机审后台负责人信息。",
+          "overview": "新增谢欣然负责行业剧本创作，补充石山在热点复刻中的具体分工及模型表现细节（商业模型可行但 tianmu-video 不可行），并修正机审后台负责人信息。",
+          "category": "资料参考",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "1327",
+            "1328",
+            "1332",
+            "1356"
+          ],
+          "linked_knowledge_ids": [
+            "762",
+            "764",
+            "766",
+            "786"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:153",
+          "text": "文档：B 端扩量、主站风控整改及 Agent 建设会议纪要\n类型：会议纪要\n摘要：记录 B 端 Q3 API 接入计划、灵机商家版功能前置保障、Agent 灰度推进策略及主站历史 AIGC 视频重扫与风险拦截决策。\n正文：# 智能会议纪要 - 视频会议\n## 会议概览\n- **核心议题**：B 端扩量与合作模式、主站风控整改、法务与版权、答疑 Agent 建设\n- **参会人数**：34\n- **已有共识**:\n1. B 端 Q3 扩量以 API 接入现有生产能力，服饰约 5K、其他类目约 5 万，7 月先 K 级别试接入，后续再爬坡。\n2. 灵机商家版三大核心功能为直播切片、图文视频、一键上墙/商详。其中一键商详需作为独立商家工具能力前置保障，并在小二版迁入商详工作流做底线任务和调试。\n3. Agent 上线前先兜住涉政涉黄与严重猎奇，通过内部集中测试分级问题，按“本周白名单、下周尾号小比例放量”的灰度节奏推进。\n4. 主站历史 AIGC 视频用更大尺寸模型全量重扫，男女裸露样本均覆盖，并以典型问题视频回测当前主站风控模型拦截能力。\n## 下一步计划\n1. **细浪与 B 端团队**：对齐 API 接入架构及“组件接入/模型计费”两种合作模式，明确授权与生产策略分工及预算。\n2. **刘卓与笑威确认问题暴露后新发视频是否仍有裸露风险**，并于周三至周四完成历史色情内容重扫结论。\n3. **法务继续推进 Agent 监管备案与版权确认**。产品侧和开发推进主站风控接口及答疑 Agent 开发落地。",
+          "score": 115.75482139523852,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 153,
+          "document_id": 153,
+          "app_name": null,
+          "win_title": null,
+          "url": null,
+          "source_url": null,
+          "title": "B 端扩量、主站风控整改及 Agent 建设会议纪要",
+          "doc_type": "会议纪要",
+          "time": 1784001494991,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "记录 B 端 Q3 API 接入计划、灵机商家版功能前置保障、Agent 灰度推进策略及主站历史 AIGC 视频重扫与风险拦截决策。",
+          "overview": "记录 B 端 Q3 API 接入计划、灵机商家版功能前置保障、Agent 灰度推进策略及主站历史 AIGC 视频重扫与风险拦截决策。",
+          "category": "会议纪要",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "944"
+          ],
+          "linked_knowledge_ids": [
+            "413"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "status",
+      "stage": "waiting_generation",
+      "message": "资料已就绪，正在等待生成",
+      "progress": 54
+    },
+    {
+      "type": "status",
+      "stage": "answering",
+      "message": "正在生成答案",
+      "progress": 62
+    },
+    {
+      "type": "delta",
+      "text": "##"
+    },
+    {
+      "type": "delta",
+      "text": " 用户"
+    },
+    {
+      "type": "delta",
+      "text": "问题"
+    },
+    {
+      "type": "delta",
+      "text": "理解"
+    },
+    {
+      "type": "delta",
+      "text": "\n用户"
+    },
+    {
+      "type": "delta",
+      "text": "正在"
+    },
+    {
+      "type": "delta",
+      "text": "查询"
+    },
+    {
+      "type": "delta",
+      "text": "快手"
+    },
+    {
+      "type": "delta",
+      "text": "“"
+    },
+    {
+      "type": "delta",
+      "text": "灵"
+    },
+    {
+      "type": "delta",
+      "text": "机"
+    },
+    {
+      "type": "delta",
+      "text": "”"
+    },
+    {
+      "type": "delta",
+      "text": "商家的"
+    },
+    {
+      "type": "delta",
+      "text": "具体"
+    },
+    {
+      "type": "delta",
+      "text": "入驻"
+    },
+    {
+      "type": "delta",
+      "text": "政策"
+    },
+    {
+      "type": "delta",
+      "text": "、"
+    },
+    {
+      "type": "delta",
+      "text": "合作"
+    },
+    {
+      "type": "delta",
+      "text": "要求"
+    },
+    {
+      "type": "delta",
+      "text": "及"
+    },
+    {
+      "type": "delta",
+      "text": "官方"
+    },
+    {
+      "type": "delta",
+      "text": "指引"
+    },
+    {
+      "type": "delta",
+      "text": "材料"
+    },
+    {
+      "type": "delta",
+      "text": "。"
+    },
+    {
+      "type": "delta",
+      "text": "\n\n##"
+    },
+    {
+      "type": "delta",
+      "text": " 回答"
+    },
+    {
+      "type": "delta",
+      "text": "\n根据"
+    },
+    {
+      "type": "delta",
+      "text": "现有"
+    },
+    {
+      "type": "delta",
+      "text": "工作"
+    },
+    {
+      "type": "delta",
+      "text": "记录"
+    },
+    {
+      "type": "delta",
+      "text": "，"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "未"
+    },
+    {
+      "type": "delta",
+      "text": "找到"
+    },
+    {
+      "type": "delta",
+      "text": "关于"
+    },
+    {
+      "type": "delta",
+      "text": "“"
+    },
+    {
+      "type": "delta",
+      "text": "灵"
+    },
+    {
+      "type": "delta",
+      "text": "机"
+    },
+    {
+      "type": "delta",
+      "text": "商家"
+    },
+    {
+      "type": "delta",
+      "text": "招商"
+    },
+    {
+      "type": "delta",
+      "text": "政策"
+    },
+    {
+      "type": "delta",
+      "text": "与"
+    },
+    {
+      "type": "delta",
+      "text": "材料"
+    },
+    {
+      "type": "delta",
+      "text": "”"
+    },
+    {
+      "type": "delta",
+      "text": "的直接"
+    },
+    {
+      "type": "delta",
+      "text": "公开"
+    },
+    {
+      "type": "delta",
+      "text": "文档"
+    },
+    {
+      "type": "delta",
+      "text": "或"
+    },
+    {
+      "type": "delta",
+      "text": "URL"
+    },
+    {
+      "type": "delta",
+      "text": "**。"
+    },
+    {
+      "type": "delta",
+      "text": "上下文"
+    },
+    {
+      "type": "delta",
+      "text": "中的"
+    },
+    {
+      "type": "delta",
+      "text": "资料"
+    },
+    {
+      "type": "delta",
+      "text": "主要"
+    },
+    {
+      "type": "delta",
+      "text": "涉及"
+    },
+    {
+      "type": "delta",
+      "text": "内部"
+    },
+    {
+      "type": "delta",
+      "text": "评审"
+    },
+    {
+      "type": "delta",
+      "text": "纪要"
+    },
+    {
+      "type": "delta",
+      "text": "、"
+    },
+    {
+      "type": "delta",
+      "text": "PR"
+    },
+    {
+      "type": "delta",
+      "text": "D"
+    },
+    {
+      "type": "delta",
+      "text": "需求"
+    },
+    {
+      "type": "delta",
+      "text": "说明"
+    },
+    {
+      "type": "delta",
+      "text": "、"
+    },
+    {
+      "type": "delta",
+      "text": "OK"
+    },
+    {
+      "type": "delta",
+      "text": "R"
+    },
+    {
+      "type": "delta",
+      "text": "目标"
+    },
+    {
+      "type": "delta",
+      "text": "设定"
+    },
+    {
+      "type": "delta",
+      "text": "及"
+    },
+    {
+      "type": "delta",
+      "text": "人力"
+    },
+    {
+      "type": "delta",
+      "text": "分工"
+    },
+    {
+      "type": "delta",
+      "text": "等"
+    },
+    {
+      "type": "delta",
+      "text": "内部管理"
+    },
+    {
+      "type": "delta",
+      "text": "内容"
+    },
+    {
+      "type": "delta",
+      "text": "，"
+    },
+    {
+      "type": "delta",
+      "text": "不包含"
+    },
+    {
+      "type": "delta",
+      "text": "面向"
+    },
+    {
+      "type": "delta",
+      "text": "商家的"
+    },
+    {
+      "type": "delta",
+      "text": "对外"
+    },
+    {
+      "type": "delta",
+      "text": "招商"
+    },
+    {
+      "type": "delta",
+      "text": "指南"
+    },
+    {
+      "type": "delta",
+      "text": "。"
+    },
+    {
+      "type": "delta",
+      "text": "\n\n以下是"
+    },
+    {
+      "type": "delta",
+      "text": "基于"
+    },
+    {
+      "type": "delta",
+      "text": "上下"
+    },
+    {
+      "type": "delta",
+      "text": "文中"
+    },
+    {
+      "type": "delta",
+      "text": "可"
+    },
+    {
+      "type": "delta",
+      "text": "提取"
+    },
+    {
+      "type": "delta",
+      "text": "的"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "项目"
+    },
+    {
+      "type": "delta",
+      "text": "背景"
+    },
+    {
+      "type": "delta",
+      "text": "与合作"
+    },
+    {
+      "type": "delta",
+      "text": "模式"
+    },
+    {
+      "type": "delta",
+      "text": "信息"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "："
+    },
+    {
+      "type": "delta",
+      "text": "\n\n###"
+    },
+    {
+      "type": "delta",
+      "text": " 1"
+    },
+    {
+      "type": "delta",
+      "text": "."
+    },
+    {
+      "type": "delta",
+      "text": " 灵"
+    },
+    {
+      "type": "delta",
+      "text": "机"
+    },
+    {
+      "type": "delta",
+      "text": "商家"
+    },
+    {
+      "type": "delta",
+      "text": "版"
+    },
+    {
+      "type": "delta",
+      "text": "核心"
+    },
+    {
+      "type": "delta",
+      "text": "功能"
+    },
+    {
+      "type": "delta",
+      "text": "与"
+    },
+    {
+      "type": "delta",
+      "text": "定位"
+    },
+    {
+      "type": "delta",
+      "text": "\n*"
+    },
+    {
+      "type": "delta",
+      "text": "   **"
+    },
+    {
+      "type": "delta",
+      "text": "产品"
+    },
+    {
+      "type": "delta",
+      "text": "定义"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "："
+    },
+    {
+      "type": "delta",
+      "text": "快手"
+    },
+    {
+      "type": "delta",
+      "text": "电商"
+    },
+    {
+      "type": "delta",
+      "text": " A"
+    },
+    {
+      "type": "delta",
+      "text": "IG"
+    },
+    {
+      "type": "delta",
+      "text": "C"
+    },
+    {
+      "type": "delta",
+      "text": " 内容"
+    },
+    {
+      "type": "delta",
+      "text": "经营"
+    },
+    {
+      "type": "delta",
+      "text": "平台"
+    },
+    {
+      "type": "delta",
+      "text": "，"
+    },
+    {
+      "type": "delta",
+      "text": "旨在"
+    },
+    {
+      "type": "delta",
+      "text": "帮助"
+    },
+    {
+      "type": "delta",
+      "text": "商家"
+    },
+    {
+      "type": "delta",
+      "text": "低成本"
+    },
+    {
+      "type": "delta",
+      "text": "完成"
+    },
+    {
+      "type": "delta",
+      "text": "视频"
+    },
+    {
+      "type": "delta",
+      "text": "、"
+    },
+    {
+      "type": "delta",
+      "text": "文案"
+    },
+    {
+      "type": "delta",
+      "text": "创作"
+    },
+    {
+      "type": "delta",
+      "text": "及"
+    },
+    {
+      "type": "delta",
+      "text": "一键"
+    },
+    {
+      "type": "delta",
+      "text": "发布"
+    },
+    {
+      "type": "delta",
+      "text": "。"
+    },
+    {
+      "type": "delta",
+      "text": "\n    *"
+    },
+    {
+      "type": "delta",
+      "text": "   ["
+    },
+    {
+      "type": "delta",
+      "text": "文档"
+    },
+    {
+      "type": "delta",
+      "text": "名"
+    },
+    {
+      "type": "delta",
+      "text": "]("
+    },
+    {
+      "type": "delta",
+      "text": "URL"
+    },
+    {
+      "type": "delta",
+      "text": ")"
+    },
+    {
+      "type": "delta",
+      "text": "：**"
+    },
+    {
+      "type": "delta",
+      "text": "【"
+    },
+    {
+      "type": "delta",
+      "text": "PR"
+    },
+    {
+      "type": "delta",
+      "text": "D"
+    },
+    {
+      "type": "delta",
+      "text": "】"
+    },
+    {
+      "type": "delta",
+      "text": "商家"
+    },
+    {
+      "type": "delta",
+      "text": "版"
+    },
+    {
+      "type": "delta",
+      "text": "灵"
+    },
+    {
+      "type": "delta",
+      "text": "机"
+    },
+    {
+      "type": "delta",
+      "text": "平台"
+    },
+    {
+      "type": "delta",
+      "text": "一期"
+    },
+    {
+      "type": "delta",
+      "text": " -"
+    },
+    {
+      "type": "delta",
+      "text": " 云"
+    },
+    {
+      "type": "delta",
+      "text": "文档"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": " ("
+    },
+    {
+      "type": "delta",
+      "text": "https"
+    },
+    {
+      "type": "delta",
+      "text": "://"
+    },
+    {
+      "type": "delta",
+      "text": "docs"
+    },
+    {
+      "type": "delta",
+      "text": ".cor"
+    },
+    {
+      "type": "delta",
+      "text": "p"
+    },
+    {
+      "type": "delta",
+      "text": ".k"
+    },
+    {
+      "type": "delta",
+      "text": "ua"
+    },
+    {
+      "type": "delta",
+      "text": "ish"
+    },
+    {
+      "type": "delta",
+      "text": "ou"
+    },
+    {
+      "type": "delta",
+      "text": ".com"
+    },
+    {
+      "type": "delta",
+      "text": "/k"
+    },
+    {
+      "type": "delta",
+      "text": "/home"
+    },
+    {
+      "type": "delta",
+      "text": "/V"
+    },
+    {
+      "type": "delta",
+      "text": "f"
+    },
+    {
+      "type": "delta",
+      "text": "NIK"
+    },
+    {
+      "type": "delta",
+      "text": "MQ"
+    },
+    {
+      "type": "delta",
+      "text": "6"
+    },
+    {
+      "type": "delta",
+      "text": "5"
+    },
+    {
+      "type": "delta",
+      "text": "X"
+    },
+    {
+      "type": "delta",
+      "text": "wg"
+    },
+    {
+      "type": "delta",
+      "text": "/f"
+    },
+    {
+      "type": "delta",
+      "text": "c"
+    },
+    {
+      "type": "delta",
+      "text": "ACP"
+    },
+    {
+      "type": "delta",
+      "text": "Q"
+    },
+    {
+      "type": "delta",
+      "text": "w"
+    },
+    {
+      "type": "delta",
+      "text": "B"
+    },
+    {
+      "type": "delta",
+      "text": "XX"
+    },
+    {
+      "type": "delta",
+      "text": "Pa"
+    },
+    {
+      "type": "delta",
+      "text": "-"
+    },
+    {
+      "type": "delta",
+      "text": "nt"
+    },
+    {
+      "type": "delta",
+      "text": "nP"
+    },
+    {
+      "type": "delta",
+      "text": "J"
+    },
+    {
+      "type": "delta",
+      "text": "Q"
+    },
+    {
+      "type": "delta",
+      "text": "_N"
+    },
+    {
+      "type": "delta",
+      "text": "w"
+    },
+    {
+      "type": "delta",
+      "text": "J"
+    },
+    {
+      "type": "delta",
+      "text": "NB"
+    },
+    {
+      "type": "delta",
+      "text": ")"
+    },
+    {
+      "type": "delta",
+      "text": "\n*"
+    },
+    {
+      "type": "delta",
+      "text": "   **"
+    },
+    {
+      "type": "delta",
+      "text": "核心"
+    },
+    {
+      "type": "delta",
+      "text": "功能"
+    },
+    {
+      "type": "delta",
+      "text": "模块"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "："
+    },
+    {
+      "type": "delta",
+      "text": "直播"
+    },
+    {
+      "type": "delta",
+      "text": "切片"
+    },
+    {
+      "type": "delta",
+      "text": "、"
+    },
+    {
+      "type": "delta",
+      "text": "图文"
+    },
+    {
+      "type": "delta",
+      "text": "视频"
+    },
+    {
+      "type": "delta",
+      "text": "生成"
+    },
+    {
+      "type": "delta",
+      "text": "、"
+    },
+    {
+      "type": "delta",
+      "text": "一键"
+    },
+    {
+      "type": "delta",
+      "text": "上"
+    },
+    {
+      "type": "delta",
+      "text": "墙"
+    },
+    {
+      "type": "delta",
+      "text": "/"
+    },
+    {
+      "type": "delta",
+      "text": "商"
+    },
+    {
+      "type": "delta",
+      "text": "详"
+    },
+    {
+      "type": "delta",
+      "text": "挂载"
+    },
+    {
+      "type": "delta",
+      "text": "。"
+    },
+    {
+      "type": "delta",
+      "text": "\n\n###"
+    },
+    {
+      "type": "delta",
+      "text": " 2"
+    },
+    {
+      "type": "delta",
+      "text": "."
+    },
+    {
+      "type": "delta",
+      "text": " Q"
+    },
+    {
+      "type": "delta",
+      "text": "3"
+    },
+    {
+      "type": "delta",
+      "text": " 业务"
+    },
+    {
+      "type": "delta",
+      "text": "目标"
+    },
+    {
+      "type": "delta",
+      "text": "与"
+    },
+    {
+      "type": "delta",
+      "text": "规模"
+    },
+    {
+      "type": "delta",
+      "text": "规划"
+    },
+    {
+      "type": "delta",
+      "text": "（"
+    },
+    {
+      "type": "delta",
+      "text": "招商"
+    },
+    {
+      "type": "delta",
+      "text": "参考"
+    },
+    {
+      "type": "delta",
+      "text": "）"
+    },
+    {
+      "type": "delta",
+      "text": "\n*"
+    },
+    {
+      "type": "delta",
+      "text": "   **"
+    },
+    {
+      "type": "delta",
+      "text": "使用"
+    },
+    {
+      "type": "delta",
+      "text": "规模"
+    },
+    {
+      "type": "delta",
+      "text": "目标"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "："
+    },
+    {
+      "type": "delta",
+      "text": "平台"
+    },
+    {
+      "type": "delta",
+      "text": "日均"
+    },
+    {
+      "type": "delta",
+      "text": "使用"
+    },
+    {
+      "type": "delta",
+      "text": "商家"
+    },
+    {
+      "type": "delta",
+      "text": "数"
+    },
+    {
+      "type": "delta",
+      "text": "达到"
+    },
+    {
+      "type": "delta",
+      "text": " **"
+    },
+    {
+      "type": "delta",
+      "text": "1"
+    },
+    {
+      "type": "delta",
+      "text": "0"
+    },
+    {
+      "type": "delta",
+      "text": "万"
+    },
+    {
+      "type": "delta",
+      "text": "+"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "，"
+    },
+    {
+      "type": "delta",
+      "text": "其中"
+    },
+    {
+      "type": "delta",
+      "text": "图"
+    },
+    {
+      "type": "delta",
+      "text": "生"
+    },
+    {
+      "type": "delta",
+      "text": "视频"
+    },
+    {
+      "type": "delta",
+      "text": "用户"
+    },
+    {
+      "type": "delta",
+      "text": "目标"
+    },
+    {
+      "type": "delta",
+      "text": "为"
+    },
+    {
+      "type": "delta",
+      "text": " **"
+    },
+    {
+      "type": "delta",
+      "text": "5"
+    },
+    {
+      "type": "delta",
+      "text": "万"
+    },
+    {
+      "type": "delta",
+      "text": "+"
+    },
+    {
+      "type": "delta",
+      "text": "**。"
+    },
+    {
+      "type": "delta",
+      "text": "\n    *"
+    },
+    {
+      "type": "delta",
+      "text": "   ["
+    },
+    {
+      "type": "delta",
+      "text": "文档"
+    },
+    {
+      "type": "delta",
+      "text": "名"
+    },
+    {
+      "type": "delta",
+      "text": "]("
+    },
+    {
+      "type": "delta",
+      "text": "URL"
+    },
+    {
+      "type": "delta",
+      "text": ")"
+    },
+    {
+      "type": "delta",
+      "text": "：**"
+    },
+    {
+      "type": "delta",
+      "text": "灵"
+    },
+    {
+      "type": "delta",
+      "text": "机"
+    },
+    {
+      "type": "delta",
+      "text": " OK"
+    },
+    {
+      "type": "delta",
+      "text": "R"
+    },
+    {
+      "type": "delta",
+      "text": " 对齐"
+    },
+    {
+      "type": "delta",
+      "text": " -"
+    },
+    {
+      "type": "delta",
+      "text": "2"
+    },
+    {
+      "type": "delta",
+      "text": "6"
+    },
+    {
+      "type": "delta",
+      "text": " 年"
+    },
+    {
+      "type": "delta",
+      "text": " ("
+    },
+    {
+      "type": "delta",
+      "text": "快手"
+    },
+    {
+      "type": "delta",
+      "text": "电商"
+    },
+    {
+      "type": "delta",
+      "text": " A"
+    },
+    {
+      "type": "delta",
+      "text": "IG"
+    },
+    {
+      "type": "delta",
+      "text": "C"
+    },
+    {
+      "type": "delta",
+      "text": " 内容"
+    },
+    {
+      "type": "delta",
+      "text": "经营"
+    },
+    {
+      "type": "delta",
+      "text": "平台"
+    },
+    {
+      "type": "delta",
+      "text": ")**"
+    },
+    {
+      "type": "delta",
+      "text": " ("
+    },
+    {
+      "type": "delta",
+      "text": "https"
+    },
+    {
+      "type": "delta",
+      "text": "://"
+    },
+    {
+      "type": "delta",
+      "text": "docs"
+    },
+    {
+      "type": "delta",
+      "text": ".cor"
+    },
+    {
+      "type": "delta",
+      "text": "p"
+    },
+    {
+      "type": "delta",
+      "text": ".k"
+    },
+    {
+      "type": "delta",
+      "text": "ua"
+    },
+    {
+      "type": "delta",
+      "text": "ish"
+    },
+    {
+      "type": "delta",
+      "text": "ou"
+    },
+    {
+      "type": "delta",
+      "text": ".com"
+    },
+    {
+      "type": "delta",
+      "text": "/d"
+    },
+    {
+      "type": "delta",
+      "text": "/home"
+    },
+    {
+      "type": "delta",
+      "text": "/f"
+    },
+    {
+      "type": "delta",
+      "text": "c"
+    },
+    {
+      "type": "delta",
+      "text": "AA"
+    },
+    {
+      "type": "delta",
+      "text": "K"
+    },
+    {
+      "type": "delta",
+      "text": "1"
+    },
+    {
+      "type": "delta",
+      "text": "Q"
+    },
+    {
+      "type": "delta",
+      "text": "7"
+    },
+    {
+      "type": "delta",
+      "text": "5"
+    },
+    {
+      "type": "delta",
+      "text": "X"
+    },
+    {
+      "type": "delta",
+      "text": "7"
+    },
+    {
+      "type": "delta",
+      "text": "4"
+    },
+    {
+      "type": "delta",
+      "text": "ck"
+    },
+    {
+      "type": "delta",
+      "text": "G"
+    },
+    {
+      "type": "delta",
+      "text": "m"
+    },
+    {
+      "type": "delta",
+      "text": "Q"
+    },
+    {
+      "type": "delta",
+      "text": "FD"
+    },
+    {
+      "type": "delta",
+      "text": "7"
+    },
+    {
+      "type": "delta",
+      "text": "L"
+    },
+    {
+      "type": "delta",
+      "text": "d"
+    },
+    {
+      "type": "delta",
+      "text": "7"
+    },
+    {
+      "type": "delta",
+      "text": "l"
+    },
+    {
+      "type": "delta",
+      "text": "B"
+    },
+    {
+      "type": "delta",
+      "text": ")"
+    },
+    {
+      "type": "delta",
+      "text": "\n*"
+    },
+    {
+      "type": "delta",
+      "text": "   **"
+    },
+    {
+      "type": "delta",
+      "text": "合作"
+    },
+    {
+      "type": "delta",
+      "text": "模式"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "："
+    },
+    {
+      "type": "delta",
+      "text": "目前"
+    },
+    {
+      "type": "delta",
+      "text": "主要"
+    },
+    {
+      "type": "delta",
+      "text": "采取"
+    },
+    {
+      "type": "delta",
+      "text": " API"
+    },
+    {
+      "type": "delta",
+      "text": " 接入"
+    },
+    {
+      "type": "delta",
+      "text": "现有"
+    },
+    {
+      "type": "delta",
+      "text": "生产能力"
+    },
+    {
+      "type": "delta",
+      "text": "的方式"
+    },
+    {
+      "type": "delta",
+      "text": "，"
+    },
+    {
+      "type": "delta",
+      "text": "分为"
+    },
+    {
+      "type": "delta",
+      "text": "“"
+    },
+    {
+      "type": "delta",
+      "text": "组件"
+    },
+    {
+      "type": "delta",
+      "text": "接入"
+    },
+    {
+      "type": "delta",
+      "text": "”"
+    },
+    {
+      "type": "delta",
+      "text": "与"
+    },
+    {
+      "type": "delta",
+      "text": "“"
+    },
+    {
+      "type": "delta",
+      "text": "模型"
+    },
+    {
+      "type": "delta",
+      "text": "计费"
+    },
+    {
+      "type": "delta",
+      "text": "”"
+    },
+    {
+      "type": "delta",
+      "text": "两种"
+    },
+    {
+      "type": "delta",
+      "text": "合作"
+    },
+    {
+      "type": "delta",
+      "text": "模式"
+    },
+    {
+      "type": "delta",
+      "text": "。"
+    },
+    {
+      "type": "delta",
+      "text": "\n\n###"
+    },
+    {
+      "type": "delta",
+      "text": " 3"
+    },
+    {
+      "type": "delta",
+      "text": "."
+    },
+    {
+      "type": "delta",
+      "text": " 合规"
+    },
+    {
+      "type": "delta",
+      "text": "与安全"
+    },
+    {
+      "type": "delta",
+      "text": "要求"
+    },
+    {
+      "type": "delta",
+      "text": "（"
+    },
+    {
+      "type": "delta",
+      "text": "招商"
+    },
+    {
+      "type": "delta",
+      "text": "前置"
+    },
+    {
+      "type": "delta",
+      "text": "条件"
+    },
+    {
+      "type": "delta",
+      "text": "）"
+    },
+    {
+      "type": "delta",
+      "text": "\n商家"
+    },
+    {
+      "type": "delta",
+      "text": "入驻"
+    },
+    {
+      "type": "delta",
+      "text": "需"
+    },
+    {
+      "type": "delta",
+      "text": "符合"
+    },
+    {
+      "type": "delta",
+      "text": "以下"
+    },
+    {
+      "type": "delta",
+      "text": "风控"
+    },
+    {
+      "type": "delta",
+      "text": "标准"
+    },
+    {
+      "type": "delta",
+      "text": "，"
+    },
+    {
+      "type": "delta",
+      "text": "否则"
+    },
+    {
+      "type": "delta",
+      "text": "无法"
+    },
+    {
+      "type": "delta",
+      "text": "通过"
+    },
+    {
+      "type": "delta",
+      "text": "审核"
+    },
+    {
+      "type": "delta",
+      "text": "或"
+    },
+    {
+      "type": "delta",
+      "text": "上线"
+    },
+    {
+      "type": "delta",
+      "text": "："
+    },
+    {
+      "type": "delta",
+      "text": "\n*"
+    },
+    {
+      "type": "delta",
+      "text": "   **"
+    },
+    {
+      "type": "delta",
+      "text": "内容"
+    },
+    {
+      "type": "delta",
+      "text": "安全"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "："
+    },
+    {
+      "type": "delta",
+      "text": "必须"
+    },
+    {
+      "type": "delta",
+      "text": "覆盖"
+    },
+    {
+      "type": "delta",
+      "text": "涉"
+    },
+    {
+      "type": "delta",
+      "text": "政"
+    },
+    {
+      "type": "delta",
+      "text": "、"
+    },
+    {
+      "type": "delta",
+      "text": "涉"
+    },
+    {
+      "type": "delta",
+      "text": "黄"
+    },
+    {
+      "type": "delta",
+      "text": "及"
+    },
+    {
+      "type": "delta",
+      "text": "严重"
+    },
+    {
+      "type": "delta",
+      "text": "猎"
+    },
+    {
+      "type": "delta",
+      "text": "奇"
+    },
+    {
+      "type": "delta",
+      "text": "内容的"
+    },
+    {
+      "type": "delta",
+      "text": "拦截"
+    },
+    {
+      "type": "delta",
+      "text": "；"
+    },
+    {
+      "type": "delta",
+      "text": "历史"
+    },
+    {
+      "type": "delta",
+      "text": " A"
+    },
+    {
+      "type": "delta",
+      "text": "IG"
+    },
+    {
+      "type": "delta",
+      "text": "C"
+    },
+    {
+      "type": "delta",
+      "text": " 视频"
+    },
+    {
+      "type": "delta",
+      "text": "需"
+    },
+    {
+      "type": "delta",
+      "text": "进行"
+    },
+    {
+      "type": "delta",
+      "text": "全"
+    },
+    {
+      "type": "delta",
+      "text": "量"
+    },
+    {
+      "type": "delta",
+      "text": "重"
+    },
+    {
+      "type": "delta",
+      "text": "扫"
+    },
+    {
+      "type": "delta",
+      "text": "。"
+    },
+    {
+      "type": "delta",
+      "text": "\n    *"
+    },
+    {
+      "type": "delta",
+      "text": "   ["
+    },
+    {
+      "type": "delta",
+      "text": "文档"
+    },
+    {
+      "type": "delta",
+      "text": "名"
+    },
+    {
+      "type": "delta",
+      "text": "]("
+    },
+    {
+      "type": "delta",
+      "text": "URL"
+    },
+    {
+      "type": "delta",
+      "text": ")"
+    },
+    {
+      "type": "delta",
+      "text": "：**"
+    },
+    {
+      "type": "delta",
+      "text": "B"
+    },
+    {
+      "type": "delta",
+      "text": " 端"
+    },
+    {
+      "type": "delta",
+      "text": "扩"
+    },
+    {
+      "type": "delta",
+      "text": "量"
+    },
+    {
+      "type": "delta",
+      "text": "、"
+    },
+    {
+      "type": "delta",
+      "text": "主"
+    },
+    {
+      "type": "delta",
+      "text": "站"
+    },
+    {
+      "type": "delta",
+      "text": "风控"
+    },
+    {
+      "type": "delta",
+      "text": "整改"
+    },
+    {
+      "type": "delta",
+      "text": "及"
+    },
+    {
+      "type": "delta",
+      "text": " Agent"
+    },
+    {
+      "type": "delta",
+      "text": " 建设"
+    },
+    {
+      "type": "delta",
+      "text": "会议纪要"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": " ("
+    },
+    {
+      "type": "delta",
+      "text": "内部"
+    },
+    {
+      "type": "delta",
+      "text": "纪要"
+    },
+    {
+      "type": "delta",
+      "text": "，"
+    },
+    {
+      "type": "delta",
+      "text": "无"
+    },
+    {
+      "type": "delta",
+      "text": "公开"
+    },
+    {
+      "type": "delta",
+      "text": "链接"
+    },
+    {
+      "type": "delta",
+      "text": ")"
+    },
+    {
+      "type": "delta",
+      "text": "\n*"
+    },
+    {
+      "type": "delta",
+      "text": "   **"
+    },
+    {
+      "type": "delta",
+      "text": "协议"
+    },
+    {
+      "type": "delta",
+      "text": "签署"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "："
+    },
+    {
+      "type": "delta",
+      "text": "首次"
+    },
+    {
+      "type": "delta",
+      "text": "未"
+    },
+    {
+      "type": "delta",
+      "text": "登录"
+    },
+    {
+      "type": "delta",
+      "text": "用户"
+    },
+    {
+      "type": "delta",
+      "text": "强制"
+    },
+    {
+      "type": "delta",
+      "text": "弹窗"
+    },
+    {
+      "type": "delta",
+      "text": "提示"
+    },
+    {
+      "type": "delta",
+      "text": "，"
+    },
+    {
+      "type": "delta",
+      "text": "签署"
+    },
+    {
+      "type": "delta",
+      "text": "与"
+    },
+    {
+      "type": "delta",
+      "text": "版本"
+    },
+    {
+      "type": "delta",
+      "text": "信息"
+    },
+    {
+      "type": "delta",
+      "text": "须"
+    },
+    {
+      "type": "delta",
+      "text": "完整"
+    },
+    {
+      "type": "delta",
+      "text": "存储"
+    },
+    {
+      "type": "delta",
+      "text": "于"
+    },
+    {
+      "type": "delta",
+      "text": "统一"
+    },
+    {
+      "type": "delta",
+      "text": "中"
+    },
+    {
+      "type": "delta",
+      "text": "台"
+    },
+    {
+      "type": "delta",
+      "text": "（"
+    },
+    {
+      "type": "delta",
+      "text": "目前"
+    },
+    {
+      "type": "delta",
+      "text": "尚"
+    },
+    {
+      "type": "delta",
+      "text": "待"
+    },
+    {
+      "type": "delta",
+      "text": "调研"
+    },
+    {
+      "type": "delta",
+      "text": "）。"
+    },
+    {
+      "type": "delta",
+      "text": "\n\n###"
+    },
+    {
+      "type": "delta",
+      "text": " 4"
+    },
+    {
+      "type": "delta",
+      "text": "."
+    },
+    {
+      "type": "delta",
+      "text": " 缺失"
+    },
+    {
+      "type": "delta",
+      "text": "说明"
+    },
+    {
+      "type": "delta",
+      "text": "\n以下"
+    },
+    {
+      "type": "delta",
+      "text": "具体"
+    },
+    {
+      "type": "delta",
+      "text": "招商"
+    },
+    {
+      "type": "delta",
+      "text": "细节"
+    },
+    {
+      "type": "delta",
+      "text": "在"
+    },
+    {
+      "type": "delta",
+      "text": "提供的"
+    },
+    {
+      "type": "delta",
+      "text": "参考资料"
+    },
+    {
+      "type": "delta",
+      "text": "中"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "无法"
+    },
+    {
+      "type": "delta",
+      "text": "找到"
+    },
+    {
+      "type": "delta",
+      "text": "依据"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "："
+    },
+    {
+      "type": "delta",
+      "text": "\n*"
+    },
+    {
+      "type": "delta",
+      "text": "   **"
+    },
+    {
+      "type": "delta",
+      "text": "具体的"
+    },
+    {
+      "type": "delta",
+      "text": "入驻"
+    },
+    {
+      "type": "delta",
+      "text": "门槛"
+    },
+    {
+      "type": "delta",
+      "text": "清单"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "（"
+    },
+    {
+      "type": "delta",
+      "text": "如"
+    },
+    {
+      "type": "delta",
+      "text": "保证金"
+    },
+    {
+      "type": "delta",
+      "text": "金额"
+    },
+    {
+      "type": "delta",
+      "text": "、"
+    },
+    {
+      "type": "delta",
+      "text": "资质"
+    },
+    {
+      "type": "delta",
+      "text": "要求"
+    },
+    {
+      "type": "delta",
+      "text": "等"
+    },
+    {
+      "type": "delta",
+      "text": "）"
+    },
+    {
+      "type": "delta",
+      "text": "未"
+    },
+    {
+      "type": "delta",
+      "text": "提及"
+    },
+    {
+      "type": "delta",
+      "text": "。"
+    },
+    {
+      "type": "delta",
+      "text": "\n*"
+    },
+    {
+      "type": "delta",
+      "text": "   **"
+    },
+    {
+      "type": "delta",
+      "text": "官方"
+    },
+    {
+      "type": "delta",
+      "text": "对外"
+    },
+    {
+      "type": "delta",
+      "text": "发布的"
+    },
+    {
+      "type": "delta",
+      "text": "招商"
+    },
+    {
+      "type": "delta",
+      "text": "政策"
+    },
+    {
+      "type": "delta",
+      "text": "文档"
+    },
+    {
+      "type": "delta",
+      "text": "链接"
+    },
+    {
+      "type": "delta",
+      "text": "**。"
+    },
+    {
+      "type": "delta",
+      "text": "\n*"
+    },
+    {
+      "type": "delta",
+      "text": "   **"
+    },
+    {
+      "type": "delta",
+      "text": "商家"
+    },
+    {
+      "type": "delta",
+      "text": "端"
+    },
+    {
+      "type": "delta",
+      "text": "的具体"
+    },
+    {
+      "type": "delta",
+      "text": "操作"
+    },
+    {
+      "type": "delta",
+      "text": "手册"
+    },
+    {
+      "type": "delta",
+      "text": "或"
+    },
+    {
+      "type": "delta",
+      "text": "物料"
+    },
+    {
+      "type": "delta",
+      "text": "下载"
+    },
+    {
+      "type": "delta",
+      "text": "入口"
+    },
+    {
+      "type": "delta",
+      "text": "**。"
+    },
+    {
+      "type": "delta",
+      "text": "\n\n建议"
+    },
+    {
+      "type": "delta",
+      "text": "直接"
+    },
+    {
+      "type": "delta",
+      "text": "联系"
+    },
+    {
+      "type": "delta",
+      "text": "快手"
+    },
+    {
+      "type": "delta",
+      "text": "电商"
+    },
+    {
+      "type": "delta",
+      "text": "业务"
+    },
+    {
+      "type": "delta",
+      "text": "方"
+    },
+    {
+      "type": "delta",
+      "text": "获取"
+    },
+    {
+      "type": "delta",
+      "text": "最新的"
+    },
+    {
+      "type": "delta",
+      "text": "《"
+    },
+    {
+      "type": "delta",
+      "text": "灵"
+    },
+    {
+      "type": "delta",
+      "text": "机"
+    },
+    {
+      "type": "delta",
+      "text": "商家"
+    },
+    {
+      "type": "delta",
+      "text": "入驻"
+    },
+    {
+      "type": "delta",
+      "text": "白皮书"
+    },
+    {
+      "type": "delta",
+      "text": "》"
+    },
+    {
+      "type": "delta",
+      "text": "或"
+    },
+    {
+      "type": "delta",
+      "text": "咨询"
+    },
+    {
+      "type": "delta",
+      "text": "相关"
+    },
+    {
+      "type": "delta",
+      "text": "对接"
+    },
+    {
+      "type": "delta",
+      "text": "人"
+    },
+    {
+      "type": "delta",
+      "text": "，"
+    },
+    {
+      "type": "delta",
+      "text": "以上"
+    },
+    {
+      "type": "delta",
+      "text": "信息"
+    },
+    {
+      "type": "delta",
+      "text": "仅"
+    },
+    {
+      "type": "delta",
+      "text": "基于"
+    },
+    {
+      "type": "delta",
+      "text": "内部"
+    },
+    {
+      "type": "delta",
+      "text": "项目"
+    },
+    {
+      "type": "delta",
+      "text": "规划"
+    },
+    {
+      "type": "delta",
+      "text": "与"
+    },
+    {
+      "type": "delta",
+      "text": "风控"
+    },
+    {
+      "type": "delta",
+      "text": "标准"
+    },
+    {
+      "type": "delta",
+      "text": "整理"
+    },
+    {
+      "type": "delta",
+      "text": "。"
+    },
+    {
+      "type": "done",
+      "answer": "## 用户问题理解\n用户正在查询快手“灵机”商家的具体入驻政策、合作要求及官方指引材料。\n\n## 回答\n根据现有工作记录，**未找到关于“灵机商家招商政策与材料”的直接公开文档或URL**。上下文中的资料主要涉及内部评审纪要、PRD需求说明、OKR目标设定及人力分工等内部管理内容，不包含面向商家的对外招商指南。\n\n以下是基于上下文中可提取的**项目背景与合作模式信息**：\n\n### 1. 灵机商家版核心功能与定位\n*   **产品定义**：快手电商 AIGC 内容经营平台，旨在帮助商家低成本完成视频、文案创作及一键发布。\n    *   [文档名](URL)：**【PRD】商家版灵机平台一期 - 云文档** (https://docs.corp.kuaishou.com/k/home/VfNIKMQ65Xwg/fcACPQwBXXPa-ntnPJQ_NwJNB)\n*   **核心功能模块**：直播切片、图文视频生成、一键上墙/商详挂载。\n\n### 2. Q3 业务目标与规模规划（招商参考）\n*   **使用规模目标**：平台日均使用商家数达到 **10万+**，其中图生视频用户目标为 **5万+**。\n    *   [文档名](URL)：**灵机 OKR 对齐 -26 年 (快手电商 AIGC 内容经营平台)** (https://docs.corp.kuaishou.com/d/home/fcAAK1Q75X74ckGmQFD7Ld7lB)\n*   **合作模式**：目前主要采取 API 接入现有生产能力的方式，分为“组件接入”与“模型计费”两种合作模式。\n\n### 3. 合规与安全要求（招商前置条件）\n商家入驻需符合以下风控标准，否则无法通过审核或上线：\n*   **内容安全**：必须覆盖涉政、涉黄及严重猎奇内容的拦截；历史 AIGC 视频需进行全量重扫。\n    *   [文档名](URL)：**B 端扩量、主站风控整改及 Agent 建设会议纪要** (内部纪要，无公开链接)\n*   **协议签署**：首次未登录用户强制弹窗提示，签署与版本信息须完整存储于统一中台（目前尚待调研）。\n\n### 4. 缺失说明\n以下具体招商细节在提供的参考资料中**无法找到依据**：\n*   **具体的入驻门槛清单**（如保证金金额、资质要求等）未提及。\n*   **官方对外发布的招商政策文档链接**。\n*   **商家端的具体操作手册或物料下载入口**。\n\n建议直接联系快手电商业务方获取最新的《灵机商家入驻白皮书》或咨询相关对接人，以上信息仅基于内部项目规划与风控标准整理。\n\n相关文档链接：\n- [AIGC视频 - 云文档](https://docs.corp.kuaishou.com/t/home/VRjujfRZO3Ck/fcAAKx_r4GOnClLtlYYtZHBBq)",
+      "contexts": [
+        {
+          "capture_id": 0,
+          "doc_key": "floating-assist:1788691226013",
+          "text": "灵机商家招商的文档",
+          "score": 1.0,
+          "source": "floating_assist",
+          "source_type": "floating_assist",
+          "title": "咨询附件",
+          "screenshot_path": null,
+          "screenshot_width": null,
+          "screenshot_height": null,
+          "attachments": []
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:550",
+          "text": "文档：灵机商家版登录协议及图生视频流程内部评审纪要\n类型：会议纪要\n摘要：记录2026-7-29关于灵机登录、图生视频及Agent架构的内部评审共识，明确功能边界与技术约束。\n正文：# 会议概览\n**核心议题**：灵机商家版登录与协议、图生视频流程及 Agent 架构改造与人力。\n\n## 已有共识\n- **范围界定**：本轮仅做内部评审，范围为排线及商详一键下单（含评论），不含主谓金特/智能体模块开发。\n- **协议系统**：灵机将独立部署协议系统；首次未签署用户需强制弹窗提示；签署与版本信息须完整存储于统一中台（目前尚待调研）。\n- **视频流程**：图生视频阶段优先完全复用小店现有长链路流程；Agent改造和前端交互需单独评审并预留人力。\n\n## 下一步行动\n1. **参数对齐**：与商家端对齐登录参数和权限复用方案，评估复用成本（含自建及接天启）。\n2. **技术验证**：验证未登录访问灵机首页与独立 BIS 登录页的可行性。 \n3. **中台调研**：调研公司统一协议中台接入方式以规避业务自存风险。\n4. **架构排期**：明确 Agent 架构改造方案、前后端改动成本及人力排期，避免反复返工。\n\n## 会议详情与参会情况\n- **参会范围**：本次为内部评审，暂不邀请商家技术及测试人员参与。后续若有明确需求再单独沟通。\n- **前端协同**：当前仅杨哥在场，计划拉入俊姐（金姐）共同讨论 Agent 架构改造方案。\n- **排期预估**：Agent 架构预计两周内完成改造；前端尚无具体排期，需单独评审工作量。",
+          "score": 0.022379032258064514,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 550,
+          "document_id": 550,
+          "app_name": null,
+          "win_title": null,
+          "url": null,
+          "source_url": null,
+          "title": "灵机商家版登录协议及图生视频流程内部评审纪要",
+          "doc_type": "会议纪要",
+          "time": 1785327526101,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "记录2026-7-29关于灵机登录、图生视频及Agent架构的内部评审共识，明确功能边界与技术约束。",
+          "overview": "记录2026-7-29关于灵机登录、图生视频及Agent架构的内部评审共识，明确功能边界与技术约束。",
+          "category": "会议纪要",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "1922"
+          ],
+          "linked_knowledge_ids": [
+            "1218"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:592",
+          "text": "文档：灵机商家版登录与图生视频流程评审纪要\n类型：会议纪要\n摘要：记录2026-07-29关于灵机登录协议、图生视频复用及Agent改造的内部评审决策，明确范围边界与技术约束。\n正文：# 智能会议纪要 - 我与王凯茜的会议\n**主持人**：赵婷婷 | **时长**：19:15～20:00 | **参会人数**：24人\n\n## 📋 会议概览\n- **核心议题**：灵机商家版登录与协议、图生视频流程及Agent架构改造与人力。\n\n---\n\n### ✅ 已有共识（决策点）\n1. **评审范围界定**\n   - 本轮仅做内部评审，范围为排线及商详一键购流程（含评论）。\n   - **排除项**：主谓金特、智能体模块本期不纳入。\n2. **协议架构策略**\n   - 灵机与小店共用一套主/子协议。\n3. **登录交互机制**\n   - 采用灵机独立协议，首次登录未签署时强制弹窗。\n   - 签署及版本信息需完整存储。\n4. **中台接入状态**\n   - 统一协议中台尚待调研（存在业务自存风险）。\n5. **图生视频流程策略**\n   - 阶段一：完全复用小店现有长链路流程。\n6. **Agent改造规划**\n   - Agent改造和前端交互需单独评审并预留人力。",
+          "score": 0.022211044042029955,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 592,
+          "document_id": 592,
+          "app_name": null,
+          "win_title": null,
+          "url": null,
+          "source_url": null,
+          "title": "灵机商家版登录与图生视频流程评审纪要",
+          "doc_type": "会议纪要",
+          "time": 1785391491236,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "记录2026-07-29关于灵机登录协议、图生视频复用及Agent改造的内部评审决策，明确范围边界与技术约束。",
+          "overview": "记录2026-07-29关于灵机登录协议、图生视频复用及Agent改造的内部评审决策，明确范围边界与技术约束。",
+          "category": "会议纪要",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "1921"
+          ],
+          "linked_knowledge_ids": [
+            "1217"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:150",
+          "text": "文档：智能体团队自评报告\n类型：汇报\n摘要：新增高梦洁在 AIGC 机审体系从 0 到 1 建设中的具体量化成果（如裸体检测拦截率、商业模型自部署成本优化）及王柯杰在大模型基础架构优化与数字员工规模化落地方面的详细数据。\nURL：https://docs.corp.kuaishou.com/d/home/fcAAoxSDoOMfbrhHWdqRcd35D\n正文：# 智能体团队自评报告\n## C3/C4 可编辑马达/管理员更新于 7 月 13 日 (新内容补充)\n*注：原文档存在多人在线冲突提示（在线阅读人数较多），已切换为只读模式展示最新捕获的 2026H1 绩效自评详情。文档由 C4 管理员马达于 7 月 13 日更新，记录了王柯杰、高梦洁等多位同事的工作内容。*\n\n---\n\n## 目录\n智能体团队自评 - 2026H1 核心项目复盘与规划\n- **综合绩效等级**：A (快手派 A)\n- **核心人员覆盖范围**：王柯杰、高梦洁等。\n- **核心项目覆盖范围**：灵机商品成片 Agent、图生视频工程链路及行业探索。 \n\n---\n\n## 1. 重点工作成果更新（新增章节）\n*基于 2026H1 最新捕获内容补充，原文档中关于分销诊断与电商 AIGC 工作流的描述保留作为团队整体背景。*\n\n### 1. **灵机商品成片 Agent 项目** (王柯杰负责)\n   - **负责人**：王柯杰。\n   - **负责领域**：面向商家的 AIGC 商品成片全链路技术开发。\n     - **核心定位**：支持脚本对话/编辑能力、持久化/异步执行能力，旨在降低商家成片门槛并保证商品一致性。提供从\"被动接受\"到\"参与创作\"的 Wizard-then-Agent 体验。\n   - **具体工作内容：**\n     - **主导全流程开发**：负责评审方案制定、技术方案设计、工程实现及完整联调。覆盖创建会话、选品/选图、模板确认、LLM 生成脚本、脚本改稿、配置提交、结果轮询等主链路，以及跨步骤换商品/换图/换模板/改配置并重新生成的复杂业务逻辑。\n     - **关键贡献**：主导底层 Agent 工程链路的方案设计和实现，主动推动上下游联调测试。截至 7 月 9 日底，项目整体进度达**90%**，计划于 7 月 13 日发布结果产出（完成技术评审、设计、实施及协调）。\n     - **新增亮点**：引入 LLM 驱动的多轮对话能力与 Wizard-then-Agent 设计。商家可通过自然语言交互完成\"换商品/图/模板/风格并重新生成\"，将单条视频生成成功率提升至**70%**以上。\n\n### 2. **灵机图生视频离线任务规模化工程链路建设** (王柯杰负责)\n   - **负责人**：王柯杰。\n   - **负责领域**：电商「商品成片」+「直播引流」的图生视频能力从在线向离线的规模化迁移与保障。目标为支撑每日 30w 级别生产量，完成商家端灵机图生视频提测交付及服饰工作流迁移。\n     *(注：高梦洁等同事也参与了相关工作)*\n   - **具体工作内容：**\n     - **工程链路搭建**：主导完成支持每日 30w 级别生产的工程链路，支撑规模化产能提升。将 AIGC 服务接入新架构链路并具备切流能力",
+          "score": 0.021869802803516275,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 150,
+          "document_id": 150,
+          "app_name": null,
+          "win_title": null,
+          "url": "https://docs.corp.kuaishou.com/d/home/fcAAoxSDoOMfbrhHWdqRcd35D",
+          "source_url": "https://docs.corp.kuaishou.com/d/home/fcAAoxSDoOMfbrhHWdqRcd35D",
+          "title": "智能体团队自评报告",
+          "doc_type": "汇报",
+          "time": 1785762615320,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "新增高梦洁在 AIGC 机审体系从 0 到 1 建设中的具体量化成果（如裸体检测拦截率、商业模型自部署成本优化）及王柯杰在大模型基础架构优化与数字员工规模化落地方面的详细数据。",
+          "overview": "新增高梦洁在 AIGC 机审体系从 0 到 1 建设中的具体量化成果（如裸体检测拦截率、商业模型自部署成本优化）及王柯杰在大模型基础架构优化与数字员工规模化落地方面的详细数据。",
+          "category": "汇报",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "923",
+            "1113",
+            "955",
+            "956",
+            "954",
+            "1136",
+            "1153",
+            "1155",
+            "2337"
+          ],
+          "linked_knowledge_ids": [
+            "1494",
+            "404",
+            "417",
+            "418",
+            "507",
+            "592",
+            "618",
+            "631",
+            "633"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:547",
+          "text": "文档：【PRD】商家版灵机平台一期 - 云文档\n类型：需求说明\n摘要：基于最新捕获内容，补充了项目背景中的具体需求依据、详细的收益指标（含 GMV）、上线时间表及综合描述中各功能模块的优先级与逻辑说明。\nURL：https://docs.corp.kuaishou.com/k/home/VfNIKMQ65Xwg/fcACPQwBXXPa-ntnPJQ_NwJNB\n正文：# 【PRD】商家版灵机平台一期\n\n## 零：基本信息和修改记录\n### 1. 基本信息\n- **重要性**：【高】\n- **紧迫性**：【高】\n- **PRD 拟制人**：赵婷婷、王凯茜、郑媛元、郑佳仪\n\n### 2. PRD 修改记录\n| 版本 | 动作 | 内容 | 变更来源 | 日期 |\n| :--- | :--- | :--- | :--- | :--- |\n| 1.0 | 创建【第一版】 | / | - | 2026.7.23 |\n> *注：PRD 提交评审之前的修改也可以记录下来。*\n\n### 3. 沟通记录\n**时间**：2026.7.24<br>**参会人员**：<br>- **商家账户登录打通沟通**<br>灵机侧：赵婷婷、弯勇辉、谢志洋<br>电商商家侧：刘胜川、茹挺进、苑仁坤、夏俊\n\n#### 核心结论和 Todo\n1. **登录模块**\n   - ① 灵机平台使用单独的 biz，biz 用途仅是区分登录页，支持配置灵机的文案、LOGO、背景及扫码下载二维码。\n   - ② 灵机独立站申请三级域名后，并将测试、PRT 和线上域名发给 @茹挺进 做 SID 加白 cc @弯勇辉([已过滤])\n   - ③ 登录页可屏蔽子 [已过滤]\n\n---\n\n## 一：项目背景\n- **需求背景**：（内容缺失）<br>- **目标收益**：（内容缺失）\n\n## 二：综合描述\n### 产品总体逻辑<br>（内容缺失）\n### 需求清单及优先级<br>对其他产品的影响<br>（内容缺失）\n### 产品上线方式：<small>小流量/全流量</small>\n\n## 三：详细描述\n1. **3.1 账户登录** @赵婷婷\n2. **3.2 菜单导航&功能权限** @赵婷婷\n3. **3.3 签署协议** @郑佳仪\n4. **3.4 视频生成** @郑媛元\n5. **3.5 商品上新** @王凯茜\n6. **3.6 资产** @郑媛元\n\n## 四：产品运营计划<br>（内容缺失）\n\n## 五：效果评估方式和监控统计需求\n### 1. 定性评估<br>（内容缺失）<br>\n### 2. 定量评估埋点需求<br>统计需求<br>（内容缺失）\n\n# 一：项目背景\n- **需求背景**<br>在【快手电商 AIGC 内容经营】专项大背景下，需要搭建独立的灵机平台，作为统一对外品牌和 AIGC 内容经营平台，承接商家视频、图片、文案等内容生产需求。<br><br>**立项文档参考**：「灵机」 | 快手电商 AIGC 内容经营平台 - 立项文档\n- **目标收益**<br>1. **用户规模**：日均使用商家数 10w+，其中图生视频目标 5w+。<br>2. **内容规模**：AIGC 内容发布量 50w/日；商品图能力完成建设并初步跑通。<br>3. **交易规模",
+          "score": 0.021153846153846155,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 547,
+          "document_id": 547,
+          "app_name": null,
+          "win_title": null,
+          "url": "https://docs.corp.kuaishou.com/k/home/VfNIKMQ65Xwg/fcACPQwBXXPa-ntnPJQ_NwJNB",
+          "source_url": "https://docs.corp.kuaishou.com/k/home/VfNIKMQ65Xwg/fcACPQwBXXPa-ntnPJQ_NwJNB",
+          "title": "【PRD】商家版灵机平台一期 - 云文档",
+          "doc_type": "需求说明",
+          "time": 1785682254486,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "基于最新捕获内容，补充了项目背景中的具体需求依据、详细的收益指标（含 GMV）、上线时间表及综合描述中各功能模块的优先级与逻辑说明。",
+          "overview": "基于最新捕获内容，补充了项目背景中的具体需求依据、详细的收益指标（含 GMV）、上线时间表及综合描述中各功能模块的优先级与逻辑说明。",
+          "category": "需求说明",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "1915",
+            "1917"
+          ],
+          "linked_knowledge_ids": [
+            "1212",
+            "1213"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:116",
+          "text": "文档：灵机专项双日会 - 云文档\n类型：会议纪要\n摘要：新增图生视频模型幻觉问题详解（动作/保真）、Agent 交互具体验证方案及 Loop 数字员工形态设计，并补充了法务合规待办清单。\nURL：https://docs.corp.kuaishou.com/d/home/fcADwrgzZADJvmjK7gCpxTs5v\n正文：# 灵机专项双日会\n## 7.21 (最新)\n### 零、上次 todo\n- [ ] **平台权限开通**。由郑佳仪提单，朱欢欢跟进。涉及法务合规隐式标识设计对齐王琦。\n- [ ] **模型对话理解效果调测决定右侧对话框隐藏逻辑**。需确认具体执行方案。\n- [ ] **剧本创作规范沟通任务分配给鲜嘉麒**。\n- [ ] **选品与 TTS 性别不一致的 case 探查由石山跟进**。（补充：崔力此前已分享图文套图链路设计，此处重点在于 Case 探查）\n- [ ] **显性标识设计对齐王琦**。需明确具体标准并执行。 \n\n### 一、核心数据 @李鑫@郑媛元\n每次更新近 7 日数据 + wow。\n新增模块从 0 开始写。\n1. **产能提升成果**：通过扩卡及资源调配，通用视频日产量已达 **36 万+**（其他 AI 视频约 4.8 万+）。\n2. **类目模板优化**：涉及主图套图链路策略调整。 \n\n### 二、基模进展 @石山@鲜嘉麒\n汇报 FP8 VLM 大模型上线带来的成本降低与产能增长，以及复杂动作采样策略优化进展。\n1. **性能优化成果（王琦）**\n   - **FP8 VLM 上线**：VLM 推理/训练成本降低 **50%**（节省约 8 卡算力）。\n2. **产能提升详情**\n   - **扩卡策略**：视频日产量提升至 36 万+。\n   - **成本效益分析**：按日均 4 万产量估算，每日可节省成本约 **2876 元**。\n\n### 三、图生视频进展 @李鑫@王凯茜@张西蒙 (新增章节)\n*注：根据最新会议议程调整，将原“产品功能”与部分新议题整合或独立为图生视频专项讨论。*\n1. **选品策略规划（存量内容提质提效）**\n   - **现状分析**：在 9 万授权商家及资源有限的情况下，如何提升条均 GMV。\n     - **核心问题**：人为规则强拍导致低效商家（曝光为 0）和素材持续生产；高效商家选品量级不足且存在重复选品。候选池内新品/新商家未覆盖，被选择商品多来自有动销品。\n   - **规划目标**：解决选不准、覆盖率低的问题，优化 quota 分配机制。\n2. **一键商详能力与功能架构设计（刘俊涵）**\n   - **任务入口创建及业务接入层设计**。 \n3. **智能选品冷启追爆机制（王柯杰）**\n   - 灵机 Agent 二期联调进度正常推进中，重点开发此机制。\n4. **通用视频素材库方案**\n   - 基于规则与 LLM 的通用视频素材库设计方案已完成梳理。 \n\n### 四、一键商详能力 @王凯茜 (新增章节)\n*注：根据最新会议议程调整，将原“产品功能”中的部分独立议题单独列出或合并至图生视频进展中（此处保留为独立小节以清晰展示新重点）。*\n1. **商品文案生成与填充**\n   - 推进自动化文",
+          "score": 0.020805207328833175,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 116,
+          "document_id": 116,
+          "app_name": null,
+          "win_title": null,
+          "url": "https://docs.corp.kuaishou.com/d/home/fcADwrgzZADJvmjK7gCpxTs5v",
+          "source_url": "https://docs.corp.kuaishou.com/d/home/fcADwrgzZADJvmjK7gCpxTs5v",
+          "title": "灵机专项双日会 - 云文档",
+          "doc_type": "会议纪要",
+          "time": 1785050876673,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "新增图生视频模型幻觉问题详解（动作/保真）、Agent 交互具体验证方案及 Loop 数字员工形态设计，并补充了法务合规待办清单。",
+          "overview": "新增图生视频模型幻觉问题详解（动作/保真）、Agent 交互具体验证方案及 Loop 数字员工形态设计，并补充了法务合规待办清单。",
+          "category": "会议纪要",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "760",
+            "762",
+            "761",
+            "1185",
+            "1189"
+          ],
+          "linked_knowledge_ids": [
+            "329",
+            "331",
+            "332",
+            "660",
+            "664"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:277",
+          "text": "文档：灵机 OKR 对齐 -26 年 (快手电商 AIGC 内容经营平台)\n类型：会议纪要\n摘要：明确快手灵机 Q3 北极星指标（日均 GMV100w+、发布量50w/日）及四大方向 OKR，含组织分工与合规治理方案。\nURL：https://docs.corp.kuaishou.com/d/home/fcAAK1Q75X74ckGmQFD7Ld7lB\n正文：# 灵机 OKR 对齐 -26 年\n## C3 可评论 | 李鑫更新于7月20日 21:23\n\n### 一、基于 KO 的北极星指标和分工拆解\n#### 1. 立项目标\n**「灵机」| 快手电商 AIGC 内容经营平台 - 立项文档**\n- **用户目标**：商家可以围绕一个商品，低成本完成内容创作（视频、文案、图片）、商品挂车和一键发布，用户对灵机有品牌心智。\n- **业务目标 (H2)**:\n    - ●使用规模：平台日均使用商家数10w+，其中图生视频目标5w+\n    - ●内容规模：AIGC 内容发布量50w/日，商品图能力完成建设并初步跑通\n    - ●交易规模：AIGC 生成式视频内容贡献 Q3 做到 GMV 100万+/日均，年底300万 /日均成本目标模型 ROI：单条内容生成成本、模型调用成本和综合ROI打正\n#### 2. 组织阵型和分工\n灵机平台需要大横向产运 cover，中台架构按照业务纵向做工思路。\n具体方向核心分工 Q3 人力分配以业务视角拆纵向中台:\n- **视频方向**\n    - 1、能力建设：优化图生视频 Agent 和 workflow\n    - 2、商家拓展：与行业合作、灵顺协同，拓展商家\n    - 3、质量迭代：视频相关横向需求承接与赋能\n    - *负责人*：李鑫, 郑媛元 (agent), 王凯茜-选品（0.5人力）, 张西蒙-生产链路中台\n- **商品方向**\n    - 1、能力建设：商品图/商品套图、一键上架、商详优化、商品图填充；2、需求承接：承接商城、C 端商品 AIGC 等商品场景需求；3、组件沉淀：沉淀商品图、商详填充等组件\n    - *负责人*：王凯茜（0.5）-从0到1搭建中台\n- **直播方向**\n    - 1、能力迭代：直播切片、直播高光识别、短直联动、直播预热/复盘素材生成；2、外部价值探索：包括与直播的联动和内循环协同\n    - *负责人*：王凯茜-cover\n- **平台产品 (大横向)**\n    - 1、负责灵机对外平台整体的设计和建设，并优化灵机小二版的设计，并实现前后台贯通\n    - 2、统一任务流、素材和数据资产\n    - 3、与内循环等部门的跨场域协作机制\n    - *负责人*：赵婷婷, 李鑫, 郑媛元 (agent)\n- **平台产运**\n    - 1、负责与行业、小二的内部对接\n    - 2、灵机内外平台的推广和政策设计\n    - *负责人*：郑佳仪（实习生）-横向对接（合规），左智-政策 + 模型评估机制\n#### 3. 评测机制\n- **平台级治理**\n    - 1、建设标准化的模型评测和准入体系\n    - 2、沉淀追踪问题、归因、和修复结果的 Bad Case 库\n    *负责人*：左智\n### 二、Q3目标拆解和 OKR\n##",
+          "score": 0.018945068664169788,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 277,
+          "document_id": 277,
+          "app_name": null,
+          "win_title": null,
+          "url": "https://docs.corp.kuaishou.com/d/home/fcAAK1Q75X74ckGmQFD7Ld7lB",
+          "source_url": "https://docs.corp.kuaishou.com/d/home/fcAAK1Q75X74ckGmQFD7Ld7lB",
+          "title": "灵机 OKR 对齐 -26 年 (快手电商 AIGC 内容经营平台)",
+          "doc_type": "会议纪要",
+          "time": 1784803239419,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "明确快手灵机 Q3 北极星指标（日均 GMV100w+、发布量50w/日）及四大方向 OKR，含组织分工与合规治理方案。",
+          "overview": "明确快手灵机 Q3 北极星指标（日均 GMV100w+、发布量50w/日）及四大方向 OKR，含组织分工与合规治理方案。",
+          "category": "会议纪要",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "1177"
+          ],
+          "linked_knowledge_ids": [
+            "655"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:296",
+          "text": "文档：渠道大会 - 灵机部分的物料需求清单\n类型：会议纪要/资料参考\n摘要：新增关于系统原理图素材的具体补充链路要求，明确需按‘商品输入到反哺生成策略’的闭环逻辑完善真实模块名称。\n正文：# 渠道大会 - 灵机部分的物料\n## Q+A：第一页：流量团队如何从分发机制视角做⋯\n**请提供：**\n1. **灵机在流量团队视角下的定位说明**\n   *   核心目标是什么？\n   *   和 B 端/普通 AIGC 商品成片工具的区别是…\n   *   为什么说灵机是以“获取流量”为目标的内容生.\n2. **灵机和内容分发机制的关系**\n   *   推荐/分发系统如何理解商品视频？\n   *   哪些内容要素会影响视频获取流量？\n3. **灵机在生成时如何针对这些要素做设计？**\n4. **商品变成内容资产的完整链路**\n   *   输入什么商品信息？\n   *   如何理解商品卖点、人群、场景？\n5. **如何生成脚本、分镜、口播、字幕、视频？**\n6. **生成后如何进入投放/素材库/数据反馈？**\n\n## Q+A：第二页：微改 vs 灵机生成式视频＋爆款。\n**第三页：灵机在哪里用，UI 是什么样**\n\n### 正文要求规范*Arial•19.5*\n*   **插入、五**（推测为操作指令）\n    *   渠道大会 - 灵×众：Q+A\n    *   At 助手 • 我&李鑫0王柯杰 Q蔡一超Q\n\n### 修改逻辑说明\n现在的讲述逻辑是灵机系统是怎么把一个商品变成一套内容资产。\n需要调整成，流量团队是如何从**流量获取、内容分发、内容理解视角**，来做灵机（vsB 端做灵机的区别就在于以获取流\n量为目的），所以要重展示如何跟内容分发机制相关联，做出这样的设计。\n\n- **第三页：系统原理图素材**\n  *   **任务描述**：请按以下链路补充真实模块名称和实际情况。\n  *   **完整链路要求**：`商品输入 → 商品理解 → 内容策略 → 视频生成 → 内容资产 - 流量反馈 → 反哺生成策略`\n\n---\n\n### 修改逻辑说明（新增/修正部分）\n*   **当前讲述逻辑问题**：现有描述仅侧重于‘灵机系统如何把一个商品变成一套内容资产’。\n*   **调整方向**：需调整为从**流量获取、内容分发、内容理解视角**阐述灵机的运作机制。\n    *   核心区别点（vs B 端）：强调灵机是以'**获取流量**'为目标的生成系统。\n    *   展示重点：必须重新展示如何与**内容分发机制**相关联，并据此做出相应的设计决策。",
+          "score": 0.018838416612589226,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 296,
+          "document_id": 296,
+          "app_name": null,
+          "win_title": null,
+          "url": null,
+          "source_url": null,
+          "title": "渠道大会 - 灵机部分的物料需求清单",
+          "doc_type": "会议纪要/资料参考",
+          "time": 1785052024590,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "新增关于系统原理图素材的具体补充链路要求，明确需按‘商品输入到反哺生成策略’的闭环逻辑完善真实模块名称。",
+          "overview": "新增关于系统原理图素材的具体补充链路要求，明确需按‘商品输入到反哺生成策略’的闭环逻辑完善真实模块名称。",
+          "category": "会议纪要/资料参考",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "1225"
+          ],
+          "linked_knowledge_ids": [
+            "687"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:299",
+          "text": "文档：渠道大会 - 灵机物料说明\n类型：资料参考\n摘要：新增第三页关于‘灵机在哪里用’的具体使用场景清单，并补充了第二页中爆款复制与微改对比的展示形式及数据验证要求。\n正文：# 渠道大会 - 灵机物料说明\n## 第一页：流量团队如何从分发机制视角做...\n### 1. 定位与区别\n*   **核心目标**：为什么说灵机是以“获取流量”为目标的内容生成？\n*   **关系定义**：灵机和内容分发机制的关系是什么？推荐/分发系统如何理解商品视频？哪些内容要素会影响视频获取流量？\n*   **设计策略**：灵机在生成时如何针对这些要素做设计？\n\n### 2. B端与普通 AIGC工具的区别\n*   和B端/普通AIGC商品成片工具的区别是什么？\n*   为什么说灵机不是简单换皮，而是更有机会获取流量？\n\n## 第二页：微改 vs 生成式视频 + 爆款...\n### 1. 差异说明\n*   **微改主要改了什么？**\n*   **灵机生成主要重构了什么？**\n*   **为什么灵机生成不是简单换皮？**\n*   **为什么它更有机会获取流量？**\n\n## 第三页：商品变成内容资产的完整链路\n1.  **输入什么商品信息？**\n2.  **���何理解商品卖点、人群、场景？**\n3.  **如何生成脚本、分镜、口播、字幕、视频？**\n4.  **生成后如何进入投放/素材库/数据反馈？**\n\n# 第三页：灵机在哪里用\n## UI 呈现形式\n*   **视频生成 & 图片生成能力全景**\n    *   展现同一个视频的两种不同来源/处理方式。\n    *   Demo A: 使用微改工具生成的视频（展示高度重复问题）。\n    *   Demo B: 使用灵机生成式视频生成的视频。\n*   **爆款复制流程解析**\n    *   主题：讲清微改与我们的生成有什么区别，获取流量能力更强。\n    *   内容结构：①用微改改出的视频 demo；②用生成改出的视频 demo；③为什么生成更能获取流量的文字介绍；④两个视频获取流量的对比数据。\n\n## 灵机当前使用场景清单\n*   **商品成片**\n*   **爆款复制**（针对已有高流量内容进行复刻）\n*   **新商品冷启动**（帮助新品快速获得初始曝光）\n*   **老素材再生产**（对存量优质视频进行二次创作以延长生命周期）\n*   **类目批量生成**（支持大规模、标准化的内容产出）\n*   **大促/活动素材生产**（针对特定营销节点的高效物料制作）",
+          "score": 0.0184048178613396,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 299,
+          "document_id": 299,
+          "app_name": null,
+          "win_title": null,
+          "url": null,
+          "source_url": null,
+          "title": "渠道大会 - 灵机物料说明",
+          "doc_type": "资料参考",
+          "time": 1785052412482,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "新增第三页关于‘灵机在哪里用’的具体使用场景清单，并补充了第二页中爆款复制与微改对比的展示形式及数据验证要求。",
+          "overview": "新增第三页关于‘灵机在哪里用’的具体使用场景清单，并补充了第二页中爆款复制与微改对比的展示形式及数据验证要求。",
+          "category": "资料参考",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "1228"
+          ],
+          "linked_knowledge_ids": [
+            "690"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document_url:https://docs.corp.kuaishou.com/d/home/fcACZF-5CMqsOvghsfOq-1pBz",
+          "text": "文档：AIGC人员名单整理\n类型：资料参考\n摘要：新增谢欣然负责行业剧本创作，补充石山在热点复刻中的具体分工及模型表现细节（商业模型可行但 tianmu-video 不可行），并修正机审后台负责人信息。\nURL：https://docs.corp.kuaishou.com/d/home/fcACZF-5CMqsOvghsfOq-1pBz\n正文：# AIGC 项目人力投入\n## 1. AI基座-Agent模型配置\n### Agent层 -对话式AIGC生成\n- **负责人**: 曾子涵、林兆龙、王琦 (占比0.3)\n- **技术现状分析**: 与竞品 Flova 相比，当前在对话式生成及 Workflow 编排方面的智能化程度差距较大，需加强建设。\n### Agent层-workflow编排\n- **负责人**: 张振忠 (占比0.5)、王柯杰\n- **备注**: 原文档仅提及王柯杰，新内容确认了张振忠的加入及其投入比例。\n### Agent层 -剧本库/选品工作\n- **负责人**: 饶星、郝景运\n- **职责补充**: 涉及灵机智能选品的部分逻辑梳理（注：具体选品功能由徐益顺和彭海芮承担，此处主要指Agent层的剧本生成与配置）。\n## 2. 前台业务团队与服务端缺口\n### 短视频团队 (8人)\n- **负责人**: 弯勇辉\n- **涉及模块**: 商品视频生成、图片生成、内容信息生成、直播切片预估。\n- **服务端缺口**: 存在**两个**服务端缺口（原记录未明确具体数量）。\n### AI基座-Agent模型配置 (14人)\n*(注：此处主要指Agent层建设，详见第3节详细分工)*\n## 3. 运营增长与智能选品体系\n### 灵机独立站/商家端/离线托管\n- **前台 - 灵机独立站**: \n    - *负责人*: 弯勇辉 (已合并至短视频团队)\n- **前台 - 灵机商家端 **(PC&移动): \n    - *负责人*: 杨亚民\n    - *服务端缺口*: 存在**一个**服务端缺口。\n- **前台 - 离线托管**: \n    - *负责人*: 朱欢欢 (占比0.5)、吕松\n### 智能选品与热点追爆\n- **灵机智能选品功能**: \n    - *负责人*: 徐益顺、彭海芮 (占比0.5)\n- **热点视频追爆任务**: \n    - *负责人*: 朱欢欢 (占比0.5)\n    - *技术现状与缺口*: 存在**一个预估缺口**。目前依赖商业模型（可灵、seedance）实现复刻效果，tianmu-video 模型表现不佳且需人工介入。行业剧本创作对比 flova，指出智能化程度差距大。\n- **爆品视频站外爬取**: \n    - *负责人*: 王占康\n### Agent层建设重点方向 (补充)\n- **对话式AIGC生成**: 曾子涵、林兆龙、王琦。因与 flova 对比智能化程度差距大，需大力投入。\n- **Workflow编排**: 张振忠（0.5）、王柯杰。\n## 4. 其他关键人员与技术分工\n### 剧本库选品工作 (Agent层) & 热点复刻\n- **负责人**: 饶星、郝景运\n- **爆品视频热点复刻**: \n    - *负责人*: 张振忠（0.5）、石",
+          "score": 71.91827379841284,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 328,
+          "document_id": 328,
+          "app_name": null,
+          "win_title": null,
+          "url": "https://docs.corp.kuaishou.com/d/home/fcACZF-5CMqsOvghsfOq-1pBz",
+          "source_url": "https://docs.corp.kuaishou.com/d/home/fcACZF-5CMqsOvghsfOq-1pBz",
+          "title": "AIGC人员名单整理",
+          "doc_type": "资料参考",
+          "time": 1785056086719,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "新增谢欣然负责行业剧本创作，补充石山在热点复刻中的具体分工及模型表现细节（商业模型可行但 tianmu-video 不可行），并修正机审后台负责人信息。",
+          "overview": "新增谢欣然负责行业剧本创作，补充石山在热点复刻中的具体分工及模型表现细节（商业模型可行但 tianmu-video 不可行），并修正机审后台负责人信息。",
+          "category": "资料参考",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "1327",
+            "1328",
+            "1332",
+            "1356"
+          ],
+          "linked_knowledge_ids": [
+            "762",
+            "764",
+            "766",
+            "786"
+          ]
+        },
+        {
+          "capture_id": 0,
+          "doc_key": "document:153",
+          "text": "文档：B 端扩量、主站风控整改及 Agent 建设会议纪要\n类型：会议纪要\n摘要：记录 B 端 Q3 API 接入计划、灵机商家版功能前置保障、Agent 灰度推进策略及主站历史 AIGC 视频重扫与风险拦截决策。\n正文：# 智能会议纪要 - 视频会议\n## 会议概览\n- **核心议题**：B 端扩量与合作模式、主站风控整改、法务与版权、答疑 Agent 建设\n- **参会人数**：34\n- **已有共识**:\n1. B 端 Q3 扩量以 API 接入现有生产能力，服饰约 5K、其他类目约 5 万，7 月先 K 级别试接入，后续再爬坡。\n2. 灵机商家版三大核心功能为直播切片、图文视频、一键上墙/商详。其中一键商详需作为独立商家工具能力前置保障，并在小二版迁入商详工作流做底线任务和调试。\n3. Agent 上线前先兜住涉政涉黄与严重猎奇，通过内部集中测试分级问题，按“本周白名单、下周尾号小比例放量”的灰度节奏推进。\n4. 主站历史 AIGC 视频用更大尺寸模型全量重扫，男女裸露样本均覆盖，并以典型问题视频回测当前主站风控模型拦截能力。\n## 下一步计划\n1. **细浪与 B 端团队**：对齐 API 接入架构及“组件接入/模型计费”两种合作模式，明确授权与生产策略分工及预算。\n2. **刘卓与笑威确认问题暴露后新发视频是否仍有裸露风险**，并于周三至周四完成历史色情内容重扫结论。\n3. **法务继续推进 Agent 监管备案与版权确认**。产品侧和开发推进主站风控接口及答疑 Agent 开发落地。",
+          "score": 115.75482139523852,
+          "source": "document",
+          "source_type": "document",
+          "knowledge_id": null,
+          "artifact_id": 153,
+          "document_id": 153,
+          "app_name": null,
+          "win_title": null,
+          "url": null,
+          "source_url": null,
+          "title": "B 端扩量、主站风控整改及 Agent 建设会议纪要",
+          "doc_type": "会议纪要",
+          "time": 1784001494991,
+          "observed_at": null,
+          "event_time_start": null,
+          "event_time_end": null,
+          "start_time": null,
+          "end_time": null,
+          "summary": "记录 B 端 Q3 API 接入计划、灵机商家版功能前置保障、Agent 灰度推进策略及主站历史 AIGC 视频重扫与风险拦截决策。",
+          "overview": "记录 B 端 Q3 API 接入计划、灵机商家版功能前置保障、Agent 灰度推进策略及主站历史 AIGC 视频重扫与风险拦截决策。",
+          "category": "会议纪要",
+          "activity_type": null,
+          "content_origin": null,
+          "history_view": null,
+          "evidence_strength": null,
+          "importance": null,
+          "source_timeline_ids": [
+            "944"
+          ],
+          "linked_knowledge_ids": [
+            "413"
+          ]
+        }
+      ],
+      "model": "mbem-v1-local",
+      "done_reason": "stop",
+      "output_truncated": false,
+      "elapsed_ms": 79421,
+      "inference_elapsed_ms": 27136
+    }
+  ]
+}

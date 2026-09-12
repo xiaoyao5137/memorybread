@@ -36,6 +36,9 @@ process_executable() {
         105)
             printf '%s\n' "/Applications/记忆面包.app/Contents/MacOS/memory-bread-core"
             ;;
+        106)
+            printf '%s\n' "/Users/test/Library/Application Support/com.memory-bread.app/runtime/.memory-bread/initialization/runtime/ollama/v0.30.8/runtime/ollama"
+            ;;
         103|104)
             printf '%s\n' "/tmp/unrelated-service"
             ;;
@@ -45,6 +48,7 @@ process_executable() {
 pid_belongs_to_packaged_app 101
 pid_is_desktop_app 102
 pid_belongs_to_packaged_app 105
+pid_belongs_to_managed_ollama 106
 pid_belongs_to_memorybread 103
 
 if pid_belongs_to_memorybread 104; then

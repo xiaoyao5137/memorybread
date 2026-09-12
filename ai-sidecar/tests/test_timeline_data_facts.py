@@ -19,6 +19,12 @@ from knowledge.extractor_v2 import (
 SOURCE_TEXT = "其中11%的场景（如生服模特库在电商AIGC中的复用）已成功合并，节省约6.28万成本"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_data_fact_usage_logs(monkeypatch):
+    """补提炼现在有独立用量统计；回归不得向真实用户库写测试统计。"""
+    monkeypatch.setattr("monitor.llm_tracker.log_llm_usage", lambda **kwargs: None)
+
+
 def _valid_fact():
     return {
         "title": "生服模特库在电商AIGC中复用的成本节省金额",

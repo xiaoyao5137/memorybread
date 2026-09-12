@@ -1,0 +1,21 @@
+{
+  "verified_at": "2026-09-08T03:04:50.639801+00:00",
+  "url": "http://localhost:1420/",
+  "scope": "Read-only reopening of the existing dedicated acceptance conversation after managed service reload; no generation, editing, retry or new message was submitted.",
+  "session_suffix": "4ccc95d8",
+  "expected_history_id_from_prior_acceptance": 149,
+  "observed": {
+    "title": "创作验收样例",
+    "time": "周三下午",
+    "place": "三楼会议室",
+    "topic": "讨论项目进展",
+    "participants": "项目组全体成员",
+    "user_messages": 3,
+    "assistant_messages": 3,
+    "execution_traces": 3,
+    "last_answer": "会议时间：周三下午\n会议地点：三楼会议室",
+    "input_empty": true,
+    "submit_disabled": true
+  },
+  "evidence_method": "CUA accessibility tree of the selected dedicated conversation. Visible text and restored message/trace counts verified; no claim of a new model run or byte-level database comparison."
+}

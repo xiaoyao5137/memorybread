@@ -1,13 +1,15 @@
 import { strToU8, zipSync } from 'fflate'
-import { serviceEnvironmentHeaders } from '../store/useAppStore'
+import { invoke } from '@tauri-apps/api/core'
+import { serviceEnvironmentHeaders, useAppStore } from '../store/useAppStore'
 import type { DebugLogContent, DebugLogFile } from '../types'
 import type { AppMetadata } from './appMetadata'
+import { getLocalServiceBaseUrl } from './localServices'
 
 const INSTALLATION_ID_KEY = 'memory-bread_customer-log-installation-id'
 const MAX_ARCHIVE_BYTES = 10 * 1024 * 1024
 const MAX_LOG_FILES = 8
-const DEFAULT_CORE_API = 'http://127.0.0.1:7070'
-const DEFAULT_SIDECAR_API = 'http://127.0.0.1:7071'
+const DEFAULT_CORE_API = getLocalServiceBaseUrl('core')
+const DEFAULT_SIDECAR_API = getLocalServiceBaseUrl('model_api')
 
 interface DebugLogFilesResponse {
   items: DebugLogFile[]
@@ -144,6 +146,60 @@ const collectArchive = async (
   throw lastError instanceof Error ? lastError : new Error('当前没有可上报的诊断日志')
 }
 
+const bytesToBase64 = (value: Uint8Array): string => {
+  const chunkSize = 0x8000
+  let binary = ''
+  for (let offset = 0; offset < value.length; offset += chunkSize) {
+    binary += String.fromCharCode(...value.subarray(offset, offset + chunkSize))
+  }
+  return btoa(binary)
+}
+
+const diagnosticFetch = async (stage: string, url: string, init: RequestInit): Promise<Response> => {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 60000)
+  try { return await fetch(url, { ...init, signal: controller.signal }) }
+  catch { throw new Error(`${stage}失败，请检查网络后重试（日志待补传）`) }
+  finally { clearTimeout(timer) }
+}
+
+const uploadArchive = async (prepared: PreparedUpload, archive: Uint8Array): Promise<void> => {
+  const tauriInternals = (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
+  if (tauriInternals) {
+    try {
+      await invoke('upload_customer_log_archive', {
+        uploadUrl: prepared.upload_url,
+        requiredHeaders: prepared.required_headers,
+        contentBase64: bytesToBase64(archive),
+      })
+    } catch (cause) {
+      throw new Error(typeof cause === 'string' && cause.trim()
+        ? cause
+        : '诊断日志上传失败，请检查网络后重试')
+    }
+    return
+  }
+  if (import.meta.env.DEV) {
+    const response = await diagnosticFetch('传输日志附件', '/__memorybread/diagnostics/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        uploadUrl: prepared.upload_url,
+        requiredHeaders: prepared.required_headers,
+        contentBase64: bytesToBase64(archive),
+      }),
+    })
+    if (!response.ok) throw await readApiError(response, '诊断日志上传失败，请检查网络后重试')
+    return
+  }
+  const response = await diagnosticFetch('传输日志附件', prepared.upload_url, {
+    method: 'PUT',
+    headers: prepared.required_headers,
+    body: new Blob([archive.slice().buffer], { type: 'application/zip' }),
+  })
+  if (!response.ok) throw new Error('诊断日志上传失败，请检查网络后重试')
+}
+
 export const reportCustomerLogs = async ({
   adminApiBaseUrl,
   localApiBaseUrl,
@@ -168,7 +224,14 @@ export const reportCustomerLogs = async ({
     metadata,
   )
   const checksum = await sha256Hex(archive)
-  const resolvedInstallationId = installationId || getCustomerLogInstallationId()
+  const pendingKey = `memorybread.pending-initialization-log:${useAppStore.getState().serviceEnvironment}:${adminApiBaseUrl}`
+  let pending: { reportId: string; installationId: string } | null = null
+  try {
+    const saved = JSON.parse(localStorage.getItem(pendingKey) || 'null')
+    if (saved && typeof saved.reportId === 'string' && typeof saved.installationId === 'string') pending = saved
+  } catch { /* Storage is optional. */ }
+  const resolvedReportId = initializationReportId || pending?.reportId || null
+  const resolvedInstallationId = installationId || pending?.installationId || getCustomerLogInstallationId()
   const fileName = `memorybread-diagnostics-${new Date().toISOString().slice(0, 10)}.zip`
   const safeDescription = description?.trim()
     ? scrubDiagnosticLog(description.trim()).slice(0, 500)
@@ -182,7 +245,7 @@ export const reportCustomerLogs = async ({
     platform: metadata.platform,
     architecture: normalizedArchitecture(metadata.architecture),
     description: safeDescription,
-    initialization_report_id: initializationReportId || null,
+    initialization_report_id: resolvedReportId,
   }
   const headers: Record<string, string> = {
     ...serviceEnvironmentHeaders(),
@@ -190,21 +253,16 @@ export const reportCustomerLogs = async ({
   }
   if (authToken) headers.Authorization = `Bearer ${authToken}`
 
-  const prepareResponse = await fetch(`${adminApiBaseUrl}/v1/customer-logs/upload-url`, {
+  const prepareResponse = await diagnosticFetch('准备日志上传', `${adminApiBaseUrl}/v1/customer-logs/upload-url`, {
     method: 'POST',
     headers,
     body: JSON.stringify(common),
   })
   if (!prepareResponse.ok) throw await readApiError(prepareResponse, '无法准备日志上报')
   const prepared = (await prepareResponse.json() as ApiEnvelope<PreparedUpload>).data
-  const uploadResponse = await fetch(prepared.upload_url, {
-    method: 'PUT',
-    headers: prepared.required_headers,
-    body: new Blob([archive.slice().buffer], { type: 'application/zip' }),
-  })
-  if (!uploadResponse.ok) throw new Error('诊断日志上传失败，请检查网络后重试')
+  await uploadArchive(prepared, archive)
 
-  const completeResponse = await fetch(`${adminApiBaseUrl}/v1/customer-logs`, {
+  const completeResponse = await diagnosticFetch('确认日志上传', `${adminApiBaseUrl}/v1/customer-logs`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -214,5 +272,10 @@ export const reportCustomerLogs = async ({
     }),
   })
   if (!completeResponse.ok) throw await readApiError(completeResponse, '日志上报确认失败')
-  return (await completeResponse.json() as ApiEnvelope<CustomerLogReceipt>).data
+  const receipt = (await completeResponse.json() as ApiEnvelope<CustomerLogReceipt>).data
+  if (!receipt?.log_id) throw new Error('日志上传确认回执无效，请重试')
+  if (pending?.reportId === resolvedReportId) {
+    try { localStorage.removeItem(pendingKey) } catch { /* The successful receipt is still returned. */ }
+  }
+  return receipt
 }

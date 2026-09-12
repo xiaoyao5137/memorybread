@@ -1,0 +1,41 @@
+[
+  {
+    "total_duration": 2237811167,
+    "load_duration": 194346833,
+    "prompt_eval_count": 101,
+    "prompt_eval_duration": 59860000,
+    "eval_count": 102,
+    "eval_duration": 1943113000,
+    "done_reason": "stop",
+    "run": 0,
+    "wall_s": 2.2566992077045143,
+    "ttft_s": 0.31302983267232776,
+    "unattributed_s": 0.040491334
+  },
+  {
+    "total_duration": 2336350292,
+    "load_duration": 198149708,
+    "prompt_eval_count": 101,
+    "prompt_eval_duration": 52582000,
+    "eval_count": 102,
+    "eval_duration": 2083663000,
+    "done_reason": "stop",
+    "run": 1,
+    "wall_s": 2.338768833782524,
+    "ttft_s": 0.25444408413022757,
+    "unattributed_s": 0.001955584
+  },
+  {
+    "total_duration": 2493141625,
+    "load_duration": 215382084,
+    "prompt_eval_count": 101,
+    "prompt_eval_duration": 59272000,
+    "eval_count": 102,
+    "eval_duration": 2216365000,
+    "done_reason": "stop",
+    "run": 2,
+    "wall_s": 2.4948387080803514,
+    "ttft_s": 0.2774947080761194,
+    "unattributed_s": 0.002122541
+  }
+]

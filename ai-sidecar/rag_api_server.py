@@ -132,12 +132,14 @@ def rag_query():
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
+    from runtime_endpoints import service_bind
+    bind_host, bind_port = service_bind("model_api")
     logger.info("启动 RAG 查询服务")
-    logger.info("监听地址: http://127.0.0.1:7071")
+    logger.info("监听地址: http://%s:%s", bind_host, bind_port)
 
     # 预加载 RAG pipeline（避免首次查询超时）
     logger.info("预加载 RAG pipeline...")
     get_rag_pipeline()
     logger.info("RAG pipeline 预加载完成")
 
-    app.run(host='127.0.0.1', port=7071, debug=False, threaded=True)
+    app.run(host=bind_host, port=bind_port, debug=False, threaded=True)

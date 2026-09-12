@@ -1,0 +1,106 @@
+{
+  "label": "gguf-16k",
+  "runtime": "old-runtime",
+  "model": "qwen3.5:4b",
+  "ctx": 16384,
+  "server_idle": {
+    "t": 8.667696833,
+    "rss": 32112640,
+    "footprint": 16826992,
+    "processes": [
+      {
+        "pid": 22854,
+        "rss": 32112640,
+        "footprint": 16826992
+      }
+    ]
+  },
+  "loaded_short": {
+    "t": 12.814083083,
+    "rss": 5678678016,
+    "footprint": 4974810536,
+    "processes": [
+      {
+        "pid": 22854,
+        "rss": 75300864,
+        "footprint": 51446408
+      },
+      {
+        "pid": 23322,
+        "rss": 5603377152,
+        "footprint": 4923364128
+      }
+    ]
+  },
+  "load_peak": {
+    "rss": {
+      "peak_gib": 5.2886810302734375,
+      "last_gib": 5.2886810302734375,
+      "median_gib": 0.77850341796875
+    },
+    "footprint": {
+      "peak_gib": 4.633153356611729,
+      "last_gib": 4.633153356611729,
+      "median_gib": 0.6689775958657265
+    }
+  },
+  "generation": {
+    "rss": {
+      "peak_gib": 5.578399658203125,
+      "last_gib": 5.578399658203125,
+      "median_gib": 5.578125
+    },
+    "footprint": {
+      "peak_gib": 4.874044105410576,
+      "last_gib": 4.871129743754864,
+      "median_gib": 4.870305769145489
+    }
+  },
+  "post_generation_idle_5s": {
+    "rss": {
+      "peak_gib": 5.5785064697265625,
+      "last_gib": 5.5785064697265625,
+      "median_gib": 5.5785064697265625
+    },
+    "footprint": {
+      "peak_gib": 4.871251814067364,
+      "last_gib": 4.781423322856426,
+      "median_gib": 4.781423322856426
+    }
+  },
+  "after_unload": {
+    "t": 72.350159833,
+    "rss": 76840960,
+    "footprint": 57033400,
+    "processes": [
+      {
+        "pid": 22854,
+        "rss": 76840960,
+        "footprint": 57033400
+      }
+    ]
+  },
+  "ollama_ps": {
+    "models": [
+      {
+        "name": "qwen3.5:4b",
+        "model": "qwen3.5:4b",
+        "size": 3735468112,
+        "digest": "2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd",
+        "details": {
+          "parent_model": "",
+          "format": "gguf",
+          "family": "qwen35",
+          "families": [
+            "qwen35"
+          ],
+          "parameter_size": "4.7B",
+          "quantization_level": "Q4_K_M"
+        },
+        "expires_at": "2026-09-05T14:57:46.760091+08:00",
+        "size_vram": 3735468112,
+        "context_length": 16384
+      }
+    ]
+  }
+}

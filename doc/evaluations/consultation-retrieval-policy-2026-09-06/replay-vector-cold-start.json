@@ -1,0 +1,28 @@
+{
+  "seconds": 14.13,
+  "events": [
+    {
+      "type": "status",
+      "stage": "queued",
+      "message": "咨询任务已接收",
+      "progress": 18
+    },
+    {
+      "type": "status",
+      "stage": "understanding",
+      "message": "正在理解当前问题",
+      "progress": 28
+    },
+    {
+      "type": "status",
+      "stage": "retrieving",
+      "message": "正在召回相关资料",
+      "progress": 42
+    },
+    {
+      "type": "error",
+      "code": "RAG_STREAM_FAILED",
+      "message": "咨询生成失败，请稍后重试"
+    }
+  ]
+}

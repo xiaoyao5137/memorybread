@@ -146,6 +146,10 @@ pub async fn update_preference(
     if key.is_empty() {
         return Err(ApiError::BadRequest("key 不能为空".into()));
     }
+    if key == crate::services::document_refresh::DOCUMENT_REFRESH_CONFIG_KEY {
+        crate::services::document_refresh::DocumentRefreshConfig::parse(&body.value)
+            .map_err(ApiError::BadRequest)?;
+    }
     let capture_interval = if key == "privacy.capture_interval_sec" {
         let value = body
             .value

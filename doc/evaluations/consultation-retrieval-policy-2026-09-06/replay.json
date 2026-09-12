@@ -1,0 +1,22 @@
+{
+  "seconds": 5.67,
+  "events": [
+    {
+      "type": "status",
+      "stage": "queued",
+      "message": "å¨è¯¢ä»»å¡å·²æ¥æ¶",
+      "progress": 18
+    },
+    {
+      "type": "status",
+      "stage": "understanding",
+      "message": "æ­£å¨çè§£å½åé®é¢",
+      "progress": 28
+    },
+    {
+      "code": "UPSTREAM_STREAM_ERROR",
+      "message": "å¨è¯¢æµå¼è¿æ¥ä¸­æ­ï¼è¯·éè¯",
+      "type": "error"
+    }
+  ]
+}

@@ -129,12 +129,17 @@ def _parse_args() -> argparse.Namespace:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _start_vector_search_server() -> None:
-    """在 daemon 线程中启动内部向量搜索 HTTP 服务（端口 7072）。"""
+    """在 daemon 线程中启动内部向量搜索 HTTP 服务。"""
+    from runtime_endpoints import service_bind
+
+    bind_host, bind_port = service_bind("vector_search")
     try:
         from flask import Flask, jsonify, request as flask_request
         from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue, Range
 
         _vs_app = Flask("vector_search_internal")
+        from local_auth import install_flask_guard
+        install_flask_guard(_vs_app)
         logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
         def build_qdrant_filter(raw_filters: Optional[dict]):
@@ -240,8 +245,16 @@ def _start_vector_search_server() -> None:
             snapshot["running"] = True
             return jsonify(snapshot)
 
-        logging.getLogger(__name__).info("内部向量搜索服务已启动 (port 7072)")
-        _vs_app.run(host='127.0.0.1', port=7072, debug=False, threaded=True, use_reloader=False)
+        logging.getLogger(__name__).info(
+            "内部向量搜索服务已启动 (%s:%s)", bind_host, bind_port
+        )
+        _vs_app.run(
+            host=bind_host,
+            port=bind_port,
+            debug=False,
+            threaded=True,
+            use_reloader=False,
+        )
     except Exception as e:
         logging.getLogger(__name__).warning("内部向量搜索服务启动失败（不影响主服务）: %s", e)
 
@@ -286,6 +299,9 @@ async def _run_main(args: argparse.Namespace) -> None:
     runtime_state["dispatch"] = limited_dispatch
 
     async def dispatch_proxy(req):
+        if req.task.type == "interactive_ocr_activity":
+            ocr_worker.activity(req.task)
+            return IpcResponse.make_ok(req.id, PingResult(), 0)
         dispatch_fn = runtime_state["dispatch"]
         return await dispatch_fn(req)
 

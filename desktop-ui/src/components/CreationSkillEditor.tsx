@@ -35,6 +35,10 @@ interface SkillForm {
   problems: string
   domains: string
   deliverables: string
+  useWhen: string
+  notFor: string
+  requiredInputs: string
+  outputStructure: string
   executionSteps: Array<{
     id: string
     title: string
@@ -42,6 +46,7 @@ interface SkillForm {
     agents: string[]
     skills: string[]
     tools: string[]
+    outputRole?: 'process' | 'section' | 'document'
     retainWebpageScreenshot: boolean
   }>
   categoryId: string
@@ -76,6 +81,10 @@ const emptyForm: SkillForm = {
   problems: '',
   domains: '',
   deliverables: '',
+  useWhen: '',
+  notFor: '',
+  requiredInputs: '',
+  outputStructure: '',
   executionSteps: [],
   categoryId: '',
   commonTitles: '',
@@ -128,10 +137,15 @@ const toForm = (skill: LocalCreationSkill): SkillForm => ({
   problems: skill.skillDescription.problems.join('\n'),
   domains: skill.skillDescription.domains.join('\n'),
   deliverables: skill.skillDescription.deliverables.join('\n'),
+  useWhen: (skill.skillDescription.applicability?.use_when || []).join('\n'),
+  notFor: (skill.skillDescription.applicability?.not_for || []).join('\n'),
+  requiredInputs: (skill.skillDescription.applicability?.required_inputs || []).join('\n'),
+  outputStructure: (skill.skillDescription.applicability?.output_structure || []).join('\n'),
   executionSteps: skill.executionSteps.map(step => withResourceMentions({
     id: step.id,
     title: step.title,
     objective: mergeStepAction(step.objective, step.output),
+    outputRole: step.outputRole,
     agents: [...step.agents],
     skills: [...step.skills],
     tools: [...step.tools],
@@ -169,10 +183,15 @@ const analysisToForm = (analysis: CreationSkillAnalysis): SkillForm => ({
   problems: analysis.skillDescription.problems.join('\n'),
   domains: analysis.skillDescription.domains.join('\n'),
   deliverables: analysis.skillDescription.deliverables.join('\n'),
+  useWhen: (analysis.skillDescription.applicability?.use_when || []).join('\n'),
+  notFor: (analysis.skillDescription.applicability?.not_for || []).join('\n'),
+  requiredInputs: (analysis.skillDescription.applicability?.required_inputs || []).join('\n'),
+  outputStructure: (analysis.skillDescription.applicability?.output_structure || []).join('\n'),
   executionSteps: analysis.executionSteps.map(step => withResourceMentions({
     id: step.id,
     title: step.title,
     objective: mergeStepAction(step.objective, step.output),
+    outputRole: step.outputRole,
     agents: [...step.agents],
     skills: [...step.skills],
     tools: [...step.tools],
@@ -1016,6 +1035,10 @@ export default function CreationSkillEditor({ source, initialSkill, onClose, onS
       summary: summaryText,
       categoryId: form.categoryId || null,
       skillDescription: {
+        ...(form.useWhen.trim() ? { applicability: { version: 1 as const,
+          use_when: lines(form.useWhen), not_for: lines(form.notFor),
+          required_inputs: lines(form.requiredInputs), output_structure: lines(form.outputStructure),
+        } } : {}),
         purpose: summaryText || form.purpose.trim(),
         documentTypes: lines(form.documentTypes).length ? lines(form.documentTypes) : [documentTypeLabel],
         problems: lines(form.problems).length ? lines(form.problems) : [summaryText.slice(0, 240)].filter(Boolean),
@@ -1028,6 +1051,7 @@ export default function CreationSkillEditor({ source, initialSkill, onClose, onS
           id: step.id.trim() || `custom-step-${index + 1}`,
           title: step.title.trim(),
           objective: step.objective.trim(),
+          ...(step.outputRole ? { outputRole: step.outputRole } : {}),
           // “执行动作”合并了目标与产出；旧协议的 output 兼容留空。
           output: '',
           agents: resources.agents,
@@ -1074,6 +1098,9 @@ export default function CreationSkillEditor({ source, initialSkill, onClose, onS
     requiresCategory: boolean,
     status: LocalCreationSkill['status'] = savedSkill?.status || 'draft',
   ) => {
+    if (!form.useWhen.trim() && [form.notFor, form.requiredInputs, form.outputStructure].some(value => value.trim())) {
+      throw new Error('填写适用范围时，请至少填写一个适用场景')
+    }
     const input = buildLocalInput(Boolean(savedSkill?.published), savedSkill?.cloudSkillId, status)
     if (!input.title.trim()) throw new Error('请填写技能标题')
     if (!input.summary.trim()) throw new Error('请填写技能简介')
@@ -1190,6 +1217,24 @@ export default function CreationSkillEditor({ source, initialSkill, onClose, onS
               <label className="creation-skill-field--wide"><span>技能简介 <small>写明能力目标与解决的问题，用于创作时召回这枚技能</small></span><textarea rows={4} value={form.summary} maxLength={400} placeholder="例如：把架构评审文档的写法沉淀为可复用规则，用于产出可评审的技术架构设计文档，解决系统边界与关键取舍不清的问题。" onChange={event => updateSummary(event.target.value)} /></label>
             </div>
 
+            <details>
+              <summary>适用范围与交付物</summary>
+              <div className="creation-skill-form-grid">
+                <label><span>交付文档类型</span><textarea rows={2} value={form.documentTypes} onChange={event => updateField('documentTypes', event.target.value)} /></label>
+                <label><span>适用领域</span><textarea rows={2} value={form.domains} onChange={event => updateField('domains', event.target.value)} /></label>
+                <label><span>交付物</span><textarea rows={2} value={form.deliverables} onChange={event => updateField('deliverables', event.target.value)} /></label>
+                <label><span>适用场景</span><textarea rows={3} value={form.useWhen} onChange={event => updateField('useWhen', event.target.value)} placeholder="每行一个场景，以用户要完成的目标为准" /></label>
+                <label><span>不适用场景</span><textarea rows={3} value={form.notFor} onChange={event => updateField('notFor', event.target.value)} /></label>
+                <label><span>必需输入</span><textarea rows={3} value={form.requiredInputs} onChange={event => updateField('requiredInputs', event.target.value)} /></label>
+                <label><span>最终文档结构</span><textarea rows={3} value={form.outputStructure} onChange={event => updateField('outputStructure', event.target.value)} placeholder="填写最终章节，不填收集资料、审校等过程步骤" /></label>
+              </div>
+            </details>
+            {savedSkill?.skillDescription.metadataReview && !savedSkill.skillDescription.metadataReview.metadata_consistent && (
+              <p role="status">适用范围待核验：{savedSkill.skillDescription.metadataReview.status === 'unreviewed'
+                ? '已保存，使用前会重新核验技能描述。'
+                : savedSkill.skillDescription.metadataReview.conflicts.join('；')}</p>
+            )}
+
             <section className="creation-skill-workflow-card">
               <div className="creation-skill-workflow-heading">
                 <div>
@@ -1250,6 +1295,11 @@ export default function CreationSkillEditor({ source, initialSkill, onClose, onS
                         {renderMentionPicker(step, index, 'objective')}
                       </div>
                     </label>
+                    <label><span>产出用途</span><select aria-label={`执行步骤 ${index + 1} 产出用途`} value={step.outputRole || ''} onChange={event => {
+                      const outputRole = event.target.value as 'process' | 'section' | 'document' | ''
+                      setForm(prev => ({ ...prev, executionSteps: prev.executionSteps.map((item, stepIndex) =>
+                        stepIndex === index ? { ...item, outputRole: outputRole || undefined } : item) }))
+                    }}><option value="">沿用现有声明</option><option value="process">过程资料</option><option value="section">文档章节</option><option value="document">完整文档</option></select></label>
                     {stepResources(step).tools.includes('data_search') && (
                       <label className="creation-skill-webpage-screenshot-option">
                         <input

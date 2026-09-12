@@ -127,6 +127,17 @@ const renderDataTab = (overrides: Partial<React.ComponentProps<typeof BakeDataTa
 }
 
 describe('BakeDataTab', () => {
+  it('完整采集内容使用共享 Markdown 展示表格', () => {
+    renderDataTab({ items: [{ ...gpuSource, latest_snapshot: {
+      ...gpuSource.latest_snapshot!,
+      content_text: '## 采集明细\n\n| 型号 | 数量 |\n| --- | ---: |\n| 示例卡型 | 720',
+    } }] })
+    fireEvent.click(screen.getByRole('button', { name: '查看数据：GPU 利用率对比' }))
+    const region = screen.getByRole('region', { name: '表格，可横向滚动' })
+    expect(within(region).getByRole('columnheader', { name: '型号' })).toBeInTheDocument()
+    expect(within(region).getByRole('cell', { name: '720' })).toBeInTheDocument()
+  })
+
   it('以完整表格展示数据，并按需打开详情抽屉', () => {
     renderDataTab()
 

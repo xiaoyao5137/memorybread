@@ -1,0 +1,169 @@
+{
+  "date": "2026-09-09",
+  "tests": {
+    "python_passed": 353,
+    "python_skipped": 1,
+    "core_api_passed": 24,
+    "core_sse_passed": 3,
+    "frontend_passed": 77,
+    "total_passed": 457,
+    "python_runtime": "3.9.25",
+    "core_sse_note": "Initial 3s upstream-admission precondition timed out twice; unchanged binary reruns passed. Exact latency source not determined."
+  },
+  "runtime": {
+    "creation_pid": 72782,
+    "health": {
+      "status": "ok"
+    },
+    "initial_final_reload_pid": 62624,
+    "started": "Wed Sep  9 01:31:15 2026"
+  },
+  "probes": [
+    {
+      "mode": "live",
+      "http_status": 200,
+      "duration_ms": 114878,
+      "stage": "implementation",
+      "option_count": 3,
+      "attempts": [],
+      "stages": [],
+      "preservation": {
+        "session_unchanged": false,
+        "original_answers_preserved": true,
+        "history_unchanged": true,
+        "revision": 23,
+        "state_sha256": "5befb1fed0059790e0f90bfe068ef263f5fcfbbd556fae98d4102f286fe43b59"
+      }
+    },
+    {
+      "mode": "quality-recovery",
+      "http_status": 200,
+      "duration_ms": 75579,
+      "stage": "implementation",
+      "option_count": 4,
+      "attempts": [
+        {
+          "attempt": 1,
+          "schema": true
+        },
+        {
+          "attempt": 2,
+          "schema": true
+        },
+        {
+          "attempt": 3,
+          "schema": true
+        }
+      ],
+      "stages": [
+        {
+          "stage": "memory_query",
+          "duration_ms": 14535,
+          "count": 6,
+          "error_type": "none"
+        },
+        {
+          "stage": "memory_query",
+          "duration_ms": 15749,
+          "count": 6,
+          "error_type": "none"
+        },
+        {
+          "stage": "memory_retrieval",
+          "duration_ms": 30284,
+          "count": 6,
+          "error_type": "none"
+        },
+        {
+          "stage": "question_generation",
+          "duration_ms": 1,
+          "count": 1,
+          "error_type": "BrainstormGenerationError"
+        },
+        {
+          "stage": "question_generation",
+          "duration_ms": 0,
+          "count": 2,
+          "error_type": "BrainstormGenerationError"
+        },
+        {
+          "stage": "question_generation",
+          "duration_ms": 28981,
+          "count": 3,
+          "error_type": "none"
+        }
+      ],
+      "preservation": {
+        "session_unchanged": false,
+        "original_answers_preserved": true,
+        "history_unchanged": true,
+        "revision": 23,
+        "state_sha256": "5befb1fed0059790e0f90bfe068ef263f5fcfbbd556fae98d4102f286fe43b59"
+      }
+    },
+    {
+      "mode": "transport-recovery",
+      "http_status": 200,
+      "duration_ms": 67876,
+      "stage": "implementation",
+      "option_count": 3,
+      "attempts": [
+        {
+          "attempt": 1,
+          "schema": true
+        },
+        {
+          "attempt": 2,
+          "schema": true
+        }
+      ],
+      "stages": [
+        {
+          "stage": "memory_query",
+          "duration_ms": 12802,
+          "count": 6,
+          "error_type": "none"
+        },
+        {
+          "stage": "memory_query",
+          "duration_ms": 15841,
+          "count": 6,
+          "error_type": "none"
+        },
+        {
+          "stage": "memory_retrieval",
+          "duration_ms": 28643,
+          "count": 6,
+          "error_type": "none"
+        },
+        {
+          "stage": "question_generation",
+          "duration_ms": 0,
+          "count": 1,
+          "error_type": "RemoteProtocolError"
+        },
+        {
+          "stage": "question_generation",
+          "duration_ms": 26655,
+          "count": 2,
+          "error_type": "none"
+        }
+      ],
+      "preservation": {
+        "session_unchanged": false,
+        "original_answers_preserved": true,
+        "history_unchanged": true,
+        "revision": 23,
+        "state_sha256": "5befb1fed0059790e0f90bfe068ef263f5fcfbbd556fae98d4102f286fe43b59"
+      }
+    }
+  ],
+  "file_sha256": {
+    "ai-sidecar/creation/brainstorm.py": "2d4f7356a09616b2bc469815001b91804b236e487b08dc6d4616f37a80b840a1",
+    "ai-sidecar/creation/app.py": "33bc4eb7d8c5257e31008253a14d788da7513452c8e5fd0e02fb2db0a064552b",
+    "ai-sidecar/tests/test_brainstorm_automatic_recovery.py": "c1ba365b25b57952a1b89ac57632b6cc2132055c04232627e13c17c6036b1b68",
+    "ai-sidecar/tests/test_brainstorm_failure_mapping.py": "68e2030fa98aff1f5b20344a6c543fcd44dd00b8d6493a3820781cf5e8e96c2f",
+    "ai-sidecar/tests/test_brainstorm_transport.py": "dddeae0d345fc8880bad8a507a9abb29e27230025c63c2cf06c7e6a6fe9bf16c"
+  },
+  "original_session_writes_by_validation": false
+}

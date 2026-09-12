@@ -1,0 +1,259 @@
+{
+  "model": "qwen3.5:4b",
+  "endpoint": "http://127.0.0.1:50256",
+  "scope": "real routing and input assessment; synthetic documents; no external retrieval",
+  "cases": [
+    {
+      "id": "full-general",
+      "instruction": "写一份通用的会议记录写作指南，只解释一般方法，不涉及具体产品或最新事实。",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "会议记录写作指南",
+            "source": "generated",
+            "evidence": "写一份通用的会议记录写作指南，只解释一般方法，不涉及具体产品或最新事实。"
+          }
+        },
+        "reasoning": "用户明确要求创作一份通用的会议记录写作指南，且限定范围仅为一般方法，不涉及具体产品或最新事实。当前上下文无现有文档或历史正文，因此需从头生成新文档。根据规则，明确需要全文创作时选择 generate 操作，并附带 document_identity 以标识文档身份。",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "一份通用的会议记录写作指南，仅阐述一般方法，不包含具体产品、技术细节或最新事实。",
+        "self_contained_reason": "本轮任务要求生成通用方法论，且明确排除了对具体产品、最新事实及私有业务数据的依赖。所有必要信息（即会议记录的一般写作方法）均属于通用知识，无需检索外部资料或依赖未提供的材料，任务完全自足。",
+        "acceptance": [
+          {
+            "id": "general_method_only",
+            "criterion": "输出内容仅包含会议记录写作的一般性方法，不包含任何具体产品名称、技术细节、业务数据或最新事实。"
+          },
+          {
+            "id": "no_external_retrieval",
+            "criterion": "未调用任何外部数据源（如私有项目背景、业务指标或公开产品事实）进行检索。"
+          }
+        ],
+        "inputs": []
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "会议记录写作指南",
+            "source": "generated",
+            "evidence": "写一份通用的会议记录写作指南，只解释一般方法，不涉及具体产品或最新事实。"
+          }
+        },
+        "reasoning": "用户明确要求创作一份通用的会议记录写作指南，且限定范围仅为一般方法，不涉及具体产品或最新事实。当前上下文无现有文档或历史正文，因此需从头生成新文档。根据规则，明确需要全文创作时选择 generate 操作，并附带 document_identity 以标识文档身份。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true
+      },
+      "passed": true,
+      "seconds": 15.14
+    },
+    {
+      "id": "full-provided",
+      "instruction": "仅根据以下材料写一份简短业务小结，不补充外部事实：本周收入100万元，上周80万元；新增客户20家，上周10家；增长来自新渠道。",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "本周业务小结",
+            "source": "generated",
+            "evidence": "本周收入100万元，上周80万元；新增客户20家，上周10家；增长来自新渠道。"
+          },
+          "skill_assessments": []
+        },
+        "reasoning": "用户指令明确要求基于提供的具体数据（本周收入100万/上周80万，新增客户20家/上周10家，增长来源）撰写一份简短业务小结，且禁止补充外部事实。当前文档上下文为空，因此需要从头生成该文档。根据操作规则，当需要生成新文档且无明确适用技能时，选择generate操作。文档身份需基于用户提供的主题原文生成。",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "本周收入 100 万元，上周 80 万元；新增客户 20 家，上周 10 家；增长来自新渠道。",
+        "self_contained_reason": "本轮任务要求仅根据 supplied_lines 中的材料撰写业务小结。该材料已完整包含收入、客户数及增长原因等所有必要事实，且指令明确禁止补充外部事实。因此，所有事实来源均无需检索，任务完全自足。",
+        "acceptance": [
+          {
+            "id": "1",
+            "criterion": "输出内容必须严格基于 supplied_lines 中的三条事实陈述，不得添加任何外部信息或虚构细节。"
+          },
+          {
+            "id": "2",
+            "criterion": "输出形式为简短业务小结，语言简洁，逻辑连贯。"
+          }
+        ],
+        "inputs": []
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "本周业务小结",
+            "source": "generated",
+            "evidence": "本周收入100万元，上周80万元；新增客户20家，上周10家；增长来自新渠道。"
+          },
+          "skill_assessments": []
+        },
+        "reasoning": "用户指令明确要求基于提供的具体数据（本周收入100万/上周80万，新增客户20家/上周10家，增长来源）撰写一份简短业务小结，且禁止补充外部事实。当前文档上下文为空，因此需要从头生成该文档。根据操作规则，当需要生成新文档且无明确适用技能时，选择generate操作。文档身份需基于用户提供的主题原文生成。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true
+      },
+      "passed": true,
+      "seconds": 14.4
+    },
+    {
+      "id": "append-literal",
+      "instruction": "在附录末尾追加这句话：请提前准备材料。其余内容原样保留。",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "id": "node-ed551755df2ffa06"
+            }
+          ],
+          "constraint_skill_ids": []
+        },
+        "reasoning": "用户指令明确要求在'附录'章节末尾追加特定文本。根据上下文，'附录'章节的节点ID为'node-ed551755df2ffa06'。该操作属于局部内容修改，不涉及全文生成、数据检索或复杂推理，因此选择 transform 操作，并精确指定目标节点和插入位置。",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "# 会议说明\n\n## 会议安排\n周一上午讨论项目进展。\n\n## 附录\n旧说明。\n请提前准备材料。",
+        "self_contained_reason": "本轮任务仅要求对已提供的文档内容进行局部追加（在附录末尾添加指定句子），且明确指示其余内容原样保留。所需的所有事实（原文内容、追加句子）均已直接提供，无需检索外部资料或依赖私有项目背景。",
+        "acceptance": [
+          {
+            "id": "append_to_appendix",
+            "criterion": "在文档的“附录”部分末尾追加句子“请提前准备材料。”"
+          },
+          {
+            "id": "preserve_original_content",
+            "criterion": "除追加内容外，文档其余所有部分保持原样，无增删改。"
+          }
+        ],
+        "inputs": []
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "id": "node-ed551755df2ffa06"
+            }
+          ],
+          "constraint_skill_ids": []
+        },
+        "reasoning": "用户指令明确要求在'附录'章节末尾追加特定文本。根据上下文，'附录'章节的节点ID为'node-ed551755df2ffa06'。该操作属于局部内容修改，不涉及全文生成、数据检索或复杂推理，因此选择 transform 操作，并精确指定目标节点和插入位置。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": false,
+        "resources": true,
+        "no_full_workflow": true
+      },
+      "passed": false,
+      "model_replies": [
+        "{\n  \"action\": \"edit\",\n  \"deliverable\": \"修改后的文档\",\n  \"primary_goal\": \"在文档附录末尾追加指定语句\"\n}",
+        "{\n  \"reasoning\": \"用户指令明确要求在'附录'章节末尾追加特定文本。根据上下文，'附录'章节的节点ID为'node-ed551755df2ffa06'。该操作属于局部内容修改，不涉及全文生成、数据检索或复杂推理，因此选择 transform 操作，并精确指定目标节点和插入位置。\",\n  \"operation\": {\n    \"kind\": \"transform\",\n    \"targets\": [\n      {\n        \"id\": \"node-ed551755df2ffa06\"\n      }\n    ],\n    \"constraint_skill_ids\": []\n  },\n  \"tools\": [],\n  \"agents\": []\n}",
+        "{\n  \"deliverable\": \"# 会议说明\\n\\n## 会议安排\\n周一上午讨论项目进展。\\n\\n## 附录\\n旧说明。\\n请提前准备材料。\",\n  \"requirements_by_source\": {\n    \"work_context\": {\n      \"state\": \"not_needed\",\n      \"evidence\": \"\",\n      \"need\": \"\",\n      \"reason\": \"任务仅涉及文档内容的局部追加，不涉及项目背景、历史决策或私有术语的检索。\",\n      \"query\": \"\"\n    },\n    \"business_data\": {\n      \"state\": \"not_needed\",\n      \"evidence\": \"\",\n      \"need\": \"\",\n      \"reason\": \"任务不涉及任何业务指标、基线或历史表现数据的查询。\",\n      \"query\": \"\"\n    },\n    \"public_facts\": {\n      \"state\": \"not_needed\",\n      \"evidence\": \"\",\n      \"need\": \"\",\n      \"reason\": \"任务不涉及公开产品、技术能力或外部事实的检索。\",\n      \"query\": \"\"\n    }\n  },\n  \"self_contained_reason\": \"本轮任务仅要求对已提供的文档内容进行局部追加（在附录末尾添加指定句子），且明确指示其余内容原样保留。所需的所有事实（原文内容、追加句子）均已直接提供，无需检索外部资料或依赖私有项目背景。\",\n  \"acceptance\": [\n    {\n      \"id\": \"append_to_appendix\",\n      \"criterion\": \"在文档的“附录”部分末尾追加句子“请提前准备材料。”\"\n    },\n    {\n      \"id\": \"preserve_original_content\",\n      \"criterion\": \"除追加内容外，文档其余所有部分保持原样，无增删改。\"\n    }\n  ]\n}"
+      ],
+      "seconds": 13.63
+    },
+    {
+      "id": "compound-delete-research",
+      "instruction": "移除附录，然后检索最新公开会议工具信息，在联系方式后补充一段工具推荐，其他原文保留。",
+      "candidate": {
+        "tools": [
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "id": "node-ed551755df2ffa06"
+            },
+            {
+              "id": "node-1dad7ff27377868f"
+            }
+          ]
+        },
+        "reasoning": "用户指令包含三个步骤：1. 删除'附录'章节（节点 node-ed551755df2ffa06）；2. 检索最新公开会议工具信息；3. 在'联系方式'后补充工具推荐。根据操作类别约束，所有动作必须基于用户请求原文。删除章节属于 patch 操作；补充内容属于 transform 操作（需定位到'联系方式'节点后追加）。检索外部信息需调用 internet_search。由于涉及删除、追加及外部数据",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "# 会议说明\n\n## 会议安排\n周一上午讨论项目进展。\n\n## 联系方式\n请联系项目组。\n\n[此处插入最新公开会议工具推荐内容]",
+        "self_contained_reason": "任务依赖公开事实（会议工具推荐），当前未提供，需检索。",
+        "acceptance": [
+          {
+            "id": "remove_appendix",
+            "criterion": "文档中‘## 附录’及‘旧说明’部分被移除"
+          },
+          {
+            "id": "add_tool_recommendation",
+            "criterion": "在‘## 联系方式’段落后补充一段基于最新公开信息的会议工具推荐内容"
+          },
+          {
+            "id": "preserve_original_text",
+            "criterion": "除附录移除和新增推荐外，其余原文内容（标题、会议安排、联系方式）保持原样"
+          }
+        ],
+        "inputs": [
+          {
+            "state": "missing",
+            "evidence": "",
+            "need": "最新公开会议工具信息（如 Zoom、腾讯会议、飞书会议等当前主流推荐）",
+            "reason": "用户指令明确要求‘检索最新公开会议工具信息’并在联系方式后补充推荐，当前文档和指令中未包含此类事实。",
+            "query": "检索当前最新推荐的公开在线会议工具列表及其核心优势",
+            "id": "public_facts",
+            "source": "public_facts"
+          }
+        ]
+      },
+      "effective": {
+        "tools": [
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "id": "node-ed551755df2ffa06"
+            },
+            {
+              "id": "node-1dad7ff27377868f"
+            }
+          ]
+        },
+        "reasoning": "用户指令包含三个步骤：1. 删除'附录'章节（节点 node-ed551755df2ffa06）；2. 检索最新公开会议工具信息；3. 在'联系方式'后补充工具推荐。根据操作类别约束，所有动作必须基于用户请求原文。删除章节属于 patch 操作；补充内容属于 transform 操作（需定位到'联系方式'节点后追加）。检索外部信息需调用 internet_search。由于涉及删除、追加及外部数据",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "authorized_scope": true
+      },
+      "passed": true,
+      "seconds": 15.18
+    }
+  ]
+}

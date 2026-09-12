@@ -28,6 +28,14 @@ export interface CreationSkillContent {
 }
 
 export interface CreationSkillDescription {
+  metadataReview?: { status: string; metadata_consistent: boolean; conflicts: string[]; fingerprint?: string }
+  applicability?: {
+    version: 1
+    use_when: string[]
+    not_for: string[]
+    required_inputs: string[]
+    output_structure: string[]
+  }
   purpose: string
   documentTypes: string[]
   problems: string[]
@@ -36,6 +44,7 @@ export interface CreationSkillDescription {
 }
 
 export interface CreationSkillExecutionStep {
+  outputRole?: 'process' | 'section' | 'document'
   id: string
   title: string
   objective: string
@@ -448,6 +457,8 @@ function mapSkillDescription(
       : [...defaultItems]
   }
   return {
+    ...((value?.metadata_review || value?.metadataReview) ? { metadataReview: value.metadata_review || value.metadataReview } : {}),
+    ...(value?.applicability ? { applicability: value.applicability } : {}),
     purpose: String(value?.purpose || fallback.purpose).trim(),
     documentTypes: list('documentTypes', 'document_types', fallback.documentTypes),
     problems: list('problems', 'problems', fallback.problems),
@@ -476,6 +487,7 @@ function mapExecutionSteps(
         .replace(/^-|-$/g, '')
         .slice(0, 80)
       const step: CreationSkillExecutionStep = {
+        ...((item?.outputRole || item?.output_role) ? { outputRole: item.outputRole || item.output_role } : {}),
         id: id || `step-${index + 1}`,
         title: String(item?.title || '').trim(),
         objective: String(item?.objective || '').trim(),
@@ -889,6 +901,7 @@ Follow the user's facts and constraints. Treat reference examples as style guida
     kind: 'memorybread.creation-profile',
     content: {
       skill_description: {
+        ...(skill.skillDescription.applicability ? { applicability: skill.skillDescription.applicability } : {}),
         purpose: skill.skillDescription.purpose,
         document_types: skill.skillDescription.documentTypes,
         problems: skill.skillDescription.problems,
@@ -900,6 +913,7 @@ Follow the user's facts and constraints. Treat reference examples as style guida
         title: step.title,
         objective: step.objective,
         output: step.output,
+      ...(step.outputRole ? { output_role: step.outputRole } : {}),
         agents: step.agents,
         skills: step.skills,
         tools: step.tools,
@@ -1571,7 +1585,8 @@ export async function publishCreationSkill(
         category_id: skill.categoryId,
         content: {
           skill_description: {
-            purpose: skill.skillDescription.purpose,
+            ...(skill.skillDescription.applicability ? { applicability: skill.skillDescription.applicability } : {}),
+        purpose: skill.skillDescription.purpose,
             document_types: skill.skillDescription.documentTypes,
             problems: skill.skillDescription.problems,
             domains: skill.skillDescription.domains,
@@ -1780,11 +1795,13 @@ async function requestExecutionSkillRoute(
       body: JSON.stringify({
         prompt: trimmed,
         skills: candidates.map(skill => ({
+          execution_steps: skill.executionSteps,
           id: skill.id,
           title: skill.title,
           summary: skill.summary,
           skill_description: {
-            purpose: skill.skillDescription.purpose,
+            ...(skill.skillDescription.applicability ? { applicability: skill.skillDescription.applicability } : {}),
+        purpose: skill.skillDescription.purpose,
             document_types: skill.skillDescription.documentTypes,
             problems: skill.skillDescription.problems,
             domains: skill.skillDescription.domains,
@@ -2484,7 +2501,8 @@ function serializeLocalSkill(skill: Omit<LocalCreationSkill, 'id' | 'createdAt' 
     summary: skill.summary,
     category_id: skill.categoryId || null,
     skill_description: {
-      purpose: skill.skillDescription.purpose,
+      ...(skill.skillDescription.applicability ? { applicability: skill.skillDescription.applicability } : {}),
+        purpose: skill.skillDescription.purpose,
       document_types: skill.skillDescription.documentTypes,
       problems: skill.skillDescription.problems,
       domains: skill.skillDescription.domains,
@@ -2495,6 +2513,7 @@ function serializeLocalSkill(skill: Omit<LocalCreationSkill, 'id' | 'createdAt' 
       title: step.title,
       objective: step.objective,
       output: step.output,
+      ...(step.outputRole ? { output_role: step.outputRole } : {}),
       agents: step.agents,
       skills: step.skills,
       tools: step.tools,

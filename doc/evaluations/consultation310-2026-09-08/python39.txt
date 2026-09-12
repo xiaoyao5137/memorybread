@@ -1,0 +1,1 @@
+Python 3.9.25: 20 files compatible; no PEP604 annotations.

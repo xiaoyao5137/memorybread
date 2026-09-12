@@ -33,6 +33,9 @@
 }
 
 .bake-markdown {
+  /* Markdown owns block spacing; inherited pre-wrap exposes AST separator newlines. */
+  white-space: normal;
+  min-width: 0;
   color: #2C2C2E;
   font-size: 13px;
   line-height: 1.7;
@@ -74,11 +77,55 @@
 }
 
 .bake-markdown pre {
+  white-space: pre;
   padding: 10px;
   border-radius: 8px;
   background: #F2F2F7;
   overflow-x: auto;
 }
+
+.bake-markdown pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.bake-markdown__table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 10px 0;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 8px;
+}
+
+.bake-markdown__table-scroll:focus-visible {
+  outline: 2px solid #007AFF;
+  outline-offset: 2px;
+}
+
+.bake-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: inherit;
+}
+
+.bake-markdown th,
+.bake-markdown td {
+  padding: 8px 12px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  text-align: left;
+  vertical-align: top;
+  min-width: 90px;
+}
+
+.bake-markdown th {
+  background: #F2F2F7;
+  font-weight: 600;
+}
+
+.bake-markdown ul { list-style-type: disc; }
+.bake-markdown ol { list-style-type: decimal; }
+
+.bake-markdown li > p { margin: 4px 0; }
 
 .bake-title {
   font-size: 24px;
@@ -5568,4 +5615,11 @@ td.bake-capture-table__time .bake-capture-table__id {
   .bake-capture-drawer__footer {
     background: #232326;
   }
+}
+
+/* Source snapshots are plain text; retain paragraph boundaries literally. */
+.bake-source-plain-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.75;
 }

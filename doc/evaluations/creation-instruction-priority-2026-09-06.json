@@ -1,0 +1,65 @@
+{
+  "model": "qwen3.5:4b",
+  "endpoint": "http://127.0.0.1:50256",
+  "scope": "real routing and input assessment; synthetic documents; no external retrieval",
+  "cases": [
+    {
+      "id": "append-local",
+      "instruction": "在会议安排末尾补充一句邀请大家参与讨论的话，不增加任何新事实，其他内容原样保留。",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "text": "周一上午讨论项目进展。",
+              "occurrence": 1
+            }
+          ]
+        },
+        "reasoning": "用户要求在“会议安排”章节末尾补充一句邀请语，属于局部文本改写。根据操作类别约束，目标位置和动作必须严格基于用户请求原文。该操作不涉及检索外部资料、数据分析或生成新文档，仅需对特定正文节点进行文本替换。因此，选择 transform 操作，并锁定目标为“会议安排”章节的正文内容。",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "# 会议说明\n\n## 会议安排\n周一上午讨论项目进展。\n\n欢迎参与讨论。\n\n## 附录\n旧说明。\n\n## 联系方式\n请联系项目组。",
+        "self_contained_reason": "本轮任务仅要求对当前提供的文档片段进行局部文本补充（在'会议安排'末尾添加邀请语），不依赖任何外部事实、业务数据或私有背景信息，属于完全自足的文本编辑任务。",
+        "acceptance": [
+          {
+            "id": "text_addition",
+            "criterion": "在'## 会议安排'与'## 附录'之间的末尾位置，补充一句邀请大家参与讨论的话。"
+          },
+          {
+            "id": "factual_integrity",
+            "criterion": "补充内容不增加任何新事实，且除新增语句外，其他所有原文内容保持原样。"
+          }
+        ],
+        "inputs": []
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "text": "周一上午讨论项目进展。",
+              "occurrence": 1
+            }
+          ]
+        },
+        "reasoning": "用户要求在“会议安排”章节末尾补充一句邀请语，属于局部文本改写。根据操作类别约束，目标位置和动作必须严格基于用户请求原文。该操作不涉及检索外部资料、数据分析或生成新文档，仅需对特定正文节点进行文本替换。因此，选择 transform 操作，并锁定目标为“会议安排”章节的正文内容。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "authorized_scope": true
+      },
+      "passed": true,
+      "seconds": 12.76
+    }
+  ]
+}

@@ -130,13 +130,29 @@ const App: React.FC = () => {
   // 初始化完成标记负责区分“首次使用”和“已初始化但本地组件仍在启动”。
   // 后一种状态只显示轻量启动画面，避免把正常的冷启动误呈现为首次初始化。
   const [initializationValidated, setInitializationValidated] = useState(false)
+  const [initializationRequiresAction, setInitializationRequiresAction] = useState(false)
 
-  const showOnboarding = !hasCompletedSetup
-  const showStartupLoading = hasCompletedSetup && !initializationValidated
+  const showOnboarding = !hasCompletedSetup || initializationRequiresAction
+  const showStartupLoading = hasCompletedSetup
+    && !initializationValidated
+    && !initializationRequiresAction
+  // 只有本次启动核验通过后才恢复悬浮球；持久化的首次设置标记不足以证明服务已就绪。
+  const floatingAssistReady = hasCompletedSetup && initializationValidated && !initializationRequiresAction
+  useEffect(() => {
+    const storedValue = localStorage.getItem(FLOATING_ASSIST_ENABLED_KEY)
+    if (storedValue === null) localStorage.setItem(FLOATING_ASSIST_ENABLED_KEY, 'true')
+    void invoke('set_floating_assist_readiness', {
+      ready: floatingAssistReady,
+      enabled: storedValue === null || storedValue === 'true',
+      autoTaskEnabled: readFloatingAssistAutoTaskConfig().enabled,
+    }).catch(() => {})
+  }, [floatingAssistReady])
+
   const activeAchievementCelebration = achievementCelebrations[0] ?? null
 
   const handleInitializationValidated = useCallback((ready: boolean) => {
     setInitializationValidated(ready)
+    if (ready) setInitializationRequiresAction(false)
   }, [])
 
   useEffect(() => {
@@ -169,6 +185,8 @@ const App: React.FC = () => {
       void fetchInitializationStatus()
         .then(async next => {
           if (cancelled) return
+          const requiresAction = ['not_started', 'failed', 'interrupted'].includes(next.state)
+          setInitializationRequiresAction(requiresAction)
           const ready = initializationIsReady(next) && await fetchRuntimeReadiness()
           if (cancelled) return
           setInitializationValidated(ready)
@@ -266,25 +284,6 @@ const App: React.FC = () => {
 
     const registerTrayEvents = async () => {
       try {
-        // 首次安装默认启用悬浮球，让用户可以立即体验核心功能
-        const storedValue = localStorage.getItem(FLOATING_ASSIST_ENABLED_KEY)
-        const floatingAssistEnabled = storedValue === null ? true : storedValue === 'true'
-
-        // 如果是首次启动（localStorage 中没有值），保存默认值
-        if (storedValue === null) {
-          localStorage.setItem(FLOATING_ASSIST_ENABLED_KEY, 'true')
-        }
-
-        const autoTaskConfig = readFloatingAssistAutoTaskConfig()
-        const autoTaskDetectionEnabled = floatingAssistEnabled && autoTaskConfig.enabled
-        await invoke('set_floating_assist_menu_state', { enabled: floatingAssistEnabled })
-        await invoke('set_floating_assist_auto_task_menu_state', {
-          checked: autoTaskDetectionEnabled,
-          enabled: floatingAssistEnabled,
-        })
-        if (floatingAssistEnabled) {
-          await invoke('set_floating_assist_visible', { enabled: true })
-        }
         cleanups.push(await listen('tray-navigate-settings', () => {
           setWindowMode('settings')
         }))
@@ -573,7 +572,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const openReferenceDetail = (detail: any) => {
-      const { type, captureId, knowledgeId, artifactId, documentId, dataSourceId, docKey } = detail || {}
+      const { type, captureId, knowledgeId, artifactId, documentId, dataSourceId, docKey, sourceUrl } = detail || {}
       const parsedTargetId = parseReferenceId(docKey)
       const targetId = String(documentId ?? artifactId ?? dataSourceId ?? parsedTargetId ?? '')
       const hasTargetId = targetId.trim().length > 0
@@ -585,6 +584,35 @@ const App: React.FC = () => {
         }
       }
 
+      if ((type === 'document' || type === 'pending_document') && !hasTargetId) {
+        const url = sourceUrl || (String(docKey || '').startsWith('document_url:')
+          ? String(docKey).slice('document_url:'.length) : '')
+        if (/^https:\/\//i.test(url)) {
+          // Resolve old history references against the current document identity.
+          void (async () => {
+            try {
+              const response = await fetch(`${apiBaseUrl}/api/bake/documents?source_url=${encodeURIComponent(url)}`)
+              if (response.ok) {
+                const payload = await response.json()
+                if (payload.items?.length === 1 && payload.items[0].id) {
+                  openReferenceDetail({ type: 'document', documentId: payload.items[0].id })
+                  return
+                }
+              }
+            } catch { /* A failed lookup still leaves the original source usable. */ }
+            try {
+              await invoke('open_external_url', { url })
+            } catch {
+              if (captureId) openReferenceDetail({ type: 'capture', captureId })
+            }
+          })()
+          return
+        }
+        if (captureId) {
+          openReferenceDetail({ type: 'capture', captureId })
+          return
+        }
+      }
       if (type === 'document') {
         setReferenceBackTarget(hasTargetId)
         setBakeTab('templates')
@@ -656,6 +684,7 @@ const App: React.FC = () => {
       tauriCleanup?.()
     }
   }, [
+    apiBaseUrl,
     clearBakeNavigationStack,
     pushBakeNavigationTarget,
     setBakeKnowledgeLimit,

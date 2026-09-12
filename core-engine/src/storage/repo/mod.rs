@@ -2,6 +2,10 @@
 
 pub mod action_log;
 pub mod bake_document;
+pub mod document_refresh_queue;
+pub mod document_source_checks;
+pub mod document_candidate_quality;
+pub mod document_summary_jobs;
 pub mod bake_run;
 pub mod breadcrumbs;
 pub mod capture;
@@ -10,6 +14,7 @@ pub mod creation_brainstorm;
 pub mod creation_evidence;
 pub mod creation_history;
 pub mod creation_inline_edit;
+pub mod creation_operation;
 pub mod creation_skill;
 pub mod data;
 pub mod diary;

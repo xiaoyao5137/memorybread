@@ -287,9 +287,34 @@ class TestEmbedWorkerErrors:
 # ── SentenceTransformersBackend 接口测试 ─────────────────────────────────────
 
 class TestSentenceTransformersBackend:
+    @pytest.mark.parametrize('configured,explicit,expected', [
+        ('', '', 'cpu'), ('cuda', '', 'cuda'), ('mps', 'cpu', 'cpu'),
+    ])
+    @pytest.mark.parametrize('legacy', [False, True])
+    def test_local_load_keeps_device_even_with_legacy_library(self, monkeypatch, configured, explicit, expected, legacy):
+        import sys
+        from types import SimpleNamespace
+        import embedding.sentence_transformers_backend as module
+        monkeypatch.setenv('MEMORYBREAD_EMBEDDING_DEVICE', configured)
+        calls = []
+        model = object()
+        def load(source, **kwargs):
+            calls.append(kwargs)
+            assert source == '/local/embedding'
+            if legacy and 'local_files_only' in kwargs:
+                raise TypeError('unsupported local_files_only')
+            return model
+        monkeypatch.setitem(sys.modules, 'sentence_transformers', SimpleNamespace(SentenceTransformer=load))
+        monkeypatch.setattr(module, 'resolve_embedding_model_source', lambda: '/local/embedding')
+        backend = SentenceTransformersBackend(device=explicit)
+        assert backend._load() is model
+        assert backend._load() is model
+        assert all(call['device'] == expected for call in calls)
+        assert len(calls) == (2 if legacy else 1)
+
     def test_model_name_default(self):
         backend = SentenceTransformersBackend()
-        assert "bge-small-zh" in backend.model_name.lower()
+        assert backend.model_name == "mbemb-v2-local"
 
     def test_dimension_default_before_loading(self):
         backend = SentenceTransformersBackend()

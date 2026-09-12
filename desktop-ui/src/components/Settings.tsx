@@ -25,6 +25,8 @@ import { reportCustomerLogs } from '../utils/customerLogReport'
 import { fetchSoftwareUpdate, requestSoftwareUpdate, type SoftwareUpdateCheck } from '../utils/softwareUpdate'
 import { useImeCompositionGuard } from '../hooks/useImeCompositionGuard'
 import InteractionSettings from './InteractionSettings'
+import PermissionPreparation from './PermissionPreparation'
+import { getLocalServiceBaseUrl } from '../utils/localServices'
 import './Settings.v2.css'
 
 interface SettingsProps {
@@ -45,7 +47,7 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
   const CAPTURE_RETENTION_DAYS_KEY = 'privacy.capture_retention_days'
   const ENERGY_SAVING_MODE_KEY = 'performance.energy_saving_mode'
   const USER_IDENTITY_KEY = 'user.identity_keywords'
-  const DEFAULT_API_BASE = 'http://localhost:7070'
+  const DEFAULT_API_BASE = getLocalServiceBaseUrl('core')
 
   const {
     apiBaseUrl,
@@ -441,6 +443,8 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
 
         <InteractionSettings />
 
+        <section className="settings-v2__card"><PermissionPreparation /></section>
+
         {/* 配置检测 */}
         <section className="settings-v2__card" data-testid="settings-config-checks-section">
           <div className="settings-v2__card-header">
@@ -569,7 +573,7 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
                   className="settings-v2__input"
                   value={apiUrlInput}
                   onChange={(e) => setApiUrlInput(e.target.value)}
-                  placeholder="http://localhost:7070"
+                  placeholder={DEFAULT_API_BASE}
                 />
                 <button
                   data-testid="api-url-save"

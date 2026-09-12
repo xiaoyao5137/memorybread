@@ -30,12 +30,21 @@ from typing import Any, Callable, Optional
 
 import psutil
 
+from database_readiness import DatabaseFailure, MESSAGES as DATABASE_MESSAGES, validate as validate_database
+
+from runtime_download import DownloadFailure, RuntimeDownloader, failure_code, sha256
+from runtime_endpoints import service_base_url, service_port
+
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "initialization.v1"
 MANAGED_OLLAMA_VERSION = "0.30.8"
 MANAGED_OLLAMA_URL = (
     "https://github.com/ollama/ollama/releases/download/"
+    f"v{MANAGED_OLLAMA_VERSION}/ollama-darwin.tgz"
+)
+MANAGED_OLLAMA_CDN_URL = (
+    "https://memorybread.cn/downloads/runtime/ollama/"
     f"v{MANAGED_OLLAMA_VERSION}/ollama-darwin.tgz"
 )
 # 境内访问 GitHub Release 不稳定，提供加速代理作为候选源。
@@ -62,6 +71,13 @@ AUTO_REPAIRABLE_STAGE_ERRORS = frozenset(
     {
         "RUNTIME_DOWNLOAD_FAILED",
         "RUNTIME_CHECKSUM_MISMATCH",
+        "RUNTIME_NETWORK_FAILED",
+        "RUNTIME_HTTP_FAILED",
+        "RUNTIME_TLS_FAILED",
+        "RUNTIME_DOWNLOAD_TIMEOUT",
+        "RUNTIME_RESUME_INVALID",
+        "RUNTIME_ARCHIVE_INVALID",
+        "RUNTIME_INSTALL_FAILED",
         "RUNTIME_START_FAILED",
         "MODEL_DOWNLOAD_FAILED",
         "SKILLS_TOOLS_INITIALIZATION_FAILED",
@@ -81,7 +97,13 @@ SANDBOX_COLD_INSTALL_STAGES = frozenset(
 
 # 这些供应商模型名不得出现在 get_status() 或 get_report_bundle() 中。
 _CAPTURE_MODEL_NAME = "qwen3.5:4b"
-_VECTOR_MODEL_NAME = "qllama/bge-small-zh-v1.5:q4_k_m"
+_LEGACY_VECTOR_MODEL_NAME = "qllama/bge-small-zh-v1.5:q4_k_m"
+_CAPTURE_MODEL_BLOBS = (
+    ("de9fed2251b37295b763727a59ca35cf5cfe5c7379bc3e2104b2ce3c145aa887", 475, "config"),
+    ("81fb60c7daa80fc1123380b98970b320ae233409f0f71a72ed7b9b0d62f40490", 3389971840, "model"),
+    ("7339fa418c9ad3e8e12e74ad0fd26a9cc4be8703f9c110728a992b193be85cb2", 11355, "license"),
+    ("9371364b27a52acac9d87f88bd93c9db1174d8d6ec57f6888925cdc1788871ff", 65, "params"),
+)
 
 STAGES = (
     ("preflight", "检查运行环境", 0, 8),
@@ -98,13 +120,21 @@ ERROR_SUGGESTIONS = {
     "UNSUPPORTED_PLATFORM": "当前版本暂不支持此操作系统，请升级到受支持的 macOS。",
     "UNSUPPORTED_ARCHITECTURE": "当前处理器架构暂不受支持。",
     "INSUFFICIENT_DISK_SPACE": "请释放至少 6 GB 可用空间后重试。",
-    "RUNTIME_DOWNLOAD_FAILED": "请检查网络连接后重试（已依次尝试境内加速源与官方源），已经完成的内容不会重复下载。",
+    "RUNTIME_DOWNLOAD_FAILED": "本地 AI 引擎获取失败，请重试或上报诊断；可安全续传的缓存会保留。",
     "RUNTIME_CHECKSUM_MISMATCH": "下载文件校验失败，请重试；应用不会执行未通过校验的文件。",
+    "RUNTIME_NETWORK_FAILED": "下载连接失败，请检查网络或代理后重试。",
+    "RUNTIME_HTTP_FAILED": "下载服务返回异常，请稍后重试或上报诊断。",
+    "RUNTIME_TLS_FAILED": "下载安全连接失败，请检查系统时间、代理或网络证书后重试。",
+    "RUNTIME_DOWNLOAD_TIMEOUT": "下载超过本轮等待时间，可安全续传的缓存已保留，请重试。",
+    "RUNTIME_RESUME_INVALID": "下载源返回的续传内容不一致，请重试。",
+    "RUNTIME_WRITE_FAILED": "无法写入本地 AI 引擎，请检查磁盘写入权限后重试。",
+    "RUNTIME_ARCHIVE_INVALID": "下载包无法解压或缺少必要文件，请重试或上报诊断。",
+    "RUNTIME_INSTALL_FAILED": "本地 AI 引擎安装失败，请上报诊断。",
     "RUNTIME_START_FAILED": "本地 AI 引擎未能启动，请重试或上报诊断。",
     "MODEL_DOWNLOAD_FAILED": "模型下载未完成，请检查网络和磁盘空间后重试。",
     "DATABASE_INITIALIZATION_FAILED": "本地记忆库未能完成初始化，请重试或上报诊断。",
     "CORE_SERVICE_UNAVAILABLE": "本地核心服务已自动重启但仍未就绪，请重新启动应用；若仍失败再上报诊断。",
-    "CORE_PORT_CONFLICT": "本地服务端口被其他程序占用，关闭占用 7070 端口的程序后重试。",
+    "CORE_PORT_CONFLICT": "本地核心服务端点被其他程序占用，应用会自动重新分配；若仍失败请重启应用。",
     "SKILLS_TOOLS_INITIALIZATION_FAILED": "内置技能或工具未能加载，请重新安装最新版应用。",
     "QUALITY_GATE_FAILED": "组件质检未通过，请重试；重复项会自动跳过。",
     "FEATURE_SMOKE_TEST_FAILED": "核心功能测试未通过，请重试或上报诊断。",
@@ -118,10 +148,27 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+ERROR_SUGGESTIONS.update({
+    "DATABASE_NOT_CREATED": "请重试；如果仍未创建，请上报诊断。",
+    "DATABASE_BUSY": "请等待当前任务结束，关闭重复打开的记忆面包后重试。",
+    "DATABASE_READ_ONLY": "请恢复记忆面包数据目录的写入权限后重试。",
+    "DATABASE_DISK_FULL": "请释放数据目录所在磁盘的空间后重试。",
+    "DATABASE_ACCESS_DENIED": "请检查记忆面包数据目录的访问权限后重试。",
+    "DATABASE_CORRUPT": "已有记忆已保留，请上报诊断；如需恢复备份，请先保留原始数据。",
+    "DATABASE_IO_ERROR": "请检查数据磁盘是否可用，再重试或上报诊断。",
+    "DATABASE_MIGRATION_INCOMPLETE": "已有记忆已保留，请上报诊断以检查升级状态。",
+    "DATABASE_MIGRATION_FAILED": "已有记忆已保留，请上报诊断以检查失败的升级步骤。",
+    "DATABASE_MIGRATION_TIMEOUT": "未中断正在运行的核心服务，请稍后重试或上报诊断。",
+    "DATABASE_PATH_MISMATCH": "请退出重复运行的版本后重试，仍有问题请上报诊断。",
+})
+DATABASE_STARTUP_WAIT_SECONDS = 180.0
+
+
 class InitializationFailure(RuntimeError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+        self.evidence: dict[str, Any] = {}
 
 
 class InitializationManager:
@@ -272,6 +319,27 @@ class InitializationManager:
             self.mode_path.unlink(missing_ok=True)
             return self.get_status()
 
+    def consultation_readiness(self, pipeline_ready: bool) -> dict[str, Any]:
+        state = self.get_status()
+        initialized = (state.get("mode") == "normal" and state.get("state") == "completed"
+                       and state.get("quality_gate", {}).get("passed")
+                       and not state.get("test_mode_enabled"))
+        runtime = bool(initialized and self._ollama_healthy(self._ollama_base_url("normal"))
+                       and self._managed_ollama_process_owned("normal"))
+        installed = self._installed_model_names(self._ollama_base_url("normal")) if runtime else set()
+        llm = bool(runtime and self._model_present(installed, _CAPTURE_MODEL_NAME))
+        embedding = self._embedding_ready("normal")
+        ready = bool(llm and embedding and pipeline_ready)
+        if llm and embedding and not pipeline_ready:
+            return {"ready": False, "runtime": runtime, "llm": llm, "embedding": embedding,
+                    "error_code": "LOCAL_AI_WARMING_UP", "action": "retry",
+                    "message": "本地 AI 正在准备咨询能力，完成后会自动恢复，请稍候。"}
+        return {"ready": ready, "runtime": runtime, "llm": llm, "embedding": embedding,
+                "error_code": None if ready else state.get("error_code") or "LOCAL_AI_NOT_READY",
+                "message": "本地 AI 已就绪" if ready else (
+                    state.get("suggestion") or "本地 AI 正在准备或需要修复，请打开主界面检查。"),
+                "action": "models" if initialized else "initialization"}
+
     def get_report_bundle(self) -> dict[str, Any]:
         """生成严格白名单诊断包，不包含日志正文、路径、主机名或用户内容。"""
         with self._lock:
@@ -322,7 +390,7 @@ class InitializationManager:
                 "occurred_at": state.get("finished_at") or _utc_now(),
                 "failed_stage": state.get("current_stage") if state.get("state") == "failed" else None,
                 "error_code": state.get("error_code"),
-                "summary": self._safe_summary(state.get("message")),
+                "summary": self._diagnostic_summary(state),
                 "environment": {
                     "os": environment.get("os"),
                     "os_version": environment.get("os_version"),
@@ -414,6 +482,9 @@ class InitializationManager:
                 state = self._load_state(mode)
                 stage_id = state.get("current_stage")
                 public_message = self._redact_internal_terms(str(exc))
+                state["database_diagnostics"] = exc.evidence if exc.code.startswith("DATABASE_") else {}
+                if exc.code.startswith("DATABASE_"):
+                    logger.warning("database_initialization_failed code=%s evidence=%s", exc.code, exc.evidence)
                 for stage in state["stages"]:
                     if stage["id"] == stage_id:
                         stage.update(
@@ -421,6 +492,7 @@ class InitializationManager:
                                 "status": "failed",
                                 "error_code": exc.code,
                                 "detail": public_message,
+                                "duration_ms": int((time.monotonic() - started) * 1000),
                                 "finished_at": _utc_now(),
                             }
                         )
@@ -653,7 +725,11 @@ class InitializationManager:
                     "SANDBOX_ISOLATION_FAILED",
                     "隔离端口被非本次沙箱的本地 AI 服务占用",
                 )
-            if mode == "normal" and self._ollama_gui_running():
+            if (
+                mode == "normal"
+                and self._ollama_port(mode) == NORMAL_OLLAMA_PORT
+                and self._ollama_gui_running()
+            ):
                 managed_running = self._managed_ollama_process_owned(mode)
                 executable = self._managed_ollama_executable(mode)
                 if executable is None:
@@ -680,6 +756,11 @@ class InitializationManager:
                         return False, "本地 AI 引擎已切换为无界面后台运行"
                     time.sleep(0.5)
                 raise InitializationFailure("RUNTIME_START_FAILED", "本地 AI 引擎启动超时")
+            if mode == "normal" and not self._managed_ollama_process_owned(mode):
+                raise InitializationFailure(
+                    "RUNTIME_START_FAILED",
+                    "本地 AI 服务端口被非记忆面包托管的进程占用，请关闭后重试",
+                )
             state["runtime_reused"] = True
             self._save_state(state)
             detail = (
@@ -701,10 +782,97 @@ class InitializationManager:
         raise InitializationFailure("RUNTIME_START_FAILED", "本地 AI 引擎启动超时")
 
     def _stage_capture_model(self, mode: str, _state: dict[str, Any]) -> tuple[bool, str]:
-        return self._ensure_model(mode, _CAPTURE_MODEL_NAME, "采集提炼模型")
+        base_url = self._ollama_base_url(mode)
+        installed = self._installed_model_names(base_url)
+        if self._model_present(installed, _CAPTURE_MODEL_NAME):
+            return True, "采集提炼模型已存在且校验通过"
+        self._install_pinned_capture_model(mode)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if self._model_present(self._installed_model_names(base_url), _CAPTURE_MODEL_NAME):
+                return False, "采集提炼模型已通过校验并安装"
+            time.sleep(0.5)
+        raise InitializationFailure("MODEL_DOWNLOAD_FAILED", "模型产物已安装但本地引擎未能识别")
+
+    def _install_pinned_capture_model(self, mode: str) -> None:
+        """Download the pinned Ollama artifact with verified CDN/official fallback."""
+        models_root = self._models_root(mode)
+        blobs_root = models_root / "blobs"
+        cache_root = self._workspace_root(mode) / "downloads" / "capture-model"
+        blobs_root.mkdir(parents=True, exist_ok=True)
+        total_deadline = time.monotonic() + 30 * 60
+        for digest, expected_size, _kind in _CAPTURE_MODEL_BLOBS:
+            destination = blobs_root / ("sha256-" + digest)
+            if (
+                destination.is_file()
+                and destination.stat().st_size == expected_size
+                and sha256(destination) == digest
+            ):
+                continue
+            remaining = total_deadline - time.monotonic()
+            if remaining <= 0:
+                raise InitializationFailure("MODEL_DOWNLOAD_FAILED", "模型下载超过 30 分钟总预算")
+            artifact_path = "qwen3.5/4b/blobs/sha256:" + digest
+            urls = [
+                "https://memorybread.cn/downloads/models/ollama/" + artifact_path,
+                "https://registry.ollama.ai/v2/library/qwen3.5/blobs/sha256:" + digest,
+            ]
+            downloader = RuntimeDownloader(
+                cache_root / digest[:16],
+                digest,
+                lambda progress: self._update_stage_download_progress(
+                    "capture_model", progress, "正在下载采集提炼模型"
+                ),
+                total_seconds=remaining,
+                source_seconds=min(600, remaining),
+            )
+            try:
+                verified = downloader.download(urls)
+            except DownloadFailure as exc:
+                raise InitializationFailure("MODEL_DOWNLOAD_FAILED", str(exc.code)) from exc
+            if verified.stat().st_size != expected_size:
+                raise InitializationFailure("MODEL_DOWNLOAD_FAILED", "模型产物大小校验失败")
+            temporary = destination.with_suffix(".tmp-" + uuid.uuid4().hex)
+            try:
+                os.link(verified, temporary)
+            except OSError:
+                shutil.copyfile(verified, temporary)
+            os.replace(temporary, destination)
+
+        manifest = {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+            "config": {
+                "mediaType": "application/vnd.docker.container.image.v1+json",
+                "digest": "sha256:" + _CAPTURE_MODEL_BLOBS[0][0],
+                "size": _CAPTURE_MODEL_BLOBS[0][1],
+            },
+            "layers": [
+                {
+                    "mediaType": "application/vnd.ollama.image." + kind,
+                    "digest": "sha256:" + digest,
+                    "size": size,
+                }
+                for digest, size, kind in _CAPTURE_MODEL_BLOBS[1:]
+            ],
+        }
+        manifest_path = (
+            models_root / "manifests" / "registry.ollama.ai" / "library" / "qwen3.5" / "4b"
+        )
+        self._write_json_atomic(manifest_path, manifest)
 
     def _stage_vector_model(self, mode: str, _state: dict[str, Any]) -> tuple[bool, str]:
-        return self._ensure_model(mode, _VECTOR_MODEL_NAME, "向量模型")
+        from embedding.model_sources import download_embedding_model
+
+        target = self._embedding_model_dir(mode)
+        existed = self._embedding_ready(mode)
+        if not existed:
+            errors = download_embedding_model(target)
+            if not self._embedding_ready(mode):
+                detail = "; ".join(errors[-3:]) if errors else "模型文件不完整"
+                raise InitializationFailure("MODEL_DOWNLOAD_FAILED", detail)
+        self._probe_local_embedding(mode)
+        return existed, "语义检索模型已校验并使用 CPU 后端"
 
     def _stage_database(self, mode: str, _state: dict[str, Any]) -> tuple[bool, str]:
         if mode == "sandbox":
@@ -715,32 +883,27 @@ class InitializationManager:
             self._ensure_normal_core_ready(_state)
             db_path = self._database_path(mode)
             existed_before = db_path.exists()
-        try:
-            self._validate_database(db_path)
-        except Exception as exc:
-            failure = exc if isinstance(exc, InitializationFailure) else InitializationFailure(
-                "DATABASE_INITIALIZATION_FAILED",
-                "本地数据库检查失败",
-            )
-            if mode != "normal" or not self._request_core_repair_and_wait(
-                _state,
-                "检测到记忆库迁移或读写异常，正在重启核心服务后复检",
-            ):
-                if isinstance(exc, InitializationFailure):
-                    raise
-                raise failure from exc
+        for attempt in range(3):
             try:
                 self._validate_database(db_path)
-            except InitializationFailure:
-                raise
-            except Exception as retry_exc:
-                raise InitializationFailure(
-                    "DATABASE_INITIALIZATION_FAILED",
-                    "本地数据库自动复检失败",
-                ) from retry_exc
+                break
+            except InitializationFailure as exc:
+                if exc.code != "DATABASE_BUSY" or attempt == 2:
+                    raise
+                self._set_recovery_state(
+                    self._load_state(mode), status="waiting", action="wait_for_database_lock",
+                    attempt=attempt + 1, max_attempts=2, error_code=exc.code,
+                    message="记忆库正被占用，正在等待后自动复检",
+                )
+                time.sleep(0.5 * (attempt + 1))
+        if attempt:
+            self._set_recovery_state(
+                self._load_state(mode), status="succeeded", action="wait_for_database_lock",
+                attempt=attempt, max_attempts=2, error_code=None, message="记忆库读写已恢复",
+            )
         if existed_before:
             return True, "本地记忆库已存在，迁移与读写检查通过"
-        return False, "隔离记忆库已创建，迁移与读写检查通过"
+        return False, "本地记忆库已创建，迁移与读写检查通过"
 
     def _ensure_normal_core_ready(self, state: dict[str, Any]) -> None:
         if self._core_healthy():
@@ -764,6 +927,9 @@ class InitializationManager:
                 error_code=None,
                 message="本地核心服务已就绪，继续初始化",
             )
+            return
+        self._wait_for_database_startup()
+        if self._core_healthy():
             return
         if self._request_core_repair_and_wait(
             self._load_state("normal"),
@@ -878,7 +1044,7 @@ class InitializationManager:
         checks.append(self._quality_check("engine_health", engine_ready))
         installed = self._installed_model_names(base_url)
         checks.append(self._quality_check("capture_model_ready", self._model_present(installed, _CAPTURE_MODEL_NAME)))
-        checks.append(self._quality_check("vector_model_ready", self._model_present(installed, _VECTOR_MODEL_NAME)))
+        checks.append(self._quality_check("vector_model_ready", self._embedding_ready(mode)))
         db_path = self._database_path(mode)
         try:
             self._validate_database(db_path)
@@ -938,7 +1104,7 @@ class InitializationManager:
     def _ollama_download_candidates() -> list[str]:
         """构造运行时下载候选源列表（境内加速源优先）。
 
-        顺序：显式覆盖地址 -> 自建镜像 -> 内置加速代理 -> GitHub 官方。
+        顺序：显式覆盖地址 -> 自建镜像 -> MemoryBread CDN -> 公共应急代理 -> 官方。
         所有候选产物统一做 SHA256 校验，任一候选成功即止。
         """
         candidates: list[str] = []
@@ -948,95 +1114,62 @@ class InitializationManager:
         extra = os.environ.get("MEMORY_BREAD_OLLAMA_DOWNLOAD_MIRRORS", "").strip()
         if extra:
             candidates.extend(u.strip() for u in extra.split(",") if u.strip())
+        candidates.append(MANAGED_OLLAMA_CDN_URL)
         for prefix in MANAGED_OLLAMA_MIRROR_PREFIXES:
             candidates.append(prefix + MANAGED_OLLAMA_URL)
         if not override:
             candidates.append(MANAGED_OLLAMA_URL)
         return candidates
 
-    def _download_archive_with_resume(self, url: str, archive: Path) -> None:
-        """单个候选源的下载（支持断点续传，单源内重试 3 次）。"""
-        last_error: Optional[Exception] = None
-        for attempt in range(3):
-            downloaded = archive.stat().st_size if archive.exists() else 0
-            headers = {"User-Agent": "MemoryBread-Initializer/1"}
-            if downloaded > 0:
-                headers["Range"] = f"bytes={downloaded}-"
-            try:
-                request = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(request, timeout=60) as response:
-                    resumed = downloaded > 0 and getattr(response, "status", None) == 206
-                    if not resumed:
-                        downloaded = 0
-                    content_length = int(response.headers.get("Content-Length") or 0)
-                    total = downloaded + content_length if content_length > 0 else 0
-                    with open(archive, "ab" if resumed else "wb") as output:
-                        while True:
-                            chunk = response.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            output.write(chunk)
-                            downloaded += len(chunk)
-                            if total > 0:
-                                self._update_stage_download_progress(
-                                    "inference_engine",
-                                    min(80, int(downloaded * 80 / total)),
-                                    "正在下载本地 AI 引擎",
-                                )
-                return
-            except Exception as exc:
-                last_error = exc
-                if attempt < 2:
-                    time.sleep(attempt + 1)
-        assert last_error is not None
-        raise last_error
-
     def _install_managed_ollama(self, mode: str) -> Path:
         root = self._runtime_root(mode)
         version_dir = root / f"v{MANAGED_OLLAMA_VERSION}"
-        version_dir.mkdir(parents=True, exist_ok=True)
-        archive = version_dir / "ollama-darwin.tgz.part"
         expected_sha = os.environ.get("MEMORY_BREAD_OLLAMA_SHA256", MANAGED_OLLAMA_SHA256).lower()
-
-        # 逐候选源尝试：境内加速源优先，全部失败才报下载错误。
-        # 切换候选源时丢弃旧的部分文件，避免不同源之间断点不兼容。
-        last_error: Optional[Exception] = None
-        for url in self._ollama_download_candidates():
-            try:
-                logger.info("尝试从 %s 下载本地 AI 引擎", url)
-                self._download_archive_with_resume(url, archive)
-                last_error = None
-                break
-            except Exception as exc:
-                last_error = exc
-                logger.warning("本地 AI 引擎下载失败，切换下一个候选源: %s (%s)", url, exc)
-                archive.unlink(missing_ok=True)
-        if last_error is not None:
-            raise InitializationFailure(
-                "RUNTIME_DOWNLOAD_FAILED",
-                f"本地 AI 引擎下载失败: {last_error}",
-            ) from last_error
-
-        actual_sha = self._sha256_file(archive)
-        if actual_sha != expected_sha:
-            archive.unlink(missing_ok=True)
-            raise InitializationFailure("RUNTIME_CHECKSUM_MISMATCH", "本地 AI 引擎文件校验失败")
-
-        extract_dir = Path(tempfile.mkdtemp(prefix="extract-", dir=version_dir))
+        downloader = RuntimeDownloader(
+            version_dir / "downloads", expected_sha,
+            lambda progress: self._update_stage_download_progress(
+                "inference_engine", progress, "正在下载本地 AI 引擎"),
+        )
         try:
+            archive = downloader.download(self._ollama_download_candidates())
+        except DownloadFailure as exc:
+            raise InitializationFailure(exc.code, ERROR_SUGGESTIONS.get(exc.code, "引擎下载失败")) from exc
+        except OSError as exc:
+            code = failure_code(exc)
+            if code not in {"INSUFFICIENT_DISK_SPACE", "RUNTIME_WRITE_FAILED"}:
+                code = "RUNTIME_WRITE_FAILED"
+            raise InitializationFailure(code, ERROR_SUGGESTIONS[code]) from exc
+        finally:
+            for event in downloader.events:
+                logger.info("runtime_download_attempt %s", json.dumps(event))
+        actual_sha = expected_sha
+
+        extract_dir: Optional[Path] = None
+        try:
+            extract_dir = Path(tempfile.mkdtemp(prefix="extract-", dir=version_dir))
             with tarfile.open(archive, "r:gz") as tar:
                 self._safe_extract_tar(tar, extract_dir)
             executable = self._find_ollama_executable(extract_dir)
             if executable is None:
-                raise InitializationFailure("RUNTIME_DOWNLOAD_FAILED", "下载包中缺少本地 AI 引擎")
+                raise InitializationFailure("RUNTIME_ARCHIVE_INVALID", "下载包中缺少本地 AI 引擎")
             final_dir = version_dir / "runtime"
+            backup_dir = version_dir / "runtime.previous"
+            # Recover a prior interruption before swapping the staged installation.
+            if backup_dir.exists() and not final_dir.exists():
+                os.replace(backup_dir, final_dir)
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir)
             if final_dir.exists():
-                shutil.rmtree(final_dir)
-            os.replace(extract_dir, final_dir)
-            archive.unlink(missing_ok=True)
+                os.replace(final_dir, backup_dir)
+            try:
+                os.replace(extract_dir, final_dir)
+            except OSError:
+                if backup_dir.exists():
+                    os.replace(backup_dir, final_dir)
+                raise
             executable = self._find_ollama_executable(final_dir)
             if executable is None:
-                raise InitializationFailure("RUNTIME_DOWNLOAD_FAILED", "本地 AI 引擎安装不完整")
+                raise InitializationFailure("RUNTIME_INSTALL_FAILED", "本地 AI 引擎安装不完整")
             executable.chmod(executable.stat().st_mode | 0o111)
             self._write_json_atomic(
                 version_dir / "manifest.json",
@@ -1046,10 +1179,21 @@ class InitializationManager:
                     "installed_at": _utc_now(),
                 },
             )
-            return executable
-        finally:
             archive.unlink(missing_ok=True)
-            if extract_dir.exists():
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir)
+            return executable
+        except InitializationFailure:
+            raise
+        except (tarfile.TarError, EOFError, ValueError) as exc:
+            raise InitializationFailure("RUNTIME_ARCHIVE_INVALID", "本地 AI 引擎下载包无法安全解压") from exc
+        except OSError as exc:
+            code = failure_code(exc)
+            if code not in {"INSUFFICIENT_DISK_SPACE", "RUNTIME_WRITE_FAILED"}:
+                code = "RUNTIME_INSTALL_FAILED"
+            raise InitializationFailure(code, ERROR_SUGGESTIONS[code]) from exc
+        finally:
+            if extract_dir is not None and extract_dir.exists():
                 shutil.rmtree(extract_dir, ignore_errors=True)
 
     def _start_ollama(self, mode: str, executable: Path) -> None:
@@ -1095,79 +1239,79 @@ class InitializationManager:
         )
 
     def _ensure_model(self, mode: str, model_name: str, label: str) -> tuple[bool, str]:
-        base_url = self._ollama_base_url(mode)
-        installed = self._installed_model_names(base_url)
-        if self._model_present(installed, model_name):
-            return True, f"{label}已就绪，已跳过下载"
-        data = json.dumps({"name": model_name, "stream": True}).encode("utf-8")
-        request = urllib.request.Request(
-            f"{base_url}/api/pull",
-            data=data,
-            headers={"Content-Type": "application/json"},
-        )
-        stage_id = "capture_model" if model_name == _CAPTURE_MODEL_NAME else "vector_model"
-        last_error: Optional[Exception] = None
-        for attempt in range(3):
-            try:
-                with urllib.request.urlopen(request, timeout=3600) as response:
-                    for raw_line in response:
-                        if not raw_line.strip():
-                            continue
-                        item = json.loads(raw_line.decode("utf-8"))
-                        if item.get("error"):
-                            raise RuntimeError(str(item["error"]))
-                        total = int(item.get("total") or 0)
-                        completed = int(item.get("completed") or 0)
-                        if total > 0:
-                            self._update_stage_download_progress(
-                                stage_id,
-                                min(99, int(completed * 100 / total)),
-                                f"正在下载{label}",
-                            )
-                last_error = None
-                break
-            except Exception as exc:
-                last_error = exc
-                if attempt < 2:
-                    time.sleep(attempt + 1)
-                    request = urllib.request.Request(
-                        f"{base_url}/api/pull",
-                        data=data,
-                        headers={"Content-Type": "application/json"},
-                    )
-        if last_error is not None:
+        """Compatibility entry point backed only by the pinned artifact installer."""
+        if model_name != _CAPTURE_MODEL_NAME:
             raise InitializationFailure(
                 "MODEL_DOWNLOAD_FAILED",
-                f"{label}下载失败: {last_error}",
-            ) from last_error
+                "旧向量模型安装入口已停用，请使用统一语义检索模型",
+            )
+        base_url = self._ollama_base_url(mode)
+        if self._model_present(self._installed_model_names(base_url), model_name):
+            return True, f"{label}已就绪，已跳过下载"
+        self._install_pinned_capture_model(mode)
         if not self._model_present(self._installed_model_names(base_url), model_name):
             raise InitializationFailure("MODEL_DOWNLOAD_FAILED", f"{label}下载后校验失败")
         return False, f"{label}已下载并通过校验"
 
     # ── database, checks and probes ───────────────────────────────────────
 
-    def _validate_database(self, db_path: Path) -> None:
-        deadline = time.monotonic() + 20
-        while not db_path.exists() and time.monotonic() < deadline:
-            time.sleep(0.25)
-        if not db_path.exists():
-            raise InitializationFailure("DATABASE_INITIALIZATION_FAILED", "本地数据库尚未创建")
-        required_tables = {"schema_migrations", "captures", "timelines", "creation_skills"}
-        with sqlite3.connect(db_path, timeout=10) as conn:
-            integrity = conn.execute("PRAGMA quick_check").fetchone()
-            if not integrity or integrity[0] != "ok":
-                raise InitializationFailure("DATABASE_INITIALIZATION_FAILED", "数据库完整性检查失败")
-            tables = {
-                row[0]
-                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-            }
-            missing = sorted(required_tables - tables)
-            if missing:
-                raise InitializationFailure("DATABASE_INITIALIZATION_FAILED", "数据库迁移尚未完成")
-            conn.execute("CREATE TEMP TABLE initialization_probe(value TEXT NOT NULL)")
-            conn.execute("INSERT INTO initialization_probe(value) VALUES ('ok')")
-            if conn.execute("SELECT value FROM initialization_probe").fetchone()[0] != "ok":
-                raise InitializationFailure("DATABASE_INITIALIZATION_FAILED", "数据库读写探针失败")
+    def _validate_database(self, db_path: Path, check_write: bool = True,
+                           check_integrity: bool = True) -> None:
+        metadata = getattr(self, "_core_database_metadata", None) if db_path == self._database_path("normal") else None
+        if metadata and Path(metadata["path"]).resolve() != db_path.resolve():
+            raise InitializationFailure("DATABASE_PATH_MISMATCH", DATABASE_MESSAGES["DATABASE_PATH_MISMATCH"])
+        try:
+            validate_database(db_path, metadata.get("required_migrations") if metadata else None,
+                              check_write=check_write, check_integrity=check_integrity)
+        except DatabaseFailure as exc:
+            failure = InitializationFailure(exc.code, str(exc))
+            failure.evidence = exc.evidence
+            raise failure from exc
+
+    def _database_startup_status(self) -> Optional[dict[str, Any]]:
+        try:
+            path = self.base_dir / "state" / "database-startup.json"
+            value = json.loads(path.read_text(encoding="utf-8"))
+            started = float(value["started_at"])
+            if started > time.time() + 2:
+                return None
+            process = psutil.Process(int(value["pid"]))
+            if not process.create_time() <= started < process.create_time() + 30:
+                return None
+            if "memory-bread" not in process.name().lower():
+                return None
+            return value
+        except psutil.NoSuchProcess:
+            # A recent failed startup is actionable even though its process has exited.
+            return value if value.get("phase") == "failed" and time.time() - started < 180 else None
+        except (OSError, ValueError, KeyError, TypeError, psutil.Error):
+            return None
+
+    def _wait_for_database_startup(self) -> None:
+        deadline = time.monotonic() + DATABASE_STARTUP_WAIT_SECONDS
+        while True:
+            status = self._database_startup_status()
+            if not status or status.get("phase") == "ready":
+                return
+            if status.get("phase") == "failed":
+                code = status.get("error_code")
+                code = code if code in DATABASE_MESSAGES else "DATABASE_INITIALIZATION_FAILED"
+                failure = InitializationFailure(code, DATABASE_MESSAGES[code])
+                migration = status.get("migration")
+                if isinstance(migration, str) and re.fullmatch(r"[0-9]{3}_[a-z0-9_]+", migration):
+                    failure.evidence = {"migration": migration}
+                raise failure
+            if status.get("phase") not in {"opening", "migrating"}:
+                return
+            if self._core_healthy():
+                return
+            if time.monotonic() >= deadline:
+                raise InitializationFailure("DATABASE_MIGRATION_TIMEOUT", DATABASE_MESSAGES["DATABASE_MIGRATION_TIMEOUT"])
+            self._set_recovery_state(
+                self._load_state("normal"), status="waiting", action="wait_for_database_migration",
+                attempt=0, max_attempts=0, error_code=None, message="核心服务正在初始化记忆库，正在等待升级完成",
+            )
+            time.sleep(0.5)
 
     def _start_sandbox_core(self) -> None:
         core_port = self._core_port("sandbox")
@@ -1261,20 +1405,7 @@ class InitializationManager:
             raise RuntimeError("empty extraction result")
 
     def _probe_consultation(self, mode: str) -> None:
-        base_url = self._ollama_base_url(mode)
-        payload = json.dumps(
-            {"model": _VECTOR_MODEL_NAME, "input": "初始化向量探针"}
-        ).encode("utf-8")
-        try:
-            data = self._http_json(f"{base_url}/api/embed", payload)
-        except Exception:
-            fallback = json.dumps(
-                {"model": _VECTOR_MODEL_NAME, "prompt": "初始化向量探针"}
-            ).encode("utf-8")
-            data = self._http_json(f"{base_url}/api/embeddings", fallback)
-        embeddings = data.get("embeddings") or ([data.get("embedding")] if data.get("embedding") else [])
-        if not embeddings or not embeddings[0]:
-            raise RuntimeError("empty embedding")
+        self._probe_local_embedding(mode)
         answer = self._ollama_generate(mode, "只回答“正常”：1 加 1 是否等于 2？")
         if not answer.strip():
             raise RuntimeError("empty consultation result")
@@ -1366,6 +1497,11 @@ class InitializationManager:
 
     def _refresh_completed_state(self, state: dict[str, Any]) -> dict[str, Any]:
         mode = str(state.get("mode") or "normal")
+        if state.get("state") == "completed" or (
+            state.get("state") == "interrupted"
+            and state.get("error_code") == "INITIALIZATION_COMPONENT_MISSING"
+        ):
+            self._try_restart_managed_ollama(mode)
         if (
             state.get("state") == "interrupted"
             and state.get("error_code") == "INITIALIZATION_COMPONENT_MISSING"
@@ -1418,6 +1554,36 @@ class InitializationManager:
         )
         return invalid
 
+    def _try_restart_managed_ollama(self, mode: str) -> None:
+        """Best-effort restart of an already installed, MemoryBread-owned runtime."""
+        if mode != "normal":
+            return
+        # start.sh 正在切换开发/正式运行时或刷新进程登记时，状态轮询不能并发
+        # 拉起第二个 Ollama。否则两边会争抢 11434，并把有效 PID 再次写旧。
+        if self._external_backend_start_in_progress():
+            return
+        base_url = self._ollama_base_url(mode)
+        if self._ollama_healthy(base_url) or self._managed_ollama_process_owned(mode):
+            return
+        executable = self._managed_ollama_executable(mode)
+        if executable is None or self._port_in_use(self._ollama_port(mode)):
+            return
+        try:
+            self._start_ollama(mode, executable)
+            logger.info("managed local AI engine restart requested during status refresh")
+        except Exception as exc:
+            # 状态刷新必须保持可用；失败会沿用既有 interrupted/failed 恢复入口。
+            logger.warning("managed local AI engine restart failed: %s", exc)
+
+    def _external_backend_start_in_progress(self) -> bool:
+        pid_path = self.base_dir / "state" / "start-lock" / "pid"
+        try:
+            pid = int(pid_path.read_text(encoding="utf-8").strip())
+            process = psutil.Process(pid)
+            return process.is_running()
+        except (OSError, ValueError, psutil.Error):
+            return False
+
     def _recover_interrupted_state(
         self, state: dict[str, Any], mode: str
     ) -> Optional[dict[str, Any]]:
@@ -1465,7 +1631,7 @@ class InitializationManager:
             manifests_dir = self._models_root(mode) / "manifests" / "registry.ollama.ai"
             if not manifests_dir.exists() or not any(manifests_dir.rglob("*")):
                 return True
-            self._validate_database(self._database_path(mode))
+            self._validate_database(self._database_path(mode), check_write=False, check_integrity=False)
             return False
         except Exception:
             return True
@@ -1475,17 +1641,23 @@ class InitializationManager:
             base_url = self._ollama_base_url(mode)
             if not self._ollama_healthy(base_url):
                 return False
-            if mode == "normal" and self._ollama_gui_running():
-                return False
+            if mode == "normal":
+                if (
+                    self._ollama_port(mode) == NORMAL_OLLAMA_PORT
+                    and self._ollama_gui_running()
+                ):
+                    return False
+                if not self._managed_ollama_process_owned(mode):
+                    return False
             installed = self._installed_model_names(base_url)
             if not self._model_present(installed, _CAPTURE_MODEL_NAME):
                 return False
-            if not self._model_present(installed, _VECTOR_MODEL_NAME):
+            if not self._embedding_ready(mode):
                 return False
             if mode == "sandbox" and not self._sandbox_process_owned("ollama"):
                 return False
             db_path = self._database_path(mode)
-            self._validate_database(db_path)
+            self._validate_database(db_path, check_write=False, check_integrity=False)
             return True
         except Exception:
             return False
@@ -1609,12 +1781,12 @@ class InitializationManager:
     def _ollama_port(self, mode: str) -> int:
         if mode == "sandbox":
             return self._sandbox_port("ollama_port", SANDBOX_OLLAMA_PORT)
-        return NORMAL_OLLAMA_PORT
+        return service_port("ollama")
 
     def _core_port(self, mode: str) -> int:
         if mode == "sandbox":
             return self._sandbox_port("core_port", SANDBOX_CORE_PORT)
-        return 7070
+        return service_port("core")
 
     def _database_path(self, mode: str) -> Path:
         if mode == "sandbox":
@@ -1688,6 +1860,28 @@ class InitializationManager:
     def _models_root(self, mode: str) -> Path:
         return self._workspace_root(mode) / "models"
 
+    def _embedding_model_dir(self, mode: str) -> Path:
+        if mode == "sandbox":
+            return self.sandbox_root / "embedding-models" / "bge-small-zh-v1.5"
+        return self.base_dir / "models" / "bge-small-zh-v1.5"
+
+    def _embedding_ready(self, mode: str) -> bool:
+        from embedding.model_sources import embedding_model_complete
+
+        return embedding_model_complete(self._embedding_model_dir(mode))
+
+    def _probe_local_embedding(self, mode: str) -> None:
+        from sentence_transformers import SentenceTransformer
+
+        model = SentenceTransformer(
+            str(self._embedding_model_dir(mode)),
+            device="cpu",
+            local_files_only=True,
+        )
+        vectors = model.encode(["初始化向量探针"], normalize_embeddings=True)
+        if len(vectors) != 1 or len(vectors[0]) != 512:
+            raise RuntimeError("invalid local embedding output")
+
     def _managed_ollama_executable(self, mode: str) -> Optional[Path]:
         version_dir = self._runtime_root(mode) / f"v{MANAGED_OLLAMA_VERSION}"
         manifest_path = version_dir / "manifest.json"
@@ -1704,6 +1898,51 @@ class InitializationManager:
         return self._find_ollama_executable(version_dir / "runtime")
 
     def _managed_ollama_process_owned(self, mode: str) -> bool:
+        if self._managed_ollama_marker_valid(mode):
+            return True
+        # A launcher restart can leave a stale/missing marker while the managed
+        # server is healthy. Re-attest the live process instead of permanently
+        # rejecting our own listener. Sandbox ownership must never be adopted.
+        if mode != "normal" or self._external_backend_start_in_progress():
+            return False
+        executable = self._managed_ollama_executable(mode)
+        if executable is None:
+            return False
+        executable = executable.resolve()
+        models_root = self._models_root(mode).resolve()
+        port = self._ollama_port(mode)
+        for process in psutil.process_iter(["exe"]):
+            try:
+                if not process.info.get("exe") or Path(process.info["exe"]).resolve() != executable:
+                    continue
+                if process.cmdline() != [str(executable), "serve"]:
+                    continue
+                environment = process.environ()
+                if not environment.get("OLLAMA_MODELS") or Path(environment["OLLAMA_MODELS"]).resolve() != models_root:
+                    continue
+                if environment.get("OLLAMA_HOST") != f"127.0.0.1:{port}":
+                    continue
+                connections = getattr(process, "net_connections", None) or process.connections
+                if not any(
+                    connection.status == psutil.CONN_LISTEN
+                    and connection.laddr.ip == "127.0.0.1"
+                    and connection.laddr.port == port
+                    for connection in connections(kind="tcp")
+                ):
+                    continue
+                if not process.is_running():
+                    continue
+                self._write_process_marker(
+                    mode, "ollama", process.pid, executable,
+                    {"port": port, "models_root": str(models_root)},
+                )
+                logger.info("restored managed local AI engine process identity pid=%s", process.pid)
+                return self._managed_ollama_marker_valid(mode)
+            except (OSError, ValueError, psutil.Error):
+                continue
+        return False
+
+    def _managed_ollama_marker_valid(self, mode: str) -> bool:
         marker_path = self._workspace_root(mode) / "processes" / "ollama.json"
         try:
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
@@ -1858,7 +2097,13 @@ class InitializationManager:
 
     def _core_healthy(self) -> bool:
         try:
-            payload = self._http_json("http://127.0.0.1:7070/health", timeout=2)
+            payload = self._http_json(service_base_url("core") + "/health", timeout=2)
+            metadata = payload.get("database")
+            self._core_database_metadata = metadata if (
+                isinstance(metadata, dict) and isinstance(metadata.get("path"), str)
+                and isinstance(metadata.get("required_migrations"), list)
+                and all(isinstance(item, str) for item in metadata["required_migrations"])
+            ) else None
             return (
                 payload.get("status") == "ok"
                 and payload.get("service") == "memory-bread-core"
@@ -2148,6 +2393,33 @@ class InitializationManager:
             "version": MANAGED_OLLAMA_VERSION if stage_id == "inference_engine" else None,
         }
 
+    def _diagnostic_summary(self, state: dict[str, Any]) -> Optional[str]:
+        summary = self._safe_summary(state.get("message")) or ""
+        if state.get("current_stage") == "database":
+            evidence = state.get("database_diagnostics") or {}
+            parts = []
+            for key in ("exception_type", "sqlite_errorcode", "errno", "missing_migration_count", "migration"):
+                value = evidence.get(key)
+                if isinstance(value, int) or (isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_]{1,100}", value)):
+                    parts.append(f"{key}={value}")
+            return (summary[:200] + ("; " + "; ".join(parts) if parts else ""))[:500] or None
+        if state.get("current_stage") != "inference_engine":
+            return summary or None
+        path = (self._runtime_root(state.get("mode", "normal")) / f"v{MANAGED_OLLAMA_VERSION}"
+                / "downloads" / "download-diagnostics.json")
+        try:
+            events = json.loads(path.read_text(encoding="utf-8"))
+            latest = {}
+            for event in events[-30:]:
+                identifier = str(event.get("id", ""))
+                code = event.get("error_code")
+                if re.fullmatch(r"runtime\.source_\d+\.attempt_\d+", identifier) and code in ERROR_SUGGESTIONS:
+                    latest[identifier.rsplit(".", 1)[0]] = identifier + ":" + code
+            parts = list(latest.values())
+            return (summary[:100] + ("; " + "; ".join(parts) if parts else ""))[:500]
+        except (OSError, ValueError, TypeError, AttributeError):
+            return summary or None
+
     @staticmethod
     def _safe_summary(value: Any) -> Optional[str]:
         if not value:
@@ -2163,7 +2435,7 @@ class InitializationManager:
         redacted = value
         for internal_name, public_name in (
             (_CAPTURE_MODEL_NAME, "采集提炼模型"),
-            (_VECTOR_MODEL_NAME, "向量模型"),
+            (_LEGACY_VECTOR_MODEL_NAME, "向量模型"),
             ("Ollama", "本地 AI 引擎"),
             ("ollama", "本地 AI 引擎"),
         ):

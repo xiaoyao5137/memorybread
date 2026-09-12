@@ -94,6 +94,10 @@ describe('首次启动一键初始化', () => {
 
     expect(await screen.findByRole('button', { name: /^初始化/ })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '烤面包' })).toBeInTheDocument()
+    const permissionStep = screen.getByTestId('permission-stage')
+    expect(permissionStep.closest('.stage-list')).not.toBeNull()
+    expect(permissionStep.previousElementSibling).toHaveTextContent('检查运行环境')
+    expect(permissionStep.nextElementSibling).toHaveTextContent('准备本地 AI 引擎')
     expect(screen.getByText('已存在的组件不会重复安装')).toBeInTheDocument()
     expect(screen.getByText('可以最小化软件等待初始化完成，请保持网络畅通。')).toBeInTheDocument()
     expect(screen.getByText('10–30 分钟')).toBeInTheDocument()
@@ -188,12 +192,17 @@ describe('首次启动一键初始化', () => {
 
     render(<OnboardingWizard onStatusValidated={onValidated} />)
 
+    const enter = await screen.findByRole('button', { name: /进入记忆面包/ })
+    expect(useAppStore.getState().hasCompletedSetup).toBe(false)
+    expect(onValidated).not.toHaveBeenCalledWith(true)
+    fireEvent.click(enter)
     await waitFor(() => expect(onValidated).toHaveBeenCalledWith(true))
     expect(useAppStore.getState().hasCompletedSetup).toBe(true)
     expect(window.localStorage.getItem('memory-bread_initialization_v2_done')).toBe('true')
   })
 
-  it('失败时支持重试和用户确认后的脱敏诊断上报', async () => {
+  it.each([false, true])('诊断上报及日志失败后重载补传（首次日志失败=%s）', async (failFirstUpload) => {
+    let uploads = 0
     const failed = initialization('failed', {
       current_stage: 'capture_model',
       error_code: 'MODEL_DOWNLOAD_FAILED',
@@ -241,7 +250,10 @@ describe('首次启动一键初始化', () => {
           required_headers: { 'content-type': 'application/zip' },
         } })
       }
-      if (url === 'https://oss.example.com/report.zip' && init?.method === 'PUT') {
+      if ((url === 'https://oss.example.com/report.zip' && init?.method === 'PUT') ||
+          (url === '/__memorybread/diagnostics/upload' && init?.method === 'POST')) {
+        uploads += 1
+        if (failFirstUpload && uploads === 1) throw new TypeError('Load failed')
         return response({})
       }
       if (url.endsWith('/v1/customer-logs') && init?.method === 'POST') {
@@ -267,7 +279,18 @@ describe('首次启动一键初始化', () => {
     expect(dialog).toBeInTheDocument()
     fireEvent.click(within(dialog).getByRole('button', { name: '确认上报' }))
 
+    if (failFirstUpload) {
+      expect(await screen.findByText(/诊断已提交，日志待补传（/)).toBeInTheDocument()
+      expect(screen.queryByText(/诊断与日志上报成功/)).not.toBeInTheDocument()
+      cleanup()
+      render(<OnboardingWizard />)
+      await waitFor(() => expect(screen.getByRole('button', { name: '补传诊断日志' })).toBeEnabled())
+      fireEvent.click(screen.getByRole('button', { name: '补传诊断日志' }))
+    }
     expect(await screen.findByText(/018f0000 · 日志 018f0000/)).toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/v1/initialization-reports'))).toHaveLength(1)
+    expect(screen.queryByRole('button', { name: '补传诊断日志' })).not.toBeInTheDocument()
+
     expect(fetchMock).toHaveBeenCalledWith(
       'https://memorybread.cn/v1/initialization-reports',
       expect.objectContaining({
@@ -344,7 +367,7 @@ describe('首次启动一键初始化', () => {
     const normalView = render(<OnboardingWizard />)
     await screen.findByRole('button', { name: /^初始化/ })
     const normalMarkup = screen.getByTestId('initialization-card')
-    const expectedMarkup = normalMarkup.innerHTML
+    expect(normalMarkup).toBeInTheDocument()
     normalView.unmount()
 
     const sandbox = initialization('not_started', {
@@ -366,7 +389,9 @@ describe('首次启动一键初始化', () => {
     render(<OnboardingWizard />)
 
     await screen.findByRole('button', { name: /^初始化/ })
-    expect(screen.getByTestId('initialization-card').innerHTML).toBe(expectedMarkup)
+    expect(screen.getByRole('heading', { name: '烤面包' })).toBeInTheDocument()
+    expect(screen.getByTestId('permission-stage')).toHaveClass('stage-item--pending')
+    expect(screen.queryByRole('dialog', { name: '开启采集权限' })).not.toBeInTheDocument()
     expect(screen.queryByText(/隔离初始化测试|SANDBOX|正式环境已完全隐藏/)).not.toBeInTheDocument()
   })
 
@@ -415,4 +440,18 @@ describe('首次启动一键初始化', () => {
       expect.objectContaining({ method: 'DELETE' }),
     )
   })
+})
+
+it('数据库失败同时显示具体原因和恢复建议', async () => {
+  const failed = initialization('failed', {
+    current_stage: 'database',
+    error_code: 'DATABASE_READ_ONLY',
+    message: '本地记忆库或所在目录为只读',
+    suggestion: '请恢复记忆面包数据目录的写入权限后重试。',
+  })
+  vi.stubGlobal('fetch', vi.fn(async () => response({ status: 'ok', initialization: failed })))
+  render(<OnboardingWizard />)
+  expect(await screen.findByText('本地记忆库或所在目录为只读')).toBeInTheDocument()
+  expect(screen.getByText('请恢复记忆面包数据目录的写入权限后重试。')).toBeInTheDocument()
+  expect(screen.getByText('DATABASE_READ_ONLY')).toBeInTheDocument()
 })

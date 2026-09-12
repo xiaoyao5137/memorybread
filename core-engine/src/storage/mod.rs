@@ -16,7 +16,9 @@ pub mod models_bake;
 pub mod models_data;
 pub mod models_integration;
 pub mod repo;
+pub mod search;
 pub mod snapshot;
+pub mod startup;
 
 pub use db::StorageManager;
 pub use error::StorageError;

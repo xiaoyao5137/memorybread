@@ -124,7 +124,21 @@ pub struct CreationSkillDistinctiveSection {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CreationSkillApplicability {
+    pub version: u32,
+    pub use_when: Vec<String>,
+    pub not_for: Vec<String>,
+    pub required_inputs: Vec<String>,
+    pub output_structure: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreationSkillDescription {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_review: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applicability: Option<CreationSkillApplicability>,
     #[serde(default)]
     pub purpose: String,
     #[serde(default)]
@@ -143,6 +157,8 @@ fn default_retain_webpage_screenshot() -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreationSkillExecutionStep {
+    #[serde(default, skip_serializing_if = "String::is_empty", alias = "outputRole")]
+    pub output_role: String,
     pub id: String,
     pub title: String,
     pub objective: String,
@@ -161,6 +177,7 @@ pub struct CreationSkillExecutionStep {
 impl Default for CreationSkillExecutionStep {
     fn default() -> Self {
         Self {
+            output_role: String::new(),
             id: String::new(),
             title: String::new(),
             objective: String::new(),
@@ -448,6 +465,13 @@ fn row_to_skill(row: &rusqlite::Row<'_>) -> rusqlite::Result<CreationSkillRecord
 }
 
 fn valid_skill_description(description: &CreationSkillDescription) -> bool {
+    if let Some(scope) = &description.applicability {
+        if scope.version != 1 || scope.use_when.is_empty()
+            || [&scope.use_when, &scope.not_for, &scope.required_inputs, &scope.output_structure]
+                .iter().any(|items| items.len() > 24 || items.iter().any(|item| item.trim().is_empty() || item.chars().count() > 1000)) {
+            return false;
+        }
+    }
     let legacy_empty = description.purpose.trim().is_empty()
         && description.document_types.is_empty()
         && description.problems.is_empty()
@@ -463,7 +487,8 @@ fn valid_skill_description(description: &CreationSkillDescription) -> bool {
 fn valid_execution_steps(steps: &[CreationSkillExecutionStep]) -> bool {
     steps.is_empty()
         || steps.iter().all(|step| {
-            !step.id.trim().is_empty()
+            matches!(step.output_role.as_str(), "" | "process" | "section" | "document")
+                && !step.id.trim().is_empty()
                 && !step.title.trim().is_empty()
                 && !step.objective.trim().is_empty()
                 && step.agents.len() + step.tools.len() <= 4
@@ -534,6 +559,8 @@ mod tests {
             field_examples: CreationSkillFieldExamples::default(),
             example_document: default_example_document(),
             skill_description: CreationSkillDescription {
+                applicability: None,
+                metadata_review: None,
                 purpose: "用于把已确认的技术事实组织成可评审、可实施的架构文档。".into(),
                 document_types: vec!["技术架构设计文档".into()],
                 problems: vec!["澄清系统边界、关键取舍和实施路径".into()],
@@ -541,6 +568,7 @@ mod tests {
                 deliverables: vec!["包含架构、链路、风险和验证方式的 Markdown 文档".into()],
             },
             execution_steps: vec![CreationSkillExecutionStep {
+                output_role: String::new(),
                 id: "design-solution".into(),
                 title: "设计总体方案".into(),
                 objective: "把约束和证据转化为结构化架构方案。".into(),
@@ -555,6 +583,27 @@ mod tests {
             installed: false,
             published: false,
         }
+    }
+
+    #[test]
+    fn skill_scope_and_output_roles_round_trip_and_reject_unknown_versions() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        let mut skill = sample_skill();
+        skill.skill_description.applicability = Some(CreationSkillApplicability {
+            version: 1, use_when: vec!["技术架构评审".into()], not_for: vec!["经营增长方案".into()],
+            required_inputs: vec![], output_structure: vec!["技术设计".into()],
+        });
+        skill.execution_steps[0].output_role = "document".into();
+        let saved = storage.upsert_creation_skill(&skill).unwrap();
+        let loaded = storage.get_creation_skill(saved.id).unwrap().unwrap();
+        assert_eq!(loaded.skill_description.applicability, skill.skill_description.applicability);
+        assert_eq!(loaded.execution_steps[0].output_role, "document");
+        skill.skill_description.applicability.as_mut().unwrap().version = 99;
+        assert!(storage.upsert_creation_skill(&skill).is_err());
+        skill.skill_description.applicability.as_mut().unwrap().version = 1;
+        skill.execution_steps[0].output_role = "unknown".into();
+        assert!(storage.upsert_creation_skill(&skill).is_err());
+        assert_eq!(storage.get_creation_skill(saved.id).unwrap().unwrap().execution_steps[0].output_role, "document");
     }
 
     #[test]

@@ -125,7 +125,7 @@ release_start_lock() {
 acquire_start_lock() {
     local command="${1:-}"
     case "$command" in
-        start|start-backends|stop|stop-after-app|restart)
+        start|start-backends|stop|stop-after-app|restart|clean-build-cache)
             ;;
         *)
             return 0
@@ -138,6 +138,11 @@ acquire_start_lock() {
         # 持锁进程已不存在时回收陈旧锁（崩溃/kill -9 遗留），避免永久死锁。
         local holder
         holder=$(tr -d '[:space:]' < "$START_LOCK_PID_FILE" 2>/dev/null || true)
+        # TERM/重载边界可能让同一启动器再次进入启停检查。锁属于当前进程时
+        # 视为可重入，不能等待自己直至 300 秒超时。
+        if [ "$holder" = "$$" ]; then
+            return 0
+        fi
         if [ -n "$holder" ] && ! ps -p "$holder" > /dev/null 2>&1; then
             log_warn "回收陈旧的启动锁（原持有者 PID $holder 已退出）"
             rm -rf "$START_LOCK_DIR" 2>/dev/null || true
@@ -287,9 +292,30 @@ pid_belongs_to_packaged_app() {
     esac
 }
 
+pid_belongs_to_managed_ollama() {
+    local pid=$1
+    local executable
+
+    if ! [[ "$pid" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+
+    executable=$(process_executable "$pid")
+    case "$executable" in
+        */.memory-bread/initialization/runtime/ollama/*/ollama)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 pid_belongs_to_memorybread() {
     local pid=$1
-    pid_belongs_to_project "$pid" || pid_belongs_to_packaged_app "$pid"
+    pid_belongs_to_project "$pid" \
+        || pid_belongs_to_packaged_app "$pid" \
+        || pid_belongs_to_managed_ollama "$pid"
 }
 
 pid_is_desktop_app() {
@@ -355,7 +381,12 @@ creation_service_sources_changed() {
     python_sources_newer_than \
         "$CREATION_PID_FILE" \
         "$PROJECT_ROOT/ai-sidecar/creation" \
+        "$PROJECT_ROOT/ai-sidecar/embedding" \
+        "$PROJECT_ROOT/ai-sidecar/monitor" \
         "$PROJECT_ROOT/ai-sidecar/start_creation_service.py" \
+        "$PROJECT_ROOT/ai-sidecar/inference_queue.py" \
+        "$PROJECT_ROOT/ai-sidecar/inference_transport.py" \
+        "$PROJECT_ROOT/ai-sidecar/model_schema.py" \
         "$PROJECT_ROOT/ai-sidecar/model_registry_global.py" \
         "$PROJECT_ROOT/ai-sidecar/model_manager.py"
 }
@@ -398,6 +429,11 @@ python_sources_newer_than() {
     return 1
 }
 
+source_reload_allowed() {
+    # main 为每次命令提供局部策略；直接调用启动函数时保持显式启动的默认行为。
+    [ "${allow_source_reload:-true}" = true ]
+}
+
 sidecar_sources_changed() {
     python_sources_newer_than \
         "$SIDECAR_PID_FILE" \
@@ -405,10 +441,14 @@ sidecar_sources_changed() {
         "$PROJECT_ROOT/ai-sidecar/background_processor.py" \
         "$PROJECT_ROOT/ai-sidecar/energy_policy.py" \
         "$PROJECT_ROOT/ai-sidecar/inference_queue.py" \
+        "$PROJECT_ROOT/ai-sidecar/inference_transport.py" \
+        "$PROJECT_ROOT/ai-sidecar/model_schema.py" \
         "$PROJECT_ROOT/ai-sidecar/model_registry.py" \
         "$PROJECT_ROOT/ai-sidecar/scheduled_task_executor.py" \
         "$PROJECT_ROOT/ai-sidecar/creation" \
         "$PROJECT_ROOT/ai-sidecar/knowledge" \
+        "$PROJECT_ROOT/ai-sidecar/embedding" \
+        "$PROJECT_ROOT/ai-sidecar/monitor" \
         "$PROJECT_ROOT/ai-sidecar/ocr" \
         "$PROJECT_ROOT/ai-sidecar/asr" \
         "$PROJECT_ROOT/ai-sidecar/vlm"
@@ -418,12 +458,16 @@ model_api_sources_changed() {
     python_sources_newer_than \
         "$MODEL_API_PID_FILE" \
         "$PROJECT_ROOT/ai-sidecar/model_api_server.py" \
+        "$PROJECT_ROOT/ai-sidecar/model_schema.py" \
         "$PROJECT_ROOT/ai-sidecar/initialization_manager.py" \
         "$PROJECT_ROOT/ai-sidecar/model_manager.py" \
         "$PROJECT_ROOT/ai-sidecar/model_registry.py" \
         "$PROJECT_ROOT/ai-sidecar/model_registry_global.py" \
         "$PROJECT_ROOT/ai-sidecar/inference_queue.py" \
+        "$PROJECT_ROOT/ai-sidecar/inference_transport.py" \
         "$PROJECT_ROOT/ai-sidecar/rag" \
+        "$PROJECT_ROOT/ai-sidecar/embedding" \
+        "$PROJECT_ROOT/ai-sidecar/monitor" \
         "$PROJECT_ROOT/ai-sidecar/knowledge"
 }
 
@@ -536,6 +580,80 @@ print(models_root)
 PY
 }
 
+managed_ollama_listener_pid() {
+    local expected_executable=$1
+    local pid
+    local executable
+
+    for pid in $(lsof -nP -tiTCP:"$OLLAMA_PORT" -sTCP:LISTEN 2>/dev/null | sort -u || true); do
+        [ -n "$pid" ] || continue
+        executable=$(process_executable "$pid")
+        if [ "$executable" = "$expected_executable" ]; then
+            printf '%s\n' "$pid"
+            return 0
+        fi
+    done
+    return 1
+}
+
+record_managed_ollama_process() {
+    local pid=$1
+    local executable=$2
+    local models_root=$3
+    local python_bin="$PROJECT_ROOT/ai-sidecar/.venv/bin/python"
+
+    if [ ! -x "$python_bin" ]; then
+        python_bin=$(command -v python3 || true)
+    fi
+    [ -n "$python_bin" ] || return 1
+
+    "$python_bin" - \
+        "$MANAGED_OLLAMA_MARKER" \
+        "$pid" \
+        "$executable" \
+        "$models_root" \
+        "$OLLAMA_PORT" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+import psutil
+
+marker_path = Path(sys.argv[1])
+pid = int(sys.argv[2])
+executable = Path(sys.argv[3]).resolve()
+models_root = Path(sys.argv[4]).resolve()
+port = int(sys.argv[5])
+process = psutil.Process(pid)
+command = process.cmdline()[:2]
+
+if not process.is_running():
+    raise SystemExit(1)
+if not any(Path(part).resolve() == executable for part in command if part.startswith("/")):
+    raise SystemExit(1)
+
+marker_path.parent.mkdir(parents=True, exist_ok=True)
+temporary = marker_path.with_name(marker_path.name + ".tmp")
+temporary.write_text(
+    json.dumps(
+        {
+            "pid": pid,
+            "executable": str(executable),
+            "create_time": process.create_time(),
+            "port": port,
+            "models_root": str(models_root),
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+os.replace(temporary, marker_path)
+PY
+}
+
 # 清扫托管运行时的孤儿/多余 llama-server，保证全局最多 1 个 llama-server。
 # 宿主 ollama serve 被终止后子 runner 会 reparent 到 launchd 继续驻留内存，
 # 必须在启动新 serve 前与停止服务后各清扫一次。
@@ -550,6 +668,7 @@ ensure_ollama_running() {
     local managed_config=""
     local ollama_executable=""
     local ollama_models_root=""
+    local listener_pid=""
 
     managed_config=$(resolve_managed_ollama_runtime 2>/dev/null || true)
     if [ -n "$managed_config" ]; then
@@ -558,8 +677,31 @@ ensure_ollama_running() {
     fi
 
     if is_ollama_ready; then
-        log_info "Ollama 已在运行，复用现有服务"
-        return 0
+        if [ -z "$ollama_executable" ]; then
+            log_info "Ollama 已在运行，等待初始化器完成托管运行时迁移"
+            return 0
+        fi
+
+        listener_pid=$(managed_ollama_listener_pid "$ollama_executable" 2>/dev/null || true)
+        if [ -n "$listener_pid" ]; then
+            if ! record_managed_ollama_process \
+                "$listener_pid" \
+                "$ollama_executable" \
+                "$ollama_models_root"; then
+                log_error "Ollama 进程身份登记失败，为避免初始化状态误判已停止启动"
+                return 1
+            fi
+            echo "$listener_pid" > "$OLLAMA_PID_FILE"
+            log_info "Ollama 已在运行，已同步托管进程身份 (PID: $listener_pid)"
+            return 0
+        fi
+
+        # 固定端口可能仍被已退出桌面客户端遗留的另一套 MemoryBread 托管
+        # 运行时占用。它不能复用当前开发环境的模型目录，安全清理后再启动
+        # 当前环境登记的运行时；用户自行安装的 Ollama 则绝不自动终止。
+        if ! cleanup_port "$OLLAMA_PORT" "Ollama"; then
+            return 1
+        fi
     fi
 
     if is_running "$OLLAMA_PID_FILE"; then
@@ -597,6 +739,15 @@ ensure_ollama_running() {
     echo $! > "$OLLAMA_PID_FILE"
 
     if wait_for_http "http://localhost:${OLLAMA_PORT}/api/tags" "Ollama" 30 1; then
+        if [ -n "$ollama_executable" ] && ! record_managed_ollama_process \
+            "$(cat "$OLLAMA_PID_FILE")" \
+            "$ollama_executable" \
+            "$ollama_models_root"; then
+            log_error "Ollama 已启动但进程身份登记失败，请查看日志: $OLLAMA_LOG"
+            kill "$(cat "$OLLAMA_PID_FILE")" 2>/dev/null || true
+            unlink "$OLLAMA_PID_FILE" 2>/dev/null || true
+            return 1
+        fi
         log_success "Ollama 已启动 (PID: $(cat "$OLLAMA_PID_FILE"))"
     else
         log_error "Ollama 启动失败，请查看日志: $OLLAMA_LOG"
@@ -1168,10 +1319,10 @@ start_sidecar() {
     cleanup_duplicate_sidecars
 
     if is_running "$SIDECAR_PID_FILE" && is_running "$MODEL_API_PID_FILE"; then
-        if sidecar_sources_changed; then
+        if source_reload_allowed && sidecar_sources_changed; then
             log_info "检测到 AI Sidecar 源码已更新，将自动加载最新代码"
             stop_managed_process "$SIDECAR_PID_FILE" "AI Sidecar"
-        elif model_api_sources_changed; then
+        elif source_reload_allowed && model_api_sources_changed; then
             log_info "检测到 Model API 源码已更新，将自动加载最新代码"
             stop_managed_process "$MODEL_API_PID_FILE" "Model API"
         elif ! is_http_ok "http://localhost:${MODEL_API_PORT}/api/initialization/status"; then
@@ -1268,7 +1419,7 @@ start_sidecar() {
 start_creation_service() {
     if is_running "$CREATION_PID_FILE"; then
         if is_managed_http_ok "http://127.0.0.1:${CREATION_PORT}/health" "$CREATION_PID_FILE" "$CREATION_PORT"; then
-            if creation_service_sources_changed; then
+            if source_reload_allowed && creation_service_sources_changed; then
                 log_info "检测到 Creation Service 源码晚于当前进程，将加载最新代码"
                 stop_managed_process "$CREATION_PID_FILE" "Creation Service"
             else
@@ -1287,7 +1438,7 @@ start_creation_service() {
                 "$CREATION_PORT" \
                 "$CREATION_STARTUP_RETRIES" \
                 1; then
-                if creation_service_sources_changed; then
+                if source_reload_allowed && creation_service_sources_changed; then
                     log_info "检测到 Creation Service 源码晚于当前进程，将加载最新代码"
                     stop_managed_process "$CREATION_PID_FILE" "Creation Service"
                 else
@@ -1351,12 +1502,30 @@ start_creation_service() {
     }
 }
 
+# 保留构建错误，桌面 supervisor 会把脚本的 stdout/stderr 重定向到空设备。
+build_core() {
+    log_info "构建最新 Core Engine..."
+    local build_log="$LOG_DIR/core-build.log"
+    if (
+        set -o pipefail
+        cd "$PROJECT_ROOT/core-engine" || exit 1
+        cargo build --release 2>&1 | tee "$build_log"
+    ); then
+        return 0
+    else
+        local build_status=$?
+        log_error "Core Engine 构建失败（退出码 ${build_status}），详见: $build_log"
+        return "$build_status"
+    fi
+}
+
 # 启动 Core Engine
 start_core() {
     local replace_running_core=false
+    local core_prebuilt="${1:-false}"
 
     if is_running "$CORE_PID_FILE"; then
-        if core_sources_changed; then
+        if source_reload_allowed && core_sources_changed; then
             log_info "检测到 Core Engine 源码晚于当前进程，将先完成构建再加载最新代码"
             replace_running_core=true
         else
@@ -1371,8 +1540,9 @@ start_core() {
     cd "$PROJECT_ROOT/core-engine"
 
     # 构建最新 Core Engine
-    log_info "构建最新 Core Engine..."
-    cargo build --release
+    if [ "$core_prebuilt" != true ]; then
+        build_core || return $?
+    fi
 
     # 构建失败时 `set -e` 会直接退出，现有 Core 继续服务；仅在新二进制
     # 准备完毕后切换进程，避免 Desktop UI 在编译期间同时失去创作和记录接口。
@@ -1455,6 +1625,7 @@ main() {
     maybe_delegate_to_workspace_supervisor "$@"
 
     local command="${1:-start}"
+    local allow_source_reload=true
     if [ "$#" -gt 0 ]; then
         shift
     fi
@@ -1473,6 +1644,7 @@ main() {
             parse_start_options "$@"
             check_path_leaks
             check_dependencies
+            "$PROJECT_ROOT/scripts/maintain-build-cache.sh" --auto
             ensure_ollama_running
             start_sidecar
             start_creation_service
@@ -1482,6 +1654,9 @@ main() {
             ;;
         start-backends)
             require_no_extra_args "$command" "$@"
+            # 桌面每 15 秒调用此命令修复故障；源码保存不应杀掉健康进程和
+            # 正在提炼的任务。显式 start/restart 仍负责加载最新代码。
+            allow_source_reload=false
             check_path_leaks
             check_dependencies
             ensure_ollama_running
@@ -1500,6 +1675,11 @@ main() {
             parse_start_options "$@"
             log_info "执行全组件 restart（AI Sidecar → Core Engine → Desktop UI）..."
             warn_if_multiple_desktop_apps
+            # 先验证依赖并构建，源码暂时不可编译时保留正在运行的客户端。
+            check_path_leaks
+            check_dependencies
+            "$PROJECT_ROOT/scripts/maintain-build-cache.sh" --auto
+            build_core || return $?
             # 标记覆盖完整重启窗口，不能在旧进程刚退出时就删除。否则它已经
             # 派生的 stop-after-app 会在新进程启动后执行，再次停掉整套服务。
             # EXIT 兜底保证中途构建或启动失败时不会遗留永久抑制清理的标记。
@@ -1507,12 +1687,10 @@ main() {
             trap 'rm -f "$SUPERVISOR_SHUTDOWN_MARKER"; release_start_lock' EXIT
             stop_all true
             sleep 2
-            check_path_leaks
-            check_dependencies
             ensure_ollama_running
             start_sidecar
             start_creation_service
-            start_core
+            start_core true
             start_ui
             rm -f "$SUPERVISOR_SHUTDOWN_MARKER"
             trap 'release_start_lock' EXIT
@@ -1528,8 +1706,12 @@ main() {
             log_info "查看日志 (Ctrl+C 退出)..."
             tail -f "$SIDECAR_LOG" "$MODEL_API_LOG" "$CREATION_LOG" "$CORE_LOG" "$UI_LOG" 2>/dev/null
             ;;
+        clean-build-cache)
+            require_no_extra_args "$command" "$@"
+            "$PROJECT_ROOT/scripts/maintain-build-cache.sh" --clean
+            ;;
         *)
-            echo "用法: $0 {start|stop|restart|status|logs} [--debug|--no-debug]"
+            echo "用法: $0 {start|stop|restart|status|logs|clean-build-cache} [--debug|--no-debug]"
             echo ""
             echo "命令说明:"
             echo "  start [--debug]   - 启动完整工作区；设置 MEMORYBREAD_LOCAL_ONLY=1 时仅启动客户端本地组件"
@@ -1537,6 +1719,7 @@ main() {
             echo "  restart [--debug] - 重启对应范围的服务"
             echo "  status            - 查看对应范围的服务状态"
             echo "  logs              - 查看对应范围的实时日志"
+            echo "  clean-build-cache - 清理可重建的 Rust 构建缓存"
             exit 1
             ;;
     esac

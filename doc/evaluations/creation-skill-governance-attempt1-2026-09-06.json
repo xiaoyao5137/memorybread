@@ -1,0 +1,153 @@
+{
+  "model": "qwen3.5:4b",
+  "cases": [
+    {
+      "case": "legacy_business_sota_1",
+      "checks": {
+        "model_decision": true,
+        "operation": true,
+        "no_wrong_workflow": false
+      },
+      "details": {
+        "initial_kind": "generate",
+        "kind": "generate",
+        "identity": {
+          "title": "快手灵机产品吸引非L0商家及SOTA视频生成应用方案",
+          "source": "generated",
+          "evidence": "创作一篇如何对快手灵机产品大规模吸引非L0商家的方案，为商家制作爆款视频，进而极大提高GMV爆可品和可以使用SOTA视频生成模型的方案"
+        },
+        "admission": []
+      },
+      "seconds": 44.69,
+      "passed": false
+    },
+    {
+      "case": "legacy_business_sota_2",
+      "checks": {
+        "model_decision": true,
+        "operation": true,
+        "no_wrong_workflow": false
+      },
+      "details": {
+        "initial_kind": "generate",
+        "kind": "generate",
+        "identity": {
+          "title": "快手灵机产品吸引非L0商家及SOTA视频生成应用方案",
+          "source": "generated",
+          "evidence": "创作一篇如何对快手灵机产品大规模吸引非L0商家的方案，为商家制作爆款视频，进而极大提高GMV爆可品和可以使用SOTA视频生成模型的方案"
+        },
+        "admission": []
+      },
+      "seconds": 27.64,
+      "passed": false
+    },
+    {
+      "case": "repaired_business_sota",
+      "checks": {
+        "model_decision": true,
+        "operation": true,
+        "no_wrong_workflow": true
+      },
+      "details": {
+        "initial_kind": "generate",
+        "kind": "generate",
+        "identity": {
+          "title": "快手灵机非L0商家爆款视频运营方案",
+          "source": "generated",
+          "evidence": "创作一篇如何对快手灵机产品大规模吸引非L0商家的方案，为商家制作爆款视频，进而极大提高GMV爆可品和可以使用SOTA视频生成模型的方案。"
+        },
+        "admission": []
+      },
+      "seconds": 61.0,
+      "passed": true
+    },
+    {
+      "case": "business_without_sota",
+      "checks": {
+        "model_decision": false,
+        "execution": false
+      },
+      "details": {
+        "initial_kind": "respond",
+        "error": "OperationError: 本轮操作解析失败，请重试当前指令"
+      },
+      "seconds": 69.24,
+      "passed": false
+    },
+    {
+      "case": "technical_architecture",
+      "checks": {
+        "model_decision": false,
+        "execution": false
+      },
+      "details": {
+        "initial_kind": "respond",
+        "error": "OperationError: 本轮操作解析失败，请重试当前指令"
+      },
+      "seconds": 41.7,
+      "passed": false
+    },
+    {
+      "case": "explicit_skill_business",
+      "checks": {
+        "model_decision": false,
+        "execution": false
+      },
+      "details": {
+        "initial_kind": "respond",
+        "error": "OperationError: 本轮操作解析失败，请重试当前指令"
+      },
+      "seconds": 24.78,
+      "passed": false
+    },
+    {
+      "case": "no_skill",
+      "checks": {
+        "model_decision": false,
+        "execution": false
+      },
+      "details": {
+        "initial_kind": "respond",
+        "error": "OperationError: 本轮操作解析失败，请重试当前指令"
+      },
+      "seconds": 13.38,
+      "passed": false
+    },
+    {
+      "case": "local_edit",
+      "checks": {
+        "model_decision": true,
+        "operation": true,
+        "no_wrong_workflow": true
+      },
+      "details": {
+        "initial_kind": "patch",
+        "kind": "patch",
+        "identity": null,
+        "admission": []
+      },
+      "seconds": 3.52,
+      "passed": true
+    },
+    {
+      "case": "template_question",
+      "checks": {
+        "model_decision": true,
+        "operation": false,
+        "no_wrong_workflow": true
+      },
+      "details": {
+        "initial_kind": "generate",
+        "kind": "generate",
+        "identity": {
+          "title": "技术架构方案评审文档模板适合哪些任务",
+          "source": "user",
+          "evidence": "技术架构方案评审文档模板适合哪些任务？"
+        },
+        "admission": []
+      },
+      "seconds": 10.38,
+      "passed": false
+    }
+  ]
+}

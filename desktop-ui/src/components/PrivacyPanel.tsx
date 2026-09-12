@@ -3,8 +3,9 @@ import type { AppBlacklistRecord, PrivacyFilterRecord } from '../types'
 import { toUserFacingError } from '../utils/userFacingError'
 import { BreadAppIcon, BreadToolIcon } from './icons/BreadIcons'
 import './PrivacyPanel.css'
+import { getLocalServiceBaseUrl } from '../utils/localServices'
 
-const API_BASE = 'http://127.0.0.1:7070'
+const API_BASE = getLocalServiceBaseUrl('core')
 
 const FILTER_DESCRIPTIONS: Record<string, string> = {
   chat: '检测密码、验证码、账号等聊天敏感内容',

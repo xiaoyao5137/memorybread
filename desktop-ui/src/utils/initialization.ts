@@ -1,3 +1,5 @@
+import { getLocalServiceBaseUrl } from './localServices'
+
 export type InitializationStageStatus =
   | 'pending'
   | 'running'
@@ -68,8 +70,8 @@ interface InitializationEnvelope {
   message?: string
 }
 
-const SIDECAR = 'http://127.0.0.1:7071'
-const CORE_ENGINE = 'http://127.0.0.1:7070'
+const SIDECAR = getLocalServiceBaseUrl('model_api')
+const CORE_ENGINE = getLocalServiceBaseUrl('core')
 
 async function requestInitialization(path: string, init?: RequestInit) {
   try {

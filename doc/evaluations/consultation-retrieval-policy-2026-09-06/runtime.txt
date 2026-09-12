@@ -1,0 +1,4 @@
+INFO:__main__:咨询检索决策 needs_rag=True reason=recall_by_default intent_source=model
+INFO:__main__:咨询检索决策 needs_rag=True reason=recall_by_default intent_source=model
+INFO:rag.pipeline:RAG 召回耗时 embedding_ms=372 knowledge_ms=1570 pending_document_ms=6153 vector_ms=617 merge_ms=50 total_ms=8763
+INFO:__main__:流式 RAG 阶段耗时 retrieval_ms=8763 generation_queue_wait_ms=25384 generation_prepare_ms=0 inference_ms=27136 total_ms=79421

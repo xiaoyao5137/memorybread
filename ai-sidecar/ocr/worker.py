@@ -22,6 +22,8 @@ from typing import Optional
 from memory_bread_ipc import IpcRequest, IpcResponse, OcrResult
 
 from .engine import OcrEngine
+from .control import OcrControl, OcrDeferred, use_control
+from inference_queue import interactive_demand_active
 from .privacy_filter import PrivacyFilter
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,62 @@ class OcrWorker:
         self._ocr_semaphore: Optional[asyncio.Semaphore] = None
         self._ocr_semaphore_loop: Optional[asyncio.AbstractEventLoop] = None
         self._executor = _OCR_EXECUTOR
+        self._foreground_pending = 0
+        self._background_control = None
+        self._activities = {}
+
+    def activity(self, task):
+        if task.active:
+            self._activities[task.activity_id] = time.monotonic() + 15.0
+            if self._background_control:
+                self._background_control.cancel()
+        else:
+            self._activities.pop(task.activity_id, None)
+
+    def _interactive_active(self):
+        now = time.monotonic()
+        self._activities = {key: expiry for key, expiry in self._activities.items() if expiry > now}
+        return bool(self._activities or self._foreground_pending or interactive_demand_active())
+
+    async def _recognize(self, task):
+        foreground = task.priority == 'foreground'
+        if foreground:
+            self._foreground_pending += 1
+            if self._background_control:
+                self._background_control.cancel()
+        try:
+            if not foreground and self._interactive_active():
+                raise OcrDeferred('OCR_DEFERRED')
+            async with self._ocr_semaphore:
+                if not foreground and self._interactive_active():
+                    raise OcrDeferred('OCR_DEFERRED')
+                control = OcrControl()
+                if not foreground:
+                    self._background_control = control
+                def execute():
+                    with use_control(control):
+                        return self._engine.process(task.screenshot_path)
+                future = asyncio.get_running_loop().run_in_executor(self._executor, execute)
+                try:
+                    while not future.done():
+                        await asyncio.wait({future}, timeout=0.05)
+                        if not foreground and self._interactive_active():
+                            control.cancel()
+                    return future.result()
+                except asyncio.CancelledError:
+                    control.cancel()
+                    # Do not free the OCR permit while a native call still owns it.
+                    try:
+                        await asyncio.shield(future)
+                    except Exception:
+                        pass
+                    raise
+                finally:
+                    if self._background_control is control:
+                        self._background_control = None
+        finally:
+            if foreground:
+                self._foreground_pending -= 1
 
     async def handle(self, req: IpcRequest) -> IpcResponse:
         """
@@ -62,14 +120,14 @@ class OcrWorker:
                 self._ocr_semaphore = asyncio.Semaphore(1)
                 self._ocr_semaphore_loop = loop
             ocr_semaphore = self._ocr_semaphore
-            # OCR 全局串行执行，避免 Vision 在同一张图的超时重试下并发放大。
-            async with ocr_semaphore:
-                output = await loop.run_in_executor(
-                    self._executor, self._engine.process, task.screenshot_path
-                )
+            output = await self._recognize(task)
 
             # 隐私过滤
-            text = output.text
+            if task.priority == 'foreground':
+                from .layout import reading_order_text
+                text = reading_order_text(output.boxes)
+            else:
+                text = output.text
             if self._privacy_filter and text:
                 filter_result = self._privacy_filter.detect_and_redact(text, output.boxes)
                 if filter_result.is_sensitive:
@@ -91,6 +149,9 @@ class OcrWorker:
                 language=output.language,
             )
             return IpcResponse.make_ok(req.id, result, latency_ms)
+
+        except OcrDeferred:
+            return IpcResponse.make_error(req.id, 'OCR_DEFERRED', '用户任务优先，后台 OCR 稍后恢复', int((time.monotonic() - t0) * 1000))
 
         except FileNotFoundError as exc:
             latency_ms = int((time.monotonic() - t0) * 1000)

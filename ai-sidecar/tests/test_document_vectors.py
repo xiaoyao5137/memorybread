@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 
 from background_processor import BackgroundProcessor
@@ -154,10 +155,29 @@ def test_document_chunking_keeps_content_after_old_500_character_cutoff() -> Non
     assert all(estimate_tokens(chunk) <= 500 for chunk in chunks)
 
 
+def test_url_identity_v2_shared_cases():
+    import json
+    from pathlib import Path
+    from embedding.document_chunks import _canonicalize_url
+    cases = json.loads((Path(__file__).resolve().parents[2] / "shared/document-quality/url-identity-v2-cases.json").read_text())
+    for case in cases:
+        left, right = _canonicalize_url(case["left"]), _canonicalize_url(case["right"])
+        assert left and right
+        assert (left == right) == case["equal"], case
+
+
+def test_document_identity_preserves_resource_case_scheme_and_parameters():
+    base = "https://docs.example.com/d/home/ABC123"
+    assert canonicalize_document_url(base) == canonicalize_document_url(base + "?ro=false#comment")
+    for other in (base.replace("ABC123", "abc123"), base.replace("https:", "http:"),
+                  base + "?tenant=other", base + "/"):
+        assert canonicalize_document_url(base) != canonicalize_document_url(other)
+
+
 def test_document_snapshot_uses_canonical_url_and_full_ax_text() -> None:
     capture = {
         "id": 9,
-        "url": "https://docs.example.com/k/home/sample-document?from=recent#section",
+        "url": "https://docs.example.com/k/home/sample-document?ro=false#section",
         "window_title": "调度文档",
         "ax_text": "前言。" * 120 + "潮汐特性在正文后部。",
         "ocr_text": "短 OCR",
@@ -275,6 +295,8 @@ def test_artifact_document_vectors_use_durable_owner_and_retryable_deletion_queu
 ) -> None:
     db_path = str(tmp_path / "durable-vectors.db")
     _create_durable_vector_schema(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("INSERT INTO bake_documents(id,title,full_content,updated_at) VALUES(80,'持久文档','第一块第二块',1234)")
     storage = VectorStorage(db_path=db_path)
     qdrant = _FakeQdrant()
     monkeypatch.setattr(storage, "_get_qdrant_client", lambda: qdrant)
@@ -316,6 +338,8 @@ def test_artifact_document_vectors_use_durable_owner_and_retryable_deletion_queu
         ).fetchone()[0] == 0
 
     changed = {**metadata, "content_hash": "version-two", "updated_at": 2345}
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE bake_documents SET updated_at=2345,full_content='新版本' WHERE id=80")
     assert storage.store_artifact_document_vectors(
         80,
         ["新版本"],
@@ -349,6 +373,8 @@ def test_artifact_document_vectors_rebuild_after_embedding_backend_switch(
 ) -> None:
     db_path = str(tmp_path / "artifact-model-change.db")
     _create_durable_vector_schema(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("INSERT INTO bake_documents(id,title,full_content,updated_at) VALUES(81,'切换后端文档','旧空间分块',1234)")
     storage = VectorStorage(db_path=db_path)
     qdrant = _FakeQdrant()
     monkeypatch.setattr(storage, "_get_qdrant_client", lambda: qdrant)
@@ -404,7 +430,7 @@ def test_bake_document_snapshot_does_not_need_a_capture() -> None:
     assert snapshot is not None
     assert snapshot.document_id == 80
     assert snapshot.doc_key == (
-        "document_url:https://docs.example.com/d/home/ABC"
+        "document_url:https://docs.example.com/d/home/ABC?x=1"
     )
     assert any("SMACT" in chunk for chunk in snapshot.chunks)
 
@@ -641,4 +667,324 @@ def test_load_pending_bake_documents_includes_stale_embedding_model(
     assert processor._load_pending_bake_documents(
         10,
         "BAAI/bge-small-zh-v1.5",
-    ) == [document]
+    ) == [{**document, "source_snapshot_id": None}]
+
+
+def test_verified_short_source_is_scheduled_and_indexable(tmp_path):
+    db_path = str(tmp_path / 'source.db')
+    _create_durable_vector_schema(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute('CREATE TABLE bake_document_source_heads(document_id INTEGER,snapshot_id INTEGER)')
+        conn.execute("INSERT INTO bake_documents(id,title,full_content,updated_at) VALUES(1,'短文','周一开始试运行。',100)")
+        conn.execute('INSERT INTO bake_document_source_heads VALUES(1,7)')
+        conn.execute('CREATE TABLE bake_document_source_snapshots(id INTEGER,document_id INTEGER,content_text TEXT,identity_match INTEGER,completeness_status TEXT)')
+        conn.execute("INSERT INTO bake_document_source_snapshots SELECT 7,id,full_content,1,'complete' FROM bake_documents WHERE id=1")
+    processor = BackgroundProcessor(db_path=db_path)
+    documents = processor._load_pending_bake_documents(4, source_versions_only=True)
+    assert len(documents) == 1
+    assert documents[0]['source_snapshot_id'] == 7
+    assert build_bake_document_snapshot(documents[0]).body == '周一开始试运行。'
+
+
+def test_stale_head_cannot_schedule_or_publish_vectors_with_current_body_metadata(tmp_path, monkeypatch):
+    db_path = str(tmp_path / 'stale-source.db')
+    _create_durable_vector_schema(db_path)
+    with sqlite3.connect(db_path) as conn:
+        from pathlib import Path
+        conn.executescript((Path(__file__).parents[2] / 'core-engine/src/storage/migrations/121_document_source_mismatch_events.sql').read_text())
+        conn.execute('CREATE TABLE bake_document_source_heads(document_id INTEGER,snapshot_id INTEGER)')
+        conn.execute('CREATE TABLE bake_document_source_snapshots(id INTEGER,document_id INTEGER,content_text TEXT,identity_match INTEGER,completeness_status TEXT)')
+        conn.execute("INSERT INTO bake_documents(id,title,full_content,updated_at) VALUES(1,'正文',?,100)", ('实际正文。' * 200,))
+        conn.execute('INSERT INTO bake_document_source_heads VALUES(1,7)')
+        conn.execute("INSERT INTO bake_document_source_snapshots VALUES(7,1,'失配的旧来源正文',1,'complete')")
+    processor = BackgroundProcessor(db_path=db_path)
+    assert processor._load_pending_bake_documents(4) == []
+    assert processor._load_pending_bake_documents(4, source_versions_only=True) == []
+    storage = VectorStorage(db_path=db_path)
+    qdrant = _FakeQdrant()
+    monkeypatch.setattr(storage, '_get_qdrant_client', lambda: qdrant)
+    assert not storage.store_artifact_document_vectors(1, ['实际正文。'], [[.1, .2]], {
+        'doc_key': 'document:1', 'content_hash': 'new', 'updated_at': 100, 'source_snapshot_id': 7,
+    })
+    assert qdrant.upserts == []
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute('SELECT component,reason,SUM(occurrences) FROM document_source_mismatch_events GROUP BY component,reason ORDER BY component').fetchall() == [
+            ('vector_schedule', 'head_invalid', 2), ('vector_write', 'head_invalid', 1)]
+
+
+def test_source_change_during_embedding_cannot_publish_stale_index(tmp_path, monkeypatch):
+    db_path = str(tmp_path / 'race.db')
+    _create_durable_vector_schema(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute('CREATE TABLE bake_document_source_heads(document_id INTEGER,snapshot_id INTEGER)')
+        conn.execute("INSERT INTO bake_documents(id,title,full_content,updated_at) VALUES(1,'来源','旧文',100)")
+        conn.execute('INSERT INTO bake_document_source_heads VALUES(1,7)')
+        conn.execute('CREATE TABLE bake_document_source_snapshots(id INTEGER,document_id INTEGER,content_text TEXT,identity_match INTEGER,completeness_status TEXT)')
+        conn.execute("INSERT INTO bake_document_source_snapshots SELECT 7,id,full_content,1,'complete' FROM bake_documents WHERE id=1")
+    storage = VectorStorage(db_path=db_path)
+    qdrant = _FakeQdrant()
+    def racing_upsert(**kwargs):
+        qdrant.upserts.append(kwargs)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute('UPDATE bake_document_source_heads SET snapshot_id=8')
+            conn.execute("UPDATE bake_documents SET updated_at=200,full_content='新文'")
+    monkeypatch.setattr(qdrant, 'upsert', racing_upsert)
+    monkeypatch.setattr(storage, '_get_qdrant_client', lambda: qdrant)
+    metadata = {'doc_key':'document:1','content_hash':'old','updated_at':100,'source_snapshot_id':7}
+    assert not storage.store_artifact_document_vectors(1,['旧文'],[[.1,.2]],metadata)
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM artifact_vector_index').fetchone()[0] == 0
+        assert conn.execute('SELECT reason FROM vector_deletion_queue').fetchone()[0] == 'source_changed_during_embedding'
+    assert not storage.store_artifact_document_vectors(1,['旧文'],[[.1,.2]],metadata)
+    assert len(qdrant.upserts) == 1
+
+
+def test_unversioned_document_edit_during_embedding_rejects_stale_index(tmp_path, monkeypatch):
+    import hashlib
+    db_path = str(tmp_path / "unversioned-race.db")
+    _create_durable_vector_schema(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("INSERT INTO bake_documents(id,title,full_content,updated_at) VALUES(1,'手动文档','旧文',100)")
+    storage = VectorStorage(db_path=db_path)
+    qdrant = _FakeQdrant()
+    def racing_upsert(**kwargs):
+        qdrant.upserts.append(kwargs)
+        with sqlite3.connect(db_path) as conn:
+            # Deliberately retain the timestamp to test body identity within one millisecond.
+            conn.execute("UPDATE bake_documents SET full_content='用户已修改'")
+    monkeypatch.setattr(qdrant, 'upsert', racing_upsert)
+    monkeypatch.setattr(storage, '_get_qdrant_client', lambda: qdrant)
+    metadata = {'doc_key':'document:1','content_hash':'old','updated_at':100,
+                'source_body_hash':hashlib.sha256('旧文'.encode()).hexdigest()}
+    assert not storage.store_artifact_document_vectors(1,['旧文'],[[.1,.2]],metadata)
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM artifact_vector_index').fetchone()[0] == 0
+        assert conn.execute('SELECT COUNT(*) FROM vector_deletion_queue').fetchone()[0] == 1
+    assert not storage.store_artifact_document_vectors(1,['旧文'],[[.1,.2]],metadata)
+    assert len(qdrant.upserts) == 1
+
+
+def test_document_shell_shared_cases():
+    from pathlib import Path
+    from embedding.document_quality import is_document_shell
+    cases = json.loads((Path(__file__).resolve().parents[2] / 'shared/document-quality/cases.json').read_text())
+    for case in cases:
+        assert is_document_shell(case['text']) == case['shell'], case['name']
+        if case['shell']:
+            assert build_document_snapshot({'id': 1, 'url': 'https://docs.example.com/document/1', 'ax_text': case['text']}) is None
+            assert build_bake_document_snapshot({'id': 1, 'full_content': case['text'], 'title': '测试文档'}) is None
+            assert build_bake_document_snapshot({
+                'id': 1, 'full_content': case['text'], 'title': '测试文档',
+                'sections_json': json.dumps([{'content': 'This is a complete business procedure with detailed implementation instructions. ' * 1000}]),
+            }) is None
+
+
+class _PagedFakeQdrant:
+    """A Qdrant stub whose ``scroll`` truly paginates (so it can be truncated by
+    ``max_points``) while ``retrieve`` reports residency independently."""
+
+    def __init__(self, point_ids, page_size: int) -> None:
+        self._ids = sorted(str(point_id) for point_id in point_ids)
+        self._page = max(1, int(page_size))
+        self.retrieve_calls = 0
+
+    @staticmethod
+    def _point(point_id):
+        class _Point:
+            def __init__(self, value):
+                self.id = value
+
+        return _Point(point_id)
+
+    def scroll(self, **kwargs):
+        limit = int(kwargs.get("limit") or 1)
+        offset = kwargs.get("offset")
+        start = int(offset) if offset is not None else 0
+        size = min(limit, self._page)
+        page = self._ids[start : start + size]
+        nxt = start + size
+        next_offset = str(nxt) if nxt < len(self._ids) else None
+        return [self._point(point_id) for point_id in page], next_offset
+
+    def retrieve(self, **kwargs):
+        self.retrieve_calls += 1
+        present = set(self._ids)
+        return [
+            self._point(point_id)
+            for point_id in kwargs.get("ids", [])
+            if str(point_id) in present
+        ]
+
+    def upsert(self, **_kwargs):
+        return None
+
+    def delete(self, **_kwargs):
+        return None
+
+
+def test_backfill_bake_document_rebuilds_drifted_document_missing_from_qdrant(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """点2：账本看似已完成（非 pending）但 Qdrant 点已丢失的漂移文档，必须被
+    驻留核对重新投入重建，而不是被 5 分钟一次的补齐通道永远 SKIP。
+    """
+
+    class _Storage:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def artifact_document_version_exists(self, *_args) -> bool:
+            # 模拟漂移：账本还在，但 Qdrant 实点已丢。
+            return False
+
+        def store_artifact_document_vectors(
+            self, document_id, chunks, vectors, metadata
+        ):
+            self.calls.append((document_id, chunks, vectors, metadata))
+            return True
+
+    class _Model:
+        model_name = "test-embedding"
+
+        def encode(self, texts):
+            return [
+                EmbeddingVector(text=text, vector=[float(index), 0.5])
+                for index, text in enumerate(texts)
+            ]
+
+    db_path = str(tmp_path / "drift-residency.db")
+    _create_durable_vector_schema(db_path)
+    document = {
+        "id": 80,
+        "title": "GPU 资源池分布",
+        "doc_type": "技术文档",
+        "summary": None,
+        "full_content": "万擎 GPU 资源池调度与分配说明。" * 40,
+        "sections_json": "[]",
+        "source_url": "https://docs.example.com/k/home/DRIFT",
+        "updated_at": 1234,
+    }
+    snapshot = build_bake_document_snapshot(document)
+    assert snapshot is not None
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO bake_documents (
+                id, title, doc_type, full_content, source_url, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                document["id"],
+                document["title"],
+                document["doc_type"],
+                document["full_content"],
+                document["source_url"],
+                document["updated_at"],
+            ),
+        )
+        # 账本看似已完成：indexed_at == updated_at、模型与当前一致 → HAVING 判为跳过。
+        for index, chunk in enumerate(snapshot.chunks):
+            conn.execute(
+                """
+                INSERT INTO artifact_vector_index (
+                    document_id, qdrant_point_id, doc_key, content_hash,
+                    chunk_index, chunk_text, model_name, indexed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    document["id"],
+                    f"drift-point-{index}",
+                    snapshot.doc_key,
+                    snapshot.content_hash,
+                    index,
+                    chunk,
+                    "test-embedding",
+                    1234,
+                ),
+            )
+
+    storage = _Storage()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("embedding.vector_storage.get_vector_storage", lambda: storage)
+    monkeypatch.setattr("model_registry_global.get_shared_embedding", lambda: _Model())
+    processor = BackgroundProcessor(db_path=db_path)
+    monkeypatch.setattr(
+        processor, "_current_embedding_model_name", lambda: "test-embedding"
+    )
+
+    # 关键前提：只看账本的 pending 通道检不出这条漂移文档（返回空）。
+    assert processor._load_pending_bake_documents(10, "test-embedding") == []
+
+    result = asyncio.run(processor.backfill_bake_document_vectors())
+
+    # 只有驻留核对把它捞回来，才能重建；否则 candidate_count 会是 0。
+    assert result == {"candidate_count": 1, "processed_count": 1}
+    assert [call[0] for call in storage.calls] == [80]
+
+
+def test_consistency_audit_detects_missing_artifact_beyond_scroll_cap(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """点3：即使集合大于 max_points、孤儿 scroll 被截断（scan_truncated），
+    “账本在、点不在”的漂移仍必须被检出来（旧实现会因截断把 missing 清零）。
+    """
+    db_path = str(tmp_path / "audit-cap.db")
+    _create_durable_vector_schema(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO artifact_vector_index (
+                document_id, qdrant_point_id, doc_key, content_hash,
+                chunk_index, chunk_text, model_name, indexed_at
+            )
+            VALUES (80, 'missing-point', 'document:80', 'v1', 0, 'text', 'test', 1)
+            """
+        )
+    storage = VectorStorage(db_path=db_path)
+    # 集合中只有大量孤儿点，目标 'missing-point' 实际不存在。
+    stored = {f"orphan-{index}" for index in range(5)}
+    qdrant = _PagedFakeQdrant(stored, page_size=2)
+    monkeypatch.setattr(storage, "_get_qdrant_client", lambda: qdrant)
+
+    result = storage.audit_qdrant_consistency(
+        max_points=3,
+        mark_missing_artifacts=True,
+    )
+
+    assert result["available"] is True
+    # 孤儿扫描确实被 max_points 截断，旧逻辑会因此把 missing 强行清零。
+    assert result["scan_truncated"] is True
+    assert result["missing_count"] == 1
+    assert result["missing_artifact_count"] == 1
+    assert result["missing_artifacts_marked_for_rebuild"] == 1
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM artifact_vector_index"
+        ).fetchone()[0] == 0
+
+
+def test_document_deletion_failure_keeps_retry_without_private_diagnostics(tmp_path, monkeypatch, caplog):
+    import logging
+    secret = 'PRIVATE_BODY https://docs.example.com/private?token=SECRET'
+    db_path = str(tmp_path / 'private-delete.db')
+    _create_durable_vector_schema(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("INSERT INTO vector_deletion_queue(qdrant_point_id,source_type,reason,enqueued_at) VALUES('pending-point','document','document_body_restored',1)")
+    storage = VectorStorage(db_path=db_path)
+    class BrokenClient:
+        def delete(self, **kwargs):
+            raise RuntimeError(secret)
+    monkeypatch.setattr(storage, '_get_qdrant_client', lambda: BrokenClient())
+    with caplog.at_level(logging.DEBUG):
+        result = storage.drain_deletion_queue()
+    assert result == {'selected_count': 1, 'deleted_count': 0, 'error': 'VECTOR_DELETE_FAILED'}
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute('SELECT qdrant_point_id,attempt_count,last_error,next_attempt_at FROM vector_deletion_queue').fetchone()
+    assert row[:3] == ('pending-point', 1, 'VECTOR_DELETE_FAILED')
+    assert row[3] > 0
+    for fragment in ['PRIVATE_BODY', 'docs.example.com', 'SECRET']:
+        assert fragment not in caplog.text + json.dumps(result) + str(row)

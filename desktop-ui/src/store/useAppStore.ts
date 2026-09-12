@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { AccountType, ActionCommand, AuthSession, BakeTab, CloudBalance, CloudSubscription, CloudUser, RagContext, RepositoryTab, ServiceEnvironment, TimelineItem, WindowMode } from '../types'
 import { getLocalNickname, LOCAL_NICKNAME_KEY } from '../utils/localIdentity'
+import { getLocalServiceBaseUrl } from '../utils/localServices'
 
 export interface BakeNavigationTarget {
   windowMode: WindowMode
@@ -138,6 +139,7 @@ export interface CreationBrainstormOption {
   id: string
   label: string
   description: string
+  details?: string
   recommended?: boolean
 }
 
@@ -145,16 +147,24 @@ export interface CreationBrainstormContinuationDirection {
   id: string
   label: string
   description: string
+  details?: string
   recommended?: boolean
 }
 
+export type CreationBrainstormExplorationStage = 'explore' | 'solutions' | 'implementation' | 'validation'
+
 export interface CreationBrainstormQuestion {
+  exploration_stage?: CreationBrainstormExplorationStage
+  parent_question_id?: string | null
+  parent_option_id?: string | null
+  single_choice_reason?: string
   id: string
   dimension_id?: string
   dimension: string
   type: 'single_choice' | 'multi_choice' | 'confirm_inference'
   prompt: string
   why_now: string
+  context_details?: string
   required: boolean
   allow_custom: boolean
   options: CreationBrainstormOption[]
@@ -173,6 +183,9 @@ export interface CreationBrainstormHistoryItem {
 }
 
 export interface CreationBrainstormState {
+  archived_questions?: Array<{ question: CreationBrainstormQuestion; answer: CreationBrainstormAnswer | null }>
+  root_request?: string
+  brief_edits?: Record<string, string>
   session_id: string
   phase: 'exploring' | 'ready' | 'abandoned' | string
   revision: number
@@ -218,6 +231,9 @@ export interface CreationDraft {
   agentEvents: CreationAgentEvent[]
   creationMode: CreationMode
   brainstormState: CreationBrainstormState | null
+  // 文档生成后暂停问题交互；undefined 兼容旧草稿，按已有正文恢复。
+  brainstormPaused?: boolean
+  briefEditDraft?: { sessionId: string; values: Record<string, string> }
 }
 
 export interface CreationBackTarget {
@@ -598,7 +614,7 @@ const initialState = {
   ragError:            null,
   pendingAction:       null,
   actionConfirmed:     false,
-  apiBaseUrl:          'http://127.0.0.1:7070',
+  apiBaseUrl:          getLocalServiceBaseUrl('core'),
   adminApiBaseUrl:     initialEndpoints.adminApiBaseUrl,
   gatewayApiBaseUrl:   initialEndpoints.gatewayApiBaseUrl,
   sidecarVersion:      '0.1.0',

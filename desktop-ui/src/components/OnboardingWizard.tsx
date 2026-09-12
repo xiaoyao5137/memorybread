@@ -12,6 +12,7 @@ import {
 import { useConfirmDialog } from './useConfirmDialog'
 import { getAppMetadata } from '../utils/appMetadata'
 import { reportCustomerLogs } from '../utils/customerLogReport'
+import PermissionPreparation from './PermissionPreparation'
 import './OnboardingWizard.css'
 
 const STATUS_POLL_MS = 1_000
@@ -82,10 +83,6 @@ function notifyInitializationComplete() {
   try {
     if (Notification.permission === 'granted') {
       show()
-    } else if (Notification.permission === 'default') {
-      void Notification.requestPermission().then(permission => {
-        if (permission === 'granted') show()
-      })
     }
   } catch {
     // 系统通知是完成后的附加能力，不影响已经通过的初始化结果。
@@ -109,6 +106,21 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
   const [starting, setStarting] = useState(false)
   const [reporting, setReporting] = useState(false)
   const [reportId, setReportId] = useState('')
+  const pendingKey = `memorybread.pending-initialization-log:${serviceEnvironment}:${adminApiBaseUrl}`
+  const [pendingReport, setPendingReport] = useState<{ reportId: string; installationId: string } | null>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(pendingKey) || 'null')
+      return saved && typeof saved.reportId === 'string' && typeof saved.installationId === 'string' ? saved : null
+    } catch { return null }
+  })
+  const savePendingReport = (value: { reportId: string; installationId: string } | null) => {
+    setPendingReport(value)
+    try {
+      if (value) localStorage.setItem(pendingKey, JSON.stringify(value))
+      else localStorage.removeItem(pendingKey)
+    } catch { /* The in-memory receipt still supports retry if storage is unavailable. */ }
+  }
+
   const [leavingSandbox, setLeavingSandbox] = useState(false)
   const [sandboxExitConfirming, setSandboxExitConfirming] = useState(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
@@ -121,13 +133,10 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
     setConnecting(false)
     setConnectionError('')
     const ready = initializationIsReady(next)
-    onStatusValidated?.(ready)
+    if (!ready) onStatusValidated?.(false)
     if (ready) {
-      setHasCompletedSetup(true)
-      // 初始化完成后自动进入咨询页面（无论是刚完成还是已经完成的用户）
-      if (previousStateRef.current === 'running' || previousStateRef.current === null) {
-        setWindowMode('rag')
-      }
+      // Keep the first-run screen open so users can finish permission preparation.
+      // Completion is acknowledged explicitly below; model downloads remain independent.
     } else if (next.test_mode_enabled || next.state !== 'completed') {
       setHasCompletedSetup(false)
     }
@@ -229,7 +238,7 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
   }
 
   const report = async () => {
-    const confirmed = await confirmDestructive({
+    const confirmed = pendingReport || await confirmDestructive({
       title: '确认上报诊断信息？',
       description: '将上报应用与系统版本、硬件档位、失败阶段、稳定错误码，以及固定白名单服务日志的脱敏尾部。日志会限量并移除凭据、联系方式、外部网址和文件路径；不会上报截图、数据库、知识内容、提示词或回答。',
       confirmLabel: '确认上报',
@@ -239,40 +248,43 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
     setReporting(true)
     setActionError('')
     try {
-      const bundle = await fetchInitializationReport()
       const metadata = await getAppMetadata()
-      bundle.client_version = metadata.version
-      const runId = String(bundle.run_id || status?.run_id || Date.now())
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        'Idempotency-Key': runId,
-        'X-MemoryBread-Environment': serviceEnvironment,
+      let receipt = pendingReport
+      if (!receipt) {
+        const bundle = await fetchInitializationReport()
+        bundle.client_version = metadata.version
+        const runId = String(bundle.run_id || status?.run_id || Date.now())
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json', 'Idempotency-Key': runId,
+          'X-MemoryBread-Environment': serviceEnvironment,
+        }
+        if (authToken) headers.Authorization = `Bearer ${authToken}`
+        const response = await fetch(`${adminApiBaseUrl}/v1/initialization-reports`, {
+          method: 'POST', headers, body: JSON.stringify(bundle),
+        })
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok) throw new Error(data?.error?.message || '诊断上报失败')
+        const id = String(data?.data?.report_id || '')
+        if (!id) throw new Error('诊断上报回执无效')
+        receipt = { reportId: id, installationId: String(bundle.installation_id || '') }
+        savePendingReport(receipt)
       }
-      if (authToken) headers.Authorization = `Bearer ${authToken}`
-      const response = await fetch(`${adminApiBaseUrl}/v1/initialization-reports`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(bundle),
-      })
-      const data = await response.json().catch(() => ({}))
-      if (!response.ok) throw new Error(data?.error?.message || '诊断上报失败')
-      const initializationReportId = String(data?.data?.report_id || '')
-      if (!initializationReportId) throw new Error('诊断上报回执无效')
-      setReportId(initializationReportId)
+      const initializationReportId = receipt.reportId
       try {
         const logReceipt = await reportCustomerLogs({
           adminApiBaseUrl,
           localApiBaseUrl: apiBaseUrl,
           authToken,
           metadata,
-          installationId: String(bundle.installation_id || ''),
+          installationId: receipt.installationId,
           initializationReportId,
-          description: `初始化失败 ${String(bundle.error_code || 'INITIALIZATION_FAILED')}`,
+          description: `初始化失败 ${String(status?.error_code || 'INITIALIZATION_FAILED')}`,
         })
         setReportId(`${initializationReportId.slice(0, 8)} · 日志 ${logReceipt.log_id.slice(0, 8)}`)
+        savePendingReport(null)
       } catch (error) {
         const message = error instanceof Error ? error.message : '日志包上传失败'
-        throw new Error(`结构化诊断已接收（${initializationReportId.slice(0, 8)}），但服务日志未上传：${message}`)
+        throw new Error(`诊断已提交，日志待补传（${initializationReportId.slice(0, 8)}）：${message}`)
       }
     } catch (error) {
       setActionError(error instanceof Error ? error.message : '诊断上报失败')
@@ -365,7 +377,7 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
               {running
                 ? currentStage?.detail || status?.message
                 : failed
-                  ? status?.suggestion || '可以重试，已经安装好的内容会自动跳过。'
+                  ? status?.message || currentStage?.detail || '有一项准备未能完成。'
                   : '将自动准备本地 AI、采集提炼模型、语义检索、记忆库、技能与工具，并完成采集、提炼、咨询和创作测试。'}
             </p>
 
@@ -429,7 +441,7 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
                 </button>
                 {status.can_report && (
                   <button className="initialization-secondary" type="button" disabled={reporting} onClick={() => void report()}>
-                    {reporting ? '正在上报…' : '上报诊断'}
+                    {reporting ? '正在上报…' : pendingReport ? '补传诊断日志' : '上报诊断'}
                   </button>
                 )}
               </div>
@@ -439,13 +451,29 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
                 已自动修复 {status.recovery.attempt} 次，问题仍然存在，现可手动重试或上报诊断。
               </p>
             )}
+            {failed && status?.suggestion && status.suggestion !== status.message && (
+              <p className="initialization-copy" role="status">{status.suggestion}</p>
+            )}
             {failed && status?.error_code && (
               <p className="initialization-error-code">
                 错误码 <code>{status.error_code}</code>
               </p>
             )}
-            {reportId && <p className="report-success" role="status">上报成功，编号 {reportId}</p>}
+            {pendingReport && <p role="status">诊断已提交，日志待补传，编号 {pendingReport.reportId}</p>}
+            {pendingReport && !failed && <button type="button" disabled={reporting} onClick={() => void report()}>补传诊断日志</button>}
+            {reportId && <p className="report-success" role="status">诊断与日志上报成功，编号 {reportId}</p>}
             {actionError && <p className="action-error" role="alert">{actionError}</p>}
+            {status && initializationIsReady(status) && (
+              <button className="initialization-primary" type="button" onClick={() => {
+                setHasCompletedSetup(true)
+                onStatusValidated?.(true)
+                setWindowMode('rag')
+              }}>
+                进入记忆面包
+                <small>权限可稍后在设置中继续准备</small>
+              </button>
+            )}
+
           </section>
 
           <section className="initialization-progress-panel" aria-label="初始化进度">
@@ -486,6 +514,7 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
             )}
             <ol className="stage-list">
               {(status?.stages || []).map(stage => (
+                <React.Fragment key={stage.id}>
                 <li className={`stage-item stage-item--${stage.status}`} key={stage.id}>
                   <span className="stage-mark" aria-hidden>{stageMark(stage)}</span>
                   <span className="stage-copy">
@@ -494,6 +523,13 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
                   </span>
                   <span className="stage-status">{stageStatusLabel(stage)}</span>
                 </li>
+                {stage.id === 'preflight' && <PermissionPreparation
+                  key={status?.run_id || 'preparation'}
+                  variant="step"
+                  sandbox={status?.test_mode_enabled || status?.mode === 'sandbox'}
+                  active={['succeeded', 'skipped'].includes(stage.status)}
+                />}
+                </React.Fragment>
               ))}
             </ol>
           </section>

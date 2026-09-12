@@ -7,13 +7,14 @@ use crate::storage::{
         canonical_document_title_identity,
     },
     error::StorageError,
-    fts::{build_fts_or_query, fts_candidate_ids, render_in_clause, DEFAULT_FTS_CANDIDATE_CAP},
+    fts::{build_fts_or_query, fts_candidate_ids, DEFAULT_FTS_CANDIDATE_CAP},
     models_bake::{
         BakeActionTraceRecord, BakeDocumentRecord, BakeKnowledgeRecord, BakeMemorySourceRecord,
         BakeSopRecord, EpisodicMemoryRecord, NewBakeKnowledge, NewBakeSop, NewEpisodicMemory,
         NewTimeline, TimelineRecord,
     },
     repo::bake_run::{refresh_doc_member_temp_tables, PRODUCED_DOC_TIMELINES_CTE},
+    search::split_search_terms,
     StorageManager,
 };
 
@@ -67,26 +68,48 @@ fn details_with_source_timeline_id(details: Option<String>, timeline_id: i64) ->
 }
 
 fn keyword_terms(query: &str) -> Vec<String> {
-    let mut terms = query
-        .split(|ch: char| ch.is_whitespace() || ch.is_ascii_punctuation())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
+    split_search_terms(query)
+}
 
-    if terms.len() == 1 && terms[0].chars().count() >= 5 {
-        let chars = terms[0].chars().collect::<Vec<_>>();
-        if chars.iter().any(|ch| !ch.is_ascii()) {
-            for window in chars.windows(2) {
-                let term = window.iter().collect::<String>();
-                if !terms.contains(&term) {
-                    terms.push(term);
-                }
-            }
+fn append_timeline_search_order(
+    sql: &mut String,
+    query: &str,
+    terms: &[String],
+    bind_values: &mut Vec<Box<dyn rusqlite::ToSql>>,
+) {
+    let title_terms = terms
+        .iter()
+        .map(|_| "(k.summary LIKE ? OR COALESCE(k.frag_win_title, '') LIKE ?)")
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let title_metadata_terms = terms
+        .iter()
+        .map(|_| {
+            "(k.summary LIKE ? OR COALESCE(k.frag_win_title, '') LIKE ? OR COALESCE(k.overview, '') LIKE ? OR COALESCE(k.category, '') LIKE ?)"
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    sql.push_str(
+        " ORDER BY CASE WHEN (k.summary LIKE ? OR COALESCE(k.frag_win_title, '') LIKE ?) THEN 3 WHEN (",
+    );
+    sql.push_str(&title_terms);
+    sql.push_str(") THEN 2 WHEN (");
+    sql.push_str(&title_metadata_terms);
+    sql.push_str(") THEN 1 ELSE 0 END DESC, k.created_at_ms DESC, k.id DESC");
+    let phrase = format!("%{}%", query.trim());
+    bind_values.push(Box::new(phrase.clone()));
+    bind_values.push(Box::new(phrase));
+    for term in terms {
+        let pattern = format!("%{}%", term);
+        bind_values.push(Box::new(pattern.clone()));
+        bind_values.push(Box::new(pattern));
+    }
+    for term in terms {
+        let pattern = format!("%{}%", term);
+        for _ in 0..4 {
+            bind_values.push(Box::new(pattern.clone()));
         }
     }
-
-    terms
 }
 
 #[derive(Debug)]
@@ -597,7 +620,7 @@ impl StorageManager {
                         ))".to_string()
                     })
                     .collect::<Vec<_>>()
-                    .join(" OR ");
+                    .join(" AND ");
                 sql.push_str(" AND (");
                 sql.push_str(&query_clause);
                 sql.push(')');
@@ -605,18 +628,6 @@ impl StorageManager {
                     let pattern = format!("%{}%", term);
                     for _ in 0..11 {
                         bind_values.push(Box::new(pattern.clone()));
-                    }
-                }
-                // FTS5 预筛：timelines_fts 命中候选可用时收窄扫描范围；
-                // 候选为空/被截断/表缺失时自动回退原有 LIKE 全扫。
-                if let Some(fts_query) = build_fts_or_query(&query_terms) {
-                    if let Some(ids) =
-                        fts_candidate_ids(conn, "timelines_fts", &fts_query, DEFAULT_FTS_CANDIDATE_CAP)
-                    {
-                        let (clause, mut id_binds) = render_in_clause(&ids);
-                        sql.push_str(" AND k.id IN ");
-                        sql.push_str(&clause);
-                        bind_values.append(&mut id_binds);
                     }
                 }
             }
@@ -628,8 +639,12 @@ impl StorageManager {
                 sql.push_str(" AND k.created_at_ms <= ?");
                 bind_values.push(Box::new(value));
             }
-            // 时间线表格统一按创建时间逆序展示
-            sql.push_str(" ORDER BY k.created_at_ms DESC, k.id DESC LIMIT ? OFFSET ?");
+            if query_terms.is_empty() {
+                sql.push_str(" ORDER BY k.created_at_ms DESC, k.id DESC");
+            } else if let Some(query) = query {
+                append_timeline_search_order(&mut sql, query, &query_terms, &mut bind_values);
+            }
+            sql.push_str(" LIMIT ? OFFSET ?");
             bind_values.push(Box::new(limit as i64));
             bind_values.push(Box::new(offset as i64));
 
@@ -667,7 +682,7 @@ impl StorageManager {
                         ))".to_string()
                     })
                     .collect::<Vec<_>>()
-                    .join(" OR ");
+                    .join(" AND ");
                 sql.push_str(" AND (");
                 sql.push_str(&query_clause);
                 sql.push(')');
@@ -675,17 +690,6 @@ impl StorageManager {
                     let pattern = format!("%{}%", term);
                     for _ in 0..11 {
                         bind_values.push(Box::new(pattern.clone()));
-                    }
-                }
-                // FTS5 预筛（与列表查询保持一致的候选收窄）
-                if let Some(fts_query) = build_fts_or_query(&query_terms) {
-                    if let Some(ids) =
-                        fts_candidate_ids(conn, "timelines_fts", &fts_query, DEFAULT_FTS_CANDIDATE_CAP)
-                    {
-                        let (clause, mut id_binds) = render_in_clause(&ids);
-                        sql.push_str(" AND k.id IN ");
-                        sql.push_str(&clause);
-                        bind_values.append(&mut id_binds);
                     }
                 }
             }
@@ -1064,12 +1068,15 @@ impl StorageManager {
         let (lane_predicate, lane_order) = match lane {
             BakeCandidateLane::Retry => (
                 r#"
-                COALESCE(r.failure_count, 0) > 0
+                ((r.last_error_code='DOCUMENT_AUTOMATIC_WRITES_PAUSED' AND r.automatic_document_pause_bucket < ?5)
+                 OR (COALESCE(r.failure_count, 0) > 0 AND COALESCE(r.last_error_code,'')<>'DOCUMENT_AUTOMATIC_WRITES_PAUSED'))
                 AND r.failure_count < ?3
                 AND COALESCE(r.next_retry_at_ms, 0) <= ?4
-                AND NOT EXISTS (SELECT 1 FROM bake_knowledge bk WHERE bk.timeline_id = k.id)
-                AND NOT EXISTS (SELECT 1 FROM bake_sops bs WHERE bs.timeline_id = k.id)
-                AND CAST(k.id AS TEXT) NOT IN (SELECT tid FROM produced_doc_timelines)
+                AND (r.last_error_code IN ('BAKE_DOCUMENT_MERGE_PENDING','DOCUMENT_AUTOMATIC_WRITES_PAUSED') OR (
+                    NOT EXISTS (SELECT 1 FROM bake_knowledge bk WHERE bk.timeline_id = k.id)
+                    AND NOT EXISTS (SELECT 1 FROM bake_sops bs WHERE bs.timeline_id = k.id)
+                    AND CAST(k.id AS TEXT) NOT IN (SELECT tid FROM produced_doc_timelines)
+                ))
             "#,
                 "",
             ),
@@ -1077,6 +1084,7 @@ impl StorageManager {
                 r#"
                 COALESCE(r.failure_count, 0) < ?3
                 AND ?4 >= 0
+                AND (COALESCE(r.last_error_code,'')<>'DOCUMENT_AUTOMATIC_WRITES_PAUSED' OR r.automatic_document_pause_bucket < ?5)
                 AND EXISTS (
                     SELECT 1 FROM operation_replay_queue oq
                     WHERE oq.timeline_id = k.id
@@ -1095,6 +1103,7 @@ impl StorageManager {
             BakeCandidateLane::Fresh => (
                 r#"
                 COALESCE(r.failure_count, 0) = 0
+                AND COALESCE(r.last_error_code,'')<>'DOCUMENT_AUTOMATIC_WRITES_PAUSED'
                 AND ?3 > 0
                 AND ?4 >= 0
                 AND (
@@ -1115,6 +1124,11 @@ impl StorageManager {
                 "",
             ),
         };
+        let pause_rollout = self.get_preference_value(crate::services::document_refresh::DOCUMENT_REFRESH_CONFIG_KEY)?
+            .as_deref().map(crate::services::document_refresh::DocumentRefreshConfig::parse).transpose()
+            .map(|config| { let config=config.unwrap_or_default();
+                if config.automatic_document_writes_enabled { config.automatic_document_rollout_percent as i64 } else { 0 }
+            }).unwrap_or(0);
         self.with_conn(|conn| {
             // 文档成员展开物化为连接级临时表：捆绑 SQLite 会把只引用一次的
             // CTE 展平为关联子查询，外层每行重跑 json_each，大库上单次要数十
@@ -1140,7 +1154,7 @@ impl StorageManager {
                  INNER JOIN captures c ON c.id = k.capture_id
                  LEFT JOIN bake_retry_state r ON r.timeline_id = k.id
                  WHERE k.category NOT IN ('bake_article', 'bake_knowledge', 'bake_sop', 'legacy_bake_candidate')
-                   AND ({lane_predicate})
+                   AND ({lane_predicate}) AND ?5>=0
                  ORDER BY {lane_order} MAX(k.updated_at_ms, COALESCE((SELECT MAX(c2.ts) FROM captures c2 WHERE c2.timeline_id = k.id), 0)) ASC, k.id ASC
                  LIMIT ?2",
                 produced_doc_timelines_cte = PRODUCED_DOC_TIMELINES_CTE,
@@ -1148,7 +1162,7 @@ impl StorageManager {
             );
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map(
-                params![since_ts_ms, limit as i64, max_failures, current_ts_ms()],
+                params![since_ts_ms, limit as i64, max_failures, current_ts_ms(),pause_rollout],
                 |row| {
                 Ok(BakeMemorySourceRecord {
                     timeline: row_to_timeline_record(row).map_err(|_| rusqlite::Error::InvalidQuery)?,
@@ -1859,7 +1873,7 @@ fn aggregate_member_capture_text(
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        "SELECT id, ts, ax_text, ocr_text, input_text, url
+        "SELECT id, ts, ax_text, ocr_text, input_text, url, webpage_title
          FROM captures
          WHERE id IN ({placeholders})
          ORDER BY ts ASC
@@ -1878,6 +1892,7 @@ fn aggregate_member_capture_text(
             row.get::<_, Option<String>>(3)?,
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
         ))
     })?;
 
@@ -1889,13 +1904,17 @@ fn aggregate_member_capture_text(
     }
     let mut members: Vec<Member> = Vec::new();
     for row in rows {
-        let (cap_id, ts, ax_text, ocr_text, input_text, url) = row.map_err(StorageError::Sqlite)?;
+        let (cap_id, ts, ax_text, ocr_text, input_text, url, webpage_title) =
+            row.map_err(StorageError::Sqlite)?;
         let combined = combine_capture_text_for_url(
             ax_text.as_deref(),
             ocr_text.as_deref(),
             input_text.as_deref(),
         );
         if combined.is_empty() {
+            continue;
+        }
+        if capture_text_conflicts_with_page_title(&combined, webpage_title.as_deref()) {
             continue;
         }
         let is_doc = url.as_deref().map(is_document_url).unwrap_or(false);
@@ -2140,7 +2159,7 @@ fn aggregate_url_capture_text(
 ) -> Result<Option<(String, i64)>, StorageError> {
     let earliest = anchor_ts.saturating_sub(URL_AGGREGATION_LOOKBACK_MS);
     let mut stmt = conn.prepare(
-        "SELECT id, ts, ax_text, ocr_text, input_text
+        "SELECT id, ts, ax_text, ocr_text, input_text, webpage_title
          FROM captures
          WHERE TRIM(COALESCE(url, '')) = ?1
            AND ts >= ?2
@@ -2157,6 +2176,7 @@ fn aggregate_url_capture_text(
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         },
     )?;
@@ -2169,13 +2189,20 @@ fn aggregate_url_capture_text(
     let mut best_by_head: std::collections::HashMap<String, UrlCapture> =
         std::collections::HashMap::new();
     for row in rows {
-        let (cap_id, ts, ax_text, ocr_text, input_text) = row.map_err(StorageError::Sqlite)?;
+        let (cap_id, ts, ax_text, ocr_text, input_text, webpage_title) =
+            row.map_err(StorageError::Sqlite)?;
         let text = combine_capture_text_for_url(
             ax_text.as_deref(),
             ocr_text.as_deref(),
             input_text.as_deref(),
         );
         if text.is_empty() {
+            continue;
+        }
+        // URL/title metadata and AX extraction are collected by separate browser/AX
+        // calls. A tab switch between them can attach the previous tab's URL to the
+        // next tab's body. Such a frame must never enter same-URL aggregation.
+        if capture_text_conflicts_with_page_title(&text, webpage_title.as_deref()) {
             continue;
         }
         let head: String = text
@@ -2232,6 +2259,48 @@ fn combine_capture_text_for_url(
         .filter_map(|p| p.map(str::trim).filter(|t| !t.is_empty()))
         .collect::<Vec<_>>();
     pieces.join("\n")
+}
+
+fn generic_visible_title_identity(value: &str) -> Option<String> {
+    let first_line = value.lines().find(|line| !line.trim().is_empty())?.trim();
+    let without_heading = first_line.trim_start_matches('#').trim();
+    let core = [" - ", " — ", " | ", " · "]
+        .iter()
+        .filter_map(|separator| without_heading.find(separator))
+        .min()
+        .and_then(|index| without_heading.get(..index))
+        .unwrap_or(without_heading);
+    let normalized = core
+        .to_lowercase()
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .collect::<String>();
+    (normalized.chars().count() >= 2).then_some(normalized)
+}
+
+fn leading_document_title_identity(text: &str) -> Option<String> {
+    const TITLE_SCAN_CHARS: usize = 240;
+    const GENERIC_CONTENT_BOUNDARY: &str = "you need to enable javascript";
+    let prefix = text.chars().take(TITLE_SCAN_CHARS).collect::<String>();
+    let lowered = prefix.to_lowercase();
+    let boundary = prefix
+        .find('\n')
+        .or_else(|| lowered.find(GENERIC_CONTENT_BOUNDARY))?;
+    let candidate = prefix.get(..boundary)?.trim();
+    if candidate.chars().count() > 120 {
+        return None;
+    }
+    generic_visible_title_identity(candidate)
+}
+
+fn capture_text_conflicts_with_page_title(text: &str, page_title: Option<&str>) -> bool {
+    let Some(body_identity) = leading_document_title_identity(text) else {
+        return false;
+    };
+    let Some(page_identity) = page_title.and_then(generic_visible_title_identity) else {
+        return false;
+    };
+    body_identity != page_identity
 }
 
 fn insert_timeline_entry_inner(
@@ -2647,9 +2716,11 @@ impl StorageManager {
                 "INSERT INTO bake_knowledge (
                     timeline_id, title, summary, content, detailed_content, entities, importance,
                     user_verified, user_edited,
-                    created_at, updated_at, created_at_ms, updated_at_ms, source_capture_ids
+                    created_at, updated_at, created_at_ms, updated_at_ms, source_capture_ids,
+                    dedup_key, quality_score, gate_rule_version
                  ) VALUES (NULLIF(?1, 0), ?2, ?3, ?4, ?5, ?6, ?7, 1, 0,
-                           datetime(?8 / 1000, 'unixepoch'), datetime(?8 / 1000, 'unixepoch'), ?8, ?8, COALESCE(?9, '[]'))",
+                           datetime(?8 / 1000, 'unixepoch'), datetime(?8 / 1000, 'unixepoch'), ?8, ?8, COALESCE(?9, '[]'),
+                           ?10, ?11, ?12)",
                 params![
                     knowledge.timeline_id,
                     knowledge.title,
@@ -2660,9 +2731,35 @@ impl StorageManager {
                     knowledge.importance,
                     now,
                     knowledge.source_capture_ids,
+                    knowledge.dedup_key,
+                    knowledge.quality_score,
+                    knowledge.gate_rule_version,
                 ],
             )?;
             Ok(conn.last_insert_rowid())
+        })
+    }
+
+    /// 按语义身份键查找近重复窗口内已存在的知识条目，取窗口内最新一条。
+    ///
+    /// 存量行 `dedup_key` 为 NULL，`dedup_key = ?1` 天然不匹配，不会被回填或降级。
+    /// 返回最新而非最早的一条，避免把新事实合并进很久以前的旧条目。
+    pub fn find_recent_bake_knowledge_by_dedup_key(
+        &self,
+        dedup_key: &str,
+        since_ms: i64,
+    ) -> Result<Option<i64>, StorageError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM bake_knowledge
+                 WHERE dedup_key = ?1 AND created_at_ms >= ?2
+                 ORDER BY created_at_ms DESC LIMIT 1",
+            )?;
+            match stmt.query_row(params![dedup_key, since_ms], |row| row.get(0)) {
+                Ok(id) => Ok(Some(id)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(StorageError::Sqlite(e)),
+            }
         })
     }
 
@@ -3503,6 +3600,121 @@ mod tests {
     }
 
     #[test]
+    fn document_merge_retry_survives_existing_artifacts() {
+        let mgr = make_mgr();
+        let timeline_id = mgr.insert_timeline_entry(&sample_entry(&mgr, "document")).unwrap();
+        mgr.with_conn(|conn| {
+            conn.execute("INSERT INTO bake_knowledge (timeline_id, title, summary) VALUES (?1, '已有关联', '已有产物不证明正文更新完成')", params![timeline_id])?;
+            conn.execute("INSERT INTO bake_retry_state (timeline_id, failure_count, last_error, last_failed_at_ms, last_error_code, next_retry_at_ms) VALUES (?1, 1, 'pending merge', 1, 'BAKE_DOCUMENT_MERGE_PENDING', 0)", params![timeline_id])?;
+            Ok(())
+        }).unwrap();
+        let retry = mgr.list_bake_memory_retry_candidates(10, 3).unwrap();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].timeline.id, timeline_id);
+    }
+
+    #[test]
+    fn document_write_deferrals_survive_watermark_and_filter_before_limit() {
+        let directory=tempfile::tempdir().unwrap();
+        let path=directory.path().join("document-deferrals.db");
+        let mgr=StorageManager::open(&path).unwrap();
+        let excluded=mgr.insert_timeline_entry(&sample_entry(&mgr,"document")).unwrap();
+        let included=mgr.insert_timeline_entry(&sample_entry(&mgr,"document")).unwrap();
+        mgr.defer_automatic_document_write(excluded,90).unwrap();
+        mgr.defer_automatic_document_write(included,10).unwrap();
+        mgr.upsert_bake_watermark("unified",current_ts_ms()+60_000).unwrap();
+        mgr.with_conn(|conn| {
+            conn.execute("INSERT INTO bake_knowledge(timeline_id,title,summary) VALUES(?1,'已完成兄弟产物','文档仍待提交')",params![included])?;
+            conn.execute("UPDATE timelines SET importance=5 WHERE id IN (?1,?2)",params![included,excluded])?;
+            Ok(())
+        }).unwrap();
+        let key=crate::services::document_refresh::DOCUMENT_REFRESH_CONFIG_KEY;
+        mgr.upsert_preference(key,r#"{"automatic_document_rollout_percent":50}"#,"test",1.0).unwrap();
+        drop(mgr);
+        let mgr=StorageManager::open(&path).unwrap();
+        assert!(mgr.list_bake_memory_fresh_candidates(0,10,3).unwrap().is_empty());
+        let ready=mgr.list_bake_memory_retry_candidates(1,3).unwrap();
+        assert_eq!(ready.len(),1);
+        assert_eq!(ready[0].timeline.id,included);
+        assert_eq!(ready[0].retry_failure_count,0);
+        assert_eq!(mgr.get_bake_queue_status(3).unwrap().retry_ready_count,1);
+        assert_eq!(ready[0].retry_error_code.as_deref(),Some("DOCUMENT_AUTOMATIC_WRITES_PAUSED"));
+        mgr.upsert_preference(key,r#"{"automatic_document_writes_enabled":false}"#,"test",1.0).unwrap();
+        drop(mgr);
+        let mgr=StorageManager::open(&path).unwrap();
+        assert!(mgr.list_bake_memory_retry_candidates(10,3).unwrap().is_empty());
+        assert_eq!(mgr.get_bake_retry_failure_count(included).unwrap(),0);
+        assert_eq!(mgr.get_bake_queue_status(3).unwrap().actionable_count,0);
+        mgr.upsert_preference(key,"{}","test",1.0).unwrap();
+        assert_eq!(mgr.list_bake_memory_retry_candidates(10,3).unwrap().len(),2);
+        mgr.bump_bake_retry_failure_with_code(included,"test","BAKE_OUTPUT_INVALID").unwrap();
+        mgr.defer_automatic_document_write(included,10).unwrap();
+        assert_eq!(mgr.get_bake_retry_failure_count(included).unwrap(),1);
+        assert!(mgr.clear_bake_retry_failure(included).unwrap());
+        drop(mgr);
+        let mgr=StorageManager::open(&path).unwrap();
+        assert_eq!(mgr.list_bake_memory_retry_candidates(10,3).unwrap().len(),1);
+    }
+
+    #[test]
+    #[ignore = "requires an isolated working.db clone of the real acceptance backup"]
+    fn document_write_deferral_real_backup_acceptance() {
+        use sha2::{Digest,Sha256};
+        let path=std::path::PathBuf::from(std::env::var("MEMORYBREAD_DOCUMENT_DEFERRAL_ACCEPTANCE_DB")
+            .expect("explicit isolated fixture required"));
+        assert_eq!(path.file_name().and_then(|v|v.to_str()),Some("working.db"));
+        assert!(path.parent().and_then(|v|v.file_name()).and_then(|v|v.to_str())
+            .is_some_and(|v|v.starts_with("mb-document-deferral-real-")));
+        let state=|mgr:&StorageManager| {
+            mgr.with_conn(|conn| {
+                let mut digest=Sha256::new();
+                let mut stmt=conn.prepare("SELECT id,COALESCE(full_content,''),updated_at FROM bake_documents ORDER BY id")?;
+                let mut rows=stmt.query([])?;
+                while let Some(row)=rows.next()? {
+                    digest.update(row.get::<_,i64>(0)?.to_be_bytes());
+                    digest.update(row.get::<_,String>(1)?.as_bytes());
+                    digest.update(row.get::<_,i64>(2)?.to_be_bytes());
+                }
+                Ok(format!("{:x}",digest.finalize()))
+            }).unwrap()
+        };
+        let mgr=StorageManager::open(&path).unwrap();
+        let before=state(&mgr);
+        let candidates=mgr.list_bake_memory_fresh_candidates(0,100,3).unwrap();
+        assert!(candidates.len()>=2,"real backup has insufficient candidates");
+        let excluded=candidates[0].timeline.id;
+        let included=candidates[1].timeline.id;
+        // Only the disposable clone's scheduling state is arranged for this case.
+        mgr.with_conn(|conn| { conn.execute("DELETE FROM bake_retry_state",[])?; Ok(()) }).unwrap();
+        mgr.defer_automatic_document_write(excluded,90).unwrap();
+        mgr.defer_automatic_document_write(included,10).unwrap();
+        let watermark=current_ts_ms()+60_000;
+        mgr.upsert_bake_watermark("unified",watermark).unwrap();
+        let key=crate::services::document_refresh::DOCUMENT_REFRESH_CONFIG_KEY;
+        mgr.upsert_preference(key,r#"{"automatic_document_rollout_percent":50}"#,"acceptance",1.0).unwrap();
+        drop(mgr);
+        let mgr=StorageManager::open(&path).unwrap();
+        let ready=mgr.list_bake_memory_retry_candidates(1,3).unwrap();
+        assert_eq!(ready.len(),1);
+        assert_eq!(ready[0].timeline.id,included);
+        assert_eq!(ready[0].retry_failure_count,0);
+        mgr.upsert_preference(key,r#"{"automatic_document_writes_enabled":false}"#,"acceptance",1.0).unwrap();
+        drop(mgr);
+        let mgr=StorageManager::open(&path).unwrap();
+        assert!(mgr.list_bake_memory_retry_candidates(10,3).unwrap().is_empty());
+        mgr.upsert_preference(key,"{}","acceptance",1.0).unwrap();
+        assert_eq!(mgr.list_bake_memory_retry_candidates(10,3).unwrap().len(),2);
+        assert!(mgr.clear_bake_retry_failure(included).unwrap());
+        drop(mgr);
+        let mgr=StorageManager::open(&path).unwrap();
+        let remaining=mgr.list_bake_memory_retry_candidates(10,3).unwrap();
+        assert_eq!(remaining.len(),1);
+        assert_eq!(remaining[0].timeline.id,excluded);
+        assert_eq!(state(&mgr),before,"document bodies changed during queue acceptance");
+        eprintln!("real backup deferral acceptance: reopen, scoped LIMIT, pause/resume and completion cleanup verified; document checksum preserved");
+    }
+
+    #[test]
     fn test_retry_lane_respects_persistent_next_retry_time() {
         let mgr = make_mgr();
         let timeline_id = mgr
@@ -3950,6 +4162,40 @@ mod tests {
         assert_eq!(count, 1);
         assert!(aggregated.contains(&long_tail));
         assert!(aggregated.chars().count() >= long_text.chars().count());
+    }
+
+    #[test]
+    fn test_url_aggregation_excludes_body_from_another_tab_with_stale_url() {
+        let mgr = make_mgr();
+        let url = "https://example.com/data/assets/1009";
+        let valid_body = "数据资产页面当前展示视频样本、类目分布和筛选条件。".repeat(80);
+        seed_document_capture(&mgr, 1_700_000_000_000, valid_body.clone(), url);
+        let polluted = seed_document_capture(
+            &mgr,
+            1_700_000_010_000,
+            format!(
+                "另一份视频质量提升方案 - 云文档 You need to enable JavaScript to run this app. {}",
+                "不属于当前数据页的方案正文。".repeat(80)
+            ),
+            url,
+        );
+        mgr.with_conn(|conn| {
+            conn.execute(
+                "UPDATE captures SET webpage_title = '数据资产平台' WHERE id = ?1",
+                [polluted],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let (aggregated, count) = mgr
+            .with_conn(|conn| aggregate_url_capture_text(conn, url, 1_700_000_010_000))
+            .unwrap()
+            .expect("一致的页面帧应保留");
+
+        assert_eq!(count, 1);
+        assert!(aggregated.contains(&valid_body));
+        assert!(!aggregated.contains("另一份视频质量提升方案"));
     }
 
     #[test]

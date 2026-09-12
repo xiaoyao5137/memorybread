@@ -12,8 +12,10 @@ import base64
 import json
 import sqlite3
 from types import SimpleNamespace
+from unittest import mock
 
 import httpx
+import pytest
 
 from scheduled_task_executor import TaskExecutor
 
@@ -227,6 +229,7 @@ def test_creation_task_consumes_sse_and_links_history(tmp_path, monkeypatch):
     # 创作 Agent 请求：指令透传 + 被 @ 的技能进入 selected_skills，Agent 提及不混入。
     assert len(run_requests) == 1
     payload = run_requests[0]["json"]
+    assert payload["execution_origin"] == "scheduled_task"
     assert run_requests[0]["url"].endswith("/api/creation/agent/run")
     assert payload["user_prompt"] == instruction
     assert payload["root_request"] == instruction
@@ -323,6 +326,106 @@ def test_run_failed_event_falls_back_to_consult(tmp_path, monkeypatch):
     assert result["status"] == "success"
     assert "创作模型不可用" in result["result"]
     assert "咨询智能体结果" in result["result"]
+
+
+def test_preempted_creation_defers_without_fallback_or_failure_budget(tmp_path, monkeypatch):
+    db_path = tmp_path / "memory-bread.db"
+    conn = sqlite3.connect(db_path)
+    _create_tables(conn, with_history_column=True)
+    task_id = _insert_task(conn, "行业周报", "生成周报", executor_kind="creation")
+    conn.close()
+    history_posts = []
+    _mock_creation_services(monkeypatch, [
+        'data: {"type":"document.delta","data":{"content":"partial"}}',
+        'data: {"type":"run.failed","data":{"error_code":"INFERENCE_PREEMPTED","retryable":true}}',
+    ], skills=[], history_posts=history_posts)
+    executor = TaskExecutor(db_path=str(db_path))
+
+    def forbidden_fallback(*args, **kwargs):
+        raise AssertionError("Preemption must not trigger another model request")
+
+    executor._query_knowledge = forbidden_fallback
+    executor._llm_generate = forbidden_fallback
+    result = executor.execute_task(task_id)
+    assert result["status"] == "deferred"
+    assert result["reason"] == "INFERENCE_PREEMPTED"
+    assert history_posts == []
+    conn = sqlite3.connect(db_path)
+    assert conn.execute(
+        "SELECT status, result_text, error_message FROM task_executions"
+    ).fetchone() == ("deferred", None, "INFERENCE_PREEMPTED")
+    assert conn.execute(
+        "SELECT run_count, last_run_status FROM scheduled_tasks"
+    ).fetchone() == (0, None)
+    conn.close()
+
+
+def test_preempted_direct_diary_defers_without_failure_budget(tmp_path):
+    from inference_queue import InferencePreemptedError
+
+    db_path = tmp_path / "memory-bread.db"
+    conn = sqlite3.connect(db_path)
+    _create_tables(conn, with_history_column=True)
+    task_id = _insert_task(conn, "日记", "生成昨日工作日记")
+    conn.close()
+
+    executor = TaskExecutor(db_path=str(db_path), energy_policy=_AllowAllEnergyPolicy())
+
+    def interrupted(*args):
+        raise InferencePreemptedError("fixture")
+
+    executor._execute_diary_task = interrupted
+    assert executor.execute_task(task_id)["status"] == "deferred"
+    conn = sqlite3.connect(db_path)
+    assert conn.execute("SELECT status FROM task_executions").fetchone() == ("deferred",)
+    assert conn.execute("SELECT run_count FROM scheduled_tasks").fetchone() == (0,)
+    conn.close()
+
+
+@pytest.mark.parametrize("events", [
+    [{"error": "private upstream diagnostic"}],
+    [{"message": {"content": "partial private report"}}, {"error": "private upstream diagnostic"}],
+    [{"message": {"content": "partial private report"}}],
+])
+def test_background_report_never_saves_or_delivers_error_or_incomplete_stream(tmp_path, monkeypatch, events):
+    db_path = tmp_path / "memory-bread.db"
+    conn = sqlite3.connect(db_path)
+    _create_tables(conn, with_history_column=True)
+    task_id = _insert_task(conn, "普通报告", "整理项目进展", executor_kind="consult")
+    conn.close()
+
+    # Keep the real report -> client -> NDJSON path; only network and the machine
+    # queue are substituted so this regression cannot touch production inference.
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr("inference_transport.httpx.AsyncClient", lambda **kwargs: real_client(
+        **kwargs, transport=httpx.MockTransport(lambda request: httpx.Response(
+            200, text="\n".join(json.dumps(event) for event in events),
+        )),
+    ))
+    queue = SimpleNamespace(submit_sync=lambda priority, fn, **kwargs: fn())
+    monkeypatch.setattr("inference_queue.get_global_queue", lambda: queue)
+    monkeypatch.setattr("model_registry_global.get_active_ollama_model", lambda: "test")
+    tracker = mock.MagicMock()
+    tracker.__enter__.return_value = tracker
+    tracker.__exit__.return_value = False
+    monkeypatch.setattr("monitor.llm_tracker.LLMCallTracker", lambda **kwargs: tracker)
+    executor = TaskExecutor(db_path=str(db_path))
+    executor._query_knowledge = lambda *args, **kwargs: []
+    executor._deliver_task_result = mock.Mock()
+
+    result = executor.execute_task(task_id)
+    assert result["status"] == "failed"
+    assert "private" not in result["error"]
+    executor._deliver_task_result.assert_not_called()
+    tracker.set_response.assert_not_called()
+    conn = sqlite3.connect(db_path)
+    status, content, error = conn.execute(
+        "SELECT status, result_text, error_message FROM task_executions"
+    ).fetchone()
+    assert status == "failed" and content is None
+    assert "private" not in error
+    assert conn.execute("SELECT last_run_status FROM scheduled_tasks").fetchone() == ("failed",)
+    conn.close()
 
 
 def test_diary_task_keeps_diary_path_even_with_creation_kind(tmp_path):

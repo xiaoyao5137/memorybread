@@ -89,3 +89,17 @@ core-graphics = "0.23"
 [dev-dependencies]
 tokio          = { version = "1", features = ["full"] }
 http-body-util = "0.1"
+
+# macOS defaults to unpacked split debug info for development profiles. This
+# crate is large enough that repeated test builds otherwise leave hundreds of
+# thousands of loose object files under target/debug/deps. Keep line tables for
+# useful backtraces, but pack them and avoid the second incremental object cache.
+[profile.dev]
+debug = 1
+incremental = false
+split-debuginfo = "packed"
+
+[profile.test]
+debug = 1
+incremental = false
+split-debuginfo = "packed"

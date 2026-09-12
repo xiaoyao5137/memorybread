@@ -2023,19 +2023,29 @@ async fn run_ocr_backfill(
 ) -> Result<Option<(String, f32)>, String> {
     // spawn_blocking 中的同步 UnixStream/Vision 请求无法被 Tokio timeout 真正取消。
     // 旧实现 15 秒后释放队列许可，但阻塞线程仍继续最多重试 3 次，导致相同截图
-    // 在 Sidecar 内并发执行。这里只发一次请求，并一直持有单并发许可，直到该阻塞
-    // 调用真实结束；传输层自身仍有有限的读写截止时间用于处理 Sidecar 故障。
-    match tokio::task::spawn_blocking(move || ipc_client.call_ocr(0, &path_for_ocr)).await {
-        Ok(Ok(result)) => {
-            let trimmed = result.text.trim().to_string();
-            if trimmed.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some((trimmed, result.confidence as f32)))
+    // 在 Sidecar 内并发执行。每次只发一个请求；仅 OCR_DEFERRED 调度响应允许
+    // 保留原任务重试，超时/真正故障不重试。原任务在整个等待期间始终占有队列许可。
+    loop {
+        let attempt_client = ipc_client.clone();
+        let attempt_path = path_for_ocr.clone();
+        let result = match tokio::task::spawn_blocking(move || attempt_client.call_ocr(0, &attempt_path)).await {
+            Ok(Ok(result)) => {
+                let trimmed = result.text.trim().to_string();
+                if trimmed.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some((trimmed, result.confidence as f32)))
+                }
             }
-        }
-        Ok(Err(error)) => Err(error.to_string()),
-        Err(error) => Err(format!("OCR 后台任务崩溃: {error}")),
+            Ok(Err(error)) if error.to_string().contains("OCR_DEFERRED") => {
+                // Keep ownership of this exact job; deferred work is not failed or dropped.
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+            Ok(Err(error)) => Err(error.to_string()),
+            Err(error) => Err(format!("OCR 后台任务崩溃: {error}")),
+        };
+        return result;
     }
 }
 
@@ -2991,6 +3001,40 @@ mod tests {
         server.join().unwrap();
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
         let _ = std::fs::remove_file(socket_path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_ocr_deferred_retries_same_job_until_success() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+        let path = std::env::temp_dir().join(format!("mb-ocr-defer-{}.sock", uuid::Uuid::new_v4()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            for attempt in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut header = [0u8; 4];
+                stream.read_exact(&mut header).unwrap();
+                let mut payload = vec![0; u32::from_be_bytes(header) as usize];
+                stream.read_exact(&mut payload).unwrap();
+                let req: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+                assert_eq!(req["task"]["priority"], "background");
+                assert_eq!(req["task"]["screenshot_path"], "/tmp/retained-image.png");
+                let response = if attempt < 2 {
+                    serde_json::json!({"id":req["id"],"status":"error","error":"OCR_DEFERRED: foreground active"})
+                } else {
+                    serde_json::json!({"id":req["id"],"status":"ok","result":{"text":"resumed", "confidence":1.0}})
+                };
+                let bytes = serde_json::to_vec(&response).unwrap();
+                stream.write_all(&(bytes.len() as u32).to_be_bytes()).unwrap();
+                stream.write_all(&bytes).unwrap();
+            }
+        });
+        let client = IpcClient::with_socket_path_and_timeout(path.to_string_lossy(), Duration::from_secs(2));
+        let result = run_ocr_backfill(client, "/tmp/retained-image.png".to_string()).await.unwrap();
+        assert_eq!(result.unwrap().0, "resumed");
+        server.join().unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 
     // ── 隐私过滤 ──────────────────────────────────────────────────────────

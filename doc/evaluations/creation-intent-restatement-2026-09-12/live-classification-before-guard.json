@@ -1,0 +1,1257 @@
+{
+  "model": "qwen3.5:4b",
+  "endpoint": "http://127.0.0.1:11434",
+  "scope": "real classifier only; synthetic instructions; no retrieval, writing, or session mutation",
+  "prompt_override": null,
+  "cases": [
+    {
+      "id": "draft-existing-restatement",
+      "fixture": {
+        "id": "draft-existing-restatement",
+        "instruction": "先生成一版。请基于原始创作要求和当前创作简报中已提交的回答，在当前文档基础上更新一版文档。尚未回答的问题、未确认的选项和待补充事项不能当作用户决定；缺失内容标注待确认，不编造事实。",
+        "has_document": true,
+        "expected": "edit"
+      },
+      "passed": true,
+      "result": {
+        "action": "edit",
+        "primary_goal": "先生成一版。请基于原始创作要求和当前创作简报中已提交的回答，在当前文档基础上更新一版文档。尚未回答的问题、未确认的选项和待补充事项不能当作用户决定；缺失内容标注待确认，不编造事实。",
+        "deliverable": "先生成一版。请基于原始创作要求和当前创作简报中已提交的回答，在当前文档基础上更新一版文档。尚未回答的问题、未确认的选项和待补充事项不能当作用户决定；缺失内容标注待确认，不编造事实。",
+        "content_request": "先生成一版。请基于原始创作要求和当前创作简报中已提交的回答，在当前文档基础上更新一版文档。尚未回答的问题、未确认的选项和待补充事项不能当作用户决定；缺失内容标注待确认，不编造事实。"
+      },
+      "seconds": 6.0,
+      "model_calls": [
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"先生成一版。请基于原始创作要求和当前创作简报中已提交的回答，在当前文档基础上更新一版文档。尚未回答的问题、未确认的选项和待补充事项不能当作用户决定；缺失内容标注待确认，不编造事实。\", \"has_document\": true}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "output": "{\"requests\": [{\"request\": \"先生成一版。请基于原始创作要求和当前创作简报中已提交的回答，在当前文档基础上更新一版文档。尚未回答的问题、未确认的选项和待补充事项不能当作用户决定；缺失内容标注待确认，不编造事实。\", \"role\": \"task\", \"action\": \"edit\"}]}",
+          "seconds": 6.0
+        },
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"先生成一版。请基于原始创作要求和当前创作简报中已提交的回答，在当前文档基础上更新一版文档。尚未回答的问题、未确认的选项和待补充事项不能当作用户决定；缺失内容标注待确认，不编造事实。\", \"has_document\": true}",
+          "output": "{\"requests\": [{\"request\": \"先生成一版。请基于原始创作要求和当前创作简报中已提交的回答，在当前文档基础上更新一版文档。尚未回答的问题、未确认的选项和待补充事项不能当作用户决定；缺失内容标注待确认，不编造事实。\", \"role\": \"task\", \"action\": \"edit\"}]}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "num_predict": 1800,
+          "recording_id": "1789189301211522000",
+          "completed": true
+        }
+      ]
+    },
+    {
+      "id": "draft-existing-single-goal",
+      "fixture": {
+        "id": "draft-existing-single-goal",
+        "instruction": "请基于原始创作要求和当前创作简报中已提交的回答，在当前文档基础上更新一版文档。尚未回答的问题、未确认的选项和待补充事项不能当作用户决定；缺失内容标注待确认，不编造事实。",
+        "has_document": true,
+        "expected": "edit"
+      },
+      "passed": true,
+      "result": {
+        "action": "edit",
+        "primary_goal": "请基于原始创作要求和当前创作简报中已提交的回答，在当前文档基础上更新一版文档。",
+        "deliverable": "请基于原始创作要求和当前创作简报中已提交的回答，在当前文档基础上更新一版文档。",
+        "content_request": "请基于原始创作要求和当前创作简报中已提交的回答，在当前文档基础上更新一版文档。"
+      },
+      "seconds": 5.27,
+      "model_calls": [
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"请基于原始创作要求和当前创作简报中已提交的回答，在当前文档基础上更新一版文档。尚未回答的问题、未确认的选项和待补充事项不能当作用户决定；缺失内容标注待确认，不编造事实。\", \"has_document\": true}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "output": "{\"requests\": [{\"request\": \"请基于原始创作要求和当前创作简报中已提交的回答，在当前文档基础上更新一版文档。\", \"role\": \"task\", \"action\": \"edit\"}]}",
+          "seconds": 5.27
+        },
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"请基于原始创作要求和当前创作简报中已提交的回答，在当前文档基础上更新一版文档。尚未回答的问题、未确认的选项和待补充事项不能当作用户决定；缺失内容标注待确认，不编造事实。\", \"has_document\": true}",
+          "output": "{\"requests\": [{\"request\": \"请基于原始创作要求和当前创作简报中已提交的回答，在当前文档基础上更新一版文档。\", \"role\": \"task\", \"action\": \"edit\"}]}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "num_predict": 1800,
+          "recording_id": "1789189307215814000",
+          "completed": true
+        }
+      ]
+    },
+    {
+      "id": "draft-first-single-goal",
+      "fixture": {
+        "id": "draft-first-single-goal",
+        "instruction": "请基于原始创作要求和当前创作简报中已提交的回答，生成一版文档。尚未回答的问题、未确认的选项和待补充事项不能当作用户决定；缺失内容标注待确认，不编造事实。",
+        "expected": "create"
+      },
+      "passed": true,
+      "result": {
+        "action": "create",
+        "primary_goal": "请基于原始创作要求和当前创作简报中已提交的回答，生成一版文档。",
+        "deliverable": "请基于原始创作要求和当前创作简报中已提交的回答，生成一版文档。",
+        "content_request": "请基于原始创作要求和当前创作简报中已提交的回答，生成一版文档。"
+      },
+      "seconds": 17.36,
+      "model_calls": [
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"请基于原始创作要求和当前创作简报中已提交的回答，生成一版文档。尚未回答的问题、未确认的选项和待补充事项不能当作用户决定；缺失内容标注待确认，不编造事实。\", \"has_document\": false}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "output": "{\"requests\": [{\"request\": \"请基于原始创作要求和当前创作简报中已提交的回答，生成一版文档。\", \"role\": \"task\", \"action\": \"create\"}]}",
+          "seconds": 17.36
+        },
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"请基于原始创作要求和当前创作简报中已提交的回答，生成一版文档。尚未回答的问题、未确认的选项和待补充事项不能当作用户决定；缺失内容标注待确认，不编造事实。\", \"has_document\": false}",
+          "output": "{\"requests\": [{\"request\": \"请基于原始创作要求和当前创作简报中已提交的回答，生成一版文档。\", \"role\": \"task\", \"action\": \"create\"}]}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "num_predict": 1800,
+          "recording_id": "1789189312486156000",
+          "completed": true
+        }
+      ]
+    },
+    {
+      "id": "en-edit-restatement",
+      "fixture": {
+        "id": "en-edit-restatement",
+        "instruction": "Produce a revised draft. Update the current report with the confirmed conclusions; keep unconfirmed details marked as pending.",
+        "has_document": true,
+        "expected": "edit"
+      },
+      "passed": true,
+      "result": {
+        "action": "edit",
+        "primary_goal": "Produce a revised draft. Update the current report with the confirmed conclusions; keep unconfirmed details marked as pending.",
+        "deliverable": "Produce a revised draft. Update the current report with the confirmed conclusions; keep unconfirmed details marked as pending.",
+        "content_request": "Produce a revised draft. Update the current report with the confirmed conclusions; keep unconfirmed details marked as pending."
+      },
+      "seconds": 5.42,
+      "model_calls": [
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"Produce a revised draft. Update the current report with the confirmed conclusions; keep unconfirmed details marked as pending.\", \"has_document\": true}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "output": "{\"requests\": [{\"request\": \"Produce a revised draft. Update the current report with the confirmed conclusions; keep unconfirmed details marked as pending.\", \"role\": \"task\", \"action\": \"edit\"}]}",
+          "seconds": 5.41
+        },
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"Produce a revised draft. Update the current report with the confirmed conclusions; keep unconfirmed details marked as pending.\", \"has_document\": true}",
+          "output": "{\"requests\": [{\"request\": \"Produce a revised draft. Update the current report with the confirmed conclusions; keep unconfirmed details marked as pending.\", \"role\": \"task\", \"action\": \"edit\"}]}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "num_predict": 1800,
+          "recording_id": "1789189329842375000",
+          "completed": true
+        }
+      ]
+    },
+    {
+      "id": "distinct-writing-goals",
+      "fixture": {
+        "id": "distinct-writing-goals",
+        "instruction": "另写一份全新的通知，并精简当前已有的报告；这是两份不同产物，两个任务都必须完成。",
+        "has_document": true,
+        "expected": null
+      },
+      "passed": false,
+      "result": {
+        "action": "create",
+        "primary_goal": "另写一份全新的通知，并精简当前已有的报告；这是两份不同产物，两个任务都必须完成。",
+        "deliverable": "另写一份全新的通知，并精简当前已有的报告；这是两份不同产物，两个任务都必须完成。",
+        "content_request": "另写一份全新的通知，并精简当前已有的报告；这是两份不同产物，两个任务都必须完成。"
+      },
+      "seconds": 37.41,
+      "model_calls": [
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"另写一份全新的通知，并精简当前已有的报告；这是两份不同产物，两个任务都必须完成。\", \"has_document\": true}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "output": "{\"requests\": [{\"request\": \"另写一份全新的通知\", \"role\": \"task\", \"action\": \"create\"}, {\"request\": \"精简当前已有的报告\", \"role\": \"task\", \"action\": \"edit\"}]}",
+          "seconds": 3.0
+        },
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"另写一份全新的通知，并精简当前已有的报告；这是两份不同产物，两个任务都必须完成。\", \"has_document\": true}",
+          "output": "{\"requests\": [{\"request\": \"另写一份全新的通知\", \"role\": \"task\", \"action\": \"create\"}, {\"request\": \"精简当前已有的报告\", \"role\": \"task\", \"action\": \"edit\"}]}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "num_predict": 1800,
+          "recording_id": "1789189335260086000",
+          "completed": true
+        },
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"另写一份全新的通知，并精简当前已有的报告；这是两份不同产物，两个任务都必须完成。\", \"has_document\": true}\n上次输出未通过意图契约核验：成功请求包含无法由单一本轮动作覆盖的写作或控制目标（requests[0]=create, requests[1]=edit）。请核对是否把同一交付物的概括与后文目标限定误拆为独立任务；若是，用覆盖两者的连续原文表达一项完整任务。若确为不同目标，必须保留各项，不能丢弃动作或将其降为约束；同时区分资料来源与修改对象。",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "output": "{\"requests\": [{\"request\": \"另写一份全新的通知，并精简当前已有的报告；这是两份不同产物，两个任务都必须完成。\", \"role\": \"task\", \"action\": \"create\"}]}",
+          "seconds": 34.4
+        },
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"另写一份全新的通知，并精简当前已有的报告；这是两份不同产物，两个任务都必须完成。\", \"has_document\": true}\n上次输出未通过意图契约核验：成功请求包含无法由单一本轮动作覆盖的写作或控制目标（requests[0]=create, requests[1]=edit）。请核对是否把同一交付物的概括与后文目标限定误拆为独立任务；若是，用覆盖两者的连续原文表达一项完整任务。若确为不同目标，必须保留各项，不能丢弃动作或将其降为约束；同时区分资料来源与修改对象。",
+          "output": "{\"requests\": [{\"request\": \"另写一份全新的通知，并精简当前已有的报告；这是两份不同产物，两个任务都必须完成。\", \"role\": \"task\", \"action\": \"create\"}]}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "num_predict": 1800,
+          "recording_id": "1789189335260086000",
+          "completed": true
+        }
+      ]
+    },
+    {
+      "id": "existing-document-as-reference",
+      "fixture": {
+        "id": "existing-document-as-reference",
+        "instruction": "以当前报告为参考，另写一份通知，不修改现有报告。",
+        "has_document": true,
+        "expected": "create"
+      },
+      "passed": true,
+      "result": {
+        "action": "create",
+        "primary_goal": "以当前报告为参考，另写一份通知，不修改现有报告。",
+        "deliverable": "以当前报告为参考，另写一份通知，不修改现有报告。",
+        "content_request": "以当前报告为参考，另写一份通知，不修改现有报告。"
+      },
+      "seconds": 30.03,
+      "model_calls": [
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"以当前报告为参考，另写一份通知，不修改现有报告。\", \"has_document\": true}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "output": "{\"requests\": [{\"request\": \"以当前报告为参考，另写一份通知，不修改现有报告。\", \"role\": \"task\", \"action\": \"create\"}]}",
+          "seconds": 30.03
+        },
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"以当前报告为参考，另写一份通知，不修改现有报告。\", \"has_document\": true}",
+          "output": "{\"requests\": [{\"request\": \"以当前报告为参考，另写一份通知，不修改现有报告。\", \"role\": \"task\", \"action\": \"create\"}]}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "num_predict": 1800,
+          "recording_id": "1789189372676467000",
+          "completed": true
+        }
+      ]
+    },
+    {
+      "id": "literal-patch",
+      "fixture": {
+        "id": "literal-patch",
+        "instruction": "把当前文档中的“周一上午”逐字替换为“周二下午”；找不到原文就告知。",
+        "has_document": true,
+        "expected": "patch"
+      },
+      "passed": true,
+      "result": {
+        "action": "patch",
+        "primary_goal": "把当前文档中的“周一上午”逐字替换为“周二下午”；找不到原文就告知。",
+        "deliverable": "把当前文档中的“周一上午”逐字替换为“周二下午”；找不到原文就告知。",
+        "content_request": "把当前文档中的“周一上午”逐字替换为“周二下午”；找不到原文就告知。"
+      },
+      "seconds": 2.92,
+      "model_calls": [
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"把当前文档中的“周一上午”逐字替换为“周二下午”；找不到原文就告知。\", \"has_document\": true}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "output": "{\"requests\": [{\"request\": \"把当前文档中的“周一上午”逐字替换为“周二下午”；找不到原文就告知。\", \"role\": \"task\", \"action\": \"patch\"}]}",
+          "seconds": 2.92
+        },
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"把当前文档中的“周一上午”逐字替换为“周二下午”；找不到原文就告知。\", \"has_document\": true}",
+          "output": "{\"requests\": [{\"request\": \"把当前文档中的“周一上午”逐字替换为“周二下午”；找不到原文就告知。\", \"role\": \"task\", \"action\": \"patch\"}]}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "num_predict": 1800,
+          "recording_id": "1789189402713908000",
+          "completed": true
+        }
+      ]
+    },
+    {
+      "id": "quoted-writing",
+      "fixture": {
+        "id": "quoted-writing",
+        "instruction": "解释“写一份通知”这句话的意思，别真的写通知，不修改当前正文。",
+        "has_document": true,
+        "expected": "answer"
+      },
+      "passed": true,
+      "result": {
+        "action": "answer",
+        "primary_goal": "解释“写一份通知”这句话的意思",
+        "deliverable": "解释“写一份通知”这句话的意思",
+        "content_request": ""
+      },
+      "seconds": 16.12,
+      "model_calls": [
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"解释“写一份通知”这句话的意思，别真的写通知，不修改当前正文。\", \"has_document\": true}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "output": "{\"requests\": [{\"request\": \"解释“写一份通知”这句话的意思\", \"role\": \"task\", \"action\": \"answer\"}, {\"request\": \"别真的写通知\", \"role\": \"constraint\", \"action\": \"none\"}, {\"request\": \"不修改当前正文\", \"role\": \"constraint\", \"action\": \"none\"}]}",
+          "seconds": 16.12
+        },
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"解释“写一份通知”这句话的意思，别真的写通知，不修改当前正文。\", \"has_document\": true}",
+          "output": "{\"requests\": [{\"request\": \"解释“写一份通知”这句话的意思\", \"role\": \"task\", \"action\": \"answer\"}, {\"request\": \"别真的写通知\", \"role\": \"constraint\", \"action\": \"none\"}, {\"request\": \"不修改当前正文\", \"role\": \"constraint\", \"action\": \"none\"}]}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "num_predict": 1800,
+          "recording_id": "1789189405636541000",
+          "completed": true
+        }
+      ]
+    },
+    {
+      "id": "mixed-question-writing",
+      "fixture": {
+        "id": "mixed-question-writing",
+        "instruction": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+        "expected": "create"
+      },
+      "passed": true,
+      "result": {
+        "action": "create",
+        "primary_goal": "再据此写一段可以直接发出的通知",
+        "deliverable": "再据此写一段可以直接发出的通知",
+        "content_request": "再据此写一段可以直接发出的通知"
+      },
+      "seconds": 5.49,
+      "model_calls": [
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"请先告诉我会议时间，再据此写一段可以直接发出的通知。\", \"has_document\": false}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "output": "{\"requests\": [{\"request\": \"请先告诉我会议时间\", \"role\": \"task\", \"action\": \"answer\"}, {\"request\": \"再据此写一段可以直接发出的通知\", \"role\": \"task\", \"action\": \"create\"}]}",
+          "seconds": 5.49
+        },
+        {
+          "system_prompt": "你是写作应用的请求分析器。先按独立交付物或操作目标列出用户实际要求执行的成功任务，每项独立区分任务、约束和失败回退，再分类实际任务；不要把不同目标压成一个主目标。\n只输出 JSON：requests 数组，每项包含 request（完整 instruction 中的一项原文）、role（task/constraint/failure_fallback）、action（实际任务的类别，非任务填 none）。\n一项只包含一个可以单独判定的任务，按原文顺序列出所有实际任务；不要把“先问，再写”合并成一个回答任务。不要执行任务，不要预判资料是否已取得。\n同一交付物的概括、重述与后续具体限定是一项任务，不按句号或写作动词拆成多个任务。前文泛称写一版、输出一版，后文明确在当前正文基础上修订时，按完整目标归为 edit；request 引用覆盖概括和限定的连续原文，不能只摘泛称误判为另建文档。真正要求另写一份内容并修改已有正文是两个独立目标，必须分别列出，不能为了通过核验合并或丢弃。是否同一目标依据本轮原文，不由 has_document 单独决定。\nrole=task 表示用户实际要求执行的成功任务；role=constraint 表示对任务的限制或否定操作；role=failure_fallback 表示资料不足或工具失败时才执行的回退。后两种 role 的 action 必须为 none。被引用讨论的指令不是实际任务，不要把引号内部拆成 task。用户明确要求询问失败状态或写失败说明，本身仍是实际任务。\n\n逐项分类：\ncreate：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。\nedit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。\npatch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。\nanswer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。\nrespond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。\n来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。\n\n例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{\"request\":\"解释标语含义\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"拟两句替代文案\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"资料不全就说明\",\"role\":\"failure_fallback\",\"action\":\"none\"}]。\n例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{\"request\":\"解释‘拟两句文案’是什么意思\",\"role\":\"task\",\"action\":\"answer\"}]。\n例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{\"request\":\"查资料\",\"role\":\"task\",\"action\":\"answer\"},{\"request\":\"把现有介绍改成两句话\",\"role\":\"task\",\"action\":\"edit\"}]。\n例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{\"request\":\"出一份修订稿。以当前报告为基础补充已确认的结论。\",\"role\":\"task\",\"action\":\"edit\"}]。\n例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{\"request\":\"另写一份通知\",\"role\":\"task\",\"action\":\"create\"},{\"request\":\"精简当前报告\",\"role\":\"task\",\"action\":\"edit\"}]。\n只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。",
+          "user_prompt": "{\"instruction\": \"请先告诉我会议时间，再据此写一段可以直接发出的通知。\", \"has_document\": false}",
+          "output": "{\"requests\": [{\"request\": \"请先告诉我会议时间\", \"role\": \"task\", \"action\": \"answer\"}, {\"request\": \"再据此写一段可以直接发出的通知\", \"role\": \"task\", \"action\": \"create\"}]}",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "request": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "task",
+                        "constraint",
+                        "failure_fallback"
+                      ]
+                    },
+                    "action": {
+                      "enum": [
+                        "create",
+                        "patch",
+                        "edit",
+                        "answer",
+                        "respond",
+                        "resume",
+                        "undo",
+                        "none"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "request",
+                    "role",
+                    "action"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "additionalProperties": false
+          },
+          "num_predict": 1800,
+          "recording_id": "1789189421757978000",
+          "completed": true
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+{
+  "model": "qwen3.5:4b",
+  "endpoint": "http://127.0.0.1:50256",
+  "scope": "real routing and input assessment; synthetic documents; no external retrieval",
+  "cases": [
+    {
+      "id": "transform-no-search",
+      "instruction": "把会议安排写得更简洁，不增加新事实，其他部分保持原样",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "text": "周一上午讨论项目进展。",
+              "occurrence": 1
+            }
+          ]
+        },
+        "reasoning": "用户要求编辑现有文档，具体目标是将“会议安排”章节的内容改写得更简洁，且明确禁止增加新事实，其余部分保持不变。根据操作类别约束，此类语义编辑由改写执行器（transform）自主确定措辞。需要定位到“会议安排”章节的正文节点进行改写。当前文档中“会议安排”章节的正文内容为“周一上午讨论项目进展。”，该节点ID为node-a57eb929ed387502。无需调用外部工具或技能，因为不涉及新事实检索",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "# 会议说明\n\n## 会议安排\n周一上午讨论项目进展。\n\n## 附录\n旧说明。\n\n## 联系方式\n请联系项目组。",
+        "self_contained_reason": "本轮任务仅要求对现有文本进行语言层面的精简（去除冗余措辞），不增加任何新事实或改变原有信息。所需事实（会议时间、内容）已全部在 supplied_lines 的 document-4 中提供，且任务约束明确禁止增加新事实，因此无需检索任何外部或私有资料。",
+        "acceptance": [
+          {
+            "id": "conciseness",
+            "criterion": "会议安排部分去除冗余词汇，保持语义不变且字数减少。"
+          },
+          {
+            "id": "factual_integrity",
+            "criterion": "输出内容不增加任何新事实，仅基于 supplied_lines 中的现有信息进行改写。"
+          },
+          {
+            "id": "structure_preservation",
+            "criterion": "除会议安排部分外，其他部分（标题、附录、联系方式）保持原样。"
+          }
+        ],
+        "inputs": []
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "text": "周一上午讨论项目进展。",
+              "occurrence": 1
+            }
+          ]
+        },
+        "reasoning": "用户要求编辑现有文档，具体目标是将“会议安排”章节的内容改写得更简洁，且明确禁止增加新事实，其余部分保持不变。根据操作类别约束，此类语义编辑由改写执行器（transform）自主确定措辞。需要定位到“会议安排”章节的正文节点进行改写。当前文档中“会议安排”章节的正文内容为“周一上午讨论项目进展。”，该节点ID为node-a57eb929ed387502。无需调用外部工具或技能，因为不涉及新事实检索",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "authorized_scope": true,
+        "all_requested_scopes": true
+      },
+      "passed": true,
+      "seconds": 16.34
+    }
+  ]
+}

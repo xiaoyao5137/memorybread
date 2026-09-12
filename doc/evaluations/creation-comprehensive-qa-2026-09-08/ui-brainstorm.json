@@ -1,0 +1,72 @@
+{
+  "scope": "Real localhost:1420 GUI; synthetic session; persisted session read only; no final document requested in this brainstorm fixture",
+  "history_id": 151,
+  "session_id": "creation-1788813998523-2d595be6162fb",
+  "original_instruction": "我想设计一场小型读书交流会，先帮我梳理方向。这是创作功能验收样例，不检索个人资料。",
+  "model_questions_observed": 2,
+  "first_question": "这场小型读书交流会，你最希望它最终达成什么效果？",
+  "neutral_outline_observed": [
+    "目标与期望结果",
+    "面向对象与使用情境",
+    "内容结构与呈现方式",
+    "范围与现实约束",
+    "完成与成功标准"
+  ],
+  "memory_status": "本轮按你的资料范围要求未检索历史记忆，仅依据当前输入展开。",
+  "selected_option_ids": [
+    "recommended_option",
+    "alternative_option_2"
+  ],
+  "branch_labels_observed": [
+    "促进深度交流与观点碰撞",
+    "建立社群归属感与长期连接"
+  ],
+  "second_question_observed": "这场读书交流会主要面向谁？在什么具体情境下开展？",
+  "edited_goal": "促进深度交流与观点碰撞；建立社群归属感与长期连接；活动后自愿保持联系。",
+  "edit_revision": 2,
+  "restored_session_revision": 3,
+  "user_input_revisions": {
+    "q_e38343edad0b": 2,
+    "root_request": 0
+  },
+  "checks": {
+    "original_request_unchanged": true,
+    "no_selected_skill": true,
+    "persisted_skip_policy": true,
+    "neutral_first_dimension": true,
+    "multiselect_persisted": true,
+    "edited_goal_exact": true,
+    "input_revision_preserved": true,
+    "cancelled_history_retained": true,
+    "reload_keeps_edit": true
+  },
+  "passed": true,
+  "gui_observations": [
+    "Two checkboxes were simultaneously checked before confirmation.",
+    "The next question appeared under the first selected branch; the second branch remained visible and pending.",
+    "Saving displayed version 2 and the exact manually edited text.",
+    "Cancel disabled continuation while preserving the brief.",
+    "After reload and opening history 151, the exact edit and both branches remained visible; the session remained cancelled."
+  ],
+  "proof_boundary": "GUI and persisted state show skipped memory. Code-path and transport regression tests verify that this skipped branch returns before query analysis and retrieval; this record is not a packet capture.",
+  "runtime_proof": {
+    "verified_at": "2026-09-07T20:46:31.496159+00:00",
+    "processes": {
+      "7070": [
+        {
+          "pid": "47837",
+          "start": "Tue Sep  8 04:42:27 2026",
+          "source_newer_than_process": []
+        }
+      ],
+      "8001": [
+        {
+          "pid": "57047",
+          "start": "Tue Sep  8 04:45:54 2026",
+          "source_newer_than_process": []
+        }
+      ]
+    },
+    "brainstorm_sha256": "48e6461dcb4f27b8eb7e6a06cfd49846565bf75fb61c2ee0de9c00a09c7f3a73"
+  }
+}

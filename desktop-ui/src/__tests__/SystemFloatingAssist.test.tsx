@@ -1,10 +1,11 @@
+import { useConsultationReadiness } from '../hooks/useConsultationReadiness'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import SystemFloatingAssist from '../components/SystemFloatingAssist'
 import { useAppStore } from '../store/useAppStore'
-import { runGatewayRagQueryStream, runRagQueryStream } from '../hooks/useApi'
+import { runGatewayRagQueryStream, runRagQueryStream, saveConsultationHistory } from '../hooks/useApi'
 import {
   FLOATING_ASSIST_AUTO_TASK_KEY,
   FLOATING_ASSIST_ENABLED_KEY,
@@ -19,6 +20,13 @@ const cloudMocks = vi.hoisted(() => ({
   fetchBillingBalance: vi.fn(),
 }))
 
+vi.mock('../hooks/useConsultationReadiness', () => ({
+  useConsultationReadiness: vi.fn(() => ({
+    status: { ready: true, message: '已就绪' }, ready: true, loading: false,
+    refresh: vi.fn().mockResolvedValue(true),
+  })),
+}))
+
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn().mockResolvedValue(undefined),
 }))
@@ -29,6 +37,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 vi.mock('../hooks/useApi', () => ({
   RAG_REFERENCE_LIMIT: 5,
+  saveConsultationHistory: vi.fn().mockResolvedValue(141),
   runGatewayRagQueryStream: vi.fn(),
   runRagQueryStream: vi.fn(),
 }))
@@ -175,13 +184,13 @@ beforeEach(() => {
   mockedListen.mockResolvedValue(() => {})
   mockedRunRagQueryStream.mockReset()
   mockedRunRagQueryStream.mockResolvedValue({
-    answer: '自动识别任务的咨询输出',
+    answer: '自动识别任务的咨询结果',
     contexts: [],
     output_truncated: false,
   } as any)
   mockedRunGatewayRagQueryStream.mockReset()
   mockedRunGatewayRagQueryStream.mockResolvedValue({
-    answer: '云端咨询输出',
+    answer: '云端咨询结果',
     contexts: [],
     output_truncated: false,
   } as any)
@@ -199,6 +208,151 @@ afterEach(() => {
 })
 
 describe('SystemFloatingAssist', () => {
+  it('OCR 超时后点击重试会重新识别原附件并保留原问题，不改为屏幕识别', async () => {
+    vi.useRealTimers()
+    let attempts = 0
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'save_consultation_attachment') {
+        if (++attempts === 1) throw new Error('图片已保存，但文字识别失败：屏幕文字识别等待超时，请稍后重试')
+        return { path: '/local/retry.png', ocr_text: '生日提醒，请送贺卡' } as any
+      }
+      return undefined
+    })
+    const { container } = render(<SystemFloatingAssist />)
+    fireEvent.click(assistButton())
+    const textarea = await screen.findByPlaceholderText('帮我回顾一下上周项目评审的关键结论')
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [new File(['a'], 'a.png', { type: 'image/png' })] } })
+    await screen.findByRole('button', { name: '查看图片 图片1' })
+    fireEvent.change(textarea, { target: { value: '他表达的是什么含义？ @图片1' } })
+    fireEvent.submit(textarea.closest('form')!)
+    await screen.findByText(/图片已保存，但文字识别失败/)
+    expect(mockedRunRagQueryStream).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: '重试' }))
+    await waitFor(() => expect(mockedRunRagQueryStream).toHaveBeenCalledOnce())
+    const metadata = mockedRunRagQueryStream.mock.calls[0][4] as any
+    expect(metadata.manual_instruction).toBe('他表达的是什么含义？ @图片1')
+    expect(metadata.ocr_text).toContain('生日提醒，请送贺卡')
+    expect(attempts).toBe(2)
+    expect(mockedInvoke.mock.calls.some(([command]) => command === 'capture_screen_ocr_for_floating_assist')).toBe(false)
+  })
+
+  it.each(['manual', 'screen'] as const)('%s 咨询成功后清空输入区图片，下一次咨询不携带旧附件', async (mode) => {
+    vi.useRealTimers()
+    const settings = readInteractionSettings()
+    window.localStorage.setItem(INTERACTION_SETTINGS_KEY, JSON.stringify({
+      ...settings,
+      floatingBall: { ...settings.floatingBall, doubleClick: 'recognize_screen_task' },
+    }))
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'save_consultation_attachment') return { path: '/local/a.png', ocr_text: '仅属于第一轮的图片文字' } as any
+      if (command === 'capture_screen_ocr_for_floating_assist') return taskOcrResult as any
+      return undefined
+    })
+    const { container } = render(<SystemFloatingAssist />)
+    fireEvent.click(assistButton())
+    const textarea = await screen.findByPlaceholderText('帮我回顾一下上周项目评审的关键结论')
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [new File(['a'], 'a.png', { type: 'image/png' })] } })
+    await screen.findByRole('button', { name: '查看图片 图片1' })
+    if (mode === 'manual') {
+      fireEvent.change(textarea, { target: { value: '解释 @图片1' } })
+      fireEvent.submit(textarea.closest('form')!)
+    } else {
+      fireEvent.doubleClick(assistButton())
+    }
+    await waitFor(() => expect(mockedRunRagQueryStream).toHaveBeenCalledOnce(), { timeout: 3000 })
+    expect((mockedRunRagQueryStream.mock.calls[0][4] as any).attachments).toHaveLength(1)
+    await waitFor(() => expect(screen.queryByRole('button', { name: '查看图片 图片1' })).not.toBeInTheDocument())
+    fireEvent.change(textarea, { target: { value: '这是一个新的问题' } })
+    fireEvent.submit(textarea.closest('form')!)
+    await waitFor(() => expect(mockedRunRagQueryStream).toHaveBeenCalledTimes(2))
+    expect((mockedRunRagQueryStream.mock.calls[1][4] as any).attachments).toEqual([])
+    expect(mockedRunRagQueryStream.mock.calls[1][2]).not.toContain('仅属于第一轮的图片文字')
+  })
+
+  it('图片文字缺失时保留问题并阻止无依据生成', async () => {
+    vi.useRealTimers()
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'save_consultation_attachment') return { path: '/local/a.png', ocr_text: '' } as any
+      return undefined
+    })
+    const { container } = render(<SystemFloatingAssist />)
+    fireEvent.click(assistButton())
+    const textarea = await screen.findByPlaceholderText('帮我回顾一下上周项目评审的关键结论')
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [new File(['a'], 'a.png', { type: 'image/png' })] } })
+    await screen.findByRole('button', { name: '查看图片 图片1' })
+    fireEvent.change(textarea, { target: { value: '他表达了什么？' } })
+    fireEvent.submit(textarea.closest('form')!)
+    await screen.findByText(/部分图片未识别到文字/)
+    expect(mockedRunRagQueryStream).not.toHaveBeenCalled()
+    expect(textarea).toHaveValue('他表达了什么？')
+  })
+
+  it('上传多图后展示缩略图，先保存历史再提问；生成失败仍保留问题和附件', async () => {
+    vi.useRealTimers()
+    vi.mocked(saveConsultationHistory).mockClear()
+    mockedInvoke.mockImplementation(async (command, args: any) => {
+      if (command === 'save_consultation_attachment') return { path: `/local/${args.dataUrl.endsWith('YQ==') ? 'a' : 'b'}.png`, ocr_text: '图片内的测试文字' } as any
+      return undefined
+    })
+    mockedRunRagQueryStream.mockRejectedValue(new Error('模拟生成失败'))
+    const { container } = render(<SystemFloatingAssist />)
+    fireEvent.click(assistButton())
+    const textarea = await screen.findByPlaceholderText('帮我回顾一下上周项目评审的关键结论')
+    fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [new File(['a'], 'a.png', { type: 'image/png' }), new File(['b'], 'b.png', { type: 'image/png' })] } })
+    await screen.findByRole('button', { name: '查看图片 图片2' })
+    fireEvent.click(screen.getByRole('button', { name: '查看图片 图片2' }))
+    expect(screen.getByRole('dialog', { name: '图片原图预览' })).toBeInTheDocument()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(textarea).toBeVisible()
+    fireEvent.change(textarea, { target: { value: '比较 @' } })
+    fireEvent.click(screen.getByRole('option', { name: '@图片2' }))
+    fireEvent.submit(textarea.closest('form')!)
+    await waitFor(() => expect(mockedRunRagQueryStream).toHaveBeenCalledOnce())
+    const payload = mockedRunRagQueryStream.mock.calls[0][4] as any
+    expect(payload.attachments.map((item: any) => item.name)).toEqual(['图片1', '图片2'])
+    expect(mockedRunRagQueryStream.mock.calls[0][2]).toContain('@图片2')
+    expect(payload.attachments).toHaveLength(2)
+    expect(payload.history_id).toBe(141)
+    expect(JSON.stringify(payload)).not.toContain('base64')
+    await waitFor(() => expect(vi.mocked(saveConsultationHistory).mock.calls).toHaveLength(2))
+    expect(vi.mocked(saveConsultationHistory).mock.calls[1][5]).toBe(141)
+    expect(screen.getByRole('button', { name: '查看图片 图片1' })).toBeInTheDocument()
+    expect(textarea).toHaveValue('比较 @图片2 ')
+    expect(screen.getByText('模拟生成失败')).toBeInTheDocument()
+  })
+
+  it('咨询正文、表头和单元格的外链交给浏览器打开，页内锚点保留', async () => {
+    const answer = [
+      '[正文链接](https://example.com/article) 与 [页内位置](#details)',
+      '',
+      '| [表头链接](https://example.com/header) | 说明 |',
+      '| --- | --- |',
+      '| [**表格链接**](http://example.com/cell) | 内容 |',
+    ].join('\n')
+    mockedRunRagQueryStream.mockResolvedValue({ answer, contexts: [] } as any)
+    render(<SystemFloatingAssist />)
+    fireEvent.click(assistButton())
+    act(() => vi.advanceTimersByTime(220))
+    const textarea = screen.getByPlaceholderText('帮我回顾一下上周项目评审的关键结论')
+    fireEvent.change(textarea, { target: { value: '查询相关链接' } })
+    await act(async () => {
+      fireEvent.submit(textarea.closest('form')!)
+      await flushMicrotasks()
+    })
+
+    for (const [name, href] of [
+      ['正文链接', 'https://example.com/article'],
+      ['表头链接', 'https://example.com/header'],
+      ['表格链接', 'http://example.com/cell'],
+    ]) {
+      const link = screen.getByRole('link', { name })
+      expect(link).toHaveAttribute('href', href)
+      expect(link).toHaveAttribute('target', '_blank')
+      expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+    }
+    expect(screen.getByRole('link', { name: '页内位置' })).not.toHaveAttribute('target')
+  })
+
   it('只在开发模式显示悬浮球开发标识', () => {
     const { rerender } = render(<SystemFloatingAssist developmentMode />)
 
@@ -308,7 +462,7 @@ describe('SystemFloatingAssist', () => {
     window.history.pushState(
       {},
       '',
-      '/?view=floating-assist&debugPhase=done&debugAnswer=%E5%B7%B2%E7%94%9F%E6%88%90%E7%9A%84%E5%92%A8%E8%AF%A2%E8%BE%93%E5%87%BA',
+      `/?view=floating-assist&debugPhase=done&debugAnswer=${encodeURIComponent('已生成的咨询结果')}`,
     )
     render(<SystemFloatingAssist />)
 
@@ -321,8 +475,57 @@ describe('SystemFloatingAssist', () => {
     })
 
     expect(button).toHaveClass('system-floating-assist__ball--idle')
-    expect(screen.getByText('咨询输出')).toBeInTheDocument()
-    expect(screen.getByText('已生成的咨询输出')).toBeInTheDocument()
+    expect(screen.getByText('咨询结果')).toBeInTheDocument()
+    expect(screen.getByText('已生成的咨询结果')).toBeInTheDocument()
+  })
+
+  it('初始化失败时保留问题、拦截请求并能打开修复入口', async () => {
+    const readiness = vi.mocked(useConsultationReadiness)
+    const original = readiness.getMockImplementation()!
+    readiness.mockImplementation(() => ({
+      status: { ready: false, runtime: false, llm: false, embedding: false, message: '引擎下载失败', action: 'initialization' },
+      ready: false, loading: false, refresh: vi.fn().mockResolvedValue(false),
+    }))
+    try {
+      render(<SystemFloatingAssist />)
+      fireEvent.click(assistButton())
+      act(() => { vi.advanceTimersByTime(220) })
+      const input = screen.getByPlaceholderText('帮我回顾一下上周项目评审的关键结论')
+      fireEvent.change(input, { target: { value: '保留这个问题' } })
+      expect(screen.getByRole('button', { name: '发送手工咨询' })).toBeDisabled()
+      fireEvent.submit(input.closest('form')!)
+      await act(async () => flushMicrotasks())
+      expect(input).toHaveValue('保留这个问题')
+      expect(mockedRunRagQueryStream).not.toHaveBeenCalled()
+      fireEvent.click(screen.getByRole('button', { name: '继续初始化 / 修复' }))
+      await act(async () => flushMicrotasks())
+      expect(mockedInvoke).toHaveBeenCalledWith('show_main_panel_from_floating_assist')
+    } finally { readiness.mockImplementation(original) }
+  })
+
+  it('预热期间保留问题并重新检查，不误导用户重做初始化', async () => {
+    const readiness = vi.mocked(useConsultationReadiness)
+    const original = readiness.getMockImplementation()!
+    const refresh = vi.fn().mockResolvedValue(false)
+    readiness.mockImplementation(() => ({
+      status: { ready: false, runtime: true, llm: true, embedding: true,
+        message: '正在准备咨询能力', action: 'retry', error_code: 'LOCAL_AI_WARMING_UP' },
+      ready: false, loading: false, refresh,
+    }))
+    try {
+      render(<SystemFloatingAssist />)
+      fireEvent.click(assistButton())
+      act(() => { vi.advanceTimersByTime(220) })
+      const input = screen.getByPlaceholderText('帮我回顾一下上周项目评审的关键结论')
+      fireEvent.change(input, { target: { value: '预热后继续回答' } })
+      expect(screen.queryByRole('button', { name: '继续初始化 / 修复' })).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '发送手工咨询' })).toBeDisabled()
+      fireEvent.click(screen.getByRole('button', { name: '重新检查' }))
+      await act(async () => flushMicrotasks())
+      expect(refresh).toHaveBeenCalledOnce()
+      expect(input).toHaveValue('预热后继续回答')
+      expect(mockedRunRagQueryStream).not.toHaveBeenCalled()
+    } finally { readiness.mockImplementation(original) }
   })
 
   it('默认单击打开悬浮球咨询框，双击打开主面板', async () => {
@@ -454,11 +657,12 @@ describe('SystemFloatingAssist', () => {
   it('默认显示 5 条参考资料并支持展开和收起更多资料', async () => {
     const sourceTypes = ['bake_knowledge', 'document', 'operation', 'knowledge', 'document', 'operation', 'bake_knowledge']
     mockedRunRagQueryStream.mockResolvedValue({
-      answer: '已生成的咨询输出',
+      answer: '已生成的咨询结果',
       contexts: Array.from({ length: 7 }, (_, index) => ({
         capture_id: index + 1,
         doc_key: `${sourceTypes[index]}:${index + 1}`,
         title: `参考资料 ${index + 1}`,
+        source_url: 'https://example.com/original',
         text: `参考内容 ${index + 1}`,
         score: 1 - index / 10,
         source: sourceTypes[index],
@@ -492,6 +696,10 @@ describe('SystemFloatingAssist', () => {
     expect(screen.queryByText('参考资料 6')).not.toBeInTheDocument()
     expect(screen.getByText('参考资料 1').closest('button')?.firstElementChild).toHaveTextContent('知识')
     expect(screen.getByText('参考资料 2').closest('button')?.firstElementChild).toHaveTextContent('文档')
+    fireEvent.click(screen.getByText('参考资料 2').closest('button')!)
+    expect(mockedInvoke).toHaveBeenCalledWith('open_floating_assist_reference', {
+      detail: expect.objectContaining({ type: 'document', sourceUrl: 'https://example.com/original' }),
+    })
     expect(screen.getByText('参考资料 3').closest('button')?.firstElementChild).toHaveTextContent('操作')
     expect(screen.getByText('参考资料 4').closest('button')?.firstElementChild).toHaveTextContent('时间线')
 
@@ -501,6 +709,106 @@ describe('SystemFloatingAssist', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '收起' }))
     expect(screen.queryByText('参考资料 6')).not.toBeInTheDocument()
+  })
+
+  it('未被答案标注采用的召回记忆仍然展示，并区分采用状态', async () => {
+    mockedRunRagQueryStream.mockResolvedValue({
+      answer: 'SMACT 衡量 SM 活跃时间比例，英伟达阈值 80%。',
+      contexts: [
+        {
+          capture_id: 2,
+          doc_key: 'document:2',
+          title: 'SMACT 指标定义',
+          text: '正文 2',
+          score: 0.9,
+          source: 'document',
+          source_type: 'document',
+          cited: true,
+          recall_index: 2,
+        },
+        {
+          capture_id: 1,
+          doc_key: 'document:1',
+          title: 'GPU 利用率日报',
+          text: '正文 1',
+          score: 0.8,
+          source: 'document',
+          source_type: 'document',
+          cited: false,
+          recall_index: 1,
+        },
+      ],
+      output_truncated: false,
+    } as any)
+
+    render(<SystemFloatingAssist />)
+    fireEvent.click(assistButton())
+    act(() => {
+      vi.advanceTimersByTime(220)
+    })
+
+    const textarea = screen.getByPlaceholderText('帮我回顾一下上周项目评审的关键结论')
+    fireEvent.change(textarea, { target: { value: 'SMACT文档' } })
+    await act(async () => {
+      fireEvent.submit(textarea.closest('form')!)
+      await flushMicrotasks()
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(900)
+      await flushMicrotasks()
+    })
+
+    expect(screen.getByText('参考资料（2）')).toBeInTheDocument()
+    expect(screen.getByText('答案采用 1 条')).toBeInTheDocument()
+    const adopted = screen.getByText('SMACT 指标定义').closest('button')!
+    const recalledOnly = screen.getByText('GPU 利用率日报').closest('button')!
+    expect(adopted).toHaveTextContent('已采用')
+    expect(adopted).toHaveTextContent('M2')
+    // 模型漏标注时召回证据不得消失，且保留召回序号供用户核对
+    expect(recalledOnly).toHaveTextContent('M1')
+    expect(recalledOnly).not.toHaveTextContent('已采用')
+    expect(recalledOnly).toHaveAttribute('title', '已召回，本次答案未标注采用')
+  })
+
+  it('召回记忆全部未被采用时仍然展示并明确标注', async () => {
+    mockedRunRagQueryStream.mockResolvedValue({
+      answer: '小米体重计通过生物电阻抗测量体脂。',
+      contexts: [
+        {
+          capture_id: 1,
+          doc_key: 'document:1',
+          title: 'GPU 利用率日报',
+          text: '正文 1',
+          score: 0.7,
+          source: 'document',
+          source_type: 'document',
+          cited: false,
+          recall_index: 1,
+        },
+      ],
+      output_truncated: false,
+    } as any)
+
+    render(<SystemFloatingAssist />)
+    fireEvent.click(assistButton())
+    act(() => {
+      vi.advanceTimersByTime(220)
+    })
+
+    const textarea = screen.getByPlaceholderText('帮我回顾一下上周项目评审的关键结论')
+    fireEvent.change(textarea, { target: { value: '小米体重计的工作原理' } })
+    await act(async () => {
+      fireEvent.submit(textarea.closest('form')!)
+      await flushMicrotasks()
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(900)
+      await flushMicrotasks()
+    })
+
+    expect(screen.getByText('参考资料（1）')).toBeInTheDocument()
+    expect(screen.getByText('答案未采用')).toBeInTheDocument()
+    expect(screen.getByText('GPU 利用率日报')).toBeInTheDocument()
   })
 
   it('流式生成时先展示参考资料和部分答案，完成后展示推理耗时', async () => {
@@ -539,7 +847,9 @@ describe('SystemFloatingAssist', () => {
     })
 
     expect(screen.getByText('提前召回的资料')).toBeInTheDocument()
-    expect(screen.getByText('咨询输出 · 正在生成').closest('.system-floating-assist__answer'))
+    // 生成过程中还不能判定采用情况，不得提前给出结论
+    expect(screen.queryByText('答案未采用')).not.toBeInTheDocument()
+    expect(screen.getByText('咨询结果 · 正在生成').closest('.system-floating-assist__answer'))
       .toHaveClass('system-floating-assist__answer--streaming')
     expect(mockedInvoke.mock.calls).toContainEqual([
       'set_floating_assist_size',

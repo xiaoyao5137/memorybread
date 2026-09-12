@@ -1,0 +1,374 @@
+[
+  {
+    "call": 5,
+    "candidate_document": "# 会议通知\n\n**先告诉我会议时间：**  \n本次会议由周三下午召开，具体时间为当周周三的下午时段（相对时间参照用户原始材料）。地点为二楼会议室。  \n\n**再据此写一段可以直接发出的通知：**  \n各位同事：  \n现将定于本周三下午在二楼会议室召开的会议通知如下，请准时参加并做好准备。如有特殊情况需请假或调整安排，请及时与组织者联系。",
+    "provided_materials": {
+      "user_instruction_and_supplied_facts": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+      "original_document": "",
+      "root_request": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+      "conversation": [
+        {
+          "role": "user",
+          "content": "会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。"
+        }
+      ],
+      "creation_brief": "",
+      "retrieved_evidence": {
+        "references": [],
+        "data_results": [],
+        "web_results": [],
+        "tool_results": [],
+        "source_view": {
+          "excerpted": true,
+          "counts": {
+            "references": {
+              "available": 0,
+              "included": 0
+            },
+            "data_results": {
+              "available": 0,
+              "included": 0
+            },
+            "web_results": {
+              "available": 0,
+              "included": 0
+            },
+            "tool_results": {
+              "available": 0,
+              "included": 0
+            }
+          }
+        }
+      },
+      "user_options": {},
+      "supplied_lines": {
+        "instruction-1": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+        "root-1": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+        "conversation-0-1": "会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。"
+      }
+    },
+    "contract": {
+      "deliverable": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+      "self_contained_reason": "所有必要事实（时间、地点）及约束条件（不检索、不补充）已在用户指令和对话记录中明确提供，无需外部或历史输入",
+      "acceptance": [
+        {
+          "id": "source_scope_grounding",
+          "criterion": "独立核对本轮新增或修改的称谓、受众身份、人物关系、组织归属和适用范围，是否在已给事件或参与行为以外附加了外部既存身份或关系。称谓词义本身仅表示阅读本文或参加当前活动时，可以中性指称而不要求名单。共同工作、家庭、职业、组织关系或管理职责是外部限定，不因收件人会阅读或参加而变为中性，必须有用户材料、显式user_options或可用原文支持，不能从场景常见性推定。没有新增外部限定、已有依据或获用户虚构授权时通过；否则删除该限定或中性改写，不用其他事实正确抵消，也不因非必要称谓而blocked。局部编辑不审查未改动的旧内容。"
+        },
+        {
+          "id": "source_attributes_grounding",
+          "criterion": "独立核对本轮新增或修改的事件性质、周期、对象类别、状态、角色是否存在及其职责。格式引导语不免检：其内部的性质或周期限定仍是事实，不能把整个引导句都当作格式。每项实质限定须由输入必然支持，或处于用户明确授权的方案设计/虚构范围；常见合理不等于有依据。一处无依据即本项失败，删除多余限定即可，不因缺少非必要内容而blocked。虚构角色、地点、事件及拟人只核对用户明确设定，不要求现实依据；未改动旧内容免审。"
+        },
+        {
+          "id": "source_obligations_grounding",
+          "criterion": "独立核对本轮向现实读者新增的规则、办理流程、前置条件、条件触发步骤或行为义务。邀请参加已给事件可以中性表达；附加条件下要求办理另一动作或联系某角色则新增了要求，即使是常见、礼貌或不具名的流程，也须由输入规则或明确的方案设计授权支持。没有新增步骤或已有依据时通过；一处无依据就本项失败，删除额外要求即可。虚构角色在故事内部的行为属于情节，不是现实读者义务；不审查未改动旧内容。"
+        },
+        {
+          "id": "provide_time",
+          "criterion": "明确输出会议时间（周三下午）"
+        },
+        {
+          "id": "generate_notice",
+          "criterion": "生成一段可直接发出的通知文本"
+        },
+        {
+          "id": "no_external_lookup",
+          "criterion": "通知内容仅基于提供的材料，未检索或补充新事实"
+        },
+        {
+          "id": "calendar_grounding",
+          "criterion": "以下日期、周次或相对时间限定未出现在输入原文：本周三。只有给定时间的等价改写、用户明确要求且有可靠基准的日期换算、明确标为待确认的建议时间，或用户明确允许虚构的叙事情境才可采用；否则必须删除这些未经提供的时间标注，保留原有相对时间。执行当天日期与检索时间范围不能证明历史材料里的本周、上周指哪个自然周。"
+        }
+      ],
+      "inputs": [
+        {
+          "state": "provided",
+          "evidence": "会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。",
+          "need": "会议时间、地点及约束条件",
+          "reason": "用户指令中已明确会议时间（周三下午）、地点（二楼会议室）及约束（不检索、不补充新事实），无需额外输入",
+          "query": "",
+          "id": "work_context",
+          "source": "work_context"
+        }
+      ]
+    },
+    "raw_review": {
+      "source_audit": {
+        "span-0-8": {
+          "text": "# 会议通知\n\n",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "用户要求先告知时间再写通知",
+          "kind": "neutral",
+          "basis": "neutral_expression"
+        },
+        "span-8-24": {
+          "text": "**先告诉我会议时间：**  \n",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "用户要求先告知时间",
+          "kind": "neutral",
+          "basis": "neutral_expression"
+        },
+        "span-24-36": {
+          "text": "本次会议由周三下午召开，",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "会议时间设定为周三下午",
+          "kind": "attribute",
+          "basis": "source_supported"
+        },
+        "span-36-65": {
+          "text": "具体时间为当周周三的下午时段（相对时间参照用户原始材料）。",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "将时间具体化为当周周三下午",
+          "kind": "attribute",
+          "basis": "unsupported"
+        },
+        "span-65-78": {
+          "text": "地点为二楼会议室。  \n\n",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "会议地点为二楼会议室",
+          "kind": "attribute",
+          "basis": "source_supported"
+        },
+        "span-78-101": {
+          "text": "**再据此写一段可以直接发出的通知：**  \n",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "用户要求生成可直接发出的通知",
+          "kind": "neutral",
+          "basis": "neutral_expression"
+        },
+        "span-101-109": {
+          "text": "各位同事：  \n",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "通知受众为各位同事",
+          "kind": "identity",
+          "basis": "unsupported"
+        },
+        "span-109-134": {
+          "text": "现将定于本周三下午在二楼会议室召开的会议通知如下，",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "通知内容包含本周三下午在二楼会议室召开会议",
+          "kind": "attribute",
+          "basis": "unsupported"
+        },
+        "span-134-145": {
+          "text": "请准时参加并做好准备。",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "要求参会人员准时参加并做好准备",
+          "kind": "obligation",
+          "basis": "unsupported"
+        },
+        "span-145-160": {
+          "text": "如有特殊情况需请假或调整安排，",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "提及请假或调整安排的情况",
+          "kind": "neutral",
+          "basis": "unsupported"
+        },
+        "span-160-170": {
+          "text": "请及时与组织者联系。",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "要求相关人员与组织者联系",
+          "kind": "obligation",
+          "basis": "unsupported"
+        }
+      },
+      "checks": {
+        "source_scope_grounding": {
+          "evidence": "line-7",
+          "reason": "将受众限定为'各位同事'，该称谓隐含共同工作关系，超出用户提供的'参加当前活动'的中性范围，且无用户材料或显式授权支持此外部关系。",
+          "passed": false
+        },
+        "source_attributes_grounding": {
+          "evidence": "line-4",
+          "reason": "将时间具体化为'当周周三'，属于将相对时间展开为未经提供的绝对日期限定，且无用户材料支持'当周'的具体指代。",
+          "passed": false
+        },
+        "source_obligations_grounding": {
+          "evidence": "line-8",
+          "reason": "新增'请准时参加并做好准备'及'与组织者联系'的行为义务，属于附加条件下的另一办理步骤，无用户规则或方案设计授权支持。",
+          "passed": false
+        },
+        "provide_time": {
+          "evidence": "line-4",
+          "reason": "已明确输出会议时间为'周三下午'，满足提供时间要求。",
+          "passed": true
+        },
+        "generate_notice": {
+          "evidence": "line-8",
+          "reason": "已生成一段完整的会议通知文本，满足生成通知要求。",
+          "passed": true
+        },
+        "no_external_lookup": {
+          "evidence": "line-4",
+          "reason": "通知内容中的时间、地点等事实均源自用户提供的材料，未检索或补充新事实。",
+          "passed": true
+        },
+        "calendar_grounding": {
+          "evidence": "line-4",
+          "reason": "输入原文仅包含'周三下午'，未出现'本周三'。产物中'本周三'属于未经提供的绝对日期标注，违反时间限定约束。",
+          "passed": false
+        }
+      },
+      "status": "revise",
+      "corrections": []
+    },
+    "expected_status": "revise"
+  },
+  {
+    "call": 7,
+    "candidate_document": "# 会议通知\n\n会议时间定于周三下午，地点为二楼会议室。特此通知。",
+    "provided_materials": {
+      "user_instruction_and_supplied_facts": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+      "original_document": "",
+      "root_request": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+      "conversation": [
+        {
+          "role": "user",
+          "content": "会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。"
+        }
+      ],
+      "creation_brief": "",
+      "retrieved_evidence": {
+        "references": [],
+        "data_results": [],
+        "web_results": [],
+        "tool_results": [],
+        "source_view": {
+          "excerpted": true,
+          "counts": {
+            "references": {
+              "available": 0,
+              "included": 0
+            },
+            "data_results": {
+              "available": 0,
+              "included": 0
+            },
+            "web_results": {
+              "available": 0,
+              "included": 0
+            },
+            "tool_results": {
+              "available": 0,
+              "included": 0
+            }
+          }
+        }
+      },
+      "user_options": {},
+      "supplied_lines": {
+        "instruction-1": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+        "root-1": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+        "conversation-0-1": "会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。"
+      }
+    },
+    "contract": {
+      "deliverable": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+      "self_contained_reason": "所有必要事实（时间、地点）及约束条件（不检索、不补充）已在用户指令和对话记录中明确提供，无需外部或历史输入",
+      "acceptance": [
+        {
+          "id": "source_scope_grounding",
+          "criterion": "独立核对本轮新增或修改的称谓、受众身份、人物关系、组织归属和适用范围，是否在已给事件或参与行为以外附加了外部既存身份或关系。称谓词义本身仅表示阅读本文或参加当前活动时，可以中性指称而不要求名单。共同工作、家庭、职业、组织关系或管理职责是外部限定，不因收件人会阅读或参加而变为中性，必须有用户材料、显式user_options或可用原文支持，不能从场景常见性推定。没有新增外部限定、已有依据或获用户虚构授权时通过；否则删除该限定或中性改写，不用其他事实正确抵消，也不因非必要称谓而blocked。局部编辑不审查未改动的旧内容。"
+        },
+        {
+          "id": "source_attributes_grounding",
+          "criterion": "独立核对本轮新增或修改的事件性质、周期、对象类别、状态、角色是否存在及其职责。格式引导语不免检：其内部的性质或周期限定仍是事实，不能把整个引导句都当作格式。每项实质限定须由输入必然支持，或处于用户明确授权的方案设计/虚构范围；常见合理不等于有依据。一处无依据即本项失败，删除多余限定即可，不因缺少非必要内容而blocked。虚构角色、地点、事件及拟人只核对用户明确设定，不要求现实依据；未改动旧内容免审。"
+        },
+        {
+          "id": "source_obligations_grounding",
+          "criterion": "独立核对本轮向现实读者新增的规则、办理流程、前置条件、条件触发步骤或行为义务。邀请参加已给事件可以中性表达；附加条件下要求办理另一动作或联系某角色则新增了要求，即使是常见、礼貌或不具名的流程，也须由输入规则或明确的方案设计授权支持。没有新增步骤或已有依据时通过；一处无依据就本项失败，删除额外要求即可。虚构角色在故事内部的行为属于情节，不是现实读者义务；不审查未改动旧内容。"
+        },
+        {
+          "id": "provide_time",
+          "criterion": "明确输出会议时间（周三下午）"
+        },
+        {
+          "id": "generate_notice",
+          "criterion": "生成一段可直接发出的通知文本"
+        },
+        {
+          "id": "no_external_lookup",
+          "criterion": "通知内容仅基于提供的材料，未检索或补充新事实"
+        }
+      ],
+      "inputs": [
+        {
+          "state": "provided",
+          "evidence": "会议定在周三下午，地点二楼会议室。只使用这些材料，不检索、不补充新事实。",
+          "need": "会议时间、地点及约束条件",
+          "reason": "用户指令中已明确会议时间（周三下午）、地点（二楼会议室）及约束（不检索、不补充新事实），无需额外输入",
+          "query": "",
+          "id": "work_context",
+          "source": "work_context"
+        }
+      ]
+    },
+    "raw_review": {
+      "source_audit": {
+        "span-0-8": {
+          "text": "# 会议通知\n\n",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "生成一段可直接发出的通知文本",
+          "kind": "neutral",
+          "basis": "neutral_expression"
+        },
+        "span-8-19": {
+          "text": "会议时间定于周三下午，",
+          "source_id": "conversation-user-0",
+          "meaning": "会议定在周三下午",
+          "kind": "attribute",
+          "basis": "source_supported"
+        },
+        "span-19-28": {
+          "text": "地点为二楼会议室。",
+          "source_id": "conversation-user-0",
+          "meaning": "地点二楼会议室",
+          "kind": "attribute",
+          "basis": "source_supported"
+        },
+        "span-28-33": {
+          "text": "特此通知。",
+          "source_id": "user_instruction_and_supplied_facts",
+          "meaning": "通知结束",
+          "kind": "neutral",
+          "basis": "neutral_expression"
+        }
+      },
+      "checks": {
+        "source_scope_grounding": {
+          "evidence": "line-1",
+          "reason": "正文中未出现任何称谓（如“各位同事”），仅包含标题和通知正文，未新增外部身份或关系，符合仅基于现有材料且不添加外部限定的要求。",
+          "passed": true
+        },
+        "source_attributes_grounding": {
+          "evidence": "line-3",
+          "reason": "正文中关于时间（周三下午）和地点（二楼会议室）的陈述与用户提供的材料完全一致，未添加任何未经证实的性质、状态或虚构内容。",
+          "passed": true
+        },
+        "source_obligations_grounding": {
+          "evidence": "line-3",
+          "reason": "正文中未包含任何要求读者执行的动作（如“请准时参加”、“请联系组织者”），仅陈述事实并宣告通知，未新增现实读者的义务或办理流程。",
+          "passed": true
+        },
+        "provide_time": {
+          "evidence": "line-3",
+          "reason": "正文明确输出了会议时间：周三下午。",
+          "passed": true
+        },
+        "generate_notice": {
+          "evidence": "line-3",
+          "reason": "正文生成了一段结构完整、可直接发出的通知文本。",
+          "passed": true
+        },
+        "no_external_lookup": {
+          "evidence": "line-3",
+          "reason": "正文内容完全基于用户指令和对话记录中提供的材料，未检索或补充任何新事实。",
+          "passed": true
+        }
+      },
+      "status": "pass",
+      "corrections": []
+    },
+    "expected_status": "pass"
+  }
+]

@@ -1,0 +1,29 @@
+{
+  "date": "2026-09-09",
+  "scope": "synthetic isolated Core router and real local-model Sidecar",
+  "user_session_answers_submitted": false,
+  "foreground_model_calls": 2,
+  "initial_question_ms": 15791,
+  "first_direction_ms": 7965,
+  "background_sibling_ms": 100353,
+  "background_queue_wait_ms": 90464,
+  "background_model_generation_ms": 9720,
+  "prepared_sibling_answer_ms": 4,
+  "prepared_sibling_triggered_foreground_inference": false,
+  "background_changed_sqlite_state": false,
+  "revision_before": 1,
+  "revision_after": 2,
+  "next_stage": "solutions",
+  "next_branch": "second selected sibling",
+  "caveat": "shared single-model-slot contention remains; a cache hit does not imply no queue waiting during preparation",
+  "core_pid_at_reload": 51980,
+  "creation_pid_at_reload": 51290,
+  "original_sessions_checked": 17,
+  "original_sessions_exactly_unchanged": true,
+  "runtime_health": "passed",
+  "python_39_compatibility": "passed",
+  "final_managed_pids": {
+    "core": 52844,
+    "creation": 52358
+  }
+}

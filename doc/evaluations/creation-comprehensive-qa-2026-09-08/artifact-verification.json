@@ -1,0 +1,21 @@
+{
+  "verified_at": "2026-09-08T03:04:51.537689+00:00",
+  "source_paths": 32,
+  "python_paths": 22,
+  "all_manifest_hashes_match": true,
+  "python39_checked_hashes_match": true,
+  "task_patch_reverse_check": "git apply --check --reverse passed; check only, patch not applied",
+  "component_baseline": {
+    "path": "desktop-ui/src/components/CreationBriefEditor.tsx",
+    "added": 11,
+    "removed": 5,
+    "baseline_source": "/tmp/mb-creation-qa-20260908/frontend-baseline/src/components/CreationBriefEditor.tsx",
+    "baseline_sha256": "2bd7f9427538121de18bc16ec76f52e02bf36a2644cca4b82736590d0dde17e3"
+  },
+  "patch_sha256": "192c7e1ba7916e77de263051dea30b73b753c02f9b17bf62f716bef4f0db38a1",
+  "valid_json_files": 21,
+  "existing_local_markdown_links": 47,
+  "reviewed_user_case_hashes": 7,
+  "accepted_source_scope_targets": 6,
+  "production_runtime": "runtime-final.json; current listener identities and disk hashes rechecked; source loading remains an explicit identity/timestamp inference"
+}

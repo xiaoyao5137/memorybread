@@ -1,0 +1,49 @@
+{
+  "history_id": 159,
+  "session_suffix": "e3fd2f4c",
+  "scope": "original instruction and saved checkpoint replay through routing and input assessment only; original body and history unchanged",
+  "before": {
+    "accepted": false,
+    "model_calls": 2,
+    "actions": [
+      [
+        "create",
+        "edit"
+      ],
+      [
+        "create",
+        "edit"
+      ]
+    ]
+  },
+  "after": {
+    "action": "edit",
+    "model_calls": 1,
+    "evidence_is_original_instruction": true
+  },
+  "checkpoint": {
+    "operation_kind": "transform",
+    "inputs_assessed": true,
+    "required_tools": [],
+    "body_preserved": true,
+    "seconds": 204.39,
+    "model_calls": 5
+  },
+  "preservation": {
+    "creation_history": {
+      "rows": 1,
+      "unchanged": true,
+      "sha256": "60889009daf828cfcd0e46aedadfd89c9c01c0008dbe44b4ff3a2720a1367a6f"
+    },
+    "creation_operations": {
+      "rows": 4,
+      "unchanged": true,
+      "sha256": "75281634a308692f5fb6fcbd0b895a8332d635a64297a252a3328f08521c065f"
+    },
+    "creation_brainstorm_sessions": {
+      "rows": 1,
+      "unchanged": true,
+      "sha256": "97c38f6fde5cb9b3bd9f1439852cb41f8dd608a700943778d7a557a8c57f6c9a"
+    }
+  }
+}

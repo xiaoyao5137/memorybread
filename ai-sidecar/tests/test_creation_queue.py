@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import importlib
 import json
 import threading
+from types import SimpleNamespace
 from typing import Optional
 
 import httpx
@@ -120,6 +122,7 @@ async def test_dynamic_brainstorm_runs_in_interactive_p0_lane(monkeypatch):
                 "brief_markdown": "# 创作简报",
                 "selected_skills": [{"title": "微服务技术方案"}],
                 "force_continue": True,
+                "exploration_stage": "implementation",
             },
         )
 
@@ -129,6 +132,163 @@ async def test_dynamic_brainstorm_runs_in_interactive_p0_lane(monkeypatch):
     assert received["decisions"][0]["answer"] == "私有化部署"
     assert received["selected_skills"][0]["title"] == "微服务技术方案"
     assert received["force_continue"] is True
+    assert received["exploration_stage"] == "implementation"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_name, expected_code", [
+    ("BrainstormGenerationError", "BRAINSTORM_MODEL_OUTPUT_INVALID"),
+    ("BrainstormOutputTruncated", "BRAINSTORM_MODEL_OUTPUT_TRUNCATED"),
+    ("BrainstormGenerationTimeout", "BRAINSTORM_MODEL_TIMEOUT"),
+])
+async def test_brainstorm_failure_preserves_stage_error_contract(monkeypatch, error_name, expected_code):
+    from creation import brainstorm
+
+    class FailedQueue:
+        def submit(self, *args, **kwargs):
+            future = concurrent.futures.Future()
+            future.set_exception(getattr(brainstorm, error_name)("脑暴选项未能完整生成"))
+            return future
+
+    monkeypatch.setattr(creation_app, "get_global_queue", lambda: FailedQueue())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=creation_app.app), base_url="http://test"
+    ) as client:
+        response = await client.post("/creation/brainstorm/next", json={"root_request": "设计一份方案"})
+    assert response.status_code == (504 if expected_code == "BRAINSTORM_MODEL_TIMEOUT" else 502)
+    assert response.json()["detail"] == {
+        "code": expected_code, "message": "脑暴选项未能完整生成",
+        "retryable": expected_code == "BRAINSTORM_MODEL_TIMEOUT",
+    }
+
+
+@pytest.mark.asyncio
+async def test_brainstorm_queue_deadline_cancels_unadmitted_work(monkeypatch):
+    from creation.brainstorm import BrainstormGenerationTimeout
+
+    calls = []
+
+    async def fake_next_step(**kwargs):
+        calls.append(kwargs)
+        return {"status": "question"}
+
+    class PendingQueue:
+        def submit(self, *args, **kwargs):
+            self.fn = args[1]
+            self.future = concurrent.futures.Future()
+            return self.future
+
+    pending = PendingQueue()
+    monkeypatch.setattr(creation_app, "get_global_queue", lambda: pending)
+    monkeypatch.setattr(creation_app.brainstorm_coordinator, "MAX_TURN_SECONDS", 0.02)
+    monkeypatch.setattr(creation_app.brainstorm_coordinator, "next_step", fake_next_step)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=creation_app.app), base_url="http://test"
+    ) as client:
+        response = await client.post("/creation/brainstorm/next", json={"root_request": "设计一份方案"})
+
+    assert response.status_code == 504
+    assert response.json()["detail"]["code"] == "BRAINSTORM_MODEL_TIMEOUT"
+    assert response.json()["detail"]["retryable"] is True
+    assert pending.future.cancelled()
+    assert not pending.future.set_running_or_notify_cancel()
+    # 即使队列在取消/准入竞争中仍调用了函数，过期任务也不能触发模型。
+    with pytest.raises(BrainstormGenerationTimeout):
+        await asyncio.to_thread(pending.fn)
+    assert calls == []
+
+
+class BrainstormDeadlineThreadQueue:
+    def submit(self, _priority, fn, lane=None):
+        self.future = concurrent.futures.Future()
+
+        def run():
+            if not self.future.set_running_or_notify_cancel():
+                return
+            try:
+                self.future.set_result(fn())
+            except Exception as exc:
+                self.future.set_exception(exc)
+
+        self.worker = threading.Thread(target=run, name="brainstorm-deadline-test", daemon=True)
+        self.worker.start()
+        return self.future
+
+
+@pytest.mark.asyncio
+async def test_brainstorm_admission_uses_only_remaining_request_budget(monkeypatch):
+    clock = [100.0]
+    timeouts = []
+    real_wait_for = asyncio.wait_for
+
+    async def record_wait_for(awaitable, timeout):
+        timeouts.append((threading.current_thread().name, timeout))
+        return await real_wait_for(awaitable, timeout=timeout)
+
+    async def fake_next_step(**kwargs):
+        return {"status": "question"}
+
+    class DelayedQueue(BrainstormDeadlineThreadQueue):
+        def submit(self, *args, **kwargs):
+            # 模拟入队后消耗 90 秒，无需让回归测试实际等待。
+            clock[0] += 90.0
+            return super().submit(*args, **kwargs)
+
+    queue = DelayedQueue()
+    monkeypatch.setattr(creation_app, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(creation_app.asyncio, "wait_for", record_wait_for)
+    monkeypatch.setattr(creation_app, "get_global_queue", lambda: queue)
+    monkeypatch.setattr(creation_app.brainstorm_coordinator, "MAX_TURN_SECONDS", 150.0)
+    monkeypatch.setattr(creation_app.brainstorm_coordinator, "next_step", fake_next_step)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=creation_app.app), base_url="http://test"
+    ) as client:
+        response = await client.post("/creation/brainstorm/next", json={"root_request": "设计一份方案"})
+
+    assert response.status_code == 200
+    assert ("brainstorm-deadline-test", 60.0) in timeouts
+    assert all(timeout == 60.0 for _, timeout in timeouts)
+    await asyncio.to_thread(queue.worker.join, 1.0)
+    assert not queue.worker.is_alive()
+
+
+@pytest.mark.asyncio
+async def test_brainstorm_running_deadline_cancels_model_stream_and_finishes_worker(monkeypatch):
+    from creation.brainstorm import BrainstormGenerationTimeout
+
+    started = threading.Event()
+    stream_closed = threading.Event()
+
+    async def model_stream():
+        started.set()
+        try:
+            await asyncio.sleep(60)
+            yield "此内容不应生成"
+        finally:
+            stream_closed.set()
+
+    async def fake_next_step(**kwargs):
+        async for _ in model_stream():
+            pass
+        return {"status": "question"}
+
+    queue = BrainstormDeadlineThreadQueue()
+    monkeypatch.setattr(creation_app, "get_global_queue", lambda: queue)
+    monkeypatch.setattr(creation_app.brainstorm_coordinator, "MAX_TURN_SECONDS", 0.05)
+    monkeypatch.setattr(creation_app.brainstorm_coordinator, "next_step", fake_next_step)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=creation_app.app), base_url="http://test"
+    ) as client:
+        response = await client.post("/creation/brainstorm/next", json={"root_request": "设计一份方案"})
+
+    assert response.status_code == 504
+    assert response.json()["detail"]["code"] == "BRAINSTORM_MODEL_TIMEOUT"
+    assert response.json()["detail"]["retryable"] is True
+    assert started.is_set()
+    assert await asyncio.to_thread(stream_closed.wait, 1.0)
+    await asyncio.to_thread(queue.worker.join, 1.0)
+    assert not queue.worker.is_alive()
+    assert isinstance(queue.future.exception(), BrainstormGenerationTimeout)
 
 
 @pytest.mark.asyncio
@@ -283,3 +443,15 @@ async def test_creation_agent_transport_failure_returns_retryable_user_message(m
         "error_code": "MODEL_TRANSPORT_UNAVAILABLE",
         "retryable": True,
     }
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404])
+def test_model_rejection_has_safe_actionable_failure_details(status):
+    from creation.service import CloudModelRequestError
+    code, summary, retryable = creation_app._creation_failure_details(
+        CloudModelRequestError(status, "private provider model and request_id"))
+    assert code == ("MODEL_ACCESS_DENIED" if status in {401, 403} else "MODEL_REQUEST_FAILED")
+    assert "请" in summary
+    assert "private" not in summary
+    assert "request_id" not in summary
+    assert retryable is False

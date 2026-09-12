@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import CreationPanel from '../components/CreationPanel'
 import { sha256Hex } from '../components/creation-selection/creationInlineEdit'
 import { useAppStore } from '../store/useAppStore'
@@ -663,10 +663,16 @@ describe('创作文档划选操作', () => {
     ))).toBeInTheDocument()
   })
 
-  it('在润色左侧启动局部脑暴，右侧确认选项后将结论写回选区', async () => {
+  it.each(['complete', 'terminate', 'new-session'] as const)('局部脑暴 SSE 成功与迟到响应隔离：%s', async outcome => {
     const baseHash = await sha256Hex(content)
     const brainstormPayloads: Array<Record<string, unknown>> = []
     const inlinePayloads: Array<Record<string, unknown>> = []
+    let lateResponse: (() => void) | undefined
+    let brainstormSignal: AbortSignal | undefined
+    const brainstormResponse = (state: object) => new Response(
+      `event: brainstorm.started\ndata: {}\n\n: keep-alive\n\nevent: brainstorm.completed\ndata: ${JSON.stringify({ state })}\n\n`,
+      { headers: { 'Content-Type': 'text/event-stream' } },
+    )
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input))
       if (url.pathname === '/api/creation/skills') return Response.json([])
@@ -707,10 +713,12 @@ describe('创作文档划选操作', () => {
         })
       }
       if (url.pathname === '/api/creation/brainstorm/turn') {
+        expect(new Headers(init?.headers).get('Accept')).toBe('text/event-stream')
+        brainstormSignal = init?.signal || undefined
         const payload = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
         brainstormPayloads.push(payload)
         if (payload.action === 'answer') {
-          return Response.json({
+          return brainstormResponse({
             session_id: payload.session_id,
             phase: 'ready',
             revision: 1,
@@ -727,7 +735,7 @@ describe('创作文档划选操作', () => {
             decisions: [{ question_id: 'direction', dimension: '表达方向', summary: '突出用户价值', source: 'user' }],
           })
         }
-        return Response.json({
+        const reply = brainstormResponse({
           session_id: payload.session_id,
           phase: 'exploring',
           revision: 0,
@@ -756,6 +764,8 @@ describe('创作文档划选操作', () => {
           history: [],
           decisions: [],
         })
+        if (outcome === 'complete') return reply
+        return new Promise<Response>(resolve => { lateResponse = () => resolve(reply) })
       }
       if (url.pathname === '/api/creation/inline-edit/run') {
         const payload = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
@@ -789,6 +799,17 @@ describe('创作文档划选操作', () => {
     const polishButton = screen.getByRole('button', { name: '润色' })
     expect(brainstormButton.compareDocumentPosition(polishButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     fireEvent.click(brainstormButton)
+
+    if (outcome !== 'complete') {
+      await waitFor(() => expect(lateResponse).toBeDefined())
+      fireEvent.click(screen.getByRole('button', { name: outcome === 'terminate' ? '终止当前会话' : '开启新会话' }))
+      expect(brainstormSignal?.aborted).toBe(true)
+      await act(async () => { lateResponse?.() })
+      expect(screen.queryByText('这段内容最需要突出什么？')).not.toBeInTheDocument()
+      expect(screen.queryByText('局部脑暴失败，请重试')).not.toBeInTheDocument()
+      expect(inlinePayloads).toHaveLength(0)
+      return
+    }
 
     const instruction = await screen.findByText((_, element) => (
       element?.tagName === 'P' && Boolean(element.textContent?.includes('脑暴要求：围绕所选内容探索'))

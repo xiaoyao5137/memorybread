@@ -21,6 +21,8 @@ import {
   useFetchBakeTemplates,
   useToggleBakeTemplateStatus,
   useRefreshBakeDocument,
+  useRetryBakeDocumentSummary,
+  useCancelBakeDocumentRefresh,
   useSetBakeDocumentRefreshPolicy,
   useUpdateBakeKnowledge,
   useUpdateBakeSop,
@@ -227,6 +229,8 @@ const BakePanel: React.FC = () => {
   const toggleTemplateStatus = useToggleBakeTemplateStatus()
   const deleteTemplate = useDeleteBakeTemplate()
   const refreshBakeDocument = useRefreshBakeDocument()
+  const retryBakeDocumentSummary = useRetryBakeDocumentSummary()
+  const cancelBakeDocumentRefresh = useCancelBakeDocumentRefresh()
   const setTemplateRefreshPolicy = useSetBakeDocumentRefreshPolicy()
   const fetchSops = useFetchBakeSops()
   const fetchSop = useFetchBakeSop()
@@ -245,6 +249,9 @@ const BakePanel: React.FC = () => {
   const [overview, setOverview] = useState<BakeOverview>(defaultOverview)
   const [knowledgeItems, setKnowledgeItems] = useState<BakeKnowledgeItem[]>([])
   const [knowledgeTotal, setKnowledgeTotal] = useState(0)
+  const [knowledgeLoading, setKnowledgeLoading] = useState(false)
+  // Mutations reload through the same request guard as paging and filtering.
+  const [knowledgeRevision, setKnowledgeRevision] = useState(0)
   const [memoryItems, setMemoryItems] = useState<TimelineItem[]>([])
   const [templates, setTemplates] = useState<ArticleTemplate[]>([])
   const [templateTotal, setTemplateTotal] = useState(0)
@@ -275,6 +282,7 @@ const BakePanel: React.FC = () => {
   const [draftKnowledgeTo, setDraftKnowledgeTo] = useState(bakeKnowledgeTo)
   const [knowledgeFavoriteFilter, setKnowledgeFavoriteFilter] = useState<MemoryFavoriteFilter>('all')
   const [draftTemplateQuery, setDraftTemplateQuery] = useState(bakeTemplateQuery)
+  const [templateSearchRevision, setTemplateSearchRevision] = useState(0)
   const [draftTemplateFrom, setDraftTemplateFrom] = useState(bakeTemplateFrom)
   const [draftTemplateTo, setDraftTemplateTo] = useState(bakeTemplateTo)
   const [templateDocType, setTemplateDocType] = useState('')
@@ -527,40 +535,49 @@ const BakePanel: React.FC = () => {
 
   useEffect(() => {
     if (bakeTab !== 'knowledge') return
-    if (bakeKnowledgeFocusId) {
-      const requestSeq = knowledgeRequestSeqRef.current + 1
-      knowledgeRequestSeqRef.current = requestSeq
-      void fetchKnowledgeDetail(bakeKnowledgeFocusId).then((item) => {
-        if (requestSeq !== knowledgeRequestSeqRef.current) return
-        setKnowledgeItems([item])
-        setKnowledgeTotal(1)
-        setSelectedKnowledgeId(item.id)
-      }).catch((error) => {
-        if (requestSeq !== knowledgeRequestSeqRef.current) return
-        setKnowledgeItems([])
-        setKnowledgeTotal(0)
-        setStatusMessage(toUserFacingError(error, '未找到这条知识'))
-      })
-      return
-    }
     const requestSeq = knowledgeRequestSeqRef.current + 1
     knowledgeRequestSeqRef.current = requestSeq
-    void fetchKnowledge({
-      q: bakeKnowledgeQuery.trim() || undefined,
-      from: parseDateInputToMs(bakeKnowledgeFrom),
-      to: parseDateInputToMs(bakeKnowledgeTo, true),
-      favorite: favoriteFilterToQuery(knowledgeFavoriteFilter),
-      limit: bakeKnowledgeLimit,
-      offset: bakeKnowledgeOffset,
-    }).then((data) => {
-      if (requestSeq !== knowledgeRequestSeqRef.current) return
-      setKnowledgeItems(data.items)
-      setKnowledgeTotal(data.total)
-    }).catch((error) => {
-      if (requestSeq !== knowledgeRequestSeqRef.current) return
-      setStatusMessage(toUserFacingError(error, '知识加载失败'))
-    })
-  }, [bakeKnowledgeFocusId, bakeKnowledgeFrom, bakeKnowledgeLimit, bakeKnowledgeOffset, bakeKnowledgeQuery, bakeKnowledgeTo, bakeTab, fetchKnowledge, fetchKnowledgeDetail, knowledgeFavoriteFilter, setSelectedKnowledgeId])
+    setKnowledgeLoading(true)
+    const loadKnowledge = async () => {
+      try {
+        if (bakeKnowledgeFocusId) {
+          const item = await fetchKnowledgeDetail(bakeKnowledgeFocusId)
+          if (requestSeq !== knowledgeRequestSeqRef.current) return
+          setKnowledgeItems([item])
+          setKnowledgeTotal(1)
+          setSelectedKnowledgeId(item.id)
+        } else {
+          const data = await fetchKnowledge({
+            q: bakeKnowledgeQuery.trim() || undefined,
+            from: parseDateInputToMs(bakeKnowledgeFrom),
+            to: parseDateInputToMs(bakeKnowledgeTo, true),
+            favorite: favoriteFilterToQuery(knowledgeFavoriteFilter),
+            limit: bakeKnowledgeLimit,
+            offset: bakeKnowledgeOffset,
+          })
+          if (requestSeq !== knowledgeRequestSeqRef.current) return
+          const lastOffset = Math.max(0, Math.ceil(data.total / bakeKnowledgeLimit) - 1) * bakeKnowledgeLimit
+          if (bakeKnowledgeOffset > lastOffset) {
+            // Keep loading until the valid page arrives.
+            knowledgeRequestSeqRef.current += 1
+            setBakeKnowledgeOffset(lastOffset)
+            return
+          }
+          setKnowledgeItems(data.items)
+          setKnowledgeTotal(data.total)
+        }
+      } catch (error) {
+        if (requestSeq !== knowledgeRequestSeqRef.current) return
+        setKnowledgeItems([])
+        if (bakeKnowledgeFocusId) setKnowledgeTotal(0)
+        setStatusMessage(toUserFacingError(error, bakeKnowledgeFocusId ? '未找到这条知识' : '知识加载失败'))
+      } finally {
+        if (requestSeq === knowledgeRequestSeqRef.current) setKnowledgeLoading(false)
+      }
+    }
+    void loadKnowledge()
+    return () => { knowledgeRequestSeqRef.current += 1 }
+  }, [bakeKnowledgeFocusId, bakeKnowledgeFrom, bakeKnowledgeLimit, bakeKnowledgeOffset, bakeKnowledgeQuery, bakeKnowledgeTo, bakeTab, fetchKnowledge, fetchKnowledgeDetail, knowledgeFavoriteFilter, knowledgeRevision, setBakeKnowledgeOffset, setSelectedKnowledgeId])
 
   useEffect(() => {
     if (bakeTab !== 'templates') return
@@ -596,7 +613,7 @@ const BakePanel: React.FC = () => {
       if (requestSeq !== templateRequestSeqRef.current) return
       setStatusMessage(toUserFacingError(error, '文档加载失败'))
     })
-  }, [bakeTab, bakeTemplateFocusId, bakeTemplateFrom, bakeTemplateLimit, bakeTemplateOffset, bakeTemplateQuery, bakeTemplateTo, fetchTemplate, fetchTemplates, setSelectedTemplateId, templateDocType, templateFavoriteFilter])
+  }, [bakeTab, bakeTemplateFocusId, bakeTemplateFrom, bakeTemplateLimit, bakeTemplateOffset, bakeTemplateQuery, bakeTemplateTo, fetchTemplate, fetchTemplates, setSelectedTemplateId, templateDocType, templateFavoriteFilter, templateSearchRevision])
 
   useEffect(() => {
     if (bakeTab !== 'templates' || !selectedTemplateId) return
@@ -742,19 +759,6 @@ const BakePanel: React.FC = () => {
   const refreshOverview = async () => {
     const data = await fetchOverview()
     setOverview(mapBakeOverview(data))
-  }
-
-  const refreshKnowledge = async (offset = bakeKnowledgeOffset) => {
-    const data = await fetchKnowledge({
-      q: bakeKnowledgeQuery.trim() || undefined,
-      from: parseDateInputToMs(bakeKnowledgeFrom),
-      to: parseDateInputToMs(bakeKnowledgeTo, true),
-      favorite: favoriteFilterToQuery(knowledgeFavoriteFilter),
-      limit: bakeKnowledgeLimit,
-      offset,
-    })
-    setKnowledgeItems(data.items)
-    setKnowledgeTotal(data.total)
   }
 
   const refreshTemplates = async (offset = bakeTemplateOffset) => {
@@ -904,6 +908,7 @@ const BakePanel: React.FC = () => {
   }
 
   const handleSearchTemplate = () => {
+    setTemplateSearchRevision((revision) => revision + 1)
     clearBakeNavigationStack()
     setSelectedTemplateId(null)
     setBakeTemplateFocusId(null)
@@ -1129,12 +1134,11 @@ const BakePanel: React.FC = () => {
     try {
       await updateMemoryFavorite('knowledge', item.id, isFavorite)
       const remainsVisible = favoriteMatchesFilter(knowledgeFavoriteFilter, isFavorite)
-      setKnowledgeItems(previous => remainsVisible
-        ? previous.map(entry => entry.id === item.id ? { ...entry, isFavorite } : entry)
-        : previous.filter(entry => entry.id !== item.id))
-      if (!remainsVisible) {
-        setKnowledgeTotal(previous => Math.max(0, previous - 1))
+      if (remainsVisible) {
+        setKnowledgeItems(previous => previous.map(entry => entry.id === item.id ? { ...entry, isFavorite } : entry))
+      } else {
         setSelectedKnowledgeId(null)
+        setKnowledgeRevision(previous => previous + 1)
       }
       setStatusMessage(isFavorite ? '已收藏知识' : '已取消收藏知识')
       return true
@@ -1279,12 +1283,14 @@ const BakePanel: React.FC = () => {
 
   const documentRefreshSkipLabels: Record<string, string> = {
     policy_never: '刷新策略为“从不刷新”，已跳过',
+    refresh_in_progress: '正在获取这份文档的原文，请等待当前任务完成',
     url_missing: '该文档没有来源网址，无法刷新',
     url_invalid: '来源网址格式不合法，无法刷新',
     page_gone: '来源页面已不存在，已停止自动刷新',
     check_throttled: '近期已检查过刷新，本次跳过',
     no_update_evidence: '该文档不满足自动原地更新条件，已跳过',
     content_fresh: '内容仍在新鲜期内，无需刷新',
+    SOURCE_REFRESH_PAUSED: '文档来源刷新已暂停，原正文和待处理记录保留',
   }
 
   const handleRefreshTemplate = async (templateId: string) => {
@@ -1294,12 +1300,18 @@ const BakePanel: React.FC = () => {
       const result = await refreshBakeDocument(templateId)
       if (result.document) {
         setTemplates(prev => prev.map(item => item.id === templateId ? result.document! : item))
+      } else {
+        // Failed checks still update freshness and diagnostics in storage.
+        // Refresh the open drawer too, without replacing its reliable body.
+        await refreshTemplates()
       }
-      if (result.status === 'updated') {
+      if (result.reason === 'SOURCE_REFRESH_CANCELLED') {
+        setStatusMessage('已取消本次文档刷新，原正文保留')
+      } else if (result.status === 'updated') {
         setStatusMessage(result.completenessStatus === 'partial'
           ? '已取得新版本，但页面内容只完成部分采集'
           : '已验证最新来源，发现新版本')
-      } else if (result.status === 'no_change') {
+      } else if (result.status === 'no_change' || result.status === 'reused') {
         setStatusMessage(result.completenessStatus === 'partial'
           ? '已检查来源页面，但只完成部分采集'
           : '已检查来源页面，内容暂无变化')
@@ -1312,6 +1324,16 @@ const BakePanel: React.FC = () => {
       setStatusMessage(toUserFacingError(error, '刷新文档失败'))
     } finally {
       setRefreshingTemplateId(null)
+    }
+  }
+
+  const handleCancelTemplateRefresh = async (templateId: string) => {
+    try {
+      const status = await cancelBakeDocumentRefresh(templateId)
+      setStatusMessage(status === 'finishing' ? '本次采集已进入提交阶段，请等待完成' : status === 'idle' ? '当前没有待取消的刷新任务' : '已取消本次文档刷新，原正文保留')
+      if (status === 'cancelled') await refreshTemplates()
+    } catch (error) {
+      setStatusMessage(toUserFacingError(error, '取消文档刷新失败'))
     }
   }
 
@@ -1397,9 +1419,9 @@ const BakePanel: React.FC = () => {
   ): Promise<boolean> => {
     try {
       const created = await createKnowledge(input)
-      setKnowledgeItems(previous => [created, ...previous.filter(item => item.id !== created.id)])
-      setKnowledgeTotal(previous => previous + 1)
+      setBakeKnowledgeFocusId(null)
       setBakeKnowledgeOffset(0)
+      setKnowledgeRevision(previous => previous + 1)
       setSelectedKnowledgeId(created.id)
       setStatusMessage(`已新建知识「${created.summary}」`)
       await refreshOverview()
@@ -1460,11 +1482,11 @@ const BakePanel: React.FC = () => {
       if (selectedKnowledgeId === id || resolvedKnowledgeId === id) {
         setSelectedKnowledgeId(null)
       }
+      if (bakeKnowledgeFocusId === id) setBakeKnowledgeFocusId(null)
       if (nextOffset !== bakeKnowledgeOffset) {
         setBakeKnowledgeOffset(nextOffset)
-      } else {
-        await refreshKnowledge(nextOffset)
       }
+      setKnowledgeRevision(previous => previous + 1)
       setStatusMessage('已删除知识条目')
       await refreshOverview()
       return true
@@ -1589,6 +1611,7 @@ const BakePanel: React.FC = () => {
         {bakeTab === 'knowledge' && (
           <BakeKnowledgeTab
             items={knowledgeItems}
+            loading={knowledgeLoading}
             total={knowledgeTotal}
             offset={bakeKnowledgeOffset}
             limit={bakeKnowledgeLimit}
@@ -1682,6 +1705,9 @@ const BakePanel: React.FC = () => {
             onToggleTemplateStatus={handleToggleTemplateStatus}
             onDeleteTemplate={handleDeleteTemplate}
             onRefreshTemplate={handleRefreshTemplate}
+            onLoadTemplate={fetchTemplate}
+            onRetrySummary={retryBakeDocumentSummary}
+            onCancelRefreshTemplate={handleCancelTemplateRefresh}
             refreshingTemplateId={refreshingTemplateId}
             onSetTemplateRefreshPolicy={handleSetTemplateRefreshPolicy}
             onSettleSkill={(template) => setCreationSkillEditor({ source: {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -26,6 +27,53 @@ def document_408() -> dict:
         "updated_at": 1_785_081_300_661,
         "source_url": None,
     }
+
+
+def test_unbound_summary_cannot_select_or_embed_current_source(tmp_path):
+    from pathlib import Path
+    from types import SimpleNamespace
+    path = str(tmp_path / "summary-input.db")
+    with sqlite3.connect(path) as conn:
+        conn.executescript("""
+            CREATE TABLE bake_documents(id INTEGER PRIMARY KEY,title TEXT,doc_type TEXT,summary TEXT,
+                full_content TEXT,sections_json TEXT,style_phrases TEXT,prompt_hint TEXT,usage_count INTEGER,
+                review_status TEXT,updated_at INTEGER,source_url TEXT,deleted_at INTEGER);
+            CREATE TABLE bake_document_source_heads(document_id INTEGER,snapshot_id INTEGER);
+            CREATE TABLE bake_document_source_snapshots(id INTEGER PRIMARY KEY,document_id INTEGER,
+                content_text TEXT,identity_match INTEGER,completeness_status TEXT);
+            INSERT INTO bake_documents VALUES(1,'方案甲','document',NULL,'缓存策略与更新步骤','[]','[]','',0,'auto_created',100,NULL,NULL);
+            INSERT INTO bake_documents VALUES(2,'方案乙','document','缓存策略 POISON_SUMMARY','仓储物流与到货流程','[]','[]','',0,'auto_created',100,NULL,NULL);
+            INSERT INTO bake_document_source_heads VALUES(1,7),(2,8);
+            INSERT INTO bake_document_source_snapshots SELECT id+6,id,full_content,1,'complete' FROM bake_documents;
+        """)
+        migrations = Path(__file__).parents[2] / "core-engine/src/storage/migrations"
+        conn.executescript((migrations / "121_document_source_mismatch_events.sql").read_text())
+        conn.executescript((migrations / "124_document_summary_binding.sql").read_text())
+    service = CreationService.__new__(CreationService)
+    service.db_path = path
+    service._memory_term_specs = lambda *args: [("缓存策略", 1.0)]
+    rows = service._query_document_rows("缓存策略", {}, CreationOptions())
+    assert [row['id'] for row in rows] == [1]
+    inputs = []
+    class Encoder:
+        def encode(self, texts):
+            inputs.extend(texts)
+            return [SimpleNamespace(vector=[1.0, 0.0]) for _ in texts]
+    service._embedding_model = Encoder()
+    service._vector_recall("缓存策略")
+    assert inputs and all("POISON_SUMMARY" not in text for text in inputs)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT SUM(occurrences) FROM document_source_mismatch_events WHERE reason='summary_version_mismatch'").fetchone()[0] == 1
+        # A restored historical body may have no source head. Its fluent old
+        # summary must not hide the failed page from the pre-encoding gate.
+        conn.execute("DELETE FROM bake_document_source_heads WHERE document_id=2")
+        conn.execute("UPDATE bake_documents SET full_content=?,summary=? WHERE id=2", (
+            "页面加载失败 SHELL_BODY_SENTINEL", "缓存策略 POISON_SUMMARY " * 100,
+        ))
+    inputs.clear()
+    recalled = service._vector_recall("缓存策略")
+    assert [row["id"] for row in recalled] == [1]
+    assert inputs and all("SHELL_BODY_SENTINEL" not in text and "POISON_SUMMARY" not in text for text in inputs)
 
 
 def test_reference_period_evidence_uses_document_date_not_refresh_time():
@@ -75,6 +123,42 @@ def test_reference_period_evidence_uses_document_date_not_refresh_time():
     }
     service = CreationService.__new__(CreationService)
     assert service._infer_doc_type("获取本周会议纪要并总结") == "会议纪要"
+
+
+@pytest.mark.parametrize("source_type", ["document", "pending_document"])
+def test_shell_body_cannot_be_rescued_by_summary_or_vector_score(tmp_path, source_type):
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(tmp_path / "memory.db")
+    tmp_path.joinpath("memory.db").touch()
+    service.enable_vector_recall = True
+    service._embedding_model = object()
+    row = {**document_408(), "source_type": source_type,
+           "full_content": "知识库 首页 目录 收藏 分享 编辑 全部暂停",
+           "summary": "This document explains the complete procedure for claiming employee anniversary gifts. " * 20,
+           "_vector_similarity": 1.0}
+    service._query_memory_rows = lambda *_args: [row]
+    service._vector_recall = lambda *_args: [row]
+    service._query_semantic_seed_rows = lambda *_args: [row]
+    def unexpected_embedding(*_args):
+        pytest.fail("Shell body reached semantic reranking")
+    service._apply_semantic_similarities = unexpected_embedding
+    parsed = {"keywords": ["周年", "礼物"]}
+    assert service.retrieve_references("周年礼物指南", parsed, CreationOptions()) == []
+    assert parsed["retrieval_diagnostics"] == {
+        "candidate_count": 1, "eligible_count": 0, "selected_count": 0,
+        "filter_counts": {"document_shell": 1},
+    }
+    assert service._semantic_row_text(row) == ""
+
+
+def test_creation_body_gate_matches_shared_quality_cases():
+    from pathlib import Path
+    cases = json.loads((Path(__file__).resolve().parents[2] / "shared/document-quality/cases.json").read_text())
+    for case in cases:
+        row = {**document_408(), "full_content": case["text"]}
+        assert CreationService._is_document_shell_row(row) == case["shell"], case["name"]
+        assert bool(CreationService._semantic_row_text(row)) == (not case["shell"])
+    assert not CreationService._is_document_shell_row({"source_type": "knowledge", "full_content": "页面加载失败"})
 
 
 def test_vector_evidence_survives_keyword_dedup_and_relevance_filter(tmp_path):
@@ -286,6 +370,79 @@ def test_skill_objective_keywords_keep_aigc_project_and_inference_topic():
     assert "推理性能优化" in keywords
 
 
+def test_capability_mention_never_becomes_search_topic():
+    # 复现创作记录 #146：@技能名 留在 topic 里，联网检索召回“显卡天梯图”“gpu是显卡吗”
+    # 这类同名通用词条，把技能真正需要的外部资料挤掉。
+    service = CreationService.__new__(CreationService)
+    instruction = "@GPU成本优化周报模板 请生成GPU成本优化的周报"
+
+    topic = service._infer_topic(instruction)
+    queries = service._build_search_queries(
+        instruction,
+        {"topic": topic, "doc_type": "周报", "keywords": ["GPU", "成本优化"]},
+    )
+
+    assert topic == "请生成GPU成本优化的周报"
+    assert all("@" not in query and "周报模板" not in query for query in queries)
+
+
+def test_web_search_queries_fall_back_to_mention_free_instruction():
+    # topic 缺失时会回落到原始指令，回落路径同样不能带走能力标记。
+    service = CreationService.__new__(CreationService)
+
+    queries = service._build_search_queries(
+        "@GPU成本优化周报模板 请生成GPU成本优化的周报", {}
+    )
+
+    assert queries
+    assert all("GPU成本优化周报模板" not in query for query in queries)
+    assert any("成本优化" in query for query in queries)
+
+
+@pytest.mark.asyncio
+async def test_github_search_query_drops_capability_mention(monkeypatch):
+    captured = []
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, params):
+            captured.append(str(params.get("q") or ""))
+            return httpx.Response(200, request=httpx.Request("GET", url), json={"items": []})
+
+    monkeypatch.setattr(
+        "creation.service.httpx.AsyncClient",
+        lambda **_kwargs: FakeAsyncClient(),
+    )
+    service = CreationService.__new__(CreationService)
+
+    await service.search_github_context(
+        "@GPU成本优化周报模板 请生成GPU成本优化的周报",
+        {"topic": "@GPU成本优化周报模板 请生成GPU成本优化的周报", "keywords": []},
+    )
+
+    assert captured
+    assert "@" not in captured[0]
+    assert "GPU成本优化周报模板" not in captured[0]
+    assert "成本优化" in captured[0]
+
+
+def test_mention_stripping_keeps_business_subject_and_drops_only_the_marker():
+    from creation.service import strip_capability_mentions
+
+    service = CreationService.__new__(CreationService)
+
+    # 正常写法：只剪掉标记，业务主题完整保留。
+    assert service._infer_topic("@GPU成本优化周报模板 请生成GPU成本优化的周报") == "请生成GPU成本优化的周报"
+    # 修复前 topic 会先压掉空白，留下与正文粘连的历史文本；正则吃掉整段后只剩空串，
+    # 调用方按“本轮没有业务主题”兜底，而不是拿技能名去检索。
+    assert strip_capability_mentions("@GPU成本优化周报模板请生成周报") == ""
+
+
 def test_current_week_is_resolved_to_runtime_iso_week_and_exact_dates():
     now = datetime(2026, 8, 13, 20, 20, tzinfo=timezone(timedelta(hours=8)))
 
@@ -365,6 +522,68 @@ def _create_unified_memory_db(path):
     conn.close()
 
 
+@pytest.mark.parametrize("details", ["商家只审核商业逻辑与合规底线。", ""])
+@pytest.mark.parametrize("has_quality_metadata", [False, True])
+def test_knowledge_recall_uses_body_without_persistence_metadata(
+    tmp_path, details, has_quality_metadata,
+):
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    summary = "平台代商家制作视频，商家负责最终审核。"
+    envelope = {
+        "creation_mode": "llm_bake",
+        "generation_version": "bake.v3",
+        "source_timeline_id": 10806,
+        "source_memory_ids": ["10806"],
+        "source_capture_ids": ["capture-1"],
+        "evidence_summary": "这是一条内部证据归因，不是用户正文。",
+    }
+    if has_quality_metadata:
+        envelope.update({"dedup_key": "private-dedup", "gate_rule_version": "gate.v3"})
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "INSERT INTO bake_knowledge VALUES (4406, ?, ?, ?, ?, '', 5, 1, 1, 1)",
+            ("商家视频方案", summary, json.dumps(envelope), details),
+        )
+        service = CreationService.__new__(CreationService)
+        rows = service._query_bake_artifact_rows(
+            conn, "bake_knowledge", "knowledge", "商家", {"keywords": ["商家"]},
+            CreationOptions(),
+        )
+
+    assert len(rows) == 1
+    assert rows[0]["source_id"] == 4406
+    assert rows[0]["full_content"] == (details or summary)
+    assert not any(key.startswith("_artifact_") for key in rows[0])
+
+
+@pytest.mark.parametrize("content", [
+    '{"creation_mode":"llm_bake","dedup_key":"order-1",'
+    '"gate_rule_version":"approval.v2","rules":["人工复核"]}',
+    '{"conversion_rate":0.42,"target":"GMV"}',
+    "正文中的 creation_mode、dedup_key 和 gate_rule_version 是业务字段说明。",
+    '{"creation_mode":"llm_bake",',
+])
+def test_knowledge_recall_preserves_business_json_and_plain_text(tmp_path, content):
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    details = "商家的指标口径与审核规则。"
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "INSERT INTO bake_knowledge VALUES (1, '商家规则', '商家规则', ?, ?, '', 5, 1, 1, 1)",
+            (content, details),
+        )
+        service = CreationService.__new__(CreationService)
+        rows = service._query_bake_artifact_rows(
+            conn, "bake_knowledge", "knowledge", "商家", {"keywords": ["商家"]},
+            CreationOptions(),
+        )
+
+    assert rows[0]["full_content"] == content + "\n" + details
+
+
 def test_unified_memory_recall_includes_document_knowledge_operation_and_data(tmp_path):
     db_path = tmp_path / "memory-bread.db"
     _create_unified_memory_db(db_path)
@@ -438,7 +657,7 @@ def test_refined_document_keeps_representation_over_newer_capture_of_same_url(tm
             content,
             content,
             capture_ms - 1_000,
-            "https://docs.example/aigc",
+            "https://docs.example/d/home/aigc",
         ),
     )
     conn.execute(
@@ -448,7 +667,7 @@ def test_refined_document_keeps_representation_over_newer_capture_of_same_url(tm
             capture_ms,
             "AIGC 共建项目周报",
             content,
-            "https://docs.example/aigc?ro=false",
+            "https://docs.example/d/home/aigc?ro=false",
         ),
     )
     conn.commit()
@@ -465,7 +684,7 @@ def test_refined_document_keeps_representation_over_newer_capture_of_same_url(tm
     linked = [
         item
         for item in references
-        if item.source_url and "docs.example/aigc" in item.source_url
+        if item.source_url and "docs.example/d/home/aigc" in item.source_url
     ]
     assert len(linked) == 1
     assert linked[0].source_type == "document"
@@ -581,11 +800,13 @@ async def test_github_search_maps_public_repository_metadata(monkeypatch):
         ("reused", "fresh_recent_partial", "reused"),
     ],
 )
+@pytest.mark.parametrize("snapshot_id", [61, None, 0, True, "61"])
 async def test_document_refresh_consumes_verified_snapshot_without_replacing_baked_asset(
     monkeypatch,
     response_status,
     expected_refresh_status,
     expected_stat,
+    snapshot_id,
 ):
     calls = []
 
@@ -607,6 +828,7 @@ async def test_document_refresh_consumes_verified_snapshot_without_replacing_bak
                     # document 仍代表烘焙资产；本轮创作必须只消费独立来源快照。
                     "document": {"full_content": "不可消费的烘焙正文返回值"},
                     "source_snapshot": {
+                        "id": snapshot_id,
                         "page_title": "即时校验标题",
                         "content_text": "本轮浏览器抓取正文",
                         "completeness_status": "partial",
@@ -656,11 +878,32 @@ async def test_document_refresh_consumes_verified_snapshot_without_replacing_bak
     assert "allow_foreground" not in calls[0][1]
     assert calls[0][1]["require_latest"] is True
     assert calls[0][1]["browser_extension_enabled"] is True
+    if type(snapshot_id) is not int or snapshot_id <= 0:
+        assert reference.full_content == "历史烘焙正文"
+        assert reference.summary == "历史摘要"
+        assert reference.refresh_status == "historical_only"
+        assert stats["failed"] == 1
+        return
     assert reference.full_content == "本轮浏览器抓取正文"
     assert reference.full_content != "不可消费的烘焙正文返回值"
     assert reference.refresh_status == expected_refresh_status
     assert reference.refresh_completeness == "partial"
     assert reference.refresh_truncated is True
+    assert reference.source_snapshot_id == 61
+    import hashlib
+    assert reference.source_body_hash == hashlib.sha256("本轮浏览器抓取正文".encode("utf-8")).hexdigest()
+    assert reference.summary == ""
+    assert reference.sections_json == "[]"
+    assert reference.style_phrases == "[]"
+    assert reference.prompt_hint == ""
+    from creation.agent_loop import CreationAgentLoop
+    loop = CreationAgentLoop.__new__(CreationAgentLoop)
+    loop.service = service
+    serialized = loop._reference_to_state(reference)
+    assert serialized["source_snapshot_id"] == 61
+    assert serialized["source_body_hash"] == reference.source_body_hash
+    assert serialized["summary"] == ""
+    assert serialized["refresh_completeness"] == "partial"
     expected_stats = {
         "attempted": 1,
         "updated": 0,
@@ -1924,3 +2167,45 @@ def test_creation_entity_corpus_recalibrates_planner_mid_frequency_term(tmp_path
     assert agent_term["role"] == "generic"
     assert agent_term["calibration"] == "creation_entity_corpus_df"
     assert plan["term_weights"]["agent"] == 0.15
+
+
+def test_source_snapshot_binding_requires_same_document_and_exact_body():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE bake_documents(id INTEGER, full_content TEXT)")
+    assert CreationService._source_snapshot_select(conn) == "NULL"
+    conn.executescript("""
+        CREATE TABLE bake_document_source_heads(document_id INTEGER, snapshot_id INTEGER);
+        CREATE TABLE bake_document_source_snapshots(id INTEGER, document_id INTEGER, content_text TEXT, identity_match INTEGER, completeness_status TEXT);
+        INSERT INTO bake_documents VALUES(1,'当前正文');
+        INSERT INTO bake_document_source_heads VALUES(1,61);
+        INSERT INTO bake_document_source_snapshots VALUES(61,1,'当前正文',1,'complete');
+    """)
+    sql = "SELECT " + CreationService._source_snapshot_select(conn) + " FROM bake_documents"
+    assert conn.execute(sql).fetchone()[0] == 61
+    coverage_sql = "SELECT " + CreationService._source_snapshot_select(conn, "completeness_status") + " FROM bake_documents"
+    assert conn.execute(coverage_sql).fetchone()[0] == "complete"
+    conn.execute("UPDATE bake_document_source_snapshots SET identity_match=0")
+    assert conn.execute(sql).fetchone()[0] is None
+    assert conn.execute(coverage_sql).fetchone()[0] is None
+    conn.execute("UPDATE bake_document_source_snapshots SET identity_match=1")
+    conn.execute("UPDATE bake_documents SET full_content='编辑后的正文'")
+    assert conn.execute(sql).fetchone()[0] is None
+    conn.execute("UPDATE bake_documents SET full_content='当前正文'")
+    conn.execute("UPDATE bake_document_source_snapshots SET document_id=2")
+    assert conn.execute(sql).fetchone()[0] is None
+    conn.close()
+
+
+def test_verified_source_quality_does_not_depend_on_removed_model_artifacts():
+    service = CreationService.__new__(CreationService)
+    row = {"full_content": "短而完整的原文。", "source_snapshot_id": 61,
+           "source_completeness": "complete", "summary": "", "prompt_hint": "",
+           "sections_json": "[]", "review_status": "source_verified"}
+    assert service._score_quality(row) == 1.0
+    assert service._score_completeness(row) == 1.0
+    # Coverage labels without an exact source binding must not gain trust;
+    # nor may a partial observation be promoted to complete by text length.
+    assert service._score_quality(dict(row, source_snapshot_id=None)) < 1.0
+    assert service._score_completeness(dict(row, source_snapshot_id=None)) < 1.0
+    assert service._score_quality(dict(row, source_completeness="partial")) < 1.0
+    assert service._score_completeness(dict(row, source_completeness="partial")) < 1.0

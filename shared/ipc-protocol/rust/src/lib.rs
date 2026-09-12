@@ -9,12 +9,13 @@
 //! use memory_bread_ipc::{IpcClient, TaskRequest, OcrRequest};
 //!
 //! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let mut client = IpcClient::connect_default().await?;
 //!
 //!     let resp = client.send(TaskRequest::Ocr(OcrRequest {
 //!         capture_id:      1,
 //!         screenshot_path: "/tmp/shot.jpg".into(),
+//!         priority: Default::default(),
 //!     })).await?;
 //!
 //!     println!("OCR result: {:?}", resp.result);

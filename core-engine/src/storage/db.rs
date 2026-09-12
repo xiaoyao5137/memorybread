@@ -466,7 +466,118 @@ static MIGRATIONS: &[(&str, &str)] = &[
         "109_reconcile_operation_replay_queue",
         include_str!("migrations/109_reconcile_operation_replay_queue.sql"),
     ),
+    (
+        "110_deduplicate_legacy_bake_documents",
+        include_str!("migrations/110_deduplicate_legacy_bake_documents.sql"),
+    ),
+    (
+        "111_creation_operations",
+        include_str!("migrations/111_creation_operations.sql"),
+    ),
+    (
+        "112_creation_operation_recovery_columns",
+        include_str!("migrations/112_creation_operation_recovery_columns.sql"),
+    ),
+    (
+        "113_creation_skill_governance",
+        include_str!("migrations/113_creation_skill_governance.sql"),
+    ),
+    (
+        "114_bake_knowledge_reuse_gate",
+        include_str!("migrations/114_bake_knowledge_reuse_gate.sql"),
+    ),
+    (
+        "115_document_source_versions",
+        include_str!("migrations/115_document_source_versions.sql"),
+    ),
+    (
+        "116_document_source_index_invalidation",
+        include_str!("migrations/116_document_source_index_invalidation.sql"),
+    ),
+    (
+        "117_document_refresh_observations",
+        include_str!("migrations/117_document_refresh_observations.sql"),
+    ),
+    (
+        "118_document_identity_v2",
+        include_str!("migrations/118_document_identity_v2.sql"),
+    ),
+    (
+        "119_document_source_checks",
+        include_str!("migrations/119_document_source_checks.sql"),
+    ),
+    (
+        "120_document_refresh_attempt_metrics",
+        include_str!("migrations/120_document_refresh_attempt_metrics.sql"),
+    ),
+    (
+        "121_document_source_mismatch_events",
+        include_str!("migrations/121_document_source_mismatch_events.sql"),
+    ),
+    (
+        "122_document_candidate_quality_events",
+        include_str!("migrations/122_document_candidate_quality_events.sql"),
+    ),
+    (
+        "123_document_write_deferrals",
+        include_str!("migrations/123_document_write_deferrals.sql"),
+    ),
+    (
+        "124_document_summary_binding",
+        include_str!("migrations/124_document_summary_binding.sql"),
+    ),
+    (
+        "125_document_summary_jobs",
+        include_str!("migrations/125_document_summary_jobs.sql"),
+    ),
+    (
+        "126_document_summary_retry_events",
+        include_str!("migrations/126_document_summary_retry_events.sql"),
+    ),
+    (
+        "127_document_summary_versions",
+        include_str!("migrations/127_document_summary_versions.sql"),
+    ),
+    (
+        "128_document_summary_mismatch_audit",
+        include_str!("migrations/128_document_summary_mismatch_audit.sql"),
+    ),
+    (
+        "129_document_summary_schedule_audit",
+        include_str!("migrations/129_document_summary_schedule_audit.sql"),
+    ),
+    (
+        "130_document_coalesce_identity",
+        include_str!("migrations/130_document_coalesce_identity.sql"),
+    ),
+
 ];
+
+fn migrate_document_identity_v2(conn: &Connection, sql: &str) -> Result<(), StorageError> {
+    let tx=conn.unchecked_transaction()?;
+    tx.execute_batch(sql)?;
+    tx.execute("INSERT OR IGNORE INTO bake_document_identity_aliases
+        (document_id,identity,identity_version,created_at)
+        SELECT id,document_identity,'legacy-v1',?1 FROM bake_documents WHERE document_identity IS NOT NULL AND document_identity NOT LIKE 'document-url-v2:%'",
+        rusqlite::params![current_ts_ms()])?;
+    let rows = {
+        let mut stmt=tx.prepare("SELECT id,source_url FROM bake_documents WHERE deleted_at IS NULL ORDER BY created_at,id")?;
+        let mapped=stmt.query_map([],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,Option<String>>(1)?)))?;
+        mapped.collect::<Result<Vec<_>,_>>()?
+    };
+    tx.execute("UPDATE bake_documents SET document_identity=NULL WHERE deleted_at IS NULL",[])?;
+    let mut claimed=std::collections::HashSet::new();
+    for (id,url) in rows {
+        if let Some(identity)=url.as_deref().and_then(super::document_identity::canonical_document_identity) {
+            if claimed.insert(identity.clone()) {
+                tx.execute("UPDATE bake_documents SET document_identity=?2 WHERE id=?1",rusqlite::params![id,identity])?;
+            }
+        }
+    }
+    tx.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES('118_document_identity_v2',?1)",rusqlite::params![current_ts_ms()])?;
+    tx.commit()?;
+    Ok(())
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // StorageManager
@@ -487,12 +598,24 @@ impl StorageManager {
     ///
     /// `db_path` 通常为 `~/.memory-bread/memory-bread.db`。
     pub fn open(db_path: &Path) -> Result<Self, StorageError> {
+        Self::open_inner(db_path, None)
+    }
+
+    pub fn open_observed(db_path: &Path) -> Result<Self, StorageError> {
+        let mut startup = super::startup::DatabaseStartup::new(db_path);
+        let result = Self::open_inner(db_path, Some(&mut startup));
+        startup.finish(&result);
+        result
+    }
+
+    pub fn required_migrations() -> Vec<&'static str> {
+        MIGRATIONS.iter().map(|(version, _)| *version).collect()
+    }
+
+    fn open_inner(db_path: &Path, startup: Option<&mut super::startup::DatabaseStartup>) -> Result<Self, StorageError> {
         // 确保父目录存在
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| StorageError::MigrationFailed {
-                version: "open",
-                reason: e.to_string(),
-            })?;
+            std::fs::create_dir_all(parent)?;
         }
 
         let conn = Connection::open(db_path)?;
@@ -501,7 +624,7 @@ impl StorageManager {
         let mgr = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
-        mgr.run_migrations()?;
+        mgr.run_migrations_observed(startup)?;
         mgr.with_conn(|conn| {
             conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
             Ok(())
@@ -541,6 +664,10 @@ impl StorageManager {
     // ── 迁移执行 ─────────────────────────────────────────────────────────────
 
     fn run_migrations(&self) -> Result<(), StorageError> {
+        self.run_migrations_observed(None)
+    }
+
+    fn run_migrations_observed(&self, mut startup: Option<&mut super::startup::DatabaseStartup>) -> Result<(), StorageError> {
         let conn = self.conn.lock().unwrap_or_else(|poisoned| {
             warn!("数据库连接锁曾因线程 panic 中毒，已恢复连接访问");
             poisoned.into_inner()
@@ -563,6 +690,26 @@ impl StorageManager {
 
             if already_applied {
                 debug!("迁移 {} 已执行，跳过", version);
+                continue;
+            }
+
+            if let Some(status) = startup.as_deref_mut() { status.migration(version); }
+
+            if *version == "112_creation_operation_recovery_columns" {
+                // Version 111 shipped before recovery/undo columns were added.
+                // Upgrade existing databases, including intermediate schemas, atomically.
+                let tx = conn.unchecked_transaction()?;
+                if !Self::has_column(&tx, "creation_operations", "original_document")? {
+                    Self::add_column_if_missing(&tx, "creation_operations", "original_document", "TEXT NOT NULL DEFAULT ''")?;
+                    tx.execute("UPDATE creation_operations SET original_document=base_document", [])?;
+                }
+                Self::add_column_if_missing(&tx, "creation_operations", "retry_checkpoint_json", "TEXT")?;
+                tx.execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                    rusqlite::params![version, current_ts_ms()],
+                )?;
+                tx.commit()?;
+                info!("迁移 {} 执行成功", version);
                 continue;
             }
 
@@ -867,9 +1014,9 @@ impl StorageManager {
                      ON creation_evidence_assets(history_id, captured_at DESC);
                      COMMIT;",
                 )
-                .map_err(|e| StorageError::MigrationFailed {
-                    version,
-                    reason: e.to_string(),
+                .map_err(|e| match &e {
+                    rusqlite::Error::SqliteFailure(code, _) if matches!(code.extended_code & 255, 3 | 5 | 6 | 8 | 10 | 11 | 13 | 14 | 23 | 26) => StorageError::Sqlite(e),
+                    _ => StorageError::MigrationFailed { version, reason: e.to_string() },
                 })?;
                 let count: i64 = conn.query_row(
                     "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
@@ -883,6 +1030,11 @@ impl StorageManager {
                     )?;
                 }
                 info!("迁移 {} 执行成功", version);
+                continue;
+            }
+
+            if *version == "118_document_identity_v2" {
+                migrate_document_identity_v2(&conn, sql)?;
                 continue;
             }
 
@@ -1460,6 +1612,45 @@ mod tests {
         assert!(!examples.contains("structure_pattern"));
         assert!(!examples.contains("structurePattern"));
         assert!(examples.contains("示例标题"));
+    }
+
+    #[test]
+    fn creation_operation_upgrade_preserves_existing_state_and_is_idempotent() {
+        for (original_exists, retry_exists) in [(false, false), (true, false), (false, true), (true, true)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let db = tmp.path().join("legacy-operations.db");
+            let storage = StorageManager::open(&db).unwrap();
+            storage.with_conn(|conn| {
+                conn.execute("INSERT INTO creation_history (id,prompt,generated_content,created_at,updated_at)
+                    VALUES (1,'goal','base',1,1)", [])?;
+                conn.execute("INSERT INTO creation_operations
+                    (operation_id,session_id,instruction_id,instruction,history_id,base_revision,base_document,
+                    original_document,retry_checkpoint_json,checkpoint_json,created_at,updated_at)
+                    VALUES ('op','s','i','modify',1,1,'base','original','{\"cursor\":1}','{\"cursor\":2}',1,1)", [])?;
+                if !original_exists {
+                    conn.execute_batch("ALTER TABLE creation_operations DROP COLUMN original_document;")?;
+                }
+                if !retry_exists {
+                    conn.execute_batch("ALTER TABLE creation_operations DROP COLUMN retry_checkpoint_json;")?;
+                }
+                conn.execute("DELETE FROM schema_migrations WHERE version='112_creation_operation_recovery_columns'", [])?;
+                Ok(())
+            }).unwrap();
+            drop(storage);
+            for _ in 0..2 {
+                let upgraded = StorageManager::open(&db).unwrap();
+                upgraded.with_conn(|conn| {
+                    let op = super::super::repo::creation_operation::get(conn,"s","op")?.unwrap();
+                    assert_eq!(op.original_document, if original_exists { "original" } else { "base" });
+                    assert_eq!(op.checkpoint.unwrap()["cursor"], 2);
+                    let retry: Option<String> = conn.query_row("SELECT retry_checkpoint_json FROM creation_operations WHERE operation_id='op'", [], |r| r.get(0))?;
+                    assert_eq!(retry.as_deref(), if retry_exists { Some("{\"cursor\":1}") } else { None });
+                    assert_eq!(super::super::repo::creation_operation::pending(conn,"s","")?.len(),1);
+                    assert!(super::super::repo::creation_operation::undo_candidates(conn,"s",1)?.is_empty());
+                    Ok(())
+                }).unwrap();
+            }
+        }
     }
 
     #[test]
@@ -2170,6 +2361,28 @@ mod tests {
     }
 
     #[test]
+    fn document_identity_v2_migration_preserves_ids_and_separates_case_collisions() {
+        let conn=Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE schema_migrations(version TEXT PRIMARY KEY,applied_at INTEGER);
+            CREATE TABLE bake_documents(id INTEGER PRIMARY KEY,source_url TEXT,document_identity TEXT,deleted_at INTEGER,created_at INTEGER,full_content TEXT);
+            CREATE UNIQUE INDEX identity_active ON bake_documents(document_identity) WHERE deleted_at IS NULL AND document_identity IS NOT NULL;
+            INSERT INTO bake_documents VALUES
+            (1,'https://docs.example.com/d/home/ABC','docs.example.com/d/home/abc',NULL,1,'保留正文1'),
+            (2,'https://docs.example.com/d/home/abc',NULL,NULL,2,'保留正文2'),
+            (3,'https://docs.example.com/d/home/ABC?ro=false',NULL,NULL,3,'保留正文3');").unwrap();
+        let sql=include_str!("migrations/118_document_identity_v2.sql");
+        for _ in 0..2 { migrate_document_identity_v2(&conn,sql).unwrap(); }
+        let identities:Vec<(i64,Option<String>)>=conn.prepare("SELECT id,document_identity FROM bake_documents ORDER BY id").unwrap()
+            .query_map([],|r|Ok((r.get(0)?,r.get(1)?))).unwrap().map(Result::unwrap).collect();
+        assert_eq!(identities.len(),3);
+        assert!(identities[0].1.as_deref().unwrap().ends_with("/ABC"));
+        assert!(identities[1].1.as_deref().unwrap().ends_with("/abc"));
+        assert!(identities[2].1.is_none());
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM bake_document_identity_aliases",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM bake_documents WHERE full_content LIKE '保留正文%' AND deleted_at IS NULL",[],|r|r.get::<_,i64>(0)).unwrap(),3);
+    }
+
+    #[test]
     fn document_identity_migration_preserves_legacy_duplicates_and_claims_one_identity() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -2362,6 +2575,155 @@ mod tests {
                         (4, "discarded".to_string()),
                     ]
                 );
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn legacy_document_deduplication_merges_links_and_soft_deletes_auto_duplicates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("legacy-document-deduplication.db");
+        let storage = StorageManager::open(&db).unwrap();
+
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO bake_documents (
+                         id, title, source_memory_ids, source_capture_ids,
+                         source_episode_ids, linked_knowledge_ids, source_url,
+                         creation_mode, review_status, document_identity,
+                         usage_count, created_at, updated_at
+                     ) VALUES
+                         (263, '主文档', '[\"1146\"]', '[\"13712\"]', '[\"1146\"]',
+                          '[\"634\"]',
+                          'https://docs.example.com/d/home/DocABC#section=one',
+                          'llm_bake', 'auto_created',
+                          'docs.example.com/d/home/docabc', 2, 10, 20),
+                         (265, '历史重复一', '[\"1149\"]', '[\"13721\"]', '[\"1149\"]',
+                          '[\"636\"]',
+                          'https://docs.example.com/d/home/DocABC#section=two',
+                          'llm_bake', 'auto_created', NULL, 3, 11, 21),
+                         (271, '历史重复二', '[\"1142\"]', '[\"13702\"]', '[\"1142\"]',
+                          '[\"645\"]',
+                          'http://docs.example.com/d/home/docabc/?view=latest',
+                          'llm_bake', 'auto_created', NULL, 4, 12, 22),
+                         (272, '已审核副本', '[\"1200\"]', '[\"14000\"]', '[\"1200\"]',
+                          '[]', 'https://docs.example.com/d/home/DocABC',
+                          'llm_bake', 'approved', NULL, 1, 13, 23);
+
+                     INSERT INTO bake_document_source_fingerprints
+                         (document_id, fingerprint, source_timeline_id, created_at)
+                     VALUES (265, 'fingerprint-265', 1149, 21);
+
+                     INSERT INTO bake_document_source_snapshots (
+                         document_id, source_url, page_title, content_text, content_hash,
+                         completeness_status, collected_at
+                     ) VALUES (
+                         271, 'https://docs.example.com/d/home/DocABC', '历史重复二',
+                         '来源正文', 'snapshot-271', 'complete', 22
+                     );
+
+                     INSERT INTO artifact_vector_index (
+                         document_id, qdrant_point_id, doc_key, content_hash,
+                         chunk_index, chunk_text, model_name, indexed_at
+                     ) VALUES (
+                         271, 'duplicate-vector', 'document:271', 'vector-271',
+                         0, '重复向量', 'test', 22
+                     );
+
+                     INSERT INTO memory_favorites
+                         (resource_kind, resource_id, created_at, updated_at)
+                     VALUES ('document', 265, 30, 31);
+
+                     INSERT INTO creation_skills (
+                         client_skill_key, source_kind, source_id, title, summary,
+                         created_at, updated_at
+                     ) VALUES (
+                         'legacy-document-skill', 'bake_document', '271',
+                         '历史文档 Skill', '应迁移来源', 40, 41
+                     );",
+                )?;
+
+                conn.execute_batch(include_str!(
+                    "migrations/110_deduplicate_legacy_bake_documents.sql"
+                ))?;
+                // 迁移必须可重复执行；第二次不应继续修改或报错。
+                conn.execute_batch(include_str!(
+                    "migrations/110_deduplicate_legacy_bake_documents.sql"
+                ))?;
+
+                let survivor = conn.query_row(
+                    "SELECT source_memory_ids, source_capture_ids,
+                            source_episode_ids, linked_knowledge_ids, usage_count
+                     FROM bake_documents WHERE id = 263",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )?;
+                assert_eq!(survivor.0, "[\"1142\",\"1146\",\"1149\"]");
+                assert_eq!(survivor.1, "[\"13702\",\"13712\",\"13721\"]");
+                assert_eq!(survivor.2, "[\"1142\",\"1146\",\"1149\"]");
+                assert_eq!(survivor.3, "[\"634\",\"636\",\"645\"]");
+                assert_eq!(survivor.4, 9);
+
+                let deleted_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM bake_documents
+                     WHERE id IN (265, 271) AND deleted_at IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let reviewed_is_active: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM bake_documents
+                     WHERE id = 272 AND deleted_at IS NULL",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(deleted_count, 2);
+                assert_eq!(reviewed_is_active, 1);
+
+                let fingerprint_document_id: i64 = conn.query_row(
+                    "SELECT document_id FROM bake_document_source_fingerprints
+                     WHERE fingerprint = 'fingerprint-265'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let snapshot_document_id: i64 = conn.query_row(
+                    "SELECT document_id FROM bake_document_source_snapshots
+                     WHERE content_hash = 'snapshot-271'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let favorite_document_id: i64 = conn.query_row(
+                    "SELECT resource_id FROM memory_favorites
+                     WHERE resource_kind = 'document'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let skill_source_id: String = conn.query_row(
+                    "SELECT source_id FROM creation_skills
+                     WHERE client_skill_key = 'legacy-document-skill'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let queued_vector_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM vector_deletion_queue
+                     WHERE qdrant_point_id = 'duplicate-vector'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(fingerprint_document_id, 263);
+                assert_eq!(snapshot_document_id, 263);
+                assert_eq!(favorite_document_id, 263);
+                assert_eq!(skill_source_id, "263");
+                assert_eq!(queued_vector_count, 1);
                 Ok(())
             })
             .unwrap();

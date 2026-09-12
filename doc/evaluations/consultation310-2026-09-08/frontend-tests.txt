@@ -1,0 +1,237 @@
+
+> memory-bread-desktop@0.4.0 test
+> vitest run src/__tests__/ConsultationOcrBoundaries.test.ts src/__tests__/ConsultationAttachments.test.tsx src/__tests__/SystemFloatingAssist.test.tsx src/__tests__/RagPanelHistory.test.tsx src/__tests__/ConsultationImageInput.test.tsx
+
+
+ RUN  v2.1.9 /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui
+
+(node:29748) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:29745) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:29744) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:29747) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:29746) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ src/__tests__/ConsultationOcrBoundaries.test.ts (2 tests) 2ms
+ ✓ src/__tests__/ConsultationImageInput.test.tsx (3 tests) 64ms
+ ✓ src/__tests__/ConsultationAttachments.test.tsx (6 tests) 88ms
+stderr | src/__tests__/RagPanelHistory.test.tsx > 咨询输入框提交 > 多张上传图片在历史列表及打开后的咨询中均可预览
+Warning: An update to Attachment inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://reactjs.org/link/wrap-tests-with-act
+    at Attachment (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/ConsultationAttachments.tsx:20:23)
+    at div
+    at ConsultationAttachments (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/ConsultationAttachments.tsx:76:36)
+    at div
+    at section
+    at div
+    at RagPanel (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/RagPanel.v2.tsx:223:21)
+Warning: An update to Attachment inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://reactjs.org/link/wrap-tests-with-act
+    at Attachment (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/ConsultationAttachments.tsx:20:23)
+    at div
+    at ConsultationAttachments (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/ConsultationAttachments.tsx:76:36)
+    at div
+    at section
+    at div
+    at RagPanel (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/RagPanel.v2.tsx:223:21)
+
+stderr | src/__tests__/RagPanelHistory.test.tsx > 清空当前会话 > 点击清空后重置指令、咨询结果与参考资料
+Warning: An update to RagPanel inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://reactjs.org/link/wrap-tests-with-act
+    at RagPanel (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/RagPanel.v2.tsx:223:21)
+Warning: An update to RagPanel inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://reactjs.org/link/wrap-tests-with-act
+    at RagPanel (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/RagPanel.v2.tsx:223:21)
+Warning: An update to RagPanel inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://reactjs.org/link/wrap-tests-with-act
+    at RagPanel (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/RagPanel.v2.tsx:223:21)
+
+stderr | src/__tests__/RagPanelHistory.test.tsx > 清空当前会话 > 咨询进行中点击清空会中断请求并退出加载状态
+Warning: An update to RagPanel inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://reactjs.org/link/wrap-tests-with-act
+    at RagPanel (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/RagPanel.v2.tsx:223:21)
+
+stderr | src/__tests__/RagPanelHistory.test.tsx > 咨询历史截图 > 加载原图并允许预览
+Warning: An update to HistoryScreenshotThumbnail inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://reactjs.org/link/wrap-tests-with-act
+    at HistoryScreenshotThumbnail (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/RagPanel.v2.tsx:154:3)
+    at div
+    at div
+    at div
+    at div
+    at div
+    at RagPanel (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/RagPanel.v2.tsx:223:21)
+
+ ✓ src/__tests__/RagPanelHistory.test.tsx (15 tests) 851ms
+   ✓ 咨询记录搜索与分页 > 展示真实总数，并按关键词和页码请求记录 330ms
+stderr | src/__tests__/SystemFloatingAssist.test.tsx > SystemFloatingAssist > 离线启动时直接显示本地悬浮助手并读取本机面包屑
+Warning: An update to SystemFloatingAssist inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://reactjs.org/link/wrap-tests-with-act
+    at SystemFloatingAssist (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/SystemFloatingAssist.tsx:195:3)
+
+stderr | src/__tests__/SystemFloatingAssist.test.tsx > SystemFloatingAssist > 闲置态渲染面包人角色且不再使用旧图片层
+Warning: An update to SystemFloatingAssist inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://reactjs.org/link/wrap-tests-with-act
+    at SystemFloatingAssist (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/SystemFloatingAssist.tsx:195:3)
+
+stderr | src/__tests__/SystemFloatingAssist.test.tsx > SystemFloatingAssist > 鼠标进入和离开时切换悬停动画状态
+Warning: An update to SystemFloatingAssist inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://reactjs.org/link/wrap-tests-with-act
+    at SystemFloatingAssist (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/SystemFloatingAssist.tsx:195:3)
+
+stderr | src/__tests__/SystemFloatingAssist.test.tsx > SystemFloatingAssist > 闲置动画按周期播放并在间隔期停止合成
+Warning: An update to SystemFloatingAssist inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://reactjs.org/link/wrap-tests-with-act
+    at SystemFloatingAssist (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/SystemFloatingAssist.tsx:195:3)
+
+stderr | src/__tests__/SystemFloatingAssist.test.tsx > SystemFloatingAssist > 完成态 5 分钟后自动切回闲置态
+Warning: An update to SystemFloatingAssist inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://reactjs.org/link/wrap-tests-with-act
+    at SystemFloatingAssist (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/SystemFloatingAssist.tsx:195:3)
+
+stderr | src/__tests__/SystemFloatingAssist.test.tsx > SystemFloatingAssist > 展开后窗口失焦或点击外层区域时保持展开
+Warning: An update to SystemFloatingAssist inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://reactjs.org/link/wrap-tests-with-act
+    at SystemFloatingAssist (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/SystemFloatingAssist.tsx:195:3)
+
+stderr | src/__tests__/SystemFloatingAssist.test.tsx > SystemFloatingAssist > 咨询输入框使用输入法确认候选词时不发送
+Warning: An update to SystemFloatingAssist inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://reactjs.org/link/wrap-tests-with-act
+    at SystemFloatingAssist (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/SystemFloatingAssist.tsx:195:3)
+
+stderr | src/__tests__/SystemFloatingAssist.test.tsx > SystemFloatingAssist > 自动识别任务开启后在面包人左上角显示 auto 标识
+Warning: An update to SystemFloatingAssist inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://reactjs.org/link/wrap-tests-with-act
+    at SystemFloatingAssist (/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/SystemFloatingAssist.tsx:195:3)
+
+ ✓ src/__tests__/SystemFloatingAssist.test.tsx (34 tests) 1607ms
+   ✓ SystemFloatingAssist > OCR 超时后点击重试会重新识别原附件并保留原问题，不改为屏幕识别 350ms
+
+ Test Files  5 passed (5)
+      Tests  60 passed (60)
+   Start at  02:36:34
+   Duration  4.30s (transform 925ms, setup 901ms, collect 2.61s, tests 2.61s, environment 4.71s, prepare 441ms)
+

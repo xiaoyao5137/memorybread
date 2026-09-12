@@ -1,0 +1,281 @@
+{
+  "model": "qwen3.5:4b",
+  "endpoint": "http://127.0.0.1:50256",
+  "scope": "real routing and input assessment; synthetic documents; no external retrieval",
+  "cases": [
+    {
+      "id": "simple-replace",
+      "instruction": "把周一上午改成周三下午",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "replace",
+              "target": {
+                "text": "周一上午",
+                "occurrence": 1
+              },
+              "content": "周三下午"
+            }
+          ]
+        },
+        "reasoning": "用户指令明确要求将正文中的'周一上午'修改为'周三下午'。根据操作类别约束，必须使用 patch 操作。目标位置锁定在'会议安排'章节下的具体文本片段'周一上午'。该修改不涉及文档结构变化、数据查询或外部信息检索，因此无需调用任何工具或 Agent。",
+        "source": "model"
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "replace",
+              "target": {
+                "text": "周一上午",
+                "occurrence": 1
+              },
+              "content": "周三下午"
+            }
+          ]
+        },
+        "reasoning": "用户指令明确要求将正文中的'周一上午'修改为'周三下午'。根据操作类别约束，必须使用 patch 操作。目标位置锁定在'会议安排'章节下的具体文本片段'周一上午'。该修改不涉及文档结构变化、数据查询或外部信息检索，因此无需调用任何工具或 Agent。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "exact_result": true
+      },
+      "passed": true,
+      "seconds": 6.2
+    },
+    {
+      "id": "simple-rename",
+      "instruction": "把标题会议说明改为项目例会说明，其他不动",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "replace",
+              "target": {
+                "text": "会议说明",
+                "occurrence": 1
+              },
+              "content": "项目例会说明"
+            }
+          ]
+        },
+        "reasoning": "用户指令明确要求将标题'会议说明'修改为'项目例会说明'，其余内容不动。根据操作类别约束，此任务属于精确的文本替换，应使用 patch 操作。需定位到标题节点'会议说明'（node-13312432b565f2df）进行替换，不触发其他技能或工具。",
+        "source": "model"
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "replace",
+              "target": {
+                "text": "会议说明",
+                "occurrence": 1
+              },
+              "content": "项目例会说明"
+            }
+          ]
+        },
+        "reasoning": "用户指令明确要求将标题'会议说明'修改为'项目例会说明'，其余内容不动。根据操作类别约束，此任务属于精确的文本替换，应使用 patch 操作。需定位到标题节点'会议说明'（node-13312432b565f2df）进行替换，不触发其他技能或工具。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "exact_result": true
+      },
+      "passed": true,
+      "seconds": 5.44
+    },
+    {
+      "id": "append-literal",
+      "instruction": "在附录末尾追加这句话：请提前准备材料。其余内容原样保留。",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "insert",
+              "target": {
+                "text": "附录",
+                "occurrence": 1
+              },
+              "content": "请提前准备材料。",
+              "position": "after"
+            }
+          ]
+        },
+        "reasoning": "用户指令明确要求在“附录”节点末尾追加特定文本，属于局部内容修改。根据操作类别约束，必须使用 patch 操作。目标位置锁定为“附录”节点（node-ed551755df2ffa06）的末尾，动作类型为 insert，内容为“请提前准备材料。”。无需调用任何工具或 Agent，因为不涉及外部事实检索、数据查询或文档结构重组。",
+        "source": "model"
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "insert",
+              "target": {
+                "text": "附录",
+                "occurrence": 1
+              },
+              "content": "请提前准备材料。",
+              "position": "after"
+            }
+          ]
+        },
+        "reasoning": "用户指令明确要求在“附录”节点末尾追加特定文本，属于局部内容修改。根据操作类别约束，必须使用 patch 操作。目标位置锁定为“附录”节点（node-ed551755df2ffa06）的末尾，动作类型为 insert，内容为“请提前准备材料。”。无需调用任何工具或 Agent，因为不涉及外部事实检索、数据查询或文档结构重组。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "literal_added": true
+      },
+      "passed": true,
+      "seconds": 5.54
+    },
+    {
+      "id": "append-local",
+      "instruction": "在会议安排末尾补充一句邀请大家参与讨论的话，不增加任何新事实，其他内容原样保留。",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "source": "fallback",
+        "operation": {
+          "kind": "respond",
+          "response": "本轮操作解析失败，请重试当前指令。"
+        },
+        "reasoning": "CREATION_OPERATION_INVALID"
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "source": "fallback",
+        "operation": {
+          "kind": "respond",
+          "response": "本轮操作解析失败，请重试当前指令。"
+        },
+        "reasoning": "CREATION_OPERATION_INVALID"
+      },
+      "checks": {
+        "model_route": false,
+        "operation": false,
+        "resources": true,
+        "no_full_workflow": true
+      },
+      "passed": false,
+      "model_replies": [
+        "{\n  \"action\": \"patch\",\n  \"deliverable\": \"会议安排末尾补充的邀请讨论语句\",\n  \"primary_goal\": \"在现有文档末尾追加特定措辞，不改变原有事实或内容\"\n}",
+        "{\"reasoning\":\"用户指令明确要求在“会议安排”章节末尾补充一句邀请语，属于局部文本改写。根据操作类别约束，必须使用 patch 操作，且目标位置和动作内容严格依据用户原文。需定位到“会议安排”章节（node-a57eb929ed387502）的末尾节点，执行 insert 动作，内容为用户指定的邀请语，不引入新事实。\", \"operation\":{\"kind\":\"patch\",\"patches\":[{\"action\":\"insert\",\"target\":{\"text\":\"周一上午讨论项目进展。\",\"occurrence\":1},\"content\":\"欢迎各位参与讨论，共同推进项目。\",\"position\":\"after\"}]},\"tools\":[],\"agents\":[]}",
+        "{\n  \"reasoning\": \"用户指令要求在“会议安排”章节末尾补充邀请语，且明确约束“不增加任何新事实”、“其他内容原样保留”。上次输出使用了 patch 操作并直接编造了用户未提供的具体措辞（“欢迎各位参与讨论，共同推进项目。”），违反了“目标位置和全部动作只以用户请求原文为准”的约束。本次修正需将操作类型改为 transform，目标锁定为“会议安排”章节（node-a57eb929ed387502），内容严格基于用户指令中的“邀请大家参与讨论的话”这一通用意图进行改写，不引入具体未授权的新事实或措辞，同时保持章节结构完整。\",\n  \"operation\": {\n    \"kind\": \"patch\",\n    \"patches\": [\n      {\n        \"action\": \"insert\",\n        \"target\": {\n          \"text\": \"周一上午讨论项目进展。\",\n          \"occurrence\": 1\n        },\n        \"content\": \"欢迎各位参与讨论，共同推进项目。\",\n        \"position\": \"after\"\n      }\n    ]\n  },\n  \"tools\": [],\n  \"agents\": []\n}"
+      ],
+      "seconds": 12.02
+    },
+    {
+      "id": "compound-delete-research",
+      "instruction": "移除附录，然后检索最新公开会议工具信息，在联系方式后补充一段工具推荐，其他原文保留。",
+      "candidate": {
+        "tools": [
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "id": "node-1dad7ff27377868f"
+            }
+          ],
+          "constraint_skill_ids": []
+        },
+        "reasoning": "用户指令包含三个步骤：1. 删除'附录'章节（节点 node-ed551755df2ffa06）；2. 检索最新公开会议工具信息；3. 在'联系方式'后补充工具推荐。根据操作类别约束'edit'，删除章节属于 patch 操作。检索外部信息需使用 internet_search 工具。补充内容属于 transform 操作，需定位到'联系方式'章节（节点 node-1dad7ff27377868f",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "# 会议说明\n\n## 会议安排\n周一上午讨论项目进展。\n\n## 联系方式\n请联系项目组。\n\n[此处插入最新公开会议工具推荐内容]",
+        "self_contained_reason": "任务依赖公开事实（会议工具推荐），当前未提供，需检索。",
+        "acceptance": [
+          {
+            "id": "remove_appendix",
+            "criterion": "文档中‘## 附录’及‘旧说明’部分被移除"
+          },
+          {
+            "id": "add_tool_recommendation",
+            "criterion": "在‘## 联系方式’段落后补充一段基于最新公开信息的会议工具推荐内容"
+          },
+          {
+            "id": "preserve_original_text",
+            "criterion": "除附录移除和新增推荐外，其余原文内容（标题、会议安排、联系方式）保持原样"
+          }
+        ],
+        "inputs": [
+          {
+            "state": "missing",
+            "evidence": "",
+            "need": "最新公开会议工具信息（如 Zoom、腾讯会议、飞书会议等当前主流推荐）",
+            "reason": "用户指令明确要求‘检索最新公开会议工具信息’并在联系方式后补充推荐，当前文档和指令中未包含此类事实。",
+            "query": "检索当前最新推荐的公开在线会议工具列表及其核心优势",
+            "id": "public_facts",
+            "source": "public_facts"
+          }
+        ]
+      },
+      "effective": {
+        "tools": [
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "id": "node-1dad7ff27377868f"
+            }
+          ],
+          "constraint_skill_ids": []
+        },
+        "reasoning": "用户指令包含三个步骤：1. 删除'附录'章节（节点 node-ed551755df2ffa06）；2. 检索最新公开会议工具信息；3. 在'联系方式'后补充工具推荐。根据操作类别约束'edit'，删除章节属于 patch 操作。检索外部信息需使用 internet_search 工具。补充内容属于 transform 操作，需定位到'联系方式'章节（节点 node-1dad7ff27377868f",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "authorized_scope": true,
+        "all_requested_scopes": false
+      },
+      "passed": false,
+      "model_replies": [
+        "{\n  \"action\": \"edit\",\n  \"deliverable\": \"修改后的文档\",\n  \"primary_goal\": \"移除附录，检索最新公开会议工具信息并在联系方式后补充推荐段落\"\n}",
+        "{\"reasoning\":\"用户指令包含三个步骤：1. 删除'附录'章节（节点 node-ed551755df2ffa06）；2. 检索最新公开会议工具信息；3. 在'联系方式'后补充工具推荐。根据操作类别约束'edit'，删除章节属于 patch 操作。检索外部信息需使用 internet_search 工具。补充内容属于 transform 操作，需定位到'联系方式'章节（节点 node-1dad7ff27377868f）及其后文。由于涉及删除、检索和改写，且删除操作不能与 transform 合并（patch 不允许附带 tools/agents），因此需拆分为两个操作：先执行 patch 删除，再执行 transform 改写。\", \"operation\":{\"kind\":\"transform\",\"targets\":[{\"id\":\"node-1dad7ff27377868f\"}],\"constraint_skill_ids\":[]},\"tools\":[\"internet_search\"],\"agents\":[]}",
+        "{\n  \"deliverable\": \"# 会议说明\\n\\n## 会议安排\\n周一上午讨论项目进展。\\n\\n## 联系方式\\n请联系项目组。\\n\\n[此处插入最新公开会议工具推荐内容]\",\n  \"requirements_by_source\": {\n    \"work_context\": {\n      \"state\": \"not_needed\",\n      \"evidence\": \"\",\n      \"need\": \"\",\n      \"reason\": \"用户指令仅要求移除附录并补充公开信息，未涉及项目私有背景、历史决策或特定内部约束。\",\n      \"query\": \"\"\n    },\n    \"business_data\": {\n      \"state\": \"not_needed\",\n      \"evidence\": \"\",\n      \"need\": \"\",\n      \"reason\": \"任务不涉及真实业务指标、基线或历史表现，仅需公开产品事实。\",\n      \"query\": \"\"\n    },\n    \"public_facts\": {\n      \"state\": \"missing\",\n      \"evidence\": \"\",\n      \"need\": \"最新公开会议工具信息（如 Zoom、腾讯会议、飞书会议等当前主流推荐）\",\n      \"reason\": \"用户指令明确要求‘检索最新公开会议工具信息’并在联系方式后补充推荐，当前文档和指令中未包含此类事实。\",\n      \"query\": \"检索当前最新推荐的公开在线会议工具列表及其核心优势\"\n    }\n  },\n  \"self_contained_reason\": \"任务依赖公开事实（会议工具推荐），当前未提供，需检索。\",\n  \"acceptance\": [\n    {\n      \"id\": \"remove_appendix\",\n      \"criterion\": \"文档中‘## 附录’及‘旧说明’部分被移除\"\n    },\n    {\n      \"id\": \"add_tool_recommendation\",\n      \"criterion\": \"在‘## 联系方式’段落后补充一段基于最新公开信息的会议工具推荐内容\"\n    },\n    {\n      \"id\": \"preserve_original_text\",\n      \"criterion\": \"除附录移除和新增推荐外，其余原文内容（标题、会议安排、联系方式）保持原样\"\n    }\n  ]\n}"
+      ],
+      "seconds": 14.73
+    }
+  ]
+}

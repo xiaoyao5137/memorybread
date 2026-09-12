@@ -1,0 +1,19 @@
+[
+  {
+    "operation_id": "operation-093795f1c7a9bc7cceb125fa672442d7d7116cc5c461afc4a1a9bd4cfe1ef3dd",
+    "session_id": "skill-governance-acceptance-explicit-1788630307",
+    "instruction_id": "history-user-137",
+    "instruction": "使用@技术架构方案评审文档模板 编写商家增长业务方案，文档标题为《灵机商家增长试点方案》，主目标是提高商家入驻与GMV。",
+    "history_id": 137,
+    "base_revision": 1,
+    "base_document": "",
+    "checkpoint_json": null,
+    "status": "running",
+    "last_sequence": -1,
+    "result_json": null,
+    "created_at": 1788630320528,
+    "updated_at": 1788630320528,
+    "original_document": "",
+    "retry_checkpoint_json": null
+  }
+]

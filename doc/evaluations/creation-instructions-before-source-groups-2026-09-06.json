@@ -1,0 +1,194 @@
+{
+  "model": "qwen3.5:4b",
+  "scope": "real routing and input assessment; synthetic documents; no external retrieval",
+  "cases": [
+    {
+      "id": "full-business-regression",
+      "instruction": "创作一篇如何对快手灵机产品大规模吸引非L0商家的方案，为商家制作爆款视频，进而极大提高GMV爆可品和可以使用SOTA视频生成模型的方案。",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "快手灵机非L0商家爆款视频吸引方案",
+            "source": "generated",
+            "evidence": "创作一篇如何对快手灵机产品大规模吸引非L0商家的方案，为商家制作爆款视频，进而极大提高GMV爆可品和可以使用SOTA视频生成模型的方案"
+          }
+        },
+        "reasoning": "用户请求创作一篇关于快手灵机产品吸引非L0商家、制作爆款视频及提高GMV的完整方案，涉及市场调研、技术架构和实施设计。当前文档为空，无历史正文，且pending_operations为空，因此无法进行局部修改或续写。需求明确指向生成新文档，需覆盖市场调研、技术架构和实施设计三个核心部分。主交付物为完整方案文档，读者为产品团队与商家运营方，业务目标为提升非L0商家活跃度与GMV。技能评估：用户未主动",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "创作一篇针对快手灵机产品，旨在通过 SOTA 视频生成模型制作爆款视频，从而大规模吸引非 L0 商家并提高 GMV 的完整方案。",
+        "inputs": [
+          {
+            "id": "missing",
+            "need": "快手灵机产品当前的非 L0 商家触达率、现有 SOTA 视频生成模型在快手生态的适配度及生成质量基线、非 L0 商家的核心痛点与决策依据、快手平台对 AI 生成内容的审核规则及流量分发机制、过往类似 AI 营销活动的 GMV 转化数据。",
+            "source": "work_context",
+            "state": "missing",
+            "evidence": "无",
+            "query": "检索快手灵机产品非 L0 商家触达率、SOTA 视频生成模型适配度、非 L0 商家痛点、AI 内容审核规则及过往 AI 营销 GMV 数据。",
+            "reason": "方案需基于真实业务数据（触达率、痛点、转化数据）和平台规则（审核、分发）来制定策略，现有文档为空，无法提供事实依据。"
+          }
+        ],
+        "self_contained_reason": "无，因 inputs 不为空且包含缺失项。",
+        "acceptance": [
+          {
+            "id": "strategy_validity",
+            "criterion": "方案中的策略必须基于快手灵机产品的实际业务逻辑，而非通用营销理论。"
+          },
+          {
+            "id": "data_driven",
+            "criterion": "方案中关于非 L0 商家痛点、触达率及 GMV 预期的分析，必须明确标注为‘待验证’或‘基于假设’，不能编造具体数值作为事实依据。"
+          },
+          {
+            "id": "compliance",
+            "criterion": "方案中关于 SOTA 视频生成模型的应用，必须包含对快手平台 AI 内容审核规则及流量分发机制的考量，确保方案可落地且合规。"
+          },
+          {
+            "id": "scope_adherence",
+            "criterion": "方案仅针对非 L0 商家群体，不扩展至 L0 商家，且聚焦于‘制作爆款视频’这一核心动作。"
+          }
+        ]
+      },
+      "effective": {
+        "tools": [
+          "memory_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "快手灵机非L0商家爆款视频吸引方案",
+            "source": "generated",
+            "evidence": "创作一篇如何对快手灵机产品大规模吸引非L0商家的方案，为商家制作爆款视频，进而极大提高GMV爆可品和可以使用SOTA视频生成模型的方案"
+          }
+        },
+        "reasoning": "用户请求创作一篇关于快手灵机产品吸引非L0商家、制作爆款视频及提高GMV的完整方案，涉及市场调研、技术架构和实施设计。当前文档为空，无历史正文，且pending_operations为空，因此无法进行局部修改或续写。需求明确指向生成新文档，需覆盖市场调研、技术架构和实施设计三个核心部分。主交付物为完整方案文档，读者为产品团队与商家运营方，业务目标为提升非L0商家活跃度与GMV。技能评估：用户未主动",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": false
+      },
+      "passed": false,
+      "seconds": 120.74
+    },
+    {
+      "id": "full-business-metrics",
+      "instruction": "根据我们项目最近一个月的真实经营数据和之前决定的目标，写一份复盘报告，解释收入变化并提出后续改进建议。",
+      "candidate": {
+        "tools": [
+          "data_search"
+        ],
+        "agents": [
+          "data_analysis_agent"
+        ],
+        "operation": {
+          "kind": "generate",
+          "constraint_skill_ids": [],
+          "document_identity": {
+            "title": "项目月度经营复盘报告",
+            "source": "generated",
+            "evidence": "根据我们项目最近一个月的真实经营数据和之前决定的目标，写一份复盘报告，解释收入变化并提出后续改进建议"
+          },
+          "skill_assessments": [
+            {
+              "skill_id": "data_search",
+              "metadata_consistent": true,
+              "applicable": true,
+              "request_evidence": "根据我们项目最近一个月的真实经营数据",
+              "conflicts": [],
+              "missing_inputs": []
+            },
+            {
+              "skill_id": "data_analysis_agent",
+              "metadata_consistent": true,
+              "applicable": true,
+              "request_evidence": "解释收入变化并提出后续改进建议",
+              "conflicts": [],
+              "missing_inputs": []
+            }
+          ]
+        },
+        "reasoning": "用户请求生成一份基于真实经营数据的复盘报告，当前文档为空且无历史数据，需先获取数据。主目标明确为‘基于真实经营数据与既定目标对比’，因此必须调用 data_search 获取用户自有业务数据（如收入、目标等），并可能需 data_analysis_agent 进行量化分析。由于当前文档为空，无法进行 patch 或 transform 操作，需使用 generate 创建新文档。需检查是否需外部数",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "复盘报告",
+        "inputs": [
+          {
+            "id": "missing",
+            "need": "过去一个月的真实经营数据（收入、成本、用户数等）",
+            "source": "business_data",
+            "state": "missing",
+            "evidence": "无",
+            "query": "检索过去一个月的真实经营数据，包括收入、成本、用户数等关键指标",
+            "reason": "用户要求基于真实经营数据撰写报告，但当前文档为空，且未提供历史数据或业务背景。"
+          }
+        ],
+        "self_contained_reason": "无",
+        "acceptance": [
+          {
+            "id": "data_accuracy",
+            "criterion": "报告中引用的收入变化数据必须与过去一个月的真实经营数据一致"
+          },
+          {
+            "id": "goal_alignment",
+            "criterion": "报告中提出的改进建议必须基于之前决定的目标，并针对收入变化提出具体、可执行的措施"
+          },
+          {
+            "id": "format_compliance",
+            "criterion": "报告格式符合复盘报告的标准结构，包含数据分析和改进建议两部分"
+          }
+        ]
+      },
+      "effective": {
+        "tools": [
+          "data_search"
+        ],
+        "agents": [
+          "data_analysis_agent"
+        ],
+        "operation": {
+          "kind": "generate",
+          "constraint_skill_ids": [],
+          "document_identity": {
+            "title": "项目月度经营复盘报告",
+            "source": "generated",
+            "evidence": "根据我们项目最近一个月的真实经营数据和之前决定的目标，写一份复盘报告，解释收入变化并提出后续改进建议"
+          },
+          "skill_assessments": [
+            {
+              "skill_id": "data_search",
+              "metadata_consistent": true,
+              "applicable": true,
+              "request_evidence": "根据我们项目最近一个月的真实经营数据",
+              "conflicts": [],
+              "missing_inputs": []
+            },
+            {
+              "skill_id": "data_analysis_agent",
+              "metadata_consistent": true,
+              "applicable": true,
+              "request_evidence": "解释收入变化并提出后续改进建议",
+              "conflicts": [],
+              "missing_inputs": []
+            }
+          ]
+        },
+        "reasoning": "用户请求生成一份基于真实经营数据的复盘报告，当前文档为空且无历史数据，需先获取数据。主目标明确为‘基于真实经营数据与既定目标对比’，因此必须调用 data_search 获取用户自有业务数据（如收入、目标等），并可能需 data_analysis_agent 进行量化分析。由于当前文档为空，无法进行 patch 或 transform 操作，需使用 generate 创建新文档。需检查是否需外部数",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": false
+      },
+      "passed": false,
+      "seconds": 18.38
+    }
+  ]
+}

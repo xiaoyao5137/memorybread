@@ -25,13 +25,13 @@ from urllib import error as urllib_error, request as urllib_request
 from energy_policy import EnergyPolicy
 from idle_compute.model_manager import _log_model_event
 from knowledge.fragment_grouper import FragmentGrouper
+from embedding.document_source_audit import audit_source_mismatches, record_source_mismatch
+from runtime_endpoints import service_base_url
 
 logger = logging.getLogger(__name__)
 
 _RAG_LOCK_FILE = "/tmp/memory-bread-rag.lock"
 _PROCESS_LOCK_FILE = "/tmp/memory-bread-knowledge-extract.lock"
-_DEFAULT_CORE_ENGINE_URL = "http://127.0.0.1:7070"
-_DEFAULT_MODEL_API_URL = "http://127.0.0.1:7071"
 _BAKE_RUN_ENDPOINT = "/api/bake/run"
 _BAKE_QUEUE_STATUS_ENDPOINT = "/api/bake/queue-status"
 _DATA_EXTRACTION_ENDPOINT = "/api/data/sources/extract"
@@ -84,6 +84,15 @@ _BATTERY_BACKLOG_BAKE_LIMIT = 3
 _SUBSTANTIVE_DOCUMENT_MIN_CHARS = 200
 _ARTIFACT_VECTOR_CHECK_INTERVAL_SECS = 5 * 60
 _VECTOR_CONSISTENCY_AUDIT_INTERVAL_SECS = 24 * 60 * 60
+# 一致性审计与持久 bake 向量补齐都属于“可延后的维护”，原设计要求提取/烘焙积压
+# 完全归零才运行；但采集几乎不会瞬时归零，24h 一次的一致性审计会被长期饿死，
+# 账本与 Qdrant 的点漂移（账本说已索引、实际丢点）于是永远没人修复。改为“积压不高
+# 即运行”：待提炼 capture 与待烘焙 bake 候选都只在个位数到十几二十条时也应放行一次
+# 维护；只有真正的规模化积压（超过该上限）才继续让维护为 LLM 让路。
+_MAINTENANCE_BACKLOG_CEILING = 20
+# 每轮 bake 向量补齐额外做的 Qdrant 驻留核对窗口大小：核对若干条“账本看似已完成”的
+# 文档，把点已丢失的漂移文档重新投入重建通道（复用 artifact_document_version_exists）。
+_BAKE_RESIDENCY_SWEEP_LIMIT = 64
 _DATA_EXTRACTION_INTERVAL_SECS = 5 * 60
 # 推理运行时进程守卫巡检周期：保证全局最多 1 个 llama-server，孤儿及时回收。
 _RUNTIME_GUARD_INTERVAL_SECS = 15 * 60
@@ -261,6 +270,9 @@ class BackgroundProcessor:
         self._consecutive_backlog_bake_runs = 0
         self._latest_bake_actionable_count = 0
         self._latest_pending_capture_count = 0
+        # 持久 bake 文档 Qdrant 驻留核对的轮转游标：每轮扫不同窗口，多轮覆盖全量，
+        # 保证“账本在、点不在”的漂移文档迟早会被核到并重建，而不依赖 24h 一次的一致性审计。
+        self._bake_residency_offset = 0
         # no_op 活锁防护：上一次触发的 run 若被 queue-status 证实零进展则累加，
         # 达到阈值后暂停周期性触发并指数退避。
         self._consecutive_no_progress_bake_runs = 0
@@ -771,11 +783,11 @@ class BackgroundProcessor:
 
     @staticmethod
     def _get_core_engine_url() -> str:
-        return os.getenv("CORE_ENGINE_URL") or os.getenv("MEMORY_BREAD_CORE_URL") or _DEFAULT_CORE_ENGINE_URL
+        return service_base_url("core")
 
     @staticmethod
     def _get_model_api_url() -> str:
-        return os.getenv("MODEL_API_URL") or _DEFAULT_MODEL_API_URL
+        return service_base_url("model_api")
 
     def _all_inference_queues_idle(self) -> bool:
         """同时确认本进程 P1 队列和 7071 实际模型队列均为空。
@@ -2251,15 +2263,20 @@ class BackgroundProcessor:
                     self._unmark_group_extracting(group_id, succeeded)
 
             try:
-                knowledge = get_global_queue().submit_sync(
+                # Waiting for P1 must not monopolize the OCR/IPC event loop.
+                knowledge = await asyncio.to_thread(
+                    get_global_queue().submit_sync,
                     Priority.P1,
                     _run_extract_merged,
                     timeout=600.0,
                     lane=LANE_P1_CAPTURE,
+                    # 等待上一条 P2 完成不能侵占长语义组的实际执行预算。
+                    queue_timeout=600.0,
                 )
             except QueueEvictedError as ee:
                 logger.warning(f"extract_merged 被队列淘汰: {ee}")
-                self._record_timeline_extraction_failure(capture_ids)
+                # 调度让位不说明片段语义或输出有问题；不能把连续 P0 抢占计为
+                # 内容失败，进而把本可一次完成的组拆成许多单条重复提炼。
                 return False
 
             if not knowledge:
@@ -2628,7 +2645,14 @@ class BackgroundProcessor:
             }
 
     async def backfill_bake_document_vectors(self, limit: int = 128) -> dict:
-        """Backfill vectors from durable bake documents, independent of captures."""
+        """Backfill vectors from durable bake documents, independent of captures.
+
+        除了账本判定为待补齐的文档外，额外对一批“账本看似已完成”的文档做 Qdrant
+        驻留核对：这类文档的向量点可能被删除或从未真正持久化，但 SQLite 账本仍标
+        记为已索引，导致 5 分钟一次的补齐通道永远 SKIP 它们。驻留核对复用
+        _process_bake_document_vector_batch 内已有的 artifact_document_version_exists 过
+        滤：健康的直接跳过，漂移的（账本在、点不在）会重新编码并回写。
+        """
         try:
             expected_model_name = await asyncio.to_thread(
                 self._current_embedding_model_name
@@ -2638,22 +2662,43 @@ class BackgroundProcessor:
                 limit,
                 expected_model_name,
             )
-            if not documents:
+            probe_limit = min(max(1, int(limit)), _BAKE_RESIDENCY_SWEEP_LIMIT)
+            probe_offset = getattr(self, "_bake_residency_offset", 0)
+            probes = await asyncio.to_thread(
+                self._load_bake_residency_probe_documents,
+                probe_limit,
+                probe_offset,
+            )
+            # 游标轮转：不足一个窗口说明已扫到尾部，下一轮从 0 重新开始覆盖全量。
+            if len(probes) < probe_limit:
+                self._bake_residency_offset = 0
+            else:
+                self._bake_residency_offset = probe_offset + probe_limit
+
+            seen_ids: set[int] = set()
+            candidates: list[dict] = []
+            for document in list(documents) + list(probes):
+                document_id = int(document.get("id") or 0)
+                if document_id and document_id not in seen_ids:
+                    seen_ids.add(document_id)
+                    candidates.append(document)
+            if not candidates:
                 return {"candidate_count": 0, "processed_count": 0}
 
             processed = 0
-            for offset in range(0, len(documents), 4):
+            for offset in range(0, len(candidates), 4):
                 processed += await self._process_bake_document_vector_batch(
-                    documents[offset : offset + 4]
+                    candidates[offset : offset + 4]
                 )
                 await asyncio.sleep(0)
             logger.info(
-                "持久 bake 文档向量补齐完成: candidates=%s processed=%s",
+                "持久 bake 文档向量补齐完成: pending=%s residency_probe=%s processed=%s",
                 len(documents),
+                len(probes),
                 processed,
             )
             return {
-                "candidate_count": len(documents),
+                "candidate_count": len(candidates),
                 "processed_count": processed,
             }
         except Exception as exc:
@@ -2735,19 +2780,24 @@ class BackgroundProcessor:
                     "title": snapshot.title,
                     "doc_type": document.get("doc_type"),
                     "updated_at": document.get("updated_at"),
+                    "source_snapshot_id": document.get("source_snapshot_id"),
+                    "source_body_hash": hashlib.sha256(str(document.get("full_content") or "").encode("utf-8")).hexdigest(),
                     "model_name": model.model_name,
                 },
             ):
                 processed += 1
         return processed
 
+    @audit_source_mismatches("vector_schedule")
     def _load_pending_bake_documents(
         self,
         limit: int,
         expected_model_name: Optional[str] = None,
+        source_versions_only: bool = False,
     ) -> list[dict]:
         try:
             with sqlite3.connect(self.db_path) as conn:
+                conn.execute("BEGIN")
                 tables = {
                     str(row[0])
                     for row in conn.execute(
@@ -2760,6 +2810,16 @@ class BackgroundProcessor:
                 }
                 if tables != {"bake_documents", "artifact_vector_index"}:
                     return []
+                has_heads = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE name='bake_document_source_heads'").fetchone())
+                if source_versions_only and not has_heads:
+                    return []
+                from embedding.document_source import source_snapshot_select
+                source_id = source_snapshot_select(conn)
+                invalid_head_filter = (
+                    "AND (NOT EXISTS(SELECT 1 FROM bake_document_source_heads h WHERE h.document_id=d.id) OR "
+                    + source_id + " IS NOT NULL)" if has_heads else ""
+                )
+                source_filter = "AND " + source_id + " IS NOT NULL" if source_versions_only else ""
                 # 嵌入后端切换后，旧模型索引的向量也视为待重建。
                 stale_model_clause = ""
                 if expected_model_name:
@@ -2767,6 +2827,24 @@ class BackgroundProcessor:
                         "OR SUM(CASE WHEN COALESCE(v.model_name, '') != ? "
                         "THEN 1 ELSE 0 END) > 0"
                     )
+                if has_heads:
+                    # Count only bounded pending candidates rejected by the
+                    # source gate; do not let invalid heads consume valid slots.
+                    rejected = conn.execute(f"""
+                        SELECT d.id,h.snapshot_id FROM bake_documents d
+                        JOIN bake_document_source_heads h ON h.document_id=d.id
+                        LEFT JOIN artifact_vector_index v ON v.document_id=d.id
+                        WHERE d.deleted_at IS NULL AND {source_id} IS NULL
+                          AND (LENGTH(COALESCE(d.full_content,''))>=?
+                            OR LENGTH(COALESCE(d.sections_json,''))>=?)
+                        GROUP BY d.id
+                        HAVING COUNT(v.id)=0 OR MAX(v.indexed_at)<d.updated_at
+                            {stale_model_clause}
+                        ORDER BY d.updated_at DESC,d.id DESC LIMIT ?
+                    """, (_SUBSTANTIVE_DOCUMENT_MIN_CHARS, _SUBSTANTIVE_DOCUMENT_MIN_CHARS,
+                          *([expected_model_name] if expected_model_name else []), max(1, int(limit)))).fetchall()
+                    for rejected_id, rejected_head in rejected:
+                        record_source_mismatch(rejected_id, "head_invalid", expected=rejected_head)
                 rows = conn.execute(
                     f"""
                     SELECT
@@ -2777,14 +2855,18 @@ class BackgroundProcessor:
                         d.full_content,
                         d.sections_json,
                         d.source_url,
-                        d.updated_at
+                        d.updated_at,
+                        {source_id} AS source_snapshot_id
                     FROM bake_documents d
                     LEFT JOIN artifact_vector_index v
                       ON v.document_id = d.id
                     WHERE d.deleted_at IS NULL
+                      {source_filter}
+                      {invalid_head_filter}
                       AND (
                           LENGTH(COALESCE(d.full_content, '')) >= ?
                           OR LENGTH(COALESCE(d.sections_json, '')) >= ?
+                          OR {source_id} IS NOT NULL
                       )
                     GROUP BY d.id
                     HAVING COUNT(v.id) = 0
@@ -2817,6 +2899,83 @@ class BackgroundProcessor:
                 "sections_json": row[5],
                 "source_url": row[6],
                 "updated_at": row[7],
+                "source_snapshot_id": row[8],
+            }
+            for row in rows
+        ]
+
+    def _load_bake_residency_probe_documents(
+        self,
+        limit: int,
+        offset: int,
+    ) -> list[dict]:
+        """Return a rotating window of bake documents that already have a durable
+        vector ledger row.
+
+        这些文档在 待补齐 SQL 的 HAVING 里会被判为“已完成”而跳过，但它们的 Qdrant
+        点可能已经丢失（账本与集合漂移）。把这一窗口交给
+        _process_bake_document_vector_batch 后，它内部的 artifact_document_version_exists
+        会真实核对 Qdrant 驻留：健康的直接跳过，漂移的才重建。仅做有界窗口 + 游标
+        轮转，避免每轮对全量健康文档重复 retrieve。
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                tables = {
+                    str(row[0])
+                    for row in conn.execute(
+                        """
+                        SELECT name FROM sqlite_master
+                        WHERE type = 'table'
+                          AND name IN ('bake_documents', 'artifact_vector_index')
+                        """
+                    )
+                }
+                if tables != {"bake_documents", "artifact_vector_index"}:
+                    return []
+                rows = conn.execute(
+                    """
+                    SELECT
+                        d.id,
+                        d.title,
+                        d.doc_type,
+                        d.summary,
+                        d.full_content,
+                        d.sections_json,
+                        d.source_url,
+                        d.updated_at
+                    FROM bake_documents d
+                    WHERE d.deleted_at IS NULL
+                      AND EXISTS (
+                          SELECT 1 FROM artifact_vector_index v
+                          WHERE v.document_id = d.id
+                      )
+                      AND (
+                          LENGTH(COALESCE(d.full_content, '')) >= ?
+                          OR LENGTH(COALESCE(d.sections_json, '')) >= ?
+                      )
+                    ORDER BY d.id ASC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (
+                        _SUBSTANTIVE_DOCUMENT_MIN_CHARS,
+                        _SUBSTANTIVE_DOCUMENT_MIN_CHARS,
+                        max(1, int(limit)),
+                        max(0, int(offset)),
+                    ),
+                ).fetchall()
+        except (sqlite3.Error, OSError) as exc:
+            logger.warning("读取持久文档驻留核对候选失败: %s", exc)
+            return []
+        return [
+            {
+                "id": row[0],
+                "title": row[1],
+                "doc_type": row[2],
+                "summary": row[3],
+                "full_content": row[4],
+                "sections_json": row[5],
+                "source_url": row[6],
+                "updated_at": row[7],
             }
             for row in rows
         ]
@@ -2836,6 +2995,18 @@ class BackgroundProcessor:
         except Exception as exc:
             logger.warning("向量一致性审计失败: %s", exc)
             return {"available": False, "error": str(exc)}
+
+    def _maintenance_allowed(self) -> bool:
+        """判断当前是否可以跑一次可延后的向量维护（一致性审计 / bake 向量补齐）。
+
+        不再要求积压严格为 0，而是“积压不高”：只要待提炼 capture 与待烘焙 bake 候
+        选都在 _MAINTENANCE_BACKLOG_CEILING 以内就放行，避免采集常年保留少量积压时
+        把 24h 一次的审计长期饿死。只有真正的高积压才让维护为 LLM 让路。
+        """
+        return (
+            self._latest_pending_capture_count <= _MAINTENANCE_BACKLOG_CEILING
+            and self._latest_bake_actionable_count <= _MAINTENANCE_BACKLOG_CEILING
+        )
 
     def _load_document_backfill_captures(self, limit: int) -> list[dict]:
         url_markers = (
@@ -3067,12 +3238,23 @@ class BackgroundProcessor:
 
             # 使用同步方法提炼（V2 版本）—— 走 InferenceQueue 统一调度
             from inference_queue import LANE_P1_CAPTURE, Priority, get_global_queue, QueueEvictedError
+            def extract_in_queue():
+                # SQLite connections belong to the thread that created them.
+                extraction_conn = sqlite3.connect(self.db_path)
+                try:
+                    return extractor.extract_sync(capture_data, db_conn=extraction_conn)
+                finally:
+                    extraction_conn.close()
+
             try:
-                knowledge = get_global_queue().submit_sync(
+                # Waiting for P1 must not monopolize the OCR/IPC event loop.
+                knowledge = await asyncio.to_thread(
+                    get_global_queue().submit_sync,
                     Priority.P1,
-                    lambda: extractor.extract_sync(capture_data, db_conn=conn),
+                    extract_in_queue,
                     timeout=600.0,
                     lane=LANE_P1_CAPTURE,
+                    queue_timeout=600.0,
                 )
             except QueueEvictedError as ee:
                 logger.warning(f"extract_sync 被队列淘汰: {ee}")
@@ -3254,6 +3436,19 @@ class BackgroundProcessor:
             logger.warning("周期性 bake 触发失败: %s", result.get("reason"))
         return result
 
+    async def _refresh_bake_actionable_count(self) -> int:
+        """用 Core 只读 queue-status 对账 bake 可执行积压，返回对账后的口径。
+
+        缓存只在真读到 ``actionable_count`` 时更新：Core 短暂不可用时保留上一次
+        的值并下一轮再试，不能把“读不到”当成“没有积压”，否则又会退化成让位锁死。
+        """
+        queue_status = await asyncio.to_thread(self._get_bake_queue_status)
+        if isinstance(queue_status, dict) and "actionable_count" in queue_status:
+            self._latest_bake_actionable_count = int(
+                queue_status.get("actionable_count") or 0
+            )
+        return self._latest_bake_actionable_count
+
     async def _run_periodic_bake_check(
         self,
         profile,
@@ -3272,26 +3467,48 @@ class BackgroundProcessor:
         if check_ts < next_check_ts:
             return next_check_ts, False
 
-        # capture 优先：capture 严重积压且 bake 队列很小时，周期性 bake 让位，
-        # 把模型槽全部还给提炼；pending 降回恢复阈值以下后自动恢复。
+        # 让位判定依赖 bake 可执行积压，但进程内缓存原先只在 bake 触发路径里刷新，
+        # 而 yield 分支会在触发之前 return：sidecar 重启后缓存回到 __init__ 的初始 0，
+        # 只要 capture 积压没降到恢复阈值就把已有 bake 积压永久判成“没活干”。
+        # 因此凡是判定可能落在“进入让位”或“维持让位”上时，先做一次只读对账再决策。
+        actionable_bake_count = self._latest_bake_actionable_count
         if (
             pending_capture_count >= _CAPTURE_PRIORITY_PENDING_THRESHOLD
-            and self._latest_bake_actionable_count < _CAPTURE_PRIORITY_BAKE_CEILING
+            or (
+                self._bake_yield_to_capture
+                and pending_capture_count >= _CAPTURE_PRIORITY_RESUME_THRESHOLD
+            )
+        ):
+            actionable_bake_count = await self._refresh_bake_actionable_count()
+
+        # capture 优先：capture 严重积压且 bake 队列很小时，周期性 bake 让位，
+        # 把模型槽全部还给提炼；capture 降回恢复阈值以下、或 bake 自身已攒出
+        # 可执行积压时恢复，避免 capture 单边长尾把烘焙饿死数小时。
+        if (
+            pending_capture_count >= _CAPTURE_PRIORITY_PENDING_THRESHOLD
+            and actionable_bake_count < _CAPTURE_PRIORITY_BAKE_CEILING
         ):
             if not self._bake_yield_to_capture:
                 logger.info(
                     "🔁 capture 优先：pending_capture=%s 已达阈值且 actionable_bake=%s 低于 %s，"
                     "暂停周期性 bake 触发，模型槽让给提炼",
                     pending_capture_count,
-                    self._latest_bake_actionable_count,
+                    actionable_bake_count,
                     _CAPTURE_PRIORITY_BAKE_CEILING,
                 )
             self._bake_yield_to_capture = True
-        elif pending_capture_count < _CAPTURE_PRIORITY_RESUME_THRESHOLD:
+        elif (
+            pending_capture_count < _CAPTURE_PRIORITY_RESUME_THRESHOLD
+            or actionable_bake_count >= _CAPTURE_PRIORITY_BAKE_CEILING
+        ):
             if self._bake_yield_to_capture:
                 logger.info(
-                    "🔁 capture 积压已降到 %s 以下，恢复周期性 bake 触发",
+                    "🔁 恢复周期性 bake 触发：pending_capture=%s actionable_bake=%s"
+                    "（capture 已降到 %s 以下或 bake 积压已达 %s）",
+                    pending_capture_count,
+                    actionable_bake_count,
                     _CAPTURE_PRIORITY_RESUME_THRESHOLD,
+                    _CAPTURE_PRIORITY_BAKE_CEILING,
                 )
             self._bake_yield_to_capture = False
         if self._bake_yield_to_capture:
@@ -3300,7 +3517,7 @@ class BackgroundProcessor:
                 + self._scheduled_bake_interval_secs(
                     profile,
                     pending_capture_count,
-                    self._latest_bake_actionable_count,
+                    actionable_bake_count,
                 ),
                 False,
             )
@@ -3420,9 +3637,11 @@ class BackgroundProcessor:
         logger.info(f"🚀 后台处理器启动 (间隔={self.interval}s, 批量={self.batch_size})")
 
         _next_periodic_bake_check_ts: float = 0.0
-        # 启动后的首要任务是消费采集/bake 积压。向量补齐和一致性审计属于
-        # 可延后维护，不能在启动阶段先占用数分钟，让 LLM 有工作却空闲。
+        # 启动后的首要任务是消费采集/bake 积压。向量补齐和一致性审计属于可延后
+        # 维护，高积压时不能在启动阶段先占用数分钟让 LLM 有工作却空闲；但积压不高时
+        # 仍应放行（_maintenance_allowed），否则 24h 审计会被常年少量积压饿死。
         _maintenance_started_at = time.monotonic()
+        _last_source_vector_check_ts: float = 0.0
         _last_artifact_vector_check_ts: float = _maintenance_started_at
         _last_vector_consistency_audit_ts: float = _maintenance_started_at
         _last_runtime_guard_ts: float = 0.0
@@ -3438,12 +3657,17 @@ class BackgroundProcessor:
                 await asyncio.to_thread(self._drain_vector_deletion_queue)
 
                 now = time.monotonic()
-                has_known_extraction_backlog = (
-                    self._latest_pending_capture_count > 0
-                    or self._latest_bake_actionable_count > 0
-                )
+                # Applied source changes are user-visible updates, not bulk
+                # maintenance. Process a bounded batch even with capture backlog.
+                if now - _last_source_vector_check_ts >= 30:
+                    source_documents = await asyncio.to_thread(
+                        self._load_pending_bake_documents, 4, None, True)
+                    if source_documents:
+                        await self._process_bake_document_vector_batch(source_documents)
+                    _last_source_vector_check_ts = now
+                maintenance_allowed = self._maintenance_allowed()
                 if (
-                    not has_known_extraction_backlog
+                    maintenance_allowed
                     and now - _last_vector_consistency_audit_ts
                     >= _VECTOR_CONSISTENCY_AUDIT_INTERVAL_SECS
                 ):
@@ -3459,7 +3683,7 @@ class BackgroundProcessor:
                                 audit.get("orphan_count"),
                             )
                 if (
-                    not has_known_extraction_backlog
+                    maintenance_allowed
                     and now - _last_artifact_vector_check_ts
                     >= _ARTIFACT_VECTOR_CHECK_INTERVAL_SECS
                 ):

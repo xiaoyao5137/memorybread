@@ -83,18 +83,9 @@ def test_running_ollama_api_is_ready_even_when_cli_is_not_on_path(monkeypatch, t
     assert detail["can_auto_install"] is True
 
 
-@pytest.mark.parametrize(
-    ("public_model_id", "ollama_model_name"),
-    [
-        ("mbem-v1-local", "qwen3.5:4b"),
-        ("bge-small-zh", "qllama/bge-small-zh-v1.5:q4_k_m"),
-    ],
-)
-def test_text_and_vector_downloads_use_the_expected_internal_ollama_model(
+def test_text_download_uses_the_expected_internal_ollama_model(
     monkeypatch,
     tmp_path,
-    public_model_id,
-    ollama_model_name,
 ):
     manager = _manager(tmp_path)
     requested_names: list[str] = []
@@ -118,11 +109,38 @@ def test_text_and_vector_downloads_use_the_expected_internal_ollama_model(
 
     monkeypatch.setattr(model_manager_module.urllib.request, "urlopen", fake_urlopen)
 
-    result = manager.download_model(public_model_id)
+    result = manager.download_model("mbem-v1-local")
 
     assert result["status"] == "downloading"
     assert completed.wait(timeout=1)
-    assert requested_names == [ollama_model_name]
+    assert requested_names == ["qwen3.5:4b"]
+
+
+def test_vector_download_uses_verified_local_artifacts_not_ollama(monkeypatch, tmp_path):
+    from embedding import model_sources
+    from model_manager import ModelStatus
+
+    manager = _manager(tmp_path)
+    completed = threading.Event()
+    targets = []
+    monkeypatch.setattr(model_sources, "app_model_dir", lambda: tmp_path / "embedding")
+    monkeypatch.setattr(
+        model_sources,
+        "download_embedding_model",
+        lambda target: targets.append(target) or completed.set() or [],
+    )
+    monkeypatch.setattr(manager, "_check_model_status", lambda _info: ModelStatus.INSTALLED)
+    monkeypatch.setattr(
+        model_manager_module.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not call Ollama")),
+    )
+
+    result = manager.download_model("bge-small-zh")
+
+    assert result["status"] == "downloading"
+    assert completed.wait(timeout=1)
+    assert targets == [tmp_path / "embedding"]
 
 
 def test_download_transport_failure_becomes_terminal_error_status(monkeypatch, tmp_path):

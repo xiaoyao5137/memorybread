@@ -3,12 +3,61 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, Request},
+    http::StatusCode,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{delete, get, post, put},
     Router,
 };
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
+
+const LOCAL_AUTH_HEADER: &str = "x-memorybread-local-token";
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (a, b)| difference | (a ^ b))
+        == 0
+}
+
+fn local_request_authorized(
+    is_browser_request: bool,
+    is_preflight: bool,
+    expected: Option<&str>,
+    supplied: Option<&str>,
+) -> bool {
+    if !is_browser_request || is_preflight || expected.is_none() {
+        return true;
+    }
+    let expected = expected.unwrap_or_default().trim();
+    let supplied = supplied.unwrap_or_default();
+    !expected.is_empty() && constant_time_equal(expected.as_bytes(), supplied.as_bytes())
+}
+
+async fn require_local_instance_token(request: Request, next: Next) -> Response {
+    let is_browser_request = request.headers().contains_key("origin");
+    let is_preflight = request.method() == axum::http::Method::OPTIONS;
+    let token_path = std::env::var_os("MEMORY_BREAD_LOCAL_AUTH_TOKEN_FILE");
+    if is_browser_request && !is_preflight {
+        if let Some(token_path) = token_path {
+            let expected = std::fs::read_to_string(token_path).unwrap_or_default();
+            let supplied = request
+                .headers()
+                .get(LOCAL_AUTH_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            if !local_request_authorized(true, false, Some(&expected), Some(supplied)) {
+                return (StatusCode::UNAUTHORIZED, "LOCAL_AUTH_REQUIRED").into_response();
+            }
+        }
+    }
+    next.run(request).await
+}
 
 use super::{
     handlers::{
@@ -18,7 +67,7 @@ use super::{
             delete_bake_capture, delete_bake_document, delete_bake_knowledge, delete_bake_memory,
             delete_bake_sop, get_bake_artifact_audits, get_bake_capture,
             get_bake_capture_screenshot, get_bake_document, get_bake_knowledge,
-            get_bake_memory_preview, get_bake_memory_relations, get_bake_overview,
+            get_bake_memory_preview, get_bake_memory_relations, get_bake_overview, get_document_source_health,
             get_bake_queue_status, get_bake_sop, get_bake_style_config, ignore_bake_memory,
             initialize_bake_memories, list_bake_captures, list_bake_documents, list_bake_knowledge,
             list_bake_memories, list_bake_sops, promote_bake_memory_to_document,
@@ -41,7 +90,7 @@ use super::{
             cancel_creation_inline_edit, generate_document, get_history,
             get_inline_edit_capabilities, list_history, preview_references, run_creation_agent,
             run_creation_brainstorm_turn, run_creation_inline_edit, save_history, start_history,
-            undo_creation_inline_edit, update_history_progress,
+            undo_creation_inline_edit, undo_creation_operation, update_history_progress,
         },
         creation_skill::{
             analyze_creation_skill, create_creation_skill_analysis_job, delete_creation_skill,
@@ -152,6 +201,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             post(run_capture_cleanup_now),
         )
         .route("/preferences/:key", put(update_preference))
+        .route("/api/permissions", get(super::handlers::permissions::list_permissions))
+        .route("/api/permissions/:id/:action", post(super::handlers::permissions::permission_action))
         .route("/api/config-checks", get(list_config_checks))
         .route("/api/config-checks/:id/verify", post(run_config_check))
         .route("/api/config-checks/:id/install", post(install_config_check))
@@ -159,6 +210,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/pii/scrub", post(pii_scrub))
         .route("/api/creation/generate", post(generate_document))
         .route("/api/creation/agent/run", post(run_creation_agent))
+        .route("/api/creation/operations/undo", post(undo_creation_operation))
         .route(
             "/api/creation/inline-edit/capabilities",
             get(get_inline_edit_capabilities),
@@ -371,6 +423,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/bake/documents",
             get(list_bake_documents).post(create_bake_document),
         )
+        .route("/api/bake/documents/source-health",get(get_document_source_health))
+        .route("/api/bake/documents/:id/summary/regenerate",
+            post(crate::api::handlers::bake::regenerate_bake_document_summary))
+        .route("/api/bake/documents/:id/summary/retry",
+            post(crate::api::handlers::bake::retry_bake_document_summary))
         .route(
             "/api/bake/documents/:id",
             get(get_bake_document)
@@ -385,6 +442,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/bake/documents/:id/refresh",
             post(refresh_bake_document),
         )
+        .route("/api/bake/documents/:id/refresh/cancel",
+            post(crate::api::handlers::bake::cancel_bake_document_refresh))
         .route(
             "/api/bake/documents/:id/refresh-policy",
             put(set_bake_document_refresh_policy),
@@ -447,6 +506,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             get(get_bake_memory_preview),
         )
         .layer(cors)
+        .layer(middleware::from_fn(require_local_instance_token))
         .with_state(state)
 }
 
@@ -459,4 +519,29 @@ pub async fn start_server(state: Arc<AppState>, addr: &str) -> anyhow::Result<()
     info!("记忆面包 API 服务已启动，监听地址: http://{addr}");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod local_auth_tests {
+    use super::local_request_authorized;
+
+    #[test]
+    fn browser_requests_require_the_current_instance_token() {
+        assert!(local_request_authorized(false, false, Some("secret"), None));
+        assert!(local_request_authorized(true, true, Some("secret"), None));
+        assert!(local_request_authorized(true, false, None, None));
+        assert!(!local_request_authorized(true, false, Some("secret"), None));
+        assert!(!local_request_authorized(
+            true,
+            false,
+            Some("secret"),
+            Some("old-secret")
+        ));
+        assert!(local_request_authorized(
+            true,
+            false,
+            Some("secret"),
+            Some("secret")
+        ));
+    }
 }

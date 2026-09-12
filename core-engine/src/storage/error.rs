@@ -4,6 +4,10 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
+    #[error("DOCUMENT_AUTOMATIC_WRITES_PAUSED")]
+    DocumentAutomaticWritesPaused { bucket: u8 },
+    #[error("SOURCE_WRITES_PAUSED")]
+    DocumentSourceWritesPaused,
     #[error("SQLite 错误: {0}")]
     Sqlite(#[from] rusqlite::Error),
 

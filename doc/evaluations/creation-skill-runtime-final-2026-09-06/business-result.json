@@ -1,0 +1,37 @@
+{
+  "prior_events": null,
+  "case": "business",
+  "session_id": "skill-governance-acceptance-business-1788630996",
+  "history": {
+    "id": 138,
+    "progress_epoch": 1
+  },
+  "catalog": [
+    {
+      "id": "creation-skill-general-solution-review-doc",
+      "title": "技术架构方案评审文档模板"
+    },
+    {
+      "id": "creation-skill-microservice-module-tech-design",
+      "title": "微服务模块技术方案文档"
+    },
+    {
+      "id": "creation-skill-gpu-cost-weekly-report",
+      "title": "GPU成本优化周报模板"
+    }
+  ],
+  "tools": [],
+  "note": "Local model; empty requested tool list. Strict workflows may resolve their own declared tools. Tests routing, assembly and persistence, not factual research quality.",
+  "actual_tools": [],
+  "title": "快手灵机非L0商家爆款视频增长方案",
+  "chars": 3385,
+  "checks": {
+    "completed": true,
+    "content_saved": true,
+    "independent_title": true,
+    "expected_selection": true,
+    "preview_titles": true
+  },
+  "passed": true,
+  "admission": []
+}

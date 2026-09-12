@@ -63,6 +63,7 @@ pub enum ResponseStatus {
 pub enum TaskRequest {
     /// 心跳检测
     Ping,
+    InteractiveOcrActivity { activity_id: String, active: bool },
     /// 截图 OCR 识别
     Ocr(OcrRequest),
     /// 音频 ASR 转录
@@ -84,6 +85,16 @@ pub struct OcrRequest {
     pub capture_id: i64,
     /// JPEG 截图文件的绝对路径
     pub screenshot_path: String,
+    #[serde(default)]
+    pub priority: OcrPriority,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OcrPriority {
+    #[default]
+    Background,
+    Foreground,
 }
 
 /// ASR 请求
@@ -255,6 +266,7 @@ mod tests {
         let req = IpcRequest::new(TaskRequest::Ocr(OcrRequest {
             capture_id: 42,
             screenshot_path: "/tmp/test.jpg".to_string(),
+            priority: Default::default(),
         }));
         let json = serde_json::to_string(&req).unwrap();
         let decoded: IpcRequest = serde_json::from_str(&json).unwrap();

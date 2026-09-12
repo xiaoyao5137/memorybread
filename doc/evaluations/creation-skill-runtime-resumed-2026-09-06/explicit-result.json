@@ -1,0 +1,48 @@
+{
+  "prior_events": "../doc/evaluations/creation-skill-runtime-2026-09-06/explicit-events.jsonl.gz",
+  "case": "explicit",
+  "session_id": "skill-governance-acceptance-explicit-1788630307",
+  "history": {
+    "id": 137
+  },
+  "catalog": [
+    {
+      "id": "creation-skill-general-solution-review-doc",
+      "title": "技术架构方案评审文档模板"
+    },
+    {
+      "id": "creation-skill-microservice-module-tech-design",
+      "title": "微服务模块技术方案文档"
+    },
+    {
+      "id": "creation-skill-gpu-cost-weekly-report",
+      "title": "GPU成本优化周报模板"
+    }
+  ],
+  "tools": [],
+  "note": "Local model; empty requested tool list. Strict workflows may resolve their own declared tools. Tests routing, assembly and persistence, not factual research quality.",
+  "actual_tools": [
+    "internet_search",
+    "memory_search"
+  ],
+  "title": "灵机商家增长试点方案",
+  "chars": 4478,
+  "checks": {
+    "completed": true,
+    "content_saved": true,
+    "independent_title": true,
+    "expected_selection": true,
+    "specified_title": true,
+    "preview_titles": true
+  },
+  "passed": true,
+  "admission": [
+    {
+      "admitted": true,
+      "code": "explicit_selection",
+      "fingerprint": "dd4dfc305d59e819bd9852737bae32114fcecc3dd420fe1f9ad5a02083d680ec",
+      "skill_id": "creation-skill-general-solution-review-doc",
+      "source": "user"
+    }
+  ]
+}

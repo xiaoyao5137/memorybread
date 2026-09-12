@@ -18,6 +18,8 @@ from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from rag.query_planner import ArtifactQueryPlan, build_artifact_query_plan
+from embedding.document_source_audit import audit_source_mismatches, record_source_mismatch
+from runtime_endpoints import service_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -258,25 +260,8 @@ def _artifact_doc_key(source_type: str, artifact_id: int) -> str:
 
 
 def _canonical_document_url(url: Optional[str]) -> str:
-    value = str(url or "").strip()
-    if not value:
-        return ""
-    try:
-        parsed = urlsplit(value)
-    except ValueError:
-        return ""
-    if not parsed.netloc:
-        return ""
-    path = (parsed.path or "/").rstrip("/") or "/"
-    return urlunsplit(
-        (
-            parsed.scheme.lower() or "https",
-            parsed.netloc.lower(),
-            path,
-            "",
-            "",
-        )
-    )
+    from embedding.document_chunks import _canonicalize_url
+    return _canonicalize_url(url) or ""
 
 
 def _document_url_doc_key(url: Optional[str]) -> str:
@@ -460,7 +445,14 @@ class VectorRetriever:
     """Qdrant 向量检索器"""
 
     # sidecar 内部向量搜索服务地址（main_v2.py 启动，避免 Qdrant 文件锁冲突）
-    _INTERNAL_SEARCH_URL = "http://127.0.0.1:7072/vector_search"
+    # 内部向量搜索复用 sidecar 单进程内的 Qdrant 本地存储；后台索引写入会短暂持有
+    # 存储锁。单次 3s 超时遇到写入突发（批量 upsert / 提炼任务）会把“读阻塞”误判为
+    # “服务不可用”，进而硬失败整条咨询（前端表现为“咨询生成失败，请稍后重试”）。这里
+    # 对瞬时失败（连接被拒 / 超时 / 5xx）做有界重试 + 退避，等写入锁释放后再读；连续
+    # 重试仍失败才按既有策略抛错，仍不降级到直连 Qdrant 或关键词兜底。
+    _INTERNAL_SEARCH_ATTEMPTS = 3
+    _INTERNAL_SEARCH_TIMEOUT = 5.0
+    _INTERNAL_SEARCH_BACKOFF_SECONDS = (0.5, 1.0)
 
     def __init__(
         self,
@@ -507,8 +499,13 @@ class VectorRetriever:
         top_k: int,
         score_threshold: float,
         filters: Optional[VectorSearchFilter],
+        timeout: float = 3.0,
     ) -> Optional[list]:
-        """尝试通过 sidecar 内部 HTTP 服务做向量搜索，避免 Qdrant 文件锁冲突。"""
+        """尝试通过 sidecar 内部 HTTP 服务做向量搜索，避免 Qdrant 文件锁冲突。
+
+        成功返回结果列表（可能为空）；连接被拒 / 超时 / 5xx 等瞬时故障返回 None，并
+        记录失败原因（此前静默吞异常，线上只剩兜底文案无从定位是超时还是服务未起）。
+        """
         try:
             import urllib.request, json as _json
             payload = _json.dumps({
@@ -518,16 +515,62 @@ class VectorRetriever:
                 'filters': self._filters_to_payload(filters),
             }).encode()
             req = urllib.request.Request(
-                self._INTERNAL_SEARCH_URL,
+                service_base_url("vector_search") + "/vector_search",
                 data=payload,
                 headers={'Content-Type': 'application/json'},
                 method='POST',
             )
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = _json.loads(resp.read())
             return data.get('results', [])
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "内部向量搜索 HTTP 调用失败 code=VECTOR_SEARCH_HTTP_FAILED",
+            )
             return None
+
+    def _search_via_internal_http(
+        self,
+        query_vector: list[float],
+        top_k: int,
+        score_threshold: float,
+        filters: Optional[VectorSearchFilter],
+    ) -> Optional[list]:
+        """对内部向量搜索做有界重试，吸收后台索引写入持锁导致的瞬时读阻塞。
+
+        后台提炼 / 索引是常态化的突发写入，写入锁在两次 upsert 之间会释放；单次超时
+        失败并不代表服务真的不可用。这里最多重试 ``_INTERNAL_SEARCH_ATTEMPTS`` 次、逐
+        次退避，全部失败才返回 None 交由上层按既有策略抛错。
+        """
+        import time
+        for attempt in range(self._INTERNAL_SEARCH_ATTEMPTS):
+            raw = self._try_internal_http(
+                query_vector,
+                top_k,
+                score_threshold,
+                filters,
+                timeout=self._INTERNAL_SEARCH_TIMEOUT,
+            )
+            if raw is not None:
+                if attempt:
+                    logger.info("内部向量搜索在第 %d 次重试后成功", attempt)
+                return raw
+            if attempt < self._INTERNAL_SEARCH_ATTEMPTS - 1:
+                backoff = self._INTERNAL_SEARCH_BACKOFF_SECONDS[
+                    min(attempt, len(self._INTERNAL_SEARCH_BACKOFF_SECONDS) - 1)
+                ]
+                logger.warning(
+                    "内部向量搜索第 %d/%d 次尝试失败，%.1fs 后重试（后台索引可能正占用存储锁）",
+                    attempt + 1,
+                    self._INTERNAL_SEARCH_ATTEMPTS,
+                    backoff,
+                )
+                time.sleep(backoff)
+        logger.error(
+            "内部向量搜索连续 %d 次尝试均失败，放弃本次向量召回",
+            self._INTERNAL_SEARCH_ATTEMPTS,
+        )
+        return None
 
     def _get_client(self):
         """创建 Qdrant 直连客户端（仅当内部 HTTP 服务不可用时使用）"""
@@ -539,7 +582,7 @@ class VectorRetriever:
                 client = QdrantClient(host=self.host or "localhost", port=self.port or 6333)
             return client
         except Exception as e:
-            logger.error(f"连接 Qdrant 失败: {e}")
+            logger.error("连接 Qdrant 失败 code=QDRANT_CONNECT_FAILED")
             return None
 
     def is_available(self) -> bool:
@@ -548,7 +591,9 @@ class VectorRetriever:
         if self.qdrant_path:
             try:
                 import urllib.request
-                with urllib.request.urlopen("http://127.0.0.1:7072/health", timeout=2):
+                with urllib.request.urlopen(
+                    service_base_url("vector_search") + "/health", timeout=2
+                ):
                     return True
             except Exception:
                 pass
@@ -568,7 +613,7 @@ class VectorRetriever:
         # 本地模式：始终优先走 sidecar 内部 HTTP（避免 Qdrant 文件锁冲突）。
         # 注意：即使带 metadata filters 也不能直连本地 Qdrant 文件，否则会与 sidecar 写入进程抢锁。
         if self.qdrant_path:
-            raw = self._try_internal_http(query_vector, top_k, score_threshold, filters)
+            raw = self._search_via_internal_http(query_vector, top_k, score_threshold, filters)
             if raw is not None:
                 chunks = []
                 for item in raw:
@@ -643,7 +688,7 @@ class VectorRetriever:
             )
             return collapsed
         except Exception as e:
-            logger.error(f"向量检索失败: {e}")
+            logger.error("向量检索失败 code=VECTOR_SEARCH_FAILED")
             raise RuntimeError(f"向量检索失败: {e}") from e
 
     @staticmethod
@@ -711,7 +756,7 @@ class VectorRetriever:
                 elif len(normalized) > 1:
                     conditions.append(FieldCondition(key="evidence_strength", match=MatchAny(any=normalized)))
         except Exception as exc:
-            logger.warning("构造 Qdrant filter 失败，忽略 metadata filter: %s", exc)
+            logger.warning("构造 Qdrant filter 失败 code=VECTOR_FILTER_FAILED")
             return None
 
         if not conditions:
@@ -772,7 +817,7 @@ class Fts5Retriever:
             logger.debug(f"Capture 字段回退检索返回 {len(chunks)} 条结果")
             return chunks
         except Exception as e:
-            logger.error(f"FTS5 检索失败: {e}")
+            logger.error("FTS5 检索失败 code=FTS_SEARCH_FAILED")
             return []
 
     def _search_by_fts(
@@ -1062,8 +1107,124 @@ class KnowledgeFts5Retriever:
             logger.debug(f"知识库字段回退检索返回 {len(chunks)} 条结果")
             return chunks
         except Exception as e:
-            logger.error(f"知识库检索失败: {e}")
+            logger.error("知识库检索失败 code=KNOWLEDGE_SEARCH_FAILED")
             return []
+
+    @audit_source_mismatches("rag")
+    def materialize_documents(
+        self, chunks: list[RetrievedChunk], query: str,
+    ) -> list[RetrievedChunk]:
+        """Resolve legacy URL vectors to current durable content before fusion.
+
+        Deleted/invalid documents never fall back to their stale capture vectors.
+        Unbaked pages remain explicitly labelled pending_document.
+        """
+        from embedding.document_quality import is_document_shell
+        document_types = {"document", "pending_document"}
+        if not any((c.metadata.get("source_type") or c.source) in document_types for c in chunks):
+            return list(chunks)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            # Hold one SQLite read snapshot across identity, source-head and
+            # body reads; a concurrent refresh must not mix two revisions.
+            conn.execute("BEGIN")
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='bake_documents'").fetchone():
+                return list(chunks)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(bake_documents)")}
+            identity_column = "document_identity" if "document_identity" in columns else "NULL AS document_identity"
+            identities = conn.execute("SELECT id, source_url, deleted_at, " + identity_column + " FROM bake_documents").fetchall()
+            def identity_key(url):
+                return _canonical_document_url(url)
+            by_id = {str(row["id"]): row for row in identities}
+            source_heads = {}
+            raw_source_heads = {}
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='bake_document_source_heads'").fetchone():
+                from embedding.document_source import source_snapshot_select
+                raw_source_heads = dict(conn.execute("SELECT document_id,snapshot_id FROM bake_document_source_heads"))
+                source_heads = {row[0]: row[1] for row in conn.execute(
+                    "SELECT d.id," + source_snapshot_select(conn) + " FROM bake_documents d"
+                ) if row[1] is not None}
+            by_url: dict[str, list] = {}
+            for row in identities:
+                key = identity_key(row["source_url"])
+                if key:
+                    by_url.setdefault(key, []).append(row)
+            plan = build_artifact_query_plan(conn.cursor(), query)
+            rows = {}
+            result = []
+            for chunk in chunks:
+                metadata = chunk.metadata or {}
+                if (metadata.get("source_type") or chunk.source) not in document_types:
+                    result.append(chunk)
+                    continue
+                identifier = metadata.get("document_id") or metadata.get("artifact_id")
+                if not identifier and re.fullmatch(r"document:\d+", chunk.doc_key or ""):
+                    identifier = chunk.doc_key.split(":", 1)[1]
+                url = metadata.get("source_url") or metadata.get("url")
+                if not url and (chunk.doc_key or "").startswith("document_url:"):
+                    url = chunk.doc_key[len("document_url:"):]
+                candidates = by_url.get(identity_key(url), [])
+                identity = by_id.get(str(identifier)) if identifier else None
+                if identity is None:
+                    active = [row for row in candidates if row["deleted_at"] is None]
+                    # Ambiguous URLs must not be attached to an arbitrary document.
+                    identity = active[0] if len(active) == 1 else None
+                    if candidates and identity is None:
+                        continue
+                if identity is None:
+                    if identifier or is_document_shell(chunk.text):
+                        continue
+                    result.append(RetrievedChunk(
+                        capture_id=chunk.capture_id, text=chunk.text, score=chunk.score,
+                        source=chunk.source, doc_key=chunk.doc_key,
+                        metadata={**metadata, "source_type": "pending_document"},
+                    ))
+                    continue
+                if identity["deleted_at"] is not None:
+                    continue
+                doc_id = identity["id"]
+                if doc_id not in rows:
+                    from embedding.document_source import source_summary_select
+                    raw_row = conn.execute("SELECT * FROM bake_documents WHERE id=?", (doc_id,)).fetchone()
+                    safe_row = dict(raw_row)
+                    safe_row["summary"] = conn.execute("SELECT " + source_summary_select(conn, "bake_documents")
+                                                       + " FROM bake_documents WHERE id=?", (doc_id,)).fetchone()[0]
+                    safe_row["_summary_rejected"] = bool(raw_row["summary"]) and safe_row["summary"] is None
+                    if safe_row["_summary_rejected"]:
+                        binding = raw_row["summary_source_snapshot_id"] if "summary_source_snapshot_id" in columns else None
+                        record_source_mismatch(doc_id, "summary_version_mismatch", raw_source_heads.get(doc_id), binding)
+                    rows[doc_id] = safe_row
+                row = rows[doc_id]
+                if chunk.source == "vector" and metadata.get("source_snapshot_id") is not None:
+                    vector_source_id = metadata["source_snapshot_id"]
+                    if type(vector_source_id) is not int or vector_source_id != source_heads.get(doc_id):
+                        record_source_mismatch(doc_id, "snapshot_mismatch", source_heads.get(doc_id), vector_source_id)
+                        continue
+                if doc_id in raw_source_heads and doc_id not in source_heads and chunk.source == "vector":
+                    record_source_mismatch(doc_id, "head_invalid", raw_source_heads[doc_id])
+                    continue
+                if doc_id in source_heads and chunk.source == "vector":
+                    # Old vectors must not lend their relevance score to a new
+                    # source while asynchronous Qdrant deletion is pending.
+                    indexed_at = metadata.get("time") or metadata.get("ts") or 0
+                    try:
+                        current_index = int(indexed_at) == int(row["updated_at"] or 0)
+                    except (ValueError, TypeError):
+                        current_index = False
+                    if (metadata.get("content_origin") != "bake_document" or not current_index
+                            or metadata.get("source_snapshot_id") != source_heads[doc_id]):
+                        record_source_mismatch(doc_id, "index_version_mismatch", source_heads[doc_id], metadata.get("source_snapshot_id"))
+                        continue
+                if is_document_shell(str(row["full_content"] or "")):
+                    continue
+                resolved = self._document_row_to_chunk(row, plan)
+                if not row.get("_summary_rejected"):
+                    resolved.score = chunk.score
+                resolved.metadata["retrieval_method"] = metadata.get("retrieval_method", chunk.source)
+                if doc_id in source_heads:
+                    resolved.metadata["source_snapshot_id"] = source_heads[doc_id]
+                result.append(resolved)
+            return _merge_chunks(result, len(result))
 
     def materialize_durable_knowledge(
         self,
@@ -1203,7 +1364,12 @@ class KnowledgeFts5Retriever:
                 artifact = chunks_by_artifact.get(artifact_id)
                 if artifact is None or not artifact.doc_key or artifact.doc_key in seen:
                     continue
-                artifact.score = chunk.score
+                # A source timeline can cover several unrelated topics. Its
+                # similarity is provenance, not evidence that this artifact is
+                # relevant; the pipeline embeds the artifact itself before its
+                # score can qualify as a semantic match.
+                artifact.metadata["semantic_source_score"] = float(chunk.score or 0.0)
+                artifact.score = 0.0
                 artifact.metadata["retrieval_method"] = "timeline_to_bake_knowledge"
                 artifact.metadata["semantic_source_timeline_id"] = timeline_id
                 result.append(artifact)
@@ -1725,16 +1891,18 @@ class KnowledgeFts5Retriever:
         if not cursor.fetchone():
             return []
 
+        from embedding.document_source import source_summary_select
+        summary_expr = source_summary_select(cursor.connection, "bake_documents")
         terms = plan.candidate_terms
         clause, params = _build_like_clauses(
-            "LOWER(COALESCE(title, '') || ' ' || COALESCE(doc_type, '') || ' ' || COALESCE(summary, '') || ' ' || COALESCE(full_content, '') || ' ' || COALESCE(sections_json, '') || ' ' || COALESCE(source_url, ''))",
+            f"LOWER(COALESCE(title, '') || ' ' || COALESCE(doc_type, '') || ' ' || COALESCE({summary_expr}, '') || ' ' || COALESCE(full_content, '') || ' ' || COALESCE(sections_json, '') || ' ' || COALESCE(source_url, ''))",
             terms,
         )
         candidate_filter = clause or "1=1"
 
         sql = f"""
             SELECT
-                id, title, doc_type, summary, full_content, sections_json, source_url,
+                id, title, doc_type, {summary_expr} AS summary, full_content, sections_json, source_url,
                 source_memory_ids, linked_knowledge_ids, updated_at
             FROM bake_documents
             WHERE deleted_at IS NULL AND {candidate_filter}

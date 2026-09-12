@@ -1,0 +1,504 @@
+{
+  "model": "qwen3.5:4b",
+  "scope": "real routing, writing and acceptance; synthetic documents and supplied evidence; no production session mutation",
+  "cases": [
+    {
+      "id": "provided-document",
+      "checks": {
+        "completed": true,
+        "accepted": true,
+        "no_search": true,
+        "facts": true
+      },
+      "passed": true,
+      "document": "# 本周业务小结\n\n## 核心指标概览\n\n*   **收入情况**：本周实现收入100万元，较上周的80万元有所提升。\n*   **客户增长**：本周新增客户20家，是上周（10家）的两倍。\n\n## 经营分析\n\n业务增长的驱动力明确指向新渠道的贡献。通过拓展新的合作渠道，不仅有效带动了收入的回升至100万元水平，同时也显著提升了获客效率，实现周环比翻倍的新增客户数。",
+      "seconds": 39.38,
+      "events": [
+        {
+          "type": "run.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "goal.updated",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "thinking.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "intent.pending",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "thinking.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "thinking.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "document.identity",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "inputs.assessed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "intent.interpreted",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "agent.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "thinking.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "agent.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "thinking.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "thinking.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "phase.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "agent.started",
+          "actor": {
+            "kind": "agent",
+            "id": "document_writer_agent",
+            "name": "文档撰写 Agent"
+          }
+        },
+        {
+          "type": "thinking.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "document.preview",
+          "actor": {
+            "kind": "agent",
+            "id": "document_writer_agent",
+            "name": "文档撰写 Agent"
+          }
+        },
+        {
+          "type": "document.replaced",
+          "actor": {
+            "kind": "agent",
+            "id": "document_writer_agent",
+            "name": "文档撰写 Agent"
+          }
+        },
+        {
+          "type": "agent.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "document_writer_agent",
+            "name": "文档撰写 Agent"
+          }
+        },
+        {
+          "type": "thinking.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "phase.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "phase.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "agent.started",
+          "actor": {
+            "kind": "agent",
+            "id": "delivery_validation",
+            "name": "核对本轮交付条件"
+          }
+        },
+        {
+          "type": "delivery.checked",
+          "actor": {
+            "kind": "agent",
+            "id": "delivery_validation",
+            "name": "核对本轮交付条件"
+          }
+        },
+        {
+          "type": "agent.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "delivery_validation",
+            "name": "核对本轮交付条件"
+          }
+        },
+        {
+          "type": "phase.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "goal.updated",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "run.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        }
+      ]
+    },
+    {
+      "id": "local-append",
+      "checks": {
+        "completed": true,
+        "accepted": true,
+        "no_search": true,
+        "preserved_outside": true,
+        "added_content": true
+      },
+      "passed": true,
+      "document": "# 会议说明\n\n## 会议安排\n周一上午讨论项目进展。\n欢迎参与讨论。\n\n## 联系方式\n请联系项目组。\n",
+      "seconds": 95.56,
+      "events": [
+        {
+          "type": "run.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "goal.updated",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "thinking.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "intent.pending",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "thinking.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "thinking.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "inputs.assessed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "intent.interpreted",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "agent.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "thinking.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "agent.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "thinking.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "thinking.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "phase.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "agent.started",
+          "actor": {
+            "kind": "agent",
+            "id": "document_transform",
+            "name": "修改指定内容"
+          }
+        },
+        {
+          "type": "thinking.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "document.patch.applied",
+          "actor": {
+            "kind": "agent",
+            "id": "document_transform",
+            "name": "修改指定内容"
+          }
+        },
+        {
+          "type": "thinking.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "phase.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "phase.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "agent.started",
+          "actor": {
+            "kind": "agent",
+            "id": "delivery_validation",
+            "name": "核对本轮交付条件"
+          }
+        },
+        {
+          "type": "delivery.checked",
+          "actor": {
+            "kind": "agent",
+            "id": "delivery_validation",
+            "name": "核对本轮交付条件"
+          }
+        },
+        {
+          "type": "agent.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "delivery_validation",
+            "name": "核对本轮交付条件"
+          }
+        },
+        {
+          "type": "phase.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "run.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        }
+      ]
+    },
+    {
+      "id": "reject-invented-number",
+      "review": {
+        "checks": [
+          {
+            "id": "a",
+            "passed": false,
+            "reason": "输入数据中'本周真实收入'的状态为'missing'，且source_evidence中无任何数据检索结果（data_results为空），无法提供依据真实数据撰写小结的证据。",
+            "evidence": ""
+          }
+        ],
+        "status": "blocked",
+        "corrections": []
+      },
+      "passed": true
+    },
+    {
+      "id": "accept-supported-number",
+      "review": {
+        "checks": [
+          {
+            "id": "a",
+            "passed": true,
+            "reason": "正文 line-2 明确陈述'本周收入100万元'，且 source_evidence 中的 data_results 提供了'本周收入100万元'作为证据，两者一致，满足'依据给定真实数据'的要求。",
+            "evidence": "根据本周收入报表，本周收入100万元。"
+          }
+        ],
+        "status": "pass",
+        "corrections": []
+      },
+      "passed": true
+    },
+    {
+      "id": "reject-no-search-receipt",
+      "error": "CREATION_EVIDENCE_UNAVAILABLE",
+      "passed": true
+    }
+  ]
+}

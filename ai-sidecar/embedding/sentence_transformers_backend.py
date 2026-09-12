@@ -12,21 +12,29 @@ huggingface.co 在线校验拖慢启动。模型缺失时才走境内镜像级�
 from __future__ import annotations
 
 import logging
+import os
 from .base import EmbeddingBackend, EmbeddingVector
-from .model_sources import build_local_files_only_kwargs, resolve_embedding_model_source
+from .model_sources import (
+    MODEL_CAPABILITY_ID,
+    build_local_files_only_kwargs,
+    resolve_embedding_model_source,
+)
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL = "BAAI/bge-small-zh-v1.5"
+_DEFAULT_MODEL = MODEL_CAPABILITY_ID
 _DEFAULT_DIMENSION = 512
 
 
 class SentenceTransformersBackend(EmbeddingBackend):
     """sentence-transformers 本地推理后端（无需 Ollama）"""
 
-    def __init__(self, model_name: str = _DEFAULT_MODEL) -> None:
+    def __init__(self, model_name: str = _DEFAULT_MODEL, device: str = "") -> None:
         self._model_name = model_name
         self._model = None
+        # Small embeddings use CPU by default; automatic MPS selection can block
+        # the first encode indefinitely and contend with the local LLM's GPU.
+        self._device = device.strip() or os.environ.get("MEMORYBREAD_EMBEDDING_DEVICE", "").strip() or "cpu"
 
     def is_available(self) -> bool:
         try:
@@ -41,12 +49,13 @@ class SentenceTransformersBackend(EmbeddingBackend):
             model_source = resolve_embedding_model_source()
             logger.info("加载本地 embedding 模型: %s (源: %s)", self._model_name, model_source)
             kwargs = build_local_files_only_kwargs()
+            kwargs["device"] = self._device
             try:
                 self._model = SentenceTransformer(model_source, **kwargs)
             except TypeError:
                 # 旧版 sentence-transformers 不识别 local_files_only，
                 # 传入的是本地目录，去掉参数重试仍然不会联网。
-                self._model = SentenceTransformer(model_source)
+                self._model = SentenceTransformer(model_source, device=self._device)
         return self._model
 
     def encode(self, texts: list[str]) -> list[EmbeddingVector]:

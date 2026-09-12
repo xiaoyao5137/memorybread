@@ -42,6 +42,12 @@ pub struct RagQueryRequest {
     pub screenshot_height: Option<u32>,
     #[serde(default)]
     pub ocr_text: Option<String>,
+    #[serde(default)]
+    pub manual_instruction: Option<String>,
+    #[serde(default)]
+    pub history_id: Option<i64>,
+    #[serde(default)]
+    pub attachments: Vec<serde_json::Value>,
 }
 
 fn default_top_k() -> usize {
@@ -114,6 +120,14 @@ pub struct RagContext {
     pub screenshot_width: Option<u32>,
     #[serde(default)]
     pub screenshot_height: Option<u32>,
+    #[serde(default)]
+    pub attachments: Vec<serde_json::Value>,
+    /// 本次答案是否实际采用了这条召回记忆（模型标注 [M编号] 时为 true）。
+    #[serde(default)]
+    pub cited: Option<bool>,
+    /// 召回序号，与答案里的 [记忆N] 一一对应。
+    #[serde(default)]
+    pub recall_index: Option<i64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -374,6 +388,9 @@ fn legacy_capture_context(capture_id: i64) -> RagContext {
         screenshot_path: None,
         screenshot_width: None,
         screenshot_height: None,
+        attachments: Vec::new(),
+        cited: None,
+        recall_index: None,
     }
 }
 
@@ -421,6 +438,8 @@ pub struct RagHistoryItem {
 
 #[derive(Deserialize)]
 pub struct SaveRagHistoryRequest {
+    #[serde(default)]
+    pub id: Option<i64>,
     pub query: String,
     pub answer: String,
     #[serde(default)]
@@ -464,7 +483,18 @@ pub async fn save_rag_history(
         model: req.model,
     };
     let storage = state.storage.clone();
-    let id = tokio::task::spawn_blocking(move || storage.insert_rag_session(&session))
+    let id = tokio::task::spawn_blocking(move || {
+        if let Some(id) = req.id {
+            storage.with_conn(|conn| {
+                let count = conn.execute(
+                    "UPDATE rag_sessions SET retrieved_ids=?1, llm_response=?2, latency_ms=?3, model=?4 WHERE id=?5",
+                    rusqlite::params![session.retrieved_ids, session.llm_response, session.latency_ms, session.model, id],
+                )?;
+                if count == 0 { return Err(crate::storage::error::StorageError::Sqlite(rusqlite::Error::QueryReturnedNoRows)); }
+                Ok(id)
+            })
+        } else { storage.insert_rag_session(&session) }
+    })
         .await
         .map_err(|e| ApiError::Internal(format!("保存咨询记录失败: {e}")))??;
     Ok(Json(SaveRagHistoryResponse { id }))
@@ -544,6 +574,9 @@ pub async fn rag_stream(
         "screenshot_width": body.screenshot_width,
         "screenshot_height": body.screenshot_height,
         "ocr_text": body.ocr_text,
+        "manual_instruction": body.manual_instruction,
+        "history_id": body.history_id,
+        "attachments": body.attachments,
     });
     let response = reqwest::Client::new()
         .post(format!("{}/query/stream", state.sidecar_url))
@@ -664,6 +697,9 @@ async fn call_rag_endpoint(
         "screenshot_width": body.screenshot_width,
         "screenshot_height": body.screenshot_height,
         "ocr_text": body.ocr_text,
+        "manual_instruction": body.manual_instruction,
+        "history_id": body.history_id,
+        "attachments": body.attachments,
     });
 
     let response = client
@@ -731,5 +767,27 @@ async fn call_rag_endpoint(
             code,
             message,
         })
+    }
+}
+
+#[cfg(test)]
+mod attachment_contract_tests {
+    use super::*;
+    #[test]
+    fn preserves_multiple_attachment_references_in_history_and_request() {
+        let attachments = serde_json::json!([
+            {"id":"a", "name":"a.png", "type":"image/png", "size":100, "path":"/local/a.png"},
+            {"id":"b", "name":"b.png", "type":"image/png", "size":100, "path":"/local/b.png"}
+        ]);
+        let request: RagQueryRequest = serde_json::from_value(serde_json::json!({
+            "query":"比较图片", "manual_instruction":"比较图片", "history_id":42, "attachments": attachments
+        })).unwrap();
+        assert_eq!(request.attachments.len(), 2);
+        assert_eq!(request.history_id, Some(42));
+        let raw = serde_json::json!([{"capture_id":0, "text":"比较图片", "score":1.0, "source":"floating_assist", "attachments": attachments}]).to_string();
+        let contexts = parse_saved_contexts(Some(&raw));
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].attachments.len(), 2);
+        assert_eq!(contexts[0].attachments[1]["path"], "/local/b.png");
     }
 }

@@ -108,3 +108,108 @@ def test_non_retryable_cloud_http_statuses(status_code):
     assert not CreationService._is_retryable_cloud_error(
         CloudModelRequestError(status_code, "permanent")
     )
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("status", [400, 401, 403, 404])
+def test_specialist_does_not_retry_permanent_error_with_empty_output(monkeypatch, status, streaming):
+    service = object.__new__(CreationService)
+    service.model = "test-local"
+    calls = []
+
+    async def rejected(**kwargs):
+        calls.append(kwargs)
+        raise CloudModelRequestError(status, "private provider detail")
+        yield ""
+
+    monkeypatch.setattr(service, "_stream_direct_completion", rejected)
+    monkeypatch.setattr(service, "_log_creation_usage", lambda **kwargs: None)
+    with pytest.raises(CloudModelRequestError):
+        kwargs = dict(agent_id="test", system_prompt="test", user_prompt="test")
+        if streaming:
+            asyncio.run(_collect_stream(service.stream_specialist_agent(**kwargs)))
+        else:
+            asyncio.run(service.run_specialist_agent(**kwargs))
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_routing_does_not_fallback_on_access_denied(monkeypatch, status):
+    service = object.__new__(CreationService)
+    service.model = "test-local"
+
+    async def rejected(**kwargs):
+        raise CloudModelRequestError(status, "private provider detail")
+        yield ""
+
+    monkeypatch.setattr(service, "_stream_direct_completion", rejected)
+    with pytest.raises(CloudModelRequestError):
+        asyncio.run(service.route_capabilities(query="test", requirement={}))
+
+
+def test_qwen_non_thinking_prompt_closes_reasoning_before_generation():
+    service = object.__new__(CreationService)
+    prompt = service._build_qwen35_prompt("system", "user", disable_thinking=True)
+    assert prompt.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+    assert "/no_think" not in prompt
+    assert service._build_qwen35_prompt("system", "user").endswith("<|im_start|>assistant\n")
+
+@pytest.mark.parametrize("entry", ["analysis", "skill", "document", "json"])
+def test_agent_length_recovery_discards_partial_candidate(monkeypatch, entry):
+    from creation.operations import OperationError
+    service = object.__new__(CreationService)
+    service.model = "local"
+    calls = []
+    async def generate(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            yield "discard this truncated candidate"
+            raise OperationError("CREATION_DOCUMENT_TRUNCATED", "length")
+        yield '{"complete":true}' if entry == "json" else "Complete document."
+    monkeypatch.setattr(service, "_stream_direct_completion", generate)
+    monkeypatch.setattr(service, "_log_creation_usage", lambda **kwargs: None)
+    kwargs = dict(system_prompt="system", user_prompt="original request")
+    if entry in {"analysis", "json"}:
+        result = asyncio.run(service.run_specialist_agent(agent_id="research", json_mode=entry == "json", **kwargs))
+    elif entry == "skill":
+        result = "".join(asyncio.run(_collect_stream(service.stream_specialist_agent(agent_id="skill", **kwargs))))
+    else:
+        result = "".join(asyncio.run(_collect_stream(service.stream_agent_document(**kwargs))))
+    assert result == ('{"complete":true}' if entry == "json" else "Complete document.")
+    assert len(calls) == 2
+    assert calls[1]["num_predict"] > calls[0]["num_predict"]
+    assert all(call["disable_thinking"] for call in calls)
+    assert all(call["user_prompt"] == "original request" for call in calls)
+
+
+def test_agent_length_recovery_stops_at_budget_ceiling(monkeypatch):
+    from creation.operations import OperationError
+    service = object.__new__(CreationService)
+    budgets = []
+    async def generate(**kwargs):
+        budgets.append(kwargs["num_predict"])
+        yield "partial"
+        raise OperationError("CREATION_DOCUMENT_TRUNCATED", "length")
+    monkeypatch.setattr(service, "_stream_direct_completion", generate)
+    emitted = []
+    async def run():
+        with pytest.raises(OperationError, match="length"):
+            async for chunk in service._stream_complete_agent_output(num_predict=1600):
+                emitted.append(chunk)
+    asyncio.run(run())
+    assert budgets == [1600, 6400, 16384]
+    assert emitted == []
+
+@pytest.mark.parametrize("code,key", [("CREATION_DOCUMENT_INVALID", None), ("CREATION_DOCUMENT_TRUNCATED", "test-key")])
+def test_agent_budget_recovery_does_not_retry_unrelated_or_external_errors(monkeypatch, code, key):
+    from creation.operations import OperationError
+    service = object.__new__(CreationService)
+    calls = []
+    async def generate(**kwargs):
+        calls.append(kwargs)
+        yield "partial"
+        raise OperationError(code, "rejected")
+    monkeypatch.setattr(service, "_stream_direct_completion", generate)
+    with pytest.raises(OperationError, match="rejected"):
+        asyncio.run(_collect_stream(service._stream_complete_agent_output(num_predict=1600, creation_api_key=key)))
+    assert len(calls) == 1

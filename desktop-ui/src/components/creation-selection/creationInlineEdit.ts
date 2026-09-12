@@ -1,3 +1,4 @@
+import { prepareCreationMarkdown } from '../../utils/creationMarkdown'
 export type CreationInlineEditAction = 'brainstorm' | 'polish' | 'expand' | 'elaborate'
 
 export interface CreationInlineEditCapabilities {
@@ -101,7 +102,9 @@ const selectionIntersectsUnsupportedContent = (range: Range, container: HTMLElem
 
 const lineAtOffset = (source: string, offset: number) => source.slice(0, offset).split('\n').length
 
-const markdownVisibleTextMap = (source: string) => {
+const markdownVisibleTextMap = (original: string) => {
+  const prepared = prepareCreationMarkdown(original)
+  const source = prepared.text
   let visible = ''
   const charStarts: number[] = []
   const charEnds: number[] = []
@@ -111,8 +114,8 @@ const markdownVisibleTextMap = (source: string) => {
   const append = (value: string, sourceStart: number, sourceEnd: number) => {
     visible += value
     for (let index = 0; index < value.length; index += 1) {
-      charStarts.push(sourceStart + index)
-      charEnds.push(index === value.length - 1 ? sourceEnd : sourceStart + index + 1)
+      charStarts.push(prepared.offsets[sourceStart + index])
+      charEnds.push(prepared.offsets[index === value.length - 1 ? sourceEnd - 1 : sourceStart + index] + 1)
     }
   }
 

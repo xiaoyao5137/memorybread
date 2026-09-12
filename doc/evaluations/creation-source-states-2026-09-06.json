@@ -1,0 +1,247 @@
+{
+  "model": "qwen3.5:4b",
+  "scope": "real routing and input assessment; synthetic documents; no external retrieval",
+  "cases": [
+    {
+      "id": "full-business-regression",
+      "instruction": "创作一篇如何对快手灵机产品大规模吸引非L0商家的方案，为商家制作爆款视频，进而极大提高GMV爆可品和可以使用SOTA视频生成模型的方案。",
+      "candidate": {
+        "tools": [
+          "memory_search",
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "快手灵机非 L0 商家爆款视频增长与 SOTA 模型应用方案",
+            "source": "generated",
+            "evidence": "创作一篇如何对快手灵机产品大规模吸引非 L0 商家的方案，为商家制作爆款视频，进而极大提高 GMV 爆可品和可以使用 SOTA 视频生成模型的方案。"
+          }
+        },
+        "reasoning": "用户请求创作一篇关于快手灵机产品吸引非 L0 商家、制作爆款视频及利用 SOTA 模型提升 GMV 的完整方案文档。当前上下文无现有文档或历史正文，且无用户主动指定的技能。根据规则，当没有明确适用的技能且需要生成新文档时，应优先选择 generate 操作。该操作需包含 document_identity 以明确文档身份，并调用必要的工具（如 memory_search 或 internet_se",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "创作一篇如何对快手灵机产品大规模吸引非 L0 商家的方案，为商家制作爆款视频，进而极大提高 GMV 爆可品和可以使用 SOTA 视频生成模型的方案。",
+        "self_contained_reason": "本轮任务要求创作针对‘快手灵机’和‘非 L0 商家’的具体方案，涉及真实产品（快手灵机）、真实用户群体（非 L0 商家）和真实技术指标（SOTA 模型、GMV）。由于指令中未提供任何项目背景、历史数据或产品具体参数，且‘创作’在此语境下指代基于事实的解决方案而非虚构故事，因此必须依赖真实业务事实来确保方案的可行性和准确性。若仅凭通用原理创作，将导致方案无法落地或违背产品实际能力，故需检索上述三类事实。",
+        "acceptance": [
+          {
+            "id": "fact_dependency_verified",
+            "criterion": "方案中提到的快手灵机功能、SOTA 模型能力及非 L0 商家特征必须基于检索到的公开事实或真实业务数据，不得虚构产品参数或能力。"
+          },
+          {
+            "id": "target_audience_accuracy",
+            "criterion": "方案策略必须针对真实存在的非 L0 商家群体及其痛点，而非 L0 商家的定义和特征需符合快手平台实际情况。"
+          },
+          {
+            "id": "technical_feasibility",
+            "criterion": "方案中关于使用 SOTA 视频生成模型制作爆款视频的具体路径，必须基于该模型在快手灵机中的真实可用状态和技术限制。"
+          },
+          {
+            "id": "goal_quantification",
+            "criterion": "方案中‘极大提高 GMV 爆可品’的目标设定需有历史数据基线或行业基准作为参考，不得凭空设定无法验证的数值。"
+          }
+        ],
+        "inputs": [
+          {
+            "need": "快手灵机产品的非 L0 商家现状、现有流量分发机制、商家对视频制作的真实痛点、过往吸引商家的策略效果、SOTA 视频生成模型在快手灵机中的具体集成状态及限制。",
+            "reason": "方案需基于真实业务场景（非 L0 商家特征）和现有产品能力（灵机、SOTA 模型）制定，缺乏项目背景和真实数据会导致方案脱离实际或虚构能力。",
+            "state": "missing",
+            "evidence": "",
+            "query": "检索快手灵机产品当前非 L0 商家的规模、活跃度、主要制作痛点；检索快手灵机现有的流量分发逻辑及过往吸引商家的成功案例；检索快手灵机中 SOTA 视频生成模型的具体功能边界、调用成本及已支持的场景。",
+            "id": "work_context",
+            "source": "work_context"
+          },
+          {
+            "need": "非 L0 商家的真实 GMV 转化数据、爆款视频的特征指标（如完播率、互动率）、历史营销活动 ROI、SOTA 模型应用后的预期 GMV 提升基线。",
+            "reason": "方案中的‘极大提高 GMV'和‘爆款视频’定义需有数据支撑，缺乏历史基线和转化数据无法量化目标或评估方案有效性。",
+            "state": "missing",
+            "evidence": "",
+            "query": "检索快手灵机非 L0 商家近半年的 GMV 平均转化率和波动范围；检索快手灵机历史爆款视频的关键指标特征（完播、互动、转化）；检索过往针对非 L0 商家的营销活动 ROI 数据；检索 SOTA 视频生成模型在类似场景下的预期 GMV 提升幅度基线。",
+            "id": "business_data",
+            "source": "business_data"
+          },
+          {
+            "need": "快手灵机产品的官方定位、SOTA 视频生成模型（如快手自研或开源模型）的公开技术参数、行业通用的非 L0 商家运营方法论、快手电商平台的通用流量规则。",
+            "reason": "方案需符合产品公开事实和技术能力，不能凭空捏造模型参数或产品功能，需确保方案在技术可行性和平台规则内。",
+            "state": "missing",
+            "evidence": "",
+            "query": "检索快手灵机产品的官方功能文档及非 L0 商家支持范围；检索快手 SOTA 视频生成模型（如快手智效等）的公开技术能力、输出格式及限制；检索快手电商平台对非 L0 商家的流量分配规则；检索行业通用的非 L0 商家短视频运营最佳实践。",
+            "id": "public_facts",
+            "source": "public_facts"
+          }
+        ]
+      },
+      "effective": {
+        "tools": [
+          "memory_search",
+          "data_search",
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "快手灵机非 L0 商家爆款视频增长与 SOTA 模型应用方案",
+            "source": "generated",
+            "evidence": "创作一篇如何对快手灵机产品大规模吸引非 L0 商家的方案，为商家制作爆款视频，进而极大提高 GMV 爆可品和可以使用 SOTA 视频生成模型的方案。"
+          }
+        },
+        "reasoning": "已按本轮资料需求校正检索依赖；必要查询见各输入缺口与工具步骤。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true
+      },
+      "passed": true,
+      "seconds": 114.07
+    },
+    {
+      "id": "full-provided",
+      "instruction": "仅根据以下材料写一份简短业务小结，不补充外部事实：本周收入100万元，上周80万元；新增客户20家，上周10家；增长来自新渠道。",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "本周业务小结",
+            "source": "generated",
+            "evidence": "本周收入100万元，上周80万元；新增客户20家，上周10家；增长来自新渠道。"
+          },
+          "skill_assessments": []
+        },
+        "reasoning": "用户明确要求仅根据提供的材料撰写业务小结，不补充外部事实。当前文档为空，无历史正文可修改，因此无需调用检索工具或执行技能工作流。主目标为生成新文档，且内容完全基于用户提供的文本片段，无需复杂的数据分析或外部调研。根据操作规则，当需要生成新文档且无现有文档可编辑时，应使用 generate 操作。",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "本周收入 100 万元，上周 80 万元；新增客户 20 家，上周 10 家；增长来自新渠道。",
+        "self_contained_reason": "用户指令已包含所有必要事实（具体数值、对比对象、增长原因），且明确禁止使用外部资料，因此无需检索任何事实即可生成符合要求的简短业务小结。",
+        "acceptance": [
+          {
+            "id": "1",
+            "criterion": "输出内容必须严格基于用户指令中的数字和描述，不得补充任何外部事实或虚构细节。"
+          },
+          {
+            "id": "2",
+            "criterion": "输出形式为简短业务小结，保持与输入指令一致的核心信息。"
+          }
+        ],
+        "inputs": []
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "本周业务小结",
+            "source": "generated",
+            "evidence": "本周收入100万元，上周80万元；新增客户20家，上周10家；增长来自新渠道。"
+          },
+          "skill_assessments": []
+        },
+        "reasoning": "用户明确要求仅根据提供的材料撰写业务小结，不补充外部事实。当前文档为空，无历史正文可修改，因此无需调用检索工具或执行技能工作流。主目标为生成新文档，且内容完全基于用户提供的文本片段，无需复杂的数据分析或外部调研。根据操作规则，当需要生成新文档且无现有文档可编辑时，应使用 generate 操作。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true
+      },
+      "passed": true,
+      "seconds": 57.12
+    },
+    {
+      "id": "simple-negation",
+      "instruction": "不要删除附录，只回答你是否理解",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "respond",
+          "response": "已理解您的指令：保留附录，不进行删除操作。"
+        },
+        "reasoning": "用户指令明确要求‘不要删除附录，只回答你是否理解’，属于确认理解类回应，无需修改文档或调用技能。根据操作规则，此类确认指令应使用 respond 操作，直接输出确认内容。",
+        "source": "model"
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "respond",
+          "response": "已理解您的指令：保留附录，不进行删除操作。"
+        },
+        "reasoning": "用户指令明确要求‘不要删除附录，只回答你是否理解’，属于确认理解类回应，无需修改文档或调用技能。根据操作规则，此类确认指令应使用 respond 操作，直接输出确认内容。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true
+      },
+      "passed": true,
+      "seconds": 129.65
+    },
+    {
+      "id": "answer-only",
+      "instruction": "查一下最近的公开会议软件动态，只回答问题，不要修改文档",
+      "candidate": {
+        "tools": [
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "answer",
+          "skill_assessments": []
+        },
+        "reasoning": "用户明确要求回答关于会议软件的最新公开动态，且禁止修改文档。当前文档为会议安排说明，与查询外部公开信息无关。根据操作上下文，pending_operations为空，无需继续任务。该请求属于获取最新外部事实，需调用互联网检索工具。主目标为生成答案，故选择answer操作。",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "最近的公开会议软件动态",
+        "self_contained_reason": "本轮任务依赖公开事实（public_facts），且该事实未在输入文档或对话历史中提供，因此需要检索。",
+        "acceptance": [
+          {
+            "id": "answer_public_dynamics",
+            "criterion": "回答必须仅包含最近的公开会议软件动态，不得修改或引用文档中的会议安排"
+          }
+        ],
+        "inputs": [
+          {
+            "need": "公开产品、技术能力和最新事实",
+            "reason": "用户指令明确要求查询最近的公开会议软件动态",
+            "state": "missing",
+            "evidence": "",
+            "query": "查询最近的公开会议软件行业动态、新产品发布或重大技术更新",
+            "id": "public_facts",
+            "source": "public_facts"
+          }
+        ]
+      },
+      "effective": {
+        "tools": [
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "answer",
+          "skill_assessments": []
+        },
+        "reasoning": "用户明确要求回答关于会议软件的最新公开动态，且禁止修改文档。当前文档为会议安排说明，与查询外部公开信息无关。根据操作上下文，pending_operations为空，无需继续任务。该请求属于获取最新外部事实，需调用互联网检索工具。主目标为生成答案，故选择answer操作。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true
+      },
+      "passed": true,
+      "seconds": 86.17
+    }
+  ]
+}

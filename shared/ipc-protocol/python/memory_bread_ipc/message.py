@@ -28,6 +28,13 @@ class OcrRequest(BaseModel):
     type:            Literal["ocr"] = "ocr"
     capture_id:      int
     screenshot_path: str
+    priority: Literal["background", "foreground"] = "background"
+
+
+class InteractiveOcrActivityRequest(BaseModel):
+    type: Literal["interactive_ocr_activity"] = "interactive_ocr_activity"
+    activity_id: str = Field(min_length=1, max_length=128)
+    active: bool
 
 
 class AsrRequest(BaseModel):
@@ -75,6 +82,7 @@ TaskRequest = Annotated[
     Union[
         PingRequest,
         OcrRequest,
+        InteractiveOcrActivityRequest,
         AsrRequest,
         VlmRequest,
         EmbedRequest,

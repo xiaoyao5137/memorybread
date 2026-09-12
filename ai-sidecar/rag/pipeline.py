@@ -8,6 +8,7 @@ RagPipeline — 完整 RAG 查询流水线
 from __future__ import annotations
 
 import logging
+import math
 import re
 import sqlite3
 import time
@@ -18,6 +19,7 @@ from typing import Callable, Optional
 from embedding.model import EmbeddingModel
 
 from .llm.base import LlmBackend
+from .material_retrieval import ConsultationQuery
 from .reranker import reciprocal_rank_fusion
 from .retriever import (
     Fts5Retriever,
@@ -32,14 +34,19 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_SYSTEM_PROMPT = (
     "你是记忆面包，一个本地运行的 AI 工作助手。"
-    "根据以下工作记录上下文，简洁、准确地回答用户的问题，不要向用户反问或要求补充信息。"
-    "如果上下文中没有相关信息，请直接说明。\n"
+    "围绕用户原始问题简洁、准确地回答，不要强行引入历史背景。\n"
+    "候选历史记忆采用宽松召回，可能与当前问题完全无关，也可能为空。你必须自行逐条判断每条候选记忆"
+    "是否真能回答当前问题：只采用确实相关的部分，无关的直接忽略，且不要提及、罗列或复述这些无关记忆。\n"
+    "当问题属于通用知识、常识、概念或原理（不依赖用户私人或内部事实）时，即使候选记忆无关或为空，"
+    "也要直接依据你自己的知识准确、完整地回答，绝不能以「参考资料不足」「没有相关记忆」为由拒答。\n"
+    "只有当问题确实需要用户个人的工作记录、文档、项目数据等内部事实，而这些证据在候选记忆与本次材料中"
+    "都缺失时，才说明未在其记忆中找到。\n"
     "当用户要求周报、日报、项目总结等工作产出时，请按清晰的报告结构输出，只基于参考资料展开，"
     "没有数据支撑的章节直接跳过，不输出占位文字。\n"
     "涉及 OKR/KPI/量化进展时，量化结论必须有参考资料中的证据支撑，无证据不得编造数字。\n"
     "当用户使用「本周/上周/今天/昨天/最近」等相对时间时，以上下文中给出的【时间口径】为准，"
     "并结合每条记录的时间标注（看到时间/事件时间/创建或更新时间）判断其是否落在所请求的周期内；"
-    "落在周期内的记录视为有效证据，不得以时间定义不明确为由拒绝总结。\n"
+    "仅在主题、对象及时间都适用时采用记录，不得仅因时间落在周期内就视为有效证据。\n"
     "回答中提到文档或网页时，若参考资料已给出该文档的 URL，必须以 Markdown 超链接格式"
     "[文档名](URL) 一并给出；没有 URL 的只提名称，不得编造链接。"
 )
@@ -87,6 +94,8 @@ def _build_relative_time_clause(intent: "QueryIntent") -> str:
 
 def _extract_core_retrieval_query(user_query: str) -> str:
     """For structured assistant prompts, keep retrieval focused on the actual user question."""
+    if isinstance(user_query, ConsultationQuery):
+        return user_query.retrieval_query
     text = (user_query or "").strip()
     for line in text.splitlines():
         line = line.strip()
@@ -120,6 +129,14 @@ _VECTOR_RRF_WEIGHT = 1.0
 # 阈值高于该值会在向量召回存在时误删直接命中的持久知识，只留下向量结果。
 _LOOKUP_MIN_RRF_SCORE_WITH_VECTOR = 0.01
 _VECTOR_SCORE_THRESHOLD = 0.45
+# 向量 kNN 永远返回“最近的 top_k”，库里无相关记忆时会把域外文档顶上来。
+# 实测 bge-small-zh-v1.5 对「小米体重计的原理」：无关大模型/GPU 文档 cosine≤0.522，
+# 真相关及近义改写 cosine≥0.571。0.55 落在两者间隙，作为“纯语义命中计入相关”的
+# 置信下限；仅用于相关性门（是否算相关），不改变 kNN 的召回阈值 _VECTOR_SCORE_THRESHOLD。
+_VECTOR_RELEVANT_FLOOR = 0.55
+# 相关性门的最小判别短语长度：中文需≥3 字连续命中（或整 ASCII token）才算强锚点，
+# 单个 2 字泛词（如“原理”）不足以判定相关。
+_MIN_RELEVANCE_PHRASE_LEN = 3
 
 
 @dataclass
@@ -132,6 +149,7 @@ class RagResult:
     tokens: int = 0
     done_reason: Optional[str] = None
     output_truncated: bool = False
+    cited_contexts: list[RetrievedChunk] = field(default_factory=list)
 
 
 def _is_output_truncated(done_reason: Optional[str]) -> bool:
@@ -167,6 +185,29 @@ class QueryIntent:
     period_kind: str = ""
     period_phrase: str = ""
     period_display: str = ""
+
+
+@dataclass(frozen=True)
+class RelevancePolicy:
+    """召回相关性门策略：判定候选是否真与查询相关，避免用无关项凑满 top_k。
+
+    - discriminative_phrases：判别性短语（中文≥_MIN_RELEVANCE_PHRASE_LEN 字，或整
+      ASCII token），命中任一即视为相关（强锚点）。
+    - discriminative_terms：判别性词元，命中数量达 min_distinct_terms 即视为相关。
+    - min_distinct_terms：需命中的不同判别词数量（查询判别词很少时降为 1）。
+    - dense_floor / vector_scores：纯语义命中的置信下限与融合前各 doc_key 的向量 cosine。
+    """
+
+    discriminative_terms: tuple = ()
+    discriminative_phrases: tuple = ()
+    min_distinct_terms: int = 1
+    dense_floor: float = _VECTOR_RELEVANT_FLOOR
+    vector_scores: dict = field(default_factory=dict)
+    material_min_anchor_matches: int = 1
+    material_anchors: tuple = ()
+    material_measurement_anchors: tuple = ()
+    material_min_measurement_matches: int = 2
+    requires_material_grounding: bool = False
 
 
 class RagPipeline:
@@ -211,7 +252,7 @@ class RagPipeline:
             conn.close()
             return (row[0] or "").strip() if row else ""
         except Exception as exc:
-            logger.warning("读取用户身份偏好失败: %s", exc)
+            logger.warning("读取用户身份偏好失败 code=IDENTITY_READ_FAILED")
             return ""
 
     def _baked_document_doc_keys(self) -> set[str]:
@@ -236,7 +277,7 @@ class RagPipeline:
             keys.discard("")
             return keys
         except Exception as exc:
-            logger.warning("查询已烘焙文档清单失败，跳过重复过滤: %s", exc)
+            logger.warning("查询已烘焙文档清单失败，跳过重复过滤 code=DOCUMENT_LIST_FAILED")
             return set()
 
     def _build_identity_clause(self, user_identity: str) -> str:
@@ -263,13 +304,19 @@ class RagPipeline:
         references_only: bool = False,
         on_contexts: Optional[Callable[[list[RetrievedChunk]], None]] = None,
         on_delta: Optional[Callable[[str], None]] = None,
+        supplied_contexts: Optional[list[RetrievedChunk]] = None,
     ) -> RagResult:
         """执行完整 RAG 查询，返回 LLM 答案及引用的上下文片段。"""
         retrieval_query = _extract_core_retrieval_query(user_query)
         effective_top_k = max(1, int(top_k or self._top_k))
         # 意图只从真正的检索问题中提取。悬浮咨询会在原始请求里附加
         # “核心问题/用户问题理解/输出格式”等包装文本，这些内容不能改变召回策略。
-        intent = self._parse_query_intent(retrieval_query)
+        instruction = user_query.instruction if isinstance(user_query, ConsultationQuery) else retrieval_query
+        intent = self._parse_query_intent(instruction)
+        # None recalls memory; an explicit empty list answers only the supplied material.
+        if supplied_contexts is not None:
+            return self._answer_with_contexts(user_query, list(supplied_contexts), intent,
+                                              llm, references_only, on_contexts, on_delta)
         retrieval_started = time.perf_counter()
 
         query_vector: list[float] = []
@@ -278,7 +325,7 @@ class RagPipeline:
             if embed_results:
                 query_vector = embed_results[0].vector
         except Exception as exc:
-            logger.warning("Query embedding 失败: %s", exc)
+            logger.warning("Query embedding 失败 code=QUERY_EMBEDDING_FAILED")
             # 向量只是多路召回之一；本地模型暂不可用时继续走持久知识/FTS，
             # 避免整个咨询链路因可选增强能力故障而不可用。
             query_vector = []
@@ -407,6 +454,7 @@ class RagPipeline:
                 retrieval_query,
                 entity_terms=knowledge_entity_terms,
             )
+            self._score_materialized_knowledge(vector_results, query_vector)
 
         promote_linked_documents = getattr(
             type(self._knowledge),
@@ -423,7 +471,7 @@ class RagPipeline:
                     entity_terms=knowledge_entity_terms,
                 )
             except Exception as exc:
-                logger.warning("关联知识反向提升文档失败，保留原召回结果: %s", exc)
+                logger.warning("关联知识反向提升文档失败，保留原召回结果 code=DOCUMENT_LINK_RECALL_FAILED")
                 linked_document_results = []
             if linked_document_results:
                 promoted_keys = {
@@ -438,6 +486,50 @@ class RagPipeline:
                     ),
                 ][:knowledge_top_k]
                 logger.info("关联知识反向提升文档: %s 条", len(linked_document_results))
+
+        materialize_documents = getattr(type(self._knowledge), "materialize_documents", None)
+        if callable(materialize_documents):
+            knowledge_results = materialize_documents(self._knowledge, knowledge_results, retrieval_query)
+            vector_results = materialize_documents(self._knowledge, vector_results, retrieval_query)
+            pending_document_results = materialize_documents(self._knowledge, pending_document_results, retrieval_query)
+
+        # Explicit artifact lookups must be grounded in the requested topic, even
+        # when a semantic channel ranks a generic document or navigation shell first.
+        from .query_planner import build_artifact_query_plan, _contains_phrase
+        relevance_policy: Optional[RelevancePolicy] = None
+        if self._db_path:
+            with sqlite3.connect(self._db_path) as conn:
+                lookup_plan = build_artifact_query_plan(conn.cursor(), retrieval_query)
+                # 相关性门用带 entity_terms 的计划：与词法通道同一套判别词口径。
+                relevance_plan = build_artifact_query_plan(
+                    conn.cursor(), retrieval_query, knowledge_entity_terms,
+                )
+            if lookup_plan.source_types and lookup_plan.discriminative_terms:
+                def grounded(chunk: RetrievedChunk) -> bool:
+                    metadata = chunk.metadata or {}
+                    body = " ".join(str(value or "") for value in (
+                        chunk.text, metadata.get("title"), metadata.get("summary"),
+                    )).lower()
+                    return not _is_noise_chunk(chunk) and any(
+                        _contains_phrase(body, term.text.lower())
+                        for term in lookup_plan.discriminative_terms
+                    )
+                knowledge_results = [c for c in knowledge_results if grounded(c)]
+                vector_results = [c for c in vector_results if grounded(c)]
+                pending_document_results = [c for c in pending_document_results if grounded(c)]
+            relevance_policy = _build_relevance_policy(relevance_plan, vector_results)
+
+        if isinstance(user_query, ConsultationQuery) and (
+                user_query.requires_material_grounding or user_query.material_measurement_anchors):
+            from dataclasses import replace
+            relevance_policy = replace(
+                relevance_policy or RelevancePolicy(),
+                material_anchors=user_query.material_anchors,
+                requires_material_grounding=user_query.requires_material_grounding,
+                material_min_anchor_matches=user_query.material_min_anchor_matches,
+                material_measurement_anchors=user_query.material_measurement_anchors,
+                material_min_measurement_matches=user_query.material_min_measurement_matches,
+            )
 
         keyword_weight = _KEYWORD_RRF_WEIGHT if vector_results else 1.0
         min_rrf_score = (
@@ -464,6 +556,7 @@ class RagPipeline:
             merged,
             effective_top_k,
             rescue_priority_terms=self._lexical_priority_terms(retrieval_query),
+            relevance_policy=relevance_policy,
         )
         retrieval_finished = time.perf_counter()
         logger.info(
@@ -484,6 +577,11 @@ class RagPipeline:
             round((retrieval_finished - vector_finished) * 1000),
             round((retrieval_finished - retrieval_started) * 1000),
         )
+        return self._answer_with_contexts(user_query, selected_contexts, intent,
+                                          llm, references_only, on_contexts, on_delta)
+
+    def _answer_with_contexts(self, user_query, selected_contexts, intent,
+                              llm=None, references_only=False, on_contexts=None, on_delta=None):
         if on_contexts:
             on_contexts(selected_contexts)
 
@@ -494,59 +592,103 @@ class RagPipeline:
                 model="references-only",
             )
 
+        from rag.memory_evidence import MEMORY_RULES, CitationStream, cited_memories, render_citations
+
         context_text = self._build_context(selected_contexts)
 
         link_rule = (
-            "用户正在询问地址/链接/网址。若上下文中包含 URL，请在回答中直接给出完整 URL，并用 Markdown 链接格式展示。\n"
+            "用户正在询问地址/链接/网址。只提供与当前需求相符且实际采用的资料链接，并标注记忆编号。\n"
             if _is_link_query(user_query) else ""
         )
-        is_floating_assist_query = "## 用户问题理解" in user_query and "## 回答" in user_query
+        is_floating_assist_query = (
+            ("核心问题：" in user_query and "检索问题：" in user_query)
+            or ("## 用户问题理解" in user_query and "## 回答" in user_query)
+        )
         floating_format_rule = ""
-        if is_floating_assist_query:
-            floating_format_rule = (
-                "必须严格按以下 Markdown 结构输出，不能省略任何章节：\n"
-                "## 用户问题理解\n"
-                "用一句话说明你判断出的用户真实问题。\n"
-                "## 回答\n"
-                "直接给出结论和依据，不要反问，不要只给追问话术。\n\n"
-            )
         time_clause = _build_relative_time_clause(intent)
-        prompt = f"{link_rule}{floating_format_rule}{time_clause}工作记录上下文：\n{context_text}\n\n用户问题：{user_query}"
+        history_section = (
+            "候选历史记忆（宽松召回，可能无关，请自行判断是否采用，可全部忽略）：\n"
+            + context_text
+        )
+        if isinstance(user_query, ConsultationQuery) and user_query.requires_material_grounding:
+            # Put the requested evidence closest to generation. Long historical
+            # matches must not displace the current material or its comparison
+            # baseline simply because they share a technology/object name.
+            prompt = (
+                f"{link_rule}{time_clause}{history_section}\n\n"
+                f"用户原始需求与本次材料：\n{user_query}\n\n"
+                "材料解读要求：逐份说明材料能支持的结论，再在对应关系明确时综合。"
+                "材料已足够回答时，直接回答，不加入历史背景段落。"
+                "技术名或关键词相同不代表同一次试验或同一事件；"
+                "只有历史事实确实补足当前问题需要的证据时才采用，不能用历史结论解释本次测量。\n"
+                "对象名称照录材料，不改写标识符。比较数值时把对象、指标、实际值和基线放在一起核对；"
+                "相对基线改善不能改写成优于另一个方案。不同层级或不同图片的数据不能互换。"
+                "若有材料字段逐项对照，数字必须使用对应层级、对象、字段的完整读数；"
+                "不要从其他字段挪用相似的比例。同一指标涉及不同方案时逐个对应，不把不相等的数值说成相等。"
+                "优先用少量原始读数支持主要结论，升降方向按字段对照；不自行计算材料未给出的比率。"
+                "只有坐标轴/图例文字时，不能推断曲线读数、走势、全程统计或对应方案。\n"
+                "按每份材料分别回答，只有不能读出的部分才说明限制。"
+                "只概括材料能够证明的结论，不推测没有测量的吞吐收益、瓶颈成因或业务适用条件。\n"
+                f"请仅回答用户原始问题：{user_query.instruction}"
+            )
+        else:
+            prompt = f"{link_rule}{floating_format_rule}{time_clause}用户原始需求与本次材料：\n{user_query}\n\n{history_section}\n\n请仅回答原始问题：{_extract_core_retrieval_query(user_query)}。不需要展示候选筛选过程，也不需要为了列依据而扩写问题。"
 
         # 注入用户身份说明（通用能力，不依赖任务类型）
         user_identity = self._read_user_identity()
         identity_clause = self._build_identity_clause(user_identity)
-        system = self._system + identity_clause
+        system = self._system + identity_clause + MEMORY_RULES
 
         llm_kwargs = {}
         if is_floating_assist_query:
             llm_kwargs["num_predict"] = 8192
             llm_kwargs["temperature"] = 0.2
             llm_kwargs["top_p"] = 0.8
-
         primary_llm = llm or self._llm
 
+        # A general conclusion over an explicitly bound comparison table has
+        # checkable values and directions. Keep those authoritative in the final
+        # rendering, instead of allowing free-form generation to change them.
+        material_summary = getattr(user_query, "material_comparison_summary", "")
+        citation_stream = CitationStream(on_delta, selected_contexts) if on_delta and not material_summary else None
         try:
             if on_delta:
                 llm_resp = primary_llm.complete_stream(
                     prompt,
                     system=system,
-                    on_delta=on_delta,
+                    on_delta=citation_stream.feed if citation_stream else None,
                     **llm_kwargs,
                 )
             else:
                 llm_resp = primary_llm.complete(prompt, system=system, **llm_kwargs)
             answer = llm_resp.text
+            if not answer.strip():
+                if _is_output_truncated(llm_resp.done_reason):
+                    raise RuntimeError("模型已达到生成长度限制，但未返回可用答案。")
+                raise RuntimeError("模型未返回可用答案。")
+            if material_summary:
+                answer = material_summary
         except Exception:
             raise
 
-        answer = _attach_document_links(answer, selected_contexts, self._db_path)
-        if _is_link_query(user_query):
-            answer = _ensure_link_answer(answer, selected_contexts)
+        if citation_stream:
+            citation_stream.finish()
+        citation_contexts = [] if material_summary else selected_contexts
+        cited = cited_memories(answer, citation_contexts)
+        answer = render_citations(answer, citation_contexts)
+        # 模型漏标注 [M编号] 时，答案里提到的文档仍需可核对的真实链接，
+        # 否则用户无法区分「基于记忆作答」与「模型自行推理」。
+        if not material_summary:
+            answer = _attach_document_links(answer, selected_contexts, self._db_path)
+        if not answer.strip():
+            raise RuntimeError("模型未返回可用答案。")
+        if on_delta and material_summary:
+            on_delta(answer)
 
         return RagResult(
             answer=answer,
             contexts=selected_contexts,
+            cited_contexts=cited,
             model=llm_resp.model,
             tokens=llm_resp.tokens,
             done_reason=llm_resp.done_reason,
@@ -556,7 +698,7 @@ class RagPipeline:
     @staticmethod
     def _build_context(chunks: list[RetrievedChunk]) -> str:
         if not chunks:
-            return "（无相关工作记录）"
+            return "（本次没有召回到候选历史记忆；请依据用户问题、本次材料以及你自己的通用知识直接回答，不要因缺少记忆而拒答）"
         parts = []
         for i, chunk in enumerate(chunks, 1):
             source = chunk.metadata.get("source_type") or chunk.source
@@ -569,7 +711,7 @@ class RagPipeline:
             importance = chunk.metadata.get("importance")
             record_time = chunk.metadata.get("updated_at") or chunk.metadata.get("time")
             text = chunk.text[:_MAX_CHUNK_LEN]
-            prefix: list[str] = [f"[{i}][{source}]"]
+            prefix: list[str] = [f"[M{i}][{source}]"]
             if observed_at:
                 prefix.append(f"看到时间={_format_ts(observed_at)}")
             if event_start or event_end:
@@ -616,14 +758,41 @@ class RagPipeline:
                 terms.append((text, idf))
             return terms
         except Exception as exc:
-            logger.warning("提取补位优先词失败，回退按分排序: %s", exc)
+            logger.warning("提取补位优先词失败，回退按分排序 code=RESCUE_TERMS_FAILED")
             return []
+
+    def _score_materialized_knowledge(self, chunks: list[RetrievedChunk],
+                                     query_vector: list[float]) -> None:
+        """Measure converted artifacts themselves; never borrow source cosine."""
+        converted = [chunk for chunk in chunks
+                     if (chunk.metadata or {}).get("retrieval_method") == "timeline_to_bake_knowledge"]
+        if not converted or not query_vector:
+            return
+        try:
+            embeddings = self._embed.encode([chunk.text[:4000] for chunk in converted])
+            for chunk, embedding in zip(converted, embeddings):
+                vector = embedding.vector
+                if len(vector) != len(query_vector):
+                    continue
+                norm = math.sqrt(sum(value * value for value in query_vector)
+                                 * sum(value * value for value in vector))
+                if not norm:
+                    continue
+                score = sum(a * b for a, b in zip(query_vector, vector)) / norm
+                chunk.score = max(-1.0, min(1.0, score)) if math.isfinite(score) else 0.0
+                chunk.metadata["artifact_semantic_score"] = chunk.score
+            chunks.sort(key=lambda chunk: float(chunk.score or 0.0), reverse=True)
+        except Exception as exc:
+            # Lexical evidence may still qualify; failed local embeddings must
+            # not turn the source timeline's score back into artifact evidence.
+            logger.warning("长期知识自身语义评估失败，保留词法相关性判断 code=KNOWLEDGE_SEMANTICS_FAILED")
 
     @staticmethod
     def _select_contexts(
         chunks: list[RetrievedChunk],
         top_k: int,
         rescue_priority_terms: Optional[list[tuple[str, float]]] = None,
+        relevance_policy: Optional[RelevancePolicy] = None,
     ) -> list[RetrievedChunk]:
         selected: list[RetrievedChunk] = []
         selected_keys: set[str] = set()
@@ -635,10 +804,15 @@ class RagPipeline:
                 "knowledge", "document", "pending_document", "bake_knowledge", "operation", "data"
             }
             if source_type not in allowed_source_types:
-                logger.info(f"  跳过: source_type={source_type}")
+                logger.info("  跳过: 不支持的来源类型")
                 return False
             if _is_noise_chunk(chunk):
                 logger.info(f"  跳过: 噪音chunk")
+                return False
+            # 相关性门：仅命中单个泛词或字符碎片的候选不得入选，宁可返回少于 top_k
+            # 乃至 0 条，也不用无关记忆凑数（无相关时模型仍会用自身知识作答）。
+            if relevance_policy is not None and not _candidate_relevance(chunk, relevance_policy):
+                logger.info("  跳过: 相关性不足")
                 return False
 
             identity_keys = _chunk_identity_keys(chunk)
@@ -652,10 +826,8 @@ class RagPipeline:
                 logger.info("  跳过: 时间线已有对应产物入选")
                 return False
             logger.info(
-                "  ✓ 选中: origin=%s importance=%s activity=%s",
+                "  ✓ 选中: origin=%s",
                 selection_origin,
-                chunk.metadata.get("importance"),
-                chunk.metadata.get("activity_type"),
             )
             selected.append(chunk)
             selected_keys.update(identity_keys)
@@ -718,6 +890,11 @@ class RagPipeline:
                 try_select(chunk, "rrf")
 
         logger.info(f"_select_contexts: 最终选中 {len(selected)} 条")
+        if relevance_policy is not None and len(selected) < top_k:
+            logger.info(
+                "_select_contexts: 相关性门后仅 %s 条达标（top_k=%s），不凑数",
+                len(selected), top_k,
+            )
         return selected
 
     @staticmethod
@@ -845,6 +1022,8 @@ class RagPipeline:
 def _extract_query_terms(query: str) -> list[str]:
     import re
 
+    from .query_planner import _valid_cjk_candidate
+
     tokens = re.findall(r"[A-Za-z0-9.]+|[\u4e00-\u9fff]+", query.lower())
     terms: list[str] = []
     seen: set[str] = set()
@@ -877,6 +1056,11 @@ def _extract_query_terms(query: str) -> list[str]:
                         continue
                     if any(mark in candidate for mark in ("工作", "总结", "哪些", "最近", "今天", "昨天", "本周")):
                         continue
+                    # 丢弃首/尾为边界助词的跨词碎片（如「计的」「的原」「的原理」）。
+                    # 这类字符 n-gram 不是真实词，会在词法通道 LIKE 命中大量无关文档，
+                    # 与 query_planner._valid_cjk_candidate 保持同一口径。
+                    if not _valid_cjk_candidate(candidate):
+                        continue
                     meaningful_subterms.append(candidate)
             if meaningful_subterms:
                 for candidate in meaningful_subterms:
@@ -890,8 +1074,11 @@ def _extract_query_terms(query: str) -> list[str]:
 
 
 def _looks_like_noise_chunk(chunk: RetrievedChunk) -> bool:
+    from embedding.document_quality import is_document_shell
     metadata = chunk.metadata or {}
     text = (chunk.text or "").strip()
+    if is_document_shell(text):
+        return True
     activity_type = metadata.get("activity_type")
     content_origin = metadata.get("content_origin")
     evidence_strength = metadata.get("evidence_strength")
@@ -908,6 +1095,135 @@ def _is_noise_chunk(chunk: RetrievedChunk) -> bool:
     if overview.startswith("低价值工作片段（"):
         return True
     return _looks_like_noise_chunk(chunk)
+
+
+def _candidate_relevance(chunk: RetrievedChunk, policy: RelevancePolicy) -> bool:
+    """判定候选是否真与查询相关（确定性，无模型调用）。
+
+    相关 = 词法强锚点命中 或 纯语义高置信命中：
+      - 含任一判别短语（中文≥_MIN_RELEVANCE_PHRASE_LEN 字连续 / 整 ASCII token）；或
+      - 含 ≥ min_distinct_terms 个不同判别词；或
+      - 该 doc_key 融合前向量 cosine ≥ dense_floor。
+    仅命中单个泛词（如「原理」）或仅靠字符碎片匹配的候选一律判为不相关。
+
+    无任何判别依据时（既无词法锚点又无向量分）不过滤：artifact 语料稀疏或查询
+    无罕见词会让 plan 为空，此时无从判定相关性，保持既有召回行为、避免误杀。
+    """
+    from .query_planner import _contains_phrase
+
+    metadata = chunk.metadata or {}
+    haystack = " ".join(
+        str(value or "")
+        for value in (
+            chunk.text,
+            metadata.get("title"),
+            metadata.get("summary"),
+            metadata.get("overview"),
+        )
+    ).lower()
+
+    if policy.material_measurement_anchors:
+        from .material_retrieval import count_material_measurement_matches
+        if count_material_measurement_matches(haystack, policy.material_measurement_anchors) < policy.material_min_measurement_matches:
+            return False
+
+    if policy.requires_material_grounding:
+        # The referent is the supplied material. A generic report/question
+        # cosine cannot establish that an old event concerns that subject.
+        matched_material_terms = sum(
+            _contains_phrase(haystack, anchor) for anchor in policy.material_anchors
+        )
+        if not policy.material_anchors or matched_material_terms < policy.material_min_anchor_matches:
+            return False
+
+    if not policy.discriminative_terms and not policy.vector_scores:
+        # Converted artifacts without their own semantic evidence still need
+        # an actual lexical match, even when the query plan is uninformative.
+        return metadata.get("retrieval_method") != "timeline_to_bake_knowledge"
+
+    for phrase in policy.discriminative_phrases:
+        if phrase and _contains_phrase(haystack, phrase):
+            return True
+
+    if policy.discriminative_terms:
+        distinct = sum(
+            1
+            for term in policy.discriminative_terms
+            if term and _contains_phrase(haystack, term)
+        )
+        if distinct >= policy.min_distinct_terms:
+            return True
+
+    doc_key = chunk.doc_key or metadata.get("doc_key")
+    if doc_key and policy.vector_scores.get(doc_key, 0.0) >= policy.dense_floor:
+        return True
+
+    return False
+
+
+def _is_generic_edge_fragment(term: str, generic_terms: tuple) -> bool:
+    """term 是否为「泛词 ± 单个字符」的跨词 n-gram 碎片。
+
+    字符 n-gram 拆词会在词边界处产生如「计原理」（体重计|原理）这类碎片：它包含
+    一个泛词（原理），去掉泛词后只剩单个字符。这类碎片的文档命中集合是对应泛词
+    命中集合的子集，特异性仅来自边界处的孤立字符，会把「设计原理/统计原理」之类
+    无关文档误判为相关。去掉泛词后剩余 ≥2 字的是真实复合词（如「深度学习」去掉
+    泛词「学习」后剩「深度」），予以保留。
+    """
+    for generic in generic_terms:
+        if not generic or generic == term or generic not in term:
+            continue
+        if len(term) - len(generic) <= 1:
+            return True
+    return False
+
+
+def _build_relevance_policy(
+    plan: "ArtifactQueryPlan",
+    vector_results: list[RetrievedChunk],
+) -> RelevancePolicy:
+    """从词法查询计划 + 融合前向量结果构造相关性门策略。"""
+    generic_terms = tuple(
+        dict.fromkeys(
+            str(term.text).lower() for term in (*plan.generic_terms, *plan.type_terms) if term.text
+        )
+    )
+    discriminative_terms = tuple(
+        term
+        for term in dict.fromkeys(
+            str(term.text).lower() for term in plan.discriminative_terms if term.text
+        )
+        # 剔除「泛词±单字」跨词碎片（如「计原理」）：其命中由所含泛词主导，
+        # 单独作为强锚点会把「设计原理/统计原理」类无关文档误判为相关。
+        if term not in generic_terms and not _is_generic_edge_fragment(term, generic_terms)
+    )
+    discriminative_phrases = tuple(
+        term
+        for term in discriminative_terms
+        if len(term) >= _MIN_RELEVANCE_PHRASE_LEN or term.isascii()
+    )
+    min_distinct = min(2, max(1, len(discriminative_terms)))
+    vector_scores: dict = {}
+    for chunk in vector_results:
+        key = chunk.doc_key or (chunk.metadata or {}).get("doc_key")
+        if not key:
+            continue
+        metadata = chunk.metadata or {}
+        if metadata.get("retrieval_method") == "timeline_to_bake_knowledge":
+            # A converted artifact only contributes independently measured
+            # cosine, even if some caller accidentally retained a source score.
+            score = float(metadata.get("artifact_semantic_score") or 0.0)
+        else:
+            score = float(chunk.score or 0.0)
+        if score > vector_scores.get(key, 0.0):
+            vector_scores[key] = score
+    return RelevancePolicy(
+        discriminative_terms=discriminative_terms,
+        discriminative_phrases=discriminative_phrases,
+        min_distinct_terms=min_distinct,
+        dense_floor=_VECTOR_RELEVANT_FLOOR,
+        vector_scores=vector_scores,
+    )
 
 
 def _source_ids_of(chunk: RetrievedChunk) -> set[str]:
@@ -1025,6 +1341,9 @@ def _build_pending_document_candidates(
         url = str(metadata.get("url") or metadata.get("source_url") or "").strip()
         canonical_url = _normalize_document_url(url)
         text = str(chunk.text or "").strip()
+        from embedding.document_quality import is_document_shell
+        if is_document_shell(text):
+            continue
         if not canonical_url or not _looks_like_document_url(canonical_url) or len(text) < 200:
             continue
         if canonical_url in seen_urls:
@@ -1073,7 +1392,8 @@ def _match_centered_excerpt(text: str, terms: list[str], max_chars: int) -> str:
 
 
 def _normalize_document_url(url: str) -> str:
-    return re.split(r"[?#]", str(url or "").strip(), maxsplit=1)[0].rstrip("/")
+    from embedding.document_chunks import _canonicalize_url
+    return _canonicalize_url(url) or str(url or "").strip()
 
 
 def _looks_like_document_url(url: str) -> bool:
@@ -1167,7 +1487,7 @@ def _baked_document_link_index(db_path: Optional[str]) -> dict:
                 index[key] = (str(title).strip(), str(url).strip())
         conn.close()
     except Exception as exc:
-        logger.warning("查询烘焙文档链接失败，跳过链接兜底: %s", exc)
+        logger.warning("查询烘焙文档链接失败，跳过链接兜底 code=DOCUMENT_LINK_LOOKUP_FAILED")
     return index
 
 

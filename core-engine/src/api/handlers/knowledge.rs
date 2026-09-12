@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     api::{error::ApiError, state::AppState},
-    storage::TimelineRecord,
+    storage::{search::split_search_terms, TimelineRecord},
 };
 
 const FALLBACK_NOISE_OVERVIEW_PREFIX: &str = "低价值工作片段（";
@@ -349,7 +349,7 @@ pub async fn list_knowledge(
                     .iter()
                     .map(|_| "(COALESCE(summary, '') LIKE ? OR COALESCE(overview, '') LIKE ? OR COALESCE(details, '') LIKE ? OR COALESCE(category, '') LIKE ?)".to_string())
                     .collect::<Vec<_>>()
-                    .join(" OR ");
+                    .join(" AND ");
                 sql.push_str(" AND (");
                 sql.push_str(&query_clause);
                 sql.push(')');
@@ -359,25 +359,15 @@ pub async fn list_knowledge(
                         bind.push(Box::new(pattern.clone()));
                     }
                 }
-                // FTS5 预筛：timelines_fts 候选可用时收窄扫描，否则回退 LIKE 全扫
-                if let Some(fts_query) = crate::storage::fts::build_fts_or_query(&query_terms) {
-                    if let Some(ids) = crate::storage::fts::fts_candidate_ids(
-                        &conn,
-                        "timelines_fts",
-                        &fts_query,
-                        crate::storage::fts::DEFAULT_FTS_CANDIDATE_CAP,
-                    ) {
-                        let (clause, mut id_binds) = crate::storage::fts::render_in_clause(&ids);
-                        sql.push_str(" AND id IN ");
-                        sql.push_str(&clause);
-                        bind.append(&mut id_binds);
-                    }
-                }
             }
             if let Some(f) = params.from { sql.push_str(" AND created_at_ms >= ?"); bind.push(Box::new(f)); }
             if let Some(t) = params.to   { sql.push_str(" AND created_at_ms <= ?"); bind.push(Box::new(t)); }
-            // 时间线表格统一按创建时间逆序展示
-            sql.push_str(" ORDER BY created_at_ms DESC, id DESC LIMIT ? OFFSET ?");
+            if query_terms.is_empty() {
+                sql.push_str(" ORDER BY created_at_ms DESC, id DESC");
+            } else if let Some(query) = params.q.as_deref() {
+                append_timeline_relevance_order(&mut sql, &mut bind, query, &query_terms);
+            }
+            sql.push_str(" LIMIT ? OFFSET ?");
             bind.push(Box::new(params.limit));
             bind.push(Box::new(params.offset));
 
@@ -429,7 +419,7 @@ pub async fn list_knowledge(
                     .iter()
                     .map(|_| "(COALESCE(summary, '') LIKE ? OR COALESCE(overview, '') LIKE ? OR COALESCE(details, '') LIKE ? OR COALESCE(category, '') LIKE ?)".to_string())
                     .collect::<Vec<_>>()
-                    .join(" OR ");
+                    .join(" AND ");
                 count_sql.push_str(" AND (");
                 count_sql.push_str(&query_clause);
                 count_sql.push(')');
@@ -437,20 +427,6 @@ pub async fn list_knowledge(
                     let pattern = format!("%{}%", term);
                     for _ in 0..4 {
                         count_bind.push(Box::new(pattern.clone()));
-                    }
-                }
-                // FTS5 预筛（与列表查询保持一致的候选收窄）
-                if let Some(fts_query) = crate::storage::fts::build_fts_or_query(&query_terms) {
-                    if let Some(ids) = crate::storage::fts::fts_candidate_ids(
-                        &conn,
-                        "timelines_fts",
-                        &fts_query,
-                        crate::storage::fts::DEFAULT_FTS_CANDIDATE_CAP,
-                    ) {
-                        let (clause, mut id_binds) = crate::storage::fts::render_in_clause(&ids);
-                        count_sql.push_str(" AND id IN ");
-                        count_sql.push_str(&clause);
-                        count_bind.append(&mut id_binds);
                     }
                 }
             }
@@ -476,12 +452,42 @@ pub async fn list_knowledge(
 }
 
 fn keyword_terms(query: &str) -> Vec<String> {
-    query
-        .split_whitespace()
-        .map(str::trim)
-        .filter(|term| !term.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
+    split_search_terms(query)
+}
+
+fn append_timeline_relevance_order(
+    sql: &mut String,
+    bind: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    query: &str,
+    terms: &[String],
+) {
+    let title_terms = terms
+        .iter()
+        .map(|_| "COALESCE(summary, '') LIKE ?")
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let title_metadata_terms = terms
+        .iter()
+        .map(|_| {
+            "(COALESCE(summary, '') LIKE ? OR COALESCE(overview, '') LIKE ? OR COALESCE(category, '') LIKE ?)"
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    sql.push_str(" ORDER BY CASE WHEN COALESCE(summary, '') LIKE ? THEN 3 WHEN (");
+    sql.push_str(&title_terms);
+    sql.push_str(") THEN 2 WHEN (");
+    sql.push_str(&title_metadata_terms);
+    sql.push_str(") THEN 1 ELSE 0 END DESC, created_at_ms DESC, id DESC");
+    bind.push(Box::new(format!("%{}%", query.trim())));
+    for term in terms {
+        bind.push(Box::new(format!("%{}%", term)));
+    }
+    for term in terms {
+        let pattern = format!("%{}%", term);
+        for _ in 0..3 {
+            bind.push(Box::new(pattern.clone()));
+        }
+    }
 }
 
 /// GET /api/knowledge/:id - 获取单条时间线详情

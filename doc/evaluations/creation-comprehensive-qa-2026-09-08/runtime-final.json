@@ -1,0 +1,114 @@
+{
+  "verified_at": "2026-09-08T03:03:41.166078+00:00",
+  "verification_method": "Actual listening PID, executable text mapping, expected launch entry and exact cwd, endpoint health, process start after checked source/binary mtimes; current-source loading is an inference from those checks. Disk hashes identify the checked files, not in-memory bytes.",
+  "services": {
+    "core": {
+      "port": 7070,
+      "pid": 47837,
+      "started_local": "Tue Sep  8 04:42:27 2026",
+      "command": "./target/release/memory-bread",
+      "cwd": "/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/core-engine",
+      "executable_text_mapping": "/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/core-engine/target/release/memory-bread",
+      "launch_entry": "/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/core-engine/target/release/memory-bread",
+      "health_http_status": 200,
+      "health_body": "{\"status\":\"ok\",\"service\":\"memory-bread-core\",\"version\":\"0.1.0\",\"database\":{\"path\":\"/Users/xianjiaqi/.memory-bread/memory-bread.db\",\"required_migrations\":[\"001_init\",\"002_seed_defaults\",\"003_views\",\"004_captures_knowledge_id\",\"005_monitor_tables\",\"006_monitor_metric_scopes\",\"007_vector_index_rag_metadata\",\"008_knowledge_semantic_metadata\",\"009_bake_templates\",\"010_knowledge_entries\",\"011_bake_pipeline\",\"012_fix_knowledge_fts_triggers\",\"013_rebuild_knowledge_fts\",\"014_add_knowledge_timestamp_ms\",\"015_split_knowledge_tables\",\"016_fix_split_tables_fts_triggers\",\"018_create_bake_designs\",\"019_rename_to_timelines\",\"020_add_detailed_content\",\"021_unify_bake_designs\",\"022_fix_bake_fts_delete_triggers\",\"023_rename_bake_run_design_count\",\"024_create_bake_documents\",\"025_add_capture_web_source\",\"026_add_capture_screenshot_source\",\"027_bake_retry_state\",\"028_remove_bake_manual_review\",\"029_rename_capture_knowledge_id_to_timeline_id\",\"030_archive_legacy_bake_article_timelines\",\"031_ensure_full_schema\",\"032_restore_bake_article_from_legacy\",\"033_drop_bake_episodic_memory_id\",\"034_create_creation_history\",\"035_seed_privacy_defaults\",\"036_seed_capture_retention_days\",\"037_add_model_to_history\",\"038_add_latency_to_creation_history\",\"039_create_diaries\",\"040_update_default_capture_interval\",\"041_due_diary_catchup_tasks\",\"042_seed_default_diary_tasks\",\"043_normalize_scheduled_task_cron\",\"044_correct_weekday_semantics\",\"045_remove_daily_diary_future_plans\",\"046_seed_energy_saving_mode\",\"047_update_diary_timeline_sources\",\"048_preserve_existing_capture_runtime\",\"049_create_creation_skills\",\"050_add_creation_skill_lifecycle\",\"051_expand_creation_skill_examples\",\"052_add_creation_skill_market_source\",\"053_backfill_document_timeline_metadata\",\"054_task_notification_channels\",\"055_add_creation_agent_history\",\"056_creation_revision_context\",\"057_add_creation_skill_package_files\",\"058_add_creation_skill_distinctive_sections\",\"059_seed_other_privacy_filter\",\"060_add_creation_skill_description\",\"061_requeue_historical_bake_timeouts\",\"062_document_artifact_identity\",\"063_durable_artifact_vectors\",\"064_data_memory_module\",\"065_allow_browser_attach_snapshots\",\"066_creation_evidence_latest_data\",\"067_integration_skill_runs\",\"068_timeline_data_facts\",\"069_creation_skill_manual_source\",\"070_requeue_bake_output_failures\",\"071_timelines_fts\",\"072_requeue_bake_output_failures_v2\",\"073_capture_attempt_audit\",\"074_data_snapshot_period_history\",\"075_timeline_data_fact_period_history\",\"076_remove_creation_skill_structure_pattern\",\"077_bake_retry_schedule\",\"078_local_breadcrumbs\",\"079_breadcrumb_rule_activation\",\"080_bake_candidate_audits\",\"081_allow_manual_bake_artifacts\",\"082_timeline_work_context\",\"083_requeue_semantic_sop_candidates\",\"084_requeue_semantic_sop_prompt_rejects\",\"085_memory_favorites\",\"086_task_creation_link\",\"087_requeue_recoverable_bake_outputs\",\"088_bake_artifact_audits\",\"089_bake_runs_trigger_actionable\",\"090_repair_document_knowledge_links\",\"091_timeline_driven_data_materialization\",\"092_timeline_data_materialization_versions\",\"093_reaggregate_timeline_data_sets\",\"094_cleanup_recreated_single_metric_data\",\"095_restore_uncovered_legacy_data_rows\",\"096_refresh_timeline_dataset_titles\",\"097_refine_timeline_dataset_titles\",\"098_refresh_dataset_natural_summaries\",\"099_repair_timeline_dataset_snapshots\",\"100_bake_document_refresh_policy\",\"101_bake_document_source_snapshots\",\"102_memory_quality_gates\",\"103_data_fact_quality_gate\",\"104_creation_history_lifecycle\",\"105_operation_evidence_recovery\",\"106_creation_brainstorm_sessions\",\"107_creation_history_progress_epoch\",\"108_creation_inline_edit_runs\",\"109_reconcile_operation_replay_queue\",\"110_deduplicate_legacy_bake_documents\",\"111_creation_operations\",\"112_creation_operation_recovery_columns\",\"113_creation_skill_governance\",\"114_bake_knowledge_reuse_gate\"]}}",
+      "newer_source_or_binary": [],
+      "process_identity_and_file_timestamp_checks_passed": true,
+      "current_source_loading_inferred": true,
+      "checked_files": [
+        {
+          "path": "core-engine/target/release/memory-bread",
+          "sha256": "70fb0cb5bce5f8ccb1121ed7852182eb225a6ec336dbfdfab30212babcd86204"
+        },
+        {
+          "path": "core-engine/src/api/handlers/creation.rs",
+          "sha256": "4bd78a3741696127fcca573b0c31f1bcf8e4bf45012c8c8447cef7d0b4adb7be"
+        },
+        {
+          "path": "core-engine/src/storage/repo/creation_history.rs",
+          "sha256": "692a90c1523ab757a830e8d6d4568b3a94cfedf49a2de7e1d78d0cb77a868662"
+        }
+      ]
+    },
+    "creation": {
+      "port": 8001,
+      "pid": 41826,
+      "started_local": "Tue Sep  8 11:02:56 2026",
+      "command": "/opt/homebrew/Cellar/python@3.9/3.9.25/Frameworks/Python.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python start_creation_service.py",
+      "cwd": "/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/ai-sidecar",
+      "executable_text_mapping": "/opt/homebrew/Cellar/python@3.9/3.9.25/Frameworks/Python.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python",
+      "launch_entry": "/Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/ai-sidecar/start_creation_service.py",
+      "health_http_status": 200,
+      "health_body": "{\"status\":\"ok\"}",
+      "newer_source_or_binary": [],
+      "process_identity_and_file_timestamp_checks_passed": true,
+      "current_source_loading_inferred": true,
+      "checked_files": [
+        {
+          "path": "ai-sidecar/start_creation_service.py",
+          "sha256": "8515bfe0025365b66ba915812c907a330e5bffab8d3842a103c8f69d4ba5ce09"
+        },
+        {
+          "path": "ai-sidecar/creation/__init__.py",
+          "sha256": "7a21d2bc89e88f524eb63acb4c1c07d922c593aca109a71136c358cc013cda53"
+        },
+        {
+          "path": "ai-sidecar/creation/agent_loop.py",
+          "sha256": "ffad73b83bc4c9b8eb22a8cf99321f2b096431b3a679a9caf2d80b8c732809ef"
+        },
+        {
+          "path": "ai-sidecar/creation/app.py",
+          "sha256": "9101ef1ad67785826112389b775b3234a8923c1946051bf6a26fb30d625c9cb1"
+        },
+        {
+          "path": "ai-sidecar/creation/brainstorm.py",
+          "sha256": "48e6461dcb4f27b8eb7e6a06cfd49846565bf75fb61c2ee0de9c00a09c7f3a73"
+        },
+        {
+          "path": "ai-sidecar/creation/delivery_contract.py",
+          "sha256": "9b2de6cced441947892daa024258527f02243d055ffcd3b5ee5c89c2a6ab60a8"
+        },
+        {
+          "path": "ai-sidecar/creation/document_integrity.py",
+          "sha256": "698007e3f0d77de4b32bf8a596c3ef87243f411d7d0d839b46654258f009392b"
+        },
+        {
+          "path": "ai-sidecar/creation/inline_edit.py",
+          "sha256": "373aa949a9543c892f50c80927e0878858174e8aee8470493741a88219f15526"
+        },
+        {
+          "path": "ai-sidecar/creation/markdown_format.py",
+          "sha256": "676b2d174ebd2276a45e6d8ef6109dff5e40e362af372746049e8394aa1ed925"
+        },
+        {
+          "path": "ai-sidecar/creation/operations.py",
+          "sha256": "a0d2cc9c2ed0dae224b01472072134b6aa904e751e5fdfa3ac0a9f2e22b47ff5"
+        },
+        {
+          "path": "ai-sidecar/creation/prompt_evidence.py",
+          "sha256": "28ed652a810e82cc673c8e8fd0e2fccc1644e4303e6b82bb8967c2b6c57bfde5"
+        },
+        {
+          "path": "ai-sidecar/creation/query_engine.py",
+          "sha256": "3bda04a8c16754cb4d4900dfac55e5875e284b12cce742f3a8d5f5a58601e854"
+        },
+        {
+          "path": "ai-sidecar/creation/service.py",
+          "sha256": "ae59d663fbaf1c9ec9e97277d00c58130210d4404826a65dc7d745875b4bcaee"
+        },
+        {
+          "path": "ai-sidecar/creation/skill_governance.py",
+          "sha256": "230c6fb2ffd5c5a2de3acc8c1d1082d4b2221743d625f7d71c1674dd096ebf7f"
+        },
+        {
+          "path": "ai-sidecar/creation/tools.py",
+          "sha256": "39455c682ba7347dd526e5579d594a7911f7fd02d9114c91f3d716278eb17f35"
+        },
+        {
+          "path": "ai-sidecar/creation/visual_plan.py",
+          "sha256": "139c798f49fd0dd7c7d62a667dc09caf3bfa7acf673d4b398927adc180ef0134"
+        }
+      ]
+    }
+  }
+}

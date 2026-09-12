@@ -613,6 +613,30 @@ fn sanitize_export_database(conn: &Connection) -> Result<(), StorageError> {
 
     if table_exists(conn, "captures")? {
         let mut references = Vec::new();
+        // Retention may remove raw captures while durable assets still refer to
+        // their IDs. Discover declared relationships so new asset tables do not
+        // silently lose their reference stubs during portable export.
+        for table in table_names(conn)? {
+            let mut stmt = conn.prepare(&format!("PRAGMA foreign_key_list({})", quote_identifier(&table)))?;
+            let columns = stmt.query_map([], |row| Ok((row.get::<_,String>(2)?,row.get::<_,String>(3)?)))?
+                .collect::<Result<Vec<_>,_>>()?;
+            for (parent, column) in columns {
+                if parent == "captures" {
+                    let column = quote_identifier(&column);
+                    references.push(format!("SELECT {column} FROM {} WHERE {column} IS NOT NULL",quote_identifier(&table)));
+                }
+            }
+            let available_columns = table_columns(conn, &table)?;
+            for (column, parent) in json_reference_columns(&table) {
+                if *parent == "captures" && available_columns.iter().any(|name|name==column) {
+                    let column = format!("owner.{}",quote_identifier(column));
+                    references.push(format!("SELECT CAST(ref.value AS INTEGER) FROM {} owner,
+                        json_each(CASE WHEN json_valid({column}) THEN {column} ELSE '[]' END) ref
+                        WHERE ref.type='integer' OR (ref.type='text' AND ref.value=CAST(CAST(ref.value AS INTEGER) AS TEXT))",
+                        quote_identifier(&table)));
+                }
+            }
+        }
         for (table, column) in [
             ("timelines", "capture_id"),
             ("data_source_links", "capture_id"),
@@ -646,7 +670,9 @@ fn sanitize_export_database(conn: &Connection) -> Result<(), StorageError> {
              SET app_name = NULL,
                  app_bundle_id = NULL,
                  win_title = NULL,
-                 event_type = 'snapshot_ref',
+                 event_type = CASE WHEN ts=0 AND event_type =
+                    'snapshot_ref_missing:' || CAST(SUBSTR(event_type,22) AS INTEGER)
+                    THEN event_type ELSE 'snapshot_ref' END,
                  ax_text = NULL,
                  ax_focused_role = NULL,
                  ax_focused_id = NULL,
@@ -660,6 +686,16 @@ fn sanitize_export_database(conn: &Connection) -> Result<(), StorageError> {
                  webpage_title = NULL,
                  screenshot_source = NULL;",
         )?;
+        if !references.is_empty() {
+            // A missing capture has no recoverable timestamp or raw content.
+            // The typed marker retains its original reference ID for idempotent
+            // remapping, including a collision with a real local capture ID.
+            conn.execute(&format!("WITH referenced(ref_id) AS ({})
+                INSERT INTO captures(id,ts,event_type,is_sensitive,pii_scrubbed)
+                SELECT ref_id,0,'snapshot_ref_missing:' || ref_id,1,1 FROM referenced
+                WHERE ref_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM captures c WHERE c.id=ref_id)",
+                references.join(" UNION ")), [])?;
+        }
         if table_exists(conn, "captures_fts")? {
             conn.execute_batch("INSERT INTO captures_fts(captures_fts) VALUES ('rebuild');")?;
         }
@@ -716,6 +752,7 @@ struct MergeTable {
 struct MergeForeignKey {
     column: String,
     parent_table: String,
+    on_delete: String,
 }
 
 /// Merge a complete snapshot without replacing any local row. Business unique
@@ -737,6 +774,8 @@ fn merge_database_snapshot(
         let tx = target.unchecked_transaction()?;
         let mut id_maps: BTreeMap<String, BTreeMap<i64, i64>> = BTreeMap::new();
         let mut reports = Vec::new();
+        let mut inserted_document_ids = Vec::new();
+        let mut imported_summary_bindings = Vec::new();
 
         for table in &tables {
             if !table_exists(&tx, &table.name)? {
@@ -760,14 +799,60 @@ fn merge_database_snapshot(
             };
 
             for mut row in rows {
+                // Remember the source identity before remapping an owner key.
+                let original_source_id = table.primary_key.as_deref()
+                    .and_then(|column| json_i64(&row, column));
+                let summary_source_id = if table.name == "bake_documents" {
+                    let binding = json_i64(&row,"summary_source_snapshot_id");
+                    // The document and its snapshots reference each other. Resolve
+                    // this edge after both sets of IDs have been imported.
+                    if row.contains_key("summary_source_snapshot_id") {
+                        row.insert("summary_source_snapshot_id".into(),Value::Null);
+                    }
+                    binding
+                } else { None };
                 sanitize_and_remap_foreign_keys(&mut row, table, &id_maps);
+                if table.name == "bake_document_body_versions" {
+                    if let Some(mut archived)=row.get("record_json").and_then(Value::as_str)
+                        .and_then(|raw|serde_json::from_str::<Value>(raw).ok()) {
+                        if archived.get("summary_source_snapshot_id").is_some() {
+                            let mapped=archived["summary_source_snapshot_id"].as_i64()
+                                .and_then(|id|id_maps.get("bake_document_source_snapshots").and_then(|m|m.get(&id)).copied());
+                            let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM bake_document_source_snapshots
+                                WHERE id=?1 AND document_id=?2 AND content_text=?3
+                                AND identity_match=1 AND completeness_status='complete')",
+                                rusqlite::params![mapped,json_i64(&row,"document_id"),archived.get("full_content").and_then(Value::as_str)],
+                                |r|r.get(0))?;
+                            archived["summary_source_snapshot_id"]=if valid {serde_json::json!(mapped)} else {Value::Null};
+                            if !valid {archived["summary_generation_version"]=Value::Null;}
+                            row.insert("record_json".into(),Value::String(archived.to_string()));
+                        }
+                    }
+                }
+                if table.name == "bake_document_source_heads" {
+                    // Import preserves local document edits. An incoming source
+                    // pointer is current only when it describes that exact body.
+                    let valid: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM bake_documents d
+                         JOIN bake_document_source_snapshots s ON s.document_id=d.id
+                         WHERE d.id=?1 AND s.id=?2 AND d.deleted_at IS NULL
+                         AND s.identity_match=1 AND s.completeness_status='complete'
+                         AND s.content_text=d.full_content)",
+                        rusqlite::params![json_i64(&row,"document_id"),json_i64(&row,"snapshot_id")],
+                        |r|r.get(0),
+                    )?;
+                    if !valid {
+                        report.skipped += 1;
+                        continue;
+                    }
+                }
                 let source_id = table
                     .primary_key
                     .as_deref()
                     .and_then(|column| json_i64(&row, column));
 
                 if let Some(existing_id) = find_existing_merge_row(&tx, table, &row, &columns)? {
-                    if let (Some(source_id), Some(existing_id)) = (source_id, existing_id) {
+                    if let (Some(source_id), Some(existing_id)) = (original_source_id, existing_id) {
                         id_maps
                             .entry(table.name.clone())
                             .or_default()
@@ -792,13 +877,19 @@ fn merge_database_snapshot(
                 }
                 report.inserted += 1;
                 if let (Some(primary_key), Some(source_id)) =
-                    (table.primary_key.as_deref(), source_id)
+                    (table.primary_key.as_deref(), original_source_id)
                 {
                     let target_id = if insert_columns.iter().any(|column| column == primary_key) {
-                        source_id
+                        json_i64(&row, primary_key).unwrap_or(source_id)
                     } else {
                         tx.last_insert_rowid()
                     };
+                    if table.name == "bake_documents" {
+                        inserted_document_ids.push(target_id);
+                        if let Some(snapshot_id) = summary_source_id {
+                            imported_summary_bindings.push((target_id,snapshot_id));
+                        }
+                    }
                     id_maps
                         .entry(table.name.clone())
                         .or_default()
@@ -806,6 +897,31 @@ fn merge_database_snapshot(
                 }
             }
             reports.push(report);
+        }
+
+        for (document_id,source_snapshot_id) in imported_summary_bindings {
+            let mapped = id_maps.get("bake_document_source_snapshots")
+                .and_then(|ids| ids.get(&source_snapshot_id)).copied();
+            let valid:bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM bake_document_source_heads h
+                JOIN bake_document_source_snapshots s ON s.id=h.snapshot_id
+                JOIN bake_documents d ON d.id=h.document_id
+                WHERE d.id=?1 AND s.id=?2 AND s.document_id=d.id AND d.deleted_at IS NULL
+                AND s.identity_match=1 AND s.completeness_status='complete' AND s.content_text=d.full_content)",
+                rusqlite::params![document_id,mapped],|r|r.get(0))?;
+            // Do not downgrade a rejected bound summary into unversioned legacy text.
+            tx.execute("UPDATE bake_documents SET summary_source_snapshot_id=?2,
+                summary=CASE WHEN ?3 THEN summary ELSE NULL END WHERE id=?1",
+                rusqlite::params![document_id,if valid { mapped } else { None },valid])?;
+        }
+
+        // Freshness is a projection of a valid current head. A newly imported
+        // historical row must not keep a complete claim after its head was rejected.
+        // Existing local documents are deliberately outside this update.
+        for id in inserted_document_ids {
+            tx.execute("UPDATE bake_documents SET last_refresh_status='historical_only',
+                last_refresh_completeness='unverified',last_refresh_error='SOURCE_HEAD_UNVERIFIED'
+                WHERE id=?1 AND last_refresh_status='fresh_complete'
+                AND NOT EXISTS(SELECT 1 FROM bake_document_source_heads WHERE document_id=?1)",[id])?;
         }
 
         let violation = tx
@@ -865,6 +981,7 @@ fn merge_tables(conn: &Connection) -> Result<Vec<MergeTable>, StorageError> {
                 Ok(MergeForeignKey {
                     parent_table: row.get(2)?,
                     column: row.get(3)?,
+                    on_delete: row.get(6)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -916,6 +1033,11 @@ fn is_mergeable_complete_table(name: &str) -> bool {
                 | "bake_retry_state"
                 | "bake_candidate_audits"
                 | "bake_artifact_audits"
+                | "bake_document_refresh_attempt_metrics"
+                | "document_source_mismatch_events"
+                | "document_candidate_quality_events"
+                | "document_summary_jobs"
+                | "document_summary_retry_events"
         )
 }
 
@@ -1020,6 +1142,13 @@ fn sanitize_and_remap_foreign_keys(
         }
     }
     for foreign_key in &table.foreign_keys {
+        // Excluded runtime history has no imported identity. Follow SET NULL
+        // instead of binding the old ID to unrelated local operational history.
+        if !is_mergeable_complete_table(&foreign_key.parent_table)
+            && foreign_key.on_delete.eq_ignore_ascii_case("SET NULL") {
+            row.insert(foreign_key.column.clone(), Value::Null);
+            continue;
+        }
         let Some(old_id) = json_i64(row, &foreign_key.column) else {
             continue;
         };
@@ -1111,6 +1240,14 @@ fn find_existing_merge_row(
     row: &JsonRow,
     columns: &[String],
 ) -> Result<Option<Option<i64>>, StorageError> {
+    // A primary key that also references its owner cannot be allocated anew.
+    // Preserve the local row even when mutable queue/status fields differ.
+    if let Some(primary_key) = table.primary_key.as_ref() {
+        if table.foreign_keys.iter().any(|fk| &fk.column == primary_key) {
+            return find_row_by_columns(conn, table, row, &[primary_key.clone()]);
+        }
+    }
+    let mut exact_match_ruled_out = false;
     for key in semantic_keys(&table.name)
         .into_iter()
         .chain(table.unique_keys.clone())
@@ -1125,8 +1262,12 @@ fn find_existing_merge_row(
             if let Some(id) = find_row_by_columns(conn, table, row, &key)? {
                 return Ok(Some(id));
             }
+            // Exact equality implies equality on every non-primary subset.
+            // A failed subset lookup makes another full-row scan redundant.
+            exact_match_ruled_out |= key.iter().all(|column| table.primary_key.as_ref()!=Some(column));
         }
     }
+    if exact_match_ruled_out { return Ok(None); }
     let exact_columns = columns
         .iter()
         .filter(|column| table.primary_key.as_ref() != Some(*column))
@@ -1162,6 +1303,8 @@ fn semantic_keys(table: &str) -> Vec<Vec<String>> {
             &["document_id", "section_index"],
             &["document_id", "section_index", "content_hash"],
         ],
+        // This primary key is also the owner FK, never a new allocatable ID.
+        "bake_document_source_heads" => &[&["document_id"]],
         "creation_history" => &[
             &["session_id", "revision_no"],
             &["prompt", "generated_content", "created_at"],
@@ -2635,6 +2778,100 @@ mod tests {
     }
 
     #[test]
+    fn complete_snapshot_keeps_identical_state_for_distinct_owners() {
+        let source=StorageManager::open_in_memory().unwrap();
+        seed_assets(&source);
+        source.with_conn(|c| {
+            c.execute("INSERT INTO timelines(id,capture_id,summary,created_at,created_at_ms,updated_at_ms)
+                VALUES(8,42,'another owner','2000-01-01 00:00:00',2,2)",[])?;
+            c.execute("INSERT INTO operation_replay_queue(timeline_id,reason,queued_at_ms)
+                VALUES(7,'same-state',1),(8,'same-state',1)",[])?;
+            Ok(())
+        }).unwrap();
+        let snapshot=source.export_asset_snapshot().unwrap();
+        let target=StorageManager::open_in_memory().unwrap();
+        target.import_asset_snapshot(&snapshot,false).unwrap();
+        target.import_asset_snapshot(&snapshot,false).unwrap();
+        target.with_conn(|c| {
+            assert_eq!(c.query_row("SELECT COUNT(DISTINCT timeline_id) FROM operation_replay_queue WHERE reason='same-state'",[],|r|r.get::<_,i64>(0))?,2);
+            assert!(c.query_row("PRAGMA foreign_key_check",[],|r|r.get::<_,String>(0)).optional()?.is_none());
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn complete_snapshot_does_not_rebind_excluded_runtime_history() {
+        let source = StorageManager::open_in_memory().unwrap();
+        seed_assets(&source);
+        source.with_conn(|c| {
+            c.execute("INSERT INTO bake_runs(id,trigger_reason,status,started_at) VALUES(123,'source','completed',1)",[])?;
+            c.execute("INSERT INTO operation_replay_queue(timeline_id,reason,queued_at_ms,last_run_id)
+                VALUES(7,'runtime-reference',1,123)",[])?;
+            Ok(())
+        }).unwrap();
+        let snapshot=source.export_asset_snapshot().unwrap();
+        for existing_local_run in [false,true] {
+            let target=StorageManager::open_in_memory().unwrap();
+            if existing_local_run {
+                target.with_conn(|c| {
+                    c.execute("INSERT INTO bake_runs(id,trigger_reason,status,started_at) VALUES(123,'local','completed',2)",[])?;
+                    Ok(())
+                }).unwrap();
+            }
+            target.import_asset_snapshot(&snapshot,false).unwrap();
+            target.with_conn(|c| {
+                let run:Option<i64>=c.query_row("SELECT last_run_id FROM operation_replay_queue WHERE reason='runtime-reference'",[],|r|r.get(0))?;
+                assert_eq!(run,None);
+                assert_eq!(c.query_row("SELECT count(*) FROM bake_runs",[],|r|r.get::<_,i64>(0))?,i64::from(existing_local_run));
+                assert!(c.query_row("PRAGMA foreign_key_check",[],|r|r.get::<_,String>(0)).optional()?.is_none());
+                Ok(())
+            }).unwrap();
+        }
+        source.with_conn(|c| {
+            assert_eq!(c.query_row("SELECT last_run_id FROM operation_replay_queue WHERE reason='runtime-reference'",[],|r|r.get::<_,i64>(0))?,123);
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn complete_snapshot_preserves_remapped_owner_primary_keys() {
+        let source = StorageManager::open_in_memory().unwrap();
+        seed_assets(&source);
+        source.with_conn(|c| {
+            c.execute("INSERT INTO operation_replay_queue (timeline_id,reason,queued_at_ms)
+                       VALUES (7,'snapshot-owner-test',1)", [])?;
+            Ok(())
+        }).unwrap();
+        let snapshot = source.export_asset_snapshot().unwrap();
+        let target = StorageManager::open_in_memory().unwrap();
+        target.with_conn(|c| {
+            c.execute("INSERT INTO captures (id,ts,event_type) VALUES (42,999,'local')", [])?;
+            c.execute("INSERT INTO timelines (id,capture_id,summary,created_at_ms,updated_at_ms)
+                       VALUES (7,42,'local owner',999,999)", [])?;
+            Ok(())
+        }).unwrap();
+        target.import_asset_snapshot(&snapshot, false).unwrap();
+        target.with_conn(|c| {
+            c.execute("UPDATE operation_replay_queue SET status='completed'
+                       WHERE reason='snapshot-owner-test'", [])?;
+            Ok(())
+        }).unwrap();
+        target.import_asset_snapshot(&snapshot, false).unwrap();
+        target.with_conn(|c| {
+            let (id,status,summary): (i64,String,String) = c.query_row(
+                "SELECT q.timeline_id,q.status,t.summary FROM operation_replay_queue q
+                 JOIN timelines t ON t.id=q.timeline_id WHERE q.reason='snapshot-owner-test'",
+                [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+            assert_ne!(id,7);
+            assert_eq!(status,"completed");
+            assert_eq!(summary,"一次重要时间线");
+            assert_eq!(c.query_row("SELECT count(*) FROM operation_replay_queue WHERE reason='snapshot-owner-test'", [], |r| r.get::<_,i64>(0))?,1);
+            assert!(c.query_row("PRAGMA foreign_key_check", [], |r| r.get::<_,String>(0)).optional()?.is_none());
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
     fn complete_snapshot_preserves_local_rows_and_remaps_colliding_ids() {
         let source = StorageManager::open_in_memory().unwrap();
         seed_assets(&source);
@@ -2722,6 +2959,160 @@ mod tests {
         assert_eq!(count_table(&target, "bake_knowledge"), 2);
         assert!(!first.database_replaced);
         assert!(second.tables.iter().all(|table| table.inserted == 0));
+    }
+
+    #[test]
+    fn complete_snapshot_downgrades_imported_stale_head_without_changing_local_freshness() {
+        let source=StorageManager::open_in_memory().unwrap();
+        source.with_conn(|c| {c.execute_batch("INSERT INTO bake_documents(id,title,doc_type,full_content,document_identity,created_at,updated_at,last_refresh_status)
+            VALUES(1,'source','document','edited body','same-doc',1,1,'fresh_complete');
+            INSERT INTO bake_document_source_snapshots(id,document_id,source_url,page_title,content_text,content_hash,completeness_status,identity_match,collected_at)
+            VALUES(61,1,'https://example.com/doc','source','old body','old-hash','complete',1,1);
+            INSERT INTO bake_document_source_heads VALUES(1,61,1);")?;Ok(())}).unwrap();
+        let snapshot=source.export_asset_snapshot().unwrap();
+        for existing_local in [false,true] {
+            let target=StorageManager::open_in_memory().unwrap();
+            if existing_local {
+                target.with_conn(|c| {c.execute_batch("INSERT INTO bake_documents(id,title,doc_type,full_content,document_identity,created_at,updated_at,last_refresh_status)
+                    VALUES(1,'local','document','local body','same-doc',2,2,'fresh_complete');
+                    INSERT INTO bake_document_source_snapshots(id,document_id,source_url,page_title,content_text,content_hash,completeness_status,identity_match,collected_at)
+                    VALUES(62,1,'https://example.com/doc','local','local body','local-hash','complete',1,2);
+                    INSERT INTO bake_document_source_heads VALUES(1,62,2);")?;Ok(())}).unwrap();
+            }
+            target.import_asset_snapshot(&snapshot,false).unwrap();
+            target.with_conn(|c| {
+                let (body,status):(String,String)=c.query_row("SELECT full_content,last_refresh_status FROM bake_documents WHERE id=1",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+                assert_eq!(body,if existing_local {"local body"} else {"edited body"});
+                assert_eq!(status,if existing_local {"fresh_complete"} else {"historical_only"});
+                assert_eq!(c.query_row("SELECT count(*) FROM bake_document_source_heads",[],|r|r.get::<_,i64>(0))?,i64::from(existing_local));
+                assert!(c.query_row("SELECT EXISTS(SELECT 1 FROM bake_document_source_snapshots WHERE content_hash='old-hash')",[],|r|r.get::<_,bool>(0))?);
+                Ok(())
+            }).unwrap();
+        }
+        source.with_conn(|c| {
+            assert_eq!(c.query_row("SELECT last_refresh_status FROM bake_documents WHERE id=1",[],|r|r.get::<_,String>(0))?,"fresh_complete");Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn complete_snapshot_preserves_document_source_provenance() {
+        let source=StorageManager::open_in_memory().unwrap();
+        source.with_conn(|c| { c.execute_batch("INSERT INTO bake_documents(id,title,doc_type,full_content,document_identity,created_at,updated_at)
+            VALUES(1,'source','document','verified body','source-identity',1,1);
+            INSERT INTO bake_document_source_snapshots(id,document_id,source_url,page_title,content_text,content_hash,completeness_status,identity_match,collected_at)
+            VALUES(61,1,'https://example.com/doc/1','source','verified body','hash','complete',1,1);
+            INSERT INTO bake_document_source_heads VALUES(1,61,1);
+            INSERT INTO bake_document_source_checks(document_id,snapshot_id,checked_at,evidence_json) VALUES(1,61,1,'{}');
+            UPDATE bake_documents SET summary='verified summary',summary_source_snapshot_id=61 WHERE id=1;")?; Ok(()) }).unwrap();
+        source.with_conn(|c| {c.execute("INSERT INTO document_summary_versions(version_key,document_id,record_json,saved_at,reason)
+            VALUES('summary-history-key',1,?1,1,'explicit_regeneration')",
+            [r#"{"summary":"preserved legacy text","updated_at":1,"summary_source_snapshot_id":null}"#])?;Ok(())}).unwrap();
+        source.with_conn(|c| {c.execute("INSERT INTO bake_document_body_versions(document_id,replaced_by_snapshot_id,record_json,saved_at)
+            VALUES(1,61,?1,1)",[r#"{"full_content":"verified body","summary":"archived source summary","summary_source_snapshot_id":61,"summary_generation_version":"document-summary.v1"}"#])?;Ok(())}).unwrap();
+        for archive_case in ["valid","missing_source","wrong_body"] {
+        let archive=serde_json::json!({"full_content":if archive_case=="wrong_body" {"other body"} else {"verified body"},
+            "summary":"archived source summary","summary_source_snapshot_id":if archive_case=="missing_source" {999999} else {61},
+            "summary_generation_version":"document-summary.v1"});
+        source.with_conn(|c| {c.execute("UPDATE bake_document_body_versions SET record_json=?1",[archive.to_string()])?;Ok(())}).unwrap();
+        let snapshot=source.export_asset_snapshot().unwrap();
+        for (same_identity,local_head) in [(false,false),(false,true),(true,false),(true,true)] {
+            let target=StorageManager::open_in_memory().unwrap();
+            target.with_conn(|c| { c.execute("INSERT INTO bake_documents(id,title,doc_type,full_content,document_identity,created_at,updated_at)
+                VALUES(1,'local','document','local edited body',?1,2,2)",
+                [if same_identity {"source-identity"} else {"local-identity"}])?; Ok(()) }).unwrap();
+            if local_head {
+                target.with_conn(|c| { c.execute_batch("INSERT INTO bake_document_source_snapshots(id,document_id,source_url,page_title,content_text,content_hash,completeness_status,identity_match,collected_at)
+                    VALUES(61,1,'https://example.com/doc/1','local','local edited body','local-hash','complete',1,2);
+                    INSERT INTO bake_document_source_heads VALUES(1,61,2);")?; Ok(()) }).unwrap();
+            }
+            target.import_asset_snapshot(&snapshot,false).unwrap();
+            target.with_conn(|c| {
+                let archived:(String,String)=c.query_row("SELECT d.document_identity,v.record_json
+                    FROM document_summary_versions v JOIN bake_documents d ON d.id=v.document_id
+                    WHERE v.version_key='summary-history-key'",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+                assert_eq!(archived.0,"source-identity");
+                assert_eq!(serde_json::from_str::<serde_json::Value>(&archived.1).unwrap()["summary"],"preserved legacy text");
+                let (body_archive,owner):(String,i64)=c.query_row("SELECT record_json,document_id FROM bake_document_body_versions",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+                let body_archive:Value=serde_json::from_str(&body_archive).unwrap();
+                if archive_case=="valid" {
+                let snapshot_id=body_archive["summary_source_snapshot_id"].as_i64().unwrap();
+                let (snapshot_owner,source_body):(i64,String)=c.query_row("SELECT document_id,content_text FROM bake_document_source_snapshots WHERE id=?1",[snapshot_id],|r|Ok((r.get(0)?,r.get(1)?)))?;
+                assert_eq!(snapshot_owner,owner);
+                assert_eq!(source_body,"verified body");
+                assert_eq!(body_archive["summary_generation_version"],"document-summary.v1");
+                if local_head {assert_ne!(snapshot_id,61,"archived binding must follow imported ID, not collide with local head");}
+                } else {
+                    assert!(body_archive["summary_source_snapshot_id"].is_null());
+                    assert!(body_archive["summary_generation_version"].is_null());
+                    assert_eq!(body_archive["summary"],"archived source summary");
+                }
+                let invalid:i64=c.query_row("SELECT COUNT(*) FROM bake_document_source_heads h
+                    LEFT JOIN bake_documents d ON d.id=h.document_id
+                    LEFT JOIN bake_document_source_snapshots s ON s.id=h.snapshot_id
+                    WHERE d.id IS NULL OR s.id IS NULL OR s.document_id<>d.id OR s.content_text<>d.full_content",[],|r|r.get(0))?;
+                assert_eq!(invalid,0,"import must not attach foreign or stale source heads");
+                let body:String=c.query_row("SELECT full_content FROM bake_documents WHERE id=1",[],|r|r.get(0))?;
+                assert_eq!(body,"local edited body");
+                let checks:i64=c.query_row("SELECT COUNT(*) FROM bake_document_source_checks k JOIN bake_document_source_snapshots s ON k.snapshot_id=s.id AND k.document_id=s.document_id",[],|r|r.get(0))?;
+                assert_eq!(checks,1);
+                let heads:i64=c.query_row("SELECT COUNT(*) FROM bake_document_source_heads",[],|r|r.get(0))?;
+                assert_eq!(heads, i64::from(local_head) + i64::from(!same_identity));
+                if !same_identity {
+                    let valid_summary:i64=c.query_row("SELECT COUNT(*) FROM bake_documents d
+                        JOIN bake_document_source_heads h ON h.document_id=d.id
+                        WHERE d.document_identity='source-identity' AND d.summary='verified summary'
+                        AND d.summary_source_snapshot_id=h.snapshot_id",[],|r|r.get(0))?;
+                    assert_eq!(valid_summary,1,"import must remap the summary binding to its own source");
+                }
+                if local_head {
+                    let current:i64=c.query_row("SELECT snapshot_id FROM bake_document_source_heads WHERE document_id=1",[],|r|r.get(0))?;
+                    assert_eq!(current,61);
+                }
+                Ok(())
+            }).unwrap();
+            let repeat=target.import_asset_snapshot(&snapshot,false).unwrap();
+            assert!(repeat.tables.iter().all(|t|t.inserted==0));
+        }
+        }
+    }
+
+    #[test]
+    fn complete_snapshot_preserves_pruned_capture_references_without_raw_content() {
+        let source = StorageManager::open_in_memory().unwrap();
+        seed_assets(&source);
+        source.with_conn(|c| {
+            c.execute_batch("PRAGMA foreign_keys=OFF;
+                DELETE FROM captures WHERE id=42;
+                UPDATE bake_documents SET source_capture_ids='[42,\"202\"]';
+                INSERT INTO integration_import_items(skill_id,source_key,source_path,content_hash,capture_id,timeline_id,created_at_ms,updated_at_ms)
+                VALUES ('test','one','one','one',200,7,1,1),('test','two','two','two',201,7,1,1);
+                PRAGMA foreign_keys=ON;")?;
+            Ok(())
+        }).unwrap();
+        let snapshot = source.export_asset_snapshot().unwrap();
+        assert_eq!(count_table(&source,"captures"),0, "export must not repair the live database");
+        let target=StorageManager::open_in_memory().unwrap();
+        target.with_conn(|c| {c.execute("INSERT INTO captures(id,ts,event_type,ax_text) VALUES(200,1,'manual','local capture')",[])?;Ok(())}).unwrap();
+        target.import_asset_snapshot(&snapshot,false).unwrap();
+        let second=target.import_asset_snapshot(&snapshot,false).unwrap();
+        assert!(second.tables.iter().all(|t|t.inserted==0));
+        target.with_conn(|c| {
+            let violation=c.query_row("PRAGMA foreign_key_check",[],|r|r.get::<_,String>(0)).optional()?;
+            assert!(violation.is_none());
+            let refs:i64=c.query_row("SELECT COUNT(DISTINCT capture_id) FROM integration_import_items",[],|r|r.get(0))?;
+            assert_eq!(refs,2);
+            let valid:i64=c.query_row("SELECT COUNT(*) FROM captures WHERE event_type LIKE 'snapshot_ref_missing:%'
+                AND ts=0 AND ax_text IS NULL AND ocr_text IS NULL AND input_text IS NULL AND audio_text IS NULL
+                AND screenshot_path IS NULL AND is_sensitive=1 AND pii_scrubbed=1",[],|r|r.get(0))?;
+            assert_eq!(valid,4);
+            assert_eq!(c.query_row("SELECT ax_text FROM captures WHERE id=200",[],|r|r.get::<_,String>(0))?,"local capture");
+            Ok(())
+        }).unwrap();
+        // Another export must preserve the placeholder origin even after ID remapping.
+        let round_trip=target.export_asset_snapshot().unwrap();
+        let bytes=decode_database_snapshot(round_trip.database.as_ref().unwrap()).unwrap();
+        let (_dir, copied)=open_database_snapshot(&bytes).unwrap();
+        assert_eq!(copied.query_row("SELECT COUNT(*) FROM captures WHERE event_type LIKE 'snapshot_ref_missing:%'",[],|r|r.get::<_,i64>(0)).unwrap(),4);
     }
 
     #[test]
@@ -2923,11 +3314,24 @@ mod tests {
             return;
         };
 
-        let source = StorageManager::open(Path::new(&db_path)).unwrap();
+        // Use the production database filename in its own data root. Otherwise
+        // source.db and adjacent restore fixtures become raw local attachments,
+        // bypassing the database export sanitization under test.
+        let fixture = StorageManager::open(Path::new(&db_path)).unwrap();
+        let source_root = tempdir().unwrap();
+        let source_path = source_root.path().join(DATABASE_FILE_NAME);
+        fixture.with_conn(|conn| {
+            let mut destination = Connection::open(&source_path)?;
+            let backup = Backup::new(conn, &mut destination)?;
+            backup.run_to_completion(100, Duration::from_millis(5), None)?;
+            Ok(())
+        }).unwrap();
+        let source = StorageManager::open(&source_path).unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("external-assets.mbsnapshot.json");
         let export = source.export_asset_snapshot_to_path(&path).unwrap();
         assert!(export.file_size_bytes > 0);
+        assert_eq!(export.manifest.local_file_count, 0, "database fixture must not be exported as an attachment");
 
         let target = StorageManager::open_in_memory().unwrap();
         let report = target
@@ -2976,6 +3380,29 @@ mod tests {
             })
             .unwrap();
         assert_eq!(raw_capture_count, 0);
+        for table in ["bake_document_source_checks", "bake_document_body_versions"] {
+            assert_eq!(count_table(&target,table),summary_count(&export.manifest,table));
+        }
+        // A historical database can contain a stale head. The import contract
+        // preserves its snapshot as history but must not publish it as current.
+        let valid_source_heads:i64=source.with_conn(|c| Ok(c.query_row(
+            "SELECT COUNT(*) FROM bake_document_source_heads h
+             JOIN bake_documents d ON d.id=h.document_id
+             JOIN bake_document_source_snapshots s ON s.id=h.snapshot_id
+             WHERE d.deleted_at IS NULL AND s.document_id=d.id AND s.identity_match=1
+             AND s.completeness_status='complete' AND s.content_text=d.full_content",[],|r|r.get(0))?)).unwrap();
+        assert_eq!(count_table(&target,"bake_document_source_heads"),valid_source_heads);
+        target.with_conn(|c| {
+            let invalid:i64=c.query_row("SELECT COUNT(*) FROM bake_document_source_heads h
+                LEFT JOIN bake_documents d ON d.id=h.document_id
+                LEFT JOIN bake_document_source_snapshots s ON s.id=h.snapshot_id
+                WHERE d.id IS NULL OR s.id IS NULL OR s.document_id<>d.id OR s.content_text<>d.full_content",[],|r|r.get(0))?;
+            assert_eq!(invalid,0);
+            let invalid_checks:i64=c.query_row("SELECT COUNT(*) FROM bake_document_source_checks k
+                JOIN bake_document_source_snapshots s ON s.id=k.snapshot_id WHERE k.document_id<>s.document_id",[],|r|r.get(0))?;
+            assert_eq!(invalid_checks,0);
+            Ok(())
+        }).unwrap();
         assert!(!report.database_replaced);
     }
 

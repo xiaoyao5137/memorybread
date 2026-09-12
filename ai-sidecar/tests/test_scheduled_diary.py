@@ -485,7 +485,7 @@ def test_diary_ollama_client_bypasses_system_proxy(monkeypatch):
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    monkeypatch.setitem(sys.modules, "ollama", SimpleNamespace(Client=FakeClient))
+    monkeypatch.setattr("inference_transport.CancellableOllamaClient", FakeClient)
     executor = TaskExecutor(db_path=":memory:")
 
     assert isinstance(executor._get_llm_client(), FakeClient)

@@ -14,13 +14,11 @@ import json
 from typing import Optional
 
 from .base import EmbeddingBackend, EmbeddingVector
+from runtime_endpoints import service_base_url
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL = "qllama/bge-small-zh-v1.5:q4_k_m"
 _DEFAULT_DIMENSION = 512
-_API_URL = "http://localhost:11434/api/embed"
-_TAGS_URL = "http://localhost:11434/api/tags"
 
 
 class OllamaEmbeddingBackend(EmbeddingBackend):
@@ -33,17 +31,19 @@ class OllamaEmbeddingBackend(EmbeddingBackend):
 
     def __init__(
         self,
-        model_name: str = _DEFAULT_MODEL,
-        api_url: str = _API_URL,
+        model_name: Optional[str] = None,
+        api_url: Optional[str] = None,
         timeout: int = 30,
     ) -> None:
+        if not model_name:
+            raise RuntimeError("Ollama 向量后端已停用，请使用本地 CPU 向量能力")
         self._model_name = model_name
-        self._api_url = api_url
+        self._api_url = api_url or (service_base_url("ollama") + "/api/embed")
         self._timeout = timeout
 
     def is_available(self) -> bool:
         try:
-            req = urllib.request.Request(_TAGS_URL)
+            req = urllib.request.Request(service_base_url("ollama") + "/api/tags")
             with urllib.request.urlopen(req, timeout=1) as resp:
                 return resp.status == 200
         except Exception:

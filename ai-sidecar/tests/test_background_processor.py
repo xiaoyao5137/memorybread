@@ -2,16 +2,24 @@ import asyncio
 import json
 import sqlite3
 import time
+import pytest
 from typing import Optional
 
 from background_processor import (
     BackgroundProcessor,
     _is_self_generated_capture,
+    _MAINTENANCE_BACKLOG_CEILING,
     _TIMELINE_MAX_MEMBER_COUNT,
     _TIMELINE_MAX_OCCURRENCE_COUNT,
     _TIMELINE_MAX_SPAN_HOURS,
 )
 from knowledge.fragment_grouper import FragmentGrouper
+
+
+@pytest.fixture(autouse=True)
+def isolate_background_runtime_status(tmp_path, monkeypatch):
+    # 构造处理器就会更新状态心跳；临时数据库的单测不能覆盖真实客户端状态。
+    monkeypatch.setenv("HOME", str(tmp_path))
 
 
 class _StubVectorStorage:
@@ -142,6 +150,30 @@ def test_failed_oldest_capture_enters_persistent_cooldown(tmp_path) -> None:
 
     assert [capture["id"] for capture in captures] == [2, 3]
     assert restarted._timeline_retry_state[1]["failure_count"] == 1
+
+
+@pytest.mark.parametrize("error_name", ["InferencePreemptedError", "QueueWaitTimeoutError"])
+@pytest.mark.parametrize("grouped", [True, False])
+def test_queue_preemption_does_not_count_as_timeline_content_failure(
+    tmp_path, monkeypatch, error_name, grouped,
+) -> None:
+    import inference_queue
+
+    class PreemptedQueue:
+        def submit_sync(self, *args, **kwargs):
+            assert kwargs["queue_timeout"] == 600.0
+            assert kwargs["timeout"] == 600.0
+            raise getattr(inference_queue, error_name)("waiting for model slot")
+
+    processor = BackgroundProcessor(db_path=str(tmp_path / "captures.db"))
+    processor._knowledge_extractor = object()
+    monkeypatch.setattr("inference_queue.get_global_queue", lambda: PreemptedQueue())
+    group = [{"id": 1, "ts": 1000}, {"id": 2, "ts": 2000}]
+    for _ in range(3):
+        operation = (processor._process_capture_group(group) if grouped
+                     else processor._process_knowledge_extraction(group[0]))
+        assert asyncio.run(operation) is False
+    assert processor._timeline_retry_state == {}
 
 
 def test_fragment_grouper_uses_input_and_audio_text() -> None:
@@ -367,7 +399,7 @@ def test_save_knowledge_persists_semantic_fields(tmp_path) -> None:
 
 
 class _ImmediateQueue:
-    def submit_sync(self, _priority, fn, timeout=None, lane=None):
+    def submit_sync(self, _priority, fn, timeout=None, lane=None, queue_timeout=None):
         return fn()
 
 
@@ -1518,6 +1550,13 @@ def test_capture_priority_yields_and_resumes_bake_trigger(
     processor = BackgroundProcessor(db_path=db_path)
     profile = _make_charging_profile()
     processor._latest_bake_actionable_count = 36
+    # 让位判定现在会先读 Core 只读口径，测试里把该口径固定成小量 bake 积压。
+    status = {"actionable_count": 36}
+    monkeypatch.setattr(
+        processor,
+        "_get_bake_queue_status",
+        lambda: {"capture_enabled": True, "actionable_count": status["actionable_count"]},
+    )
 
     def _fail_if_called(*args, **kwargs):
         raise AssertionError("capture 优先时不应触发 bake")
@@ -1533,7 +1572,7 @@ def test_capture_priority_yields_and_resumes_bake_trigger(
     assert hold is False
     assert processor._bake_yield_to_capture is True
 
-    # pending 降到 100~499 之间：仍处于让位态（滞回，避免阈值抖动）。
+    # pending 降到 100~499 之间且 bake 仍无大积压：仍让位（滞回，避免阈值抖动）。
     _, hold = asyncio.run(
         processor._run_periodic_bake_check(
             profile, 0.0, now=1.0, pending_capture_count=200
@@ -1547,7 +1586,7 @@ def test_capture_priority_yields_and_resumes_bake_trigger(
 
     async def _fake_periodic_bake(*, limit, max_concurrency):
         triggers["count"] += 1
-        return {"triggered": True, "actionable_count": 36}
+        return {"triggered": True, "actionable_count": status["actionable_count"]}
 
     monkeypatch.setattr(processor, "_maybe_trigger_periodic_bake", _fake_periodic_bake)
     asyncio.run(
@@ -1560,7 +1599,7 @@ def test_capture_priority_yields_and_resumes_bake_trigger(
 
     # bake 队列本身较大（>=50）时，即使 capture 积压达阈也不让位。
     processor._bake_yield_to_capture = False
-    processor._latest_bake_actionable_count = 50
+    status["actionable_count"] = 50
     asyncio.run(
         processor._run_periodic_bake_check(
             profile, 0.0, now=3.0, pending_capture_count=500
@@ -1568,6 +1607,107 @@ def test_capture_priority_yields_and_resumes_bake_trigger(
     )
     assert processor._bake_yield_to_capture is False
     assert triggers["count"] == 2
+
+
+def test_capture_priority_reconciles_stale_cache_after_sidecar_restart(
+    tmp_path, monkeypatch
+) -> None:
+    """回归：sidecar 重启后缓存为初始 0，不得据此锁死已有 bake 积压的调度。
+
+    现场复现：pending_capture=935 且 Core 报 actionable_count=120，旧逻辑用
+    __init__ 的 0 判定“烘焙没活干”并提前 return，缓存再也不会刷新，烘焙队列
+    因此空转数小时。
+    """
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    profile = _make_charging_profile()
+    assert processor._latest_bake_actionable_count == 0
+    assert processor._bake_yield_to_capture is False
+    monkeypatch.setattr(processor, "_get_bake_queue_status", lambda: {
+        "capture_enabled": True,
+        "actionable_count": 120,
+    })
+    triggers = {"count": 0}
+
+    async def _fake_periodic_bake(*, limit, max_concurrency):
+        triggers["count"] += 1
+        return {"triggered": True, "actionable_count": 120}
+
+    monkeypatch.setattr(processor, "_maybe_trigger_periodic_bake", _fake_periodic_bake)
+
+    asyncio.run(
+        processor._run_periodic_bake_check(
+            profile, 0.0, now=0.0, pending_capture_count=935
+        )
+    )
+
+    assert processor._bake_yield_to_capture is False
+    assert processor._latest_bake_actionable_count == 120
+    assert triggers["count"] == 1
+
+
+def test_capture_priority_releases_latch_when_bake_backlog_grows(
+    tmp_path, monkeypatch
+) -> None:
+    """capture 仍在滞回区间内时，bake 积压长到阈值以上也必须解锁。"""
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    profile = _make_charging_profile()
+    processor._bake_yield_to_capture = True
+    processor._latest_bake_actionable_count = 0
+    monkeypatch.setattr(processor, "_get_bake_queue_status", lambda: {
+        "capture_enabled": True,
+        "actionable_count": 116,
+    })
+    triggers = {"count": 0}
+
+    async def _fake_periodic_bake(*, limit, max_concurrency):
+        triggers["count"] += 1
+        return {"triggered": True, "actionable_count": 116}
+
+    monkeypatch.setattr(processor, "_maybe_trigger_periodic_bake", _fake_periodic_bake)
+
+    # pending=200：既没降到恢复阈值以下，又已攒出 bake 可执行积压。
+    asyncio.run(
+        processor._run_periodic_bake_check(
+            profile, 0.0, now=0.0, pending_capture_count=200
+        )
+    )
+
+    assert processor._bake_yield_to_capture is False
+    assert processor._latest_bake_actionable_count == 116
+    assert triggers["count"] == 1
+
+
+def test_capture_priority_keeps_cache_when_core_queue_status_unavailable(
+    tmp_path, monkeypatch
+) -> None:
+    """Core 短暂读不到时保留上一次口径，不能把“读不到”当成“没有积压”。"""
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    profile = _make_charging_profile()
+    processor._latest_bake_actionable_count = 120
+    monkeypatch.setattr(processor, "_get_bake_queue_status", lambda: None)
+    triggers = {"count": 0}
+
+    async def _fake_periodic_bake(*, limit, max_concurrency):
+        triggers["count"] += 1
+        return {"triggered": True, "actionable_count": 120}
+
+    monkeypatch.setattr(processor, "_maybe_trigger_periodic_bake", _fake_periodic_bake)
+
+    asyncio.run(
+        processor._run_periodic_bake_check(
+            profile, 0.0, now=0.0, pending_capture_count=600
+        )
+    )
+
+    assert processor._latest_bake_actionable_count == 120
+    assert processor._bake_yield_to_capture is False
+    assert triggers["count"] == 1
 
 
 def test_battery_idle_check_requires_local_and_model_api_queues_idle(
@@ -2266,3 +2406,176 @@ def test_similarity_merge_allowed_when_entities_overlap(tmp_path, monkeypatch) -
     assert timeline_count == 1
     assert json.loads(ids1) == [1, 2]
     assert occ1 == 2
+
+
+@pytest.mark.parametrize('grouped', [True, False])
+def test_background_inference_does_not_block_live_ocr_ipc(tmp_path, monkeypatch, grouped):
+    """The real framed IPC handler must answer while P1 is still waiting."""
+    import json
+    import struct
+    import threading
+    from memory_bread_ipc import IpcServer, IpcResponse, OcrResult
+
+    started = threading.Event()
+    release = threading.Event()
+    completed = threading.Event()
+    class SlowQueue:
+        def submit_sync(self, priority, fn, **kwargs):
+            started.set()
+            release.wait(3)  # safety bound lets the pre-fix implementation fail, not hang
+            try:
+                return fn()
+            finally:
+                completed.set()
+    class Extractor:
+        def extract_merged(self, **kwargs):
+            return None
+        def extract_sync(self, capture, db_conn):
+            # Validate SQLite ownership on the executor thread as well.
+            db_conn.execute('SELECT 1').fetchone()
+            return None
+    processor = BackgroundProcessor(db_path=str(tmp_path / 'test.db'))
+    monkeypatch.setattr(processor, '_get_knowledge_extractor', lambda: Extractor())
+    monkeypatch.setattr(processor, '_mark_group_extracting', lambda group: 'test')
+    monkeypatch.setattr(processor, '_unmark_group_extracting', lambda *a: None)
+    monkeypatch.setattr(processor, '_record_timeline_extraction_failure', lambda ids: 1)
+    monkeypatch.setattr('inference_queue.get_global_queue', lambda: SlowQueue())
+
+    async def scenario():
+        async def dispatch(req):
+            assert req.task.type == 'ocr'
+            assert not completed.is_set(), 'OCR waited behind background inference'
+            return IpcResponse.make_ok(req.id, OcrResult(text='生日提醒', confidence=1.0, language='zh'))
+        ipc = IpcServer(dispatch_fn=dispatch)
+        server = await asyncio.start_server(ipc._handle_connection, '127.0.0.1', 0)
+        capture = {'id': 1, 'ts': 1, 'ocr_text': 'fixture'}
+        job = asyncio.create_task(processor._process_capture_group([capture]) if grouped
+                                  else processor._process_knowledge_extraction(capture))
+        writer = None
+        try:
+            for _ in range(100):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.005)
+            assert started.is_set()
+            reader, writer = await asyncio.open_connection('127.0.0.1', server.sockets[0].getsockname()[1])
+            payload = json.dumps({'id': 'interactive-ocr', 'ts': 1, 'task': {
+                'type': 'ocr', 'capture_id': 0, 'screenshot_path': '/fixture.png'}}).encode()
+            writer.write(struct.pack('>I', len(payload)) + payload)
+            await writer.drain()
+            header = await asyncio.wait_for(reader.readexactly(4), 0.5)
+            response = json.loads(await asyncio.wait_for(reader.readexactly(struct.unpack('>I', header)[0]), 0.5))
+            assert response['result']['text'] == '生日提醒'
+            assert not completed.is_set()
+        finally:
+            release.set()
+            await job
+            if writer:
+                writer.close()
+                await writer.wait_closed()
+            server.close()
+            await server.wait_closed()
+    asyncio.run(scenario())
+
+
+def test_maintenance_allowed_allows_small_backlog_but_blocks_high(tmp_path) -> None:
+    """点1：一致性审计/向量补齐门槛从“积压==0”放宽为“积压不高（<=上限）即放行”。
+
+    只要待提炼 capture 与待烘焙 bake 候选都在上限内，哪怕不是 0（个位数到十几二十
+    条）也应放行维护；任一侧越过上限才让维护为 LLM 让路。
+    """
+    processor = BackgroundProcessor(db_path=str(tmp_path / "gate.db"))
+    ceiling = _MAINTENANCE_BACKLOG_CEILING
+
+    # 归零：放行。
+    processor._latest_pending_capture_count = 0
+    processor._latest_bake_actionable_count = 0
+    assert processor._maintenance_allowed() is True
+
+    # 非零但都不超过上限（含正好等于上限）：仍放行。
+    processor._latest_pending_capture_count = max(ceiling - 1, 0)
+    processor._latest_bake_actionable_count = ceiling
+    assert processor._maintenance_allowed() is True
+
+    # 只要有一侧越过上限：让路。
+    processor._latest_pending_capture_count = ceiling + 1
+    assert processor._maintenance_allowed() is False
+
+    processor._latest_pending_capture_count = 0
+    processor._latest_bake_actionable_count = ceiling + 1
+    assert processor._maintenance_allowed() is False
+
+
+@pytest.mark.parametrize(
+    "pending_capture_count, actionable_bake_count, should_maintain",
+    [(0, 0, True), (20, 20, True), (21, 0, False), (0, 21, False), (1459, 127, False)],
+)
+def test_background_loop_defers_due_maintenance_under_backlog(
+    tmp_path, monkeypatch, pending_capture_count, actionable_bake_count, should_maintain
+) -> None:
+    """Exercise the actual loop: the gate alone cannot catch an inverted caller."""
+    from types import SimpleNamespace
+    import background_processor
+    from energy_policy import EnergyProfile
+
+    clock = [0.0]
+    calls = {"audit": 0, "backfill": 0, "capture": 0}
+    monkeypatch.setattr(BackgroundProcessor, "_touch_status_file", lambda self: None)
+    processor = BackgroundProcessor(db_path=str(tmp_path / "maintenance-loop.db"))
+    processor._latest_bake_actionable_count = actionable_bake_count
+    profile = EnergyProfile(
+        mode="charging", saving_enabled=True, on_external_power=True,
+        battery_percent=100.0, allow_background_extraction=True, allow_diary=True,
+        timeline_interval_secs=30, timeline_batch_size=20,
+        bake_interval_secs=90, bake_limit=10, bake_concurrency=1,
+    )
+    monkeypatch.setattr(
+        background_processor, "time",
+        SimpleNamespace(monotonic=lambda: clock[0], time=time.time),
+    )
+    monkeypatch.setattr(processor, "_enforce_runtime_guard", lambda reason: None)
+    monkeypatch.setattr(processor, "_drain_vector_deletion_queue", lambda: {})
+    monkeypatch.setattr(processor, "_capture_and_extraction_enabled", lambda: True)
+    monkeypatch.setattr(processor.energy_policy, "current_profile", lambda **kwargs: profile)
+    monkeypatch.setattr(processor, "_count_unprocessed_captures", lambda: pending_capture_count)
+
+    def audit():
+        calls["audit"] += 1
+        return {"available": True}
+
+    async def backfill(**kwargs):
+        calls["backfill"] += 1
+        return {}
+
+    async def capture(**kwargs):
+        calls["capture"] += 1
+        return {"processed_count": 0}
+
+    async def periodic_bake(*args, **kwargs):
+        return clock[0] + 30, False
+
+    async def data_extraction(**kwargs):
+        return {}
+
+    async def next_iteration(delay):
+        if calls["capture"] >= 2:
+            processor.running = False
+        else:
+            # The first loop refreshes the backlog; both maintenance jobs are
+            # due on the second loop, without waiting or invoking real models.
+            clock[0] += background_processor._VECTOR_CONSISTENCY_AUDIT_INTERVAL_SECS
+
+    monkeypatch.setattr(processor, "_audit_vector_consistency", audit)
+    monkeypatch.setattr(processor, "backfill_bake_document_vectors", backfill)
+    monkeypatch.setattr(processor, "_process_batch", capture)
+    monkeypatch.setattr(processor, "_run_periodic_bake_check", periodic_bake)
+    monkeypatch.setattr(processor, "_trigger_data_extraction", data_extraction)
+    monkeypatch.setattr(background_processor.asyncio, "sleep", next_iteration)
+
+    asyncio.run(processor.run())
+
+    assert calls == {
+        "audit": int(should_maintain),
+        "backfill": int(should_maintain),
+        "capture": 2,
+    }

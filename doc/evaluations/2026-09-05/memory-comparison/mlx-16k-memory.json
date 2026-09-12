@@ -1,0 +1,104 @@
+{
+  "label": "mlx-16k",
+  "runtime": "new-runtime",
+  "model": "qwen3.5:4b-mlx",
+  "ctx": 16384,
+  "server_idle": {
+    "t": 150.351281083,
+    "rss": 32309248,
+    "footprint": 16548440,
+    "processes": [
+      {
+        "pid": 27727,
+        "rss": 32309248,
+        "footprint": 16548440
+      }
+    ]
+  },
+  "loaded_short": {
+    "t": 153.622216333,
+    "rss": 3768238080,
+    "footprint": 4370633480,
+    "processes": [
+      {
+        "pid": 27727,
+        "rss": 34996224,
+        "footprint": 18137712
+      },
+      {
+        "pid": 28388,
+        "rss": 3733241856,
+        "footprint": 4352495768
+      }
+    ]
+  },
+  "load_peak": {
+    "rss": {
+      "peak_gib": 3.8986053466796875,
+      "last_gib": 3.504241943359375,
+      "median_gib": 2.9068756103515625
+    },
+    "footprint": {
+      "peak_gib": 4.345341227948666,
+      "last_gib": 4.1075484827160835,
+      "median_gib": 2.8702427446842194
+    }
+  },
+  "generation": {
+    "rss": {
+      "peak_gib": 3.5270843505859375,
+      "last_gib": 3.5270843505859375,
+      "median_gib": 3.52459716796875
+    },
+    "footprint": {
+      "peak_gib": 6.471775867044926,
+      "last_gib": 4.702214099466801,
+      "median_gib": 4.637684680521488
+    }
+  },
+  "post_generation_idle_5s": {
+    "rss": {
+      "peak_gib": 3.5262298583984375,
+      "last_gib": 3.5262298583984375,
+      "median_gib": 3.5262298583984375
+    },
+    "footprint": {
+      "peak_gib": 4.479420520365238,
+      "last_gib": 4.377583362162113,
+      "median_gib": 4.377583362162113
+    }
+  },
+  "after_unload": {
+    "t": 204.477860708,
+    "rss": 35225600,
+    "footprint": 18367088,
+    "processes": [
+      {
+        "pid": 27727,
+        "rss": 35225600,
+        "footprint": 18367088
+      }
+    ]
+  },
+  "ollama_ps": {
+    "models": [
+      {
+        "name": "qwen3.5:4b-mlx",
+        "model": "qwen3.5:4b-mlx",
+        "size": 4519777808,
+        "digest": "b4a8b533ba9aca23e0b5335b8e19e1be8a5f69d465f0d2b18bbfc7c1d6fdd2bd",
+        "details": {
+          "parent_model": "",
+          "format": "safetensors",
+          "family": "",
+          "families": null,
+          "parameter_size": "",
+          "quantization_level": "nvfp4"
+        },
+        "expires_at": "2026-09-05T14:59:58.868836+08:00",
+        "size_vram": 4519777808,
+        "context_length": 16384
+      }
+    ]
+  }
+}

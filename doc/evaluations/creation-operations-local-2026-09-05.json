@@ -1,0 +1,205 @@
+{
+  "model": "qwen3.5:4b",
+  "cases": [
+    {
+      "instruction": "移除附录，保留其他内容",
+      "decision": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "delete",
+              "target": "node-f59215c0998e8598"
+            }
+          ]
+        },
+        "reasoning": "用户要求移除附录，保留其他内容。根据上下文，正文中有一个标题为'附录'的二级节点（node-f59215c0998e8598），需要将其删除。这是一个精确的局部修改任务，无需检索外部资料或调用复杂Agent，直接通过patch操作完成删除。",
+        "source": "model"
+      },
+      "seconds": 4.85,
+      "checks": {
+        "valid_model_decision": true,
+        "kind": true,
+        "no_unneeded_agents": true,
+        "tools": true,
+        "exact_document": true
+      },
+      "passed": true
+    },
+    {
+      "instruction": "Delete the appendix section and leave everything else unchanged.",
+      "decision": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "delete",
+              "target": "node-f59215c0998e8598"
+            }
+          ]
+        },
+        "reasoning": "用户要求删除'附录'章节并保留其余内容。根据上下文，'附录'章节的节点ID为'node-f59215c0998e8598'。这是一个明确的删除操作，无需检索外部资料或调用其他Agent，直接执行patch操作即可。",
+        "source": "model"
+      },
+      "seconds": 11.43,
+      "checks": {
+        "valid_model_decision": true,
+        "kind": true,
+        "no_unneeded_agents": true,
+        "tools": true,
+        "exact_document": true
+      },
+      "passed": true
+    },
+    {
+      "instruction": "把周一上午改成周三下午",
+      "decision": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "replace",
+              "target": {
+                "text": "周一上午讨论。",
+                "occurrence": 1
+              },
+              "content": "周三下午讨论。"
+            }
+          ]
+        },
+        "reasoning": "用户要求将正文中'周一上午'修改为'周三下午'。根据上下文，该文本位于节点'node-e83d3c02aa2bd39c'（会议安排）内。这是一个精确的局部修改，不涉及全文创作、数据检索或复杂分析，因此选择patch操作，仅替换目标文本片段。",
+        "source": "model"
+      },
+      "seconds": 37.27,
+      "checks": {
+        "valid_model_decision": true,
+        "kind": true,
+        "no_unneeded_agents": true,
+        "tools": true,
+        "exact_document": true
+      },
+      "passed": true
+    },
+    {
+      "instruction": "不要删除附录，只回答你是否理解",
+      "decision": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "respond",
+          "response": "是的，我理解您的要求：不会删除附录，仅确认指令。"
+        },
+        "reasoning": "用户指令明确要求‘不要删除附录，只回答你是否理解’，属于对当前指令的确认回复，不涉及任何文档修改、检索或生成任务，因此无需调用任何工具或 Agent，直接生成确认回复。",
+        "source": "model"
+      },
+      "seconds": 23.26,
+      "checks": {
+        "valid_model_decision": true,
+        "kind": true,
+        "no_unneeded_agents": true,
+        "tools": true
+      },
+      "passed": true
+    },
+    {
+      "instruction": "接着完成刚才没做完的修改",
+      "decision": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "resume",
+          "operation_id": "pending-1"
+        },
+        "reasoning": "用户请求继续完成上一轮失败的修改操作。根据 pending_operations 记录，上一轮操作 ID 为 pending-1，指令是将'会议安排'章节中的'周一'改为'周三'，该操作状态为 failed。因此，本轮应直接通过 resume 操作从 pending_operations 中恢复该任务。",
+        "source": "model"
+      },
+      "seconds": 16.32,
+      "checks": {
+        "valid_model_decision": true,
+        "kind": true,
+        "no_unneeded_agents": true,
+        "tools": true,
+        "resume_target": true
+      },
+      "passed": true
+    },
+    {
+      "instruction": "把会议安排写得更简洁，其他部分保持原样",
+      "decision": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            "node-e83d3c02aa2bd39c"
+          ]
+        },
+        "reasoning": "用户要求将‘会议安排’部分写得更简洁，其他部分保持不变。根据上下文，该部分对应节点'node-e83d3c02aa2bd39c'。此操作属于对特定正文节点的局部改写，无需检索外部资料或调用专业Agent，因此选择transform操作，并指定该节点作为目标。",
+        "source": "model"
+      },
+      "seconds": 5.0,
+      "checks": {
+        "valid_model_decision": true,
+        "kind": true,
+        "no_unneeded_agents": true,
+        "tools": true
+      },
+      "passed": true
+    },
+    {
+      "instruction": "移除附录，然后检索最新公开会议工具信息，补充一段推荐",
+      "decision": {
+        "tools": [
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            "node-f59215c0998e8598",
+            "node-962aa049e5d09895"
+          ]
+        },
+        "reasoning": "本轮需求包含两个动作：1. 移除正文中的'附录'章节（节点 node-f59215c0998e8598）；2. 检索最新公开会议工具信息并补充推荐。第一个动作是局部删除，无需工具；第二个动作需要外部信息，且涉及在文档中生成新内容（推荐段落），根据校验反馈，涉及文档修改措辞的应使用 transform 而非 patch 或 answer。因此，操作类型应调整为 transform，并调用 inter",
+        "source": "model"
+      },
+      "seconds": 12.19,
+      "checks": {
+        "valid_model_decision": true,
+        "kind": true,
+        "no_unneeded_agents": true,
+        "tools": true
+      },
+      "passed": true
+    },
+    {
+      "instruction": "查一下最近的公开会议软件动态，只回答问题，不要修改文档",
+      "decision": {
+        "tools": [
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "answer",
+          "constraint_skill_ids": []
+        },
+        "reasoning": "用户明确要求查询最近的公开会议软件动态，且仅回答问题，不修改文档。当前上下文未包含此类最新公开信息，属于外部事实缺口，需使用互联网检索工具获取。根据指令约束，仅回答问题，不执行文档操作，因此无需调用文档撰写或审校类 Agent。",
+        "source": "model"
+      },
+      "seconds": 12.19,
+      "checks": {
+        "valid_model_decision": true,
+        "kind": true,
+        "no_unneeded_agents": true,
+        "tools": true
+      },
+      "passed": true
+    }
+  ]
+}

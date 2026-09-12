@@ -1,0 +1,269 @@
+{
+  "model": "qwen3.5:4b",
+  "scope": "real routing, writing and acceptance; synthetic documents and supplied evidence; no production session mutation",
+  "cases": [
+    {
+      "id": "provided-document",
+      "passed": false,
+      "error": "无法核验最终交付结果",
+      "cause": "验收结论缺少产物原文依据",
+      "model_replies": [
+        "# 本周业务小结\n\n**时间周期：**2026年第35周（2026-08-24 至 2026-08-30）\n\n### 核心经营数据概览\n\n| 指标项 | 本期数值 | 上期数值 | 变动情况 |\n| :--- | :--- | :--- | :--- |\n| **收入** | 100万元 | 80万元 | +25% |\n| **新增客户数** | 20家 | 10家 | +10家（+100%） |\n\n### 增长归因分析\n\n本期业务增长的驱动力明确指向新渠道的拓展。在收入与新增客户量双升的背景下，主要得益于新渠道带来的增量效应，有效推动了整体业绩的提升。",
+        "{\n  \"checks\": [\n    {\n      \"id\": \"a1\",\n      \"passed\": true,\n      \"reason\": \"输出内容严格基于提供的三组数据（本周100万、上周80万、新增20家）和一句定性描述（增长来自新渠道），未引入任何外部数据或假设。\",\n      \"evidence\": \"本周收入100万元，上周80万元；新增客户20家，上周10家；增长来自新渠道。\"\n    },\n    {\n      \"id\": \"a2\",\n      \"passed\": true,\n      \"reason\": \"输出格式为简短业务小结，包含核心数据对比和增长原因说明。\",\n      \"evidence\": \"文档标题为'本周业务小结'，正文包含'核心经营数据概览'表格及'增长归因分析'段落，结构符合简短业务小结要求。\"\n    },\n    {\n      \"id\": \"a3\",\n      \"passed\": true,\n      \"reason\": \"未包含任何未经验证的推测或外部事实引用。\",\n      \"evidence\": \"文中仅陈述'本期业务增长的驱动力明确指向新渠道的拓展'，该陈述直接对应输入材料中的'增长来自新渠道'，无额外推测。\"\n    }\n  ],\n  \"status\": \"pass\",\n  \"corrections\": []\n}",
+        "{\n  \"checks\": [\n    {\n      \"id\": \"a1\",\n      \"passed\": true,\n      \"reason\": \"输出内容严格基于提供的三组数据（本周100万、上周80万、新增20家）和一句定性描述（增长来自新渠道），未引入任何外部数据或假设。\",\n      \"evidence\": \"本期业务增长的驱动力明确指向新渠道的拓展。\"\n    },\n    {\n      \"id\": \"a2\",\n      \"passed\": true,\n      \"reason\": \"输出格式为简短业务小结，包含核心数据对比和增长原因说明。\",\n      \"evidence\": \"### 核心经营数据概览\\n\\n| 指标项 | 本期数值 | 上期数值 | 变动情况 |\\n| :--- | :--- | :--- | :--- |\\n| **收入** | 100万元 | 80万元 | +25% |\\n| **新增客户数** | 20家 | 10家 | +10家（+100%）|\"\n    },\n    {\n      \"id\": \"a3\",\n      \"passed\": true,\n      \"reason\": \"未包含任何未经验证的推测或外部事实引用。\",\n      \"evidence\": \"在收入与新增客户量双升的背景下，主要得益于新渠道带来的增量效应，有效推动了整体业绩的提升。\"\n    }\n  ],\n  \"status\": \"pass\",\n  \"corrections\": []\n}"
+      ]
+    },
+    {
+      "id": "local-append",
+      "checks": {
+        "completed": true,
+        "accepted": true,
+        "no_search": true,
+        "preserved_outside": false,
+        "added_content": true
+      },
+      "passed": false,
+      "document": "# 会议说明\n\n## 会议安排\n周一上午讨论项目进展。\n\n## 联系方式\n请联系项目组。\n欢迎参与讨论。\n",
+      "seconds": 101.93,
+      "events": [
+        {
+          "type": "run.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "goal.updated",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "thinking.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "intent.pending",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "thinking.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "thinking.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "inputs.assessed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "intent.interpreted",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "agent.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "thinking.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "agent.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "thinking.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "thinking.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "phase.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "agent.started",
+          "actor": {
+            "kind": "agent",
+            "id": "document_transform",
+            "name": "修改指定内容"
+          }
+        },
+        {
+          "type": "thinking.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "document.patch.applied",
+          "actor": {
+            "kind": "agent",
+            "id": "document_transform",
+            "name": "修改指定内容"
+          }
+        },
+        {
+          "type": "thinking.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "phase.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "phase.started",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "agent.started",
+          "actor": {
+            "kind": "agent",
+            "id": "delivery_validation",
+            "name": "核对本轮交付条件"
+          }
+        },
+        {
+          "type": "delivery.checked",
+          "actor": {
+            "kind": "agent",
+            "id": "delivery_validation",
+            "name": "核对本轮交付条件"
+          }
+        },
+        {
+          "type": "agent.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "delivery_validation",
+            "name": "核对本轮交付条件"
+          }
+        },
+        {
+          "type": "phase.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        },
+        {
+          "type": "run.completed",
+          "actor": {
+            "kind": "agent",
+            "id": "creation_main_agent",
+            "name": "创作 Agent"
+          }
+        }
+      ]
+    },
+    {
+      "id": "reject-invented-number",
+      "review": {
+        "checks": [
+          {
+            "id": "a",
+            "passed": false,
+            "reason": "输入数据中'本周真实收入'的状态为'missing'，且source_evidence中无任何数据检索结果（data_results为空），无法提供支撑收入数值（100万元）或增长率（80%）的原始证据。根据合同要求，收入必须依据给定真实数据，不能编造。",
+            "evidence": ""
+          }
+        ],
+        "status": "blocked",
+        "corrections": []
+      },
+      "passed": true
+    },
+    {
+      "id": "accept-supported-number",
+      "review": {
+        "checks": [
+          {
+            "id": "a",
+            "passed": true,
+            "reason": "文档内容'本周收入100万元'与数据检索结果'本周收入100万元'完全一致，且数据检索状态为'completed'，满足依据真实数据的要求。",
+            "evidence": "本周收入100万元。"
+          }
+        ],
+        "status": "pass",
+        "corrections": []
+      },
+      "passed": true
+    },
+    {
+      "id": "reject-no-search-receipt",
+      "error": "CREATION_EVIDENCE_UNAVAILABLE",
+      "passed": true
+    }
+  ]
+}

@@ -34,6 +34,6 @@ class RagWorker:
         return IpcResponse.make_error(
             req.id,
             "NOT_IMPLEMENTED",
-            "RAG 查询请使用 HTTP API: http://127.0.0.1:7071/query",
+            "RAG 查询请使用本机模型 API，而非 IPC",
             latency_ms,
         )

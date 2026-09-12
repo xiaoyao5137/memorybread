@@ -16,6 +16,7 @@ pub struct ContentFilterResult {
     pub text: String,
     pub hit_types: Vec<String>,
     pub redacted_count: usize,
+    pub redacted_characters: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -142,15 +143,28 @@ fn collect_keyword_value_range(
     ranges: &mut Vec<(usize, usize, String)>,
 ) {
     for (keyword_start, _) in text.match_indices(keyword) {
+        // Match the configured field label, not the suffix of a different
+        // label (for example 主账号). More labels can be configured explicitly.
+        if keyword == "账号" && text[..keyword_start].chars().next_back()
+            .is_some_and(|ch| ch.is_alphanumeric() || ch == '_') {
+            continue;
+        }
         let mut cursor = keyword_start + keyword.len();
-        let bytes = text.as_bytes();
-        while cursor < text.len() {
-            let ch = text[cursor..].chars().next().unwrap();
-            if ch == ':' || ch == '：' || ch.is_whitespace() {
-                cursor += ch.len_utf8();
-            } else {
-                break;
-            }
+        // A configured credential field requires its separator. A mention such
+        // as 商家账号运营 is prose, not a field whose value extends to line end.
+        // Do not cross block boundaries while looking for a separator/value.
+        while text[cursor..].starts_with([' ', '\t']) {
+            cursor += 1;
+        }
+        let Some(separator) = text[cursor..].chars().next() else {
+            continue;
+        };
+        if !matches!(separator, ':' | '：') {
+            continue;
+        }
+        cursor += separator.len_utf8();
+        while text[cursor..].starts_with([' ', '\t']) {
+            cursor += 1;
         }
 
         let mut end = cursor;
@@ -165,7 +179,7 @@ fn collect_keyword_value_range(
             end += ch.len_utf8();
         }
 
-        if end > cursor && bytes.get(cursor).is_some() {
+        if end > cursor {
             ranges.push((keyword_start, end, filter_type.to_string()));
         }
     }
@@ -239,6 +253,7 @@ fn redact_ranges(text: &str, mut ranges: Vec<(usize, usize, String)>) -> Content
             text: text.to_string(),
             hit_types: Vec::new(),
             redacted_count: 0,
+            redacted_characters: 0,
         };
     }
 
@@ -277,6 +292,7 @@ fn redact_ranges(text: &str, mut ranges: Vec<(usize, usize, String)>) -> Content
         text: result,
         hit_types: hit_types.into_iter().collect(),
         redacted_count: merged.len(),
+        redacted_characters: merged.iter().map(|(start,end,_)|text[*start..*end].chars().count()).sum(),
     }
 }
 
@@ -377,10 +393,43 @@ mod tests {
     }
 
     #[test]
+    fn credential_patterns_preserve_business_account_prose() {
+        let filter = ContentFilter {
+            rules: vec![FilterRule {
+                filter_type: "chat".into(),
+                config: serde_json::json!({"patterns": ["账号[:：]", "密码[:：]", "验证码[:：]"]}),
+            }],
+        };
+        let prose = "核心策略：商家账号运营与成熟的账号矩阵，后续应保留完整业务正文。";
+        assert_eq!(filter.filter_text(prose).text, prose);
+        assert_eq!(filter.filter_text("● 主账号 ：保留商家原有人设与历史视频。").text,
+                   "● 主账号 ：保留商家原有人设与历史视频。");
+        assert_eq!(filter.filter_text("账号：merchant_123\n业务正文保留").text,
+                   "[已过滤]\n业务正文保留");
+        assert_eq!(filter.filter_text("密码: secret with spaces\n业务正文保留").text,
+                   "[已过滤]\n业务正文保留");
+        assert_eq!(filter.filter_text("验证码：123456 用于登录").text,
+                   "[已过滤] 用于登录");
+        assert_eq!(filter.filter_text("账号\n：业务正文").text, "账号\n：业务正文");
+    }
+
+    #[test]
+    fn redaction_statistics_count_unicode_union_not_replacement_length() {
+        let result = redact_ranges("甲乙丙丁", vec![
+            (0, 6, "first".into()), (3, 9, "overlap".into()),
+        ]);
+        assert_eq!(result.text, "[已过滤]丁");
+        assert_eq!(result.redacted_count, 1);
+        assert_eq!(result.redacted_characters, 3);
+        assert_eq!(redact_ranges("正常正文", vec![]).redacted_characters, 0);
+    }
+
+    #[test]
     fn redacts_pii() {
         let result = filter().filter_text("手机号 13800138000 邮箱 a@test.com");
         assert_eq!(result.text, "手机号 [已过滤] 邮箱 [已过滤]");
         assert_eq!(result.hit_types, vec!["pii"]);
         assert_eq!(result.redacted_count, 2);
+        assert_eq!(result.redacted_characters, 21);
     }
 }

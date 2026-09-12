@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>同选项多问题 · 隔离开发验收</title>
+    <script>
+      const previewStorage = new Map();
+      Object.defineProperty(window, 'localStorage', { value: {
+        getItem: key => previewStorage.get(String(key)) ?? null,
+        setItem: (key, value) => previewStorage.set(String(key), String(value)),
+        removeItem: key => previewStorage.delete(String(key)),
+        clear: () => previewStorage.clear(),
+        key: index => [...previewStorage.keys()][index] ?? null,
+        get length() { return previewStorage.size; },
+      } });
+    </script>
+  </head>
+  <body><div id="root"></div><script type="module" src="/test/brainstorm-siblings-preview.tsx"></script></body>
+</html>

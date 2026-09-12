@@ -10,7 +10,8 @@
 - 推理并发由供电状态和模型服务实际并行度共同决定；模型并行度默认 1，
   可通过 MEMORY_BREAD_MODEL_PARALLELISM 配置，使用电池时固定为 1。
   P0 保留快速通道，P1/P2 后台 lane 不占满全部并发。
-- 同优先级内 FIFO；高优先级整体先于低优先级出队，阻塞 lane 不影响同优先级其他 lane。
+- 同优先级内 FIFO；P0 优先，跨进程后台 P1 默认最多连续执行 2 次后让位等待的
+  P2（MEMORY_BREAD_BACKGROUND_PRIORITY_BURST 可配），阻塞 lane 不占就绪名额。
 - 长度淘汰：
     单优先级队列 > 32：丢最老（FIFO），future.set_exception(QueueEvictedError)
     总队列 > 64：只保留 P0，P1/P2 全部 evict
@@ -23,10 +24,12 @@ from __future__ import annotations
 import collections
 import concurrent.futures
 import enum
+import json
 import logging
 import os
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -47,6 +50,10 @@ class QueueEvictedError(RuntimeError):
 
 class QueueShutdownError(RuntimeError):
     """队列已关闭。"""
+
+
+class QueueWaitTimeoutError(QueueEvictedError):
+    """模型尚未开始执行，等待共享槽超过调度预算；可按服务繁忙重试。"""
 
 
 class InferencePreemptedError(QueueEvictedError):
@@ -95,6 +102,7 @@ LANE_P1_CAPTURE = "p1_capture"
 LANE_P1_PREEXTRACT = "p1_preextract"
 LANE_P2_BAKE = "p2_bake"
 LANE_P2_DIARY = "p2_diary"
+LANE_P2_CREATION = "p2_creation"
 
 _DEFAULT_PER_PRIORITY_LIMIT = 32
 _DEFAULT_TOTAL_LIMIT = 64
@@ -111,8 +119,14 @@ _INTERACTIVE_DEMAND_LOCK_FILE = "/tmp/memory-bread-interactive-demand.lock"
 _INTERACTIVE_DEMAND_PROBE_LOCK_FILE = (
     "/tmp/memory-bread-interactive-demand-probe.lock"
 )
+_RAG_LOCK_FILE = "/tmp/memory-bread-rag.lock"
+_RAG_LOCK_OWNER_FILE = "/tmp/memory-bread-rag-owner.txt"
 _PREEMPT_POLL_INTERVAL_SECS = 0.05
 _MODEL_PARALLELISM_ENV = "MEMORY_BREAD_MODEL_PARALLELISM"
+_BACKGROUND_BURST_ENV = "MEMORY_BREAD_BACKGROUND_PRIORITY_BURST"
+_DEFAULT_BACKGROUND_PRIORITY_BURST = 2
+_READY_LEASE_SECS = 2.0
+_READY_REFRESH_SECS = 0.5
 
 
 def _configured_model_parallelism() -> int:
@@ -151,6 +165,15 @@ class InferenceQueue:
         self._last_background_preempted_at = 0.0
         self._on_external_power: Optional[bool] = None
         self._model_parallelism = _configured_model_parallelism()
+        self._queue_identity = uuid.uuid4().hex
+        try:
+            self._background_priority_burst = max(
+                1, min(16, int(os.environ.get(
+                    _BACKGROUND_BURST_ENV, str(_DEFAULT_BACKGROUND_PRIORITY_BURST)
+                )))
+            )
+        except (TypeError, ValueError):
+            self._background_priority_burst = _DEFAULT_BACKGROUND_PRIORITY_BURST
         if self._power_aware:
             self._max_concurrency = self._power_aware_max_concurrency()
         else:
@@ -162,7 +185,9 @@ class InferenceQueue:
             LANE_P1_PREEXTRACT: 1,
             LANE_P2_BAKE: self._background_concurrency_limit(),
             LANE_P2_DIARY: 1,
+            LANE_P2_CREATION: self._background_concurrency_limit(),
         }
+        self._creation_lane_limit_override = LANE_P2_CREATION in (lane_limits or {})
         if lane_limits:
             self._lane_limits.update({k: max(1, int(v)) for k, v in lane_limits.items()})
         self._active_total = 0
@@ -187,8 +212,8 @@ class InferenceQueue:
             for p in Priority
         }
         # P0 (RAG 查询) 执行时持有此文件锁，让 extractor_v2._rag_is_active() 能正确检测
-        self._rag_lock_file = "/tmp/memory-bread-rag.lock"
-        self._rag_lock_owner_file = "/tmp/memory-bread-rag-owner.txt"
+        self._rag_lock_file = _RAG_LOCK_FILE
+        self._rag_lock_owner_file = _RAG_LOCK_OWNER_FILE
         self._worker_threads = [
             threading.Thread(
                 target=self._worker_loop,
@@ -228,14 +253,34 @@ class InferenceQueue:
                 lane=lane or self._default_lane(priority),
             )
             if priority == Priority.P0:
-                task.interactive_demand_handle = _acquire_interactive_demand()
+                task.interactive_demand_handle = _acquire_interactive_demand(
+                    global_slot_prefix=self._global_slot_prefix,
+                )
                 callbacks = self._request_background_preemption_locked()
             self._queues[priority].append(task)
+            future.add_done_callback(
+                lambda done: self._remove_cancelled_queued_task(task) if done.cancelled() else None
+            )
             self._stats[priority.name]["submitted"] += 1
             self._evict_if_needed_locked()
             self._cv.notify_all()
         _invoke_preempt_callbacks(callbacks)
         return future
+
+    def _remove_cancelled_queued_task(self, task: _Task) -> None:
+        """Release a cancelled P0's demand without waiting for any active worker.
+
+        Future.cancel() succeeds only before admission; running requests keep
+        their resource handles until their transport/function has actually exited.
+        """
+        with self._cv:
+            try:
+                self._queues[task.priority].remove(task)
+            except ValueError:
+                return
+            _release_interactive_demand(task)
+            self._publish_global_readiness_locked()
+            self._cv.notify_all()
 
     def submit_sync(
         self,
@@ -243,9 +288,12 @@ class InferenceQueue:
         fn: Callable[[], Any],
         timeout: Optional[float] = None,
         lane: Optional[str] = None,
+        queue_timeout: Optional[float] = None,
     ) -> Any:
         """阻塞提交；调用方超时后同步取消排队项或抢占正在执行的后台项。
 
+        显式指定 queue_timeout 时，排队预算和 timeout 执行预算分开计算。
+        未指定时保留既有从提交开始计时的语义。
         `Future.result(timeout=...)` 本身只停止等待，不会取消任务。若不显式
         中断，HTTP 已返回 504 后底层 Ollama 仍会继续占用唯一推理槽。
         """
@@ -253,11 +301,27 @@ class InferenceQueue:
             logger.debug("InferenceQueue reentrant submit_sync，直接执行 %s", priority.name)
             return fn()
         future = self.submit(priority, fn, lane=lane)
+        if queue_timeout is not None:
+            self._wait_for_admission(future, queue_timeout)
         try:
             return future.result(timeout=timeout)
         except concurrent.futures.TimeoutError:
             self._cancel_timed_out_future(future)
             raise
+
+    def _wait_for_admission(
+        self, future: concurrent.futures.Future, queue_timeout: float,
+    ) -> None:
+        deadline = time.monotonic() + max(0.0, queue_timeout)
+        with self._cv:
+            while not future.running() and not future.done():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    # admission 和取消都在同一把锁下，不能将刚开始运行的请求
+                    # 当作排队超时取消，白白丢掉已经消耗的模型计算。
+                    self._cancel_timed_out_future(future)
+                    raise QueueWaitTimeoutError("等待模型推理槽超时，任务尚未执行")
+                self._cv.wait(timeout=remaining)
 
     def _cancel_timed_out_future(
         self,
@@ -290,6 +354,7 @@ class InferenceQueue:
 
             if timed_out_task is not None:
                 self._stats[timed_out_task.priority.name]["timed_out"] += 1
+                self._publish_global_readiness_locked()
                 self._cv.notify_all()
 
         _invoke_preempt_callbacks(callbacks)
@@ -351,6 +416,7 @@ class InferenceQueue:
             "on_external_power": self._on_external_power,
             "cross_process_limit": self._max_concurrency if self._global_slot_prefix else None,
             "model_parallelism": self._model_parallelism,
+            "background_priority_burst": self._background_priority_burst,
             "interactive_demand_active": interactive_demand_active(),
             "background_retry_after_ms": background_retry_after_ms,
             "lane_limits": dict(self._lane_limits),
@@ -368,6 +434,7 @@ class InferenceQueue:
                     _release_interactive_demand(task)
                     if not task.future.done():
                         task.future.set_exception(QueueShutdownError("队列已关闭"))
+            self._publish_global_readiness_locked()
 
     # ── 内部 ──────────────────────────────────────────────────────────────
 
@@ -415,17 +482,135 @@ class InferenceQueue:
                 break  # 全是 P0，无法再淘汰
 
     def _pop_highest_locked(self) -> Optional[_Task]:
+        if self._global_slot_prefix:
+            try:
+                return self._pop_with_global_fairness_locked()
+            except (ImportError, IOError, OSError) as exc:
+                logger.warning("跨进程优先级协调不可用，保留共享槽限制: %s", exc)
+        return self._pop_local_locked()
+
+    def _pop_local_locked(
+        self, background_priority: Optional[Priority] = None,
+    ) -> Optional[_Task]:
         for p in Priority:  # IntEnum 自然顺序 P0 < P1 < P2
+            if p != Priority.P0 and background_priority is not None and p != background_priority:
+                continue
             q = self._queues[p]
             for idx, task in enumerate(q):
                 if self._can_run_locked(task) and self._try_acquire_global_slot_locked(task):
                     del q[idx]
+                    if not task.future.set_running_or_notify_cancel():
+                        self._release_global_slot(task)
+                        _release_interactive_demand(task)
+                        return None
                     self._active_total += 1
                     self._active_by_lane[task.lane] += 1
                     self._active_by_priority[task.priority] += 1
                     self._active_tasks[task.seq] = task
+                    self._cv.notify_all()
                     return task
         return None
+
+    def _ready_background_priorities_locked(self) -> list[int]:
+        if self._shutdown or self._available_mb() < self._low_mem_mb:
+            return []
+        return [
+            int(priority) for priority in (Priority.P1, Priority.P2)
+            if any(not task.future.cancelled() and self._can_run_locked(task)
+                   for task in self._queues[priority])
+        ]
+
+    def _publish_global_readiness_locked(self) -> None:
+        if self._global_slot_prefix:
+            try:
+                self._pop_with_global_fairness_locked(admit=False)
+            except Exception:
+                # 就绪登记是调度提示，失败不能中断任务/释放槽的生命周期。
+                logger.warning("更新跨进程推理就绪状态失败", exc_info=True)
+
+    def _pop_with_global_fairness_locked(self, *, admit: bool = True) -> Optional[_Task]:
+        """跨进程按就绪优先级分配槽，连续 P1 有界，P2 也能持续前进。
+
+        槽锁本身没有优先级，释放槽的进程往往会连续抢回槽。用另一把短锁
+        将“检查就绪需求、选择优先级、获取槽”串行化。仅登记可运行的后台
+        任务；登记有短租期，进程退出或暂停后不会阻塞另一个进程。
+        本方法不抢占正在运行的任务，P0 始终绕过后台交替规则。
+        """
+        import fcntl
+
+        task: Optional[_Task] = None
+        try:
+            with open(f"{self._global_slot_prefix}-scheduler.json", "a+") as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+                handle.seek(0)
+                try:
+                    state = json.load(handle)
+                    if not isinstance(state, dict):
+                        state = {}
+                except (ValueError, TypeError):
+                    state = {}
+                original = json.dumps(state, sort_keys=True)
+                # JSON 租约由不同进程比较；Python 3.9/macOS 的 monotonic
+                # 起点并不共享，必须使用公共时基。本地排队/执行预算仍用
+                # monotonic。回拨后的未来租约和前跳后的过期租约在下面
+                # 一并失效，publish_local 会按当前时间重新登记本进程。
+                now = time.time()
+                peers = state.get("ready")
+                if not isinstance(peers, dict):
+                    peers = {}
+                peers = {
+                    key: entry for key, entry in peers.items()
+                    if isinstance(entry, dict)
+                    and isinstance(entry.get("updated"), (int, float))
+                    and 0 <= now - entry["updated"] < _READY_LEASE_SECS
+                    and isinstance(entry.get("priorities"), list)
+                }
+
+                def publish_local() -> None:
+                    ready = self._ready_background_priorities_locked()
+                    previous = peers.get(self._queue_identity, {})
+                    if not ready:
+                        peers.pop(self._queue_identity, None)
+                    elif (previous.get("priorities") != ready
+                          or now - previous.get("updated", 0) >= _READY_REFRESH_SECS):
+                        peers[self._queue_identity] = {"priorities": ready, "updated": now}
+
+                publish_local()
+                ready_priorities = {
+                    value for entry in peers.values()
+                    for value in entry["priorities"] if value in (1, 2)
+                }
+                preferred = Priority.P1
+                streak = state.get("p1_streak", 0)
+                if not isinstance(streak, int):
+                    streak = 0
+                if 2 in ready_priorities and (
+                    1 not in ready_priorities or streak >= self._background_priority_burst
+                ):
+                    preferred = Priority.P2
+                task = (
+                    self._pop_local_locked(background_priority=preferred) if admit else None
+                )
+                if task is not None and task.priority != Priority.P0:
+                    state["p1_streak"] = (
+                        min(self._background_priority_burst, streak + 1)
+                        if task.priority == Priority.P1 else 0
+                    )
+                    publish_local()
+                state["ready"] = peers
+                encoded = json.dumps(state, sort_keys=True)
+                if encoded != original:
+                    handle.seek(0)
+                    handle.truncate()
+                    handle.write(encoded)
+                    handle.flush()
+                return task
+        except (IOError, OSError):
+            if task is None:
+                raise
+            # 已取得槽的任务必须交给 worker；状态文件写入/关闭失败不能丢失它。
+            logger.warning("推理任务已取得槽，协调状态写入失败，继续执行", exc_info=True)
+            return task
 
     def _request_background_preemption_locked(self) -> list[Callable[[], None]]:
         callbacks: list[Callable[[], None]] = []
@@ -483,6 +668,7 @@ class InferenceQueue:
                             "InferenceQueue 内存压力超 %.0fs，P2 全部 evict",
                             _MEMORY_PRESSURE_EVICT_SECS,
                         )
+                        self._cv.notify_all()
                         _low_mem_since = None  # 重置计时，下一轮压力重新计
                     self._cv.wait(timeout=_MEMORY_RECHECK_INTERVAL)
                     continue
@@ -594,6 +780,9 @@ class InferenceQueue:
                         self._active_by_priority.pop(task.priority, None)
                     else:
                         self._active_by_priority[task.priority] -= 1
+                    # 先公布当前 lane 已就绪，再释放真实槽。否则另一进程
+                    # 会在本进程下一次轮询前连取多个低优先级任务。
+                    self._publish_global_readiness_locked()
                     self._release_global_slot(task)
                     _release_interactive_demand(task)
                     self._cv.notify_all()
@@ -656,6 +845,12 @@ class InferenceQueue:
         保留槽只允许 P0 使用，从而即使 main.py 与 model_api_server.py
         同时有后台积压，也不会把在线咨询完全堵住。
         """
+        # 正常跨进程准入已持 scheduler 短锁，P0 的 demand 注册使用同一把锁。
+        # 必须在取槽前拦住后台，而不能让它先占槽再被 watcher 取消。
+        # 此检查不放在 _can_run_locked：后台仍须公布资源/lane 就绪状态，
+        # P0 完成后才能立即恢复原有 P1/P2 公平调度。
+        if task.priority != Priority.P0 and interactive_demand_active():
+            return False
         if not self._global_slot_prefix:
             return True
         if task.global_slot_handle is not None:
@@ -730,6 +925,8 @@ class InferenceQueue:
         previous = self._max_concurrency
         self._max_concurrency = next_concurrency
         self._lane_limits[LANE_P2_BAKE] = self._background_concurrency_limit()
+        if not self._creation_lane_limit_override:
+            self._lane_limits[LANE_P2_CREATION] = self._background_concurrency_limit()
         logger.info(
             "InferenceQueue 供电状态切换 max_concurrency=%d->%d plugged=%s",
             previous,
@@ -746,8 +943,18 @@ class InferenceQueue:
         return result
 
 
-def _acquire_interactive_demand():
+def _acquire_interactive_demand(global_slot_prefix: Optional[str] = None):
     """P0 从提交到完成持有共享锁，跨进程通知后台推理立即让出。"""
+    if global_slot_prefix:
+        try:
+            import fcntl
+            # 与后台的 demand 检查 + 取槽构成同一个准入临界区，避免 P0
+            # 正好注册在后台检查之后、获取空槽之前的竞态。
+            with open(f"{global_slot_prefix}-scheduler.json", "a+") as scheduler:
+                fcntl.flock(scheduler, fcntl.LOCK_EX)
+                return _acquire_interactive_demand()
+        except (ImportError, IOError, OSError):
+            logger.warning("交互推理准入协调不可用，保留需求锁和运行中抢占")
     try:
         import fcntl
         handle = open(_INTERACTIVE_DEMAND_LOCK_FILE, "a+")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import pytest
 
 import model_api_server
 from knowledge.extractor_v2 import (
@@ -13,9 +14,11 @@ from knowledge.extractor_v2 import (
 class _TimeoutQueue:
     def __init__(self):
         self.timeout = None
+        self.queue_timeout = None
 
     def submit_sync(self, *_args, **kwargs):
         self.timeout = kwargs.get("timeout")
+        self.queue_timeout = kwargs.get("queue_timeout")
         raise concurrent.futures.TimeoutError
 
 
@@ -95,6 +98,7 @@ def test_bake_extract_timeout_is_retryable(monkeypatch):
         "scope": "candidate",
     }
     assert queue.timeout == 180.0
+    assert queue.queue_timeout == 90.0
 
 
 def test_bake_extract_truncated_output_is_structured_and_retryable(monkeypatch):
@@ -275,6 +279,29 @@ def test_bake_document_merge_timeout_is_retryable(monkeypatch):
         "scope": "candidate",
     }
     assert queue.timeout == 300.0
+    assert queue.queue_timeout == 90.0
+
+
+@pytest.mark.parametrize("endpoint", ["/bake/extract", "/bake/merge_document"])
+def test_bake_queue_timeout_is_service_busy_without_candidate_failure(monkeypatch, endpoint):
+    from inference_queue import QueueWaitTimeoutError
+
+    class _BusyQueue:
+        def submit_sync(self, *_args, **kwargs):
+            assert kwargs["queue_timeout"] == 90.0
+            raise QueueWaitTimeoutError("queued, never started")
+
+    monkeypatch.setattr(model_api_server, "get_global_queue", _BusyQueue)
+    monkeypatch.setattr(model_api_server, "get_bake_extractor", lambda: _Extractor(24_000))
+    response = model_api_server.app.test_client().post(endpoint, json={
+        "candidate": {"source_timeline_id": 42},
+        "existing_document": {"title": "existing"},
+    })
+    assert response.status_code == 503
+    result = response.get_json()
+    assert result["code"] == "INFERENCE_QUEUE_BUSY"
+    assert result["scope"] == "service"
+    assert result["retryable"] is True
 
 
 def test_bake_document_merge_unclassified_exception_is_bounded(monkeypatch):

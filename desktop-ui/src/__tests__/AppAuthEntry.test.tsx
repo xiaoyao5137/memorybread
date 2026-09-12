@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { invoke } from '@tauri-apps/api/core'
 import App from '../App'
 import { useAppStore } from '../store/useAppStore'
 
@@ -42,7 +43,9 @@ vi.mock('../utils/initialization', async importOriginal => ({
   fetchRuntimeReadiness: initializationMocks.fetchRuntimeReadiness,
 }))
 
-const initializationStatus = (state: 'not_started' | 'completed') => ({
+const initializationStatus = (
+  state: 'not_started' | 'completed' | 'failed' | 'interrupted',
+) => ({
   schema_version: 'initialization.v1',
   mode: 'normal' as const,
   state,
@@ -58,6 +61,8 @@ const initializationStatus = (state: 'not_started' | 'completed') => ({
 })
 
 beforeEach(() => {
+  vi.mocked(invoke).mockClear()
+  localStorage.removeItem('memoryBread.floatingAssist.enabled')
   window.history.replaceState({}, '', '/')
   Object.defineProperty(window.navigator, 'onLine', { configurable: true, value: true })
   useAppStore.getState().reset()
@@ -69,6 +74,36 @@ beforeEach(() => {
 })
 
 describe('App auth entry', () => {
+  it('冷启动等待核验期间不显示悬浮球，通过后才恢复开启偏好', async () => {
+    let resolveReady: ((ready: boolean) => void) | undefined
+    initializationMocks.fetchRuntimeReadiness.mockImplementation(() => new Promise(resolve => {
+      resolveReady = resolve
+    }))
+    render(<App />)
+    await waitFor(() => expect(initializationMocks.fetchRuntimeReadiness).toHaveBeenCalled())
+    expect(invoke).toHaveBeenCalledWith('set_floating_assist_readiness', {
+      ready: false, enabled: true, autoTaskEnabled: expect.any(Boolean),
+    })
+    expect(vi.mocked(invoke).mock.calls.some(([command, args]) =>
+      command === 'set_floating_assist_visible' ||
+      (command === 'set_floating_assist_readiness' && (args as { ready: boolean }).ready),
+    )).toBe(false)
+    await act(async () => { resolveReady?.(true) })
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('set_floating_assist_readiness', {
+      ready: true, enabled: true, autoTaskEnabled: expect.any(Boolean),
+    }))
+  })
+
+  it('初始化完成后仍尊重用户关闭悬浮球的偏好', async () => {
+    localStorage.setItem('memoryBread.floatingAssist.enabled', 'false')
+    render(<App />)
+    await screen.findByTestId('rag-panel')
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('set_floating_assist_readiness', {
+      ready: true, enabled: false, autoTaskEnabled: expect.any(Boolean),
+    }))
+    expect(localStorage.getItem('memoryBread.floatingAssist.enabled')).toBe('false')
+  })
+
   it('全新安装没有新版质检完成标记时显示强制初始化门禁', async () => {
     useAppStore.setState({ hasCompletedSetup: false, setupSkipped: false })
     initializationMocks.fetchInitializationStatus.mockResolvedValue(initializationStatus('not_started'))
@@ -79,6 +114,9 @@ describe('App auth entry', () => {
       await Promise.resolve()
     })
 
+    expect(invoke).toHaveBeenCalledWith('set_floating_assist_readiness', {
+      ready: false, enabled: true, autoTaskEnabled: expect.any(Boolean),
+    })
     expect(screen.getByText('烤面包')).toBeInTheDocument()
     expect(screen.queryByText(/跳过/)).not.toBeInTheDocument()
   })
@@ -119,7 +157,22 @@ describe('App auth entry', () => {
     expect(screen.queryByTestId('startup-loading')).not.toBeInTheDocument()
   })
 
-  it('已完成初始化的后台核验发现能力未就绪时回到 Loading 而非初始化页', async () => {
+  it('已完成首次设置但初始化中断时展示恢复入口而非无限 Loading', async () => {
+    initializationMocks.fetchInitializationStatus.mockResolvedValue({
+      ...initializationStatus('interrupted'),
+      error_code: 'INITIALIZATION_COMPONENT_MISSING',
+      suggestion: '检测到本地能力不完整，点击恢复即可自动复用仍然可用的内容。',
+      can_retry: true,
+    })
+
+    render(<App />)
+
+    expect(await screen.findByTestId('initialization-gate')).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: '恢复初始化' })).toBeInTheDocument()
+    expect(screen.queryByTestId('startup-loading')).not.toBeInTheDocument()
+  })
+
+  it('已完成初始化的后台核验发现能力未就绪时进入恢复页', async () => {
     let resolveStatus: ((status: ReturnType<typeof initializationStatus>) => void) | undefined
     initializationMocks.fetchInitializationStatus.mockImplementation(() => new Promise(resolve => {
       resolveStatus = resolve
@@ -141,8 +194,8 @@ describe('App auth entry', () => {
       resolveStatus?.(initializationStatus('not_started'))
     })
 
-    expect(await screen.findByTestId('startup-loading')).toBeInTheDocument()
-    expect(screen.queryByText('烤面包')).not.toBeInTheDocument()
+    expect(await screen.findByTestId('initialization-gate')).toBeInTheDocument()
+    expect(screen.queryByTestId('startup-loading')).not.toBeInTheDocument()
     expect(useAppStore.getState().hasCompletedSetup).toBe(true)
   })
 
@@ -443,4 +496,41 @@ describe('App auth entry', () => {
     expect(screen.getByTestId('floating-assist')).toBeInTheDocument()
     expect(initializationMocks.fetchInitializationStatus).not.toHaveBeenCalled()
   })
+
+it.each([
+  { type: 'document', captureId: 73137, docKey: 'document_url:https://example.com/docs/h3' },
+  { type: 'pending_document', captureId: 73137, sourceUrl: 'https://example.com/docs/h3' },
+])('无内部文档 ID 的引用直接打开原文 $type', async detail => {
+  render(<App />)
+  await screen.findByTestId('rag-panel')
+  act(() => window.dispatchEvent(new CustomEvent('view-rag-reference', { detail })))
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('open_external_url', { url: 'https://example.com/docs/h3' }))
+  expect(screen.queryByTestId('bake-panel')).not.toBeInTheDocument()
+})
+
+  it('文档引用没有内部 ID 和 URL 时打开其采集记录', async () => {
+    render(<App />)
+    await screen.findByTestId('rag-panel')
+    act(() => window.dispatchEvent(new CustomEvent('view-rag-reference', {
+      detail: { type: 'document', captureId: 73137 },
+    })))
+    expect(screen.getByTestId('repository-panel')).toBeInTheDocument()
+    expect(useAppStore.getState().selectedCaptureId).toBe('73137')
+  })
+
+  it('旧 URL 引用优先解析并打开已入库文档详情', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => ({
+      ok: String(input).includes('/api/bake/documents?source_url='),
+      json: async () => ({ items: [{ id: '945' }] }),
+    })))
+    render(<App />)
+    await screen.findByTestId('rag-panel')
+    act(() => window.dispatchEvent(new CustomEvent('view-rag-reference', {
+      detail: { type: 'document', sourceUrl: 'https://example.com/docs/h3', captureId: 73137 },
+    })))
+    await screen.findByTestId('bake-panel')
+    expect(useAppStore.getState().selectedTemplateId).toBe('945')
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'open_external_url')).toBe(false)
+  })
+
 })

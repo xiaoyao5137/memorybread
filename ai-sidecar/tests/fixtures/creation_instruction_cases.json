@@ -1,0 +1,232 @@
+[
+  {
+    "id": "full-business-regression",
+    "instruction": "创作一篇如何对快手灵机产品大规模吸引非L0商家的方案，为商家制作爆款视频，进而极大提高GMV爆可品和可以使用SOTA视频生成模型的方案。",
+    "document": "",
+    "kinds": [
+      "generate"
+    ],
+    "tools": [
+      "memory_search",
+      "data_search",
+      "internet_search"
+    ]
+  },
+  {
+    "id": "full-business-metrics",
+    "instruction": "根据我们项目最近一个月的真实经营数据和之前决定的目标，写一份复盘报告，解释收入变化并提出后续改进建议。",
+    "document": "",
+    "kinds": [
+      "generate"
+    ],
+    "tools": [
+      "memory_search",
+      "data_search"
+    ]
+  },
+  {
+    "id": "full-public-research",
+    "instruction": "查阅最新官方资料，写一份主流视频生成模型的当前能力对比文档，注明来源。",
+    "document": "",
+    "kinds": [
+      "generate"
+    ],
+    "tools": [
+      "internet_search"
+    ]
+  },
+  {
+    "id": "full-fiction",
+    "instruction": "写一篇200字的童话：一只蜗牛在月亮上开面包店。",
+    "document": "",
+    "kinds": [
+      "generate"
+    ],
+    "tools": []
+  },
+  {
+    "id": "full-general",
+    "instruction": "写一份通用的会议记录写作指南，只解释一般方法，不涉及具体产品或最新事实。",
+    "document": "",
+    "kinds": [
+      "generate"
+    ],
+    "tools": []
+  },
+  {
+    "id": "full-provided",
+    "instruction": "仅根据以下材料写一份简短业务小结，不补充外部事实：本周收入100万元，上周80万元；新增客户20家，上周10家；增长来自新渠道。",
+    "document": "",
+    "kinds": [
+      "generate"
+    ],
+    "tools": []
+  },
+  {
+    "id": "simple-delete",
+    "instruction": "移除附录，保留其他内容",
+    "kinds": [
+      "patch"
+    ],
+    "tools": [],
+    "delete": "## 附录\n旧说明。\n\n"
+  },
+  {
+    "id": "simple-delete-en",
+    "instruction": "Delete the appendix section and leave everything else unchanged.",
+    "kinds": [
+      "patch"
+    ],
+    "tools": [],
+    "delete": "## 附录\n旧说明。\n\n"
+  },
+  {
+    "id": "simple-replace",
+    "instruction": "把周一上午改成周三下午",
+    "kinds": [
+      "patch"
+    ],
+    "tools": [],
+    "replace": [
+      "周一上午",
+      "周三下午"
+    ]
+  },
+  {
+    "id": "simple-rename",
+    "instruction": "把标题会议说明改为项目例会说明，其他不动",
+    "kinds": [
+      "patch"
+    ],
+    "tools": [],
+    "replace": [
+      "# 会议说明",
+      "# 项目例会说明"
+    ]
+  },
+  {
+    "id": "simple-negation",
+    "instruction": "不要删除附录，只回答你是否理解",
+    "kinds": [
+      "respond"
+    ],
+    "tools": []
+  },
+  {
+    "id": "simple-resume",
+    "instruction": "接着完成刚才没做完的修改",
+    "kinds": [
+      "resume"
+    ],
+    "tools": [],
+    "pending": true
+  },
+  {
+    "id": "simple-clarify",
+    "instruction": "删掉那个章节",
+    "kinds": [
+      "respond"
+    ],
+    "tools": []
+  },
+  {
+    "id": "append-literal",
+    "instruction": "在附录末尾追加这句话：请提前准备材料。其余内容原样保留。",
+    "kinds": [
+      "patch"
+    ],
+    "tools": [],
+    "contains": "请提前准备材料。"
+  },
+  {
+    "id": "append-local",
+    "instruction": "在会议安排末尾补充一句邀请大家参与讨论的话，不增加任何新事实，其他内容原样保留。",
+    "kinds": [
+      "transform"
+    ],
+    "tools": [],
+    "scope_titles": [
+      "会议安排"
+    ]
+  },
+  {
+    "id": "append-public",
+    "instruction": "在附录补充最新公开会议软件的一项能力，查官方资料后再写，其他部分不动。",
+    "kinds": [
+      "transform"
+    ],
+    "tools": [
+      "internet_search"
+    ],
+    "scope_titles": [
+      "附录"
+    ]
+  },
+  {
+    "id": "append-metrics",
+    "instruction": "查一下本周真实项目经营数据，在附录补充本周收入，其他内容原样保留。",
+    "kinds": [
+      "transform"
+    ],
+    "tools": [
+      "data_search"
+    ],
+    "scope_titles": [
+      "附录"
+    ],
+    "document": "# 星禾项目会议说明\n\n## 会议安排\n周一上午讨论项目进展。\n\n## 附录\n旧说明。\n\n## 联系方式\n请联系项目组。\n"
+  },
+  {
+    "id": "compound-delete-research",
+    "instruction": "移除附录，然后检索最新公开会议工具信息，在联系方式后补充一段工具推荐，其他原文保留。",
+    "kinds": [
+      "transform"
+    ],
+    "tools": [
+      "internet_search"
+    ],
+    "scope_titles": [
+      "附录",
+      "联系方式"
+    ]
+  },
+  {
+    "id": "answer-only",
+    "instruction": "查一下最近的公开会议软件动态，只回答问题，不要修改文档",
+    "kinds": [
+      "answer"
+    ],
+    "tools": [
+      "internet_search"
+    ]
+  },
+  {
+    "id": "transform-no-search",
+    "instruction": "把会议安排写得更简洁，不增加新事实，其他部分保持原样",
+    "kinds": [
+      "transform"
+    ],
+    "tools": [],
+    "scope_titles": [
+      "会议安排"
+    ]
+  },
+  {
+    "id": "append-metrics-ambiguous-project",
+    "instruction": "查一下本周真实项目经营数据，在附录补充本周收入，其他内容原样保留。",
+    "kinds": [
+      "transform"
+    ],
+    "tools": [
+      "data_search"
+    ],
+    "allowed_tools": [
+      "data_search",
+      "memory_search"
+    ],
+    "scope_titles": [
+      "附录"
+    ],
+    "purpose": "缺少项目身份时允许先检索私有上下文确认对象，不应扩展到公开技术调研。"
+  }
+]

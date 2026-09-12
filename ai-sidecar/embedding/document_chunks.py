@@ -17,6 +17,7 @@ from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from knowledge.fragment_grouper import _is_document_url
+from .document_quality import is_document_shell
 
 
 DOCUMENT_CHUNK_TARGET_TOKENS = 420
@@ -56,28 +57,34 @@ class BakeDocumentSnapshot:
 
 def _canonicalize_url(url: Optional[str]) -> Optional[str]:
     value = str(url or "").strip()
-    if not value:
-        return None
     try:
         parsed = urlsplit(value)
-    except ValueError:
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+            return None
+        port = parsed.port
+        host = parsed.hostname.encode("idna").decode("ascii").lower()
+    except (ValueError, UnicodeError):
         return None
-    if not parsed.netloc:
-        return None
-    path = (parsed.path or "/").rstrip("/") or "/"
-    return urlunsplit(
-        (
-            parsed.scheme.lower() or "https",
-            parsed.netloc.lower(),
-            path,
-            "",
-            "",
-        )
-    )
+    scheme = parsed.scheme.lower()
+    if ":" in host:
+        host = "[" + host + "]"
+    if port is not None and port != (443 if scheme == "https" else 80):
+        host += ":" + str(port)
+    path = parsed.path or "/"
+    query, fragment = parsed.query, parsed.fragment
+    if path.startswith(("/d/home/", "/s/home/", "/k/home/")):
+        pairs = []
+        for pair in query.split("&"):
+            key, _, val = pair.partition("=")
+            if key == "section" or (key == "ro" and val in ("true", "false")):
+                continue
+            pairs.append(pair)
+        query, fragment = "&".join(pairs), ""
+    return urlunsplit((scheme, host, path, query, fragment))
 
 
 def canonicalize_document_url(url: Optional[str]) -> Optional[str]:
-    """Return a query/fragment-free URL suitable for document identity."""
+    """Preserve identity-bearing URL components; ignore declared editor view controls."""
     value = str(url or "").strip()
     if not value or not _is_document_url(value):
         return None
@@ -243,6 +250,8 @@ def build_document_snapshot(capture: dict) -> Optional[DocumentSnapshot]:
         or capture.get("win_title")
         or "未命名文档"
     ).strip()
+    if is_document_shell(body):
+        return None
     chunks = chunk_document(body, title=title)
     if not chunks:
         return None
@@ -291,6 +300,10 @@ def build_bake_document_snapshot(document: dict) -> Optional[BakeDocumentSnapsho
         return None
     title = str(document.get("title") or "未命名文档").strip()
     full_content = str(document.get("full_content") or "").strip()
+    # Derived sections must not mask a known failed source page, including
+    # historical records restored without an applied source head.
+    if is_document_shell(full_content):
+        return None
     section_parts: list[str] = []
     sections_json = document.get("sections_json")
     if sections_json:
@@ -308,7 +321,7 @@ def build_bake_document_snapshot(document: dict) -> Optional[BakeDocumentSnapsho
     body = max(body_candidates, key=lambda value: len(re.sub(r"\s+", "", value)))
     body = body.replace("\r\n", "\n").replace("\r", "\n")
     body = re.sub(r"\n{3,}", "\n\n", body).strip()
-    if len(re.sub(r"\s+", "", body)) < MIN_DOCUMENT_CHARS:
+    if not body or (not document.get("source_snapshot_id") and len(re.sub(r"\s+", "", body)) < MIN_DOCUMENT_CHARS):
         return None
 
     canonical_url = _canonicalize_url(document.get("source_url"))
@@ -317,6 +330,8 @@ def build_bake_document_snapshot(document: dict) -> Optional[BakeDocumentSnapsho
         if canonical_url
         else f"bake_document:{document_id}"
     )
+    if is_document_shell(body):
+        return None
     chunks = chunk_document(body, title=title)
     if not chunks:
         return None

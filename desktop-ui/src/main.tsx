@@ -65,6 +65,8 @@ export const bootstrapApp = async () => {
   console.log('根元素:', rootElement)
 
   try {
+    const { bootstrapLocalServices } = await import('./utils/localServices')
+    await bootstrapLocalServices()
     const [{ default: React }, ReactDOM, { default: App }] = await Promise.all([
       import('react'),
       import('react-dom/client'),

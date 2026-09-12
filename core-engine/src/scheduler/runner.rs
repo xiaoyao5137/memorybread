@@ -18,7 +18,6 @@ use super::{
 use crate::storage::StorageManager;
 
 const POLL_INTERVAL_SECS: u64 = 30;
-const PYTHON_EXECUTOR_URL: &str = "http://127.0.0.1:7071/tasks/execute";
 /// 允许同时触发的最大任务数，防止长时间离线后恢复时大量任务并发打垮 Python executor
 const MAX_CONCURRENT_TRIGGERS: usize = 5;
 const BUSY_RETRY_BACKOFF_MS: i64 = 5 * 60 * 1000;
@@ -143,8 +142,10 @@ impl Scheduler {
         client: &reqwest::Client,
         task_id: i64,
     ) -> anyhow::Result<TriggerOutcome> {
+        let sidecar_url = std::env::var("SIDECAR_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:7071".to_string());
         let resp = client
-            .post(PYTHON_EXECUTOR_URL)
+            .post(format!("{}/tasks/execute", sidecar_url.trim_end_matches('/')))
             .json(&serde_json::json!({ "task_id": task_id }))
             .timeout(std::time::Duration::from_secs(1800)) // 创作智能体单轮耗时更长，最长等待30分钟
             .send()

@@ -1,0 +1,358 @@
+{
+  "model": "qwen3.5:4b",
+  "endpoint": "http://127.0.0.1:11434",
+  "scope": "real classifier only; synthetic instructions; no retrieval, writing, or session mutation",
+  "prompt_override": null,
+  "source_run": "/tmp/mb-creation-qa-20260908/intent-request-roles-final-real.json",
+  "cases": [
+    {
+      "id": "memory-original",
+      "fixture": {
+        "id": "memory-original",
+        "instruction": "请使用记忆搜索读取本地的《青禾项目验收材料》，据该文档写一小段项目小结。只复述其中的已完成项数、待办项数和负责人，并注明资料标题；不加编号、日期、比例、合计、原因、效果或建议。只用该本地文档，不联网、不查询看板，未取得文档就明确失败，不猜测内容。",
+        "expected": "create"
+      },
+      "passed": true,
+      "result": {
+        "action": "create",
+        "primary_goal": "据该文档写一小段项目小结",
+        "deliverable": "据该文档写一小段项目小结",
+        "content_request": "据该文档写一小段项目小结"
+      },
+      "seconds": 10.43,
+      "model_call_count": 1
+    },
+    {
+      "id": "memory-question",
+      "fixture": {
+        "id": "memory-question",
+        "instruction": "请使用记忆搜索读取本地的《青禾项目验收材料》，回答其中已完成几项、待办几项、负责人是谁，并注明资料标题；只回答问题，不修改文档；不加编号、日期、比例、合计、原因、效果或建议。只用该本地文档，不联网、不查询看板，未取得文档就明确失败，不猜测内容。",
+        "expected": "answer"
+      },
+      "passed": true,
+      "result": {
+        "action": "answer",
+        "primary_goal": "请使用记忆搜索读取本地的《青禾项目验收材料》，回答其中已完成几项、待办几项、负责人是谁，并注明资料标题",
+        "deliverable": "请使用记忆搜索读取本地的《青禾项目验收材料》，回答其中已完成几项、待办几项、负责人是谁，并注明资料标题",
+        "content_request": ""
+      },
+      "seconds": 24.07,
+      "model_call_count": 1
+    },
+    {
+      "id": "summary-no-fallback",
+      "fixture": {
+        "id": "summary-no-fallback",
+        "instruction": "读取本地活动记录，据此写一小段活动小结，只复述材料中的事实，不补充新事实。",
+        "expected": "create"
+      },
+      "passed": true,
+      "result": {
+        "action": "create",
+        "primary_goal": "据此写一小段活动小结",
+        "deliverable": "据此写一小段活动小结",
+        "content_request": "据此写一小段活动小结"
+      },
+      "seconds": 9.15,
+      "model_call_count": 1
+    },
+    {
+      "id": "summary-fallback-first",
+      "fixture": {
+        "id": "summary-fallback-first",
+        "instruction": "材料找不到就明确说明，不能猜测。请读取本地活动记录，并据此写一小段活动小结，只复述材料中的事实。",
+        "expected": "create"
+      },
+      "passed": true,
+      "result": {
+        "action": "create",
+        "primary_goal": "并据此写一小段活动小结",
+        "deliverable": "并据此写一小段活动小结",
+        "content_request": "并据此写一小段活动小结"
+      },
+      "seconds": 16.72,
+      "model_call_count": 1
+    },
+    {
+      "id": "short-notice",
+      "fixture": {
+        "id": "short-notice",
+        "instruction": "把这些事实写成一句可以直接发出的通知：活动在周三下午举行，地点为二楼会议室。",
+        "expected": "create"
+      },
+      "passed": true,
+      "result": {
+        "action": "create",
+        "primary_goal": "把这些事实写成一句可以直接发出的通知：活动在周三下午举行，地点为二楼会议室。",
+        "deliverable": "把这些事实写成一句可以直接发出的通知：活动在周三下午举行，地点为二楼会议室。",
+        "content_request": "把这些事实写成一句可以直接发出的通知：活动在周三下午举行，地点为二楼会议室。"
+      },
+      "seconds": 4.54,
+      "model_call_count": 1
+    },
+    {
+      "id": "short-question",
+      "fixture": {
+        "id": "short-question",
+        "instruction": "活动在周三下午举行，地点为二楼会议室。活动是什么时候，在哪里？只回答，不修改文档。",
+        "expected": "answer"
+      },
+      "passed": true,
+      "result": {
+        "action": "answer",
+        "primary_goal": "活动在周三下午举行，地点为二楼会议室。活动是什么时候，在哪里？",
+        "deliverable": "活动在周三下午举行，地点为二楼会议室。活动是什么时候，在哪里？",
+        "content_request": ""
+      },
+      "seconds": 14.82,
+      "model_call_count": 1
+    },
+    {
+      "id": "en-summary",
+      "fixture": {
+        "id": "en-summary",
+        "instruction": "Read the local event notes and draft a one-sentence recap using only those facts. If unavailable, report that and do not guess.",
+        "expected": "create"
+      },
+      "passed": true,
+      "result": {
+        "action": "create",
+        "primary_goal": "draft a one-sentence recap using only those facts",
+        "deliverable": "draft a one-sentence recap using only those facts",
+        "content_request": "draft a one-sentence recap using only those facts"
+      },
+      "seconds": 5.49,
+      "model_call_count": 1
+    },
+    {
+      "id": "en-question",
+      "fixture": {
+        "id": "en-question",
+        "instruction": "Read the local event notes and tell me when and where it happened. If unavailable, report that and do not guess. Do not modify the document.",
+        "expected": "answer"
+      },
+      "passed": true,
+      "result": {
+        "action": "answer",
+        "primary_goal": "Read the local event notes and tell me when and where it happened",
+        "deliverable": "Read the local event notes and tell me when and where it happened",
+        "content_request": ""
+      },
+      "seconds": 12.71,
+      "model_call_count": 1
+    },
+    {
+      "id": "failure-report",
+      "fixture": {
+        "id": "failure-report",
+        "instruction": "只按已有材料写一小段任务失败说明，不能猜测原因；材料不足就告知。",
+        "expected": "create"
+      },
+      "passed": true,
+      "result": {
+        "action": "create",
+        "primary_goal": "只按已有材料写一小段任务失败说明",
+        "deliverable": "只按已有材料写一小段任务失败说明",
+        "content_request": "只按已有材料写一小段任务失败说明"
+      },
+      "seconds": 5.32,
+      "model_call_count": 1
+    },
+    {
+      "id": "failure-question",
+      "fixture": {
+        "id": "failure-question",
+        "instruction": "查一下已有材料，这次任务失败了吗？只回答，不修改文档；材料不足就告知。",
+        "expected": "answer"
+      },
+      "passed": true,
+      "result": {
+        "action": "answer",
+        "primary_goal": "查一下已有材料，这次任务失败了吗？",
+        "deliverable": "查一下已有材料，这次任务失败了吗？",
+        "content_request": ""
+      },
+      "seconds": 23.67,
+      "model_call_count": 1
+    },
+    {
+      "id": "edit-from-material",
+      "fixture": {
+        "id": "edit-from-material",
+        "instruction": "读取材料后，用一句话改写当前文档的结论；资料不足就说明原因，其他部分原样保留。",
+        "has_document": true,
+        "expected": "edit"
+      },
+      "passed": true,
+      "result": {
+        "action": "edit",
+        "primary_goal": "读取材料后，用一句话改写当前文档的结论",
+        "deliverable": "读取材料后，用一句话改写当前文档的结论",
+        "content_request": "读取材料后，用一句话改写当前文档的结论"
+      },
+      "seconds": 31.47,
+      "model_call_count": 1
+    },
+    {
+      "id": "literal-patch",
+      "fixture": {
+        "id": "literal-patch",
+        "instruction": "把当前文档中的“周一上午”逐字替换为“周二下午”；找不到原文就告知。",
+        "has_document": true,
+        "expected": "patch"
+      },
+      "passed": true,
+      "result": {
+        "action": "patch",
+        "primary_goal": "把当前文档中的“周一上午”逐字替换为“周二下午”",
+        "deliverable": "把当前文档中的“周一上午”逐字替换为“周二下午”",
+        "content_request": "把当前文档中的“周一上午”逐字替换为“周二下午”"
+      },
+      "seconds": 18.57,
+      "model_call_count": 1
+    },
+    {
+      "id": "negated-writing",
+      "fixture": {
+        "id": "negated-writing",
+        "instruction": "不要写通知。只告诉我当前文档中的活动时间是什么，保持正文不变。",
+        "has_document": true,
+        "expected": "answer"
+      },
+      "passed": true,
+      "result": {
+        "action": "answer",
+        "primary_goal": "只告诉我当前文档中的活动时间是什么",
+        "deliverable": "只告诉我当前文档中的活动时间是什么",
+        "content_request": ""
+      },
+      "seconds": 3.02,
+      "model_call_count": 1
+    },
+    {
+      "id": "quoted-writing",
+      "fixture": {
+        "id": "quoted-writing",
+        "instruction": "解释“写一份通知”这句话的意思，别真的写通知，不修改当前正文。",
+        "has_document": true,
+        "expected": "answer"
+      },
+      "passed": true,
+      "result": {
+        "action": "answer",
+        "primary_goal": "解释“写一份通知”这句话的意思",
+        "deliverable": "解释“写一份通知”这句话的意思",
+        "content_request": ""
+      },
+      "seconds": 54.44,
+      "model_call_count": 1
+    },
+    {
+      "id": "mixed-question-writing",
+      "fixture": {
+        "id": "mixed-question-writing",
+        "instruction": "请先告诉我会议时间，再据此写一段可以直接发出的通知。",
+        "expected": "create"
+      },
+      "passed": true,
+      "result": {
+        "action": "create",
+        "primary_goal": "再据此写一段可以直接发出的通知",
+        "deliverable": "再据此写一段可以直接发出的通知",
+        "content_request": "再据此写一段可以直接发出的通知"
+      },
+      "seconds": 17.58,
+      "model_call_count": 1
+    },
+    {
+      "id": "implicit-resume",
+      "fixture": {
+        "id": "implicit-resume",
+        "instruction": "继续",
+        "has_document": true,
+        "expected": "resume"
+      },
+      "passed": true,
+      "result": {
+        "action": "resume",
+        "primary_goal": "继续",
+        "deliverable": "继续",
+        "content_request": ""
+      },
+      "seconds": 24.35,
+      "model_call_count": 1
+    },
+    {
+      "id": "undo",
+      "fixture": {
+        "id": "undo",
+        "instruction": "撤销刚才的修改",
+        "has_document": true,
+        "expected": "undo"
+      },
+      "passed": true,
+      "result": {
+        "action": "undo",
+        "primary_goal": "撤销刚才的修改",
+        "deliverable": "撤销刚才的修改",
+        "content_request": ""
+      },
+      "seconds": 38.46,
+      "model_call_count": 1
+    },
+    {
+      "id": "implicit-edit",
+      "fixture": {
+        "id": "implicit-edit",
+        "instruction": "再短一点",
+        "has_document": true,
+        "expected": "edit"
+      },
+      "passed": true,
+      "result": {
+        "action": "edit",
+        "primary_goal": "再短一点",
+        "deliverable": "再短一点",
+        "content_request": "再短一点"
+      },
+      "seconds": 24.65,
+      "model_call_count": 1
+    },
+    {
+      "id": "polite-edit",
+      "fixture": {
+        "id": "polite-edit",
+        "instruction": "能不能把这段改成两句话？",
+        "has_document": true,
+        "expected": "edit"
+      },
+      "passed": true,
+      "result": {
+        "action": "edit",
+        "primary_goal": "把这段改成两句话",
+        "deliverable": "把这段改成两句话",
+        "content_request": "把这段改成两句话"
+      },
+      "seconds": 24.66,
+      "model_call_count": 1
+    },
+    {
+      "id": "polite-answer",
+      "fixture": {
+        "id": "polite-answer",
+        "instruction": "能不能解释一下这句话？不要改正文。",
+        "has_document": true,
+        "expected": "answer"
+      },
+      "passed": true,
+      "result": {
+        "action": "answer",
+        "primary_goal": "解释一下这句话",
+        "deliverable": "解释一下这句话",
+        "content_request": ""
+      },
+      "seconds": 36.16,
+      "model_call_count": 1
+    }
+  ]
+}

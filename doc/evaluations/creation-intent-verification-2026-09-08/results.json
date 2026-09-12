@@ -1,0 +1,66 @@
+{
+  "date": "2026-09-08",
+  "history_id": 154,
+  "original_history_unchanged": true,
+  "production_process": {
+    "pid": 41000,
+    "started_local": "2026-09-08 19:44:57",
+    "health": "ok",
+    "http_endpoint": "http://127.0.0.1:8001/creation/agent/run"
+  },
+  "python_runtime": "3.9.25",
+  "python39_files_checked": 9,
+  "regression": {
+    "passed": 1164,
+    "deselected": 1326,
+    "seconds": 12.27,
+    "selection": "creation or skill or routing or intent",
+    "new_tests": 59
+  },
+  "original_intent_model_replay": {
+    "passed": true,
+    "model_calls": 1,
+    "seconds": 17.103,
+    "exact_original_evidence_restored": true
+  },
+  "original_checkpoint_replay": {
+    "passed": true,
+    "seconds": 46.57,
+    "model_calls": 3,
+    "scope": "isolated original failed checkpoint through inputs.assessed; original brief and catalog retained; no original document generated"
+  },
+  "http_end_to_end": {
+    "passed": true,
+    "seconds": 64.525,
+    "checks": {
+      "completed": true,
+      "accepted": true,
+      "contains_provided_facts": true,
+      "no_tool_calls": true
+    },
+    "document": "# AI读书会通知\n\n**活动名称：** AI 读书会  \n**活动时间：** 周三下午  \n**活动地点：** 二楼会议室  \n**参与对象：** 项目组全体成员  \n\n欢迎参加本次 AI 读书会，让我们共同探讨人工智能相关话题。",
+    "scope": "running production HTTP endpoint; synthetic brainstorm brief; isolated session ID"
+  },
+  "audit_negative_replay": {
+    "recorded_real_model_outputs": 2,
+    "both_returned_revise": true,
+    "failed_checks_each": 4,
+    "corrections_each": 7,
+    "scope": "invalid synthetic candidate remains rejected after restoring candidate quote typography"
+  },
+  "initial_http_test": {
+    "passed": false,
+    "reason": "model added Han/ASCII spacing to the candidate title; malformed synthetic brief also lacked matching structured decisions for its summary facts; neither the candidate nor this attempt was counted as accepted"
+  },
+  "source_sha256": {
+    "ai-sidecar/creation/source_spans.py": "e2c64c9452077e4c2e0b9e1b450da0aaefc82ee57da027207cebd5711657833d",
+    "ai-sidecar/creation/skill_governance.py": "7782fcc084247f19795ff442820b77c69e8a6ad7f01317ace56bb2160f376f24",
+    "ai-sidecar/creation/agent_loop.py": "1d24bdd7cfcf36890a75d7e4e33cf53fa81afb359efe305741f7ebc1f55a9535",
+    "ai-sidecar/creation/service.py": "e5f69a68b18160a5dfe2ec697ae8587881a91afb43cac400d1a57de43b128ba9",
+    "ai-sidecar/creation/delivery_contract.py": "838ff431f997fe31c1f84a5d6a56dee635b65d05213f361e5fd982ff1dd2d696",
+    "ai-sidecar/tests/test_creation_intent_evidence.py": "717a85cfb3d8a8cd6fa72aa58fbf5b659053969c0e22268b94e798785d16374a",
+    "ai-sidecar/tests/test_creation_intent_context.py": "1f28518faba191c8d01fbc5c49b44820839e8d792b858a24af9d6262c44e3543",
+    "ai-sidecar/tests/test_creation_audit_typography.py": "8bd2e3f0125fd1f6cb230e107092cdf05ec32a3a545782d974eed5120488d6da",
+    "ai-sidecar/tests/test_creation_agent_loop.py": "1f4237858455b66fc20d88b6971719aec58462b525c0260b9ef447fea202aadd"
+  }
+}

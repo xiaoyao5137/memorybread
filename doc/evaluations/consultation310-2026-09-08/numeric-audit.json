@@ -1,0 +1,291 @@
+{
+  "status": "passed_with_coverage_limits",
+  "method": "Independent comparison with original image pixels; expected measurements manually transcribed separately from material bindings. No LLM request.",
+  "payload": "Original consultation 171 question and its two unchanged images",
+  "summary": "answer.md",
+  "summary_sha256": "21f05d46222e5c10b4cd5f497f8a963a76898f2738b9a4f3fcb9409bbfd13961",
+  "numeric_comparison_count": 30,
+  "numeric_checks": [
+    {
+      "layer": "智能体层",
+      "object": "FP8 EAGLE",
+      "metric": "TTFT avg（s）",
+      "before": "15.21s",
+      "after": "11.53s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "智能体层",
+      "object": "FP8 EAGLE",
+      "metric": "E2E avg（s）",
+      "before": "25.04s",
+      "after": "21.60s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "智能体层",
+      "object": "FP8 EAGLE",
+      "metric": "E2E P99（s）",
+      "before": "131.41s",
+      "after": "168.18s",
+      "direction": "上升",
+      "passed": true
+    },
+    {
+      "layer": "智能体层",
+      "object": "FP8 EAGLE",
+      "metric": "TTFT P95（s）",
+      "before": "36.33s",
+      "after": "30.86s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "智能体层",
+      "object": "FP8 EAGLE",
+      "metric": "TTFT P99（s）",
+      "before": "56.56s",
+      "after": "42.14s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "智能体层",
+      "object": "FP8 EAGLE",
+      "metric": "E2E P95（s）",
+      "before": "59.91s",
+      "after": "57.95s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "智能体层",
+      "object": "tp1•DFlash2",
+      "metric": "TTFT avg（s）",
+      "before": "15.21s",
+      "after": "12.92s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "智能体层",
+      "object": "tp1•DFlash2",
+      "metric": "E2E avg（s）",
+      "before": "25.04s",
+      "after": "21.84s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "智能体层",
+      "object": "tp1•DFlash2",
+      "metric": "TTFT P95（s）",
+      "before": "36.33s",
+      "after": "41.30s",
+      "direction": "上升",
+      "passed": true
+    },
+    {
+      "layer": "智能体层",
+      "object": "tp1•DFlash2",
+      "metric": "TTFT P99（s）",
+      "before": "56.56s",
+      "after": "60.28s",
+      "direction": "上升",
+      "passed": true
+    },
+    {
+      "layer": "智能体层",
+      "object": "tp1•DFlash2",
+      "metric": "E2E P95（s）",
+      "before": "59.91s",
+      "after": "67.84s",
+      "direction": "上升",
+      "passed": true
+    },
+    {
+      "layer": "智能体层",
+      "object": "tp1•DFlash2",
+      "metric": "E2E P99（s）",
+      "before": "131.41s",
+      "after": "121.03s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "智能体层",
+      "object": "tp2•DFlash2",
+      "metric": "TTFT avg（s）",
+      "before": "15.21s",
+      "after": "6.71s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "智能体层",
+      "object": "tp2•DFlash2",
+      "metric": "E2E avg（s）",
+      "before": "25.04s",
+      "after": "11.84s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "智能体层",
+      "object": "tp2•DFlash2",
+      "metric": "TTFT P95（s）",
+      "before": "36.33s",
+      "after": "17.80s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "智能体层",
+      "object": "tp2•DFlash2",
+      "metric": "TTFT P99（s）",
+      "before": "56.56s",
+      "after": "33.63s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "智能体层",
+      "object": "tp2•DFlash2",
+      "metric": "E2E P95（s）",
+      "before": "59.91s",
+      "after": "32.28s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "智能体层",
+      "object": "tp2•DFlash2",
+      "metric": "E2E P99（s）",
+      "before": "131.41s",
+      "after": "55.17s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "模型层",
+      "object": "FP8 EAGLE",
+      "metric": "调用 E2E avg（s）",
+      "before": "6.37s",
+      "after": "5.09s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "模型层",
+      "object": "FP8 EAGLE",
+      "metric": "调用 E2E P95（s）",
+      "before": "20.45s",
+      "after": "16.29s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "模型层",
+      "object": "FP8 EAGLE",
+      "metric": "调用 E2E P99（s）",
+      "before": "32.76s",
+      "after": "32.08s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "模型层",
+      "object": "FP8 EAGLE",
+      "metric": "Cache",
+      "before": "64.62%",
+      "after": "64.94%",
+      "direction": "上升",
+      "passed": true
+    },
+    {
+      "layer": "模型层",
+      "object": "tp1•DFlash2",
+      "metric": "调用 E2E avg（s）",
+      "before": "6.37s",
+      "after": "5.06s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "模型层",
+      "object": "tp1•DFlash2",
+      "metric": "调用 E2E P95（s）",
+      "before": "20.45s",
+      "after": "18.01s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "模型层",
+      "object": "tp1•DFlash2",
+      "metric": "调用 E2E P99（s）",
+      "before": "32.76s",
+      "after": "28.10s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "模型层",
+      "object": "tp1•DFlash2",
+      "metric": "Cache",
+      "before": "64.62%",
+      "after": "56.89%",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "模型层",
+      "object": "tp2•DFlash2",
+      "metric": "调用 E2E avg（s）",
+      "before": "6.37s",
+      "after": "2.45s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "模型层",
+      "object": "tp2•DFlash2",
+      "metric": "调用 E2E P95（s）",
+      "before": "20.45s",
+      "after": "8.23s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "模型层",
+      "object": "tp2•DFlash2",
+      "metric": "调用 E2E P99（s）",
+      "before": "32.76s",
+      "after": "12.48s",
+      "direction": "下降",
+      "passed": true
+    },
+    {
+      "layer": "模型层",
+      "object": "tp2•DFlash2",
+      "metric": "Cache",
+      "before": "64.62%",
+      "after": "68.00%",
+      "direction": "上升",
+      "passed": true
+    }
+  ],
+  "lowest_duration_claims": {
+    "智能体层": "tp2•DFlash2 matches all 8 displayed duration metrics",
+    "模型层": "tp2•DFlash2 matches all 4 displayed call-duration metrics"
+  },
+  "image2_boundary": "Passed: labels and rolling 60-second completed-request scope only; no curve data, axis statistics, active-series or model/configuration inference.",
+  "coverage_limits": [
+    "Summary does not explicitly name the BASE (BF16) baseline.",
+    "FP8 success 99.2% to 97.6% and tp2 success 99.6% are not emitted because those source fields were not unambiguously bound; no complete-coverage claim is warranted."
+  ],
+  "memory_citations": "None",
+  "production_history_id": 182
+}

@@ -1,0 +1,26 @@
+{
+  "verified_at": "2026-09-06T04:57:14.941290+08:00",
+  "regression": {
+    "python": 526,
+    "core": 62,
+    "desktop": 72
+  },
+  "real_model": {
+    "routing_and_input_assessment": 21,
+    "writing_and_acceptance": 6
+  },
+  "manual_checks": [
+    "provided facts preserved; no invented date, efficiency or coverage claims",
+    "local append preserves all content outside requested section"
+  ],
+  "scope": "Isolated Ollama 0.30.8 and synthetic inputs; no production session edits. Routing matrix passed; subsequent writer/reviewer-only changes were retested with all delivery cases and Python regressions. Installed application not replaced.",
+  "artifacts": {
+    "creation-instructions-final-2026-09-06.json": "d7a6568ca19182776cea7b47bf66e2eb0c55478459551677dc261fc197d23f7c",
+    "creation-delivery-final-2026-09-06.json": "f0bff7518eadc9da9a9f34311561586299259795ab603dc561805b897ec5c37e"
+  },
+  "cleanup": {
+    "owned_test_process_group_terminated": 34970,
+    "test_port_closed": 50256,
+    "application_runtime_unchanged_during_cleanup": 35762
+  }
+}

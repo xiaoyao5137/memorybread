@@ -61,6 +61,37 @@ test("Codex and Claude Code ship the same deterministic recall tool", async () =
   assert.equal(codex, claude);
 });
 
+for (const script of [CODEX_SCRIPT, CLAUDE_SCRIPT]) {
+  test(`${script}: requests ten memories by default and preserves explicit limits`, async () => {
+    const requests = [];
+    await withServer(async (request, response) => {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      requests.push(body);
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({
+        contexts: Array.from({ length: body.top_k }, (_, index) => ({
+          source_type: "knowledge", knowledge_id: index, text: `记忆 ${index}`,
+        })),
+      }));
+    }, async (baseUrl) => {
+      for (const [args, expected] of [[[], 10], [["--top-k", "3"], 3]]) {
+        const result = await runNode(script, ["--query", "项目决策", "--base-url", baseUrl, ...args]);
+        assert.equal(result.code, 0, result.stderr);
+        const payload = JSON.parse(result.stdout);
+        assert.equal(payload.result_count, expected);
+        assert.equal(payload.contexts.length, expected);
+        assert.deepEqual(requests.at(-1), { query: "项目决策", top_k: expected });
+      }
+      const invalid = await runNode(script, ["--query", "项目决策", "--base-url", baseUrl, "--top-k", "11"]);
+      assert.equal(invalid.code, 2);
+      assert.equal(JSON.parse(invalid.stderr).error.code, "INVALID_ARGUMENT");
+      assert.equal(requests.length, 2);
+    });
+  });
+}
+
 test("normalizes recall results and truncates oversized text", async () => {
   await withServer((request, response) => {
     if (request.url !== "/api/rag/references" || request.method !== "POST") {

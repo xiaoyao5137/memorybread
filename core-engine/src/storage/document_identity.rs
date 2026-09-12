@@ -1,47 +1,32 @@
-/// 将文档 URL 归一化为稳定身份。
-///
-/// query/fragment 通常只表示章节、视图或分享参数，不应把同一份文档拆成多条；
-/// scheme、host 和企业文档 ID 的大小写在实际 capture 中也并不稳定，因此统一小写。
-pub(crate) fn canonical_document_identity(url: &str) -> Option<String> {
-    let trimmed = url.trim();
-    if trimmed.is_empty() {
-        return None;
+/// Versioned resource identity. URL parsing normalizes only scheme/host; path
+/// case, protocol and unknown query parameters remain identity-bearing.
+pub(crate) fn canonical_document_identity(raw: &str) -> Option<String> {
+    let mut url = reqwest::Url::parse(raw.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
+        || !url.username().is_empty() || url.password().is_some() { return None; }
+    let host = url.host_str()?.to_lowercase();
+    let path = url.path().to_string();
+    let path_lower = path.to_lowercase();
+    let recognized_host = ["docs.google.com", "yuque.com", "feishu.cn", "larkoffice.com", "notion.so", "shimo.im"]
+        .iter().any(|domain| host == *domain || host.ends_with(&format!(".{domain}")));
+    let recognized_path = ["/docs/", "/document/", "/wiki/", "/d/home/", "/s/home/", "/k/home/"]
+        .iter().any(|marker| path_lower.contains(marker));
+    if !recognized_host && !recognized_path && !host.contains("confluence") { return None; }
+    let paginated_editor = ["/d/home/", "/s/home/", "/k/home/"]
+        .iter().any(|marker| path.starts_with(marker));
+    if paginated_editor {
+        // These are editor view controls, not generic URL tracking parameters.
+        // Preserve every other query pair, including its order and encoding.
+        if let Some(query) = url.query() {
+            let remaining = query.split('&').filter(|pair| {
+                let (key,value)=pair.split_once('=').unwrap_or((pair,""));
+                !(key == "section" || (key == "ro" && matches!(value,"true"|"false")))
+            }).collect::<Vec<_>>().join("&");
+            url.set_query(if remaining.is_empty() { None } else { Some(&remaining) });
+        }
+        url.set_fragment(None);
     }
-    let lowered = trimmed.to_lowercase();
-    const DOCUMENT_URL_MARKERS: &[&str] = &[
-        "/docs/",
-        "docs.google",
-        "/document/",
-        "yuque.com",
-        "feishu.cn/docx",
-        "feishu.cn/wiki",
-        "larkoffice.com/wiki",
-        "notion.so",
-        "confluence",
-        "/wiki/",
-        "shimo.im",
-        "/d/home/",
-        "/s/home/",
-        "/k/home/",
-    ];
-    if !DOCUMENT_URL_MARKERS
-        .iter()
-        .any(|marker| lowered.contains(marker))
-    {
-        return None;
-    }
-
-    let without_fragment = trimmed.split('#').next().unwrap_or(trimmed);
-    let without_query = without_fragment
-        .split('?')
-        .next()
-        .unwrap_or(without_fragment);
-    let without_scheme = without_query
-        .strip_prefix("https://")
-        .or_else(|| without_query.strip_prefix("http://"))
-        .unwrap_or(without_query);
-    let identity = without_scheme.trim_end_matches('/').trim().to_lowercase();
-    (!identity.is_empty()).then_some(identity)
+    Some(format!("document-url-v2:{}", url.as_str()))
 }
 
 /// 标题只作为无 URL 文档的保守兜底身份。
@@ -203,13 +188,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_url_ignores_view_parameters_and_scheme() {
+    fn canonical_url_ignores_only_declared_view_parameters() {
         assert_eq!(
             canonical_document_identity(
                 "https://Docs.Example.Com/d/home/ABC123?section=one#comment"
             ),
-            canonical_document_identity("http://docs.example.com/d/home/abc123/")
+            canonical_document_identity("https://docs.example.com/d/home/ABC123")
         );
+    }
+
+    #[test]
+    fn resource_identity_preserves_case_protocol_and_unknown_parameters() {
+        let base="https://docs.example.com/d/home/ABC123";
+        for different in ["https://docs.example.com/d/home/abc123",
+            "http://docs.example.com/d/home/ABC123", "https://docs.example.com/d/home/ABC123?tenant=other",
+            "https://docs.example.com/d/home/ABC123/"] {
+            assert_ne!(canonical_document_identity(base),canonical_document_identity(different));
+        }
+        assert_eq!(canonical_document_identity(base),canonical_document_identity(&format!("{base}?ro=false#comment")));
+        assert!(canonical_document_identity("https://example.com/?next=/document/secret").is_none());
+        assert!(canonical_document_identity("https://user:password@docs.example.com/document/a").is_none());
+    }
+
+    #[test]
+    fn url_identity_v2_shared_cases() {
+        let cases:serde_json::Value=serde_json::from_str(include_str!("../../../shared/document-quality/url-identity-v2-cases.json")).unwrap();
+        for case in cases.as_array().unwrap() {
+            let left=canonical_document_identity(case["left"].as_str().unwrap()).unwrap();
+            let right=canonical_document_identity(case["right"].as_str().unwrap()).unwrap();
+            assert_eq!(left==right,case["equal"].as_bool().unwrap(),"{case}");
+        }
     }
 
     #[test]

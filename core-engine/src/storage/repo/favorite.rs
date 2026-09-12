@@ -146,6 +146,7 @@ mod tests {
                 entities: "[]".to_string(),
                 importance: 5,
                 source_capture_ids: Some("[]".to_string()),
+                ..Default::default()
             })
             .unwrap();
         let operation_id = storage

@@ -31,12 +31,7 @@ pub fn build_fts_or_query(terms: &[String]) -> Option<String> {
 
 /// 按空白拆分用户输入为关键词列表（供整串 query 的调用方使用）。
 pub fn split_query_terms(query: &str) -> Vec<String> {
-    query
-        .split_whitespace()
-        .map(str::trim)
-        .filter(|term| !term.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
+    crate::storage::search::split_search_terms(query)
 }
 
 /// 通过 FTS5 MATCH 查询候选 rowid。
@@ -120,7 +115,7 @@ mod tests {
     #[test]
     fn test_split_query_terms() {
         let terms = split_query_terms("  GPU 利用率  ");
-        assert_eq!(terms, vec!["GPU".to_string(), "利用率".to_string()]);
+        assert_eq!(terms, vec!["gpu".to_string(), "利用率".to_string()]);
         assert!(split_query_terms("   ").is_empty());
     }
 

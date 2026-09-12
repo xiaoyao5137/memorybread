@@ -1,0 +1,17 @@
+........................................................................ [ 12%]
+........................................................................ [ 24%]
+........................................................................ [ 36%]
+........................................................................ [ 49%]
+........................................................................ [ 61%]
+........................................................................ [ 73%]
+........................................................................ [ 85%]
+........................................................................ [ 98%]
+...........                                                              [100%]
+=============================== warnings summary ===============================
+tests/test_rag.py::TestVectorRetriever::test_is_available_returns_bool
+tests/test_rag.py::TestVectorRetriever::test_search_returns_empty_when_unavailable
+  /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/ai-sidecar/rag/retriever.py:598: UserWarning: Failed to obtain server version. Unable to check client-server compatibility. Set check_compatibility=False to skip version check.
+    client = QdrantClient(host=self.host or "localhost", port=self.port or 6333)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+587 passed, 2 warnings in 2.92s

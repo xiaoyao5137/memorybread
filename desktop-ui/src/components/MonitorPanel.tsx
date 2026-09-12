@@ -5,8 +5,9 @@ import { useAppStore } from '../store/useAppStore'
 import { toUserFacingError } from '../utils/userFacingError'
 import PipelineDagPanel from './PipelineDagPanel'
 import './MonitorPanel.css'
+import { getLocalServiceBaseUrl } from '../utils/localServices'
 
-const API = 'http://localhost:7070'
+const API = getLocalServiceBaseUrl('core')
 
 const EMPTY_OVERVIEW: MonitorOverview = {
   db_size_bytes: 0,

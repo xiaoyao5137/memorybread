@@ -30,6 +30,8 @@ uuid = { version = "1", features = ["v4"] }
 xcap = "0.8"
 base64 = "0.22"
 rfd = "0.15"
+rusqlite = { version = "0.31", features = ["bundled"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 [target."cfg(target_os = \"macos\")".dependencies]
 objc2 = "0.6"
@@ -40,3 +42,15 @@ objc2-foundation = { version = "0.3", features = ["NSData"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-shell = "2"
+
+# Avoid unbounded loose debug-object growth during repeated Tauri dev builds on
+# macOS while retaining line-level backtraces.
+[profile.dev]
+debug = 1
+incremental = false
+split-debuginfo = "packed"
+
+[profile.test]
+debug = 1
+incremental = false
+split-debuginfo = "packed"

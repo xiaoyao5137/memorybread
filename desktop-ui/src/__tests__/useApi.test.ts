@@ -15,6 +15,7 @@ import {
   useFetchDataSources,
   useFetchRagHistory,
   useUpdateMemoryFavorite,
+  useRetryBakeDocumentSummary,
 } from '../hooks/useApi'
 import { useAppStore } from '../store/useAppStore'
 
@@ -718,5 +719,23 @@ describe('useFetchBakeCaptures', () => {
       summary: '设计稿页面',
     })
     expect(data.total).toBe(1)
+  })
+})
+
+
+describe('document summary explicit regeneration', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+  it('sends the displayed revision only for explicit regeneration', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ queued: true }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { result } = renderHook(() => useRetryBakeDocumentSummary())
+    expect(await result.current('953', 123)).toBe(true)
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/953/summary/regenerate'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expected_updated_at: 123 }),
+    })
+    fetchMock.mockResolvedValue(jsonResponse({ queued: false }))
+    expect(await result.current('953')).toBe(false)
+    expect(fetchMock).toHaveBeenLastCalledWith(expect.stringContaining('/953/summary/retry'), { method: 'POST' })
   })
 })

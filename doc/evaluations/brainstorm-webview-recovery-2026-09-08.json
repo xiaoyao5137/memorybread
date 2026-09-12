@@ -1,0 +1,23 @@
+{
+  "history_id": 153,
+  "session_id": "creation-1788839287733-8b87e3c942303",
+  "phase": "exploring",
+  "revision": 0,
+  "answered_count": 0,
+  "body_chars": 0,
+  "root_request_preserved": true,
+  "state_sha256": "97987b7cb2afbde3e960efef407664c32849fc36cbd1fcbe5982291e2faa69f7",
+  "question_id": "q_02f32d40c48a",
+  "options": 4,
+  "reload_state_unchanged": true,
+  "reload_no_regeneration": true,
+  "core_elapsed_ms": 77811,
+  "queue_wait_ms": 15702,
+  "execution_ms": 62098,
+  "frontend_tests_passed": 175,
+  "core_api_tests_passed": 21,
+  "core_handler_tests_passed": 27,
+  "core_transport_tests_passed": 3,
+  "webkit_silent_failed_ms": 61009,
+  "webkit_keepalive_succeeded_ms": 65046
+}

@@ -29,7 +29,7 @@ describe('Settings debug mode visibility', () => {
     expect(screen.queryByTestId('debug-mode-toggle')).not.toBeInTheDocument()
     expect(screen.queryByTestId('settings-api-section')).not.toBeInTheDocument()
     expect(screen.queryByTestId('local-debug-mode-toggle')).not.toBeInTheDocument()
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(3))
   })
 
   it('Debug 启动时默认选择测试环境，但普通账号仍隐藏本机 Core 配置', async () => {
@@ -48,7 +48,7 @@ describe('Settings debug mode visibility', () => {
 
     fireEvent.click(screen.getByTestId('open-debug-btn'))
     expect(useAppStore.getState().windowMode).toBe('debug')
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(3))
   })
 
   it('测试账号以 Debug 启动后显示本机服务配置', async () => {
@@ -71,7 +71,7 @@ describe('Settings debug mode visibility', () => {
     expect(screen.getByTestId('api-url-input')).toBeInTheDocument()
     expect(screen.queryByTestId('local-debug-mode-toggle')).not.toBeInTheDocument()
     expect(useAppStore.getState().debugModeEnabled).toBe(true)
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(3))
   })
 
   it('在开发者模式中切换正式和测试服务环境', async () => {
@@ -85,6 +85,6 @@ describe('Settings debug mode visibility', () => {
     expect(useAppStore.getState().gatewayApiBaseUrl).toBe('https://gateway.memorybread.cn')
     expect(screen.getByTestId('service-environment-production')).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByTestId('service-environment-staging')).toHaveAttribute('aria-pressed', 'false')
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(3))
   })
 })

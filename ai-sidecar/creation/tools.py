@@ -39,17 +39,34 @@ SOLUTION_DESIGN_AGENT_ID = "solution_design_agent"
 
 # 每个可路由能力在自身定义处声明描述：解决什么问题、在什么目标下使用。
 # 路由系统提示词只动态加载这些描述（渐进式披露），不内置硬编码倾向。
-# memory_search / webpage_scrape 属于结构性能力，不参与路由选择：前者总是作为
-# 证据探针执行，后者只由 Harness 依据 data_search 的反馈调度。
+# 每项能力均可独立选择；启用只表示允许调用。网页刷新仍需有效来源。
 ROUTING_CAPABILITIES = (
+    {"id": MEMORY_SEARCH_TOOL_ID, "kind": "tool", "name": "记忆搜索 Tool",
+     "description": (
+         "召回本机记忆中当前正文和已提供资料未实质覆盖的用户私有输入："
+         "项目现状、术语与过去决策，用户过往的同类创作、文档、脚本与素材，"
+         "以及可复用的写作风格、结构口径、历史结论和方案范例。"
+         "当本轮要产出的内容需要延续用户真实上下文、复用其历史成果或对齐其既有口径，"
+         "而这些在现有材料中没有实质体现时使用；现有材料已充分覆盖则无需重复召回。"
+     )},
+    {"id": "document_writer_agent", "kind": "agent", "name": "文档撰写 Agent",
+     "description": "生成新文档或用户要求的全文改写。局部可定位修改由 patch 操作完成。"},
+    {"id": "chapter_design_agent", "kind": "agent", "name": "章节设计 Agent",
+     "description": "为需要新结构的文档设计章节蓝图。已有结构足够时无需选择。"},
+    {"id": "data_query_planner", "kind": "agent", "name": "数据查询规划",
+     "description": "当本轮需要对结构化结果排序、分组、聚合或筛选时使用。"},
+    {"id": "quality_review_agent", "kind": "agent", "name": "质量审校 Agent",
+     "description": "用户要求审查或本轮产物确有语义质量问题时进行审查。"},
     {
         "id": INTERNET_SEARCH_TOOL_ID,
         "kind": "tool",
         "name": "互联网检索 Tool",
         "description": (
-            "解决需要获取本地资料之外的公开外部事实的问题：政策法规、行业标准、"
-            "新闻动态、竞品动态、市场调研、价格、开源版本趋势等。"
-            "当请求需要最新外部信息或公开资料时使用。"
+            "解决需要本地资料之外的公开外部输入的问题，既包括事实也包括做法与参考："
+            "政策法规、行业标准、新闻动态、竞品动态、市场调研、价格、开源版本趋势等事实；"
+            "以及公开的方法论、最佳实践、行业范式、创作结构与套路、案例范例和灵感思路。"
+            "当本轮要产出的内容涉及最新外部信息、专业领域做法，或需要借鉴公开范例来形成思路，"
+            "而现有材料未实质提供时使用；纯虚构创作或通用常识无需检索。"
         ),
     },
     {
@@ -59,9 +76,9 @@ ROUTING_CAPABILITIES = (
         "description": (
             "解决需要获取用户自有业务或运营数据的问题：看板、报表、指标、用量、"
             "成本、利用率、QPS 等，以及日报、周报、月报、经营分析、数据分析类文档。"
-            "当用户要求查看、展示或获取今天、本周等实时数值时必须使用；"
-            "只要请求疑似涉及用户自己的数据、看板或报表，优先用本能力探测，"
-            "宁可多探测，不能遗漏。"
+            "当本轮需要查询当前上下文未包含的数值时使用；"
+            "当前已有充分数据时无需重复查询。"
+            "不要仅因历史需求提到数据而调用。"
         ),
     },
     {
@@ -106,7 +123,7 @@ ROUTING_CAPABILITIES = (
         "name": "行业调研 Agent",
         "description": (
             "解决需要深入外部调研的问题：行业与市场现状、竞争格局、政策环境、"
-            "技术演进趋势，形成带来源的调研结论。"
+            "技术演进趋势，分析已提供的来源形成调研结论。本 Agent 不检索外部信息；如来源缺失须按缺口选择检索工具。"
         ),
     },
     {
@@ -115,10 +132,33 @@ ROUTING_CAPABILITIES = (
         "name": "方案设计 Agent",
         "description": (
             "解决需要把需求与调研结论转成可落地设计的问题：交付物是方案、"
-            "架构、规划、设计类文档时，用于产出方案结构与关键取舍。"
+            "架构、规划、设计中的新决策时使用；仅修改已有文档的格式或范围无需调用。"
         ),
     },
 )
+
+# Ordering is a declared data dependency between already selected capabilities.
+# It never activates an absent capability or imposes a workflow on an operation.
+CAPABILITY_DEPENDENCIES = {
+    "solution_design_agent": ("industry_research_agent", "data_analysis_agent", "data_query_planner"),
+    "chapter_design_agent": ("solution_design_agent", "industry_research_agent", "data_analysis_agent"),
+    "document_writer_agent": ("chapter_design_agent", "solution_design_agent", "industry_research_agent", "data_analysis_agent", "data_query_planner"),
+    "quality_review_agent": ("document_writer_agent",),
+}
+
+
+def order_selected_capabilities(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    remaining = list(plan)
+    ordered: list[dict[str, Any]] = []
+    while remaining:
+        remaining_ids = {item["id"] for item in remaining}
+        ready = next((item for item in remaining if not remaining_ids.intersection(CAPABILITY_DEPENDENCIES.get(item["id"], ()))), None)
+        if ready is None:
+            raise ValueError("Capability dependencies contain a cycle")
+        ordered.append(ready)
+        remaining.remove(ready)
+    return ordered
+
 
 # 白名单由能力自描述派生，路由决策校验与提示词组装共用同一来源。
 ROUTABLE_TOOL_IDS = tuple(
@@ -501,10 +541,24 @@ def validate_routing_decision(raw: Any) -> dict[str, list[str]]:
     if isinstance(raw, dict):
         tools_raw = raw.get("tools") or ()
         agents_raw = raw.get("agents") or ()
-    return {
+    result = {
         "tools": clean(tools_raw, ROUTABLE_TOOL_IDS),
         "agents": clean(agents_raw, ROUTABLE_AGENT_IDS),
     }
+    if isinstance(raw, dict) and "operation" in raw:
+        from .operations import OperationError, validate_operation
+        result["operation"] = validate_operation(raw["operation"])
+        for key, allowed in (("tools", ROUTABLE_TOOL_IDS), ("agents", ROUTABLE_AGENT_IDS)):
+            if not isinstance(raw.get(key, []), list) or any(item not in allowed for item in raw.get(key, [])):
+                raise OperationError("CREATION_CAPABILITY_UNAVAILABLE", "操作计划包含不可用的能力标识")
+        kind = result["operation"]["kind"]
+        if kind in {"patch", "respond", "resume", "undo"} and (result["tools"] or result["agents"]):
+            raise OperationError("CREATION_OPERATION_INVALID", "此操作不消费资源调用；需要检索或生成措辞的文档修改应选择 transform")
+        forbidden = ({"document_writer_agent", "quality_review_agent"} if kind == "transform"
+                     else {"document_writer_agent"} if kind == "answer" else set())
+        if forbidden.intersection(result["agents"]):
+            raise OperationError("CREATION_OPERATION_INVALID", "操作计划不能混入全文写作或审查")
+    return result
 
 
 def fallback_routing_decision(
@@ -512,50 +566,10 @@ def fallback_routing_decision(
     requirement: dict[str, Any],
     enabled_tool_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
-    """模型不可用或输出无法解析时的降级路由，沿用探针优先的保守策略。
-
-    降级探针与模型路径同契约：只产出已启用的工具，避免选出执行不了的
-    能力；None 表示不过滤（测试/兼容旧调用）。
-    """
-    normalized = text.lower()
-    allowed_tool_ids: Optional[set] = None
-    if enabled_tool_ids is not None:
-        allowed_tool_ids = {str(item) for item in enabled_tool_ids}
-
-    def tool_allowed(tool_id: str) -> bool:
-        return allowed_tool_ids is None or tool_id in allowed_tool_ids
-
-    tools: list[str] = []
-    if should_use_internet_search(text, requirement) and tool_allowed(
-        INTERNET_SEARCH_TOOL_ID
-    ):
-        tools.append(INTERNET_SEARCH_TOOL_ID)
-    if should_use_github_search(text) and tool_allowed(GITHUB_SEARCH_TOOL_ID):
-        tools.append(GITHUB_SEARCH_TOOL_ID)
-    if should_use_plantuml(text, requirement) and tool_allowed(
-        PLANTUML_DIAGRAM_TOOL_ID
-    ):
-        tools.append(PLANTUML_DIAGRAM_TOOL_ID)
-    if should_use_mermaid(text, requirement) and tool_allowed(
-        MERMAID_DIAGRAM_TOOL_ID
-    ):
-        tools.append(MERMAID_DIAGRAM_TOOL_ID)
-    if should_use_data_tools(text, requirement) and tool_allowed(DATA_SEARCH_TOOL_ID):
-        tools.append(DATA_SEARCH_TOOL_ID)
-    agents: list[str] = []
-    if any(
-        marker in normalized
-        for marker in ("数据", "指标", "分析", "统计", "趋势", "成本", "收益")
-    ):
-        agents.append(DATA_ANALYSIS_AGENT_ID)
-    if should_use_internet_search(text, requirement):
-        agents.append(INDUSTRY_RESEARCH_AGENT_ID)
-    if any(
-        marker in f"{text} {requirement.get('doc_type', '')}"
-        for marker in ("方案", "架构", "PRD", "设计", "规划", "建设")
-    ):
-        agents.append(SOLUTION_DESIGN_AGENT_ID)
-    return {"tools": tools, "agents": agents, "source": "fallback"}
+    """无法解释操作时不猜测执行范围，更不恢复主题关键词流水线。"""
+    return {"tools": [], "agents": [], "source": "fallback",
+            "operation": {"kind": "respond", "response": "本轮操作解析失败，请重试当前指令。"},
+            "reasoning": "CREATION_OPERATION_INVALID"}
 
 
 def _contains_any(text: str, markers: tuple[str, ...]) -> bool:

@@ -13,7 +13,10 @@ let pollTimer = null
 let heartbeatTimer = null
 let reconnectTimer = null
 let busy = false
+let activeExecution = null
 const activeJobTabs = new Map()
+const cancelledJobIds = new Set()
+const jobCancellationWaiters = new Map()
 
 function connectNative() {
   clearTimeout(reconnectTimer)
@@ -37,6 +40,7 @@ function connectNative() {
     // Core/Native Host 重启会使旧 job 永远无法回传。连接断开时
     // 必须同时释放 busy，否则重连后只会继续发心跳而永久不 poll。
     busy = false
+    activeExecution = null
     for (const jobId of activeJobTabs.keys()) void closeActiveJobTab(jobId)
     clearInterval(pollTimer)
     pollTimer = null
@@ -69,6 +73,7 @@ function sendHeartbeat() {
 }
 
 function sendProgress(job, progress) {
+  if (cancelledJobIds.has(job.browser_job_id)) return
   nativePort?.postMessage({
     type: 'progress',
     extension_version: EXTENSION_VERSION,
@@ -81,18 +86,29 @@ function sendProgress(job, progress) {
 }
 
 async function handleNativeResponse(message) {
+  for (const jobId of message?.cancelled_job_ids || []) {
+    cancelledJobIds.add(jobId)
+    if (cancelledJobIds.size > 256) cancelledJobIds.delete(cancelledJobIds.values().next().value)
+    await closeActiveJobTab(jobId)
+    jobCancellationWaiters.get(jobId)?.()
+  }
   if (!message?.job || busy) return
+  const job = message.job
   busy = true
+  activeExecution = job
   try {
-    const job = message.job
     const timeoutMs = Math.max(
       MIN_JOB_TIMEOUT_MS,
       Math.min(MAX_JOB_TIMEOUT_MS, Number(job.deadline_ms || Date.now()) - Date.now() + JOB_TIMEOUT_GRACE_MS),
     )
     let result
     try {
+      if (cancelledJobIds.has(job.browser_job_id)) throw jobError('SOURCE_REFRESH_CANCELLED', '页面读取已取消')
+      const cancellation = new Promise((_, reject) => {
+        jobCancellationWaiters.set(job.browser_job_id, () => reject(jobError('SOURCE_REFRESH_CANCELLED', '页面读取已取消')))
+      })
       result = await withTimeout(
-        executeJob(job),
+        Promise.race([executeJob(job), cancellation]),
         timeoutMs,
         () => jobError('JOB_EXECUTION_TIMEOUT', '后台页面读取超过任务截止时间'),
       )
@@ -105,12 +121,15 @@ async function handleNativeResponse(message) {
         error_message: String(error?.message || error || 'Chrome 扩展读取失败'),
       }
     }
-    nativePort?.postMessage({type: 'result', extension_version: EXTENSION_VERSION, result})
+    if (activeExecution === job) nativePort?.postMessage({type: 'result', extension_version: EXTENSION_VERSION, result})
   } finally {
-    busy = false
-    // setInterval 可能在 MV3 Service Worker 休眠/恢复期间丢拍。
-    // 每个任务结束后主动 poll，避免心跳在线但任务队列无人领取。
-    poll()
+    jobCancellationWaiters.delete(job.browser_job_id)
+    if (activeExecution === job) {
+      activeExecution = null
+      busy = false
+      // An old disconnected execution must not release a newer job's slot.
+      poll()
+    }
   }
 }
 
@@ -126,14 +145,20 @@ async function executeJob(job) {
     tabId = tab.id
     if (tabId == null) throw jobError('BACKGROUND_TAB_BLOCKED', '无法创建后台标签')
     activeJobTabs.set(job.browser_job_id, tabId)
+    if (cancelledJobIds.has(job.browser_job_id)) throw jobError('SOURCE_REFRESH_CANCELLED', '页面读取已取消')
     preview = await startLivePreview(job, tabId)
+    if (cancelledJobIds.has(job.browser_job_id)) throw jobError('SOURCE_REFRESH_CANCELLED', '页面读取已取消')
     preview.setStage('loading')
     await waitForTab(tabId, Math.min(30000, Math.max(1000, job.deadline_ms - Date.now())))
+    if (cancelledJobIds.has(job.browser_job_id)) throw jobError('SOURCE_REFRESH_CANCELLED', '页面读取已取消')
     const loadedTab = await chrome.tabs.get(tabId)
     preview.setStage('reading', loadedTab.title || '', loadedTab.url || job.url)
     await preview.capture()
+    if (cancelledJobIds.has(job.browser_job_id)) throw jobError('SOURCE_REFRESH_CANCELLED', '页面读取已取消')
     await chrome.scripting.executeScript({target: {tabId, allFrames: false}, files: ['content-runtime.js']})
+    if (cancelledJobIds.has(job.browser_job_id)) throw jobError('SOURCE_REFRESH_CANCELLED', '页面读取已取消')
     const result = await chrome.tabs.sendMessage(tabId, {type: 'memorybread.extract', job})
+    if (cancelledJobIds.has(job.browser_job_id)) throw jobError('SOURCE_REFRESH_CANCELLED', '页面读取已取消')
     preview.setStage('finalizing', result?.title || loadedTab.title || '', result?.url || loadedTab.url || job.url)
     await preview.capture()
     return {browser_job_id: job.browser_job_id, ...result}

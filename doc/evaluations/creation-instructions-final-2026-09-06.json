@@ -1,0 +1,1237 @@
+{
+  "model": "qwen3.5:4b",
+  "endpoint": "http://127.0.0.1:50256",
+  "scope": "real routing and input assessment; synthetic documents; no external retrieval",
+  "cases": [
+    {
+      "id": "full-business-regression",
+      "instruction": "创作一篇如何对快手灵机产品大规模吸引非L0商家的方案，为商家制作爆款视频，进而极大提高GMV爆可品和可以使用SOTA视频生成模型的方案。",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "快手灵机产品非L0商家爆款视频GMV提升方案",
+            "source": "generated",
+            "evidence": "创作一篇如何对快手灵机产品大规模吸引非L0商家的方案，为商家制作爆款视频，进而极大提高GMV爆可品和可以使用SOTA视频生成模型的方案。"
+          }
+        },
+        "reasoning": "用户明确要求创作一篇关于快手灵机产品吸引非L0商家、制作爆款视频及提高GMV的完整方案，属于从零开始的新文档创作。当前上下文无正文、无历史文档，且用户未指定具体技能，因此需选择 generate 操作。文档主题为‘快手灵机产品非L0商家爆款视频GMV提升方案’，需基于用户指令生成，不依赖外部检索或内部数据。",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "一篇针对快手灵机产品，旨在通过 SOTA 视频生成模型制作爆款视频，从而大规模吸引非 L0 商家并提高 GMV 的实施方案。",
+        "self_contained_reason": "本轮请求要求创作针对特定产品（快手灵机）和特定用户群（非 L0 商家）的规模化商业方案，并涉及具体技术（SOTA 视频生成模型）的应用。由于缺少项目背景、业务基线数据及公开技术事实，无法构建一个基于现实约束的、可执行的、数据驱动的改进方案。",
+        "acceptance": [
+          {
+            "id": "1",
+            "criterion": "方案必须基于快手灵机产品的真实业务现状（非 L0 商家痛点、现有机制）制定，而非虚构通用流程。"
+          },
+          {
+            "id": "2",
+            "criterion": "方案必须包含可量化的 GMV 提升目标及衡量依据，需依赖真实业务数据。"
+          },
+          {
+            "id": "3",
+            "criterion": "方案中关于 SOTA 视频生成模型的应用需符合公开技术事实及行业合规要求。"
+          }
+        ],
+        "inputs": [
+          {
+            "state": "missing",
+            "evidence": "",
+            "need": "快手灵机产品的具体用户画像、非 L0 商家的核心痛点、现有流量分发机制、SOTA 模型在快手生态的适配情况、过往针对非 L0 商家的成功案例或失败教训。",
+            "reason": "方案需基于真实业务现状制定，缺乏项目背景、目标受众特征及现有能力基线，无法确保方案的可落地性和针对性。",
+            "query": "查询快手灵机产品非 L0 商家画像、现有流量机制及 SOTA 视频生成模型在平台的应用现状。",
+            "id": "work_context",
+            "source": "work_context"
+          },
+          {
+            "state": "missing",
+            "evidence": "",
+            "need": "非 L0 商家的视频制作能力基线、当前 GMV 转化漏斗数据、爆款视频的特征指标（如完播率、互动率）、SOTA 模型生成内容的预期性能提升数据。",
+            "reason": "缺乏真实业务指标作为衡量依据，无法量化‘极大提高 GMV'的具体目标，也无法评估 SOTA 模型的实际效果。",
+            "query": "查询快手灵机产品非 L0 商家视频制作能力基线、GMV 转化数据及爆款视频特征指标。",
+            "id": "business_data",
+            "source": "business_data"
+          },
+          {
+            "state": "missing",
+            "evidence": "",
+            "need": "当前主流 SOTA 视频生成模型的技术参数、生成成本、算力需求、内容合规性要求、行业通用的爆款视频制作标准。",
+            "reason": "方案中明确提及使用 SOTA 视频生成模型，需核对公开技术事实以确保方案的可行性、成本效益及合规性。",
+            "query": "查询当前主流 SOTA 视频生成模型的技术参数、成本及行业爆款视频制作标准。",
+            "id": "public_facts",
+            "source": "public_facts"
+          }
+        ]
+      },
+      "effective": {
+        "tools": [
+          "memory_search",
+          "data_search",
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "快手灵机产品非L0商家爆款视频GMV提升方案",
+            "source": "generated",
+            "evidence": "创作一篇如何对快手灵机产品大规模吸引非L0商家的方案，为商家制作爆款视频，进而极大提高GMV爆可品和可以使用SOTA视频生成模型的方案。"
+          }
+        },
+        "reasoning": "已按本轮资料需求校正检索依赖；必要查询见各输入缺口与工具步骤。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true
+      },
+      "passed": true,
+      "seconds": 20.96
+    },
+    {
+      "id": "full-business-metrics",
+      "instruction": "根据我们项目最近一个月的真实经营数据和之前决定的目标，写一份复盘报告，解释收入变化并提出后续改进建议。",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "项目月度经营复盘报告",
+            "source": "generated",
+            "evidence": "根据我们项目最近一个月的真实经营数据和之前决定的目标，写一份复盘报告，解释收入变化并提出后续改进建议。"
+          }
+        },
+        "reasoning": "用户要求撰写一份基于真实经营数据和既定目标的复盘报告，属于创作新文档任务。当前文档上下文为空，且用户未指定具体技能，因此需选择 generate 操作。根据规则，主交付物为复盘报告，读者为项目相关方，业务目标为解释收入变化并提出改进建议。由于缺乏具体的经营数据（如收入数值、目标数值等），且用户未主动选择技能，故不启用 data_query_planner 或 data_analysis_agent",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "一份复盘报告，解释收入变化并提出后续改进建议",
+        "self_contained_reason": "任务依赖项目特定的内部目标数据和近期经营数据，当前输入中未提供这些关键事实，因此需要检索。",
+        "acceptance": [
+          {
+            "id": "report_generated",
+            "criterion": "生成的复盘报告包含基于真实数据的收入变化解释，且提出的改进建议是基于该变化与既定目标对比后的逻辑推导。"
+          }
+        ],
+        "inputs": [
+          {
+            "state": "missing",
+            "evidence": "",
+            "need": "项目之前决定的目标（具体数值或定性目标）",
+            "reason": "指令要求解释收入变化，必须将实际收入与既定目标进行对比才能得出变化幅度及原因分析；缺少目标无法完成对比分析。",
+            "query": "检索项目历史决策记录，提取最近一个月设定的收入目标数值或具体描述。",
+            "id": "work_context",
+            "source": "work_context"
+          },
+          {
+            "state": "missing",
+            "evidence": "",
+            "need": "项目最近一个月的真实经营数据（特别是收入数据）",
+            "reason": "指令明确要求基于“真实经营数据”解释收入变化，缺少具体数据无法进行事实陈述和趋势分析。",
+            "query": "查询项目最近一个月（具体日期范围需结合上下文或默认最近 30 天）的实际收入数据。",
+            "id": "business_data",
+            "source": "business_data"
+          }
+        ]
+      },
+      "effective": {
+        "tools": [
+          "memory_search",
+          "data_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "项目月度经营复盘报告",
+            "source": "generated",
+            "evidence": "根据我们项目最近一个月的真实经营数据和之前决定的目标，写一份复盘报告，解释收入变化并提出后续改进建议。"
+          }
+        },
+        "reasoning": "已按本轮资料需求校正检索依赖；必要查询见各输入缺口与工具步骤。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true
+      },
+      "passed": true,
+      "seconds": 14.01
+    },
+    {
+      "id": "full-public-research",
+      "instruction": "查阅最新官方资料，写一份主流视频生成模型的当前能力对比文档，注明来源。",
+      "candidate": {
+        "tools": [
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "主流视频生成模型能力对比",
+            "source": "generated",
+            "evidence": "查阅最新官方资料，写一份主流视频生成模型的当前能力对比文档，注明来源。"
+          },
+          "skill_assessments": []
+        },
+        "reasoning": "用户要求查阅最新官方资料并撰写主流视频生成模型的能力对比文档。当前上下文无正文、无历史文档，且无已选技能。主交付物为‘能力对比文档’，需先通过互联网检索获取最新官方资料，再基于资料生成文档。因此选择 generate 操作，并调用 internet_search 工具以获取必要的外部事实。",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "一份主流视频生成模型的当前能力对比文档，注明来源。",
+        "self_contained_reason": "本轮任务依赖公开产品事实（public_facts）以完成对比文档，因指令中未提供具体模型名称或数据，故需检索最新官方资料。",
+        "acceptance": [
+          {
+            "id": "doc_generation",
+            "criterion": "生成一份包含主流视频生成模型能力对比的文档。"
+          },
+          {
+            "id": "source_citation",
+            "criterion": "文档中所有对比数据均标注了官方来源。"
+          }
+        ],
+        "inputs": [
+          {
+            "state": "missing",
+            "evidence": "",
+            "need": "主流视频生成模型（如 Sora, Gen-3, Runway Gen-2/3, Pika, Stable Video Diffusion 等）的最新官方能力参数（分辨率、时长、帧率、控制精度、多模态支持等）及官方发布来源。",
+            "reason": "指令明确要求“查阅最新官方资料”并“写一份...对比文档”，且未提供任何具体模型名称或数据作为输入。必须检索公开产品资料以完成对比。",
+            "query": "查询主流视频生成模型（如 Sora, Gen-3, Runway, Pika, Stable Video Diffusion 等）的最新官方技术规格、能力参数及发布来源。",
+            "id": "public_facts",
+            "source": "public_facts"
+          }
+        ]
+      },
+      "effective": {
+        "tools": [
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "主流视频生成模型能力对比",
+            "source": "generated",
+            "evidence": "查阅最新官方资料，写一份主流视频生成模型的当前能力对比文档，注明来源。"
+          },
+          "skill_assessments": []
+        },
+        "reasoning": "用户要求查阅最新官方资料并撰写主流视频生成模型的能力对比文档。当前上下文无正文、无历史文档，且无已选技能。主交付物为‘能力对比文档’，需先通过互联网检索获取最新官方资料，再基于资料生成文档。因此选择 generate 操作，并调用 internet_search 工具以获取必要的外部事实。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true
+      },
+      "passed": true,
+      "seconds": 14.72
+    },
+    {
+      "id": "full-fiction",
+      "instruction": "写一篇200字的童话：一只蜗牛在月亮上开面包店。",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "一只蜗牛在月亮上开面包店",
+            "source": "generated",
+            "evidence": "写一篇200字的童话：一只蜗牛在月亮上开面包店。"
+          }
+        },
+        "reasoning": "用户明确要求创作一篇200字的童话，主题为‘一只蜗牛在月亮上开面包店’。当前文档为空，无历史正文，无待修改节点。根据规则，当主目标为创作新文档且无适用技能时，选择 generate 操作。需确认文档身份：title 为具体主题‘一只蜗牛在月亮上开面包店’，source 为 user（因用户明确指定了标题内容），evidence 为用户原文指令片段。无需调用外部工具或技能，直接生成。",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "一篇 200 字的童话：一只蜗牛在月亮上开面包店。",
+        "self_contained_reason": "本轮任务为原创童话创作，所需事实（如角色、场景、情节）完全由用户指令提供，无需检索外部资料或依赖项目背景。",
+        "acceptance": [
+          {
+            "id": "word_count",
+            "criterion": "生成的童话字数约为 200 字。"
+          },
+          {
+            "id": "theme",
+            "criterion": "故事主角为一只蜗牛，场景设定在月亮上，核心情节涉及开面包店。"
+          }
+        ],
+        "inputs": []
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "一只蜗牛在月亮上开面包店",
+            "source": "generated",
+            "evidence": "写一篇200字的童话：一只蜗牛在月亮上开面包店。"
+          }
+        },
+        "reasoning": "用户明确要求创作一篇200字的童话，主题为‘一只蜗牛在月亮上开面包店’。当前文档为空，无历史正文，无待修改节点。根据规则，当主目标为创作新文档且无适用技能时，选择 generate 操作。需确认文档身份：title 为具体主题‘一只蜗牛在月亮上开面包店’，source 为 user（因用户明确指定了标题内容），evidence 为用户原文指令片段。无需调用外部工具或技能，直接生成。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true
+      },
+      "passed": true,
+      "seconds": 13.33
+    },
+    {
+      "id": "full-general",
+      "instruction": "写一份通用的会议记录写作指南，只解释一般方法，不涉及具体产品或最新事实。",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "会议记录写作指南",
+            "source": "generated",
+            "evidence": "写一份通用的会议记录写作指南，只解释一般方法，不涉及具体产品或最新事实。"
+          }
+        },
+        "reasoning": "用户明确要求创作一份新的文档（会议记录写作指南），且指定了内容范围（通用方法，不涉及具体产品或最新事实）。当前上下文无现有文档，无历史操作待恢复，无资料缺口（无需检索外部数据或内部数据）。根据规则，当主目标是创作新文档且没有适用的 Skill 时，应执行 generate 操作。",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "一份通用的会议记录写作指南，仅阐述一般方法，不包含具体产品、技术细节或最新事实。",
+        "self_contained_reason": "本轮任务要求生成通用方法论，且明确排除了对具体产品、最新事实及私有业务数据的依赖。所有必要信息（即会议记录的一般写作方法）均属于通用知识，无需检索外部资料或依赖未提供的材料，任务完全自足。",
+        "acceptance": [
+          {
+            "id": "general_method_only",
+            "criterion": "输出内容仅包含会议记录写作的一般性方法，不包含任何具体产品名称、技术细节、业务数据或最新事实。"
+          },
+          {
+            "id": "no_external_retrieval",
+            "criterion": "未调用任何外部数据源（如私有项目背景、业务指标或公开产品事实）进行检索。"
+          }
+        ],
+        "inputs": []
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "会议记录写作指南",
+            "source": "generated",
+            "evidence": "写一份通用的会议记录写作指南，只解释一般方法，不涉及具体产品或最新事实。"
+          }
+        },
+        "reasoning": "用户明确要求创作一份新的文档（会议记录写作指南），且指定了内容范围（通用方法，不涉及具体产品或最新事实）。当前上下文无现有文档，无历史操作待恢复，无资料缺口（无需检索外部数据或内部数据）。根据规则，当主目标是创作新文档且没有适用的 Skill 时，应执行 generate 操作。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true
+      },
+      "passed": true,
+      "seconds": 14.17
+    },
+    {
+      "id": "full-provided",
+      "instruction": "仅根据以下材料写一份简短业务小结，不补充外部事实：本周收入100万元，上周80万元；新增客户20家，上周10家；增长来自新渠道。",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "本周业务小结",
+            "source": "generated",
+            "evidence": "本周收入100万元，上周80万元；新增客户20家，上周10家；增长来自新渠道。"
+          }
+        },
+        "reasoning": "用户指令明确要求基于给定材料创作一份简短业务小结，且禁止补充外部事实。当前文档上下文为空，无历史文档可编辑，因此必须执行文档生成操作。主交付物为业务小结，读者为业务相关人员，业务目标为呈现本周业务增长情况。检查可用技能：用户未主动指定技能，且现有材料（本周/上周收入、客户数、增长原因）已足够完成创作，无需检索外部数据或进行复杂分析，故不选择任何工具或 Agent。根据规则，当主目标为创作新文档且无",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "本周收入 100 万元，上周 80 万元；新增客户 20 家，上周 10 家；增长来自新渠道。",
+        "self_contained_reason": "本轮任务要求仅根据 supplied_lines 中的材料撰写业务小结。该材料已完整包含收入、客户数及增长原因等所有必要事实，且指令明确禁止补充外部事实。因此，所有事实来源均无需检索，任务完全自足。",
+        "acceptance": [
+          {
+            "id": "1",
+            "criterion": "输出内容必须严格基于 supplied_lines 中的三条事实陈述，不得添加任何外部信息或虚构细节。"
+          },
+          {
+            "id": "2",
+            "criterion": "输出形式为简短业务小结，语言简洁，逻辑连贯。"
+          }
+        ],
+        "inputs": []
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "generate",
+          "document_identity": {
+            "title": "本周业务小结",
+            "source": "generated",
+            "evidence": "本周收入100万元，上周80万元；新增客户20家，上周10家；增长来自新渠道。"
+          }
+        },
+        "reasoning": "用户指令明确要求基于给定材料创作一份简短业务小结，且禁止补充外部事实。当前文档上下文为空，无历史文档可编辑，因此必须执行文档生成操作。主交付物为业务小结，读者为业务相关人员，业务目标为呈现本周业务增长情况。检查可用技能：用户未主动指定技能，且现有材料（本周/上周收入、客户数、增长原因）已足够完成创作，无需检索外部数据或进行复杂分析，故不选择任何工具或 Agent。根据规则，当主目标为创作新文档且无",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true
+      },
+      "passed": true,
+      "seconds": 15.38
+    },
+    {
+      "id": "simple-delete",
+      "instruction": "移除附录，保留其他内容",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "delete",
+              "target": "node-ed551755df2ffa06"
+            }
+          ]
+        },
+        "reasoning": "用户指令明确要求移除'附录'章节，保留其他内容。根据操作类别约束，必须使用 patch 操作。目标位置为节点'node-ed551755df2ffa06'（标题：附录），动作为删除。无需调用任何工具或 Agent，因为删除操作不涉及外部数据检索或复杂推理。",
+        "source": "model"
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "delete",
+              "target": "node-ed551755df2ffa06"
+            }
+          ]
+        },
+        "reasoning": "用户指令明确要求移除'附录'章节，保留其他内容。根据操作类别约束，必须使用 patch 操作。目标位置为节点'node-ed551755df2ffa06'（标题：附录），动作为删除。无需调用任何工具或 Agent，因为删除操作不涉及外部数据检索或复杂推理。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "exact_result": true
+      },
+      "passed": true,
+      "seconds": 5.8
+    },
+    {
+      "id": "simple-delete-en",
+      "instruction": "Delete the appendix section and leave everything else unchanged.",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "delete",
+              "target": "node-ed551755df2ffa06"
+            }
+          ]
+        },
+        "reasoning": "用户指令明确要求删除'附录'章节（node-ed551755df2ffa06），其余内容保持不变。该指令属于精确的局部编辑，符合 patch 操作类别。根据约束，目标位置和动作必须严格基于用户请求原文。无需调用任何工具或 Agent，因为删除操作不涉及外部数据检索、事实核查或内容生成。",
+        "source": "model"
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "delete",
+              "target": "node-ed551755df2ffa06"
+            }
+          ]
+        },
+        "reasoning": "用户指令明确要求删除'附录'章节（node-ed551755df2ffa06），其余内容保持不变。该指令属于精确的局部编辑，符合 patch 操作类别。根据约束，目标位置和动作必须严格基于用户请求原文。无需调用任何工具或 Agent，因为删除操作不涉及外部数据检索、事实核查或内容生成。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "exact_result": true
+      },
+      "passed": true,
+      "seconds": 5.89
+    },
+    {
+      "id": "simple-replace",
+      "instruction": "把周一上午改成周三下午",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "replace",
+              "target": {
+                "text": "周一上午讨论项目进展",
+                "occurrence": 1
+              },
+              "content": "周三下午讨论项目进展"
+            }
+          ]
+        },
+        "reasoning": "用户指令明确要求将正文中的'周一上午'修改为'周三下午'。根据操作类别约束，必须使用 patch 操作。目标位置锁定在'会议安排'章节下的'周一上午讨论项目进展'这一具体文本片段。无需调用任何工具或 Agent，因为修改内容不涉及外部事实检索、数据查询或文档结构重组。",
+        "source": "model"
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "replace",
+              "target": {
+                "text": "周一上午讨论项目进展",
+                "occurrence": 1
+              },
+              "content": "周三下午讨论项目进展"
+            }
+          ]
+        },
+        "reasoning": "用户指令明确要求将正文中的'周一上午'修改为'周三下午'。根据操作类别约束，必须使用 patch 操作。目标位置锁定在'会议安排'章节下的'周一上午讨论项目进展'这一具体文本片段。无需调用任何工具或 Agent，因为修改内容不涉及外部事实检索、数据查询或文档结构重组。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "exact_result": true
+      },
+      "passed": true,
+      "seconds": 5.35
+    },
+    {
+      "id": "simple-rename",
+      "instruction": "把标题会议说明改为项目例会说明，其他不动",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "replace",
+              "target": {
+                "text": "会议说明",
+                "occurrence": 1
+              },
+              "content": "项目例会说明"
+            }
+          ]
+        },
+        "reasoning": "用户指令明确要求将文档标题'会议说明'修改为'项目例会说明'，其余内容保持不变。根据操作类别约束，此任务属于局部编辑，应使用 patch 操作。需定位标题节点（node-13312432b565f2df）并执行替换动作。无需调用任何工具或 Agent，因为不涉及外部数据检索、事实核查或文档结构重组。",
+        "source": "model"
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "replace",
+              "target": {
+                "text": "会议说明",
+                "occurrence": 1
+              },
+              "content": "项目例会说明"
+            }
+          ]
+        },
+        "reasoning": "用户指令明确要求将文档标题'会议说明'修改为'项目例会说明'，其余内容保持不变。根据操作类别约束，此任务属于局部编辑，应使用 patch 操作。需定位标题节点（node-13312432b565f2df）并执行替换动作。无需调用任何工具或 Agent，因为不涉及外部数据检索、事实核查或文档结构重组。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "exact_result": true
+      },
+      "passed": true,
+      "seconds": 5.73
+    },
+    {
+      "id": "simple-negation",
+      "instruction": "不要删除附录，只回答你是否理解",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "respond",
+          "response": "是的，我已理解您的要求：保留附录内容，仅确认理解。"
+        },
+        "reasoning": "用户指令明确要求‘不要删除附录，只回答你是否理解’，属于确认理解类回应，无需执行文档修改、检索或生成操作。根据操作类别约束，此类指令应使用 respond 操作，且 response 内容需严格基于用户请求原文，不引入新事实或修改文档结构。",
+        "source": "model"
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "respond",
+          "response": "是的，我已理解您的要求：保留附录内容，仅确认理解。"
+        },
+        "reasoning": "用户指令明确要求‘不要删除附录，只回答你是否理解’，属于确认理解类回应，无需执行文档修改、检索或生成操作。根据操作类别约束，此类指令应使用 respond 操作，且 response 内容需严格基于用户请求原文，不引入新事实或修改文档结构。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true
+      },
+      "passed": true,
+      "seconds": 5.04
+    },
+    {
+      "id": "simple-resume",
+      "instruction": "接着完成刚才没做完的修改",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "resume",
+          "operation_id": "pending-1"
+        },
+        "reasoning": "用户指令为'接着完成刚才没做完的修改'，结合上下文中的 pending_operations 可知，上一轮操作（将'周一'改为'周三'）失败。当前文档中'会议安排'节点下的正文内容为'周一上午讨论项目进展'。根据操作约束，需执行 resume 操作，绑定唯一的 operation_id 'pending-1'，将'周一'替换为'周三'。无需调用任何工具或技能，因为修改内容已在文档中明确，且属于简单",
+        "source": "model"
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "resume",
+          "operation_id": "pending-1"
+        },
+        "reasoning": "用户指令为'接着完成刚才没做完的修改'，结合上下文中的 pending_operations 可知，上一轮操作（将'周一'改为'周三'）失败。当前文档中'会议安排'节点下的正文内容为'周一上午讨论项目进展'。根据操作约束，需执行 resume 操作，绑定唯一的 operation_id 'pending-1'，将'周一'替换为'周三'。无需调用任何工具或技能，因为修改内容已在文档中明确，且属于简单",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "resume_target": true
+      },
+      "passed": true,
+      "seconds": 5.46
+    },
+    {
+      "id": "simple-clarify",
+      "instruction": "删掉那个章节",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "respond",
+          "response": "请明确您希望删除哪一个章节？（例如：‘会议安排’、‘附录’或‘联系方式’）"
+        },
+        "reasoning": "用户指令‘删掉那个章节’存在指代歧义，当前文档包含‘会议安排’、‘附录’、‘联系方式’三个二级章节，无法确定具体删除目标。根据操作约束，目标位置必须基于用户请求原文，当前原文未明确具体章节，故无法执行删除操作，需先消歧。",
+        "source": "model"
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "respond",
+          "response": "请明确您希望删除哪一个章节？（例如：‘会议安排’、‘附录’或‘联系方式’）"
+        },
+        "reasoning": "用户指令‘删掉那个章节’存在指代歧义，当前文档包含‘会议安排’、‘附录’、‘联系方式’三个二级章节，无法确定具体删除目标。根据操作约束，目标位置必须基于用户请求原文，当前原文未明确具体章节，故无法执行删除操作，需先消歧。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true
+      },
+      "passed": true,
+      "seconds": 5.06
+    },
+    {
+      "id": "append-literal",
+      "instruction": "在附录末尾追加这句话：请提前准备材料。其余内容原样保留。",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "insert",
+              "target": {
+                "text": "旧说明。",
+                "occurrence": 1
+              },
+              "content": "请提前准备材料。",
+              "position": "after"
+            }
+          ]
+        },
+        "reasoning": "用户指令明确要求在“附录”节点末尾追加特定文本。根据操作类别约束，必须使用 patch 操作。目标位置锁定为“附录”节点（node-ed551755df2ffa06）的末尾。动作类型为 insert，内容为“请提前准备材料。”，位置为 after 该节点内容。无需调用任何工具或 Agent，因为不涉及外部事实检索、数据查询或文档结构重组，仅需执行精确的文本插入。",
+        "source": "model"
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "patch",
+          "patches": [
+            {
+              "action": "insert",
+              "target": {
+                "text": "旧说明。",
+                "occurrence": 1
+              },
+              "content": "请提前准备材料。",
+              "position": "after"
+            }
+          ]
+        },
+        "reasoning": "用户指令明确要求在“附录”节点末尾追加特定文本。根据操作类别约束，必须使用 patch 操作。目标位置锁定为“附录”节点（node-ed551755df2ffa06）的末尾。动作类型为 insert，内容为“请提前准备材料。”，位置为 after 该节点内容。无需调用任何工具或 Agent，因为不涉及外部事实检索、数据查询或文档结构重组，仅需执行精确的文本插入。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "literal_added": true
+      },
+      "passed": true,
+      "seconds": 5.92
+    },
+    {
+      "id": "append-local",
+      "instruction": "在会议安排末尾补充一句邀请大家参与讨论的话，不增加任何新事实，其他内容原样保留。",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "id": "node-a57eb929ed387502"
+            }
+          ],
+          "constraint_skill_ids": []
+        },
+        "reasoning": "用户指令要求在“会议安排”章节末尾补充邀请语，且明确约束“不增加任何新事实”、“目标位置和全部动作只以用户请求原文为准”。上次输出使用了 patch 操作并自行创作了“欢迎各位参与讨论，共同推进项目。”，这违反了“不增加新事实”的约束（因为用户未提供具体措辞，任何创作都视为新增事实）。根据修正要求，必须使用 transform 操作来改写指定范围的内容，将用户未提供的具体措辞替换为符合语境的通用邀",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "# 会议说明\n\n## 会议安排\n周一上午讨论项目进展。\n\n欢迎参与讨论。\n\n## 附录\n旧说明。\n\n## 联系方式\n请联系项目组。",
+        "self_contained_reason": "本轮任务仅要求对当前提供的文档片段进行局部文本补充（在'会议安排'末尾添加邀请语），不依赖任何外部事实、业务数据或私有背景信息，属于完全自足的文本编辑任务。",
+        "acceptance": [
+          {
+            "id": "text_addition",
+            "criterion": "在'## 会议安排'与'## 附录'之间的末尾位置，补充一句邀请大家参与讨论的话。"
+          },
+          {
+            "id": "factual_integrity",
+            "criterion": "补充内容不增加任何新事实，且除新增语句外，其他所有原文内容保持原样。"
+          }
+        ],
+        "inputs": []
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "id": "node-a57eb929ed387502"
+            }
+          ],
+          "constraint_skill_ids": []
+        },
+        "reasoning": "用户指令要求在“会议安排”章节末尾补充邀请语，且明确约束“不增加任何新事实”、“目标位置和全部动作只以用户请求原文为准”。上次输出使用了 patch 操作并自行创作了“欢迎各位参与讨论，共同推进项目。”，这违反了“不增加新事实”的约束（因为用户未提供具体措辞，任何创作都视为新增事实）。根据修正要求，必须使用 transform 操作来改写指定范围的内容，将用户未提供的具体措辞替换为符合语境的通用邀",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "authorized_scope": true,
+        "all_requested_scopes": true
+      },
+      "passed": true,
+      "seconds": 21.14
+    },
+    {
+      "id": "append-public",
+      "instruction": "在附录补充最新公开会议软件的一项能力，查官方资料后再写，其他部分不动。",
+      "candidate": {
+        "tools": [
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "text": "## 附录\n旧说明。",
+              "occurrence": 1
+            }
+          ]
+        },
+        "reasoning": "用户要求在“附录”章节补充最新公开会议软件的一项能力，并明确要求查官方资料。目标位置明确为“附录”节点（node-ed551755df2ffa06），操作类型为transform（局部改写/追加）。由于涉及“最新公开”且需“查官方资料”，必须调用internet_search获取外部事实，随后由transform执行器根据检索结果生成新内容并插入到指定位置。无需调用memory_search（无历",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "# 会议说明\n\n## 会议安排\n周一上午讨论项目进展。\n\n## 附录\n旧说明。\n最新公开会议软件具备实时远程协作白板功能，支持多人同步编辑与即时标注。\n\n## 联系方式\n请联系项目组。",
+        "self_contained_reason": "任务依赖外部公开事实（会议软件能力），当前材料中未提供该具体事实，因此必须检索。",
+        "acceptance": [
+          {
+            "id": "append_section_updated",
+            "criterion": "文档中'附录'部分已补充最新公开会议软件的一项具体能力描述，且该描述基于官方资料。"
+          },
+          {
+            "id": "other_sections_unchanged",
+            "criterion": "除附录外，文档其他部分（标题、会议安排、联系方式）保持原样，未进行任何修改。"
+          }
+        ],
+        "inputs": [
+          {
+            "state": "missing",
+            "evidence": "",
+            "need": "最新公开会议软件的一项具体能力（如实时远程协作白板、虚拟背景、屏幕共享等），需基于官方资料确认。",
+            "reason": "指令明确要求'查官方资料后再写'，且当前文档中附录仅包含'旧说明'，缺乏具体能力描述。",
+            "query": "查询主流会议软件（如 Zoom、腾讯会议、Google Meet 等）的官方功能列表，提取一项最新或核心能力。",
+            "id": "public_facts",
+            "source": "public_facts"
+          }
+        ]
+      },
+      "effective": {
+        "tools": [
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "text": "## 附录\n旧说明。",
+              "occurrence": 1
+            }
+          ]
+        },
+        "reasoning": "用户要求在“附录”章节补充最新公开会议软件的一项能力，并明确要求查官方资料。目标位置明确为“附录”节点（node-ed551755df2ffa06），操作类型为transform（局部改写/追加）。由于涉及“最新公开”且需“查官方资料”，必须调用internet_search获取外部事实，随后由transform执行器根据检索结果生成新内容并插入到指定位置。无需调用memory_search（无历",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "authorized_scope": true,
+        "all_requested_scopes": true
+      },
+      "passed": true,
+      "seconds": 14.9
+    },
+    {
+      "id": "append-metrics",
+      "instruction": "查一下本周真实项目经营数据，在附录补充本周收入，其他内容原样保留。",
+      "candidate": {
+        "tools": [
+          "data_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "text": "## 附录",
+              "occurrence": 1
+            },
+            {
+              "text": "旧说明。",
+              "occurrence": 1
+            }
+          ]
+        },
+        "reasoning": "用户要求补充本周收入数据，属于需要查询自有业务数据（经营数据）的场景。当前文档上下文（正文和历史）中未包含本周收入数值，且用户指令明确指向‘附录’位置进行补充。根据操作类别约束，需先检索数据，再执行局部追加操作。因此选择 data_search 工具获取数据，并执行 transform 操作将数据插入到‘附录’节点后。",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "# 星禾项目会议说明\n\n## 会议安排\n周一上午讨论项目进展。\n\n## 附录\n本周收入：[需补充数据]\n\n## 联系方式\n请联系项目组。",
+        "self_contained_reason": "",
+        "acceptance": [
+          {
+            "id": "append_income",
+            "criterion": "在文档'附录'部分补充本周真实项目收入数据，格式需符合原文语境。"
+          },
+          {
+            "id": "preserve_content",
+            "criterion": "除补充收入数据外，文档其他所有内容（标题、会议安排、联系方式等）保持原样。"
+          }
+        ],
+        "inputs": [
+          {
+            "state": "missing",
+            "evidence": "",
+            "need": "本周真实项目经营数据（具体为收入数值）",
+            "reason": "用户指令明确要求'查一下本周真实项目经营数据'并在附录中补充，该数据属于真实业务指标，当前文档和指令中未提供具体数值，必须检索。",
+            "query": "查询星禾项目本周真实经营数据中的收入指标",
+            "id": "business_data",
+            "source": "business_data"
+          }
+        ]
+      },
+      "effective": {
+        "tools": [
+          "data_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "text": "## 附录",
+              "occurrence": 1
+            },
+            {
+              "text": "旧说明。",
+              "occurrence": 1
+            }
+          ]
+        },
+        "reasoning": "用户要求补充本周收入数据，属于需要查询自有业务数据（经营数据）的场景。当前文档上下文（正文和历史）中未包含本周收入数值，且用户指令明确指向‘附录’位置进行补充。根据操作类别约束，需先检索数据，再执行局部追加操作。因此选择 data_search 工具获取数据，并执行 transform 操作将数据插入到‘附录’节点后。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "authorized_scope": true,
+        "all_requested_scopes": true
+      },
+      "passed": true,
+      "seconds": 14.25
+    },
+    {
+      "id": "compound-delete-research",
+      "instruction": "移除附录，然后检索最新公开会议工具信息，在联系方式后补充一段工具推荐，其他原文保留。",
+      "candidate": {
+        "tools": [
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "text": "## 附录\n旧说明。",
+              "occurrence": 1
+            },
+            {
+              "text": "## 联系方式\n请联系项目组。",
+              "occurrence": 1
+            }
+          ],
+          "constraint_skill_ids": []
+        },
+        "reasoning": "用户指令包含三个步骤：1. 删除'附录'章节（节点 node-ed551755df2ffa06）；2. 检索最新公开会议工具信息；3. 在'联系方式'后补充工具推荐。第一步是精确的删除操作，使用 patch 即可。第二步和第三步需要外部最新信息，因此必须调用 internet_search 工具获取数据，随后由改写执行器（transform）根据检索结果生成新内容并插入到指定位置。由于存在明确的删",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "# 会议说明\n\n## 会议安排\n周一上午讨论项目进展。\n\n## 联系方式\n请联系项目组。\n\n[此处插入最新公开会议工具推荐内容]",
+        "self_contained_reason": "任务依赖公开事实（会议工具推荐），当前未提供，需检索。",
+        "acceptance": [
+          {
+            "id": "remove_appendix",
+            "criterion": "文档中‘## 附录’及‘旧说明’部分被移除"
+          },
+          {
+            "id": "add_tool_recommendation",
+            "criterion": "在‘## 联系方式’段落后补充一段基于最新公开信息的会议工具推荐内容"
+          },
+          {
+            "id": "preserve_original_text",
+            "criterion": "除附录移除和新增推荐外，其余原文内容（标题、会议安排、联系方式）保持原样"
+          }
+        ],
+        "inputs": [
+          {
+            "state": "missing",
+            "evidence": "",
+            "need": "最新公开会议工具信息（如 Zoom、腾讯会议、飞书会议等当前主流推荐）",
+            "reason": "用户指令明确要求‘检索最新公开会议工具信息’并在联系方式后补充推荐，当前文档和指令中未包含此类事实。",
+            "query": "检索当前最新推荐的公开在线会议工具列表及其核心优势",
+            "id": "public_facts",
+            "source": "public_facts"
+          }
+        ]
+      },
+      "effective": {
+        "tools": [
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "text": "## 附录\n旧说明。",
+              "occurrence": 1
+            },
+            {
+              "text": "## 联系方式\n请联系项目组。",
+              "occurrence": 1
+            }
+          ],
+          "constraint_skill_ids": []
+        },
+        "reasoning": "用户指令包含三个步骤：1. 删除'附录'章节（节点 node-ed551755df2ffa06）；2. 检索最新公开会议工具信息；3. 在'联系方式'后补充工具推荐。第一步是精确的删除操作，使用 patch 即可。第二步和第三步需要外部最新信息，因此必须调用 internet_search 工具获取数据，随后由改写执行器（transform）根据检索结果生成新内容并插入到指定位置。由于存在明确的删",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "authorized_scope": true,
+        "all_requested_scopes": true
+      },
+      "passed": true,
+      "seconds": 17.3
+    },
+    {
+      "id": "answer-only",
+      "instruction": "查一下最近的公开会议软件动态，只回答问题，不要修改文档",
+      "candidate": {
+        "tools": [
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "answer",
+          "constraint_skill_ids": [],
+          "skill_assessments": []
+        },
+        "reasoning": "用户明确要求查询最近的公开会议软件动态，并指定只回答问题、不修改文档。根据操作类别约束（answer），此任务属于需要获取外部公开事实（行业新闻/动态）的回答场景。需调用互联网检索工具获取最新信息，直接生成回答，无需修改文档或进行复杂的数据分析。",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "最近的公开会议软件动态",
+        "self_contained_reason": "本轮任务依赖公开事实（public_facts），当前材料中未提供该事实，因此需要检索。",
+        "acceptance": [
+          {
+            "id": "answer_public_meeting_software_trends",
+            "criterion": "回答最近的公开会议软件动态"
+          },
+          {
+            "id": "no_document_modification",
+            "criterion": "不修改文档"
+          }
+        ],
+        "inputs": [
+          {
+            "state": "missing",
+            "evidence": "",
+            "need": "最近的公开会议软件动态",
+            "reason": "用户指令明确要求提供该信息，且当前文档和指令中未包含任何关于会议软件动态的事实，必须检索公开信息。",
+            "query": "查询最近的公开会议软件动态",
+            "id": "public_facts",
+            "source": "public_facts"
+          }
+        ]
+      },
+      "effective": {
+        "tools": [
+          "internet_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "answer",
+          "constraint_skill_ids": [],
+          "skill_assessments": []
+        },
+        "reasoning": "用户明确要求查询最近的公开会议软件动态，并指定只回答问题、不修改文档。根据操作类别约束（answer），此任务属于需要获取外部公开事实（行业新闻/动态）的回答场景。需调用互联网检索工具获取最新信息，直接生成回答，无需修改文档或进行复杂的数据分析。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true
+      },
+      "passed": true,
+      "seconds": 13.58
+    },
+    {
+      "id": "transform-no-search",
+      "instruction": "把会议安排写得更简洁，不增加新事实，其他部分保持原样",
+      "candidate": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "text": "周一上午讨论项目进展。",
+              "occurrence": 1
+            }
+          ]
+        },
+        "reasoning": "用户要求编辑现有文档，具体目标是将“会议安排”章节的内容改写得更简洁，且明确禁止增加新事实，其余部分保持不变。根据操作类别约束，此类语义编辑由改写执行器（transform）自主确定措辞。需要定位到“会议安排”章节的正文节点进行改写。当前文档中“会议安排”章节的正文内容为“周一上午讨论项目进展。”，该节点ID为node-a57eb929ed387502。无需调用外部工具或技能，因为不涉及新事实检索",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "# 会议说明\n\n## 会议安排\n周一上午讨论项目进展。\n\n## 附录\n旧说明。\n\n## 联系方式\n请联系项目组。",
+        "self_contained_reason": "本轮任务仅要求对现有文本进行语言层面的精简（去除冗余措辞），不增加任何新事实或改变原有信息。所需事实（会议时间、内容）已全部在 supplied_lines 的 document-4 中提供，且任务约束明确禁止增加新事实，因此无需检索任何外部或私有资料。",
+        "acceptance": [
+          {
+            "id": "conciseness",
+            "criterion": "会议安排部分去除冗余词汇，保持语义不变且字数减少。"
+          },
+          {
+            "id": "factual_integrity",
+            "criterion": "输出内容不增加任何新事实，仅基于 supplied_lines 中的现有信息进行改写。"
+          },
+          {
+            "id": "structure_preservation",
+            "criterion": "除会议安排部分外，其他部分（标题、附录、联系方式）保持原样。"
+          }
+        ],
+        "inputs": []
+      },
+      "effective": {
+        "tools": [],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "text": "周一上午讨论项目进展。",
+              "occurrence": 1
+            }
+          ]
+        },
+        "reasoning": "用户要求编辑现有文档，具体目标是将“会议安排”章节的内容改写得更简洁，且明确禁止增加新事实，其余部分保持不变。根据操作类别约束，此类语义编辑由改写执行器（transform）自主确定措辞。需要定位到“会议安排”章节的正文节点进行改写。当前文档中“会议安排”章节的正文内容为“周一上午讨论项目进展。”，该节点ID为node-a57eb929ed387502。无需调用外部工具或技能，因为不涉及新事实检索",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "authorized_scope": true,
+        "all_requested_scopes": true
+      },
+      "passed": true,
+      "seconds": 17.3
+    },
+    {
+      "id": "append-metrics-ambiguous-project",
+      "instruction": "查一下本周真实项目经营数据，在附录补充本周收入，其他内容原样保留。",
+      "candidate": {
+        "tools": [
+          "data_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "text": "附录",
+              "occurrence": 1
+            }
+          ]
+        },
+        "reasoning": "用户要求补充本周收入数据，属于需要查询自有业务数据（经营数据）的场景。当前文档中“附录”节点（node-ed551755df2ffa06）存在但内容为旧说明，需在此处插入新数据。根据操作约束，必须使用用户请求原文作为目标位置依据，且不能仅因历史需求提到数据就调用，需确认当前上下文无此数据。因此选择 data_search 工具查询经营数据，并对“附录”节点执行 insert 操作。",
+        "source": "model"
+      },
+      "input_contract": {
+        "deliverable": "# 会议说明\n\n## 会议安排\n周一上午讨论项目进展。\n\n## 附录\n本周收入：[待补充数据]\n\n## 联系方式\n请联系项目组。",
+        "self_contained_reason": "任务依赖真实业务数据（本周收入），该数据未在提供的文档或指令中给出，因此不属于自足任务，必须检索外部业务数据。",
+        "acceptance": [
+          {
+            "id": "append_income_data",
+            "criterion": "在文档'附录'部分补充本周真实项目收入数据，格式需符合上下文逻辑（如：本周收入：XXX 元），其他原有内容保持不变。"
+          },
+          {
+            "id": "retrieve_business_data",
+            "criterion": "成功检索并获取本周项目经营数据中的收入数值，确保补充的数据为真实业务指标而非虚构内容。"
+          }
+        ],
+        "inputs": [
+          {
+            "state": "missing",
+            "evidence": "",
+            "need": "本周真实项目经营数据（具体为收入数值）",
+            "reason": "用户指令明确要求'查一下本周真实项目经营数据'并'补充本周收入'，当前文档和指令中未提供任何收入数值，必须检索真实业务指标。",
+            "query": "查询本周项目经营数据中的收入指标",
+            "id": "business_data",
+            "source": "business_data"
+          }
+        ]
+      },
+      "effective": {
+        "tools": [
+          "data_search"
+        ],
+        "agents": [],
+        "operation": {
+          "kind": "transform",
+          "targets": [
+            {
+              "text": "附录",
+              "occurrence": 1
+            }
+          ]
+        },
+        "reasoning": "用户要求补充本周收入数据，属于需要查询自有业务数据（经营数据）的场景。当前文档中“附录”节点（node-ed551755df2ffa06）存在但内容为旧说明，需在此处插入新数据。根据操作约束，必须使用用户请求原文作为目标位置依据，且不能仅因历史需求提到数据就调用，需确认当前上下文无此数据。因此选择 data_search 工具查询经营数据，并对“附录”节点执行 insert 操作。",
+        "source": "model"
+      },
+      "checks": {
+        "model_route": true,
+        "operation": true,
+        "resources": true,
+        "no_full_workflow": true,
+        "authorized_scope": true,
+        "all_requested_scopes": true
+      },
+      "passed": true,
+      "seconds": 15.82
+    }
+  ]
+}

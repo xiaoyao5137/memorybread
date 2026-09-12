@@ -17,6 +17,13 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = str(Path.home() / ".memory-bread" / "memory-bread.db")
 
+SQLITE_MAX_INTEGER = 2**63 - 1
+
+
+def _usage_integer(value, fallback=0):
+    """Usage columns accept bounded integers, never arbitrary model metadata."""
+    return value if type(value) is int and 0 <= value <= SQLITE_MAX_INTEGER else fallback
+
 
 def log_llm_usage(
     caller: str,
@@ -46,6 +53,9 @@ def log_llm_usage(
         error_msg: 失败原因
     """
     try:
+        prompt_tokens = _usage_integer(prompt_tokens)
+        completion_tokens = _usage_integer(completion_tokens)
+        latency_ms = _usage_integer(latency_ms)
         conn = sqlite3.connect(db_path)
         _ensure_llm_usage_trace_columns(conn)
         conn.execute(
@@ -60,7 +70,7 @@ def log_llm_usage(
                 model_name,
                 prompt_tokens,
                 completion_tokens,
-                prompt_tokens + completion_tokens,
+                min(prompt_tokens + completion_tokens, SQLITE_MAX_INTEGER),
                 latency_ms,
                 status,
                 error_msg,
@@ -71,9 +81,9 @@ def log_llm_usage(
         )
         conn.commit()
         conn.close()
-    except Exception as e:
+    except Exception:
         # 埋点失败不影响主流程
-        logger.warning(f"LLM 用量埋点失败: {e}")
+        logger.warning("LLM 用量埋点失败 code=LLM_USAGE_WRITE_FAILED")
 
 
 def _truncate_trace(value: Optional[str], limit: int = 4000) -> Optional[str]:
@@ -114,7 +124,8 @@ class LLMCallTracker:
             tracker.set_response(response)
     """
 
-    def __init__(self, caller: str, model_name: str, caller_id: Optional[str] = None, db_path: str = DB_PATH):
+    def __init__(self, caller: str, model_name: str, caller_id: Optional[str] = None, db_path: str = DB_PATH, *, capture_content: bool = True):
+        self.capture_content = capture_content
         self.caller = caller
         self.model_name = model_name
         self.caller_id = caller_id
@@ -135,25 +146,29 @@ class LLMCallTracker:
     def set_response(self, response: dict):
         """从 Ollama 响应中提取 token 用量"""
         usage = response.get("usage") or {}
+        if not isinstance(usage, dict):
+            usage = {}
         # Ollama 响应格式
         self._prompt_tokens = (
-            usage.get("prompt_tokens")
-            or response.get("prompt_eval_count")
+            _usage_integer(usage.get("prompt_tokens"))
+            or _usage_integer(response.get("prompt_eval_count"))
             or 0
         )
         self._completion_tokens = (
-            usage.get("completion_tokens")
-            or response.get("eval_count")
+            _usage_integer(usage.get("completion_tokens"))
+            or _usage_integer(response.get("eval_count"))
             or 0
         )
         # 如果没有 token 信息，用文本估算
         if self._prompt_tokens == 0:
             msg = response.get("message", {})
+            if not isinstance(msg, dict):
+                msg = {}
             content = msg.get("content", "")
             # Qwen3.5 等推理模型可能将内容放在 thinking 字段
             if not content:
                 content = msg.get("thinking", "")
-            self._completion_tokens = estimate_tokens(content)
+            self._completion_tokens = estimate_tokens(content if isinstance(content, str) else '')
         self._done_reason = response.get("done_reason")
 
     def set_trace(
@@ -162,24 +177,24 @@ class LLMCallTracker:
         response_preview: Optional[str] = None,
         done_reason: Optional[str] = None,
     ):
-        self._raw_preview = raw_preview
-        self._response_preview = response_preview
+        self._raw_preview = raw_preview if self.capture_content else None
+        self._response_preview = response_preview if self.capture_content else None
         if done_reason:
             self._done_reason = done_reason
 
     def set_error(self, error_msg: str):
         self._status = "failed"
-        self._error_msg = error_msg
+        self._error_msg = error_msg if self.capture_content else "INFERENCE_FAILED"
 
     def set_tokens(self, prompt: int, completion: int):
-        self._prompt_tokens = prompt
-        self._completion_tokens = completion
+        self._prompt_tokens = _usage_integer(prompt)
+        self._completion_tokens = _usage_integer(completion)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         latency_ms = int(time.time() * 1000) - self._start_ms
         if exc_type is not None:
             self._status = "failed"
-            self._error_msg = str(exc_val)
+            self._error_msg = str(exc_val) if self.capture_content else "INFERENCE_FAILED"
         log_llm_usage(
             caller=self.caller,
             model_name=self.model_name,
@@ -191,7 +206,7 @@ class LLMCallTracker:
             error_msg=self._error_msg,
             raw_preview=self._raw_preview,
             response_preview=self._response_preview,
-            done_reason=self._done_reason,
+            done_reason=(self._done_reason if self.capture_content or (isinstance(self._done_reason, str) and self._done_reason in {"stop", "length", "repetition", "cancelled"}) else None),
             db_path=self.db_path,
         )
         return False  # 不吞异常

@@ -1,0 +1,930 @@
+{
+  "type": "object",
+  "properties": {
+    "reasoning": {
+      "type": "string",
+      "maxLength": 400
+    },
+    "operation": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "patch"
+            },
+            "patches": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "delete"
+                      },
+                      "target": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "id"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "text": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "occurrence": {
+                                "type": "integer",
+                                "minimum": 1
+                              }
+                            },
+                            "required": [
+                              "text"
+                            ],
+                            "additionalProperties": false
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "target"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "replace"
+                      },
+                      "target": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "id"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "text": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "occurrence": {
+                                "type": "integer",
+                                "minimum": 1
+                              }
+                            },
+                            "required": [
+                              "text"
+                            ],
+                            "additionalProperties": false
+                          }
+                        ]
+                      },
+                      "content": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "target",
+                      "content"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "insert"
+                      },
+                      "target": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "id"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "text": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "occurrence": {
+                                "type": "integer",
+                                "minimum": 1
+                              }
+                            },
+                            "required": [
+                              "text"
+                            ],
+                            "additionalProperties": false
+                          }
+                        ]
+                      },
+                      "content": {
+                        "type": "string"
+                      },
+                      "position": {
+                        "enum": [
+                          "before",
+                          "after"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "target",
+                      "content",
+                      "position"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "const": "move"
+                      },
+                      "target": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "id"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "text": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "occurrence": {
+                                "type": "integer",
+                                "minimum": 1
+                              }
+                            },
+                            "required": [
+                              "text"
+                            ],
+                            "additionalProperties": false
+                          }
+                        ]
+                      },
+                      "destination": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "id"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "text": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "occurrence": {
+                                "type": "integer",
+                                "minimum": 1
+                              }
+                            },
+                            "required": [
+                              "text"
+                            ],
+                            "additionalProperties": false
+                          }
+                        ]
+                      },
+                      "position": {
+                        "enum": [
+                          "before",
+                          "after"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "target",
+                      "destination",
+                      "position"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "skill_assessments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "skill_id": {
+                    "type": "string"
+                  },
+                  "metadata_consistent": {
+                    "type": "boolean"
+                  },
+                  "applicable": {
+                    "type": "boolean"
+                  },
+                  "request_evidence": {
+                    "type": "string"
+                  },
+                  "conflicts": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "missing_inputs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "skill_id",
+                  "metadata_consistent",
+                  "applicable",
+                  "request_evidence",
+                  "conflicts",
+                  "missing_inputs"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "constraint_skill_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "patches"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "transform"
+            },
+            "targets": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "id"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "text": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "occurrence": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "skill_assessments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "skill_id": {
+                    "type": "string"
+                  },
+                  "metadata_consistent": {
+                    "type": "boolean"
+                  },
+                  "applicable": {
+                    "type": "boolean"
+                  },
+                  "request_evidence": {
+                    "type": "string"
+                  },
+                  "conflicts": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "missing_inputs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "skill_id",
+                  "metadata_consistent",
+                  "applicable",
+                  "request_evidence",
+                  "conflicts",
+                  "missing_inputs"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "constraint_skill_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "targets"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "generate"
+            },
+            "document_identity": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "source": {
+                  "enum": [
+                    "user",
+                    "existing",
+                    "generated"
+                  ]
+                },
+                "evidence": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "title",
+                "source",
+                "evidence"
+              ],
+              "additionalProperties": false
+            },
+            "skill_assessments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "skill_id": {
+                    "type": "string"
+                  },
+                  "metadata_consistent": {
+                    "type": "boolean"
+                  },
+                  "applicable": {
+                    "type": "boolean"
+                  },
+                  "request_evidence": {
+                    "type": "string"
+                  },
+                  "conflicts": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "missing_inputs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "skill_id",
+                  "metadata_consistent",
+                  "applicable",
+                  "request_evidence",
+                  "conflicts",
+                  "missing_inputs"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "constraint_skill_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "document_identity"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "respond"
+            },
+            "response": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            "skill_assessments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "skill_id": {
+                    "type": "string"
+                  },
+                  "metadata_consistent": {
+                    "type": "boolean"
+                  },
+                  "applicable": {
+                    "type": "boolean"
+                  },
+                  "request_evidence": {
+                    "type": "string"
+                  },
+                  "conflicts": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "missing_inputs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "skill_id",
+                  "metadata_consistent",
+                  "applicable",
+                  "request_evidence",
+                  "conflicts",
+                  "missing_inputs"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "constraint_skill_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "response"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "answer"
+            },
+            "skill_assessments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "skill_id": {
+                    "type": "string"
+                  },
+                  "metadata_consistent": {
+                    "type": "boolean"
+                  },
+                  "applicable": {
+                    "type": "boolean"
+                  },
+                  "request_evidence": {
+                    "type": "string"
+                  },
+                  "conflicts": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "missing_inputs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "skill_id",
+                  "metadata_consistent",
+                  "applicable",
+                  "request_evidence",
+                  "conflicts",
+                  "missing_inputs"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "constraint_skill_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "resume"
+            },
+            "operation_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "skill_assessments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "skill_id": {
+                    "type": "string"
+                  },
+                  "metadata_consistent": {
+                    "type": "boolean"
+                  },
+                  "applicable": {
+                    "type": "boolean"
+                  },
+                  "request_evidence": {
+                    "type": "string"
+                  },
+                  "conflicts": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "missing_inputs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "skill_id",
+                  "metadata_consistent",
+                  "applicable",
+                  "request_evidence",
+                  "conflicts",
+                  "missing_inputs"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "constraint_skill_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "operation_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "undo"
+            },
+            "operation_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "skill_assessments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "skill_id": {
+                    "type": "string"
+                  },
+                  "metadata_consistent": {
+                    "type": "boolean"
+                  },
+                  "applicable": {
+                    "type": "boolean"
+                  },
+                  "request_evidence": {
+                    "type": "string"
+                  },
+                  "conflicts": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "missing_inputs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "skill_id",
+                  "metadata_consistent",
+                  "applicable",
+                  "request_evidence",
+                  "conflicts",
+                  "missing_inputs"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "constraint_skill_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "operation_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "execute_skill"
+            },
+            "skill_ids": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "document_identity": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "source": {
+                  "enum": [
+                    "user",
+                    "existing",
+                    "generated"
+                  ]
+                },
+                "evidence": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "title",
+                "source",
+                "evidence"
+              ],
+              "additionalProperties": false
+            },
+            "skill_assessments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "skill_id": {
+                    "type": "string"
+                  },
+                  "metadata_consistent": {
+                    "type": "boolean"
+                  },
+                  "applicable": {
+                    "type": "boolean"
+                  },
+                  "request_evidence": {
+                    "type": "string"
+                  },
+                  "conflicts": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "missing_inputs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "skill_id",
+                  "metadata_consistent",
+                  "applicable",
+                  "request_evidence",
+                  "conflicts",
+                  "missing_inputs"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "constraint_skill_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "skill_ids",
+            "document_identity",
+            "skill_assessments"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "memory_search",
+          "internet_search",
+          "data_search",
+          "github_search",
+          "plantuml_diagram",
+          "mermaid_diagram"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "agents": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "document_writer_agent",
+          "chapter_design_agent",
+          "data_query_planner",
+          "quality_review_agent",
+          "data_analysis_agent",
+          "industry_research_agent",
+          "solution_design_agent"
+        ]
+      },
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "reasoning",
+    "operation",
+    "tools",
+    "agents"
+  ],
+  "additionalProperties": false
+}

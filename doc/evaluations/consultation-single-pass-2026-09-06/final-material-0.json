@@ -1,0 +1,171 @@
+{
+  "seconds": 16.12,
+  "events": [
+    {
+      "type": "status",
+      "stage": "queued",
+      "message": "咨询任务已接收",
+      "progress": 18
+    },
+    {
+      "type": "status",
+      "stage": "understanding",
+      "message": "正在理解当前问题",
+      "progress": 28
+    },
+    {
+      "type": "status",
+      "stage": "retrieving",
+      "message": "正在召回相关资料",
+      "progress": 42
+    },
+    {
+      "type": "references",
+      "contexts": []
+    },
+    {
+      "type": "status",
+      "stage": "waiting_generation",
+      "message": "资料已就绪，正在等待生成",
+      "progress": 54
+    },
+    {
+      "type": "status",
+      "stage": "answering",
+      "message": "正在生成答案",
+      "progress": 62
+    },
+    {
+      "type": "delta",
+      "text": "根据"
+    },
+    {
+      "type": "delta",
+      "text": "本次"
+    },
+    {
+      "type": "delta",
+      "text": "材料"
+    },
+    {
+      "type": "delta",
+      "text": "中的"
+    },
+    {
+      "type": "delta",
+      "text": " OCR"
+    },
+    {
+      "type": "delta",
+      "text": " 内容"
+    },
+    {
+      "type": "delta",
+      "text": "，"
+    },
+    {
+      "type": "delta",
+      "text": "用户"
+    },
+    {
+      "type": "delta",
+      "text": "表达"
+    },
+    {
+      "type": "delta",
+      "text": "的是"
+    },
+    {
+      "type": "delta",
+      "text": "：**"
+    },
+    {
+      "type": "delta",
+      "text": "今天"
+    },
+    {
+      "type": "delta",
+      "text": "生日"
+    },
+    {
+      "type": "delta",
+      "text": "是小"
+    },
+    {
+      "type": "delta",
+      "text": "陈"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "，"
+    },
+    {
+      "type": "delta",
+      "text": "并"
+    },
+    {
+      "type": "delta",
+      "text": "提醒"
+    },
+    {
+      "type": "delta",
+      "text": "要"
+    },
+    {
+      "type": "delta",
+      "text": "记得"
+    },
+    {
+      "type": "delta",
+      "text": "送"
+    },
+    {
+      "type": "delta",
+      "text": "他们"
+    },
+    {
+      "type": "delta",
+      "text": "一张"
+    },
+    {
+      "type": "delta",
+      "text": "贺卡"
+    },
+    {
+      "type": "delta",
+      "text": "。"
+    },
+    {
+      "type": "references",
+      "contexts": []
+    },
+    {
+      "type": "done",
+      "answer": "根据本次材料中的 OCR 内容，用户表达的是：**今天生日是小陈**，并提醒要记得送他们一张贺卡。",
+      "contexts": [
+        {
+          "capture_id": 0,
+          "doc_key": "floating-assist:1788692884179",
+          "text": "今天生日：小陈。记得送他们一张贺卡。",
+          "score": 1.0,
+          "source": "floating_assist",
+          "source_type": "floating_assist",
+          "title": "咨询附件",
+          "screenshot_path": null,
+          "screenshot_width": null,
+          "screenshot_height": null,
+          "attachments": []
+        }
+      ],
+      "model": "mbem-v1-local",
+      "done_reason": "stop",
+      "output_truncated": false,
+      "elapsed_ms": 16105,
+      "inference_elapsed_ms": 5824
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+
+> memory-bread-desktop@0.4.0 build
+> npm run version:check && tsc && vite build
+
+
+> memory-bread-desktop@0.4.0 version:check
+> node ../scripts/check-version-sync.mjs
+
+记忆面包版本号已同步：0.4.0 (build 8)
+vite v5.4.21 building for production...
+transforming...
+✓ 5856 modules transformed.
+rendering chunks...
+[plugin:vite:reporter] [plugin vite:reporter] 
+(!) /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/node_modules/@tauri-apps/api/core.js is dynamically imported by /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/utils/integrationSkills.ts, /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/utils/integrationSkills.ts, /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/utils/integrationSkills.ts, /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/utils/integrationSkills.ts but also statically imported by /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/node_modules/@tauri-apps/api/event.js, /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/node_modules/@tauri-apps/plugin-global-shortcut/dist-js/index.js, /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/App.tsx, /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/ConsultationAttachments.tsx, /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/MemoryBackupSection.tsx, /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/MonitorPanel.tsx, /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/RagPanel.v2.tsx, /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/ScheduledTasksPanel.tsx, /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/components/SystemFloatingAssist.tsx, /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/hooks/useInteractiveOcrActivity.ts, /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/utils/appMetadata.ts, /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/utils/attachments.ts, /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/utils/browserIntegration.ts, /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/utils/customerLogReport.ts, /Users/xianjiaqi/Documents/mygit/mb-all/MemoryBread/desktop-ui/src/utils/softwareUpdate.ts, dynamic import will not move module into another chunk.
+
+computing gzip size...
+dist/index.html                                           4.84 kB │ gzip:   1.52 kB
+dist/assets/bread-roll-3vJzUIyB.png                      78.60 kB
+dist/assets/index-GetK452z.css                           77.72 kB │ gzip:  14.54 kB
+dist/assets/App-DCRH-MO-.css                            477.07 kB │ gzip:  78.34 kB
+dist/assets/clone-lZtb4NGp.js                             0.09 kB │ gzip:   0.11 kB
+dist/assets/channel-BGm_BZeK.js                           0.12 kB │ gzip:   0.13 kB
+dist/assets/init-Gi6I4Gst.js                              0.15 kB │ gzip:   0.13 kB
+dist/assets/chunk-QZHKN3VN-Dc68bkGh.js                    0.19 kB │ gzip:   0.16 kB
+dist/assets/chunk-55IACEB6-CgvtexR8.js                    0.24 kB │ gzip:   0.21 kB
+dist/assets/chunk-4BX2VUAB-BXcNgl4r.js                    0.30 kB │ gzip:   0.21 kB
+dist/assets/chunk-FMBD7UC4-CYJjibsc.js                    0.37 kB │ gzip:   0.27 kB
+dist/assets/stateDiagram-v2-4FDKWEC3-Dw8DAqqX.js          0.47 kB │ gzip:   0.31 kB
+dist/assets/classDiagram-2ON5EDUG-DpfPAayZ.js             0.51 kB │ gzip:   0.33 kB
+dist/assets/classDiagram-v2-WZHVMYZB-DpfPAayZ.js          0.51 kB │ gzip:   0.33 kB
+dist/assets/chunk-QN33PNHL-CrxmPB5j.js                    0.53 kB │ gzip:   0.37 kB
+dist/assets/client-DcqMew66.js                            0.57 kB │ gzip:   0.38 kB
+dist/assets/min-CmhervnV.js                               0.59 kB │ gzip:   0.37 kB
+dist/assets/infoDiagram-ER5ION4S-DVXlzOKy.js              0.74 kB │ gzip:   0.47 kB
+dist/assets/ordinal-Cboi1Yqb.js                           1.19 kB │ gzip:   0.57 kB
+dist/assets/chunk-TZMSLE5B-BP59q_hI.js                    1.41 kB │ gzip:   0.63 kB
+dist/assets/arc-DHzn0CB5.js                               3.44 kB │ gzip:   1.46 kB
+dist/assets/index-D3f1lpzM.js                             3.82 kB │ gzip:   1.96 kB
+dist/assets/diagram-S2PKOQOG-CbOBE8w9.js                  4.39 kB │ gzip:   1.90 kB
+dist/assets/defaultLocale-DX6XiGOO.js                     4.69 kB │ gzip:   2.17 kB
+dist/assets/pieDiagram-ADFJNKIX-CuROs6p7.js               5.31 kB │ gzip:   2.35 kB
+dist/assets/linear-D5PSjCqB.js                            5.66 kB │ gzip:   2.31 kB
+dist/assets/diagram-QEK2KX5R-DQnU9hTQ.js                  6.10 kB │ gzip:   2.55 kB
+dist/assets/index-CUhNKbQz.js                             7.35 kB │ gzip:   2.96 kB
+dist/assets/_baseUniq-BEj2fHIT.js                         8.50 kB │ gzip:   3.52 kB
+dist/assets/graph-Dj_gu4kh.js                             9.37 kB │ gzip:   3.20 kB
+dist/assets/stateDiagram-FKZM4ZOC-94cyasZO.js            10.46 kB │ gzip:   3.66 kB
+dist/assets/dagre-6UL2VRFP-dNRzTyOz.js                   11.34 kB │ gzip:   4.23 kB
+dist/assets/diagram-PSM6KHXK-DW8fa2Ws.js                 16.03 kB │ gzip:   5.72 kB
+dist/assets/kanban-definition-3W4ZIXB7-CLmUOsHq.js       20.68 kB │ gzip:   7.22 kB
+dist/assets/mindmap-definition-VGOIOE7T-eQR9xXOP.js      21.12 kB │ gzip:   7.30 kB
+dist/assets/sankeyDiagram-TZEHDZUN-DLuqdunY.js           22.32 kB │ gzip:   8.15 kB
+dist/assets/journeyDiagram-XKPGCS4Q-DwR4QaL7.js          23.64 kB │ gzip:   8.31 kB
+dist/assets/timeline-definition-IT6M3QCI-nkOq_G6k.js     23.80 kB │ gzip:   8.28 kB
+dist/assets/gitGraphDiagram-NY62KEGX-FUvZe29X.js         24.78 kB │ gzip:   7.60 kB
+dist/assets/erDiagram-Q2GNP2WA-D3CKASf5.js               25.42 kB │ gzip:   8.80 kB
+dist/assets/layout-Vl5tnEwE.js                           29.29 kB │ gzip:  10.53 kB
+dist/assets/requirementDiagram-UZGBJVZJ-czIsQvHU.js      30.35 kB │ gzip:   9.41 kB
+dist/assets/quadrantDiagram-AYHSOK5B-DXJhkXmd.js         34.40 kB │ gzip:  10.02 kB
+dist/assets/chunk-DI55MBZ5-D6EofXiy.js                   36.78 kB │ gzip:  11.85 kB
+dist/assets/xychartDiagram-PRI3JC2R-DNmgNukq.js          40.29 kB │ gzip:  11.39 kB
+dist/assets/chunk-B4BG7PRW-C7PNi0aH.js                   45.40 kB │ gzip:  14.55 kB
+dist/assets/flowDiagram-NV44I4VS-DX3To3lW.js             61.19 kB │ gzip:  19.34 kB
+dist/assets/ganttDiagram-LVOFAZNH-DJ5RU66y.js            62.66 kB │ gzip:  21.01 kB
+dist/assets/c4Diagram-YG6GDRKO-hNxhG4T_.js               70.22 kB │ gzip:  19.57 kB
+dist/assets/blockDiagram-VD42YOAC-rtG1ZFXS.js            73.23 kB │ gzip:  20.70 kB
+dist/assets/cose-bilkent-S5V4N54A-BzUJCAmy.js            81.63 kB │ gzip:  22.39 kB
+dist/assets/sequenceDiagram-WL72ISMW-CuDCjftB.js         98.19 kB │ gzip:  26.80 kB
+dist/assets/index-Dbt0gH4r.js                           133.93 kB │ gzip:  43.12 kB
+dist/assets/architectureDiagram-VXUJARFQ-DRWOvJ6Z.js    148.80 kB │ gzip:  41.89 kB
+dist/assets/katex-C5jXJg4s.js                           258.49 kB │ gzip:  77.25 kB
+dist/assets/treemap-KMMF4GRG-Br2Y1ap9.js                374.80 kB │ gzip:  92.71 kB
+dist/assets/cytoscape.esm-Dz9tvMTw.js                   443.80 kB │ gzip: 141.77 kB
+dist/assets/mermaid.core-D33uFP_B.js                    475.15 kB │ gzip: 130.41 kB
+dist/assets/App-CmYWvldZ.js                           1,322.72 kB │ gzip: 422.40 kB
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 7.44s

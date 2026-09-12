@@ -1,0 +1,78 @@
+{
+  "seconds": 21.439,
+  "source_history_id": 171,
+  "new_history_ids": [
+    182
+  ],
+  "original_171_unchanged": true,
+  "sse_request_count": 1,
+  "done_event_count": 1,
+  "error_events": [],
+  "knowledge_310_in_references": false,
+  "knowledge_310_adopted": false,
+  "new_session_rag_usage_count": 1,
+  "p0_completed_delta": 1,
+  "unchanged_other_service_pids": true,
+  "status": "passed_for_recall_adoption_and_confirmed_fields",
+  "final_candidate_count": 0,
+  "final_cited_count": 0,
+  "numeric_comparisons_verified_against_original_images": 30,
+  "answer_equals_independently_audited_source_summary": true,
+  "sse_delta_done_and_history_answers_equal": true,
+  "original_171_unchanged_since_first_snapshot": true,
+  "original_171_sha256": "c3ff0f6e1b884a11292c076ca86ab37deb3e70f4a9bfaa052935184542f691d5",
+  "answer_sha256": "21f05d46222e5c10b4cd5f497f8a963a76898f2738b9a4f3fcb9409bbfd13961",
+  "image_sha256": [
+    "f9defb8181cc60bd0cb383ae5feaf6afffb18b43604467b5d7d92ee4c88bf9ee",
+    "c88a5013473db91bed2d60a3e4b29170506ab4835be24cd9a5e0f84b69c4669a"
+  ],
+  "answer_usage": {
+    "id": 59514,
+    "ts": 1788810223540,
+    "caller": "rag",
+    "caller_id": "182",
+    "prompt_tokens": 1718,
+    "completion_tokens": 820,
+    "total_tokens": 2538,
+    "latency_ms": 21410,
+    "status": "success",
+    "done_reason": "stop"
+  },
+  "coverage_limits": [
+    "Summary does not explicitly name the BASE (BF16) baseline.",
+    "FP8 success 99.2% to 97.6% and tp2 success 99.6% are not emitted because those source fields were not unambiguously bound; no complete-coverage claim is warranted."
+  ],
+  "final_health": {
+    "active_embedding": "bge-small-zh",
+    "active_image": null,
+    "active_llm": "mbem-v1-local",
+    "pipeline_ready": true,
+    "service": "model_api_rag",
+    "status": "ok"
+  },
+  "ui_acceptance": "ui-acceptance.json",
+  "source_sha256": {
+    "ai-sidecar/model_api_server.py": "73578420e204a715597d3c5c7e41bbe17d7a8275dd79aa3eb6eb7631c591a44d",
+    "ai-sidecar/rag/pipeline.py": "a5369c7f4d23b5a19b097aba6ae5cb8f5e79adf19f1a55fb89481f933d368e55",
+    "ai-sidecar/rag/retriever.py": "f52757f087649b00d8e87b2f04fe5878299966260503c8fa55f7ebb20cfea476",
+    "ai-sidecar/rag/memory_evidence.py": "dda784f8d787444eacca1957414cbc78783991cdec5de770b2524becd9821362",
+    "ai-sidecar/rag/material_retrieval.py": "e52718a6bb5040140018e0a58d6b799565a19f7a825d2a896bce317560db5af2",
+    "ai-sidecar/rag/material_evidence.py": "39cc110aeb5daefb6fde9821c22f0416f07d1175e9e00ae78db3b0e600e1123a",
+    "ai-sidecar/rag/material_input.py": "333e27dace7c20f11ca7aeb40153d3e1c6c89cc39f9c044c0900abb61eea6443",
+    "ai-sidecar/rag/material_summary.py": "86a091378f349b8abae2c5d20f2c70baa968176982a75cec550ea50ada14a239",
+    "ai-sidecar/ocr/layout.py": "db2fe84e9a60eb2b26d023afaedfa2c1faf60b7ee20792033b2be7a6d13cc3b7",
+    "ai-sidecar/ocr/worker.py": "c81bb7c9f1769b16ae11a3016e1be11a8ae34dcf82792d921f3737621ca7ee16",
+    "desktop-ui/src/utils/attachments.ts": "9439bf8b36aac65a527841af1410c5e3bcb8c316916a48d412fe50359523fe7e",
+    "desktop-ui/src/components/RagPanel.v2.tsx": "0b37d49ab899910313c159f19bd253f914b21f5321e96efbdd4b5c9ac40b39b4",
+    "desktop-ui/src/components/SystemFloatingAssist.tsx": "9497df5c12584d7851eb17d8c1f417091f0b0338dd395441dc6f5742a0313a08"
+  },
+  "answer_hash_scope": "answer.md file bytes, UTF-8 with final newline",
+  "runtime_pids": {
+    "sidecar": "93440",
+    "model_api": "93451",
+    "creation": "62676",
+    "core": "42641",
+    "ui": "83875"
+  },
+  "all_runtime_pids_unchanged": true
+}

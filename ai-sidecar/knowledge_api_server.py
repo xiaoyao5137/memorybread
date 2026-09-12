@@ -352,6 +352,8 @@ def search_knowledge():
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
+    from runtime_endpoints import service_bind
+    bind_host, bind_port = service_bind("model_api")
     logger.info(f"启动知识库 API 服务器，数据库: {DB_PATH}")
-    logger.info("监听地址: http://127.0.0.1:7071")
-    app.run(host='127.0.0.1', port=7071, debug=False)
+    logger.info("监听地址: http://%s:%s", bind_host, bind_port)
+    app.run(host=bind_host, port=bind_port, debug=False)

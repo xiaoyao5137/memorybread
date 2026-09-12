@@ -1,0 +1,43 @@
+{
+  "case": "explicit",
+  "session_id": "skill-governance-acceptance-explicit-1788630307",
+  "history": {
+    "id": 137,
+    "progress_epoch": 1
+  },
+  "catalog": [
+    {
+      "id": "creation-skill-general-solution-review-doc",
+      "title": "技术架构方案评审文档模板"
+    },
+    {
+      "id": "creation-skill-microservice-module-tech-design",
+      "title": "微服务模块技术方案文档"
+    },
+    {
+      "id": "creation-skill-gpu-cost-weekly-report",
+      "title": "GPU成本优化周报模板"
+    }
+  ],
+  "tools": [],
+  "note": "Local model only; tests document routing, assembly and persistence, not factual research quality.",
+  "title": "",
+  "chars": 0,
+  "checks": {
+    "completed": false,
+    "content_saved": false,
+    "independent_title": false,
+    "expected_selection": true,
+    "specified_title": false
+  },
+  "passed": false,
+  "admission": [
+    {
+      "admitted": true,
+      "code": "explicit_selection",
+      "fingerprint": "dd4dfc305d59e819bd9852737bae32114fcecc3dd420fe1f9ad5a02083d680ec",
+      "skill_id": "creation-skill-general-solution-review-doc",
+      "source": "user"
+    }
+  ]
+}

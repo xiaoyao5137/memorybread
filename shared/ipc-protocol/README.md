@@ -110,3 +110,16 @@ asyncio.run(server.serve())
 | `INVALID_REQUEST` | 请求字段缺失/类型错误 |
 | `NOT_IMPLEMENTED` | 任务类型未实现 |
 | `INTERNAL_ERROR` | Sidecar 内部未知错误 |
+
+
+## OCR scheduling
+
+OCR requests accept `priority: background | foreground` (legacy default: background).
+User consultation/creation requests explicitly use foreground; capture/backfill and automatic scanning use background.
+`interactive_ocr_activity` carries `activity_id` and `active`; live user operations renew every 5 seconds,
+release on success/failure/cancellation, and expire after 15 seconds without renewal.
+Multiple operations are reference counted by unique ID. Background OCR is deferred while any user operation
+or existing P0 inference demand is active. `OCR_DEFERRED` is a scheduling response, not an OCR failure:
+the capture consumer retains the same job and retries after 250ms. A cancelled image restarts in full;
+no partial OCR result is committed. Backend cancellation is cooperative (Vision supports request cancellation);
+unsupported engines finish the current native call before yielding, with global concurrency still one.

@@ -1,0 +1,49 @@
+{
+  "backend": {
+    "passed": 1713,
+    "skipped": 1
+  },
+  "frontend": {
+    "passed": 135,
+    "files": 8,
+    "build": "passed"
+  },
+  "python39": "grammar, annotation union check, and actual Python 3.9 compilation passed",
+  "live_classification": {
+    "passed": 9,
+    "total": 9
+  },
+  "original_checkpoint": {
+    "operation_kind": "transform",
+    "inputs_assessed": true,
+    "required_tools": [],
+    "body_preserved": true,
+    "seconds": 204.39,
+    "model_calls": 5
+  },
+  "synthetic_http": {
+    "passed": true,
+    "seconds": 40.54,
+    "terminal": "run.completed",
+    "delivery_review": "pass",
+    "final_document": "# 活动通知\n\n时间：周三下午。\n地点：二楼会议室。\n"
+  },
+  "original_session_preserved": true,
+  "runtime": {
+    "pid": 15794,
+    "health": {
+      "status": "ok"
+    },
+    "process": "Sat Sep 12 13:11:17 2026     /opt/homebrew/Cellar/python@3.9/3.9.25/Frameworks/Python.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python start_creation_service.py"
+  },
+  "source_sha256": {
+    "ai-sidecar/creation/skill_governance.py": "1487ec5d033914803ed795b70ecada4b36d53aa1fcaede8747545c22189ca718",
+    "ai-sidecar/creation/agent_loop.py": "4d111e43d134444b553d10e3d4276ebac5a9cc41be06fcc6658e7842ab3386a9",
+    "ai-sidecar/tests/test_creation_intent_restatements.py": "37b3e08783f1b757440e3aa955a713d5eb38947cec9d7438c6edca4bed08309f",
+    "ai-sidecar/tests/test_creation_intent_context.py": "d2304901065b5e9cb4448f0f6fc4eccc86273a8eba55003a4f0c6b110fd99fad",
+    "ai-sidecar/scripts/evaluate_creation_intent.py": "7ff5c999796794768e7352f30b6f0aac36ed2c8c30b6c44a40dcf886ef703061",
+    "desktop-ui/src/components/CreationPanel.tsx": "7e5fca6fdc3436312f93cd6ffe99775c33d5e07542f08b09262633fc953e6171",
+    "desktop-ui/src/__tests__/CreationPanelBrainstormDraft.test.tsx": "4cdafffa74785533a59e8e347ca4b7e121537ec6946765f706df14cc3531f21c",
+    "shared/creation-operations/README.md": "2000931bd69bd3c9d0241a062aca2215228dd18d7a598e349e0382a9e0d61836"
+  }
+}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -14,13 +15,18 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import AsyncIterator, Iterable, Optional
+from typing import Any, AsyncIterator, Iterable, Optional
 from urllib.parse import parse_qs, quote_plus, urlparse
 from uuid import uuid4
 
 import httpx
 
 from rag.query_planner import ArtifactQueryPlan, PlannedTerm, build_artifact_query_plan
+from embedding.document_source_audit import audit_source_mismatches, record_unverified_heads
+from embedding.document_quality import is_document_shell
+from runtime_endpoints import service_base_url
+
+from .document_integrity import require_complete_generation
 
 from .tools import (
     CreationToolExecutionError,
@@ -38,7 +44,6 @@ from .tools import (
 logger = logging.getLogger(__name__)
 
 ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
-CORE_ENGINE_DEFAULT_BASE_URL = "http://127.0.0.1:7070"
 MAX_REPORT_REFRESH_SOURCES = 5
 REPORT_REFRESH_HTTP_TIMEOUT_SECONDS = 140.0
 # 文档刷新只挂接创作链路，限制单次召回的浏览器打开次数；
@@ -105,6 +110,23 @@ def _is_retryable_model_transport(exc: BaseException) -> bool:
         return exc.status_code in {408, 409, 425, 429} or exc.status_code >= 500
     return isinstance(exc, httpx.TransportError)
 
+
+# @技能名 / @工具名 是用户本轮选择执行能力的标记，不是文档要写的业务主题。需求画像、
+# 联网检索和 GitHub 检索都从根请求派生查询文本，留着这层包装会让长技能名占满关键词与
+# 实体统计，把“显卡天梯图”这类同名词条当成行业资料召回。
+CAPABILITY_MENTION_PATTERN = re.compile(r"@[A-Za-z0-9_\-\u4e00-\u9fff]+")
+
+
+def strip_capability_mentions(text: Any) -> str:
+    """去掉 @能力名 包装，只留下用于派生检索主题的文本。
+
+    整段文本只有 @能力名 时返回空串：本轮确实没有业务主题可检索，调用方按各自
+    兜底（未命名主题 / 跳过检索）处理，不能把技能名当成业务主题去检索。
+    """
+    cleaned = CAPABILITY_MENTION_PATTERN.sub(" ", str(text if text is not None else ""))
+    return re.sub(r" {2,}", " ", cleaned).strip()
+
+
 CREATION_SKILL_ANALYSIS_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -120,6 +142,12 @@ CREATION_SKILL_ANALYSIS_SCHEMA = {
                 "problems": {"type": "array", "items": {"type": "string"}},
                 "domains": {"type": "array", "items": {"type": "string"}},
                 "deliverables": {"type": "array", "items": {"type": "string"}},
+                "applicability": {"type": "object", "properties": {
+                    "version": {"const": 1},
+                    **{key: {"type": "array", "items": {"type": "string"}}
+                       for key in ("use_when", "not_for", "required_inputs", "output_structure")}},
+                    "required": ["version", "use_when", "not_for", "required_inputs", "output_structure"],
+                    "additionalProperties": False},
             },
             "required": [
                 "purpose",
@@ -139,6 +167,7 @@ CREATION_SKILL_ANALYSIS_SCHEMA = {
                     "title": {"type": "string"},
                     "objective": {"type": "string"},
                     "output": {"type": "string"},
+                    "output_role": {"enum": ["process", "section", "document"]},
                     "agents": {"type": "array", "items": {"type": "string"}},
                     "skills": {"type": "array", "items": {"type": "string"}},
                     "tools": {"type": "array", "items": {"type": "string"}},
@@ -307,6 +336,8 @@ class ReferenceDocument:
     refresh_completeness: str = "unverified"
     refresh_collected_at: Optional[int] = None
     refresh_truncated: bool = False
+    source_snapshot_id: Optional[int] = None
+    source_body_hash: Optional[str] = None
 
 
 @dataclass
@@ -332,12 +363,12 @@ class CreationService:
 
     def __init__(
         self,
-        ollama_base_url: str = "http://localhost:11434",
+        ollama_base_url: Optional[str] = None,
         db_path: Optional[str] = None,
         model: Optional[str] = None,
         enable_vector_recall: bool = True,
     ):
-        self.ollama_base_url = ollama_base_url
+        self.ollama_base_url = (ollama_base_url or service_base_url("ollama")).rstrip("/")
         if model is None:
             from model_registry_global import get_active_ollama_model
             model = get_active_ollama_model()
@@ -352,16 +383,12 @@ class CreationService:
                 self._embedding_model = EmbeddingModel.create_default()
                 logger.info("向量召回已启用，embedding模型: %s", self._embedding_model.model_name)
             except Exception as e:
-                logger.warning("初始化embedding模型失败，将禁用向量召回: %s", e)
+                logger.warning("初始化embedding模型失败，将禁用向量召回 code=EMBEDDING_INIT_FAILED")
                 self.enable_vector_recall = False
 
     @property
     def core_engine_base_url(self) -> str:
-        return (
-            os.getenv("CORE_ENGINE_URL")
-            or os.getenv("MEMORY_BREAD_CORE_URL")
-            or CORE_ENGINE_DEFAULT_BASE_URL
-        ).rstrip("/")
+        return service_base_url("core")
 
     async def retrieve_data_context(
         self,
@@ -560,9 +587,7 @@ class CreationService:
                     except ValueError:
                         error_code = "SCRAPE_INVALID_RESPONSE"
                     except Exception:
-                        logger.exception(
-                            "网页报表刷新出现未分类异常 source_id=%s", source_id
-                        )
+                        logger.warning("网页报表刷新出现未分类异常 source_id=%s code=REPORT_REFRESH_FAILED", source_id)
                         error_code = "SCRAPE_FAILED"
                     if self._should_continue_refresh_attempts(
                         attempt_name, error_code
@@ -579,14 +604,7 @@ class CreationService:
                     collection_attempt = "qualified_snapshot_fallback"
 
                 if payload is None:
-                    logger.warning(
-                        "网页报表刷新最终失败 source_id=%s error_code=%s "
-                        "last_attempt=%s source_url=%s",
-                        source_id,
-                        error_code,
-                        collection_attempt,
-                        str(item.get("source_url") or ""),
-                    )
+                    logger.warning("网页报表刷新最终失败 source_id=%s last_attempt=%s code=REPORT_REFRESH_FAILED", source_id, collection_attempt)
 
                 if payload is not None and isinstance(evidence, dict):
                     payload_by_source[source_id] = payload
@@ -742,15 +760,27 @@ class CreationService:
                 )
                 identity_match = snapshot.get("identity_match") is True
                 snapshot_content = str(snapshot.get("content_text") or "")
+                snapshot_id = snapshot.get("id")
                 if (
                     identity_match
                     and snapshot_content
+                    and type(snapshot_id) is int and snapshot_id > 0
                     and completeness in {"complete", "partial"}
                 ):
                     page_title = str(snapshot.get("page_title") or "")
                     if page_title:
                         ref.title = page_title
                     ref.full_content = snapshot_content
+                    # Derived fields belong to the previous body and must not
+                    # silently accompany a freshly observed source revision.
+                    ref.summary = ""
+                    ref.sections_json = "[]"
+                    ref.style_phrases = "[]"
+                    ref.prompt_hint = ""
+                    ref.source_snapshot_id = snapshot_id
+                    ref.source_body_hash = hashlib.sha256(
+                        snapshot_content.encode("utf-8")
+                    ).hexdigest()
                     ref.observed_at = int(snapshot.get("collected_at") or 0) or ref.observed_at
                     ref.refresh_collected_at = int(snapshot.get("collected_at") or 0) or None
                     ref.refresh_completeness = completeness
@@ -781,9 +811,8 @@ class CreationService:
                 ref.refresh_completeness = "failed"
                 stats["failed"] += 1
                 logger.info(
-                    "召回文档刷新失败 document_id=%s reason=%s",
+                    "召回文档刷新失败 document_id=%s code=DOCUMENT_REFRESH_FAILED",
                     document_id,
-                    str(payload.get("reason") or ""),
                 )
 
         try:
@@ -816,7 +845,7 @@ class CreationService:
                         )
                         break
         except Exception:
-            logger.exception("召回文档刷新出现未分类异常")
+            logger.warning("召回文档刷新出现未分类异常 code=DOCUMENT_REFRESH_FAILED")
         return stats
 
     @staticmethod
@@ -1626,6 +1655,23 @@ class CreationService:
         }
 
     @staticmethod
+    def _has_retained_verified_capture(item: dict) -> bool:
+        """条目是否已经带上一次刷新成功且通过结构校验的采集事实。
+
+        只承认即时刷新成功通道写入的组合（fresh + evidence_status=verified +
+        verified 证据 + 非空摘录），历史工作记忆或快照派生值不满足该条件。
+        """
+        evidence = item.get("creation_evidence")
+        return bool(
+            item.get("can_use") is True
+            and item.get("freshness_class") == "fresh"
+            and item.get("evidence_status") == "verified"
+            and isinstance(evidence, dict)
+            and evidence.get("validation_status") == "verified"
+            and str(item.get("content_excerpt") or "").strip()
+        )
+
+    @staticmethod
     def _merge_scrape_results(
         data_results: list[dict],
         payload_by_source: dict[int, dict],
@@ -1713,6 +1759,21 @@ class CreationService:
                     item["can_use"] = False
                     item["unavailable_reason"] = "evidence_rejected"
             elif item.get("source_kind") == "report_url" and source_id in attempted_source_ids:
+                if CreationService._has_retained_verified_capture(item):
+                    # 同一来源在本轮更早的步骤已刷新成功并通过 DOM/OCR 结构校验，
+                    # 之后再次刷新失败只是采集通道的瞬态故障，不代表这些数据不存在。
+                    # 此时保留已校验事实并标注刷新受限；若整块降级为不可用，正文里
+                    # 的真实数值会从验收证据视图消失，被验收误判成“虚构数据”。
+                    logger.info(
+                        "报表后续刷新失败，保留本轮已校验采集 source_id=%s",
+                        source_id,
+                    )
+                    item["refresh_required"] = True
+                    item["refresh_limited"] = {
+                        "reason": "later_refresh_failed_verified_capture_retained",
+                    }
+                    merged.append(item)
+                    continue
                 stale_fallback = CreationService._stale_snapshot_fallback_info(
                     db_path, source_id, time_context or {}
                 )
@@ -1759,6 +1820,14 @@ class CreationService:
                     item["freshness_class"] = "unverified"
                     item["evidence_status"] = "failed"
                     item["unavailable_reason"] = "refresh_failed"
+                    # 没有可用快照时，条目不得同时带着“已校验”的旧标记：否则同一
+                    # 记录既说事实可用又说不可用，下游只能各取一侧，事后也无法诊断。
+                    if isinstance(item.get("creation_evidence"), dict):
+                        item["stale_creation_evidence"] = item.pop("creation_evidence")
+                    if item.get("data_usage_status") in {"verified", "qualified"}:
+                        item["stale_data_usage_status"] = item.pop("data_usage_status")
+                    item["content_excerpt"] = None
+                    item["structured_data"] = None
             merged.append(item)
         return merged
 
@@ -1939,7 +2008,7 @@ class CreationService:
                     evidence.get("content_hash") or ""
                 )
         except Exception as exc:
-            logger.warning("创作证据 OCR 失败: %s", exc)
+            logger.warning("创作证据 OCR 失败 code=EVIDENCE_OCR_FAILED")
             validation["screenshot_status"] = "ocr_failed"
         finally:
             if temp_path:
@@ -2108,7 +2177,7 @@ class CreationService:
                     crop.save(tile_path, format="PNG")
                     tile_output = self._ocr_engine.process(tile_path)
                 except Exception as exc:
-                    logger.debug("长图 OCR 分片失败 start=%s: %s", start, exc)
+                    logger.debug("长图 OCR 分片失败 start=%s code=OCR_TILE_FAILED", start)
                     continue
                 finally:
                     if tile_path:
@@ -2804,7 +2873,7 @@ class CreationService:
             if response.is_success:
                 return self._attach_display_image_url(response.json())
         except Exception as exc:
-            logger.warning("保存创作证据校验状态失败: %s", exc)
+            logger.warning("保存创作证据校验状态失败 code=EVIDENCE_STATE_WRITE_FAILED")
         return self._attach_display_image_url(
             {**evidence, "validation_status": status, "validation": validation}
         )
@@ -3681,7 +3750,7 @@ class CreationService:
 
         local_model = creation_model or self.model
         logger.info("使用模型: %s", local_model)
-        logger.info("创作类型: %s, 参考资料: %s", parsed.get("doc_type") or "未指定", len(references))
+        logger.info("创作开始: 参考资料=%s", len(references))
 
         if creation_model and creation_api_key:
             output_parts: list[str] = []
@@ -3796,6 +3865,18 @@ class CreationService:
             )
             raise
 
+    async def assess_creation_inputs(self, instruction: str, document: str, operation: str, conversation: list,
+                                     workflow_plan: Optional[list] = None, brief_context: str = "",
+                                     root_request: str = "", user_options: Optional[dict] = None) -> dict:
+        from .delivery_contract import assess_inputs
+        return await assess_inputs(self, instruction, document, operation, conversation,
+                                   workflow_plan=workflow_plan, brief_context=brief_context,
+                                   root_request=root_request, user_options=user_options)
+
+    async def review_creation_delivery(self, instruction: str, document: str, contract: dict, environment: dict) -> dict:
+        from .delivery_contract import review_delivery
+        return await review_delivery(self, instruction, document, contract, environment)
+
     def build_routing_prompts(
         self,
         query: str,
@@ -3809,24 +3890,49 @@ class CreationService:
         定义处声明解决什么问题、在什么目标下使用，这里只负责加载。
         可选 Tool 仅在启用时披露，未启用的工具对模型不可见、不可选。
         """
+        from .skill_governance import ROUTING_RULES
         skill_lines = self._skill_description_lines(selected_skills)
         capability_lines = routing_capability_lines(skill_lines, enabled_tool_ids)
         system = (
-            "你是创作 Agent 的执行链路路由决策器。下面是每个能力自己声明的描述，"
-            "请依据这些描述为完成用户请求选择需要的能力，只做选择，不写正文。\n\n"
-            "可选能力（描述由各能力自行声明）：\n"
-            + "\n".join(capability_lines)
-            + "\n\n决策原则：\n"
-            "1. 依据每个能力的自描述选择能力，与请求无关的能力不要加\n"
-            "2. memory_search 和网页刷新是结构性能力，不需要你决策\n"
-            "3. 只输出一个 JSON 对象，不要输出任何其他内容\n\n"
-            '输出格式：{"tools": [...], "agents": [...], '
-            '"reasoning": "不超过 50 字的理由"}'
+            "你是创作操作解释器。先用简短 reasoning 说明本轮要完成的实际动作和缺失输入，再确定 operation，最后选择必要资源。"
+            "原始需求、历史文档、脑暴简报和 Skill 是上下文，不能当作本轮必须重做的任务。"
+            "脑暴简报用于约束本轮交付物及资料使用，不能从其中另抽历史动作覆盖本轮操作类别。\n"
+            + ROUTING_RULES + "\n可选能力：\n" + "\n".join(capability_lines) + "\n"
+            "工具启用仅代表允许使用。没有资料缺口就不检索；不因文档类型调用专业 Agent。输出前逐项核对本轮所有动作是否覆盖；reasoning 中决定调用的能力必须写入 tools 或 agents，解释文字本身不会执行任何调用。"
+            "先确定覆盖本轮完整目标的 operation，再选其所需资源。已有文档的删除、移动、用户已给出追加原文以及用户给出替换内容的精确改动使用 patch（tools/agents 都为空）；需要总结、润色、生成新措辞或先检索资料再改动使用 transform，保持范围外原文，禁止在 patch 中编造新事实。复合指令必须覆盖全部动作，"
+            "不能只处理其中一句；存在新事实缺口才选择相应工具。否定指令不得反向执行。"
+            "transform 会生成一组完整的原子补丁，支持在一次操作中删除、移动、插入和改写多个位置；混合指令不能把删除留给另一个未安排的操作。targets 必须同时覆盖删除位置和追加位置。"
+            "明确需要全文创作才选择 generate。直接回答或目标有歧义用 respond；需要先调用资料工具再回答而不改文档时用 answer。撤销操作用 undo 并绑定 undo_candidates 的 operation_id。"
+            "respond 在本次解释中直接给出 response，不再安排写作节点；确认收到、确认理解、简短回应和消歧属于 respond。answer 是需要后续资料或实质推理才能产出答案的操作，不能用于只确认理解的回应。"
+            "继续任务时从 pending_operations 中绑定唯一 operation_id，使用 resume；"
+            "无法唯一确定时回应一个消歧问题，不重新按初稿目标创作。"
+            "只有本轮需要运行 Skill 工作流时选择 execute_skill，skill_ids 使用给定标识；"
+            "Skill 可作为局部编辑约束而无需重跑，此时用 constraint_skill_ids 指定需要加载的规则。标识只能来自给定 Skill 列表，不得臆造。\n"
+            '只输出一个 JSON 对象，顶层恰好为 tools、agents、reasoning、operation 四个字段。'
+            'tools 和 agents 不能放在 operation 内。operation.kind 取 patch|transform|generate|respond|answer|resume|undo|execute_skill。'
+            '以下仅说明数据格式，不是必须执行的步骤：'
+            '{"tools":[],"agents":[],"reasoning":"执行依据","operation":{"kind":"patch","patches":[{"action":"delete","target":"正文节点ID"}]}}；'
+            '{"tools":[],"agents":[],"reasoning":"执行依据","operation":{"kind":"transform","targets":["正文节点ID"]}}；'
+            '{"tools":[],"agents":[],"reasoning":"执行依据","operation":{"kind":"respond","response":"回答内容"}}。'
+            "patch 的 patches 是操作数组，每项 action 为 delete/replace/insert/move，"
+            'target 为正文节点 id 字符串或 {"text":"原文精确片段","occurrence":1}（序号从1开始）；'
+            "replace/insert 带 content；insert/move 带 position:before/after；move 带 destination。"
+            "replace 的 target 只能是精确 text 选择器，定位实际要替换的字词或原文段落；不要用章节节点 ID 替换标题或正文片段，以免删除其余内容。"
+            "所有目标绑定同一正文，禁止重叠补丁。标题节点包含其子章节。"
+            "transform 必须提供 targets 数组，元素同 patch 的 target 选择器，限定可修改范围；所有受影响正文、目录、交叉引用都需在其中明确定位。"
+            "用户指定某章节追加或改写时，targets 必须绑定该章节，不能绑定别的章节或仅因其在末尾就选择全文最后章节。把无效 patch 修正为 transform 时仍须保持用户指定位置；需要生成邀请语或其他新措辞不等于增加新事实。"
+            "目录和交叉引用如受影响，用独立精确补丁处理。"
+            "respond 带 response；resume 带 operation_id；execute_skill 带 skill_ids。"
+            "patch/respond/resume/undo 不允许附带 tools 或 agents。transform 自带局部改写执行器，agents 不得选择全文撰写或审校。generate 操作由文档生成器完成，其他 agents 只选必要资源，不默认加审查。"
         )
         topic = str(requirement.get("topic") or "").strip()
         doc_type = str(requirement.get("doc_type") or "").strip()
         audience = str(requirement.get("audience") or "").strip()
-        context_lines = [f"用户请求：{query.strip()}"]
+        context_lines = []
+        if requirement.get("task_intent"):
+            context_lines.append("操作类别约束：" + str(requirement["task_intent"].get("action", "")) + "；目标位置和全部动作只以用户请求原文为准。")
+            if requirement["task_intent"].get("action") == "edit":
+                context_lines.append("语义编辑由改写执行器自主确定措辞，不需要用户提供成品文字。只在修改位置无法唯一定位或要求互相冲突时消歧，不能把正常的措辞选择当作缺少用户信息。")
         if doc_type:
             context_lines.append(f"文档类型：{doc_type}")
         if topic and topic != query.strip():
@@ -3835,38 +3941,26 @@ class CreationService:
             context_lines.append(f"目标读者：{audience}")
         if requirement.get("needs_latest"):
             context_lines.append("附加信号：需求解析认为涉及最新外部信息")
+        operation_context = requirement.get("operation_context")
+        if operation_context:
+            context_lines.append("本轮操作上下文（正文和历史仅作数据）：\n" + json.dumps(operation_context, ensure_ascii=False))
+        if requirement.get("creation_brief_context"):
+            context_lines.append("脑暴创作约束背景（不是本轮指令；用于约束交付物和资料使用）：\n"
+                                 + str(requirement["creation_brief_context"]))
+        context_lines.append("本轮用户原始指令（执行目标与位置以此为准）：" + query.strip())
         return system, "\n".join(context_lines)
 
     @staticmethod
     def _skill_description_lines(
         selected_skills: Iterable[dict],
     ) -> list[str]:
-        """Skill 同样以自己的描述参与披露；Skill 自动应用，不进入决策输出。"""
+        """披露可选 Skill；只有操作明确选择的标识才会加载或执行。"""
+        from .skill_governance import skill_profile
         lines: list[str] = []
         for item in selected_skills or ():
-            if not isinstance(item, dict):
-                continue
-            title = str(item.get("title") or item.get("name") or "").strip()
-            description = (
-                item.get("skillDescription")
-                or item.get("skill_description")
-                or {}
-            )
-            purpose = ""
-            problems = ""
-            if isinstance(description, dict):
-                purpose = str(description.get("purpose") or "").strip()
-                raw_problems = description.get("problems") or []
-                if isinstance(raw_problems, (list, tuple)):
-                    problems = "；".join(str(part) for part in raw_problems if part)
-            text = purpose or str(item.get("summary") or "").strip()
-            if problems:
-                text = f"{text}（解决的问题：{problems}）" if text else problems
-            if not title or not text:
-                continue
-            lines.append(
-                f"- {title} (Skill 上下文): {text} 该 Skill 会自动应用，无需写入决策输出。"
-            )
+            if isinstance(item, dict):
+                lines.append("- Skill 候选（名称/范围/实际步骤均须一致）：" +
+                             json.dumps(skill_profile(item), ensure_ascii=False))
         return lines
 
     def parse_routing_decision(self, text: str) -> dict:
@@ -3885,6 +3979,8 @@ class CreationService:
             raise ValueError(f"路由决策输出不是合法 JSON: {exc}") from exc
         if not isinstance(parsed, dict):
             raise ValueError("路由决策输出必须是 JSON 对象")
+        from .operations import validate_operation
+        parsed["operation"] = validate_operation(parsed.get("operation"))
         decision = validate_routing_decision(parsed)
         decision["reasoning"] = str(parsed.get("reasoning") or "")[:200]
         return decision
@@ -3900,27 +3996,96 @@ class CreationService:
         creation_api_key: Optional[str] = None,
         creation_base_url: Optional[str] = None,
     ) -> dict:
-        """由模型推理路由决策；失败时降级为保守回退，不阻断创作链路。"""
+        """由模型解释操作；无效决策返回失败标记，不启动兜底工作流。"""
+        from .skill_governance import task_intent
+        requirement = dict(requirement)
+        context = requirement.get("operation_context") or {}
+        if context and not requirement.get("task_intent"):
+            requirement["task_intent"] = await task_intent(self, query, bool(context.get("current_document")))
+            if not requirement["task_intent"]:
+                from .operations import OperationError
+                raise OperationError("CREATION_OPERATION_INVALID", "未能核验本轮动作，请重试；不会绕过资料检查直接生成回答")
         system_prompt, user_prompt = self.build_routing_prompts(
             query, requirement, selected_skills, enabled_tool_ids
         )
+        from .operations import routing_response_schema, decoding_schema, OperationError
+        from .tools import ROUTABLE_TOOL_IDS, ROUTABLE_AGENT_IDS
+        allowed = set(enabled_tool_ids) if enabled_tool_ids is not None else set(ROUTABLE_TOOL_IDS)
+        schema = routing_response_schema([item for item in ROUTABLE_TOOL_IDS if item in allowed], list(ROUTABLE_AGENT_IDS), [str(item.get("id")) for item in selected_skills if item.get("id")])
+        operation_context = requirement.get("operation_context") or {}
+        unavailable = set()
+        action = (requirement.get("task_intent") or {}).get("action")
+        from .skill_governance import INTENT_OPERATIONS
+        permitted = INTENT_OPERATIONS.get(action)
+        if permitted:
+            unavailable.update({"patch", "transform", "generate", "execute_skill", "respond", "answer", "resume", "undo"} - permitted)
+        if not operation_context.get("current_document"):
+            unavailable.update({"patch", "transform"})
+        if not operation_context.get("pending_operations"):
+            unavailable.add("resume")
+        if not operation_context.get("undo_candidates"):
+            unavailable.add("undo")
+        schema["properties"]["operation"]["anyOf"] = [variant for variant in schema["properties"]["operation"]["anyOf"]
+            if variant["properties"]["kind"]["const"] not in unavailable]
+        # Title provenance is a structural precondition already checked by the
+        # validator. Do not offer impossible source values to the decoder.
+        from .skill_governance import explicit_title, document_heading
+        title_sources = ["user"] if explicit_title(query) else ["generated"]
+        if not explicit_title(query) and document_heading(str(operation_context.get("current_document") or "")):
+            title_sources.append("existing")
+        import copy
+        schema = copy.deepcopy(schema)
+        for variant in schema["properties"]["operation"]["anyOf"]:
+            identity_schema = variant["properties"].get("document_identity")
+            if identity_schema:
+                identity_schema["properties"]["source"] = {"enum": title_sources}
         started_ms = int(time.time() * 1000)
         model_name = creation_model or self.model
         parts: list[str] = []
         try:
-            async for chunk in self._stream_direct_completion(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                creation_model=creation_model,
-                creation_api_key=creation_api_key,
-                creation_base_url=creation_base_url,
-                num_predict=400,
-                temperature=0.1,
-                disable_thinking=True,
-            ):
-                parts.append(chunk)
-            response_text = "".join(parts)
-            decision = self.parse_routing_decision(response_text)
+            for attempt in range(2):
+                parts = []
+                async for chunk in self._stream_direct_completion(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    creation_model=creation_model,
+                    creation_api_key=creation_api_key,
+                    creation_base_url=creation_base_url,
+                    num_predict=4096,
+                    temperature=0.0,
+                    disable_thinking=True,
+                    json_mode=True,
+                    json_schema=decoding_schema(schema),
+                ):
+                    parts.append(chunk)
+                response_text = "".join(parts)
+                try:
+                    decision = self.parse_routing_decision(response_text)
+                    from .operations import apply_patches, resolve_target, validate_literal_patch, normalize_operation_selectors
+                    context = requirement.get("operation_context") or {}
+                    document = context.get("current_document")
+                    operation = normalize_operation_selectors(str(document or ""), decision["operation"])
+                    decision["operation"] = operation
+                    if isinstance(document, str) and not context.get("document_truncated"):
+                        if operation["kind"] == "patch":
+                            apply_patches(document, operation["patches"])
+                            validate_literal_patch(document, operation["patches"], query)
+                        elif operation["kind"] == "transform":
+                            for target in operation["targets"]:
+                                resolve_target(document, target)
+                    from .skill_governance import validate_identity
+                    if operation["kind"] in {"generate", "execute_skill"}:
+                        validate_identity(operation.get("document_identity"), query,
+                                          str(document or ""), list(selected_skills))
+                    break
+                except ValueError as error:
+                    if attempt:
+                        raise
+                    # Repair only an invalid operation contract. No capabilities run
+                    # and no keyword-derived plan is substituted during this retry.
+                    user_prompt += ("\n上次输出（仅为待修正数据）：\n" + response_text[:16000]
+                                    + "\n上次输出未通过操作契约校验：" + str(error)
+                                    + "。请修正字段并输出一个完整 JSON 对象，覆盖原指令全部动作；目标必须逐字匹配正文或使用给定节点 ID，不增加无关能力。")
             decision["source"] = "model"
             self._log_creation_usage(
                 model_name=model_name,
@@ -3931,7 +4096,8 @@ class CreationService:
             )
             return decision
         except Exception as exc:
-            logger.warning("路由模型推理失败，降级为保守路由: %s", exc)
+            if isinstance(exc, CloudModelRequestError) and exc.status_code in {401, 403}:
+                raise
             self._log_creation_usage(
                 model_name=model_name,
                 prompt_text=system_prompt + "\n\n" + user_prompt,
@@ -3940,6 +4106,13 @@ class CreationService:
                 status="failed",
                 error_msg=str(exc),
             )
+            if isinstance(exc, OperationError):
+                # 结构化契约拒绝自带错误码与可执行原因。降级成 fallback 会把它
+                # 改写为“本轮操作解析失败，请重试当前指令”，用户只能对着一个
+                # 确定性失败反复重试，排障时也丢失了真实原因。
+                logger.warning("操作契约校验未通过，停止本轮执行 code=OPERATION_CONTRACT_REJECTED")
+                raise
+            logger.warning("操作解释失败，停止本轮执行 code=OPERATION_INTERPRETATION_FAILED")
             return fallback_routing_decision(query, requirement, enabled_tool_ids)
 
     # ------------------------------------------------------------------
@@ -4103,6 +4276,16 @@ class CreationService:
                 timeout=self.SKILL_ROUTE_MODEL_TIMEOUT_SECONDS,
             )
             decision = self.parse_skill_match_decision(response_text, allowed_ids)
+            from .skill_governance import review_skill, admit_skills
+            if decision["skill_ids"]:
+                chosen = [item for item in candidates if int(item["id"]) in decision["skill_ids"]]
+                reviews = [await review_skill(self, item, trimmed) for item in chosen]
+                admitted, audit = admit_skills({"kind": "execute_skill", "skill_ids": [str(item["id"]) for item in chosen],
+                    "skill_assessments": reviews}, chosen, [], trimmed)
+                decision["skill_ids"] = [int(value) for value in admitted.get("skill_ids", [])]
+                if not decision["skill_ids"]:
+                    decision["reasoning"] = "技能适用性未通过独立核验"
+
             decision["source"] = "model"
             latency_ms = int(time.time() * 1000) - started_ms
             self._log_creation_usage(
@@ -4125,13 +4308,7 @@ class CreationService:
                 "model_timeout" if isinstance(exc, asyncio.TimeoutError)
                 else "model_failed"
             )
-            logger.warning(
-                "技能召回模型推理失败，降级为空召回 reason=%s candidates=%d latency_ms=%d error=%s",
-                fallback_reason,
-                len(candidates),
-                latency_ms,
-                exc,
-            )
+            logger.warning("技能召回模型推理失败，降级为空召回 candidates=%d latency_ms=%d code=SKILL_RECALL_FAILED", len(candidates), latency_ms)
             self._log_creation_usage(
                 model_name=model_name,
                 prompt_text=system_prompt + "\n\n" + user_prompt,
@@ -4154,6 +4331,8 @@ class CreationService:
         creation_model: Optional[str] = None,
         creation_api_key: Optional[str] = None,
         creation_base_url: Optional[str] = None,
+        json_mode: bool = False,
+        json_schema: Optional[dict] = None,
     ) -> str:
         """执行一个需要模型推理的专业子 Agent，并返回可写回环境的结论。
 
@@ -4168,15 +4347,17 @@ class CreationService:
             parts: list[str] = []
             started_ms = int(time.time() * 1000)
             try:
-                async for chunk in self._stream_direct_completion(
+                async for chunk in self._stream_complete_agent_output(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     creation_model=creation_model,
                     creation_api_key=creation_api_key,
                     creation_base_url=creation_base_url,
-                    num_predict=1600,
-                    temperature=0.25,
+                    num_predict=8192 if json_mode else 1600,
+                    temperature=0.0 if json_mode else 0.25,
                     disable_thinking=True,
+                    json_mode=json_mode,
+                    **({"json_schema": json_schema} if json_schema is not None else {}),
                 ):
                     parts.append(chunk)
                 result = "".join(parts).strip()
@@ -4200,7 +4381,8 @@ class CreationService:
                     error_msg=str(exc),
                 )
                 if attempt < max_attempts and (
-                    not "".join(parts).strip() or _is_retryable_model_transport(exc)
+                    (not "".join(parts).strip() and not isinstance(exc, CloudModelRequestError))
+                    or _is_retryable_model_transport(exc)
                 ):
                     logger.warning(
                         "子 Agent %s 遇到可重试故障（空输出或传输中断 %s），丢弃部分输出重试: attempt=%s",
@@ -4232,7 +4414,7 @@ class CreationService:
             parts: list[str] = []
             started_ms = int(time.time() * 1000)
             try:
-                async for chunk in self._stream_direct_completion(
+                async for chunk in self._stream_complete_agent_output(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     creation_model=creation_model,
@@ -4264,7 +4446,11 @@ class CreationService:
                     status="failed",
                     error_msg=str(exc),
                 )
-                if attempt < max_attempts and not "".join(parts).strip():
+                if (
+                    attempt < max_attempts
+                    and not "".join(parts).strip()
+                    and (not isinstance(exc, CloudModelRequestError) or _is_retryable_model_transport(exc))
+                ):
                     logger.warning(
                         "子 Agent %s 流式输出为空（推理可能被抢占中断），重试: attempt=%s",
                         agent_id,
@@ -4283,7 +4469,7 @@ class CreationService:
         creation_base_url: Optional[str] = None,
     ) -> AsyncIterator[str]:
         """执行文档撰写 Agent，并把最终文档按块返回。"""
-        async for chunk in self._stream_direct_completion(
+        async for chunk in self._stream_complete_agent_output(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             creation_model=creation_model,
@@ -4291,8 +4477,69 @@ class CreationService:
             creation_base_url=creation_base_url,
             num_predict=8192,
             temperature=0.55,
+            disable_thinking=True,
         ):
             yield chunk
+
+    async def _stream_complete_agent_output(self, **kwargs) -> AsyncIterator[str]:
+        """Commit one complete candidate, never concatenate truncated attempts.
+
+        Local analysis and document nodes share bounded budget recovery. Buffering
+        keeps a discarded attempt out of document.delta and Skill previews. The
+        transport parser remains strict, including at the final budget ceiling.
+        JSON is regenerated in full instead of trying to splice partial objects.
+        """
+        from .operations import OperationError
+
+        initial_budget = int(kwargs["num_predict"])
+        ceiling = max(initial_budget, 16384)
+        budget = initial_budget
+        # 文档与本地分析节点以同一通道输出。不给它们记用量就无法在事后
+        # 区分“模型真的只写这么短”与“输入太长把输出空间挤空”，只能猜。
+        started_ms = int(time.time() * 1000)
+        prompt_text = str(kwargs.get("system_prompt") or "") + "\n\n" + str(kwargs.get("user_prompt") or "")
+        model_name = str(kwargs.get("creation_model") or getattr(self, "model", "") or "")
+
+        def record_output_usage(status: str, response_text: str, error_msg: Optional[str] = None) -> None:
+            # 轻量测试替身与外部创作节点可以只实现传输函数，不带用量埋点能力。
+            recorder = getattr(self, "_log_creation_usage", None)
+            if not callable(recorder):
+                return
+            recorder(
+                model_name=model_name,
+                prompt_text=prompt_text,
+                response_text=response_text,
+                latency_ms=int(time.time() * 1000) - started_ms,
+                status=status,
+                error_msg=error_msg,
+            )
+
+        attempts = 0
+        while True:
+            attempts += 1
+            parts = []
+            try:
+                async for chunk in self._stream_direct_completion(
+                    **dict(kwargs, num_predict=budget)
+                ):
+                    parts.append(chunk)
+            except OperationError as exc:
+                record_output_usage(
+                    "failed",
+                    "".join(parts),
+                    "{} budget={} attempts={}".format(exc.code, budget, attempts),
+                )
+                if (exc.code != "CREATION_DOCUMENT_TRUNCATED"
+                        or budget >= ceiling
+                        or kwargs.get("creation_api_key")):
+                    raise
+                budget = min(ceiling, budget * 4)
+                logger.info("Creation output budget exhausted; regenerating candidate budget=%s", budget)
+                continue
+            record_output_usage("success", "".join(parts))
+            for chunk in parts:
+                yield chunk
+            return
 
     async def _stream_direct_completion(
         self,
@@ -4306,12 +4553,13 @@ class CreationService:
         temperature: float,
         disable_thinking: bool = False,
         json_mode: bool = False,
+        json_schema: Optional[dict] = None,
     ) -> AsyncIterator[str]:
         """统一子 Agent 的本地/自带密钥模型调用，不包含 RAG 等上层编排。
 
         disable_thinking 仅供明确要求快速结构化输出的调用方使用：Qwen3.5
         默认进入思考模式，长上下文下思考可能占满 num_predict 预算导致正文为 0，
-        此时用 /no_think 指令关闭思考。Skill 路由显式保留思考模式。
+        此时使用 chat template 的非思考前缀。Skill 路由显式保留思考模式。
 
         json_mode 仅用于调用方后续会严格校验的 JSON 协议输出；本地 Ollama
         会在解码阶段约束语法，避免小模型因缺逗号或冒号导致整个业务请求失败。
@@ -4330,14 +4578,11 @@ class CreationService:
         local_model = creation_model or self.model
         is_qwen35 = "qwen3.5" in local_model.lower()
         if is_qwen35:
-            effective_user_prompt = user_prompt
-            if disable_thinking:
-                effective_user_prompt = (
-                    f"{user_prompt}\n/no_think\n直接输出结果，不要输出思考过程。"
-                )
             payload = {
                 "model": local_model,
-                "prompt": self._build_qwen35_prompt(system_prompt, effective_user_prompt),
+                "prompt": self._build_qwen35_prompt(
+                    system_prompt, user_prompt, disable_thinking=disable_thinking
+                ),
                 "raw": True,
                 "stream": True,
                 "options": {
@@ -4363,10 +4608,17 @@ class CreationService:
             }
             endpoint = "/api/chat"
 
-        if json_mode:
-            payload["format"] = "json"
+        if json_mode or json_schema:
+            payload["format"] = json_schema or "json"
+            # Extraction must copy identifiers and exact document spans faithfully;
+            # creative repetition penalties work against structured decisions.
+            payload["options"]["repeat_penalty"] = 1.0
+            payload["options"]["presence_penalty"] = 0.0
 
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        # Loopback model traffic must reach the local runtime directly. Environment
+        # proxies may alter/drop structured output and cannot own this connection.
+        loopback = urlparse(self.ollama_base_url).hostname in {"localhost", "127.0.0.1", "::1"}
+        async with httpx.AsyncClient(timeout=300.0, trust_env=not loopback) as client:
             async with client.stream(
                 "POST", f"{self.ollama_base_url}{endpoint}", json=payload
             ) as response:
@@ -4383,6 +4635,7 @@ class CreationService:
                             data = json.loads(line)
                         except json.JSONDecodeError:
                             continue
+                        require_complete_generation(data)
                         content = data.get("message", {}).get("content", "")
                         if content:
                             yield content
@@ -4415,7 +4668,7 @@ class CreationService:
             parsed["analysis_mode"] = "local_model"
             return parsed
         except Exception as exc:
-            logger.warning("本地模型提炼技能失败，使用规则分析: %s", exc)
+            logger.warning("本地模型提炼技能失败，使用规则分析 code=SKILL_EXTRACTION_FAILED")
             fallback = self._fallback_creation_skill_analysis(
                 title, style_content, doc_type
             )
@@ -4530,6 +4783,9 @@ class CreationService:
 {content}
 
 Skill 命名与简介原则：
+- 名称、自描述的产物类型和实际步骤必须范围一致。不得把狭窄的技术工作流声明为通用业务方案。
+- skill_description.applicability 声明 version=1、use_when、not_for、required_inputs、output_structure；每个列表按真实适用边界填写。
+- execution_steps.output_role 区分 process（过程资料）、section（最终章节）、document（完整文档）；不要把收集资料、审校等步骤名当作最终文档章节。
 - 标题要高度概括可复用的工作场景和交付目标，而不是复述源文档标题。
 - 标题中禁止出现具体公司、部门、事业部、团队、项目、产品、客户或人员名称。
 - 标题优先使用“适用场景 + 文档/方案/报告”的形式，例如源文档来自某研发部门的技术沟通会时，写成“跨部门技术沟通会文档”。
@@ -4869,7 +5125,15 @@ JSON 类型硬约束：
             ]
             return cls._distinct_skill_items(cleaned, maximum_items) or list(fallback_items)
 
+        applicability = raw.get("applicability")
+        scope = {}
+        if isinstance(applicability, dict) and applicability.get("version") == 1:
+            keys = ("use_when", "not_for", "required_inputs", "output_structure")
+            if all(isinstance(applicability.get(key), list) for key in keys):
+                scope = {"applicability": {"version": 1, **{key: [str(item)[:1000] for item in applicability[key][:24]
+                                                               if isinstance(item, str) and item.strip()] for key in keys}}}
         return {
+            **scope,
             "purpose": clean_text(raw.get("purpose"), str(fallback["purpose"]), 1200),
             "document_types": clean_items("document_types", 12, 120),
             "problems": clean_items("problems", 12, 240),
@@ -4944,6 +5208,7 @@ JSON 类型硬约束：
             agents = agents[: max(0, 4 - len(tools))]
             normalized.append(
                 {
+                    **({"output_role": item["output_role"]} if item.get("output_role") in {"process", "section", "document"} else {}),
                     "id": step_id,
                     "title": title,
                     "objective": objective,
@@ -6173,7 +6438,7 @@ flowchart LR
                 db_path=self.db_path,
             )
         except Exception as exc:
-            logger.warning("创作 token 用量埋点失败: %s", exc)
+            logger.warning("创作 token 用量埋点失败 code=USAGE_WRITE_FAILED")
 
     async def _generate_cloud(
         self,
@@ -6239,6 +6504,7 @@ flowchart LR
                             break
                         try:
                             data = json.loads(data_str)
+                            require_complete_generation(data)
                             if data.get("type") == "content_block_delta":
                                 text = data.get("delta", {}).get("text", "")
                                 if text:
@@ -6274,6 +6540,7 @@ flowchart LR
                             break
                         try:
                             data = json.loads(data_str)
+                            require_complete_generation(data)
                             content = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
                             if content:
                                 yield content
@@ -6407,9 +6674,13 @@ flowchart LR
         看步骤自身主题，否则背景里其他章节的实体会劫持当前步骤的层级
         排序。缺省时退回全文。
         """
-        text = user_prompt.strip()
+        # 需求画像全部派生自这段文本；@能力名 只是执行标记，不参与主题、关键词与实体。
+        text = strip_capability_mentions(user_prompt)
         doc_type = options.doc_type.strip() or self._infer_doc_type(text)
-        audience = options.audience.strip() or self._infer_audience(text)
+        # A mentioned person or organisation is not necessarily the audience.
+        # Preserve explicit settings; the original request remains available
+        # to interpret any reader instructions without an invented default.
+        audience = options.audience.strip()
         keywords = self._extract_keywords(text)
         time_context = self._relative_time_context(text)
         coverage_contract = self._enumerated_coverage_contract(text)
@@ -6617,7 +6888,7 @@ flowchart LR
             # Agent/模型等候选必须与普通词一样先经过语料泛化度判定。
             return build_artifact_query_plan(conn.cursor(), query)
         except sqlite3.Error as exc:
-            logger.debug("创作检索计划语料统计失败，降级为词面计划: %s", exc)
+            logger.debug("创作检索计划语料统计失败，降级为词面计划 code=CORPUS_STATS_FAILED")
             return None
         finally:
             conn.close()
@@ -7343,7 +7614,7 @@ flowchart LR
                         ).fetchone()[0]
                     )
                 except sqlite3.Error as exc:
-                    logger.debug("实体语料证据查询跳过 %s: %s", table, exc)
+                    logger.debug("实体语料证据查询跳过 %s code=ENTITY_QUERY_FAILED", table)
             return {
                 "mention_count": mention_count,
                 "strong_mention_count": strong_count,
@@ -7393,7 +7664,7 @@ flowchart LR
                 options,
             )
         except Exception as exc:
-            logger.warning("关键词召回失败: %s", exc)
+            logger.warning("关键词召回失败 code=KEYWORD_RECALL_FAILED")
             keyword_rows = []
 
         # 路径2: 向量召回。语义查询只保留需求解析后的主题词，避免 Skill、
@@ -7408,14 +7679,14 @@ flowchart LR
                     options.max_references * 2,
                 )
             except Exception as exc:
-                logger.warning("向量召回失败: %s", exc)
+                logger.warning("向量召回失败 code=VECTOR_RECALL_FAILED")
             try:
                 semantic_seed_rows = self._query_semantic_seed_rows(
                     parsed_requirement,
                     options,
                 )
             except Exception as exc:
-                logger.warning("跨记忆域语义候选加载失败: %s", exc)
+                logger.warning("跨记忆域语义候选加载失败 code=SEMANTIC_CANDIDATES_FAILED")
 
         # 合并去重。保留每条候选的召回路径，方便解释高分来自词面还是语义。
         merged_by_id: dict[str, dict] = {}
@@ -7437,13 +7708,15 @@ flowchart LR
                 continue
             merged_by_id[identity] = self._merge_origin_rows(existing, candidate)
         merged_rows = list(merged_by_id.values())
+        shell_count = sum(self._is_document_shell_row(row) for row in merged_rows)
+        merged_rows = [row for row in merged_rows if not self._is_document_shell_row(row)]
 
         if not merged_rows:
             parsed_requirement["retrieval_diagnostics"] = {
-                "candidate_count": 0,
+                "candidate_count": shell_count,
                 "eligible_count": 0,
                 "selected_count": 0,
-                "filter_counts": {},
+                "filter_counts": {"document_shell": shell_count} if shell_count else {},
             }
             return []
 
@@ -7472,7 +7745,7 @@ flowchart LR
         max_usage = max(int(row.get("usage_count") or 0) for row in merged_rows) or 1
         now_ms = int(time.time() * 1000)
         refs: list[ReferenceDocument] = []
-        filter_counts: dict[str, int] = {}
+        filter_counts: dict[str, int] = {"document_shell": shell_count} if shell_count else {}
 
         def record_filter(reason: str) -> None:
             filter_counts[reason] = filter_counts.get(reason, 0) + 1
@@ -7599,6 +7872,11 @@ flowchart LR
                     reason=reason,
                     source_type=str(row.get("source_type") or "document"),
                     source_id=int(row.get("source_id") or row["id"]),
+                    source_snapshot_id=row.get("source_snapshot_id"),
+                    refresh_completeness=str(row.get("source_completeness") or "unverified"),
+                    source_body_hash=hashlib.sha256(
+                        str(row.get("full_content") or "").encode("utf-8")
+                    ).hexdigest(),
                     observed_at=(
                         int(row.get("observed_at"))
                         if row.get("observed_at") is not None
@@ -7654,7 +7932,7 @@ flowchart LR
             if not item.selection_reasons:
                 item.selection_reasons = ("global_rank",)
         parsed_requirement["retrieval_diagnostics"] = {
-            "candidate_count": len(merged_rows),
+            "candidate_count": len(merged_rows) + shell_count,
             "eligible_count": len(refs),
             "selected_count": len(selected),
             "filter_counts": filter_counts,
@@ -7818,7 +8096,7 @@ flowchart LR
             )
         except Exception as exc:
             # 单个记忆域迁移未完成时，不能让它拖垮其余三个域的召回。
-            logger.warning("文档记忆召回失败，继续检索其他记忆域: %s", exc)
+            logger.warning("文档记忆召回失败，继续检索其他记忆域 code=DOCUMENT_RECALL_FAILED")
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
@@ -7868,11 +8146,7 @@ flowchart LR
                 try:
                     rows.extend(query_domain())
                 except Exception as exc:
-                    logger.warning(
-                        "%s记忆召回失败，继续使用其他记忆域: %s",
-                        domain_name,
-                        exc,
-                    )
+                    logger.warning("%s记忆召回失败，继续使用其他记忆域 code=MEMORY_DOMAIN_RECALL_FAILED", domain_name)
         finally:
             conn.close()
         return rows
@@ -8120,11 +8394,17 @@ flowchart LR
         )
         importance = "COALESCE(importance, 3)" if "importance" in columns else "3"
         verified = "COALESCE(user_verified, 0)" if "user_verified" in columns else "0"
+        raw_content = "COALESCE(content, '')" if "content" in columns else "''"
+        detail_content = (
+            "COALESCE(detailed_content, '')" if "detailed_content" in columns else "''"
+        )
         rows = conn.execute(
             f"""
             SELECT id, title, '{source_type}' AS doc_type,
                    COALESCE(summary, '') AS summary,
                    {full_content} AS full_content,
+                   {raw_content} AS _artifact_content,
+                   {detail_content} AS _artifact_detailed_content,
                    '[]' AS sections_json, '[]' AS style_phrases,
                    '' AS prompt_hint, 0 AS usage_count,
                    CASE WHEN {verified} = 1 THEN 'verified' ELSE 'auto_created' END
@@ -8144,7 +8424,34 @@ flowchart LR
                 max(options.max_references * 20, 200),
             ],
         ).fetchall()
-        return [dict(row) for row in rows]
+        result = []
+        for row in rows:
+            item = dict(row)
+            content = item.pop("_artifact_content")
+            details = item.pop("_artifact_detailed_content")
+            # Knowledge persistence stores its provenance envelope in content;
+            # the user's readable body lives in detailed_content. Decode only
+            # that known envelope contract, leaving ordinary business JSON and
+            # SOP step payloads intact.
+            if source_type == "knowledge" and self._is_knowledge_metadata_envelope(content):
+                item["full_content"] = details.strip() or item["summary"].strip()
+            result.append(item)
+        return result
+
+    @staticmethod
+    def _is_knowledge_metadata_envelope(content: str) -> bool:
+        try:
+            value = json.loads(content)
+        except (TypeError, ValueError):
+            return False
+        return (
+            isinstance(value, dict)
+            and value.get("creation_mode") == "llm_bake"
+            and isinstance(value.get("generation_version"), str)
+            and isinstance(value.get("source_timeline_id"), int)
+            and isinstance(value.get("source_memory_ids"), list)
+            and isinstance(value.get("source_capture_ids"), list)
+        )
 
     def _query_data_memory_rows(
         self,
@@ -8365,14 +8672,8 @@ flowchart LR
 
     @staticmethod
     def _canonical_memory_url(value: str) -> str:
-        try:
-            parsed = urlparse(value)
-        except ValueError:
-            return value.strip().lower()
-        if not parsed.netloc:
-            return value.strip().lower()
-        path = (parsed.path or "/").rstrip("/") or "/"
-        return f"{parsed.netloc.lower()}{path.lower()}"
+        from embedding.document_chunks import _canonicalize_url
+        return _canonicalize_url(value) or value.strip()
 
     async def collect_web_context(
         self,
@@ -8396,7 +8697,7 @@ flowchart LR
                     else:
                         found = await self._search_duckduckgo(query)
                 except Exception as exc:
-                    logger.warning("互联网检索失败 engine=%s query=%s error=%s", engine, query, exc)
+                    logger.warning("互联网检索失败 engine=%s code=WEB_SEARCH_FAILED", engine)
                     continue
                 if found:
                     results.extend(found)
@@ -8423,7 +8724,7 @@ flowchart LR
             for item in (parsed_requirement.get("keywords") or [])
             if str(item).strip()
         ]
-        topic = str(parsed_requirement.get("topic") or user_prompt).strip()
+        topic = strip_capability_mentions(str(parsed_requirement.get("topic") or user_prompt))
         query = " ".join([*keywords[:5], topic[:80]]).strip()[:220]
         if not query:
             return []
@@ -8471,6 +8772,7 @@ flowchart LR
             )
         return results
 
+    @audit_source_mismatches("creation")
     def _query_document_rows(
         self,
         user_prompt: str,
@@ -8478,34 +8780,38 @@ flowchart LR
         options: CreationOptions,
     ) -> list[dict]:
         term_specs = self._memory_term_specs(user_prompt, parsed_requirement)
-        expression = (
-            "LOWER(COALESCE(title, '') || ' ' || COALESCE(summary, '') || ' ' || "
-            "COALESCE(full_content, '') || ' ' || COALESCE(prompt_hint, ''))"
-        )
-        where, params, candidate_score, score_params = self._weighted_like_query(
-            expression,
-            term_specs,
-        )
-        # 正文与摘要都为空的占位文档没有可引用内容，不能作为创作
-        # 参考；同源原始采集会在后续仲裁中充当替身。
-        clauses: list[str] = [
-            "deleted_at IS NULL",
-            "(COALESCE(full_content, '') <> '' OR COALESCE(summary, '') <> '')",
-        ]
-        clauses.append(where)
-
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
             # status 是后迁移加的列，老库可能缺失，先探测再拼 SQL。
+            conn.execute("BEGIN")
             columns = self._table_columns(conn, "bake_documents")
+            from embedding.document_source import source_summary_select
+            summary_expr = source_summary_select(conn, "bake_documents")
+            expression = (
+                f"LOWER(COALESCE(title, '') || ' ' || COALESCE({summary_expr}, '') || ' ' || "
+                "COALESCE(full_content, '') || ' ' || COALESCE(prompt_hint, ''))"
+            )
+            where, params, candidate_score, score_params = self._weighted_like_query(
+                expression,
+                term_specs,
+            )
+            # 正文与摘要都为空的占位文档没有可引用内容，不能作为创作
+            # 参考；同源原始采集会在后续仲裁中充当替身。
+            clauses: list[str] = [
+                "deleted_at IS NULL",
+                f"(COALESCE(full_content, '') <> '' OR COALESCE({summary_expr}, '') <> '')",
+            ]
+            clauses.append(where)
             bake_status_expr = (
                 "COALESCE(status, 'draft')" if "status" in columns else "'draft'"
             )
             sql = f"""
-                SELECT id, title, doc_type, summary, full_content, sections_json, style_phrases,
+                SELECT id, title, doc_type, {summary_expr} AS summary, full_content, sections_json, style_phrases,
                        prompt_hint, usage_count, review_status, updated_at, source_url,
                        {bake_status_expr} AS bake_status,
+                       {self._source_snapshot_select(conn)} AS source_snapshot_id,
+                       {self._source_snapshot_select(conn, 'completeness_status')} AS source_completeness,
                        'document' AS source_type, id AS source_id, updated_at AS observed_at
                 FROM bake_documents
                 WHERE {' AND '.join(clauses)}
@@ -8519,28 +8825,39 @@ flowchart LR
             ]
             rows = [dict(row) for row in conn.execute(sql, query_params).fetchall()]
             if rows:
+                record_unverified_heads(conn, rows)
                 return rows
-            return [
+            rows = [
                 dict(row)
                 for row in conn.execute(
                     f"""
-                    SELECT id, title, doc_type, summary, full_content, sections_json, style_phrases,
+                    SELECT id, title, doc_type, {summary_expr} AS summary, full_content, sections_json, style_phrases,
                            prompt_hint, usage_count, review_status, updated_at, source_url,
                            {bake_status_expr} AS bake_status,
+                           {self._source_snapshot_select(conn)} AS source_snapshot_id,
+                           {self._source_snapshot_select(conn, 'completeness_status')} AS source_completeness,
                            'document' AS source_type, id AS source_id,
                            updated_at AS observed_at
                     FROM bake_documents
                     WHERE deleted_at IS NULL
-                      AND (COALESCE(full_content, '') <> '' OR COALESCE(summary, '') <> '')
+                      AND (COALESCE(full_content, '') <> '' OR COALESCE({summary_expr}, '') <> '')
                     ORDER BY usage_count DESC, updated_at DESC, id DESC
                     LIMIT ?
                     """,
                     (max(options.max_references * 3, 12),),
                 ).fetchall()
             ]
+            record_unverified_heads(conn, rows)
+            return rows
         finally:
             conn.close()
 
+    @staticmethod
+    def _source_snapshot_select(conn: sqlite3.Connection, field: str = "id") -> str:
+        from embedding.document_source import source_snapshot_select
+        return source_snapshot_select(conn, "bake_documents", field)
+
+    @audit_source_mismatches("creation")
     def _vector_recall(self, query: str, limit: int = 10) -> list[dict]:
         """向量召回：通过embedding相似度召回文档。"""
         if not self._embedding_model:
@@ -8550,14 +8867,19 @@ flowchart LR
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
+            conn.execute("BEGIN")
             columns = self._table_columns(conn, "bake_documents")
+            from embedding.document_source import source_summary_select
+            summary_expr = source_summary_select(conn, "bake_documents")
             bake_status_expr = (
                 "COALESCE(status, 'draft')" if "status" in columns else "'draft'"
             )
             select_fields = (
-                "id, title, doc_type, summary, full_content, sections_json, "
+                f"id, title, doc_type, {summary_expr} AS summary, full_content, sections_json, "
                 "style_phrases, prompt_hint, usage_count, review_status, "
-                f"updated_at, source_url, {bake_status_expr} AS bake_status"
+                f"updated_at, source_url, {bake_status_expr} AS bake_status, "
+                f"{self._source_snapshot_select(conn)} AS source_snapshot_id, "
+                f"{self._source_snapshot_select(conn, 'completeness_status')} AS source_completeness"
             )
             rows = [
                 dict(row)
@@ -8578,7 +8900,7 @@ flowchart LR
             if extra_terms:
                 expression = (
                     "LOWER(COALESCE(title, '') || ' ' || "
-                    "COALESCE(summary, '') || ' ' || COALESCE(full_content, ''))"
+                    f"COALESCE({summary_expr}, '') || ' ' || COALESCE(full_content, ''))"
                 )
                 term_specs = [
                     (term, float(len(extra_terms) - index))
@@ -8604,11 +8926,15 @@ flowchart LR
                         rows.append(item)
                         existing_ids.add(item["id"])
 
+            record_unverified_heads(conn, rows)
+            conn.rollback()  # Release the read snapshot before model work.
             if not rows:
                 return []
 
             documents: list[tuple[dict, str]] = []
             for row in rows:
+                if self._is_document_shell_row(dict(row)):
+                    continue
                 text = (row["summary"] or "") + "\n" + (row["full_content"] or "")[:500]
                 if not text.strip():
                     continue
@@ -8621,7 +8947,7 @@ flowchart LR
                     [query, *[text for _, text in documents]]
                 )
             except Exception as exc:
-                logger.error("生成召回向量失败: %s", exc)
+                logger.error("生成召回向量失败 code=RECALL_EMBEDDING_FAILED")
                 return []
             if len(embeddings) != len(documents) + 1:
                 logger.warning("向量后端返回数量与文档候选不一致")
@@ -8685,11 +9011,21 @@ flowchart LR
         ]
         if keywords:
             return " ".join(keywords)
-        topic = str(parsed_requirement.get("topic") or "").strip()
-        return topic or " ".join(user_prompt.split()).strip()
+        topic = strip_capability_mentions(str(parsed_requirement.get("topic") or ""))
+        return topic or strip_capability_mentions(" ".join(user_prompt.split()))
+
+    @staticmethod
+    def _is_document_shell_row(row: dict) -> bool:
+        # Judge the source body alone: a fluent generated summary cannot prove
+        # that the underlying page loaded. Other memory domains have their own gates.
+        return str(row.get("source_type") or "document") in ("document", "pending_document") and is_document_shell(
+            str(row.get("full_content") or "")
+        )
 
     @staticmethod
     def _semantic_row_text(row: dict) -> str:
+        if CreationService._is_document_shell_row(row):
+            return ""
         head = [
             str(row.get(key) or "").strip()
             for key in ("title", "doc_type", "summary", "prompt_hint")
@@ -8740,7 +9076,7 @@ flowchart LR
         try:
             embeddings = model.encode([query, *[text for _, text in candidates]])
         except Exception as exc:
-            logger.warning("跨记忆域语义重排失败，保留关键词排序: %s", exc)
+            logger.warning("跨记忆域语义重排失败，保留关键词排序 code=SEMANTIC_RERANK_FAILED")
             return
         if len(embeddings) != len(candidates) + 1:
             logger.warning("语义重排向量数量与候选数量不一致，保留关键词排序")
@@ -8763,7 +9099,8 @@ flowchart LR
         return dot / (norm1 * norm2)
 
     def _build_search_queries(self, user_prompt: str, parsed_requirement: dict) -> list[str]:
-        topic = parsed_requirement.get("topic") or user_prompt
+        # 调用方可能传入原始指令，检索词只描述业务主题。
+        topic = strip_capability_mentions(parsed_requirement.get("topic") or user_prompt)
         doc_type = parsed_requirement.get("doc_type") or ""
         keywords = " ".join((parsed_requirement.get("keywords") or [])[:4])
         base = " ".join(part for part in [topic, doc_type, keywords] if part)
@@ -8966,13 +9303,19 @@ flowchart LR
 
         return "\n".join(blocks)
 
-    def _build_qwen35_prompt(self, system_prompt: str, user_message: str) -> str:
+    def _build_qwen35_prompt(
+        self, system_prompt: str, user_message: str, disable_thinking: bool = False
+    ) -> str:
         """构建 Qwen3.5 的 raw 模式 prompt，使用官方 chat template。"""
-        return (
+        prompt = (
             f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
             f"<|im_start|>user\n{user_message}<|im_end|>\n"
             f"<|im_start|>assistant\n"
         )
+        # Qwen3.5's template hard switch; /no_think text alone is not reliable.
+        if disable_thinking:
+            prompt += "<think>\n\n</think>\n\n"
+        return prompt
 
     async def _stream_qwen35_raw(self, response):
         """解析 Qwen3.5 raw 模式的流式响应，过滤 <think> 标签内的内容。"""
@@ -8986,6 +9329,7 @@ flowchart LR
                 data = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            require_complete_generation(data)
             text = data.get("response", "")
             if not text:
                 continue
@@ -9093,13 +9437,8 @@ flowchart LR
             ),
         }
 
-    def _infer_audience(self, text: str) -> str:
-        for audience in ["政府", "企业管理人员", "客户", "研发团队", "运维人员", "销售", "领导"]:
-            if audience in text:
-                return audience
-        return "业务与技术相关人员"
-
     def _infer_topic(self, text: str) -> str:
+        text = strip_capability_mentions(text)
         match = re.search(r'[《“""]([^》”""]{2,60})[》”""]', text)
         if match:
             return match.group(1)
@@ -9118,7 +9457,7 @@ flowchart LR
     def _extract_keywords(self, text: str) -> list[str]:
         # @Skill/@Tool 名称是执行指令，不是事实主题。先去掉这些包装，再保留
         # 步骤 objective 中真正的数据对象；否则长 Skill 名会占满前 12 个词。
-        text_clean = re.sub(r"@[A-Za-z0-9_\-\u4e00-\u9fff]+", " ", text)
+        text_clean = strip_capability_mentions(text)
         text_clean = re.sub(
             r"(?i:\btool\b)|(?:请|帮我|帮忙|给我|写一份|生成(?:一份|一下|下)?|撰写|"
             r"输出|制作|创作(?:一份|一下|下)?|使用|用|工具获取|获取|工具)",
@@ -9622,6 +9961,10 @@ flowchart LR
         )
 
     def _score_quality(self, row: dict) -> float:
+        if row.get("source_snapshot_id") and row.get("source_completeness") == "complete":
+            # Verified original text is not lower quality because stale model
+            # summaries and template hints were cleared on source replacement.
+            return 1.0
         status = str(row.get("review_status") or "")
         bake_status = str(row.get("bake_status") or "")
         base = 0.55
@@ -9646,6 +9989,8 @@ flowchart LR
     DISTILLED_MEMORY_DOMAINS = {"knowledge", "operation", "data"}
 
     def _score_completeness(self, row: dict) -> float:
+        if row.get("source_snapshot_id") and row.get("source_completeness") == "complete":
+            return 1.0
         content_len = len(str(row.get("full_content") or ""))
         source_type = str(row.get("source_type") or "document")
         if source_type in self.DISTILLED_MEMORY_DOMAINS:

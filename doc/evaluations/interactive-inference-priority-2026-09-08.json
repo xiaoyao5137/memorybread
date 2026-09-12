@@ -1,0 +1,180 @@
+{
+  "status": "passed",
+  "date": "2026-09-08",
+  "scope": "interactive priority, preemption, cancellation and resumable background execution",
+  "tests": {
+    "python_interactive": {
+      "passed": 1382,
+      "warnings": 2,
+      "log": "entrypoints-complete-regression-final.log"
+    },
+    "python_transport_background": {
+      "passed": 409,
+      "skipped": 1,
+      "warnings": 2,
+      "log": "interruptible-inference-final-regression.log"
+    },
+    "python_suites_overlap": true,
+    "rust_creation_boundaries": 2,
+    "rust_creation_operations": 4,
+    "rust_brainstorm_transport": 3,
+    "rust_brainstorm_api": 21,
+    "rust_release_build": "passed",
+    "startup_freshness": "passed",
+    "shell_syntax": "passed",
+    "python39": {
+      "python": "3.9.25",
+      "files": [
+        "inference_queue.py",
+        "inference_transport.py",
+        "knowledge/extractor_v2.py",
+        "rag/llm/ollama.py",
+        "scheduled_task_executor.py",
+        "creation/app.py",
+        "model_api_server.py"
+      ],
+      "passed": true
+    },
+    "proposal_strict_audit": "passed"
+  },
+  "live_final_preemption": {
+    "synthetic": true,
+    "uses_production_machine_queue": true,
+    "phases": [
+      {
+        "phase": "prefill",
+        "requested_at": 1788845633.2561011,
+        "background_started_at": 1788845632.0388212,
+        "pid": 33956,
+        "admitted_at": 1788845633.363612,
+        "model_result": {
+          "chunks": 2,
+          "output_chars": 1,
+          "done": true,
+          "prompt_eval_count": 16,
+          "eval_count": 2,
+          "prompt_eval_duration": 65066999,
+          "eval_duration": 20507000
+        },
+        "completed_at": 1788845636.057878,
+        "preemption_ms": 47.54,
+        "p0_queue_ms": 107.51,
+        "p0_total_ms": 2801.78
+      },
+      {
+        "phase": "stream",
+        "requested_at": 1788845636.8082602,
+        "background_started_at": 1788845636.411857,
+        "pid": 34574,
+        "admitted_at": 1788845636.920725,
+        "model_result": {
+          "chunks": 2,
+          "output_chars": 1,
+          "done": true,
+          "prompt_eval_count": 16,
+          "eval_count": 2,
+          "prompt_eval_duration": 53738000,
+          "eval_duration": 18815000
+        },
+        "completed_at": 1788845637.215919,
+        "preemption_ms": 29.42,
+        "p0_queue_ms": 112.46,
+        "p0_total_ms": 407.66
+      }
+    ],
+    "background_resumed": true,
+    "demand_released": true
+  },
+  "live_routes": {
+    "local_consultation": {
+      "completed": true,
+      "headers_ms": 14.56,
+      "first_delta_ms": 4551.21,
+      "total_ms": 4589.89
+    },
+    "creation_generate": {
+      "completed": true,
+      "headers_ms": 21.27,
+      "first_content_ms": 24438.25,
+      "total_ms": 43036.57,
+      "acceptance": "stream delivery and completion, not content quality or latency benchmark"
+    },
+    "creation_cancel": {
+      "cancelled_at": 1788845826.04275,
+      "observed_actual_model_http_200": true,
+      "inflight_p0_before_cancel": true,
+      "next_p0_admitted_at": 1788845826.1560068,
+      "next_p0_answered": true,
+      "next_p0_queue_ms": 113.26,
+      "total_ms": 506.62,
+      "immediate_probe_demand_active": true,
+      "demand_released_after_probe_shutdown": true,
+      "settlement_checked_at": 1788845912.9204428,
+      "note": "The immediate sample raced the probe Future result with its own worker finally cleanup. The cancelled creation slot was already released, proven by the following P0 admission and completion; demand was checked again after probe shutdown."
+    }
+  },
+  "runtime": {
+    "core": {
+      "pid": 2128,
+      "started_at": 1788844522.973774,
+      "alive": true,
+      "health_http_status": 200
+    },
+    "sidecar": {
+      "pid": 32653,
+      "started_at": 1788845570.638924,
+      "alive": true
+    },
+    "model_api": {
+      "pid": 32671,
+      "started_at": 1788845571.491428,
+      "alive": true,
+      "health_http_status": 200
+    },
+    "creation": {
+      "pid": 32956,
+      "started_at": 1788845580.044855,
+      "alive": true,
+      "health_http_status": 200
+    },
+    "ollama": {
+      "pid": 83314,
+      "started_at": 1788775841.971427,
+      "alive": true
+    }
+  },
+  "source_sha256": {
+    "ai-sidecar/inference_queue.py": "2e3516c8568cd0866d14c27da3d3db9f16fe840d7e85b73b231b0d4ddf4e7632",
+    "ai-sidecar/inference_transport.py": "e416f98d47f7b482cf5224e433bfd784a1a2278a2548f593c09897955c4b2d45",
+    "ai-sidecar/creation/app.py": "b73d6dd4348535d7f4b81f7591bb43e912a715a091a9408c270e3dcc24aaebf7",
+    "ai-sidecar/model_api_server.py": "2c682ddcdf5bd4509233b6d4a3148b1d6da9e419767d3188774095e8bd2ef12c",
+    "ai-sidecar/knowledge/extractor_v2.py": "d4e9131778aafe8cd798326eb1674ee227fbe7a829e77c6ead8c9374186cddcf",
+    "ai-sidecar/rag/llm/ollama.py": "8a1b655779fe3499704383f775d2e04c63753c8a0d3d8d477b41b4a9f963ad57",
+    "ai-sidecar/scheduled_task_executor.py": "ad9ef09cd40ce2251c99d06f1a4ed11a1d915229d81a00b9cee82416397f3f25",
+    "core-engine/src/api/handlers/creation.rs": "f9303fd1dbddc3cfaa8d82a8e6732ca5d599bd86f2621dbf580898376c49b21c",
+    "start.sh": "cc9df6448c29578a2c9a83e359994c65e21c667187fdc656b22e16b6ab886338"
+  },
+  "original_session": {
+    "history_id": 153,
+    "compared_fields": [
+      "prompt",
+      "root_request",
+      "generated_content",
+      "creation_brief_json",
+      "brainstorm_revision",
+      "conversation_json",
+      "session_id"
+    ],
+    "unchanged": true,
+    "body_chars": 0,
+    "brainstorm_revision": null
+  },
+  "limits": [
+    "Synthetic queue preemption samples are not a latency SLA or evidence of long-context optimization.",
+    "Model backend logs confirm cancelled tasks stop processing before following model execution. HTTP close does not immediately interrupt an in-flight GPU kernel.",
+    "An initial consultation probe inherited existing cloud settings and received HTTP 403; explicit local rerun passed. Cloud availability not accepted.",
+    "Optional real-model data-facts test remains skipped.",
+    "Initial private probe setup failures and immediate-Future cleanup timing observations are retained in the private evidence directory."
+  ],
+  "private_evidence_directory": "/tmp/mb-interactive-priority-20260908"
+}

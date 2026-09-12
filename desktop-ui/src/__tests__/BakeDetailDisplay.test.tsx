@@ -1,11 +1,12 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ComponentProps } from 'react'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import BakeKnowledgeTab from '../components/bake/BakeKnowledgeTab'
 import BakeTemplatesTab from '../components/bake/BakeTemplatesTab'
 import BakeSopTab from '../components/bake/BakeSopTab'
 import BakeRichTextEditor from '../components/bake/BakeRichTextEditor'
+import { useAppStore } from '../store/useAppStore'
 import type { ArticleTemplate, BakeKnowledgeItem, SopCandidate } from '../types'
 import {
   DEFAULT_CREATION_SKILL_EXAMPLE_DOCUMENT,
@@ -132,6 +133,10 @@ const relatedSkill: LocalCreationSkill = {
 }
 
 describe('Bake 详情展示优化', () => {
+  beforeEach(() => {
+    useAppStore.setState({ debugModeEnabled: false })
+  })
+
   it('富文本编辑框保留标题、粗体和列表格式为 Markdown', () => {
     const onChange = vi.fn()
     render(<BakeRichTextEditor value="" onChange={onChange} ariaLabel="测试文档内容" />)
@@ -693,7 +698,19 @@ describe('Bake 详情展示优化', () => {
     />,
   )
 
+  it('刷新期间可取消本次任务且不修改原文', async () => {
+    useAppStore.setState({ debugModeEnabled: true })
+    const cancel = vi.fn().mockResolvedValue(undefined)
+    renderTemplatesTab({ templates: [{ ...template, fullContent: '取消不应清空的已有正文。' }], refreshingTemplateId: template.id, onCancelRefreshTemplate: cancel })
+    fireEvent.click(screen.getByRole('button', { name: '查看文档「周报模板」详情' }))
+    const drawer = screen.getByRole('dialog', { name: '周报模板' })
+    await userEvent.click(within(drawer).getByRole('button', { name: '取消本次刷新' }))
+    expect(cancel).toHaveBeenCalledWith(template.id)
+    expect(within(drawer).getByText('取消不应清空的已有正文。')).toBeInTheDocument()
+  })
+
   it('文档详情展示即时刷新字段，点击立即刷新调用刷新回调', async () => {
+    useAppStore.setState({ debugModeEnabled: true })
     const onRefreshTemplate = vi.fn().mockResolvedValue(undefined)
     const refreshTemplate = {
       ...template,
@@ -708,14 +725,147 @@ describe('Bake 详情展示优化', () => {
     const drawer = screen.getByRole('dialog', { name: '周报模板' })
     expect(within(drawer).getByText('即时刷新')).toBeInTheDocument()
     expect(within(drawer).getByText('自动判断')).toBeInTheDocument()
-    expect(within(drawer).getByText('FOCUS_POLICY_BLOCKED')).toBeInTheDocument()
+    expect(within(drawer).getByText('当前策略不允许切换到来源页面')).toBeInTheDocument()
     expect(within(drawer).getByText(/2026.*8.*20.*04:21:24/)).toBeInTheDocument()
+    const contentSection = within(drawer).getByText('文档内容').closest('.bake-knowledge-detail__section')
+    const refreshSection = within(drawer).getByText('即时刷新').closest('.bake-knowledge-detail__section')
+    expect(Boolean(contentSection && refreshSection
+      && (contentSection.compareDocumentPosition(refreshSection) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true)
 
     fireEvent.click(within(drawer).getByRole('button', { name: '立即刷新' }))
     await waitFor(() => expect(onRefreshTemplate).toHaveBeenCalledWith(template.id))
   })
 
-  it('无来源网址的文档不展示立即刷新按钮并提示无法刷新', () => {
+  it('来源提交暂停时展示明确原因并保留正文', () => {
+    useAppStore.setState({ debugModeEnabled: true })
+    renderTemplatesTab({ templates: [{ ...template, lastRefreshStatus: 'historical_only',
+      lastRefreshError: 'SOURCE_WRITES_PAUSED', fullContent: '可靠完整正文' }] })
+    fireEvent.click(screen.getByRole('button', { name: '查看文档「周报模板」详情' }))
+    expect(screen.getByText('来源写入已暂停，本次采集未更新正文')).toBeInTheDocument()
+    expect(within(screen.getByRole('dialog', { name: '周报模板' })).getByText('可靠完整正文')).toBeInTheDocument()
+  })
+
+  it.each(['需要保留的旧摘要', '', ' \n\t'])('旧摘要 %j 只在用户显式重建时提交当前版本', async (summary) => {
+    const regenerate = vi.fn().mockResolvedValue(true)
+    const old = { ...template, updatedAtMs: 123, summary,
+      summaryStatus: { state: 'unverified' as const, can_regenerate: true, attempts: 0, next_attempt_at_ms: 0 } }
+    renderTemplatesTab({ templates: [old], onRetrySummary: regenerate })
+    fireEvent.click(screen.getByRole('button', { name: '查看文档「周报模板」详情' }))
+    expect(regenerate).not.toHaveBeenCalled()
+    const drawer = screen.getByRole('dialog', { name: '周报模板' })
+    if (summary.trim()) expect(within(drawer).getByText(summary)).toBeInTheDocument()
+    await userEvent.click(within(drawer).getByRole('button', { name: '根据当前原文重新生成摘要' }))
+    expect(regenerate).toHaveBeenCalledWith(template.id, 123)
+  })
+
+  it('原文未核验时不提供旧摘要重建入口', () => {
+    renderTemplatesTab({ templates: [{ ...template,
+      summaryStatus: { state: 'unverified', can_regenerate: false, attempts: 0, next_attempt_at_ms: 0 } }],
+      onRetrySummary: vi.fn() })
+    fireEvent.click(screen.getByRole('button', { name: '查看文档「周报模板」详情' }))
+    expect(screen.queryByRole('button', { name: '根据当前原文重新生成摘要' })).not.toBeInTheDocument()
+  })
+
+  it('摘要生成期间自动更新，完成后停止轮询', async () => {
+    vi.useFakeTimers()
+    try {
+      const load = vi.fn().mockResolvedValueOnce({ ...template, summaryStatus: { state: 'running', attempts: 1, next_attempt_at_ms: 0 } })
+        .mockResolvedValue({ ...template, summary: '根据当前原文生成的新摘要', summaryStatus: { state: 'ready', attempts: 0, next_attempt_at_ms: 0 } })
+      const view = renderTemplatesTab({ onLoadTemplate: load })
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '查看文档「周报模板」详情' })) })
+      expect(screen.getByText('正在生成摘要')).toBeInTheDocument()
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+      expect(screen.getByText('摘要已根据当前原文生成')).toBeInTheDocument()
+      expect(screen.getByText('根据当前原文生成的新摘要')).toBeInTheDocument()
+      await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+      expect(load).toHaveBeenCalledTimes(2)
+      view.unmount()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('进入编辑后忽略迟到的详情请求，不覆盖键盘输入', async () => {
+    let resolve!: (item: ArticleTemplate) => void
+    const load = vi.fn(() => new Promise<ArticleTemplate>(done => { resolve = done }))
+    renderTemplatesTab({ onLoadTemplate: load })
+    await userEvent.click(screen.getByRole('button', { name: '查看文档「周报模板」详情' }))
+    const drawer = screen.getByRole('dialog', { name: '周报模板' })
+    await userEvent.click(within(drawer).getByRole('button', { name: /^编辑$/ }))
+    const input = within(drawer).getByRole('textbox', { name: '文档名称' })
+    await userEvent.clear(input)
+    await userEvent.type(input, '我正在编辑的名称')
+    await act(async () => { resolve({ ...template, title: '后台新标题', updatedAtMs: Date.now() }) })
+    expect(input).toHaveValue('我正在编辑的名称')
+    expect(load).toHaveBeenCalledTimes(1)
+  })
+
+  it('摘要失败提供重试入口，并重新读取真实任务状态', async () => {
+    const pending = { state: 'pending' as const, attempts: 0, next_attempt_at_ms: 0 }
+    const retry = vi.fn().mockResolvedValue(true)
+    const load = vi.fn().mockResolvedValueOnce({ ...template, summaryStatus: { ...pending, state: 'blocked', attempts: 3 } })
+      .mockResolvedValue({ ...template, summaryStatus: pending })
+    const view = renderTemplatesTab({ onLoadTemplate: load, onRetrySummary: retry })
+    await userEvent.click(screen.getByRole('button', { name: '查看文档「周报模板」详情' }))
+    await userEvent.click(await screen.findByRole('button', { name: '重试摘要' }))
+    await waitFor(() => expect(screen.getByText('等待生成摘要')).toBeInTheDocument())
+    expect(retry).toHaveBeenCalledWith(template.id)
+    expect(load).toHaveBeenCalledTimes(2)
+    view.unmount()
+  })
+
+  it('关闭详情后停止待生成摘要的轮询', async () => {
+    vi.useFakeTimers()
+    try {
+      const load = vi.fn().mockResolvedValue({ ...template, summaryStatus: { state: 'pending', attempts: 0, next_attempt_at_ms: 0 } })
+      const view = renderTemplatesTab({ onLoadTemplate: load })
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '查看文档「周报模板」详情' })) })
+      fireEvent.click(screen.getByRole('button', { name: '关闭文档详情' }))
+      await act(async () => { await vi.advanceTimersByTimeAsync(15000) })
+      expect(load).toHaveBeenCalledTimes(1)
+      view.unmount()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('更新任务失败不会把已有完整正文标记成不完整', () => {
+    useAppStore.setState({ debugModeEnabled: true })
+    renderTemplatesTab({ templates: [{ ...template, lastRefreshCompleteness: 'complete',
+      lastRefreshStatus: 'fresh_complete', sourceCollection: { state: 'blocked', attempts: 3,
+        next_attempt_at_ms: 0, last_error: 'COVERAGE_UNVERIFIED', updated_at_ms: 1 } }] })
+    fireEvent.click(screen.getByRole('button', { name: '查看文档「周报模板」详情' }))
+    expect(screen.getByText('更新暂停，请重新获取原文')).toBeInTheDocument()
+    expect(screen.getByText('尚未取得完整正文，原正文保留')).toBeInTheDocument()
+    expect(screen.getByText('已验证完整快照')).toBeInTheDocument()
+    expect(screen.queryByText(/当前内容来自历史采集/)).not.toBeInTheDocument()
+  })
+
+  it('来源原文保留换行和字面标点', () => {
+    const source = '一、现状\n第一段正文。\n\n二、方案\n* 原文标点'
+    renderTemplatesTab({ templates: [{ ...template, contentFormat: 'plain_text', fullContent: source }] })
+    fireEvent.click(screen.getByRole('button', { name: '查看文档「周报模板」详情' }))
+    const drawer = screen.getByRole('dialog', { name: '周报模板' })
+    expect(drawer.querySelector('.bake-source-plain-text')?.textContent).toBe(source)
+  })
+
+  it('部分采集明确提示覆盖限制且保留当前正文', () => {
+    renderTemplatesTab({ templates: [{ ...template, lastRefreshCompleteness: 'partial' }] })
+    fireEvent.click(screen.getByRole('button', { name: '查看文档「周报模板」详情' }))
+    expect(screen.getByRole('status')).toHaveTextContent('最近一次仅获取部分正文')
+  })
+
+  it('普通模式隐藏即时刷新信息和操作入口', () => {
+    const onRefreshTemplate = vi.fn()
+    renderTemplatesTab({ templates: [{ ...template, sourceUrl: 'https://docs.example.com/weekly' }], onRefreshTemplate })
+
+    fireEvent.click(screen.getByRole('button', { name: '查看文档「周报模板」详情' }))
+    const drawer = screen.getByRole('dialog', { name: '周报模板' })
+    expect(within(drawer).queryByText('即时刷新')).not.toBeInTheDocument()
+    expect(within(drawer).queryByRole('button', { name: '立即刷新' })).not.toBeInTheDocument()
+
+    fireEvent.click(within(drawer).getByRole('button', { name: /^编辑$/ }))
+    expect(within(drawer).queryByRole('combobox', { name: '即时刷新策略' })).not.toBeInTheDocument()
+  })
+
+  it('调试模式下无来源网址的文档不展示立即刷新按钮并提示无法刷新', () => {
+    useAppStore.setState({ debugModeEnabled: true })
     const onRefreshTemplate = vi.fn()
     renderTemplatesTab({ templates: [{ ...template, sourceUrl: undefined }], onRefreshTemplate })
 
@@ -726,6 +876,7 @@ describe('Bake 详情展示优化', () => {
   })
 
   it('编辑模式可调整即时刷新策略，保存时调用策略回调', async () => {
+    useAppStore.setState({ debugModeEnabled: true })
     const onUpdateTemplate = vi.fn().mockResolvedValue(true)
     const onSetTemplateRefreshPolicy = vi.fn().mockResolvedValue(true)
     renderTemplatesTab({
@@ -743,6 +894,7 @@ describe('Bake 详情展示优化', () => {
   })
 
   it('策略未变更时保存不调用策略回调', async () => {
+    useAppStore.setState({ debugModeEnabled: true })
     const onUpdateTemplate = vi.fn().mockResolvedValue(true)
     const onSetTemplateRefreshPolicy = vi.fn().mockResolvedValue(true)
     renderTemplatesTab({

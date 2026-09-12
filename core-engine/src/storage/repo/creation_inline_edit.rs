@@ -196,9 +196,7 @@ pub fn commit_result(
     let tx = conn.unchecked_transaction()?;
     let current = super::creation_history::get_by_id(&tx, history_id)?
         .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-    if current.session_id.as_deref() != Some(expected_session_id)
-        || current.revision_no != expected_revision_no
-        || current.generated_content != expected_base_content
+    if !super::creation_history::matches_document_base(&current, expected_session_id, expected_revision_no, expected_base_content)
     {
         return Err(rusqlite::Error::InvalidQuery);
     }

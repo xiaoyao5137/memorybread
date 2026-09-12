@@ -1,9 +1,7 @@
 """
 Embedding 向量化服务
 
-使用 Ollama API 调用 bge-small-zh-v1.5 模型将文本转换为向量。
-已从本地 sentence-transformers (BGE-M3) 迁移到 Ollama API，
-消除 PyTorch 本地加载带来的 ~1GB 内存开销。
+使用唯一的本地 SentenceTransformers CPU 后端将文本转换为向量。
 """
 
 from __future__ import annotations
@@ -15,26 +13,27 @@ logger = logging.getLogger(__name__)
 
 
 class EmbeddingService:
-    """文本向量化服务（基于 Ollama API）"""
+    """文本向量化服务（固定版本的本地 CPU 模型）。"""
 
-    def __init__(self, model_name: str = "qllama/bge-small-zh-v1.5:q4_k_m"):
+    def __init__(self):
         """
         初始化 Embedding 服务
 
         Args:
-            model_name: Ollama 模型名称，默认使用 bge-small-zh-v1.5 量化版
+            模型由初始化器按统一能力版本准备，不接受运行时切换。
         """
-        self.model_name = model_name
+        from embedding.model_sources import MODEL_CAPABILITY_ID
+
+        self.model_name = MODEL_CAPABILITY_ID
         self._model = None
-        logger.info(f"初始化 EmbeddingService，模型: {model_name}")
+        logger.info("初始化 EmbeddingService，能力版本: %s", self.model_name)
 
     def load_model(self):
-        """延迟加载模型（首次调用时创建 OllamaEmbeddingBackend）"""
+        """延迟加载唯一的 SentenceTransformers 后端。"""
         if self._model is None:
-            from embedding.ollama import OllamaEmbeddingBackend
-            logger.info(f"正在初始化 Ollama Embedding 后端: {self.model_name}")
-            self._model = OllamaEmbeddingBackend(model_name=self.model_name)
-            logger.info("Ollama Embedding 后端就绪")
+            from embedding.sentence_transformers_backend import SentenceTransformersBackend
+            self._model = SentenceTransformersBackend()
+            logger.info("本地 CPU Embedding 后端就绪")
 
     def encode(self, texts: List[str]) -> List[List[float]]:
         """

@@ -80,6 +80,13 @@ done
 
 codesign --verify --deep --strict "$APP_PATH"
 
+# Verify the actual bundled helper and native command, not only workspace sources.
+"$AI_BIN" diagnostics-self-check | grep -F 'diagnostics.v2:' >/dev/null \
+  || fail "打包内 AI helper 缺少新版初始化诊断能力"
+strings "$MAIN_BIN" | grep -F 'upload_customer_log_archive' >/dev/null \
+  || fail "打包内桌面主程序缺少原生日志上传命令"
+
+
 if [ "$MODE" = "dmg" ] && [ -n "$DMG_PATH" ]; then
   [ -f "$DMG_PATH" ] || fail "DMG 安装包不存在: $DMG_PATH"
   hdiutil verify "$DMG_PATH" >/dev/null

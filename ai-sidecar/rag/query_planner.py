@@ -22,6 +22,10 @@ _MAX_FALLBACK_TERMS = 3
 _DYNAMIC_GENERIC_MIN_CORPUS = 20
 _DYNAMIC_GENERIC_MIN_DOCUMENTS = 8
 _DYNAMIC_GENERIC_RATIO = 0.18
+# 短中文词（≤3 字）的绝对泛词阈值：在语料中命中该数量级以上即视为头部名词/碎片
+# （如「原理」「方法」「计的」），不再作为判别锚点。与比例阈值互补：小语料下比例
+# 失真时仍能拦住高频短词，大语料下罕见产品名 df 低不会被误判。
+_GENERIC_ABS_DF = 32
 _DF_CACHE_TTL_SECS = 5 * 60
 _DF_CACHE_MAX_ENTRIES = 512
 
@@ -214,7 +218,13 @@ def _surface_terms(
             working = _remove_phrase(working, phrase)
 
     candidates: list[str] = []
-    candidates.extend(str(term).strip().lower() for term in (entity_terms or []) if str(term).strip())
+    # entity_terms 可能携带字符 n-gram 碎片（如「计的」「的原」），与查询正文里的
+    # CJK run 走同一套边界助词校验，避免绕过 _valid_cjk_candidate 直接成为候选。
+    candidates.extend(
+        str(term).strip().lower()
+        for term in (entity_terms or [])
+        if str(term).strip() and _valid_cjk_candidate(str(term).strip().lower())
+    )
     candidates.extend(match.group(0).lower() for match in _ASCII_TERM_RE.finditer(working))
 
     for run in _CJK_RUN_RE.findall(working):
@@ -382,7 +392,6 @@ def build_artifact_query_plan(
 ) -> ArtifactQueryPlan:
     candidates, explicit_types, instructions, source_types = _surface_terms(query, entity_terms)
     corpus_size, frequencies = _cached_document_frequencies(cursor, candidates)
-    entity_set = {str(term).strip().lower() for term in (entity_terms or []) if str(term).strip()}
 
     discriminative: list[PlannedTerm] = []
     dynamic_types: list[PlannedTerm] = []
@@ -391,9 +400,14 @@ def build_artifact_query_plan(
         if document_frequency <= 0:
             continue
         idf = _idf(corpus_size, document_frequency)
-        is_dynamic_generic = (
-            term not in entity_set
-            and corpus_size >= _DYNAMIC_GENERIC_MIN_CORPUS
+        # 短中文词（≤3 字）一旦在语料里高频出现（如「原理」「方法」这类头部名词/碎片），
+        # 就不是好的判别锚点，无论是否来自 entity_terms 都降级为 generic。此前用
+        # `term not in entity_set` 屏蔽，导致 _extract_query_terms 生成的字符 n-gram
+        # 泛词绕过了整条过滤（如「计的」 df=198 被当成判别词）。
+        is_short_cjk = len(term) <= 3 and not term.isascii()
+        is_generic_by_abs_df = is_short_cjk and document_frequency >= _GENERIC_ABS_DF
+        is_dynamic_generic = is_generic_by_abs_df or (
+            corpus_size >= _DYNAMIC_GENERIC_MIN_CORPUS
             and document_frequency >= _DYNAMIC_GENERIC_MIN_DOCUMENTS
             and document_frequency / max(1, corpus_size) >= _DYNAMIC_GENERIC_RATIO
         )

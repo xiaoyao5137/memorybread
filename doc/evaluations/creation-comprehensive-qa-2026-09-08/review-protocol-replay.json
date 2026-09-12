@@ -1,0 +1,38 @@
+[
+  {
+    "case": "reject-unprovided-audience",
+    "calls": 1,
+    "identical_prompts_schema_budget_report": true
+  },
+  {
+    "case": "accept-explicit-audience-option",
+    "calls": 2,
+    "identical_prompts_schema_budget_report": true
+  },
+  {
+    "case": "accept-authorized-fictional-relationships",
+    "calls": 2,
+    "identical_prompts_schema_budget_report": true
+  },
+  {
+    "case": "accept-supplied-event-process",
+    "calls": 1,
+    "identical_prompts_schema_budget_report": true
+  },
+  {
+    "case": "accept-neutral-meeting-invitation",
+    "calls": 2,
+    "identical_prompts_schema_budget_report": true
+  },
+  {
+    "case": "mixed-v21",
+    "review_calls": 2,
+    "identical_prompts_schema_budget": true,
+    "identical_production_regeneration_input": true,
+    "statuses": [
+      "revise",
+      "pass"
+    ],
+    "identical_final_report": true
+  }
+]

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -20,6 +21,7 @@ use crate::storage::models::CaptureRecord;
 use crate::storage::repo::favorite::{
     FAVORITE_KIND_DOCUMENT, FAVORITE_KIND_KNOWLEDGE, FAVORITE_KIND_OPERATION,
 };
+use crate::storage::search::{search_match_score, split_search_terms};
 use crate::storage::{
     now_ms, BakeActionTraceRecord, BakeActivityRecord, BakeDocumentRecord,
     BakeDocumentSourceSnapshotRecord, BakeKnowledgeRecord, BakeMemorySourceRecord,
@@ -35,20 +37,46 @@ const CATEGORY_BAKE_KNOWLEDGE: &str = "bake_knowledge";
 const UNIFIED_BAKE_PIPELINE_NAME: &str = "unified";
 pub(crate) const BAKE_GENERATION_VERSION: &str = "bake-v1";
 // sidecar 对普通输入使用 180 秒、>=20K 长输入使用 300 秒运行时预算。
-// Core 多留 10 秒用于接收 504 和连接收尾，不能先断开后留下幽灵推理。
-const BAKE_SIDECAR_TIMEOUT_SECS: u64 = 310;
+// 独立排队最多 90 秒，Core 再留 20 秒用于收尾，避免客户端先断开留下幽灵推理。
+const BAKE_SIDECAR_TIMEOUT_SECS: u64 = 410;
 /// 整个 bake run 的最大执行时间（含候选查询、LLM 提炼、数据库写入）。
 /// 超过此时间强制标记为 failed，防止因死锁或无限等待导致 run 永久挂起。
 const BAKE_RUN_MAX_TOTAL_SECS: u64 = 30 * 60;
+const BAKE_QUEUE_BUSY_RETRY_BASE_SECS: u64 = 1;
+const BAKE_QUEUE_BUSY_RETRY_MAX_SECS: u64 = 10;
 /// 单条候选最多执行三次。
 ///
 /// 超时和模型结构化输出截断会先把批次标记为 deferred，由后台调度按退避策略
 /// 重新触发；达到此上限后才进入终态，避免一次偶发慢请求直接丢失候选。
 pub(crate) const MAX_BAKE_RETRY_FAILURES: i64 = 3;
 const BAKE_SOP_ZERO_OUTPUT_ELIGIBLE_ALERT_THRESHOLD: i64 = 20;
-const KNOWLEDGE_PUBLISH_SCORE: f64 = 0.78;
-const KNOWLEDGE_SHADOW_SCORE: f64 = 0.62;
-const KNOWLEDGE_DECISION_RULE_VERSION: &str = "knowledge-open-semantic-v1";
+/// 第一期单分数门禁口径，仅在 `bake.knowledge_gate_enabled=false` 时作为应急回退使用（ROLL-005）。
+const KNOWLEDGE_LEGACY_PUBLISH_SCORE: f64 = 0.78;
+const KNOWLEDGE_LEGACY_SHADOW_SCORE: f64 = 0.62;
+const KNOWLEDGE_LEGACY_RULE_VERSION: &str = "knowledge-open-semantic-v1";
+/// 第二期复用半径门禁的默认阈值，可被 user_preferences 覆盖。
+const KNOWLEDGE_PUBLISH_SCORE: f64 = 0.72;
+const KNOWLEDGE_SHADOW_SCORE: f64 = 0.50;
+const KNOWLEDGE_DEDUP_WINDOW_DAYS: i64 = 14;
+/// 判定语义变了就升版本号，不原地改 v2：今天已发布的行都是 v2 纯算分判的，
+/// 升版才能把它们与修复后的判定区分开，事后量得出修复效果。
+const KNOWLEDGE_DECISION_RULE_VERSION: &str = "knowledge-reuse-radius-v3";
+const PREF_KNOWLEDGE_GATE_ENABLED: &str = "bake.knowledge_gate_enabled";
+const PREF_KNOWLEDGE_PUBLISH_SCORE: &str = "bake.knowledge_publish_score";
+const PREF_KNOWLEDGE_SHADOW_SCORE: &str = "bake.knowledge_shadow_score";
+const PREF_KNOWLEDGE_DEDUP_WINDOW_DAYS: &str = "bake.knowledge_dedup_window_days";
+/// 发布除了算分够线外还必须满足的最低复用半径。受众与时效在这里是**必要条件**而不是加分项：
+/// 加性公式允许单一维度独撑发布，实测 `only_here + me_later + days + importance 4` 得 0.7375
+/// 越过发布线，而这一组合（只有我以后会用 + 几天就过期 + 别处没记录）按设计意图正是该拦的
+/// 一次性过程细节。`only_here` 拿到 0.40×1.0 就足以单独顶起发布线，因此把它能单独支撑的
+/// 上限交给这两条下限兜住。取值必须落在对应维度梯上，配成最低档等于关闭本规则。
+const KNOWLEDGE_MIN_PUBLISH_AUDIENCE: &str = "team_or_stakeholders";
+const KNOWLEDGE_MIN_PUBLISH_HORIZON: &str = "weeks";
+/// 公开参考知识硬否决开关。见 `source_publicity` 维度。
+const KNOWLEDGE_PUBLIC_REFERENCE_VETO_ENABLED: bool = true;
+const PREF_KNOWLEDGE_MIN_PUBLISH_AUDIENCE: &str = "bake.knowledge_min_publish_audience";
+const PREF_KNOWLEDGE_MIN_PUBLISH_HORIZON: &str = "bake.knowledge_min_publish_horizon";
+const PREF_KNOWLEDGE_PUBLIC_REFERENCE_VETO: &str = "bake.knowledge_public_reference_veto_enabled";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BakePagedResponse<T> {
@@ -208,6 +236,12 @@ pub struct DocumentSectionPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BakeDocumentPayload {
+    #[serde(default)]
+    pub source_check: Option<serde_json::Value>,
+    #[serde(default)]
+    pub source_collection: Option<serde_json::Value>,
+    #[serde(default)]
+    pub summary_status: Option<serde_json::Value>,
     pub id: String,
     pub is_favorite: bool,
     pub title: String,
@@ -599,6 +633,29 @@ pub struct BakeKnowledgeArtifactPayload {
     pub evidence_summary: Option<String>,
     pub future_question: Option<String>,
     pub decision_reason: Option<String>,
+    /// 不可替代性维度。描述的是这条信息自身的冗余度，不是内容类目；
+    /// Core 对无法识别的取值宽容降级为 shadow，不得按时间线类目或关键词反推。
+    #[serde(default)]
+    pub irreplaceability: Option<String>,
+    #[serde(default)]
+    pub irreplaceability_reason: Option<String>,
+    /// 复用受众维度：脱离本次会话后还有谁需要这条信息。
+    #[serde(default)]
+    pub reuse_audience: Option<String>,
+    /// 时效量级维度：这条结论过期前还能被复用多久。
+    #[serde(default)]
+    pub validity_horizon: Option<String>,
+    /// 出处性质维度：结论内容本身是否已写在公开教科书、论文或官方文档里。
+    /// 这是一个关于来源的事实判断，不像 `validity_horizon` 那样要求模型预测未来复用性。
+    /// 缺失或无法识别时一律不否决（fail-open），避免本地推理漏字段就把知识页清空。
+    #[serde(default)]
+    pub source_publicity: Option<String>,
+    /// 归一化事实对象，与 `predicate_key` 一起构成跨时间线语义身份。
+    #[serde(default)]
+    pub subject_key: Option<String>,
+    /// 归一化谓词/结论。
+    #[serde(default)]
+    pub predicate_key: Option<String>,
     pub match_score: Option<f64>,
     pub match_level: Option<String>,
     pub review_status: Option<String>,
@@ -784,7 +841,7 @@ impl BakeService {
         let favorite_ids = self
             .storage
             .list_memory_favorite_ids(FAVORITE_KIND_DOCUMENT)?;
-        Ok(self
+        let mut items: Vec<_> = self
             .storage
             .list_bake_documents()?
             .into_iter()
@@ -793,7 +850,9 @@ impl BakeService {
                 let is_favorite = favorite_ids.contains(&record.id);
                 map_document_record(record, is_favorite)
             })
-            .collect())
+            .collect();
+        self.attach_document_collection_status(&mut items)?;
+        Ok(items)
     }
 
     pub fn list_documents_paginated(
@@ -849,61 +908,26 @@ impl BakeService {
 
         if exact_id.is_none() {
             if let Some(query) = filter.q.as_deref() {
-                let query_lower = query.to_lowercase();
-                items.retain(|item| {
-                    item.title.to_lowercase().contains(&query_lower)
-                        || item.doc_type.to_lowercase().contains(&query_lower)
-                        || item
-                            .prompt_hint
-                            .as_deref()
-                            .unwrap_or_default()
-                            .to_lowercase()
-                            .contains(&query_lower)
-                        || item
-                            .summary
-                            .as_deref()
-                            .unwrap_or_default()
-                            .to_lowercase()
-                            .contains(&query_lower)
-                        || item
-                            .full_content
-                            .as_deref()
-                            .unwrap_or_default()
-                            .to_lowercase()
-                            .contains(&query_lower)
-                        || item
-                            .source_url
-                            .as_deref()
-                            .unwrap_or_default()
-                            .to_lowercase()
-                            .contains(&query_lower)
-                        || item
-                            .tags
-                            .iter()
-                            .any(|tag| tag.to_lowercase().contains(&query_lower))
-                        || item.sections.iter().any(|section| {
-                            section.title.to_lowercase().contains(&query_lower)
-                                || section
-                                    .notes
-                                    .as_deref()
-                                    .unwrap_or_default()
-                                    .to_lowercase()
-                                    .contains(&query_lower)
-                                || section
-                                    .keywords
-                                    .iter()
-                                    .any(|keyword| keyword.to_lowercase().contains(&query_lower))
+                let terms = split_search_terms(query);
+                items.retain(|item| document_search_score(item, query, &terms).is_some());
+                items.sort_by(|left, right| {
+                    document_search_score(right, query, &terms)
+                        .cmp(&document_search_score(left, query, &terms))
+                        .then_with(|| right.created_at_ms.cmp(&left.created_at_ms))
+                        .then_with(|| {
+                            numeric_payload_id(&right.id).cmp(&numeric_payload_id(&left.id))
                         })
                 });
             }
         }
 
         let total = items.len() as i64;
-        let items = items
+        let mut items: Vec<_> = items
             .into_iter()
             .skip(filter.offset)
             .take(filter.limit)
             .collect();
+        self.attach_document_collection_status(&mut items)?;
         Ok(BakePagedResponse {
             items,
             total,
@@ -925,6 +949,16 @@ impl BakeService {
         Ok(map_document_record(created, false))
     }
 
+    fn attach_document_collection_status(&self, items: &mut [BakeDocumentPayload]) -> Result<(), ApiError> {
+        for item in items {
+            if let Ok(id) = item.id.parse::<i64>() {
+                item.source_collection = self.storage.document_refresh_status(id)?;
+                item.summary_status = self.storage.document_summary_status(id,item.updated_at_ms)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn get_document(&self, id: i64) -> Result<BakeDocumentPayload, ApiError> {
         let record = self
             .storage
@@ -934,7 +968,11 @@ impl BakeService {
         let is_favorite = self
             .storage
             .is_memory_favorite(FAVORITE_KIND_DOCUMENT, record.id)?;
-        Ok(map_document_record(record, is_favorite))
+        let mut document = map_document_record(record, is_favorite);
+        document.source_collection = self.storage.document_refresh_status(id)?;
+        document.source_check = self.storage.latest_document_source_check(id)?;
+        document.summary_status = self.storage.document_summary_status(id,document.updated_at_ms)?;
+        Ok(document)
     }
 
     /// 刷新资格评估：返回文档记录与判定结论，供 handler 在浏览器采集前
@@ -1017,35 +1055,27 @@ impl BakeService {
         &self,
         snapshot: NewBakeDocumentSourceSnapshot,
     ) -> Result<(bool, DocumentSourceSnapshotPayload), ApiError> {
-        let was_seen = self
-            .storage
-            .has_bake_document_source_fingerprint(snapshot.document_id, &snapshot.content_hash)?;
+        let previous = self.storage.get_latest_bake_document_source_snapshot(snapshot.document_id)?;
+        let was_seen = previous.as_ref().is_some_and(|record| record.content_hash == snapshot.content_hash);
         let document_id = snapshot.document_id;
         let collected_at = snapshot.collected_at;
-        let source_timeline_id = self
-            .storage
-            .get_bake_document(document_id)?
-            .and_then(|record| {
-                parse_json_vec_string(&record.source_memory_ids)
-                    .first()
-                    .and_then(|value| value.parse::<i64>().ok())
-            })
-            .unwrap_or(document_id);
-        let record = self
-            .storage
-            .upsert_bake_document_source_snapshot(&snapshot)?;
-        self.storage.record_bake_document_source_fingerprint(
-            document_id,
-            &record.content_hash,
-            source_timeline_id,
-        )?;
-        let status = match record.completeness_status.as_str() {
+        let record = self.storage.upsert_bake_document_source_snapshot(&snapshot)?;
+        // Observing content is not applying it. Keep the applied fingerprint
+        // registry untouched until the body transaction succeeds.
+        let status = match snapshot.completeness_status.as_str() {
             "complete" => "fresh_complete",
             "partial" => "fresh_partial",
             _ => "unavailable",
         };
+        // A reused complete snapshot is historical evidence, not proof that
+        // this read reached full coverage. Refresh metadata describes this read.
+        let mut observed_record = record.clone();
+        observed_record.completeness_status = snapshot.completeness_status;
+        observed_record.character_count = snapshot.character_count;
+        observed_record.segment_count = snapshot.segment_count;
+        observed_record.truncated = snapshot.truncated;
         self.storage
-            .record_document_refresh_success(document_id, collected_at, status, &record)?;
+            .record_document_refresh_success(document_id, collected_at, status, &observed_record)?;
         let mut payload: DocumentSourceSnapshotPayload = record.into();
         // 相同指纹只持久化一份不可变内容，但本次重新校验的时间仍应返回给
         // Writer，避免把“刚刚确认未变化”误标成旧采集时间。
@@ -1064,6 +1094,9 @@ impl BakeService {
         scraped_url: &str,
         now_ms: i64,
     ) -> Result<DocumentRefreshOutcome, ApiError> {
+        if is_document_shell(scraped_text) {
+            return Err(ApiError::BadRequest("文档尚未加载正文，请等待页面加载完成后重试".to_string()));
+        }
         let fingerprint = source_text_fingerprint(scraped_text)
             .ok_or_else(|| ApiError::BadRequest("刷新抓取内容为空".to_string()))?;
         if self
@@ -1137,7 +1170,7 @@ impl BakeService {
         }
 
         let merged: BakeMergeDocumentResponse = response.json().await.map_err(|error| {
-            tracing::warn!("解析文档刷新合并响应失败: {}", error);
+            tracing::warn!(decode_error = error.is_decode(), "解析文档刷新合并响应失败");
             ApiError::Upstream {
                 status: StatusCode::BAD_GATEWAY,
                 code: "BAKE_SIDECAR_RESPONSE_INVALID",
@@ -1165,6 +1198,11 @@ impl BakeService {
                         existing_doc.full_content.as_deref().unwrap_or_default().chars().count(),
                         merged_content.chars().count(),
                     );
+                    return Err(ApiError::Upstream {
+                        status: StatusCode::BAD_GATEWAY,
+                        code: "BAKE_DOCUMENT_MERGE_PENDING",
+                        message: "来源刷新尚未应用：正文保留校验未通过".to_string(),
+                    });
                 }
             }
             if let Some(evidence_summary) = merged.evidence_summary {
@@ -1304,81 +1342,36 @@ impl BakeService {
             .list_memory_favorite_ids(FAVORITE_KIND_OPERATION)?;
         let records = self.storage.list_timelines_by_category(CATEGORY_BAKE_SOP)?;
         let exact_id = filter.q.as_deref().and_then(parse_exact_list_id);
-        let filtered_records = if let Some(id) = exact_id {
-            records
-                .into_iter()
-                .filter(|record| record.id == id)
-                .filter(is_current_bake_entry)
-                .filter(|record| matches_entry_bucket(record, filter.bucket))
-                .filter(|record| {
-                    filter.favorite.map_or(true, |favorite| {
-                        favorite_ids.contains(&record.id) == favorite
-                    })
+        let mut filtered_records = records
+            .into_iter()
+            .filter(|record| exact_id.map_or(true, |id| record.id == id))
+            .filter(is_current_bake_entry)
+            .filter(|record| matches_entry_bucket(record, filter.bucket))
+            .filter(|record| {
+                filter.favorite.map_or(true, |favorite| {
+                    favorite_ids.contains(&record.id) == favorite
                 })
-                .filter(|record| {
-                    filter
-                        .from_ts
-                        .map_or(true, |from| record.created_at_ms >= from)
-                })
-                .filter(|record| filter.to_ts.map_or(true, |to| record.created_at_ms <= to))
-                .collect::<Vec<_>>()
-        } else if let Some(query) = filter.q.as_deref() {
-            let query_lower = query.to_lowercase();
-            // FTS5 预筛：bake_sops_fts 候选可用时先收窄到候选 ID，再做内存 contains 校验；
-            // FTS 不可用（表缺失/候选为空/被截断）时为 None，回退原有全量过滤。
-            let fts_ids: Option<HashSet<i64>> = self
-                .storage
-                .bake_sop_fts_candidate_ids(query)
-                .map(|ids| ids.into_iter().collect());
-            records
-                .into_iter()
-                .filter(|record| {
-                    fts_ids
-                        .as_ref()
-                        .map_or(true, |ids| ids.contains(&record.id))
-                        && is_current_bake_entry(record)
-                        && matches_entry_bucket(record, filter.bucket)
-                        && filter.favorite.map_or(true, |favorite| {
-                            favorite_ids.contains(&record.id) == favorite
-                        })
-                        && filter
-                            .from_ts
-                            .map_or(true, |from| record.created_at_ms >= from)
-                        && filter.to_ts.map_or(true, |to| record.created_at_ms <= to)
-                        && (record.summary.to_lowercase().contains(&query_lower)
-                            || record
-                                .overview
-                                .as_deref()
-                                .unwrap_or_default()
-                                .to_lowercase()
-                                .contains(&query_lower)
-                            || record
-                                .details
-                                .as_deref()
-                                .unwrap_or_default()
-                                .to_lowercase()
-                                .contains(&query_lower)
-                            || record.category.to_lowercase().contains(&query_lower))
-                })
-                .collect::<Vec<_>>()
-        } else {
-            records
-                .into_iter()
-                .filter(is_current_bake_entry)
-                .filter(|record| matches_entry_bucket(record, filter.bucket))
-                .filter(|record| {
-                    filter.favorite.map_or(true, |favorite| {
-                        favorite_ids.contains(&record.id) == favorite
-                    })
-                })
-                .filter(|record| {
-                    filter
-                        .from_ts
-                        .map_or(true, |from| record.created_at_ms >= from)
-                })
-                .filter(|record| filter.to_ts.map_or(true, |to| record.created_at_ms <= to))
-                .collect::<Vec<_>>()
-        };
+            })
+            .filter(|record| {
+                filter
+                    .from_ts
+                    .map_or(true, |from| record.created_at_ms >= from)
+            })
+            .filter(|record| filter.to_ts.map_or(true, |to| record.created_at_ms <= to))
+            .collect::<Vec<_>>();
+        if exact_id.is_none() {
+            if let Some(query) = filter.q.as_deref() {
+                let terms = split_search_terms(query);
+                filtered_records
+                    .retain(|record| timeline_record_search_score(record, query, &terms).is_some());
+                filtered_records.sort_by(|left, right| {
+                    timeline_record_search_score(right, query, &terms)
+                        .cmp(&timeline_record_search_score(left, query, &terms))
+                        .then_with(|| right.created_at_ms.cmp(&left.created_at_ms))
+                        .then_with(|| right.id.cmp(&left.id))
+                });
+            }
+        }
         let total = filtered_records.len() as i64;
         let items = filtered_records
             .into_iter()
@@ -1625,32 +1618,25 @@ impl BakeService {
             .collect::<Result<Vec<_>, _>>()?;
         if exact_id.is_none() {
             if let Some(query) = filter.q.as_deref() {
-                let query_lower = query.to_lowercase();
-                filtered.retain(|item| {
-                    item.summary.to_lowercase().contains(&query_lower)
-                        || item
-                            .overview
-                            .as_deref()
-                            .unwrap_or_default()
-                            .to_lowercase()
-                            .contains(&query_lower)
-                        || item
-                            .detailed_content
-                            .as_deref()
-                            .unwrap_or_default()
-                            .to_lowercase()
-                            .contains(&query_lower)
-                        || item.category.to_lowercase().contains(&query_lower)
-                        || item
-                            .source_url
-                            .as_deref()
-                            .unwrap_or_default()
-                            .to_lowercase()
-                            .contains(&query_lower)
+                let terms = split_search_terms(query);
+                filtered.retain(|item| knowledge_search_score(item, query, &terms).is_some());
+                filtered.sort_by(|left, right| {
+                    knowledge_search_score(right, query, &terms)
+                        .cmp(&knowledge_search_score(left, query, &terms))
+                        .then_with(|| {
+                            if filter.sort == BakeListSort::Heat {
+                                right.occurrence_count.cmp(&left.occurrence_count)
+                            } else {
+                                right.updated_at_ms.cmp(&left.updated_at_ms)
+                            }
+                        })
+                        .then_with(|| right.created_at_ms.cmp(&left.created_at_ms))
+                        .then_with(|| {
+                            numeric_payload_id(&right.id).cmp(&numeric_payload_id(&left.id))
+                        })
                 });
             }
-        }
-        if filter.sort == BakeListSort::Heat {
+        } else if filter.sort == BakeListSort::Heat {
             filtered.sort_by(|left, right| {
                 right
                     .occurrence_count
@@ -1784,6 +1770,8 @@ impl BakeService {
             entities: "[]".to_string(),
             importance: payload.importance.clamp(1, 10),
             source_capture_ids: Some("[]".to_string()),
+            // 手工创建不走烘焙门禁，不参与跨时间线语义身份去重。
+            ..Default::default()
         };
         let id = self.storage.insert_bake_knowledge(&record)?;
         self.get_knowledge(id)
@@ -2122,14 +2110,14 @@ impl BakeService {
                     let _ = self.storage.defer_bake_run_preserving_progress(
                         run_id,
                         completed_at,
-                        &err.to_string(),
+                        &bake_retry_failure_summary(&err),
                         Some(latency_ms),
                     );
                 } else {
                     let _ = self.storage.fail_bake_run_preserving_progress(
                         run_id,
                         completed_at,
-                        &err.to_string(),
+                        &bake_retry_failure_summary(&err),
                         Some(latency_ms),
                     );
                 }
@@ -2206,33 +2194,32 @@ impl BakeService {
                         self.storage.defer_bake_run_preserving_progress(
                             run_id,
                             completed_at,
-                            &err.to_string(),
+                            &bake_retry_failure_summary(&err),
                             Some(latency_ms),
                         )
                     } else {
                         self.storage.fail_bake_run_preserving_progress(
                             run_id,
                             completed_at,
-                            &err.to_string(),
+                            &bake_retry_failure_summary(&err),
                             Some(latency_ms),
                         )
                     };
-                    if let Err(write_err) = write_result {
+                    if let Err(_write_err) = write_result {
                         tracing::error!(
-                            "bake run {} terminal status write failed: deferred={} err={} write_err={}",
+                            "bake run {} terminal status write failed: deferred={} err={} code=STORAGE_WRITE_FAILED",
                             run_id,
                             deferred,
-                            err,
-                            write_err
+                            bake_retry_failure_summary(&err)
                         );
                     } else if deferred {
                         tracing::warn!(
                             "bake run {} deferred after transient upstream interruption: {}",
                             run_id,
-                            err
+                            bake_retry_failure_summary(&err)
                         );
                     } else {
-                        tracing::error!("bake run {} failed in background: {}", run_id, err);
+                        tracing::error!("bake run {} failed in background: {}", run_id, bake_retry_failure_summary(&err));
                     }
                 }
                 Err(_elapsed) => {
@@ -2251,11 +2238,10 @@ impl BakeService {
                         &timeout_message,
                         Some(latency_ms),
                     );
-                    if let Err(write_err) = write_result {
+                    if let Err(_write_err) = write_result {
                         tracing::error!(
-                            "bake run {} timeout cleanup failed: write_err={}",
-                            run_id,
-                            write_err
+                            "bake run {} timeout cleanup failed: code=STORAGE_WRITE_FAILED",
+                            run_id
                         );
                     }
                 }
@@ -2291,7 +2277,21 @@ impl BakeService {
         limit: usize,
         extract_concurrency: usize,
     ) -> Result<BakeRunPayload, ApiError> {
-        let extract_concurrency = extract_concurrency.clamp(1, 3);
+        let run_deadline_ms =
+            started_at.saturating_add((BAKE_RUN_MAX_TOTAL_SECS * 1000) as i64);
+        // 候选 HTTP 并发必须受真实推理容量约束，不能让配置的 3 路在单槽模型
+        // 前排队互相消耗超时预算。容量接口不可用时保守使用单路。
+        let capacity = self
+            .client
+            .get(format!("{}/api/inference/queue-status", self.sidecar_url))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await;
+        let capacity = match capacity {
+            Ok(response) if response.status().is_success() => response.json::<Value>().await.ok(),
+            _ => None,
+        };
+        let extract_concurrency = bake_dispatch_concurrency(extract_concurrency, capacity.as_ref());
 
         tracing::info!(
             "bake run {} execute_bake_pipeline start concurrency={}",
@@ -2429,6 +2429,10 @@ impl BakeService {
             }
             let candidate_ts = candidate.timeline.updated_at_ms;
             let is_operation_replay = operation_replay_ids.contains(&candidate.timeline.id);
+            let resuming_document_write = candidate.retry_error_code.as_deref()==Some("DOCUMENT_AUTOMATIC_WRITES_PAUSED");
+
+            self.audit_document_candidate(&candidate, Some(run_id),
+                crate::storage::repo::document_candidate_quality::DocumentEvaluationStage::Precheck)?;
 
             // 已有文档的来源元数据是本地确定性信息，不应依赖 sidecar 是否接受内容合并。
             // 即使全局 watermark 已越过该 timeline，也要先补齐后来追加的 capture 和 URL。
@@ -2438,13 +2442,25 @@ impl BakeService {
                     .storage
                     .find_bake_document_by_source_memory_id(candidate.timeline.id)?
                 {
-                    if self.refresh_document_source_metadata(&candidate, &existing_doc)? {
+                    let refreshed = match self.refresh_document_source_metadata(&candidate, &existing_doc) {
+                        Err(ApiError::Storage(crate::storage::StorageError::DocumentAutomaticWritesPaused { bucket })) => {
+                            self.defer_paused_document_candidate(run_id,&candidate,bucket)?;
+                            // This is queue construction, before earlier extracts finish.
+                            // Advance only when this ordered item is consumed.
+                            work_queue.push(BakeWorkItem::Skip {
+                                timeline_id:candidate.timeline.id,candidate_ts,clear_retry:false,
+                            });
+                            local_queue_progress_count+=1;
+                            continue;
+                        }
+                        other => other?,
+                    };
+                    if refreshed {
                         source_metadata_changed = true;
                         tracing::info!(
-                            "bake document source metadata refreshed: timeline_id={} doc_id={} source_url={:?}",
+                            "bake document source metadata refreshed: timeline_id={} doc_id={}",
                             candidate.timeline.id,
                             existing_doc.id,
-                            candidate.capture_url,
                         );
                     } else {
                         // refresh 无变化却仍被 queue-status 计入 metadata_refresh 时，
@@ -2473,7 +2489,7 @@ impl BakeService {
                 // 普通历史候选只需刷新来源元数据；无变化时不消耗本轮额度。
                 // operation replay 的目标是重新判定 SOP，已有 document 不能把它
                 // 提前短路，否则相同回放项会永久停在队首。
-                if candidate_ts <= max_processed_ts && !is_operation_replay {
+                if candidate_ts <= max_processed_ts && candidate.retry_failure_count == 0 && !is_operation_replay && !resuming_document_write {
                     if source_metadata_changed {
                         metadata_refresh_count += 1;
                     }
@@ -2484,6 +2500,7 @@ impl BakeService {
             if candidate_ts <= max_processed_ts
                 && candidate.retry_failure_count == 0
                 && !is_operation_replay
+                && !resuming_document_write
             {
                 continue;
             }
@@ -2535,7 +2552,7 @@ impl BakeService {
                 work_queue.push(BakeWorkItem::Skip {
                     timeline_id: candidate.timeline.id,
                     candidate_ts,
-                    clear_retry: candidate.retry_failure_count > 0,
+                    clear_retry: candidate.retry_failure_count > 0 || resuming_document_write,
                 });
                 continue;
             }
@@ -2561,47 +2578,18 @@ impl BakeService {
                 work_queue.push(BakeWorkItem::Skip {
                     timeline_id: candidate.timeline.id,
                     candidate_ts,
-                    clear_retry: candidate.retry_failure_count > 0,
+                    clear_retry: candidate.retry_failure_count > 0 || resuming_document_write,
                 });
                 continue;
             }
             if let Some(document_url) = substantive_document_url(&candidate) {
-                // 同 URL 文档已经存在时，来源合并是纯本地确定性操作。不能仍先
-                // 调模型：长文档推理超时会让明明可直接关联的 timeline 进入重试。
-                if self
-                    .storage
-                    .find_document_by_source_url(&document_url)?
-                    .is_some()
-                {
-                    self.register_skipped_document_candidate_source(
-                        &candidate,
-                        &document_url,
-                        &mut deferred_coalesce_sources,
-                    )?;
-                    self.storage
-                        .upsert_bake_candidate_audit(&new_bake_candidate_audit(
-                            run_id,
-                            &candidate,
-                            "skipped",
-                            Some("existing_document_url_linked"),
-                        ))?;
-                    if is_operation_replay {
-                        self.storage
-                            .finish_operation_replay(candidate.timeline.id, "discarded")?;
-                        local_queue_progress_count += 1;
-                    }
-                    work_queue.push(BakeWorkItem::Skip {
-                        timeline_id: candidate.timeline.id,
-                        candidate_ts,
-                        clear_retry: candidate.retry_failure_count > 0,
-                    });
-                    continue;
-                }
+                // Identity locates the target; it does not prove that its body
+                // contains this observation. Only identical source fingerprints
+                // can coalesce work. Distinct content must reach persistence.
                 if !reserve_document_task(&candidate, &mut queued_document_urls) {
                     tracing::info!(
-                        "bake coalesce: timeline_id={} canonical_url={} reason=document_url_already_queued",
+                        "bake coalesce: timeline_id={} reason=document_url_already_queued",
                         candidate.timeline.id,
-                        document_url,
                     );
                     // 合并跳过只免掉重复提炼，不能免掉来源登记
                     self.register_skipped_document_candidate_source(
@@ -2610,12 +2598,12 @@ impl BakeService {
                         &mut deferred_coalesce_sources,
                     )?;
                     self.storage
-                        .upsert_bake_candidate_audit(&new_bake_candidate_audit(
+                        .upsert_document_coalesce_audit(&new_bake_candidate_audit(
                             run_id,
                             &candidate,
                             "skipped",
                             Some("document_url_already_queued"),
-                        ))?;
+                        ),&document_url)?;
                     if is_operation_replay {
                         self.storage
                             .finish_operation_replay(candidate.timeline.id, "discarded")?;
@@ -2624,7 +2612,7 @@ impl BakeService {
                     work_queue.push(BakeWorkItem::Skip {
                         timeline_id: candidate.timeline.id,
                         candidate_ts,
-                        clear_retry: candidate.retry_failure_count > 0,
+                        clear_retry: candidate.retry_failure_count > 0 || resuming_document_write,
                     });
                     continue;
                 }
@@ -2676,7 +2664,10 @@ impl BakeService {
                             candidate.timeline.category,
                             candidate.timeline.summary.chars().take(40).collect::<String>(),
                         );
-                        let result = service.extract_candidate(&reason, &candidate).await;
+                        let result = retry_unstarted_bake_in_run(Some(run_deadline_ms), || {
+                            service.extract_candidate(&reason, &candidate)
+                        })
+                        .await;
                         BakeWorkResult::Extracted(candidate, result)
                     }
                 }
@@ -2750,7 +2741,7 @@ impl BakeService {
                             candidate.timeline.id,
                             count,
                             MAX_BAKE_RETRY_FAILURES,
-                            err
+                            bake_retry_failure_summary(&err)
                         );
                         self.advance_unified_watermark(
                             &mut max_processed_ts,
@@ -2781,7 +2772,7 @@ impl BakeService {
                         candidate.timeline.id,
                         count,
                         is_bake_candidate_timeout(&err),
-                        err
+                        bake_retry_failure_summary(&err)
                     );
                     self.advance_unified_watermark(
                         &mut max_processed_ts,
@@ -2861,6 +2852,7 @@ impl BakeService {
                     &mut existing_document_sources,
                     &mut existing_document_urls,
                     &mut existing_sop_sources,
+                    Some(run_deadline_ms),
                 )
                 .await
             {
@@ -2869,6 +2861,13 @@ impl BakeService {
                     let is_operation_replay = operation_replay_ids.contains(&candidate.timeline.id);
                     // 文档合并同样会经过 sidecar，可能在持久化阶段被前台任务抢占。
                     // 此时本地已落盘的部分产物保持幂等，候选留给下一批补齐。
+                    if let ApiError::Storage(crate::storage::StorageError::DocumentAutomaticWritesPaused { bucket })=&err {
+                        self.defer_paused_document_candidate(run_id,&candidate,*bucket)?;
+                        if is_operation_replay { self.storage.finish_operation_replay(candidate.timeline.id,"pending")?; }
+                        self.advance_unified_watermark(&mut max_processed_ts,candidate.timeline.updated_at_ms,false)?;
+                        local_queue_progress_count+=1;
+                        continue;
+                    }
                     if is_untracked_transient_bake_error(&err) {
                         self.storage.finalize_bake_candidate_audit(
                             run_id,
@@ -2896,7 +2895,7 @@ impl BakeService {
                             candidate.timeline.id,
                             count,
                             MAX_BAKE_RETRY_FAILURES,
-                            err
+                            bake_retry_failure_summary(&err)
                         );
                         self.advance_unified_watermark(
                             &mut max_processed_ts,
@@ -2927,7 +2926,7 @@ impl BakeService {
                         candidate.timeline.id,
                         count,
                         is_bake_candidate_timeout(&err),
-                        err
+                        bake_retry_failure_summary(&err)
                     );
                     self.advance_unified_watermark(
                         &mut max_processed_ts,
@@ -2956,13 +2955,12 @@ impl BakeService {
                 }
             };
 
+            let (candidate_status,candidate_reason)=candidate_result.audit_status();
             self.storage.finalize_bake_candidate_audit(
                 run_id,
                 candidate.timeline.id,
-                candidate_result
-                    .sop_persist_status
-                    .unwrap_or("not_evaluated"),
-                candidate_result.sop_persist_reason.as_deref(),
+                candidate_status,
+                candidate_reason,
             )?;
             if operation_replay_ids.contains(&candidate.timeline.id) {
                 self.storage.finish_operation_replay(
@@ -3008,9 +3006,8 @@ impl BakeService {
             let Some(existing_doc) = self.storage.find_document_by_source_url(&document_url)?
             else {
                 tracing::info!(
-                    "bake coalesce: deferred registration skipped, no document yet timeline_id={} canonical_url={}",
+                    "bake coalesce: deferred registration skipped, no document yet timeline_id={}",
                     candidate.timeline.id,
-                    document_url,
                 );
                 continue;
             };
@@ -3100,7 +3097,7 @@ impl BakeService {
 
         if response.status().is_success() {
             response.json::<BakeExtractResponse>().await.map_err(|err| {
-                tracing::warn!("解析 bake sidecar 成功响应失败: {}", err);
+                tracing::warn!(decode_error = err.is_decode(), "解析 bake sidecar 成功响应失败");
                 ApiError::Upstream {
                     status: StatusCode::BAD_GATEWAY,
                     code: "BAKE_SIDECAR_RESPONSE_INVALID",
@@ -3166,7 +3163,8 @@ impl BakeService {
         candidate: &BakeMemorySourceRecord,
         extracted: &BakeExtractResponse,
     ) -> Result<(), ApiError> {
-        let document_evidence = document_evidence(candidate);
+        let document_evidence = self.audit_document_candidate(candidate, Some(run_id),
+            crate::storage::repo::document_candidate_quality::DocumentEvaluationStage::Extraction)?;
         let sop_eligibility = sop_eligibility(candidate);
         let shapes = extracted
             .artifact_shapes
@@ -3223,17 +3221,15 @@ impl BakeService {
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             tracing::info!(
-                "bake artifact decision: run_id={} timeline_id={} artifact={} deterministic_eligible={:?} deterministic_reason={:?} model_accepted={} model_reason={:?} payload_present={} payload_valid={:?} artifact_shape={:?} compatibility_recovered={}",
+                "bake artifact decision: run_id={} timeline_id={} artifact={} deterministic_eligible={:?} deterministic_reason={:?} model_accepted={} payload_present={} payload_valid={:?} compatibility_recovered={}",
                 run_id,
                 candidate.timeline.id,
                 artifact_kind,
                 deterministic_eligible,
                 deterministic_reason,
                 extraction.accepted,
-                extraction.reason,
                 extraction.payload.is_some(),
                 payload_valid,
-                artifact_shape,
                 compatibility_recovered,
             );
             self.storage
@@ -3271,7 +3267,9 @@ impl BakeService {
             "sop" => outcome.sop_created_count,
             _ => 0,
         };
-        let (status, reason) = if !extraction.accepted {
+        let (status, reason) = if artifact_kind == "document" && outcome.document_refresh_pending {
+            (outcome.document_refresh_status.unwrap_or("pending_source_refresh"), Some("source_observed_not_applied"))
+        } else if !extraction.accepted {
             (
                 "rejected",
                 extraction.reason.as_deref().or(Some("model_rejected")),
@@ -3281,7 +3279,8 @@ impl BakeService {
         } else {
             ("reused_or_merged", Some("source_already_persisted"))
         };
-        let artifact_id = if matches!(status, "created" | "reused_or_merged") {
+        let artifact_id = if matches!(status, "created" | "reused_or_merged"
+            | "pending_source_refresh" | "source_checked" | "source_refresh_blocked") {
             self.persisted_artifact_id(artifact_kind, timeline_id)?
         } else {
             None
@@ -3305,7 +3304,11 @@ impl BakeService {
                     outcome.knowledge_quality_score,
                     outcome.knowledge_decision_reason_code,
                     outcome.knowledge_decision_reason_summary.as_deref(),
-                    Some(KNOWLEDGE_DECISION_RULE_VERSION),
+                    Some(
+                        outcome
+                            .knowledge_decision_rule_version
+                            .unwrap_or(KNOWLEDGE_DECISION_RULE_VERSION),
+                    ),
                     outcome.knowledge_shadow_payload_json.as_deref(),
                 )?;
                 return Ok(());
@@ -3342,6 +3345,7 @@ impl BakeService {
         existing_document_sources: &mut std::collections::HashSet<i64>,
         existing_document_urls: &mut std::collections::HashSet<String>,
         existing_sop_sources: &mut std::collections::HashSet<i64>,
+        run_deadline_ms: Option<i64>,
     ) -> Result<CandidatePersistResult, ApiError> {
         let mut result = CandidatePersistResult::default();
         let mut completed_artifacts = 0_i64;
@@ -3390,9 +3394,9 @@ impl BakeService {
             Err(error) => {
                 let reason = format!("artifact_error:{}", bake_retry_error_code(&error));
                 tracing::warn!(
-                    "bake artifact persist failed independently: timeline_id={} artifact=sop error={}",
+                    "bake artifact persist failed independently: timeline_id={} artifact=sop code={}",
                     candidate.timeline.id,
-                    error,
+                    bake_retry_error_code(&error),
                 );
                 if let Some(run_id) = audit_run_id {
                     self.storage.finalize_bake_artifact_audit(
@@ -3430,9 +3434,9 @@ impl BakeService {
             }
             Err(error) => {
                 tracing::warn!(
-                    "bake artifact persist failed independently: timeline_id={} artifact=knowledge error={}",
+                    "bake artifact persist failed independently: timeline_id={} artifact=knowledge code={}",
                     candidate.timeline.id,
-                    error,
+                    bake_retry_error_code(&error),
                 );
                 if let Some(run_id) = audit_run_id {
                     self.storage.finalize_bake_artifact_audit(
@@ -3453,6 +3457,7 @@ impl BakeService {
         match self
             .persist_document_artifact(
                 memory_id,
+                audit_run_id,
                 candidate,
                 document_extraction,
                 deterministic_document_recovery
@@ -3460,6 +3465,7 @@ impl BakeService {
                     .map(|_| "candidate"),
                 existing_document_sources,
                 existing_document_urls,
+                run_deadline_ms,
             )
             .await
         {
@@ -3476,19 +3482,28 @@ impl BakeService {
             }
             Err(error) => {
                 tracing::warn!(
-                    "bake artifact persist failed independently: timeline_id={} artifact=document error={}",
+                    "bake artifact persist failed independently: timeline_id={} artifact=document code={}",
                     candidate.timeline.id,
-                    error,
+                    bake_retry_error_code(&error),
                 );
                 if let Some(run_id) = audit_run_id {
                     self.storage.finalize_bake_artifact_audit(
                         run_id,
                         candidate.timeline.id,
                         "document",
-                        "failed",
+                        if is_untracked_transient_bake_error(&error) {
+                            "deferred"
+                        } else {
+                            "failed"
+                        },
                         Some(bake_retry_error_code(&error)),
                         None,
                     )?;
+                }
+                if is_untracked_transient_bake_error(&error) {
+                    // 已落盘兄弟产物保持幂等；等待预算不足和前台抢占必须把
+                    // 本候选留在原水位，不能被“已有部分产物”吞成完成/误拒文档。
+                    return Err(error);
                 }
                 document_persist_error_code = Some(bake_retry_error_code(&error).to_string());
                 if first_error.is_none() {
@@ -3498,6 +3513,7 @@ impl BakeService {
         }
 
         let deterministic_recovery_succeeded = deterministic_document_recovery.is_some()
+            && !result.document_refresh_pending
             && document_persist_error_code.is_none()
             && self.document_already_persisted(candidate)?;
         if let (Some(run_id), true) = (audit_run_id, deterministic_recovery_succeeded) {
@@ -3515,10 +3531,9 @@ impl BakeService {
                 artifact_id,
             )?;
             tracing::warn!(
-                "bake document recovered from captured source: timeline_id={} artifact_id={:?} original_model_reason={:?}",
+                "bake document recovered from captured source: timeline_id={} artifact_id={:?}",
                 candidate.timeline.id,
                 artifact_id,
-                extracted.document.reason,
             );
         }
 
@@ -3542,10 +3557,9 @@ impl BakeService {
                 )?;
             }
             tracing::warn!(
-                "bake document false-negative detected: timeline_id={} evidence={:?} model_reason={:?} persist_error_code={:?}",
+                "bake document false-negative detected: timeline_id={} evidence={:?} persist_error_code={:?}",
                 candidate.timeline.id,
                 document_evidence(candidate).kind,
-                extracted.document.reason,
                 document_persist_error_code,
             );
             return Err(ApiError::Upstream {
@@ -3574,6 +3588,7 @@ impl BakeService {
         existing_sources: &mut std::collections::HashSet<i64>,
     ) -> Result<CandidatePersistResult, ApiError> {
         let source_capture_ids = collect_source_capture_id_strings(&self.storage, candidate)?;
+        let gate_config = KnowledgeGateConfig::from_storage(&self.storage);
         let source_fingerprint = artifact_source_fingerprint(candidate);
         if let Some(existing_id) = source_fingerprint
             .as_deref()
@@ -3655,7 +3670,11 @@ impl BakeService {
                     payload.match_level.as_deref(),
                 )?;
             }
-            let decision = resolve_knowledge_decision(&payload);
+            let decision = resolve_knowledge_decision(
+                &payload,
+                candidate.timeline.importance,
+                &gate_config,
+            );
             if decision.state != "published" {
                 self.merge_existing_knowledge_source_captures(&existing, &source_capture_ids)?;
                 return Ok(knowledge_gate_outcome(&payload, &decision));
@@ -3683,6 +3702,7 @@ impl BakeService {
             outcome.knowledge_quality_score = decision.score;
             outcome.knowledge_decision_reason_code = Some(decision.reason_code);
             outcome.knowledge_decision_reason_summary = Some(decision.reason_summary);
+            outcome.knowledge_decision_rule_version = Some(decision.rule_version);
             return Ok(outcome);
         }
         if !extraction.accepted {
@@ -3711,7 +3731,11 @@ impl BakeService {
                 payload.match_level.as_deref(),
             )?;
         }
-        let decision = resolve_knowledge_decision(&payload);
+        let decision = resolve_knowledge_decision(
+            &payload,
+            candidate.timeline.importance,
+            &gate_config,
+        );
         if decision.state != "published" {
             tracing::info!(
                 "bake knowledge gated: timeline_id={} state={} score={:?} reason={}",
@@ -3721,6 +3745,50 @@ impl BakeService {
                 decision.reason_code,
             );
             return Ok(knowledge_gate_outcome(&payload, &decision));
+        }
+        // 近重复语义身份抑制：同一件事被相邻时间线反复提炼时合并到已有条目，不再新增行。
+        // 存量行 dedup_key 为 NULL，不参与匹配，满足“存量不动”。
+        if let Some(dedup_key) = knowledge_dedup_key(&payload) {
+            let since_ms = now_ms().saturating_sub(gate_config.dedup_window_ms());
+            let duplicate_id = self
+                .storage
+                .find_recent_bake_knowledge_by_dedup_key(&dedup_key, since_ms)?;
+            if let Some(existing) = duplicate_id
+                .map(|id| self.storage.get_bake_knowledge(id))
+                .transpose()?
+                .flatten()
+            {
+                let review_status = "auto_created".to_string();
+                self.merge_existing_knowledge_artifact(
+                    &existing,
+                    candidate,
+                    trigger_reason,
+                    &payload,
+                    &review_status,
+                    &source_capture_ids,
+                )?;
+                self.storage.record_bake_artifact_source(
+                    "knowledge",
+                    existing.id,
+                    candidate.timeline.id,
+                    source_fingerprint.as_deref(),
+                )?;
+                existing_sources.insert(candidate.timeline.id);
+                tracing::info!(
+                    "bake knowledge merged: timeline_id={} knowledge_id={} reason=duplicate_semantic_identity dedup_key={}",
+                    candidate.timeline.id,
+                    existing.id,
+                    dedup_key,
+                );
+                let mut outcome = CandidatePersistResult::default();
+                outcome.knowledge_decision_state = Some("merged");
+                outcome.knowledge_quality_score = decision.score;
+                outcome.knowledge_decision_reason_code = Some("duplicate_semantic_identity");
+                outcome.knowledge_decision_reason_summary =
+                    Some("同一语义身份在近重复窗口内已有知识条目，合并而非新增".to_string());
+                outcome.knowledge_decision_rule_version = Some(decision.rule_version);
+                return Ok(outcome);
+            }
         }
         let review_status = "auto_created".to_string();
         tracing::info!(
@@ -3734,6 +3802,7 @@ impl BakeService {
         let record = build_bake_knowledge_entry(
             candidate,
             &payload,
+            &decision,
             &review_status,
             trigger_reason,
             &source_capture_ids,
@@ -3750,6 +3819,7 @@ impl BakeService {
         outcome.knowledge_quality_score = decision.score;
         outcome.knowledge_decision_reason_code = Some(decision.reason_code);
         outcome.knowledge_decision_reason_summary = Some(decision.reason_summary);
+        outcome.knowledge_decision_rule_version = Some(decision.rule_version);
         Ok(outcome)
     }
 
@@ -3862,16 +3932,86 @@ impl BakeService {
         Ok(())
     }
 
+    fn queue_existing_document_observation(
+        &self, candidate: &BakeMemorySourceRecord, existing: &BakeDocumentRecord,
+    ) -> Result<Option<CandidatePersistResult>, ApiError> {
+        // Title fallback and insert races must obey the same source-update contract.
+        if existing.source_url.as_deref().map(str::trim).filter(|url| !url.is_empty()).is_none() {
+            return Ok(None);
+        }
+        let Some(fingerprint) = artifact_source_fingerprint(candidate) else { return Ok(None); };
+        let (links, _) = self.document_with_merged_source_metadata(candidate, existing)?;
+        self.storage.update_document_source_links(existing.id, &links)?;
+        self.storage.enqueue_document_refresh_observation(existing.id, &fingerprint,
+            Some(candidate.timeline.id), now_ms())?;
+        let state = self.storage.document_refresh_observation_state(existing.id, &fingerprint)?;
+        let status = match state.as_deref() {
+            Some("completed") => "source_checked",
+            Some("blocked") => "source_refresh_blocked",
+            _ => "pending_source_refresh",
+        };
+        Ok(Some(CandidatePersistResult { document_refresh_pending: true,
+            document_refresh_status: Some(status), ..Default::default() }))
+    }
+
+    fn defer_paused_document_candidate(&self, run_id:i64, candidate:&BakeMemorySourceRecord, bucket:u8) -> Result<(),ApiError> {
+        // Durable pending work must exist before the caller advances its watermark.
+        self.storage.defer_automatic_document_write(candidate.timeline.id,bucket)?;
+        self.storage.upsert_bake_candidate_audit(&new_bake_candidate_audit(run_id,candidate,"deferred",
+            Some("DOCUMENT_AUTOMATIC_WRITES_PAUSED")))?;
+        Ok(())
+    }
+
+    fn audit_document_candidate(
+        &self, candidate: &BakeMemorySourceRecord, run_id: Option<i64>,
+        stage: crate::storage::repo::document_candidate_quality::DocumentEvaluationStage,
+    ) -> Result<BakeDocumentEvidencePayload, ApiError> {
+        use crate::storage::repo::document_candidate_quality::DocumentCandidateQualityEvaluation;
+        let evidence = document_evidence(candidate);
+        let document = match candidate.capture_url.as_deref() {
+            Some(url) => self.storage.find_document_by_source_url(url)?,
+            None => None,
+        }.or(self.storage.find_bake_document_by_source_memory_id(candidate.timeline.id)?);
+        let input_character_count = candidate.url_aggregated_text.as_deref()
+            .filter(|text| !text.trim().is_empty()).map(non_whitespace_char_count)
+            .unwrap_or_else(|| [candidate.capture_ax_text.as_deref(),candidate.capture_ocr_text.as_deref(),
+                candidate.capture_input_text.as_deref(),candidate.capture_audio_text.as_deref()]
+                .into_iter().flatten().map(non_whitespace_char_count).sum());
+        let capture_ids = collect_source_capture_id_strings(&self.storage,candidate)?
+            .into_iter().filter_map(|value| value.parse::<i64>().ok()).filter(|id| *id > 0).collect();
+        self.storage.record_document_candidate_quality(&DocumentCandidateQualityEvaluation {
+            run_id, timeline_id: candidate.timeline.id, document_id: document.map(|doc| doc.id),
+            capture_ids, stage, input_character_count,
+            has_document_url: evidence.has_document_url,
+            has_document_page_title: evidence.has_document_page_title,
+            has_substantive_document_body: evidence.has_substantive_document_body,
+            allows_auto_create: evidence.allows_auto_create,
+        })?;
+        Ok(evidence)
+    }
+
     async fn persist_document_artifact(
         &self,
         memory_id: Option<i64>,
+        audit_run_id: Option<i64>,
         candidate: &BakeMemorySourceRecord,
         extraction: &BakeArtifactExtraction,
         forced_review_status: Option<&str>,
         existing_sources: &mut std::collections::HashSet<i64>,
         existing_urls: &mut std::collections::HashSet<String>,
+        run_deadline_ms: Option<i64>,
     ) -> Result<CandidatePersistResult, ApiError> {
-        let evidence = document_evidence(candidate);
+        let evidence = self.audit_document_candidate(candidate, audit_run_id,
+            crate::storage::repo::document_candidate_quality::DocumentEvaluationStage::Persistence)?;
+        // Revisited URLs are observations of a potentially new revision. Never
+        // ask a model to union them with an authoritative source (or old shell).
+        if let Some(url) = candidate.capture_url.as_deref() {
+            if let Some(existing) = self.storage.find_document_by_source_url(url)? {
+                if let Some(result) = self.queue_existing_document_observation(candidate, &existing)? {
+                    return Ok(result);
+                }
+            }
+        }
         if !evidence.allows_auto_create {
             tracing::info!(
                 "bake document discard: timeline_id={} reason=insufficient_document_evidence evidence_kind={:?} source_surface={:?} has_document_url={} has_document_page_title={} has_substantive_document_body={}",
@@ -3891,8 +4031,13 @@ impl BakeService {
                     .storage
                     .find_bake_document_by_source_memory_id(candidate.timeline.id)?
                 {
-                    self.merge_document_with_sidecar(candidate, &existing_doc)
-                        .await?;
+                    if let Some(result) = self.queue_existing_document_observation(candidate, &existing_doc)? {
+                        return Ok(result);
+                    }
+                    retry_unstarted_bake_in_run(run_deadline_ms, || {
+                        self.merge_document_with_sidecar(candidate, &existing_doc)
+                    })
+                    .await?;
                     tracing::info!(
                         "bake document merged: timeline_id={} doc_id={} reason=already_has_document_source",
                         candidate.timeline.id,
@@ -3917,21 +4062,25 @@ impl BakeService {
         if let Some(ref u) = candidate_url_norm {
             if let Some(existing_doc) = self.storage.find_document_by_source_url(u)? {
                 if extraction.accepted {
-                    self.merge_document_with_sidecar(candidate, &existing_doc)
-                        .await?;
+                    if let Some(result) = self.queue_existing_document_observation(candidate, &existing_doc)? {
+                        return Ok(result);
+                    }
+                    retry_unstarted_bake_in_run(run_deadline_ms, || {
+                        self.merge_document_with_sidecar(candidate, &existing_doc)
+                    })
+                    .await?;
                     existing_sources.insert(candidate.timeline.id);
                     existing_urls.insert(u.clone());
                     tracing::info!(
-                        "bake document merged: timeline_id={} url={} doc_id={}",
+                        "bake document merged: timeline_id={} doc_id={}",
                         candidate.timeline.id,
-                        u,
                         existing_doc.id,
                     );
                     return Ok(CandidatePersistResult::created_document(false));
                 } else {
                     tracing::info!(
-                        "bake document discard: timeline_id={} reason=url_already_has_document_sidecar_rejected url={}",
-                        candidate.timeline.id, u,
+                        "bake document discard: timeline_id={} doc_id={} reason=url_already_has_document_sidecar_rejected",
+                        candidate.timeline.id, existing_doc.id,
                     );
                     return Ok(CandidatePersistResult::discarded());
                 }
@@ -3951,28 +4100,31 @@ impl BakeService {
                     candidate.capture_url.as_deref(),
                 ) {
                     if extraction.accepted {
-                        self.merge_document_with_sidecar(candidate, &existing_doc)
-                            .await?;
+                        if let Some(result) = self.queue_existing_document_observation(candidate, &existing_doc)? {
+                            return Ok(result);
+                        }
+                        retry_unstarted_bake_in_run(run_deadline_ms, || {
+                            self.merge_document_with_sidecar(candidate, &existing_doc)
+                        })
+                        .await?;
                         existing_sources.insert(candidate.timeline.id);
                         tracing::info!(
-                            "bake document merged: timeline_id={} source_title={} doc_id={} reason=same_document_source_title",
+                            "bake document merged: timeline_id={} doc_id={} reason=same_document_source_title",
                             candidate.timeline.id,
-                            source_title,
                             existing_doc.id,
                         );
                         return Ok(CandidatePersistResult::created_document(false));
                     }
                     tracing::info!(
-                        "bake document discard: timeline_id={} reason=source_title_already_has_document_sidecar_rejected source_title={}",
+                        "bake document discard: timeline_id={} doc_id={} reason=source_title_already_has_document_sidecar_rejected",
                         candidate.timeline.id,
-                        source_title,
+                        existing_doc.id,
                     );
                     return Ok(CandidatePersistResult::discarded());
                 }
                 tracing::info!(
-                    "bake document title match ignored: timeline_id={} source_title={} existing_doc_id={} reason=different_document_url",
+                    "bake document title match ignored: timeline_id={} existing_doc_id={} reason=different_document_url",
                     candidate.timeline.id,
-                    source_title,
                     existing_doc.id,
                 );
             }
@@ -4014,12 +4166,9 @@ impl BakeService {
                 )
             });
         tracing::info!(
-            "bake document accept: timeline_id={} sidecar_review_status={:?} match_score={:?} match_level={:?} resolved_review_status={}",
+            "bake document accept: timeline_id={} match_score={:?}",
             candidate.timeline.id,
-            payload.review_status,
             payload.match_score,
-            payload.match_level,
-            review_status,
         );
         let source_capture_ids = collect_source_capture_id_strings(&self.storage, candidate)?;
         let linked_knowledge_ids = self
@@ -4034,8 +4183,9 @@ impl BakeService {
             &source_capture_ids,
             &linked_knowledge_ids,
         )?;
-        let document_id = match self.storage.insert_bake_document(&document) {
+        let document_id = match self.storage.insert_bake_document_from_observation(&document) {
             Ok(document_id) => document_id,
+            Err(error @ crate::storage::StorageError::DocumentAutomaticWritesPaused { .. }) => return Err(error.into()),
             Err(insert_error) => {
                 // 数据库唯一 identity 是最终并发兜底。若另一个 run 刚插入同一文档，
                 // 立即转为合并，不能把唯一键冲突暴露成整轮 bake 失败。
@@ -4046,8 +4196,13 @@ impl BakeService {
                     .transpose()?
                     .flatten();
                 if let Some(existing_doc) = concurrently_created {
-                    self.merge_document_with_sidecar(candidate, &existing_doc)
-                        .await?;
+                    if let Some(result) = self.queue_existing_document_observation(candidate, &existing_doc)? {
+                        return Ok(result);
+                    }
+                    retry_unstarted_bake_in_run(run_deadline_ms, || {
+                        self.merge_document_with_sidecar(candidate, &existing_doc)
+                    })
+                    .await?;
                     existing_sources.insert(candidate.timeline.id);
                     tracing::info!(
                         "bake document merged after identity race: timeline_id={} doc_id={}",
@@ -4120,7 +4275,7 @@ impl BakeService {
             let body = response.text().await.unwrap_or_default();
             if source_metadata_changed {
                 self.storage
-                    .update_bake_document(existing_doc.id, &update)?;
+                    .update_document_source_links(existing_doc.id, &update)?;
             }
             // 来源元数据可以先补齐，但内容合并任务本身必须记录为永久失败，
             // 不能把 504 或其他 sidecar 错误伪装成成功后再次入队。
@@ -4139,7 +4294,7 @@ impl BakeService {
         }
 
         let merged: BakeMergeDocumentResponse = response.json().await.map_err(|error| {
-            tracing::warn!("解析 merge_document 成功响应失败: {}", error);
+            tracing::warn!(decode_error = error.is_decode(), "解析 merge_document 成功响应失败");
             ApiError::Upstream {
                 status: StatusCode::BAD_GATEWAY,
                 code: "BAKE_SIDECAR_RESPONSE_INVALID",
@@ -4163,6 +4318,11 @@ impl BakeService {
                         existing_doc.full_content.as_deref().unwrap_or_default().chars().count(),
                         merged_content.chars().count(),
                     );
+                    return Err(ApiError::Upstream {
+                        status: StatusCode::BAD_GATEWAY,
+                        code: "BAKE_DOCUMENT_MERGE_PENDING",
+                        message: "文档合并未通过正文保留校验，来源内容尚未应用".to_string(),
+                    });
                 }
             }
             update.evidence_summary = merged.evidence_summary.or(update.evidence_summary);
@@ -4192,8 +4352,14 @@ impl BakeService {
             });
         }
 
-        self.storage
-            .update_bake_document(existing_doc.id, &update)?;
+        if !self.storage.update_bake_document_from_observation(existing_doc, &update)? {
+            self.storage.update_document_source_links(existing_doc.id, &update)?;
+            return Err(ApiError::Upstream {
+                status: StatusCode::CONFLICT,
+                code: "BAKE_DOCUMENT_MERGE_PENDING",
+                message: "来源正文已更新，旧合并结果未应用".to_string(),
+            });
+        }
         if let Some(fingerprint) = source_fingerprint {
             self.storage.record_bake_document_source_fingerprint(
                 existing_doc.id,
@@ -4212,8 +4378,17 @@ impl BakeService {
         let (update, changed) =
             self.document_with_merged_source_metadata(candidate, existing_doc)?;
         if changed {
-            self.storage
-                .update_bake_document(existing_doc.id, &update)?;
+            if existing_doc.generation_version.as_deref() == Some("document-source-v2") {
+                self.storage.update_document_source_links(existing_doc.id, &update)?;
+            } else if !self.storage.update_bake_document_from_observation(existing_doc, &update)? {
+                self.storage.update_document_source_links(existing_doc.id, &update)?;
+            }
+        }
+        if update.source_url.is_some() {
+            if let Some(fingerprint) = artifact_source_fingerprint(candidate) {
+                self.storage.enqueue_document_refresh_observation(existing_doc.id, &fingerprint,
+                    Some(candidate.timeline.id), now_ms())?;
+            }
         }
         Ok(changed)
     }
@@ -4758,6 +4933,8 @@ impl BakeService {
 
 #[derive(Debug, Clone, Default)]
 struct CandidatePersistResult {
+    document_refresh_pending: bool,
+    document_refresh_status: Option<&'static str>,
     auto_created_count: i64,
     candidate_count: i64,
     discarded_count: i64,
@@ -4771,14 +4948,29 @@ struct CandidatePersistResult {
     knowledge_decision_reason_code: Option<&'static str>,
     knowledge_decision_reason_summary: Option<String>,
     knowledge_shadow_payload_json: Option<String>,
+    /// 实际生效的门禁规则版本。应急开关关闭时回退到第一期口径，审计必须如实区分。
+    knowledge_decision_rule_version: Option<&'static str>,
 }
 
 impl CandidatePersistResult {
+    fn audit_status(&self) -> (&str, Option<&str>) {
+        if self.document_refresh_pending {
+            (self.document_refresh_status.unwrap_or("pending_source_refresh"),Some("source_observed_not_applied"))
+        } else {
+            (self.sop_persist_status.unwrap_or("not_evaluated"),self.sop_persist_reason.as_deref())
+        }
+    }
+
     fn discarded() -> Self {
         Self {
             discarded_count: 1,
             ..Self::default()
         }
+    }
+
+    fn with_rule_version(mut self, rule_version: &'static str) -> Self {
+        self.knowledge_decision_rule_version = Some(rule_version);
+        self
     }
 
     fn created_knowledge(auto_created: bool) -> Self {
@@ -4788,6 +4980,7 @@ impl CandidatePersistResult {
             knowledge_created_count: 1,
             knowledge_decision_state: Some("published"),
             knowledge_decision_reason_code: Some("publish_threshold_met"),
+            knowledge_decision_rule_version: Some(KNOWLEDGE_DECISION_RULE_VERSION),
             ..Self::default()
         }
     }
@@ -4841,6 +5034,8 @@ impl CandidatePersistResult {
     }
 
     fn apply(&mut self, other: Self) {
+        self.document_refresh_pending |= other.document_refresh_pending;
+        if other.document_refresh_status.is_some() { self.document_refresh_status = other.document_refresh_status; }
         self.auto_created_count += other.auto_created_count;
         self.candidate_count += other.candidate_count;
         self.discarded_count += other.discarded_count;
@@ -5171,10 +5366,93 @@ fn sop_eligibility(candidate: &BakeMemorySourceRecord) -> SopEligibility {
     }
 }
 
+fn bake_queue_busy_retry_delay(attempt: u32) -> Duration {
+    Duration::from_secs(
+        BAKE_QUEUE_BUSY_RETRY_BASE_SECS
+            .saturating_mul(1_u64 << attempt.min(10))
+            .min(BAKE_QUEUE_BUSY_RETRY_MAX_SECS),
+    )
+}
+
+fn bake_run_has_request_budget(deadline_ms: i64, now: i64, delay: Duration) -> bool {
+    let required_ms = (BAKE_SIDECAR_TIMEOUT_SECS * 1000)
+        .saturating_add(delay.as_millis().min(u64::MAX as u128) as u64);
+    deadline_ms.saturating_sub(now) > required_ms.min(i64::MAX as u64) as i64
+}
+
+fn bake_run_wait_budget_exhausted() -> ApiError {
+    ApiError::Upstream {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "INFERENCE_QUEUE_BUSY",
+        message: "本轮剩余时间不足以安全启动推理，未开始的请求留待下一轮".to_string(),
+    }
+}
+
+/// 只有服务明确确认“仍在排队、尚未开始”的请求可以留在当前 run 重试。
+/// P1 可能连续运行数分钟；将每次 90s 等待到期当作整轮终止，会撤掉 P2
+/// 就绪需求，直到下一批 capture 完成才重建，使跨进程公平调度失效。
+/// 每次仍使用原 HTTP 上限，并在发送/退避前为执行保留完整 410s；不改候选
+/// 失败次数，也不重试可能已消耗计算的超时、抢占或其他服务错误。
+async fn retry_unstarted_bake_in_run<T, F, Fut>(
+    deadline_ms: Option<i64>,
+    mut operation: F,
+) -> Result<T, ApiError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, ApiError>>,
+{
+    let Some(deadline_ms) = deadline_ms else {
+        return operation().await;
+    };
+    let mut attempt = 0_u32;
+    loop {
+        if !bake_run_has_request_budget(deadline_ms, now_ms(), Duration::ZERO) {
+            return Err(bake_run_wait_budget_exhausted());
+        }
+        match operation().await {
+            Err(ApiError::Upstream {
+                code: "INFERENCE_QUEUE_BUSY",
+                ..
+            }) => {
+                let delay = bake_queue_busy_retry_delay(attempt);
+                if !bake_run_has_request_budget(deadline_ms, now_ms(), delay) {
+                    return Err(bake_run_wait_budget_exhausted());
+                }
+                tracing::info!(
+                    "bake inference remains queued in current run: retry={} delay_ms={} remaining_ms={}",
+                    attempt + 1,
+                    delay.as_millis(),
+                    deadline_ms.saturating_sub(now_ms()),
+                );
+                tokio::time::sleep(delay).await;
+                attempt = attempt.saturating_add(1);
+            }
+            result => return result,
+        }
+    }
+}
+
+fn bake_dispatch_concurrency(requested: usize, status: Option<&Value>) -> usize {
+    let Some(stats) = status.and_then(|value| value.get("stats")) else {
+        return 1;
+    };
+    let capacity = [
+        stats.get("model_parallelism"),
+        stats.get("cross_process_limit"),
+        stats.get("max_concurrency"),
+        stats.pointer("/lane_limits/p2_bake"),
+    ]
+    .into_iter()
+    .map(|value| value.and_then(Value::as_u64).unwrap_or(1).clamp(1, 3) as usize)
+    .min()
+    .unwrap_or(1);
+    requested.clamp(1, 3).min(capacity)
+}
+
 fn map_sidecar_request_error(err: reqwest::Error) -> ApiError {
     let msg = err.to_string();
     if err.is_timeout() || msg.contains("timed out") || msg.contains("timeout") {
-        tracing::warn!("bake sidecar 响应超时: {}", err);
+        tracing::warn!("bake sidecar 响应超时 code=INFERENCE_TIMEOUT");
         ApiError::Upstream {
             status: StatusCode::GATEWAY_TIMEOUT,
             code: "INFERENCE_TIMEOUT",
@@ -5184,22 +5462,26 @@ fn map_sidecar_request_error(err: reqwest::Error) -> ApiError {
             ),
         }
     } else {
-        tracing::warn!("无法连接到 bake sidecar: {}", err);
+        tracing::warn!(connect_error=err.is_connect(), "无法连接到 bake sidecar code=SIDECAR_UNAVAILABLE");
         ApiError::Upstream {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "SIDECAR_UNAVAILABLE",
-            message: format!("bake 提炼服务不可用，请确认 AI Sidecar 已正常启动: {err}"),
+            message: "bake 提炼服务不可用，请确认 AI Sidecar 已正常启动".to_string(),
         }
     }
 }
 
 fn is_untracked_transient_bake_error(error: &ApiError) -> bool {
+    if matches!(error,ApiError::Storage(crate::storage::StorageError::DocumentAutomaticWritesPaused { .. })) {
+        return true;
+    }
     matches!(
         error,
         ApiError::Upstream { code, .. }
             if matches!(
                 *code,
                 "INFERENCE_PREEMPTED"
+                    | "INFERENCE_QUEUE_BUSY"
                     | "MODEL_RATE_LIMITED"
                     | "MODEL_UNAVAILABLE"
                     | "SIDECAR_UNAVAILABLE"
@@ -5212,12 +5494,16 @@ fn bake_retry_failure_summary(error: &ApiError) -> String {
         ApiError::Upstream { status, code, .. } => {
             format!("bake_error code={code} status={}", status.as_u16())
         }
-        _ => error.to_string(),
+        ApiError::Storage(_) => "bake_error code=STORAGE_ERROR".into(),
+        ApiError::NotFound(_) => "bake_error code=NOT_FOUND".into(),
+        ApiError::BadRequest(_) => "bake_error code=BAD_REQUEST".into(),
+        ApiError::Internal(_) => "bake_error code=INTERNAL_ERROR".into(),
     }
 }
 
 fn bake_retry_error_code(error: &ApiError) -> &str {
     match error {
+        ApiError::Storage(crate::storage::StorageError::DocumentAutomaticWritesPaused { .. }) => "DOCUMENT_AUTOMATIC_WRITES_PAUSED",
         ApiError::Upstream { code, .. } => code,
         _ => "BAKE_INTERNAL_ERROR",
     }
@@ -5238,6 +5524,7 @@ fn is_retryable_bake_candidate_error(error: &ApiError) -> bool {
                     | "BAKE_SIDECAR_RESPONSE_INVALID"
                     | "BAKE_ARTIFACT_PAYLOAD_INVALID"
                     | "BAKE_DOCUMENT_FALSE_NEGATIVE"
+                    | "BAKE_DOCUMENT_MERGE_PENDING"
                     | "BAKE_INTERNAL_ERROR"
                     | "BAKE_UNCLASSIFIED_UPSTREAM_ERROR"
             )
@@ -5319,7 +5606,7 @@ fn parse_bake_knowledge_payload(
 ) -> Result<BakeKnowledgeArtifactPayload, ApiError> {
     let mut payload: BakeKnowledgeArtifactPayload =
         serde_json::from_value(value).map_err(|err| {
-            tracing::warn!("解析 bake knowledge payload 失败: {}", err);
+            tracing::warn!(error_category=?err.classify(), "解析 bake knowledge payload 失败");
             ApiError::Upstream {
                 status: StatusCode::UNPROCESSABLE_ENTITY,
                 code: "BAKE_ARTIFACT_PAYLOAD_INVALID",
@@ -5338,7 +5625,7 @@ fn parse_bake_document_payload(
 ) -> Result<BakeDocumentArtifactPayload, ApiError> {
     let mut payload: BakeDocumentArtifactPayload =
         serde_json::from_value(value).map_err(|err| {
-            tracing::warn!("解析 bake design payload 失败: {}", err);
+            tracing::warn!(error_category=?err.classify(), "解析 bake design payload 失败");
             ApiError::Upstream {
                 status: StatusCode::UNPROCESSABLE_ENTITY,
                 code: "BAKE_ARTIFACT_PAYLOAD_INVALID",
@@ -5367,7 +5654,7 @@ fn parse_bake_sop_payload(
     candidate: &BakeMemorySourceRecord,
 ) -> Result<BakeSopArtifactPayload, ApiError> {
     let mut payload: BakeSopArtifactPayload = serde_json::from_value(value).map_err(|err| {
-        tracing::warn!("解析 bake sop payload 失败: {}", err);
+        tracing::warn!(error_category=?err.classify(), "解析 bake sop payload 失败");
         ApiError::Upstream {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             code: "BAKE_ARTIFACT_PAYLOAD_INVALID",
@@ -5474,6 +5761,7 @@ fn map_sidecar_error(
         };
         match code {
             "INFERENCE_PREEMPTED"
+            | "INFERENCE_QUEUE_BUSY"
             | "MODEL_RATE_LIMITED"
             | "MODEL_UNAVAILABLE"
             | "SIDECAR_UNAVAILABLE" => {
@@ -5515,6 +5803,7 @@ fn map_sidecar_error(
         Some("BAKE_REQUEST_INVALID") => (StatusCode::BAD_REQUEST, "BAKE_REQUEST_INVALID"),
         Some("INFERENCE_TIMEOUT") => (StatusCode::GATEWAY_TIMEOUT, "INFERENCE_TIMEOUT"),
         Some("INFERENCE_PREEMPTED") => (StatusCode::SERVICE_UNAVAILABLE, "INFERENCE_PREEMPTED"),
+        Some("INFERENCE_QUEUE_BUSY") => (StatusCode::SERVICE_UNAVAILABLE, "INFERENCE_QUEUE_BUSY"),
         Some("MODEL_RATE_LIMITED") => (StatusCode::SERVICE_UNAVAILABLE, "MODEL_RATE_LIMITED"),
         Some("MODEL_UNAVAILABLE") => (StatusCode::SERVICE_UNAVAILABLE, "MODEL_UNAVAILABLE"),
         Some("SIDECAR_UNAVAILABLE") => (StatusCode::SERVICE_UNAVAILABLE, "SIDECAR_UNAVAILABLE"),
@@ -5555,27 +5844,401 @@ struct KnowledgeDecision {
     score: Option<f64>,
     reason_code: &'static str,
     reason_summary: String,
+    rule_version: &'static str,
 }
 
-fn resolve_knowledge_decision(payload: &BakeKnowledgeArtifactPayload) -> KnowledgeDecision {
-    let score = payload.match_score.filter(|value| value.is_finite());
-    let future_question = payload
-        .future_question
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let decision_reason = payload
-        .decision_reason
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let evidence = payload
-        .evidence_summary
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+/// 知识门禁的运行时配置。读取或解析失败一律回落默认值，配置错误不得阻断烘焙。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct KnowledgeGateConfig {
+    enabled: bool,
+    publish_score: f64,
+    shadow_score: f64,
+    dedup_window_days: i64,
+    min_publish_audience: &'static str,
+    min_publish_horizon: &'static str,
+    public_reference_veto_enabled: bool,
+}
 
-    if score.is_some_and(|value| value < KNOWLEDGE_SHADOW_SCORE) {
+impl Default for KnowledgeGateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            publish_score: KNOWLEDGE_PUBLISH_SCORE,
+            shadow_score: KNOWLEDGE_SHADOW_SCORE,
+            dedup_window_days: KNOWLEDGE_DEDUP_WINDOW_DAYS,
+            min_publish_audience: KNOWLEDGE_MIN_PUBLISH_AUDIENCE,
+            min_publish_horizon: KNOWLEDGE_MIN_PUBLISH_HORIZON,
+            public_reference_veto_enabled: KNOWLEDGE_PUBLIC_REFERENCE_VETO_ENABLED,
+        }
+    }
+}
+
+impl KnowledgeGateConfig {
+    fn from_storage(storage: &StorageManager) -> Self {
+        let mut config = Self::default();
+        config.enabled = preference_bool(storage, PREF_KNOWLEDGE_GATE_ENABLED, config.enabled);
+        config.publish_score =
+            preference_score(storage, PREF_KNOWLEDGE_PUBLISH_SCORE, config.publish_score);
+        config.shadow_score =
+            preference_score(storage, PREF_KNOWLEDGE_SHADOW_SCORE, config.shadow_score);
+        config.dedup_window_days = preference_positive_i64(
+            storage,
+            PREF_KNOWLEDGE_DEDUP_WINDOW_DAYS,
+            config.dedup_window_days,
+        );
+        config.min_publish_audience = preference_ladder_value(
+            storage,
+            PREF_KNOWLEDGE_MIN_PUBLISH_AUDIENCE,
+            &KNOWLEDGE_AUDIENCE_LADDER,
+            config.min_publish_audience,
+        );
+        config.min_publish_horizon = preference_ladder_value(
+            storage,
+            PREF_KNOWLEDGE_MIN_PUBLISH_HORIZON,
+            &KNOWLEDGE_HORIZON_LADDER,
+            config.min_publish_horizon,
+        );
+        config.public_reference_veto_enabled = preference_bool(
+            storage,
+            PREF_KNOWLEDGE_PUBLIC_REFERENCE_VETO,
+            config.public_reference_veto_enabled,
+        );
+        // shadow 线不得高于 publish 线，否则会出现「够不上发布却又算不上 shadow」的空档。
+        if config.shadow_score > config.publish_score {
+            config.shadow_score = config.publish_score;
+        }
+        config
+    }
+
+    fn dedup_window_ms(&self) -> i64 {
+        self.dedup_window_days.saturating_mul(86_400_000)
+    }
+}
+
+fn preference_bool(storage: &StorageManager, key: &str, fallback: bool) -> bool {
+    let Some(raw) = storage.get_preference_value(key).ok().flatten() else {
+        return fallback;
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => true,
+        "false" | "0" | "no" | "off" => false,
+        _ => fallback,
+    }
+}
+
+fn preference_score(storage: &StorageManager, key: &str, fallback: f64) -> f64 {
+    let Some(raw) = storage.get_preference_value(key).ok().flatten() else {
+        return fallback;
+    };
+    match raw.trim().parse::<f64>() {
+        Ok(value) if value.is_finite() && (0.0..=1.0).contains(&value) => value,
+        _ => fallback,
+    }
+}
+
+fn preference_positive_i64(storage: &StorageManager, key: &str, fallback: i64) -> i64 {
+    let Some(raw) = storage.get_preference_value(key).ok().flatten() else {
+        return fallback;
+    };
+    match raw.trim().parse::<i64>() {
+        Ok(value) if value > 0 => value,
+        _ => fallback,
+    }
+}
+
+/// 读取一个必须落在有序取值梯上的字符串配置项。取值不在梯子内（拼错、来自旧版本的取值集）
+/// 时回落默认值：配置错误只应削弱严格性，不得放大成误拦。
+fn preference_ladder_value(
+    storage: &StorageManager,
+    key: &str,
+    ladder: &[(&'static str, f64)],
+    fallback: &'static str,
+) -> &'static str {
+    let Some(raw) = storage.get_preference_value(key).ok().flatten() else {
+        return fallback;
+    };
+    let target = raw.trim();
+    ladder
+        .iter()
+        .find(|(name, _)| *name == target)
+        .map(|(name, _)| *name)
+        .unwrap_or(fallback)
+}
+
+fn trimmed_non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|text| !text.is_empty())
+}
+
+/// 复用受众与时效维度的有序取值梯。下标即复用半径档位（越靠后越宽）：算分分值表与
+/// 发布下限比较都从同一张表派生，避免两处各写一份映射后失同步。
+const KNOWLEDGE_AUDIENCE_LADDER: [(&str, f64); 4] = [
+    ("only_me_this_session", 0.0),
+    ("me_later", 0.5),
+    ("team_or_stakeholders", 0.85),
+    ("anyone_same_domain", 1.0),
+];
+const KNOWLEDGE_HORIZON_LADDER: [(&str, f64); 4] = [
+    ("hours", 0.15),
+    ("days", 0.5),
+    ("weeks", 0.8),
+    ("months_or_more", 1.0),
+];
+
+fn ladder_score(ladder: &[(&str, f64)], value: &str) -> Option<f64> {
+    ladder
+        .iter()
+        .find(|(name, _)| *name == value)
+        .map(|(_, score)| *score)
+}
+
+fn ladder_rank(ladder: &[(&str, f64)], value: &str) -> Option<usize> {
+    ladder.iter().position(|(name, _)| *name == value)
+}
+
+/// 不可替代性维度得分。
+///
+/// `partially_recoverable` 取 0.55：这一档同时容纳两类内容——外部学术、理论、技术、科学
+/// 知识（原文可查回，但复原结论需重新通读与重新推导），以及已被 commit 与测试报告承载的
+/// 编码过程结论。二者的区分交给受众维度而不是靠抬高本档分值：领域公共知识取
+/// `anyone_same_domain`，`partially_recoverable + anyone_same_domain + months_or_more
+/// + importance 3` 得 0.745 仍能发布，满足「重要学术知识要纳入」的要求；而过程型内容通常
+/// 被判 `team_or_stakeholders` 或 `me_later`，同组合只有 0.705 / 0.695，落在发布线以下。
+///
+/// 分值再抬高就会失去这个区分度：取 0.62 时
+/// `partially_recoverable + team_or_stakeholders + weeks + importance 4` 为 0.733，只比发布线
+/// 高 0.013，属刀锋校准。实测回放中这一档正是过程型结论被放行的主要通道，故回到 0.55。
+///
+/// 但该区分度靠算分维持得很脆：0.55 下过程型与公共参考知识仍会混在同一档里。
+/// 因此不再继续调本档分值，而是把剩下的分工交给两道与算分无关的约束：
+/// 受众/时效的发布下限（`KNOWLEDGE_MIN_PUBLISH_*`）与出处性质硬否决（`source_publicity`）。
+fn knowledge_scope_score(irreplaceability: &str) -> Option<f64> {
+    match irreplaceability {
+        "only_here" => Some(1.0),
+        "partially_recoverable" => Some(0.55),
+        "authoritative_elsewhere" => Some(0.0),
+        _ => None,
+    }
+}
+
+fn knowledge_audience_score(reuse_audience: &str) -> Option<f64> {
+    ladder_score(&KNOWLEDGE_AUDIENCE_LADDER, reuse_audience)
+}
+
+fn knowledge_horizon_score(validity_horizon: &str) -> Option<f64> {
+    ladder_score(&KNOWLEDGE_HORIZON_LADDER, validity_horizon)
+}
+
+/// 门禁理由摘要：优先用不可替代性结论（点名了更权威载体或说明为什么找不回），
+/// 其次用模型给的复用理由，两者都缺时用固定文案兜底。
+fn knowledge_reason_summary(payload: &BakeKnowledgeArtifactPayload, fallback: &str) -> String {
+    trimmed_non_empty(payload.irreplaceability_reason.as_deref())
+        .or_else(|| trimmed_non_empty(payload.decision_reason.as_deref()))
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+/// 第二期知识门禁：模型只声明三个开放语义维度，分数由 Core 确定性算出。
+///
+/// 第一期把发布门槛交给模型自报的 `match_score`，实测该分数被 prompt 里的数字锚点固化成
+/// 少数几档（published 中 93% 落在 0.78/0.85 两个值），单纯调阈值只会平移锚点。
+/// 这里所有判定都基于「这条信息自身的冗余度与复用半径」，不引入时间线类目、
+/// `activity_type` 或关键词分支（FR-008 / AC-004）。
+fn resolve_knowledge_decision(
+    payload: &BakeKnowledgeArtifactPayload,
+    timeline_importance: i64,
+    config: &KnowledgeGateConfig,
+) -> KnowledgeDecision {
+    if !config.enabled {
+        return legacy_knowledge_decision(payload);
+    }
+
+    let irreplaceability = trimmed_non_empty(payload.irreplaceability.as_deref());
+    let reuse_audience = trimmed_non_empty(payload.reuse_audience.as_deref());
+    let validity_horizon = trimmed_non_empty(payload.validity_horizon.as_deref());
+    let source_publicity = trimmed_non_empty(payload.source_publicity.as_deref());
+    let shadow = |reason_code: &'static str, fallback: &str| KnowledgeDecision {
+        state: "shadow",
+        score: None,
+        reason_code,
+        reason_summary: knowledge_reason_summary(payload, fallback),
+        rule_version: KNOWLEDGE_DECISION_RULE_VERSION,
+    };
+
+    // 第一步 · 硬否决：四条都落在 timeline_only，不再往只写不读的 shadow 池堆数据。
+    if irreplaceability == Some("authoritative_elsewhere") {
+        return KnowledgeDecision {
+            state: "timeline_only",
+            score: None,
+            reason_code: "redundant_with_authoritative_source",
+            reason_summary: knowledge_reason_summary(
+                payload,
+                "该事实已由更权威载体完整记录，知识条目只是冗余副本",
+            ),
+            rule_version: KNOWLEDGE_DECISION_RULE_VERSION,
+        };
+    }
+    if reuse_audience == Some("only_me_this_session") {
+        return KnowledgeDecision {
+            state: "timeline_only",
+            score: None,
+            reason_code: "session_local_reuse_only",
+            reason_summary: knowledge_reason_summary(
+                payload,
+                "该结论只在本次会话内对当时的操作者有用，脱离会话后无人需要",
+            ),
+            rule_version: KNOWLEDGE_DECISION_RULE_VERSION,
+        };
+    }
+    if validity_horizon == Some("hours") && irreplaceability != Some("only_here") {
+        return KnowledgeDecision {
+            state: "timeline_only",
+            score: None,
+            reason_code: "transient_process_detail",
+            reason_summary: knowledge_reason_summary(
+                payload,
+                "时效以小时计且过期后无追溯价值，保留在原始时间线中",
+            ),
+            rule_version: KNOWLEDGE_DECISION_RULE_VERSION,
+        };
+    }
+    // 公开参考知识：结论本身已写在公开教科书、论文或官方文档里，知识条目只是复述一份。
+    // 与 `authoritative_elsewhere` 分开是因为两者拦的不是同一种冗余：前者压公共资料的
+    // 复述，后者压用户自己产出里已有的权威载体，分成两条通道才看得出各自拦掉了多少。
+    //
+    // 否决要求两个自报维度一致，不看 `source_publicity` 单一轴：实测回放里模型把用户
+    // 点名的正例判成了 `publicly_documented`，单轴硬否决会直接误杀它。只有「公开可查」
+    // 加上「任何同领域的人都能用」才构成公共参考知识：如果一条结论只有自己的团队需要，
+    // 那么即使内容出自公开资料，选哪一段、为什么对本项目重要仍然是用户的判断，这正是
+    // 「看到的重要学术知识要纳入」那条要求想保留的东西。它与 `transient_process_detail`
+    // 豁免 `only_here` 是同一套设计：取值互相矛盾时，不拿最低档自报单独定生死。
+    //
+    // 仍只在模型显式声明时触发：缺失或取值非法都不否决，否则本地推理漏一个字段就会
+    // 把整个知识页清空（同 §15.7 的 `match_score` 退化教训）。
+    if config.public_reference_veto_enabled
+        && source_publicity == Some("publicly_documented")
+        && irreplaceability != Some("only_here")
+        && reuse_audience == Some("anyone_same_domain")
+    {
+        return KnowledgeDecision {
+            state: "timeline_only",
+            score: None,
+            reason_code: "redundant_public_reference",
+            reason_summary: knowledge_reason_summary(
+                payload,
+                "结论内容已在公开资料中原样写明，无需在知识库中复述一份",
+            ),
+            rule_version: KNOWLEDGE_DECISION_RULE_VERSION,
+        };
+    }
+
+    // 第二步 · 语义完整性。任一复用语义字段为空则降级 shadow，等待后续复核。
+    let semantics_complete = [
+        trimmed_non_empty(payload.future_question.as_deref()),
+        trimmed_non_empty(payload.decision_reason.as_deref()),
+        trimmed_non_empty(payload.evidence_summary.as_deref()),
+        trimmed_non_empty(payload.irreplaceability_reason.as_deref()),
+        trimmed_non_empty(payload.subject_key.as_deref()),
+        trimmed_non_empty(payload.predicate_key.as_deref()),
+    ]
+    .iter()
+    .all(Option::is_some);
+    if !semantics_complete {
+        return shadow(
+            "reuse_semantics_incomplete",
+            "复用语义字段不完整（未来问题、复用理由、证据、不可替代性结论或语义身份缺失）",
+        );
+    }
+
+    // 维度取值缺失或为无法识别的未知值时宽容降级，不硬拒：维度是判定轴而非封闭枚举。
+    // 档位（rank）与分值同一张梯派生，用于发布下限比较；两者同真同假，一个守卫即可。
+    let scope = irreplaceability.and_then(knowledge_scope_score);
+    let audience = reuse_audience.and_then(knowledge_audience_score);
+    let horizon = validity_horizon.and_then(knowledge_horizon_score);
+    let audience_rank = reuse_audience.and_then(|value| ladder_rank(&KNOWLEDGE_AUDIENCE_LADDER, value));
+    let horizon_rank = validity_horizon.and_then(|value| ladder_rank(&KNOWLEDGE_HORIZON_LADDER, value));
+    let (
+        Some(scope),
+        Some(audience),
+        Some(horizon),
+        Some(audience_rank),
+        Some(horizon_rank),
+    ) = (scope, audience, horizon, audience_rank, horizon_rank)
+    else {
+        return shadow(
+            "reuse_dimension_missing",
+            "复用半径维度取值缺失或无法识别，降级进入 shadow 复核",
+        );
+    };
+
+    // 第三步 · Core 确定性算分，模型不参与。重要性取时间线值（上游提炼阶段独立产出），
+    // 不取知识 payload 的自报值，避免同一次推理自我抬分。
+    let importance = timeline_importance.clamp(1, 5);
+    let importance_score = (importance - 1) as f64 / 4.0;
+    let quality = 0.40 * scope + 0.25 * audience + 0.20 * horizon + 0.15 * importance_score;
+
+    if quality >= config.publish_score {
+        // 发布下限：算分够线但受众或时效低于下限时不发布。这里落 shadow 而不是 timeline_only，
+        // 是因为该候选并未被证明冗余（与硬否决本质不同），留一份影子副本能让 14 天去重窗口
+        // 挡住同一件事被反复提炼出来。
+        let min_audience_rank = ladder_rank(&KNOWLEDGE_AUDIENCE_LADDER, config.min_publish_audience)
+            .unwrap_or(0);
+        let min_horizon_rank =
+            ladder_rank(&KNOWLEDGE_HORIZON_LADDER, config.min_publish_horizon).unwrap_or(0);
+        if audience_rank < min_audience_rank || horizon_rank < min_horizon_rank {
+            let mut reason_summary = format!(
+                "复用半径算分已过发布线，但受众或时效低于发布下限（受众需 ≥ {}，时效需 ≥ {}）",
+                config.min_publish_audience, config.min_publish_horizon
+            );
+            let detail = knowledge_reason_summary(payload, "");
+            if !detail.is_empty() {
+                reason_summary.push('；');
+                reason_summary.push_str(&detail);
+            }
+            return KnowledgeDecision {
+                state: "shadow",
+                score: Some(quality),
+                reason_code: "reuse_radius_below_minimum",
+                reason_summary,
+                rule_version: KNOWLEDGE_DECISION_RULE_VERSION,
+            };
+        }
+        return KnowledgeDecision {
+            state: "published",
+            score: Some(quality),
+            reason_code: "publish_score_met",
+            reason_summary: knowledge_reason_summary(payload, ""),
+            rule_version: KNOWLEDGE_DECISION_RULE_VERSION,
+        };
+    }
+    if quality >= config.shadow_score {
+        return KnowledgeDecision {
+            state: "shadow",
+            score: Some(quality),
+            reason_code: "below_publish_score",
+            reason_summary: knowledge_reason_summary(
+                payload,
+                "复用半径算分未达发布线，进入 shadow 复核",
+            ),
+            rule_version: KNOWLEDGE_DECISION_RULE_VERSION,
+        };
+    }
+    KnowledgeDecision {
+        state: "timeline_only",
+        score: Some(quality),
+        reason_code: "below_shadow_score",
+        reason_summary: knowledge_reason_summary(payload, "复用半径算分过低，保留在原始时间线中"),
+        rule_version: KNOWLEDGE_DECISION_RULE_VERSION,
+    }
+}
+
+/// 第一期单分数门禁，仅在应急开关关闭时使用（ROLL-005）。
+fn legacy_knowledge_decision(payload: &BakeKnowledgeArtifactPayload) -> KnowledgeDecision {
+    let score = payload.match_score.filter(|value| value.is_finite());
+    let future_question = trimmed_non_empty(payload.future_question.as_deref());
+    let decision_reason = trimmed_non_empty(payload.decision_reason.as_deref());
+    let evidence = trimmed_non_empty(payload.evidence_summary.as_deref());
+
+    if score.is_some_and(|value| value < KNOWLEDGE_LEGACY_SHADOW_SCORE) {
         return KnowledgeDecision {
             state: "timeline_only",
             score,
@@ -5583,10 +6246,11 @@ fn resolve_knowledge_decision(payload: &BakeKnowledgeArtifactPayload) -> Knowled
             reason_summary: decision_reason
                 .unwrap_or("未来复用价值不足，保留在原始时间线中")
                 .to_string(),
+            rule_version: KNOWLEDGE_LEGACY_RULE_VERSION,
         };
     }
     if score.is_none()
-        || score.is_some_and(|value| value < KNOWLEDGE_PUBLISH_SCORE)
+        || score.is_some_and(|value| value < KNOWLEDGE_LEGACY_PUBLISH_SCORE)
         || future_question.is_none()
         || decision_reason.is_none()
         || evidence.is_none()
@@ -5596,7 +6260,7 @@ fn resolve_knowledge_decision(payload: &BakeKnowledgeArtifactPayload) -> Knowled
             score,
             reason_code: if score.is_none() {
                 "quality_score_missing"
-            } else if score.is_some_and(|value| value < KNOWLEDGE_PUBLISH_SCORE) {
+            } else if score.is_some_and(|value| value < KNOWLEDGE_LEGACY_PUBLISH_SCORE) {
                 "below_publish_threshold"
             } else {
                 "open_semantic_evidence_incomplete"
@@ -5604,6 +6268,7 @@ fn resolve_knowledge_decision(payload: &BakeKnowledgeArtifactPayload) -> Knowled
             reason_summary: decision_reason
                 .unwrap_or("未来问题、复用理由或事实证据尚不完整，进入 shadow 复核")
                 .to_string(),
+            rule_version: KNOWLEDGE_LEGACY_RULE_VERSION,
         };
     }
     KnowledgeDecision {
@@ -5611,6 +6276,7 @@ fn resolve_knowledge_decision(payload: &BakeKnowledgeArtifactPayload) -> Knowled
         score,
         reason_code: "publish_threshold_met",
         reason_summary: decision_reason.unwrap_or_default().to_string(),
+        rule_version: KNOWLEDGE_LEGACY_RULE_VERSION,
     }
 }
 
@@ -5629,6 +6295,51 @@ fn knowledge_gate_outcome(
             None
         },
     )
+    .with_rule_version(decision.rule_version)
+}
+
+/// 纯数字与 `v1`/`v2.3` 一类版本号 token 承载的是日期、时刻、轮次、测试项数与版本等
+/// 一次性细节，会让同一件事在相邻时间线上产生不同 key，因此不参与语义身份。
+fn is_semantic_noise_token(token: &str) -> bool {
+    let digits = token.strip_prefix('v').unwrap_or(token);
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
+/// 归一化语义身份片段：小写、剔除标点与空白、丢弃版本号与纯数字 token。
+///
+/// 拼接时刻意不插入分隔符：中文对象名本身不带空格，“联盟切流 共享集群”与
+/// “联盟切流共享集群”必须收敛到同一 key；`subject` 与 `predicate` 之间仍用 `|` 分隔。
+fn normalize_semantic_key_part(raw: &str) -> String {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in raw.to_lowercase().chars() {
+        if ch.is_alphanumeric() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+        .into_iter()
+        .filter(|token| !is_semantic_noise_token(token))
+        .collect()
+}
+
+/// 跨时间线语义身份键。同一件事被相邻时间线反复提炼时 key 应稳定一致，
+/// 供 Core 做近重复抑制；存量行该列为 NULL，不参与匹配。
+fn knowledge_dedup_key(payload: &BakeKnowledgeArtifactPayload) -> Option<String> {
+    let subject = normalize_semantic_key_part(trimmed_non_empty(payload.subject_key.as_deref())?);
+    let predicate =
+        normalize_semantic_key_part(trimmed_non_empty(payload.predicate_key.as_deref())?);
+    if subject.is_empty() || predicate.is_empty() {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{subject}|{predicate}").as_bytes());
+    Some(format!("{:x}", hasher.finalize())[..32].to_string())
 }
 
 fn collect_current_document_source_timeline_ids(
@@ -5646,10 +6357,9 @@ fn collect_current_document_source_timeline_ids(
 }
 
 fn normalize_doc_url(url: &str) -> String {
-    let trimmed = url.trim();
-    let no_fragment = trimmed.split('#').next().unwrap_or(trimmed);
-    let no_query = no_fragment.split('?').next().unwrap_or(no_fragment);
-    no_query.trim_end_matches('/').to_string()
+    canonical_document_identity(url)
+        .and_then(|identity| identity.strip_prefix("document-url-v2:").map(str::to_owned))
+        .unwrap_or_else(|| url.trim().to_string())
 }
 
 fn document_urls_compatible_for_title_match(
@@ -5657,10 +6367,15 @@ fn document_urls_compatible_for_title_match(
     candidate_url: Option<&str>,
 ) -> bool {
     match (
-        existing_url.and_then(canonical_document_identity),
-        candidate_url.and_then(canonical_document_identity),
+        existing_url.map(str::trim).filter(|url| !url.is_empty()),
+        candidate_url.map(str::trim).filter(|url| !url.is_empty()),
     ) {
-        (Some(existing), Some(candidate)) => existing == candidate,
+        (Some(existing), Some(candidate)) => match (
+            canonical_document_identity(existing), canonical_document_identity(candidate),
+        ) {
+            (Some(left), Some(right)) => left == right,
+            _ => existing == candidate,
+        },
         _ => true,
     }
 }
@@ -5778,6 +6493,7 @@ fn source_capture_id_strings(source: &BakeMemorySourceRecord) -> Vec<String> {
 fn build_bake_knowledge_entry(
     source: &BakeMemorySourceRecord,
     payload: &BakeKnowledgeArtifactPayload,
+    decision: &KnowledgeDecision,
     review_status: &str,
     trigger_reason: &str,
     source_capture_ids: &[String],
@@ -5787,6 +6503,8 @@ fn build_bake_knowledge_entry(
     } else {
         payload.entities.clone()
     };
+    // 语义身份与维度取值同时写进 content JSON 与专用列，便于事后归因与回放对账。
+    let dedup_key = knowledge_dedup_key(payload);
     let details = json!({
         "source_timeline_id": source.timeline.id,
         "source_memory_ids": [source.timeline.id.to_string()],
@@ -5802,6 +6520,16 @@ fn build_bake_knowledge_entry(
         "trigger_reason": trigger_reason,
         "status": review_status,
         "source_title": source.timeline.summary.clone(),
+        "irreplaceability": payload.irreplaceability.clone(),
+        "irreplaceability_reason": payload.irreplaceability_reason.clone(),
+        "reuse_audience": payload.reuse_audience.clone(),
+        "validity_horizon": payload.validity_horizon.clone(),
+        "source_publicity": payload.source_publicity.clone(),
+        "subject_key": payload.subject_key.clone(),
+        "predicate_key": payload.predicate_key.clone(),
+        "quality_score": decision.score,
+        "gate_rule_version": decision.rule_version,
+        "dedup_key": dedup_key.clone(),
     });
     Ok(NewBakeKnowledge {
         timeline_id: source.timeline.id,
@@ -5815,6 +6543,9 @@ fn build_bake_knowledge_entry(
             .unwrap_or(source.timeline.importance)
             .max(1),
         source_capture_ids: Some(to_json_string(&source_capture_ids)?),
+        dedup_key,
+        quality_score: decision.score,
+        gate_rule_version: Some(decision.rule_version.to_string()),
     })
 }
 
@@ -6160,6 +6891,95 @@ fn parse_exact_list_id(query: &str) -> Option<i64> {
     value.parse::<i64>().ok()
 }
 
+fn numeric_payload_id(id: &str) -> i64 {
+    id.parse::<i64>().unwrap_or_default()
+}
+
+fn document_search_score(item: &BakeDocumentPayload, query: &str, terms: &[String]) -> Option<i64> {
+    let tags = item.tags.join("\n");
+    let applicable_tasks = item.applicable_tasks.join("\n");
+    let section_titles = item
+        .sections
+        .iter()
+        .map(|section| section.title.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let section_keywords = item
+        .sections
+        .iter()
+        .flat_map(|section| section.keywords.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let section_notes = item
+        .sections
+        .iter()
+        .filter_map(|section| section.notes.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    search_match_score(
+        query,
+        terms,
+        &[item.title.as_str()],
+        &[
+            item.doc_type.as_str(),
+            tags.as_str(),
+            applicable_tasks.as_str(),
+            section_titles.as_str(),
+            section_keywords.as_str(),
+            item.source_url.as_deref().unwrap_or_default(),
+        ],
+        &[
+            item.summary.as_deref().unwrap_or_default(),
+            item.full_content.as_deref().unwrap_or_default(),
+            item.prompt_hint.as_deref().unwrap_or_default(),
+            section_notes.as_str(),
+        ],
+    )
+}
+
+fn timeline_record_search_score(
+    record: &TimelineRecord,
+    query: &str,
+    terms: &[String],
+) -> Option<i64> {
+    search_match_score(
+        query,
+        terms,
+        &[record.summary.as_str()],
+        &[
+            record.category.as_str(),
+            record.frag_win_title.as_deref().unwrap_or_default(),
+        ],
+        &[
+            record.overview.as_deref().unwrap_or_default(),
+            record.details.as_deref().unwrap_or_default(),
+        ],
+    )
+}
+
+fn knowledge_search_score(
+    item: &BakeKnowledgePayload,
+    query: &str,
+    terms: &[String],
+) -> Option<i64> {
+    let entities = item.entities.join("\n");
+    search_match_score(
+        query,
+        terms,
+        &[item.summary.as_str()],
+        &[
+            item.category.as_str(),
+            entities.as_str(),
+            item.source_url.as_deref().unwrap_or_default(),
+        ],
+        &[
+            item.overview.as_deref().unwrap_or_default(),
+            item.details.as_deref().unwrap_or_default(),
+            item.detailed_content.as_deref().unwrap_or_default(),
+        ],
+    )
+}
+
 fn validate_knowledge_request(payload: &CreateOrUpdateKnowledgeRequest) -> Result<(), ApiError> {
     if payload.summary.trim().is_empty() {
         return Err(ApiError::BadRequest("知识标题不能为空".to_string()));
@@ -6317,6 +7137,9 @@ fn map_document_record(record: BakeDocumentRecord, is_favorite: bool) -> BakeDoc
         .unwrap_or_else(|| record.updated_at.to_string());
 
     BakeDocumentPayload {
+        source_check: None,
+        source_collection: None,
+        summary_status: None,
         id: record.id.to_string(),
         is_favorite,
         title: record.title,
@@ -6762,7 +7585,7 @@ fn document_evidence(candidate: &BakeMemorySourceRecord) -> BakeDocumentEvidence
     const MIN_DOCUMENT_CHARS: usize = 200;
 
     let app_name = candidate.capture_app_name.as_deref().unwrap_or_default();
-    let has_document_url = candidate
+    let has_valid_web_url = candidate
         .capture_url
         .as_deref()
         .is_some_and(is_refreshable_document_url);
@@ -6779,19 +7602,6 @@ fn document_evidence(candidate: &BakeMemorySourceRecord) -> BakeDocumentEvidence
                 Some("document_reference")
             )
     };
-    // 页面标题必须来自采集器提供的结构化页面/窗口元数据，而不是 OCR/模型从
-    // 聊天卡片中猜出的文档名。这样未知浏览器和未知协作工具都按证据处理，
-    // 无需枚举应用名。
-    let has_structured_web_title = candidate
-        .preferred_source_title
-        .as_deref()
-        .and_then(|title| canonical_document_source_title(title, Some(app_name)))
-        .is_some()
-        || candidate
-            .capture_webpage_title
-            .as_deref()
-            .and_then(|title| canonical_document_source_title(title, Some(app_name)))
-            .is_some();
     let aggregated_body_char_count = candidate
         .url_aggregated_text
         .as_deref()
@@ -6809,7 +7619,43 @@ fn document_evidence(candidate: &BakeMemorySourceRecord) -> BakeDocumentEvidence
     .map(non_whitespace_char_count)
     .sum();
     let body_char_count = aggregated_body_char_count.max(capture_body_char_count);
-    let has_substantive_document_body = body_char_count >= MIN_DOCUMENT_CHARS;
+    let has_loaded_body = [
+        candidate.url_aggregated_text.as_deref(),
+        candidate.capture_ax_text.as_deref(),
+        candidate.capture_ocr_text.as_deref(),
+        candidate.capture_input_text.as_deref(),
+        candidate.capture_audio_text.as_deref(),
+    ].into_iter().flatten().any(|body| {
+        non_whitespace_char_count(body) >= MIN_DOCUMENT_CHARS && !is_document_shell(body)
+    });
+    let body = candidate
+        .url_aggregated_text
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+        .or(candidate.capture_ax_text.as_deref())
+        .or(candidate.capture_ocr_text.as_deref())
+        .unwrap_or_default();
+    let has_substantive_document_body = body_char_count >= MIN_DOCUMENT_CHARS && has_loaded_body;
+    let has_structured_document_body = has_document_body_structure(body);
+    // 浏览器页面是否是文档只看平台无关的采集事实：结构化页面标题必须与
+    // 正文首部一致，正文还必须具备段落/句子结构。URL 只负责证明这是可访问
+    // 的网页，域名、产品名和私有路由均不参与放行。
+    let captured_page_title_matches = candidate
+        .capture_webpage_title
+        .as_deref()
+        .is_some_and(|title| browser_title_matches_document_body(title, body));
+    let captured_page_title_is_missing_or_generic = candidate
+        .capture_webpage_title
+        .as_deref()
+        .map(is_generic_document_source_title)
+        .unwrap_or(true);
+    let preferred_title_matches = candidate
+        .preferred_source_title
+        .as_deref()
+        .is_some_and(|title| browser_title_matches_document_body(title, body));
+    let has_structured_web_title = captured_page_title_matches
+        || (captured_page_title_is_missing_or_generic && preferred_title_matches);
+    let has_document_url = has_valid_web_url && has_structured_web_title;
     let has_meaningful_native_title = [
         candidate.preferred_source_title.as_deref(),
         candidate.capture_win_title.as_deref(),
@@ -6824,9 +7670,12 @@ fn document_evidence(candidate: &BakeMemorySourceRecord) -> BakeDocumentEvidence
 
     let kind = if !has_substantive_document_body || !has_document_semantics {
         BakeDocumentEvidenceKind::Insufficient
-    } else if has_document_url && has_structured_web_title {
+    } else if has_document_url && has_structured_document_body {
         BakeDocumentEvidenceKind::DocumentUrl
-    } else if candidate.capture_webpage_title.is_some() && has_structured_web_title {
+    } else if candidate.capture_webpage_title.is_some()
+        && has_structured_web_title
+        && has_structured_document_body
+    {
         BakeDocumentEvidenceKind::BrowserDocument
     } else if has_meaningful_native_title {
         BakeDocumentEvidenceKind::NativeDocument
@@ -6851,6 +7700,33 @@ fn document_evidence(candidate: &BakeMemorySourceRecord) -> BakeDocumentEvidence
     }
 }
 
+// Keep behavior aligned with embedding/document_quality.py and shared fixtures.
+pub(crate) fn is_document_shell(text: &str) -> bool {
+    let lowered = text.to_lowercase();
+    let mut prose_chars = 0;
+    let mut sentence = String::new();
+    for ch in lowered.chars() {
+        sentence.push(ch);
+        if "。！？!?；;.".contains(ch) {
+            let length = sentence.chars().count();
+            let ui_sentence = ["you need to enable javascript to run this app", "文档加载失败", "页面加载失败",
+                "关闭提示", "只读模式", "离线阅读模式", "默认字体", "文档内容为空"]
+                .iter().any(|marker| sentence.contains(marker))
+                || ["知识库", "目录", "首页", "导航"].iter().filter(|marker| sentence.contains(**marker)).count() >= 2;
+            if (32..=400).contains(&length) && !ui_sentence { prose_chars += length; }
+            sentence.clear();
+        } else if ch == '\n' { sentence.clear(); }
+    }
+    if prose_chars >= 200 { return false; }
+    let failure = ["you need to enable javascript to run this app", "文档加载失败", "页面加载失败"]
+        .iter().any(|marker| lowered.contains(marker));
+    let navigation = ["知识库", "目录", "首页", "导航"]
+        .iter().filter(|marker| lowered.contains(**marker)).count();
+    let controls = ["0 bytes/s", "全部暂停", "进行中", "收藏", "管理员", "分享", "编辑", "设置"]
+        .iter().filter(|marker| lowered.contains(**marker)).count();
+    failure || (navigation >= 2 && controls >= 3)
+}
+
 fn non_whitespace_char_count(value: &str) -> usize {
     value.chars().filter(|ch| !ch.is_whitespace()).count()
 }
@@ -6871,6 +7747,52 @@ fn looks_like_native_document_title(title: &str) -> bool {
     .any(|marker| lowered.contains(marker))
 }
 
+fn generic_title_core(value: &str) -> Option<String> {
+    let first_line = value.lines().find(|line| !line.trim().is_empty())?.trim();
+    let without_heading = first_line.trim_start_matches('#').trim();
+    let core = [" - ", " — ", " | ", " · "]
+        .iter()
+        .filter_map(|separator| without_heading.find(separator))
+        .min()
+        .and_then(|index| without_heading.get(..index))
+        .unwrap_or(without_heading);
+    let normalized = core
+        .to_lowercase()
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .collect::<String>();
+    (normalized.chars().count() >= 2).then_some(normalized)
+}
+
+fn browser_title_matches_document_body(title: &str, body: &str) -> bool {
+    let Some(title_core) = generic_title_core(title) else {
+        return false;
+    };
+    let body_prefix = body.chars().take(480).collect::<String>();
+    let normalized_prefix = body_prefix
+        .to_lowercase()
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .collect::<String>();
+    normalized_prefix.contains(&title_core)
+}
+
+fn has_document_body_structure(body: &str) -> bool {
+    let sentence_endings = body
+        .chars()
+        .filter(|ch| matches!(ch, '。' | '！' | '？' | '；' | '.' | '!' | '?' | ';'))
+        .count();
+    let substantial_lines = body
+        .lines()
+        .filter(|line| line.chars().filter(|ch| !ch.is_whitespace()).count() >= 12)
+        .count();
+    let heading_lines = body
+        .lines()
+        .filter(|line| line.trim_start().starts_with('#'))
+        .count();
+    sentence_endings >= 3 || substantial_lines >= 3 || heading_lines >= 2
+}
+
 fn substantive_document_url(candidate: &BakeMemorySourceRecord) -> Option<String> {
     if !is_substantive_document_candidate(candidate) {
         return None;
@@ -6887,9 +7809,12 @@ fn reserve_document_task(
     candidate: &BakeMemorySourceRecord,
     queued_document_urls: &mut std::collections::HashSet<String>,
 ) -> bool {
-    substantive_document_url(candidate)
-        .map(|url| queued_document_urls.insert(url))
-        .unwrap_or(true)
+    match (substantive_document_url(candidate), artifact_source_fingerprint(candidate)) {
+        (Some(url), Some(fingerprint)) => {
+            queued_document_urls.insert(format!("{}#{}", url, fingerprint))
+        }
+        _ => true,
+    }
 }
 
 fn build_inventory_trend(
@@ -7056,7 +7981,7 @@ fn is_legacy_bake_entry_details(details: &Value) -> bool {
 }
 
 fn is_current_bake_document(record: &BakeDocumentRecord) -> bool {
-    !is_legacy_bake_document(record)
+    record.deleted_at.is_none() && !is_legacy_bake_document(record)
 }
 
 fn is_legacy_bake_document(record: &BakeDocumentRecord) -> bool {
@@ -7591,6 +8516,7 @@ mod tests {
     fn test_candidate_failures_use_bounded_retry_classification() {
         for code in [
             "INFERENCE_PREEMPTED",
+            "INFERENCE_QUEUE_BUSY",
             "MODEL_RATE_LIMITED",
             "MODEL_UNAVAILABLE",
             "SIDECAR_UNAVAILABLE",
@@ -7629,6 +8555,127 @@ mod tests {
             "永久 payload 错误".to_string(),
         )));
         assert_eq!(MAX_BAKE_RETRY_FAILURES, 3);
+    }
+
+    #[test]
+    fn test_queue_busy_retry_budget_reserves_full_request_before_waiting() {
+        let now = 1_000_000_i64;
+        let reserve_ms = (BAKE_SIDECAR_TIMEOUT_SECS * 1000) as i64;
+        assert!(!bake_run_has_request_budget(now - 1, now, Duration::ZERO));
+        assert!(!bake_run_has_request_budget(now + reserve_ms, now, Duration::ZERO));
+        assert!(bake_run_has_request_budget(now + reserve_ms + 1, now, Duration::ZERO));
+        assert!(!bake_run_has_request_budget(
+            now + reserve_ms + 1_000, now, Duration::from_secs(1),
+        ));
+        assert!(bake_run_has_request_budget(
+            now + reserve_ms + 1_001, now, Duration::from_secs(1),
+        ));
+        assert_eq!(
+            (0..6).map(bake_queue_busy_retry_delay).collect::<Vec<_>>(),
+            [1, 2, 4, 8, 10, 10].map(Duration::from_secs).to_vec(),
+        );
+        assert_eq!(bake_queue_busy_retry_delay(u32::MAX), Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn test_queue_busy_retry_does_not_start_with_insufficient_run_budget() {
+        let mut requests = 0;
+        let error = retry_unstarted_bake_in_run(
+            Some(now_ms() + (BAKE_SIDECAR_TIMEOUT_SECS * 1000) as i64 - 1),
+            || {
+                requests += 1;
+                std::future::ready(Ok::<_, ApiError>(()))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(requests, 0);
+        assert_eq!(bake_retry_error_code(&error), "INFERENCE_QUEUE_BUSY");
+        assert!(is_untracked_transient_bake_error(&error));
+    }
+
+    #[tokio::test]
+    async fn test_queue_busy_retry_stops_before_backoff_would_consume_request_budget() {
+        let mut requests = 0;
+        let error = retry_unstarted_bake_in_run(
+            Some(now_ms() + (BAKE_SIDECAR_TIMEOUT_SECS * 1000) as i64 + 500),
+            || {
+                requests += 1;
+                std::future::ready(Err::<(), _>(bake_run_wait_budget_exhausted()))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(requests, 1);
+        assert_eq!(bake_retry_error_code(&error), "INFERENCE_QUEUE_BUSY");
+    }
+
+    #[tokio::test]
+    async fn test_queue_busy_retry_excludes_preempted_timeout_and_unavailable() {
+        for code in ["INFERENCE_PREEMPTED", "INFERENCE_TIMEOUT", "SIDECAR_UNAVAILABLE"] {
+            let mut requests = 0;
+            let result = retry_unstarted_bake_in_run(Some(now_ms() + 1_800_000), || {
+                requests += 1;
+                std::future::ready(Err::<(), _>(ApiError::Upstream {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    code,
+                    message: "test".to_string(),
+                }))
+            })
+            .await;
+            assert_eq!(requests, 1);
+            assert_eq!(bake_retry_error_code(&result.unwrap_err()), code);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_queue_busy_outside_timed_run_keeps_existing_defer_behavior() {
+        let mut requests = 0;
+        let result = retry_unstarted_bake_in_run(None, || {
+            requests += 1;
+            std::future::ready(Err::<(), _>(bake_run_wait_budget_exhausted()))
+        })
+        .await;
+        assert_eq!(requests, 1);
+        assert_eq!(bake_retry_error_code(&result.unwrap_err()), "INFERENCE_QUEUE_BUSY");
+    }
+
+    #[test]
+    fn test_bake_dispatch_respects_runtime_capacity_and_safe_fallback() {
+        let mut status = json!({"stats": {
+            "model_parallelism": 1, "cross_process_limit": 1,
+            "max_concurrency": 1, "lane_limits": {"p2_bake": 1}
+        }});
+        assert_eq!(bake_dispatch_concurrency(3, Some(&status)), 1);
+        assert_eq!(bake_dispatch_concurrency(3, None), 1);
+        assert_eq!(bake_dispatch_concurrency(3, Some(&json!({"stats": {}}))), 1);
+        status["stats"]["model_parallelism"] = json!(3);
+        status["stats"]["cross_process_limit"] = json!(3);
+        status["stats"]["max_concurrency"] = json!(3);
+        assert_eq!(bake_dispatch_concurrency(3, Some(&status)), 1);
+        status["stats"]["lane_limits"]["p2_bake"] = json!(3);
+        assert_eq!(bake_dispatch_concurrency(3, Some(&status)), 3);
+        assert_eq!(bake_dispatch_concurrency(2, Some(&status)), 2);
+        status["stats"]["max_concurrency"] = json!(1);
+        assert_eq!(bake_dispatch_concurrency(3, Some(&status)), 1);
+    }
+
+    #[test]
+    fn test_queue_wait_expiry_defers_without_consuming_candidate_retry() {
+        let mapped = map_sidecar_error(StatusCode::SERVICE_UNAVAILABLE, json!({
+            "error": "waiting for inference capacity",
+            "code": "INFERENCE_QUEUE_BUSY", "scope": "service", "retryable": true
+        }).to_string(), "bake");
+        assert_eq!(mapped.code, "INFERENCE_QUEUE_BUSY");
+        let error = ApiError::Upstream {
+            status: mapped.status, code: mapped.code, message: mapped.message
+        };
+        assert!(is_untracked_transient_bake_error(&error));
+        assert!(!is_retryable_bake_candidate_error(&error));
+        let invalid = map_sidecar_error(StatusCode::SERVICE_UNAVAILABLE, json!({
+            "code": "INFERENCE_QUEUE_BUSY", "scope": "candidate", "retryable": true
+        }).to_string(), "bake");
+        assert_eq!(invalid.code, "BAKE_UNCLASSIFIED_UPSTREAM_ERROR");
     }
 
     #[test]
@@ -7799,6 +8846,104 @@ mod tests {
     }
 
     #[test]
+    fn test_document_shell_shared_cases() {
+        let cases: Value = serde_json::from_str(include_str!("../../../shared/document-quality/cases.json")).unwrap();
+        for case in cases.as_array().unwrap() {
+            assert_eq!(is_document_shell(case["text"].as_str().unwrap()), case["shell"].as_bool().unwrap(), "{}", case["name"]);
+        }
+    }
+
+    #[test]
+    fn test_document_evidence_rejects_long_navigation_shell() {
+        let service = make_service();
+        let capture_id = seed_capture(&service, 1_710_000_000_000, "Google Chrome", "文档标题");
+        let timeline_id = seed_knowledge(&service, "文档", capture_id, 4, 1);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.capture_url = Some("https://docs.example.com/document/1".to_string());
+        candidate.capture_webpage_title = Some("设计方案".to_string());
+        candidate.capture_ax_text = Some(format!("You need to enable JavaScript to run this app. {} 收藏 分享 编辑", "知识库首页目录模块入口".repeat(50)));
+        candidate.url_aggregated_text = candidate.capture_ax_text.clone();
+        candidate.capture_ocr_text = None;
+        candidate.capture_input_text = None;
+        candidate.capture_audio_text = None;
+        assert!(!document_evidence(&candidate).allows_auto_create);
+    }
+
+    #[test]
+    fn test_document_evidence_rejects_generic_data_page_even_if_model_calls_it_document() {
+        let service = make_service();
+        let capture_id = seed_capture(
+            &service,
+            1_710_000_000_000,
+            "Google Chrome",
+            "数据资产平台",
+        );
+        let timeline_id = seed_knowledge(&service, "文档", capture_id, 5, 1);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.capture_url =
+            Some("https://example.com/aigc-assets/video-samples?assetId=1009".to_string());
+        candidate.capture_webpage_title = Some("数据资产平台".to_string());
+        candidate.capture_ax_text = Some(
+            "视频样本数 8435 一级类目 54 二级类目 282 数据分布 列表 筛选 导出".repeat(40),
+        );
+        candidate.url_aggregated_text = candidate.capture_ax_text.clone();
+
+        let evidence = document_evidence(&candidate);
+
+        assert_eq!(evidence.kind, BakeDocumentEvidenceKind::Insufficient);
+        assert!(!evidence.has_document_url);
+        assert!(!evidence.has_document_page_title);
+        assert!(evidence.has_substantive_document_body);
+        assert!(!evidence.allows_auto_create);
+        assert!(!is_substantive_document_candidate(&candidate));
+    }
+
+    #[test]
+    fn test_document_evidence_accepts_unknown_platform_from_generic_structure() {
+        let service = make_service();
+        let capture_id = seed_capture(&service, 1_710_000_000_000, "Unknown Browser", "季度复盘");
+        let timeline_id = seed_knowledge(&service, "文档", capture_id, 5, 1);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.capture_url = Some("https://unknown.example/workspace/asset-42".to_string());
+        candidate.capture_webpage_title = Some("季度复盘 | Workspace".to_string());
+        candidate.capture_ax_text = Some(
+            "# 季度复盘\n本季度完成了核心链路改造，并补齐了验收记录。\n风险项已经明确负责人和截止时间。\n下一阶段将按计划推进并复核结果。".repeat(6),
+        );
+        candidate.url_aggregated_text = candidate.capture_ax_text.clone();
+
+        let evidence = document_evidence(&candidate);
+
+        assert_eq!(evidence.kind, BakeDocumentEvidenceKind::DocumentUrl);
+        assert!(evidence.has_document_url);
+        assert!(evidence.has_document_page_title);
+        assert!(evidence.has_substantive_document_body);
+        assert!(evidence.allows_auto_create);
+    }
+
+    #[test]
+    fn test_document_evidence_rejects_title_body_identity_mismatch() {
+        let service = make_service();
+        let capture_id = seed_capture(&service, 1_710_000_000_000, "Unknown Browser", "数据资产页");
+        let timeline_id = seed_knowledge(&service, "文档", capture_id, 5, 1);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.capture_url = Some("https://unknown.example/workspace/asset-42".to_string());
+        candidate.capture_webpage_title = Some("数据资产页".to_string());
+        candidate.preferred_source_title = Some("另一份技术方案 | Workspace".to_string());
+        candidate.capture_ax_text = Some(
+            "# 另一份技术方案\n本文说明系统改造背景和实施范围。\n第一阶段完成接口切换。\n第二阶段验证运行结果。".repeat(8),
+        );
+        candidate.url_aggregated_text = candidate.capture_ax_text.clone();
+
+        let evidence = document_evidence(&candidate);
+
+        assert_eq!(evidence.kind, BakeDocumentEvidenceKind::Insufficient);
+        assert!(!evidence.has_document_url);
+        assert!(!evidence.has_document_page_title);
+        assert!(evidence.has_substantive_document_body);
+        assert!(!evidence.allows_auto_create);
+    }
+
+    #[test]
     fn test_bake_payload_identity_falls_back_to_candidate() {
         let service = make_service();
         let capture_id = seed_capture(&service, 1_710_000_000_000, "Google Chrome", "候选文档标题");
@@ -7828,6 +8973,192 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn revisit_queues_source_refresh_without_overwriting_or_claiming_merge() {
+        let service = make_service();
+        let url = "https://docs.example.com/document/revisit";
+        let original = service.create_document(test_document_request("完整来源", "document", Some(url))).unwrap();
+        let document_id: i64 = original.id.parse().unwrap();
+        let before = service.storage.get_bake_document(document_id).unwrap().unwrap();
+        let capture = seed_capture(&service, 1_710_000_000_000, "Google Chrome", "新正文");
+        let timeline = seed_knowledge(&service,"文档",capture,4,1);
+        let mut candidate = make_candidate(&service,timeline);
+        candidate.capture_url = Some(url.to_string());
+        candidate.capture_ax_text = Some("后续回访只有部分内容。".repeat(20));
+        let outcome = service.persist_document_artifact(None,Some(123),&candidate,
+            &BakeArtifactExtraction { accepted:false,reason:None,payload:None },None,
+            &mut HashSet::new(),&mut HashSet::new(),None).await.unwrap();
+        assert!(outcome.document_refresh_pending);
+        let mut aggregate=CandidatePersistResult {
+            sop_persist_status:Some("rejected"),sop_persist_reason:Some("insufficient_source_capture_count".into()),
+            ..Default::default()
+        };
+        aggregate.apply(outcome.clone());
+        assert_eq!(aggregate.audit_status(),("pending_source_refresh",Some("source_observed_not_applied")));
+        assert_eq!(outcome.document_created_count,0);
+        let after = service.storage.get_bake_document(document_id).unwrap().unwrap();
+        assert_eq!(before.full_content,after.full_content);
+        assert_eq!(before.updated_at,after.updated_at);
+        assert!(after.source_memory_ids.contains(&timeline.to_string()));
+        assert!(service.storage.list_bake_document_source_fingerprints(document_id).unwrap().is_empty());
+        assert_eq!(service.storage.claim_document_refresh_job(now_ms()).unwrap().unwrap().document_id,document_id);
+        service.storage.with_conn(|conn| {
+            let (owner,stage,encoded):(i64,String,String)=conn.query_row(
+                "SELECT document_id,stage,evidence_json FROM document_candidate_quality_events WHERE timeline_id=?1 AND run_id=123",
+                [timeline],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+            assert_eq!(owner,document_id);
+            assert_eq!(stage,"persistence");
+            assert!(!encoded.contains(url));
+            assert!(!encoded.contains("后续回访"));
+            let evidence:Value=serde_json::from_str(&encoded).unwrap();
+            assert_eq!(evidence["coverage"],"unverified");
+            assert!(evidence["capture_ids"].as_array().unwrap().contains(&json!(capture)));
+            Ok(())
+        }).unwrap();
+    }
+
+    #[tokio::test]
+    async fn document_candidate_rejection_is_audited_without_publishing_shell() {
+        let service=make_service();
+        let capture=seed_capture(&service,1_710_000_000_000,"Google Chrome","目录");
+        let timeline=seed_knowledge(&service,"文档",capture,4,1);
+        let mut candidate=make_candidate(&service,timeline);
+        candidate.capture_ax_text=Some("You need to enable JavaScript to run this app.".repeat(20));
+        candidate.url_aggregated_text=None;
+        candidate.capture_ocr_text=None;
+        candidate.capture_input_text=None;
+        candidate.capture_audio_text=None;
+        let outcome=service.persist_document_artifact(None,None,&candidate,
+            &BakeArtifactExtraction { accepted:true,reason:Some("private model explanation".into()),payload:None },None,
+            &mut HashSet::new(),&mut HashSet::new(),None).await.unwrap();
+        assert_eq!(outcome.discarded_count,1);
+        assert_eq!(outcome.document_created_count,0);
+        service.storage.with_conn(|conn| {
+            let encoded:String=conn.query_row("SELECT evidence_json FROM document_candidate_quality_events WHERE timeline_id=?1",
+                [timeline],|r|r.get(0))?;
+            assert!(!encoded.contains("JavaScript"));
+            assert!(!encoded.contains("private model"));
+            let evidence:Value=serde_json::from_str(&encoded).unwrap();
+            assert_eq!(evidence["reason"],"body_not_substantive");
+            assert_eq!(evidence["allows_auto_create"],false);
+            assert!(evidence["body_character_count"].is_null());
+            Ok(())
+        }).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pipeline_pause_after_model_response_defers_new_document_and_resumes_once() {
+        use std::sync::{Arc,atomic::{AtomicUsize,Ordering}};
+        let db=StorageManager::open_in_memory().unwrap();
+        let calls=Arc::new(AtomicUsize::new(0));
+        let body="缓存一致性方案规定读取时检查来源版本，写入时检查当前修订。失败后保留任务并有界重试，恢复后继续处理，不能让旧结果覆盖新编辑。收益仅为目标，尚未完成上线验收。".repeat(12);
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address=listener.local_addr().unwrap();
+        let response_db=db.clone();let response_calls=calls.clone();let response_body=body.clone();
+        let server=tokio::spawn(async move {
+            axum::serve(listener,axum::Router::new().route("/bake/extract",axum::routing::post(move || {
+                let db=response_db.clone();let calls=response_calls.clone();let body=response_body.clone();
+                async move {
+                    if calls.fetch_add(1,Ordering::SeqCst)==0 {
+                        db.upsert_preference(crate::services::document_refresh::DOCUMENT_REFRESH_CONFIG_KEY,
+                            r#"{"automatic_document_writes_enabled":false}"#,"test",1.0).unwrap();
+                    }
+                    axum::Json(json!({"knowledge":{"accepted":false},"sop":{"accepted":false},
+                        "design":{"accepted":true,"payload":{"name":"缓存一致性方案","full_content":body}}}))
+                }
+            }))).await.unwrap();
+        });
+        let mut service=BakeService::new(db.clone(),format!("http://{address}"));
+        service.client=reqwest::Client::builder().no_proxy().build().unwrap();
+        let capture=seed_capture(&service,now_ms(),"Google Chrome","缓存一致性方案");
+        let timeline=seed_knowledge(&service,"document",capture,5,1);
+        db.with_conn(|c| {c.execute("UPDATE captures SET ax_text=?1,url='https://example.com/document/pause-fixture',webpage_title='缓存一致性方案 - 云文档' WHERE id=?2",rusqlite::params![body,capture])?;Ok(())}).unwrap();
+        let paused=service.run_bake_pipeline("test",10).await.unwrap();
+        assert!(db.list_bake_documents().unwrap().is_empty());
+        db.with_conn(|c| {
+            let deferred:(String,i64)=c.query_row("SELECT last_error_code,failure_count FROM bake_retry_state WHERE timeline_id=?1",[timeline],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            assert_eq!(deferred,("DOCUMENT_AUTOMATIC_WRITES_PAUSED".into(),0));
+            Ok(())
+        }).unwrap();
+        db.upsert_preference(crate::services::document_refresh::DOCUMENT_REFRESH_CONFIG_KEY,"{}","test",1.0).unwrap();
+        let resumed=service.run_bake_pipeline("test",10).await.unwrap();
+        server.abort();
+        assert_ne!(paused.id,resumed.id);
+        assert_eq!(calls.load(Ordering::SeqCst),2);
+        let documents=db.list_bake_documents().unwrap();
+        assert_eq!(documents.len(),1);
+        assert_eq!(documents[0].full_content.as_deref(),Some(body.as_str()));
+        db.with_conn(|c| {assert_eq!(c.query_row("SELECT count(*) FROM bake_retry_state",[],|r|r.get::<_,i64>(0))?,0);Ok(())}).unwrap();
+    }
+
+    #[tokio::test]
+    async fn automatic_document_pause_defers_bundle_instead_of_false_negative() {
+        let service=make_service();
+        let capture=seed_capture(&service,1_710_000_000_000,"Google Chrome","设计文档");
+        let timeline=seed_knowledge(&service,"文档",capture,4,1);
+        let mut candidate=make_candidate(&service,timeline);
+        candidate.capture_url=Some("https://docs.example.com/document/automatic-pause".into());
+        candidate.capture_webpage_title=Some("设计文档 - 云文档".into());
+        let body="# 设计文档\n设计方案明确了业务目标、实施步骤、验收标准和后续负责人。".repeat(30);
+        candidate.capture_ax_text=Some(body.clone());
+        candidate.url_aggregated_text=Some(body.clone());
+        assert!(document_evidence(&candidate).allows_auto_create);
+        let run=service.storage.insert_bake_run(&NewBakeRun {
+            trigger_reason:"test".into(),status:"running".into(),started_at:now_ms(),
+        }).unwrap();
+        let extracted:BakeExtractResponse=serde_json::from_value(json!({
+            "knowledge":{"accepted":false},"sop":{"accepted":false},
+            "design":{"accepted":true,"payload":{"name":"设计文档","full_content":body}}
+        })).unwrap();
+        service.record_artifact_extraction_audits(run,&candidate,&extracted).unwrap();
+        service.storage.upsert_preference(crate::services::document_refresh::DOCUMENT_REFRESH_CONFIG_KEY,
+            r#"{"automatic_document_writes_enabled":false}"#,"test",1.0).unwrap();
+        let error=service.persist_extracted_candidate(Some(run),None,&candidate,"test",extracted,
+            &mut HashSet::new(),&mut HashSet::new(),&mut HashSet::new(),&mut HashSet::new(),None)
+            .await.unwrap_err();
+        assert_eq!(bake_retry_error_code(&error),"DOCUMENT_AUTOMATIC_WRITES_PAUSED");
+        assert!(is_untracked_transient_bake_error(&error));
+        assert!(!is_retryable_bake_candidate_error(&error));
+        assert!(service.storage.list_bake_documents().unwrap().is_empty());
+        service.storage.with_conn(|conn| {
+            let (status,reason):(String,String)=conn.query_row(
+                "SELECT persist_status,persist_reason FROM bake_artifact_audits WHERE run_id=?1 AND timeline_id=?2 AND artifact_kind='document'",
+                rusqlite::params![run,timeline],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            assert_eq!(status,"deferred");
+            assert_eq!(reason,"DOCUMENT_AUTOMATIC_WRITES_PAUSED");
+            Ok(())
+        }).unwrap();
+    }
+
+    #[tokio::test]
+    async fn document_metadata_pause_does_not_advance_over_unfinished_earlier_work() {
+        let mut service=BakeService::new(StorageManager::open_in_memory().unwrap(),"http://127.0.0.1:1");
+        service.client=reqwest::Client::builder().no_proxy().build().unwrap();
+        let first_capture=seed_capture(&service,now_ms()+10_000,"Editor","先处理");
+        let first=seed_knowledge(&service,"meeting",first_capture,5,1);
+        let later_capture=seed_capture(&service,now_ms()+20_000,"Editor","后处理");
+        let later=seed_knowledge(&service,"document",later_capture,5,1);
+        assert_ne!(first,later);
+        let mut doc=NewBakeDocument::with_defaults("本地文档".into(),"document".into());
+        doc.full_content=Some("原正文保持不变。".into());
+        doc.source_memory_ids=json!([later.to_string()]).to_string();
+        service.storage.insert_bake_document(&doc).unwrap();
+        service.storage.upsert_preference(crate::services::document_refresh::DOCUMENT_REFRESH_CONFIG_KEY,
+            r#"{"automatic_document_writes_enabled":false}"#,"test",1.0).unwrap();
+        service.storage.upsert_bake_watermark("unified",1).unwrap();
+        let error=service.run_bake_pipeline("test",10).await.unwrap_err();
+        assert_eq!(bake_retry_error_code(&error),"SIDECAR_UNAVAILABLE");
+        service.storage.with_conn(|conn| {
+            let watermark:i64=conn.query_row("SELECT last_processed_ts FROM bake_watermarks WHERE pipeline_name='unified'",[],|r|r.get(0))?;
+            assert_eq!(watermark,1,"later queued pause must not mark earlier work processed");
+            let reason:String=conn.query_row("SELECT last_error_code FROM bake_retry_state WHERE timeline_id=?1",[later],|r|r.get(0))?;
+            assert_eq!(reason,"DOCUMENT_AUTOMATIC_WRITES_PAUSED");
+            let failures:i64=conn.query_row("SELECT COUNT(*) FROM bake_retry_state WHERE timeline_id=?1",[first],|r|r.get(0))?;
+            assert_eq!(failures,0);
+            Ok(())
+        }).unwrap();
+    }
+
     #[test]
     fn test_substantive_document_bypasses_importance_gate() {
         let service = make_service();
@@ -7843,7 +9174,9 @@ mod tests {
         candidate.capture_url =
             Some("https://docs.example.com/k/home/space/document-id?from=home#section".to_string());
         candidate.capture_webpage_title = Some("弹性伸缩 - 云文档".to_string());
-        candidate.capture_ax_text = Some("文档正文".repeat(80));
+        candidate.capture_ax_text = Some(
+            "# 弹性伸缩\n本文说明容量评估方法和伸缩策略。\n实施步骤包含灰度、监控和回滚。\n验收时核对延迟与错误率。".repeat(12),
+        );
         candidate.timeline.history_view = false;
         candidate.timeline.activity_type = None;
         candidate.timeline.content_origin = None;
@@ -7855,7 +9188,7 @@ mod tests {
         assert!(evidence.allows_auto_create);
         assert_eq!(
             substantive_document_url(&candidate).as_deref(),
-            Some("https://docs.example.com/k/home/space/document-id")
+            Some("https://docs.example.com/k/home/space/document-id?from=home")
         );
     }
 
@@ -7921,7 +9254,7 @@ mod tests {
         chat_with_document_link.capture_url =
             Some("https://docs.example.com/d/home/document-id".to_string());
         let linked_evidence = document_evidence(&chat_with_document_link);
-        assert!(linked_evidence.has_document_url);
+        assert!(!linked_evidence.has_document_url);
         assert_eq!(linked_evidence.kind, BakeDocumentEvidenceKind::Insufficient);
         assert!(!linked_evidence.allows_auto_create);
 
@@ -7942,11 +9275,13 @@ mod tests {
         let result = service
             .persist_document_artifact(
                 None,
+                None,
                 &candidate,
                 &extraction,
                 None,
                 &mut existing_sources,
                 &mut existing_urls,
+                None,
             )
             .await
             .expect("聊天文档门禁执行失败");
@@ -7969,7 +9304,9 @@ mod tests {
         let mut candidate = make_candidate(&service, timeline_id);
         candidate.capture_app_name = Some("Unlisted Native Editor".to_string());
         candidate.capture_win_title = Some("季度复盘方案.docx".to_string());
-        candidate.capture_ax_text = Some("季度复盘正文".repeat(80));
+        candidate.capture_ax_text = Some(
+            "季度复盘正文说明本季度目标完成情况。风险项已有负责人。后续计划已经排期。".repeat(20),
+        );
         candidate.capture_url = None;
         candidate.capture_webpage_title = None;
 
@@ -8029,7 +9366,9 @@ mod tests {
         candidate.preferred_source_title = Some("商业化大模型例行压测介绍 - 云文档".to_string());
         candidate.capture_url =
             Some("https://docs.example.com/k/home/space/document-id".to_string());
-        candidate.capture_ax_text = Some("压测文档正文".repeat(80));
+        candidate.capture_ax_text = Some(
+            "# 商业化大模型例行压测介绍\n本文说明压测范围和指标。\n执行过程保留审计。\n结果需要复核。".repeat(20),
+        );
 
         let payload = parse_bake_document_payload(
             json!({
@@ -8122,13 +9461,18 @@ mod tests {
 
     #[test]
     fn test_title_fallback_accepts_missing_url_but_rejects_different_urls() {
+        assert!(!document_urls_compatible_for_title_match(
+            Some("https://example.com/resource/a"), Some("https://example.com/resource/b")));
+        assert!(document_urls_compatible_for_title_match(
+            Some("https://example.com/resource/a"), Some("https://example.com/resource/a")));
+
         assert!(document_urls_compatible_for_title_match(
             None,
             Some("https://docs.example.com/d/home/abc123?section=one"),
         ));
         assert!(document_urls_compatible_for_title_match(
             Some("https://docs.example.com/d/home/ABC123#one"),
-            Some("http://docs.example.com/d/home/abc123?section=two"),
+            Some("https://docs.example.com/d/home/ABC123?section=two"),
         ));
         assert!(!document_urls_compatible_for_title_match(
             Some("https://docs.example.com/d/home/abc123"),
@@ -8186,9 +9530,11 @@ mod tests {
         );
         let timeline_id = seed_knowledge(&service, "文档", capture_id, 2, 1);
         let mut first = make_candidate(&service, timeline_id);
-        first.capture_ax_text = Some("文档正文".repeat(80));
+        first.capture_ax_text = Some(
+            "# 弹性伸缩\n本文说明容量评估方法。\n实施时先灰度再扩容。\n验收时检查延迟和错误率。".repeat(20),
+        );
         first.capture_url =
-            Some("https://docs.example.com/k/home/space/document-id?from=home".to_string());
+            Some("https://docs.example.com/k/home/space/document-id?ro=false".to_string());
         first.capture_webpage_title = Some("弹性伸缩 - 云文档".to_string());
         let mut second = first.clone();
         second.capture_url =
@@ -8197,12 +9543,12 @@ mod tests {
 
         assert!(reserve_document_task(&first, &mut queued));
         assert!(!reserve_document_task(&second, &mut queued));
-        assert_eq!(
-            queued,
-            std::collections::HashSet::from([String::from(
-                "https://docs.example.com/k/home/space/document-id"
-            )])
+        assert_eq!(queued.len(), 1);
+        second.capture_ax_text = Some(
+            "# 弹性伸缩\n后来访问新增了业务正文。\n补充了回滚步骤。\n验收指标保持不变。".repeat(20),
         );
+        assert!(reserve_document_task(&second, &mut queued));
+        assert_eq!(queued.len(), 2);
     }
 
     use crate::storage::models::{EventType, NewCapture};
@@ -8294,6 +9640,59 @@ mod tests {
             by_url.items[0].source_url.as_deref(),
             Some("https://docs.example.com/projects/alpha")
         );
+    }
+
+    #[test]
+    fn test_deleted_document_is_not_available_by_id() {
+        let service = make_service();
+        let document = service
+            .create_document(test_document_request("待删除文档", "general_document", None))
+            .unwrap();
+        let document_id = document.id.parse::<i64>().unwrap();
+
+        service.delete_document(document_id).unwrap();
+
+        assert!(matches!(
+            service.get_document(document_id),
+            Err(ApiError::NotFound(_))
+        ));
+        assert!(matches!(
+            service.evaluate_document_refresh(document_id, 1_710_000_000_000),
+            Err(ApiError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn test_document_list_matches_all_keywords_without_requiring_adjacency() {
+        let service = make_service();
+        let target = service
+            .create_document(test_document_request(
+                "AIGC 图生视频 RPC 接入文档",
+                "技术文档",
+                None,
+            ))
+            .unwrap();
+        service
+            .create_document(test_document_request(
+                "AIGC 图生视频 RPC 说明",
+                "技术文档",
+                None,
+            ))
+            .unwrap();
+        let mut distributed = test_document_request("AIGC", "技术文档", None);
+        distributed.summary = Some("图生视频 接入文档".to_string());
+        service.create_document(distributed).unwrap();
+
+        let page = service
+            .list_documents_paginated(BakeListFilter {
+                q: Some("AIGC 图生视频 接入文档".to_string()),
+                limit: 20,
+                ..BakeListFilter::default()
+            })
+            .unwrap();
+
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items[0].id, target.id);
     }
 
     fn seed_capture(service: &BakeService, ts: i64, app_name: &str, title: &str) -> i64 {
@@ -8418,6 +9817,7 @@ mod tests {
                 entities: "[]".to_string(),
                 importance: 7,
                 source_capture_ids: Some(format!("[{capture_id}]")),
+                ..Default::default()
             })
             .unwrap();
 
@@ -8446,6 +9846,19 @@ mod tests {
         assert_eq!(
             response.items[0].source_url.as_deref(),
             Some("https://kb.example.com/memorybread/api")
+        );
+
+        let multi_term = service
+            .list_knowledge_paginated(BakeListFilter {
+                q: Some("本地接口 kb.example.com".to_string()),
+                limit: 20,
+                ..BakeListFilter::default()
+            })
+            .unwrap();
+        assert_eq!(multi_term.total, 1);
+        assert_eq!(
+            multi_term.items[0].source_timeline_id,
+            timeline_id.to_string()
         );
     }
 
@@ -9001,6 +10414,7 @@ mod tests {
                 &mut document_sources,
                 &mut document_urls,
                 &mut sop_sources,
+                None,
             )
             .await
             .expect("知识 payload 失败不应阻止有效 SOP 持久化");
@@ -9023,7 +10437,9 @@ mod tests {
         let mut candidate = make_candidate(&service, timeline_id);
         candidate.capture_url = Some("https://docs.example.com/d/home/recruiting".to_string());
         candidate.capture_webpage_title = Some("招聘方案 - 云文档".to_string());
-        candidate.capture_ax_text = Some("招聘方案正文".repeat(100));
+        candidate.capture_ax_text = Some(
+            "# 招聘方案\n本文说明招聘目标和岗位范围。\n面试流程分为三个阶段。\n录用结果需要留档。".repeat(20),
+        );
         let run_id = service
             .storage
             .insert_bake_run(&NewBakeRun {
@@ -9088,6 +10504,91 @@ mod tests {
         assert_eq!(document.deterministic_eligible, Some(true));
     }
 
+    #[test]
+    fn test_existing_source_refresh_uses_stored_url_when_observation_has_no_url() {
+        let service = make_service();
+        let capture = seed_capture(&service, 1_710_000_000_000, "Chrome", "配置说明");
+        let timeline = seed_knowledge(&service, "文档", capture, 4, 1);
+        let mut candidate = make_candidate(&service, timeline);
+        candidate.capture_url = None;
+        candidate.capture_ax_text = Some("新的配置说明正文".repeat(50));
+        let url = "https://docs.example.com/document/stored-url";
+        service.create_document(test_document_request("配置说明", "技术文档", Some(url))).unwrap();
+        let existing = service.storage.find_document_by_source_url(url).unwrap().unwrap();
+        let result = service.queue_existing_document_observation(&candidate, &existing).unwrap().unwrap();
+        assert!(result.document_refresh_pending);
+        assert_eq!(result.document_refresh_status, Some("pending_source_refresh"));
+        let fingerprint = artifact_source_fingerprint(&candidate).unwrap();
+        assert!(!service.storage.has_bake_document_source_fingerprint(existing.id, &fingerprint).unwrap());
+        let current = service.storage.get_bake_document(existing.id).unwrap().unwrap();
+        assert_eq!(current.full_content, existing.full_content);
+        assert_eq!(current.updated_at, existing.updated_at);
+        assert_eq!(service.storage.document_refresh_observation_state(existing.id, &fingerprint).unwrap().as_deref(), Some("pending"));
+    }
+
+    #[tokio::test]
+    async fn test_online_refresh_queue_preserves_saved_sop_and_pending_audit() {
+        let service = make_service();
+        let first = seed_capture(&service, 1_710_000_000_000, "Code", "检查配置");
+        let second = seed_capture(&service, 1_710_000_001_000, "Code", "执行修复");
+        let third = seed_capture(&service, 1_710_000_002_000, "Terminal", "验证通过");
+        let timeline_id = seed_knowledge(&service, "文档", first, 4, 1);
+        link_captures_to_timeline(&service, timeline_id, &[first, second, third]);
+        let mut candidate = make_candidate(&service, timeline_id);
+        candidate.timeline.capture_ids = Some(format!("[{first},{second},{third}]"));
+        candidate.action_trace = operation_trace(&[first, second, third]);
+        candidate.capture_url = Some("https://docs.example.com/document/config-guide".to_string());
+        candidate.capture_webpage_title = Some("配置说明".to_string());
+        candidate.capture_ax_text = Some("配置说明及执行结果".repeat(100));
+        service.create_document(test_document_request(
+            "配置说明", "技术文档", candidate.capture_url.as_deref(),
+        )).unwrap();
+        let run_id = service.storage.insert_bake_run(&NewBakeRun {
+            trigger_reason: "test".to_string(),
+            status: "running".to_string(),
+            started_at: now_ms(),
+        }).unwrap();
+        let extracted = BakeExtractResponse {
+            knowledge: BakeArtifactExtraction {
+                accepted: false, reason: None, payload: None,
+            },
+            document: BakeArtifactExtraction {
+                accepted: true,
+                reason: None,
+                payload: Some(json!({"name": "配置说明", "full_content": "配置说明正文"})),
+            },
+            sop: BakeArtifactExtraction {
+                accepted: true,
+                reason: None,
+                payload: Some(json!({
+                    "summary": "检查配置、修复并验证",
+                    "steps": ["检查配置", "执行修复", "运行测试验证结果"],
+                    "step_evidence": [
+                        {"step_index": 1, "capture_ids": [first.to_string()]},
+                        {"step_index": 2, "capture_ids": [second.to_string()]},
+                        {"step_index": 3, "capture_ids": [third.to_string()]}
+                    ]
+                })),
+            },
+            primary_type: Some("sop".to_string()),
+            classification_reason: None, usage: None, model: None, degraded: None,
+            artifact_shapes: None, compatibility_recovered: None,
+        };
+        service.record_artifact_extraction_audits(run_id, &candidate, &extracted).unwrap();
+        let outcome = service.persist_extracted_candidate(
+            Some(run_id), None, &candidate, "test", extracted,
+            &mut HashSet::new(), &mut HashSet::new(), &mut HashSet::new(),
+            &mut HashSet::new(),
+            Some(now_ms() + (BAKE_SIDECAR_TIMEOUT_SECS * 1000) as i64 - 1),
+        ).await.unwrap();
+        assert!(outcome.document_refresh_pending);
+        assert_eq!(outcome.document_created_count, 0);
+        assert_eq!(service.storage.count_bake_sops().unwrap(), 1);
+        let audits = service.storage.list_bake_artifact_audits_for_timeline(timeline_id, 10).unwrap();
+        let document = audits.iter().find(|audit| audit.artifact_kind == "document").unwrap();
+        assert_eq!(document.persist_status, "pending_source_refresh");
+    }
+
     #[tokio::test]
     async fn test_strong_document_evidence_model_rejection_is_retryable_false_negative() {
         let service = make_service();
@@ -9101,7 +10602,9 @@ mod tests {
         let mut candidate = make_candidate(&service, timeline_id);
         candidate.capture_url = Some("https://docs.example.com/d/home/recruiting".to_string());
         candidate.capture_webpage_title = Some("招聘方案 - 云文档".to_string());
-        candidate.capture_ax_text = Some("岗位职责与任职要求".repeat(100));
+        candidate.capture_ax_text = Some(
+            "# 招聘方案\n本文列出岗位职责与任职要求。\n面试结果需要复核。\n录用流程需要留档。".repeat(20),
+        );
         let extracted = BakeExtractResponse {
             knowledge: BakeArtifactExtraction {
                 accepted: false,
@@ -9142,6 +10645,7 @@ mod tests {
                 &mut document_sources,
                 &mut document_urls,
                 &mut sop_sources,
+                None,
             )
             .await
             .expect_err("强文档证据不应被模型拒绝后永久跳过");
@@ -9155,6 +10659,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_final_document_retry_recovers_review_candidate_from_captured_source() {
+        use tracing::instrument::WithSubscriber;
+        #[derive(Clone)]
+        struct Writer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Writer {
+            fn write(&mut self, bytes:&[u8])->std::io::Result<usize> {self.0.lock().unwrap().extend_from_slice(bytes);Ok(bytes.len())}
+            fn flush(&mut self)->std::io::Result<()> {Ok(())}
+        }
+        let output=std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer=Writer(output.clone());
+        let subscriber=tracing_subscriber::fmt().without_time().with_ansi(false)
+            .with_max_level(tracing::Level::WARN).with_writer(move ||writer.clone()).finish();
         let service = make_service();
         let capture_id = seed_capture(
             &service,
@@ -9166,7 +10681,8 @@ mod tests {
         let mut candidate = make_candidate(&service, timeline_id);
         candidate.capture_url = Some("https://docs.example.com/d/home/recruiting".to_string());
         candidate.capture_webpage_title = Some("招聘方案 - 云文档".to_string());
-        let captured_body = "岗位职责与任职要求".repeat(100);
+        let captured_body =
+            "# 招聘方案\n本文列出岗位职责与任职要求。\n面试结果需要复核。\n录用流程需要留档。".repeat(20);
         candidate.capture_ax_text = Some(captured_body.clone());
         candidate.retry_failure_count = MAX_BAKE_RETRY_FAILURES - 1;
         let extracted = BakeExtractResponse {
@@ -9177,7 +10693,7 @@ mod tests {
             },
             document: BakeArtifactExtraction {
                 accepted: false,
-                reason: Some("not_a_document".to_string()),
+                reason: Some("PRIVATE_MODEL_REASON https://example.com/private?token=SECRET".to_string()),
                 payload: None,
             },
             sop: BakeArtifactExtraction {
@@ -9220,9 +10736,15 @@ mod tests {
                 &mut document_sources,
                 &mut document_urls,
                 &mut sop_sources,
+                None,
             )
+            .with_subscriber(subscriber)
             .await
             .expect("最后一次强文档证据应从采集正文恢复待审核文档");
+
+        let logged=String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(logged.contains("bake document recovered from captured source"));
+        assert!(!logged.contains("PRIVATE_MODEL_REASON") && !logged.contains("SECRET"));
 
         assert_eq!(result.document_created_count, 1);
         let document = service
@@ -9262,7 +10784,9 @@ mod tests {
         let mut candidate = make_candidate(&service, timeline_id);
         candidate.capture_url = Some("https://docs.example.com/d/home/invalid-payload".to_string());
         candidate.capture_webpage_title = Some("招聘方案 - 云文档".to_string());
-        candidate.capture_ax_text = Some("岗位职责与任职要求".repeat(100));
+        candidate.capture_ax_text = Some(
+            "# 招聘方案\n本文列出岗位职责与任职要求。\n面试结果需要复核。\n录用流程需要留档。".repeat(20),
+        );
         candidate.retry_failure_count = MAX_BAKE_RETRY_FAILURES - 1;
         let extracted = BakeExtractResponse {
             knowledge: BakeArtifactExtraction {
@@ -9304,6 +10828,7 @@ mod tests {
                 &mut document_sources,
                 &mut document_urls,
                 &mut sop_sources,
+                None,
             )
             .await
             .expect("最终尝试的无效文档 payload 应从采集正文恢复");
@@ -9367,6 +10892,7 @@ mod tests {
                 &mut document_sources,
                 &mut document_urls,
                 &mut sop_sources,
+                None,
             )
             .await
             .expect("非文档候选的模型拒绝应正常完成");
@@ -9411,6 +10937,7 @@ mod tests {
                     entities: "[]".to_string(),
                     importance: 3,
                     source_capture_ids: None,
+                    ..Default::default()
                 })
                 .expect("插入 bake knowledge 失败");
         }
@@ -9484,35 +11011,654 @@ mod tests {
         );
     }
 
+    /// 构造一份维度完整的知识 payload，便于逐个维度改写做门禁断言。
+    fn reuse_gate_payload(overrides: Value) -> BakeKnowledgeArtifactPayload {
+        let mut base = json!({
+            "summary": "可复用事实",
+            "evidence_summary": "来源明确记录了对象、状态和观测时间",
+            "future_question": "后续执行应依据什么事实？",
+            "decision_reason": "该事实会改变后续执行和验证方式",
+            "irreplaceability": "only_here",
+            "irreplaceability_reason": "结论只在当次会议现场给出，群公告与文档均无副本",
+            "reuse_audience": "team_or_stakeholders",
+            "validity_horizon": "months_or_more",
+            "subject_key": "联盟切流共享集群",
+            "predicate_key": "根因是老版本 SDK 放大调用量",
+            "match_score": 0.9
+        });
+        if let (Some(target), Some(source)) = (base.as_object_mut(), overrides.as_object()) {
+            for (key, value) in source {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        serde_json::from_value(base).expect("测试 payload 必须能被解析")
+    }
+
     #[test]
-    fn test_knowledge_decision_uses_final_threshold_and_open_semantics() {
-        let payload = |score: f64, include_semantics: bool| {
-            serde_json::from_value::<BakeKnowledgeArtifactPayload>(json!({
-                "summary": "可复用事实",
-                "evidence_summary": "来源明确记录了对象、状态和观测时间",
-                "future_question": include_semantics.then_some("后续执行应依据什么事实？"),
-                "decision_reason": include_semantics.then_some("该事实会改变后续执行和验证方式"),
-                "match_score": score
-            }))
-            .unwrap()
+    fn test_knowledge_decision_scores_reuse_radius_dimensions() {
+        let config = KnowledgeGateConfig::default();
+        let decide = |payload: &BakeKnowledgeArtifactPayload, importance: i64| {
+            resolve_knowledge_decision(payload, importance, &config)
         };
 
+        // 故障复盘结论：只存在于会议现场，团队与后续回溯都需要
+        let fault_review = reuse_gate_payload(json!({}));
+        let decision = decide(&fault_review, 5);
+        assert_eq!(decision.state, "published");
+        assert_eq!(decision.reason_code, "publish_score_met");
+        assert_eq!(decision.rule_version, KNOWLEDGE_DECISION_RULE_VERSION);
+        assert!(decision.score.expect("发布必须带算分") > 0.96);
+
+        // 汇报策略共识：时效以周计仍应发布
+        let report_strategy = reuse_gate_payload(json!({ "validity_horizon": "weeks" }));
+        assert_eq!(decide(&report_strategy, 4).state, "published");
+
+        // 外部性能指标结论：别处能找回一部分，但需重新拼接
+        let metric = reuse_gate_payload(json!({
+            "irreplaceability": "partially_recoverable",
+            "validity_horizon": "weeks"
+        }));
+        assert_eq!(decide(&metric, 5).state, "published");
+
+        // 过程细节：只有自己后续会用到、时效以天计，不得发布
+        let process_detail = reuse_gate_payload(json!({
+            "irreplaceability": "partially_recoverable",
+            "reuse_audience": "me_later",
+            "validity_horizon": "days"
+        }));
+        let decision = decide(&process_detail, 4);
+        assert_eq!(decision.state, "shadow");
+        assert_eq!(decision.reason_code, "below_publish_score");
+
+        // 外部学术与技术知识：原文虽在，只要结论里含有用户自己的适配与验证结果，仍应发布。
+        // 注意这里必须显式声明 `own_work_only`：纯复述型学术知识已从“可发布”改为
+        // “硬否决”（见 `test_knowledge_decision_rejects_public_reference`），
+        // 靠字段缺失走 fail-open 不是这个用例想要的契约。
+        let external_science = reuse_gate_payload(json!({
+            "irreplaceability": "partially_recoverable",
+            "reuse_audience": "anyone_same_domain",
+            "source_publicity": "own_work_only"
+        }));
+        assert_eq!(decide(&external_science, 3).state, "published");
+
+        // 同一条外部知识被模型判为「只有自己后续要用」时，不再仅凭自报重要性发布：
+        // `partially_recoverable + me_later` 是内部矛盾组合（提示词要求领域公共知识取
+        // `anyone_same_domain`），算分 0.695 落在发布线以下，只写审计不建条目。
+        let external_self_use = reuse_gate_payload(json!({
+            "irreplaceability": "partially_recoverable",
+            "reuse_audience": "me_later"
+        }));
+        assert_eq!(decide(&external_self_use, 5).state, "shadow");
+
+        // 重要性取时间线值：同一条知识在低重要性时间线上算分必须单调更低
+        let low_importance = decide(&external_self_use, 2);
+        assert_eq!(low_importance.state, "shadow");
+        assert!(
+            low_importance.score.expect("shadow 必须带算分")
+                < decide(&external_self_use, 5).score.expect("shadow 必须带算分")
+        );
+    }
+
+    /// 发布下限的回归锁（线上实测缺陷）：加性公式允许 `only_here` 单一维度独撑发布。
+    /// 真实行 `only_here + me_later + days + importance 4` 算得 0.7375，已越过 0.72 发布线，
+    /// 而这组维度（只有我以后会用 + 几天就过期）按提示词自己的定义正是该拦的一次性过程细节。
+    #[test]
+    fn test_knowledge_publish_requires_minimum_reuse_radius() {
+        let config = KnowledgeGateConfig::default();
+
+        // 用例前提：算分本身已过发布线，拦住它的只能是下限而不是分数
+        let single_dimension = reuse_gate_payload(json!({
+            "reuse_audience": "me_later",
+            "validity_horizon": "days"
+        }));
+        let decision = resolve_knowledge_decision(&single_dimension, 4, &config);
+        let score = decision.score.expect("下限降级必须保留算分");
+        assert!(score > KNOWLEDGE_PUBLISH_SCORE, "前提已变：{score} 不再过发布线");
+        assert_eq!(decision.state, "shadow");
+        assert_eq!(decision.reason_code, "reuse_radius_below_minimum");
+        // 落 shadow 而不是 timeline_only：该候选并未被证明冗余，影子副本还要承担窗口内去重
+        assert!(knowledge_gate_outcome(&single_dimension, &decision)
+            .knowledge_shadow_payload_json
+            .is_some());
+
+        // 受众与时效两条下限是任一不足即拦：分别只低于一条也要拦下
+        let audience_short = reuse_gate_payload(json!({ "reuse_audience": "me_later" }));
         assert_eq!(
-            resolve_knowledge_decision(&payload(0.78, true)).state,
+            resolve_knowledge_decision(&audience_short, 5, &config).reason_code,
+            "reuse_radius_below_minimum"
+        );
+        let horizon_short = reuse_gate_payload(json!({ "validity_horizon": "days" }));
+        assert_eq!(
+            resolve_knowledge_decision(&horizon_short, 5, &config).reason_code,
+            "reuse_radius_below_minimum"
+        );
+
+        // 下限可配置：回到最宽档位等于关闭本规则，同一条候选仍按算分发布
+        let relaxed = KnowledgeGateConfig {
+            min_publish_audience: "only_me_this_session",
+            min_publish_horizon: "hours",
+            ..KnowledgeGateConfig::default()
+        };
+        let decision = resolve_knowledge_decision(&single_dimension, 4, &relaxed);
+        assert_eq!(decision.state, "published");
+        assert_eq!(decision.reason_code, "publish_score_met");
+
+        // 下限只在算分够线时介入：算分不过线的候选仍按原 reason_code 降级，不得被改写
+        let below_line = reuse_gate_payload(json!({
+            "irreplaceability": "partially_recoverable",
+            "reuse_audience": "me_later",
+            "validity_horizon": "days"
+        }));
+        assert_eq!(
+            resolve_knowledge_decision(&below_line, 4, &config).reason_code,
+            "below_publish_score"
+        );
+    }
+
+    /// 出处性质硬否决的回归锁：公共参考知识不再挤在 `irreplaceability` 一轴上表达。
+    #[test]
+    fn test_knowledge_decision_rejects_public_reference() {
+        let config = KnowledgeGateConfig::default();
+
+        // 两个自报维度一致才否决：`publicly_documented` + 非 `only_here` + `anyone_same_domain`
+        // 就是一句任何同领域的人都能从公开资料里读到的复述。
+        let public_reference = reuse_gate_payload(json!({
+            "irreplaceability": "partially_recoverable",
+            "reuse_audience": "anyone_same_domain",
+            "source_publicity": "publicly_documented"
+        }));
+        let decision = resolve_knowledge_decision(&public_reference, 5, &config);
+        assert_eq!(decision.state, "timeline_only");
+        assert_eq!(decision.reason_code, "redundant_public_reference");
+        assert!(knowledge_gate_outcome(&public_reference, &decision)
+            .knowledge_shadow_payload_json
+            .is_none());
+
+        // 可整体关闭：需要把复述型学术知识也纳入时，靠偏好开关而不是改代码
+        let veto_off = KnowledgeGateConfig {
+            public_reference_veto_enabled: false,
+            ..KnowledgeGateConfig::default()
+        };
+        let unvetoed = resolve_knowledge_decision(&public_reference, 5, &veto_off);
+        assert_eq!(unvetoed.state, "published");
+        // 证明拦住它的是否决而不是分数：同一 payload 关掉否决后算分已越过发布线，
+        // 且受众与时效都满足发布下限。
+        assert!(unvetoed.score.expect("published 必须带算分") > KNOWLEDGE_PUBLISH_SCORE);
+
+        // 受众不自报 `anyone_same_domain` 时否决不得介入（种子 3804 的实测形态）：
+        // 内容虽出自公开资料，复用半径却只到自己的团队，那么「选哪一段、为什么对本项目
+        // 重要」本身就是用户判断。该组合算分 0.705 在发布线以下，去向由分数决定，不得出现否决理由。
+        let seed_3804_shape = reuse_gate_payload(json!({
+            "irreplaceability": "partially_recoverable",
+            "reuse_audience": "team_or_stakeholders",
+            "validity_horizon": "weeks",
+            "source_publicity": "publicly_documented"
+        }));
+        let decision = resolve_knowledge_decision(&seed_3804_shape, 4, &config);
+        assert_ne!(decision.reason_code, "redundant_public_reference");
+        assert_eq!(decision.reason_code, "below_publish_score");
+        // 同一形状只把时效抬到 `months_or_more`：否决仍未介入，正常发布。
+        let team_broad_use = reuse_gate_payload(json!({
+            "irreplaceability": "partially_recoverable",
+            "reuse_audience": "team_or_stakeholders",
+            "source_publicity": "publicly_documented"
+        }));
+        assert_eq!(
+            resolve_knowledge_decision(&team_broad_use, 5, &config).state,
             "published"
         );
+
+        // fail-open：字段缺失或取值非法都不得否决。本地推理并不保证按 schema 输出，
+        // 若缺失即否决，模型漏一个字段就会把整个知识页清空（同 match_score 退化教训）。
+        // 改变取值时其余两轴保持否决形状，证明放下来的确实只有出处这一轴。
+        for publicity in [Value::Null, json!("public_knowledge"), json!("")] {
+            let payload = reuse_gate_payload(json!({
+                "irreplaceability": "partially_recoverable",
+                "reuse_audience": "anyone_same_domain",
+                "source_publicity": publicity
+            }));
+            assert_eq!(
+                resolve_knowledge_decision(&payload, 5, &config).state,
+                "published",
+                "出处性质缺失或非法时不得否决：{publicity:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_knowledge_decision_hard_rejects_redundant_session_local_and_transient() {
+        let config = KnowledgeGateConfig::default();
+
+        // 自己的编码过程已被 commit 与 CI 完整记录，知识条目只是冗余副本
+        let redundant = reuse_gate_payload(json!({
+            "irreplaceability": "authoritative_elsewhere",
+            "irreplaceability_reason": "commit 历史与 CI 测试报告已完整记录该修复过程"
+        }));
+        let decision = resolve_knowledge_decision(&redundant, 5, &config);
+        assert_eq!(decision.state, "timeline_only");
+        assert_eq!(decision.reason_code, "redundant_with_authoritative_source");
+        // 硬否决不再往只写不读的 shadow 池堆数据，因此不应携带 shadow payload
+        assert!(knowledge_gate_outcome(&redundant, &decision)
+            .knowledge_shadow_payload_json
+            .is_none());
+
+        let session_local = reuse_gate_payload(json!({ "reuse_audience": "only_me_this_session" }));
+        let decision = resolve_knowledge_decision(&session_local, 5, &config);
+        assert_eq!(decision.state, "timeline_only");
+        assert_eq!(decision.reason_code, "session_local_reuse_only");
+
+        let transient = reuse_gate_payload(json!({
+            "irreplaceability": "partially_recoverable",
+            "validity_horizon": "hours"
+        }));
+        let decision = resolve_knowledge_decision(&transient, 5, &config);
+        assert_eq!(decision.state, "timeline_only");
+        assert_eq!(decision.reason_code, "transient_process_detail");
+
+        // 只存在于现场的信息不被时效**硬否决**误杀：该条要求 irreplaceability != only_here。
+        // 但它仍会被时效发布下限挡在 shadow：低时效内容现在由下限统一接管。
+        let only_here_hours = reuse_gate_payload(json!({ "validity_horizon": "hours" }));
+        let decision = resolve_knowledge_decision(&only_here_hours, 5, &config);
+        assert_ne!(decision.reason_code, "transient_process_detail");
+        assert_eq!(decision.reason_code, "reuse_radius_below_minimum");
+    }
+
+    #[test]
+    fn test_knowledge_decision_tolerates_unknown_dimensions_and_missing_semantics() {
+        let config = KnowledgeGateConfig::default();
+
+        // 维度是判定轴而非封闭枚举：无法识别的取值宽容降级为 shadow，不硬拒
+        let unknown = reuse_gate_payload(json!({ "reuse_audience": "future_stakeholders" }));
+        let decision = resolve_knowledge_decision(&unknown, 5, &config);
+        assert_eq!(decision.state, "shadow");
+        assert_eq!(decision.reason_code, "reuse_dimension_missing");
+
+        let absent = reuse_gate_payload(json!({ "irreplaceability": Value::Null }));
+        let decision = resolve_knowledge_decision(&absent, 5, &config);
+        assert_eq!(decision.state, "shadow");
+        assert_eq!(decision.reason_code, "reuse_dimension_missing");
+
+        // 旧 payload 与回放数据没有新维度字段，必须降级而不是报错或硬拒
+        let legacy_payload: BakeKnowledgeArtifactPayload = serde_json::from_value(json!({
+            "summary": "旧格式知识",
+            "match_score": 0.91
+        }))
+        .expect("旧 payload 必须仍可解析");
+        let decision = resolve_knowledge_decision(&legacy_payload, 5, &config);
+        assert_eq!(decision.state, "shadow");
+        assert_eq!(decision.reason_code, "reuse_semantics_incomplete");
+
+        for field in [
+            "future_question",
+            "decision_reason",
+            "evidence_summary",
+            "irreplaceability_reason",
+            "subject_key",
+            "predicate_key",
+        ] {
+            let mut overrides = serde_json::Map::new();
+            overrides.insert(field.to_string(), json!("   "));
+            let incomplete = reuse_gate_payload(Value::Object(overrides));
+            let decision = resolve_knowledge_decision(&incomplete, 5, &config);
+            assert_eq!(decision.state, "shadow", "{field} 为空时应降级 shadow");
+            assert_eq!(decision.reason_code, "reuse_semantics_incomplete", "{field}");
+            assert!(
+                knowledge_gate_outcome(&incomplete, &decision)
+                    .knowledge_shadow_payload_json
+                    .is_some(),
+                "{field} 降级 shadow 时必须保留 payload 供后续复核"
+            );
+        }
+    }
+
+    #[test]
+    fn test_knowledge_gate_config_reads_preferences_and_falls_back_on_invalid_values() {
+        let service = make_service();
         assert_eq!(
-            resolve_knowledge_decision(&payload(0.77, true)).state,
+            KnowledgeGateConfig::from_storage(&service.storage),
+            KnowledgeGateConfig::default(),
+            "未写入偏好时必须使用默认阈值"
+        );
+
+        service
+            .storage
+            .upsert_preference(PREF_KNOWLEDGE_PUBLISH_SCORE, "0.9", "test", 1.0)
+            .unwrap();
+        service
+            .storage
+            .upsert_preference(PREF_KNOWLEDGE_SHADOW_SCORE, "0.8", "test", 1.0)
+            .unwrap();
+        service
+            .storage
+            .upsert_preference(PREF_KNOWLEDGE_DEDUP_WINDOW_DAYS, "3", "test", 1.0)
+            .unwrap();
+        let config = KnowledgeGateConfig::from_storage(&service.storage);
+        assert_eq!(config.publish_score, 0.9);
+        assert_eq!(config.shadow_score, 0.8);
+        assert_eq!(config.dedup_window_days, 3);
+        assert_eq!(config.dedup_window_ms(), 3 * 86_400_000);
+
+        // 提高发布线后，原本能发布的知识应降为 shadow
+        let payload = reuse_gate_payload(json!({ "validity_horizon": "weeks" }));
+        assert_eq!(
+            resolve_knowledge_decision(&payload, 4, &config).state,
             "shadow"
         );
+
+        // 非法值一律回落默认，配置错误不得阻断烘焙
+        service
+            .storage
+            .upsert_preference(PREF_KNOWLEDGE_PUBLISH_SCORE, "not-a-number", "test", 1.0)
+            .unwrap();
+        service
+            .storage
+            .upsert_preference(PREF_KNOWLEDGE_SHADOW_SCORE, "1.8", "test", 1.0)
+            .unwrap();
+        service
+            .storage
+            .upsert_preference(PREF_KNOWLEDGE_DEDUP_WINDOW_DAYS, "-5", "test", 1.0)
+            .unwrap();
+        let config = KnowledgeGateConfig::from_storage(&service.storage);
+        assert_eq!(config.publish_score, KNOWLEDGE_PUBLISH_SCORE);
+        assert_eq!(config.shadow_score, KNOWLEDGE_SHADOW_SCORE);
+        assert_eq!(config.dedup_window_days, KNOWLEDGE_DEDUP_WINDOW_DAYS);
+
+        // shadow 线高于 publish 线时收敛，避免出现两线之间的空档
+        service
+            .storage
+            .upsert_preference(PREF_KNOWLEDGE_PUBLISH_SCORE, "0.6", "test", 1.0)
+            .unwrap();
+        service
+            .storage
+            .upsert_preference(PREF_KNOWLEDGE_SHADOW_SCORE, "0.9", "test", 1.0)
+            .unwrap();
+        let config = KnowledgeGateConfig::from_storage(&service.storage);
+        assert_eq!(config.publish_score, 0.6);
+        assert_eq!(config.shadow_score, 0.6);
+    }
+
+    /// 三个新偏好必须可读写，且非法取值只能回落默认（削弱严格性，不得放大成误拦）。
+    #[test]
+    fn test_knowledge_gate_reads_publish_minimum_and_veto_preferences() {
+        let service = make_service();
+        let default = KnowledgeGateConfig::default();
+        assert_eq!(default.min_publish_audience, "team_or_stakeholders");
+        assert_eq!(default.min_publish_horizon, "weeks");
+        assert!(default.public_reference_veto_enabled);
         assert_eq!(
-            resolve_knowledge_decision(&payload(0.91, false)).state,
+            KnowledgeGateConfig::from_storage(&service.storage),
+            default,
+            "未写入偏好时必须用默认下限"
+        );
+
+        service
+            .storage
+            .upsert_preference(
+                PREF_KNOWLEDGE_MIN_PUBLISH_AUDIENCE,
+                "anyone_same_domain",
+                "test",
+                1.0,
+            )
+            .unwrap();
+        service
+            .storage
+            .upsert_preference(PREF_KNOWLEDGE_MIN_PUBLISH_HORIZON, "months_or_more", "test", 1.0)
+            .unwrap();
+        service
+            .storage
+            .upsert_preference(PREF_KNOWLEDGE_PUBLIC_REFERENCE_VETO, "off", "test", 1.0)
+            .unwrap();
+        let config = KnowledgeGateConfig::from_storage(&service.storage);
+        assert_eq!(config.min_publish_audience, "anyone_same_domain");
+        assert_eq!(config.min_publish_horizon, "months_or_more");
+        assert!(!config.public_reference_veto_enabled);
+
+        // 收紧到最高档后，原本能发布的默认组合（team + months）也要被下限挡下
+        let payload = reuse_gate_payload(json!({}));
+        assert_eq!(
+            resolve_knowledge_decision(&payload, 5, &config).reason_code,
+            "reuse_radius_below_minimum"
+        );
+
+        // 取值不在维度梯上（拼错 / 旧版本取值）时回落默认，而不是当成“无下限”或 panic
+        service
+            .storage
+            .upsert_preference(PREF_KNOWLEDGE_MIN_PUBLISH_AUDIENCE, "long_term", "test", 1.0)
+            .unwrap();
+        service
+            .storage
+            .upsert_preference(PREF_KNOWLEDGE_MIN_PUBLISH_HORIZON, "", "test", 1.0)
+            .unwrap();
+        let config = KnowledgeGateConfig::from_storage(&service.storage);
+        assert_eq!(config.min_publish_audience, KNOWLEDGE_MIN_PUBLISH_AUDIENCE);
+        assert_eq!(config.min_publish_horizon, KNOWLEDGE_MIN_PUBLISH_HORIZON);
+    }
+
+    #[test]
+    fn test_knowledge_gate_disabled_falls_back_to_legacy_single_score() {
+        let service = make_service();
+        service
+            .storage
+            .upsert_preference(PREF_KNOWLEDGE_GATE_ENABLED, "false", "test", 1.0)
+            .unwrap();
+        let config = KnowledgeGateConfig::from_storage(&service.storage);
+        assert!(!config.enabled);
+
+        // 应急开关关闭后只看 match_score：即使维度声明为冗余副本也不再硬否决
+        let payload = reuse_gate_payload(json!({
+            "irreplaceability": "authoritative_elsewhere",
+            "match_score": 0.9
+        }));
+        let decision = resolve_knowledge_decision(&payload, 5, &config);
+        assert_eq!(decision.state, "published");
+        assert_eq!(decision.reason_code, "publish_threshold_met");
+        assert_eq!(decision.rule_version, KNOWLEDGE_LEGACY_RULE_VERSION);
+        // 审计必须如实区分生效的是哪一版规则
+        assert_eq!(
+            knowledge_gate_outcome(&payload, &decision).knowledge_decision_rule_version,
+            Some(KNOWLEDGE_LEGACY_RULE_VERSION)
+        );
+
+        let rejected = reuse_gate_payload(json!({ "match_score": 0.61 }));
+        let decision = resolve_knowledge_decision(&rejected, 5, &config);
+        assert_eq!(decision.state, "timeline_only");
+        assert_eq!(decision.reason_code, "below_shadow_threshold");
+
+        let shadowed = reuse_gate_payload(json!({ "match_score": 0.77 }));
+        assert_eq!(
+            resolve_knowledge_decision(&shadowed, 5, &config).state,
             "shadow"
         );
-        assert_eq!(
-            resolve_knowledge_decision(&payload(0.61, true)).state,
-            "timeline_only"
+
+        // 开关取值宽容：无法识别的写法不得误关门禁
+        service
+            .storage
+            .upsert_preference(PREF_KNOWLEDGE_GATE_ENABLED, "maybe", "test", 1.0)
+            .unwrap();
+        assert!(KnowledgeGateConfig::from_storage(&service.storage).enabled);
+        service
+            .storage
+            .upsert_preference(PREF_KNOWLEDGE_GATE_ENABLED, "OFF", "test", 1.0)
+            .unwrap();
+        assert!(!KnowledgeGateConfig::from_storage(&service.storage).enabled);
+    }
+
+    #[test]
+    fn test_knowledge_dedup_key_is_stable_across_versions_dates_and_punctuation() {
+        let expected = knowledge_dedup_key(&reuse_gate_payload(json!({})))
+            .expect("维度完整时应产出语义身份键");
+        assert_eq!(expected.len(), 32, "dedup_key 应为 32 位 hex");
+
+        // 版本号、日期、时刻、轮次、测试项数与标点排版均不应改变语义身份
+        for (subject, predicate) in [
+            ("联盟切流共享集群", "根因是老版本 SDK 放大调用量"),
+            ("联盟切流-共享集群", "根因是老版本 SDK 放大调用量"),
+            ("联盟切流 共享集群 v2", "根因是老版本 sdk 放大调用量"),
+            (
+                "联盟切流共享集群（2026-08-21）",
+                "根因是老版本 SDK 放大调用量。",
+            ),
+        ] {
+            let variant = reuse_gate_payload(json!({
+                "subject_key": subject,
+                "predicate_key": predicate
+            }));
+            assert_eq!(
+                knowledge_dedup_key(&variant).as_deref(),
+                Some(expected.as_str()),
+                "{subject} / {predicate} 应归一到同一语义身份"
+            );
+        }
+
+        // 不同事实必须产生不同键，否则会把无关知识合并到一起
+        let other = reuse_gate_payload(json!({ "predicate_key": "已通过验收" }));
+        assert_ne!(
+            knowledge_dedup_key(&other).as_deref(),
+            Some(expected.as_str())
         );
+
+        // 归一化后为空则不产出键，避免所有空值互相命中
+        let blank = reuse_gate_payload(json!({ "subject_key": "2026-08-21" }));
+        assert_eq!(knowledge_dedup_key(&blank), None);
+        let missing = reuse_gate_payload(json!({ "predicate_key": Value::Null }));
+        assert_eq!(knowledge_dedup_key(&missing), None);
+    }
+
+    #[test]
+    fn test_duplicate_semantic_identity_merges_instead_of_inserting_new_row() {
+        let service = make_service();
+        let first_capture = seed_capture(&service, 1_710_000_000_000, "会议", "第一次讨论切流故障");
+        let second_capture = seed_capture(
+            &service,
+            1_710_000_600_000,
+            "会议",
+            "第二次讨论同一故障的后续处理",
+        );
+        let first_timeline = seed_knowledge(&service, "meeting", first_capture, 5, 1);
+        let second_timeline = seed_knowledge(&service, "meeting", second_capture, 5, 1);
+        link_captures_to_timeline(&service, first_timeline, &[first_capture]);
+        link_captures_to_timeline(&service, second_timeline, &[second_capture]);
+
+        // 两条候选的来源文本必须不同，否则会先被 source_fingerprint 全等路径拦下，
+        // 测不到语义身份去重。现实中 4273/4274/4275 就是三条不同采集讲同一件事。
+        let mut first = make_candidate(&service, first_timeline);
+        first.capture_ax_text = Some("第一次讨论切流故障的现场记录".to_string());
+        let mut second = make_candidate(&service, second_timeline);
+        second.capture_ax_text = Some("第二次讨论同一故障后续处理的现场记录".to_string());
+
+        let extraction = BakeArtifactExtraction {
+            accepted: true,
+            reason: None,
+            payload: Some(serde_json::to_value(reuse_gate_payload(json!({}))).unwrap()),
+        };
+
+        let mut sources = std::collections::HashSet::new();
+        let created = service
+            .persist_knowledge_artifact(None, &first, "test", &extraction, &mut sources)
+            .expect("首次沉淀失败");
+        assert_eq!(created.knowledge_created_count, 1);
+        assert_eq!(created.knowledge_decision_state, Some("published"));
+
+        let duplicated = service
+            .persist_knowledge_artifact(None, &second, "test", &extraction, &mut sources)
+            .expect("近重复合并失败");
+        assert_eq!(
+            service.storage.count_bake_knowledge().unwrap(),
+            1,
+            "同一语义身份不得新增知识行"
+        );
+        assert_eq!(duplicated.knowledge_created_count, 0);
+        assert_eq!(duplicated.knowledge_decision_state, Some("merged"));
+        assert_eq!(
+            duplicated.knowledge_decision_reason_code,
+            Some("duplicate_semantic_identity")
+        );
+        assert_eq!(
+            duplicated.knowledge_decision_rule_version,
+            Some(KNOWLEDGE_DECISION_RULE_VERSION)
+        );
+
+        // 合并后两条时间线都应挂到同一知识条目上，来源不得丢失
+        let knowledge_id = service
+            .storage
+            .find_bake_artifact_by_source_timeline("knowledge", second_timeline)
+            .unwrap()
+            .expect("第二条时间线应关联到已有知识");
+        assert_eq!(
+            service
+                .storage
+                .find_bake_artifact_by_source_timeline("knowledge", first_timeline)
+                .unwrap(),
+            Some(knowledge_id)
+        );
+    }
+
+    #[test]
+    fn test_semantic_identity_dedup_ignores_legacy_rows_without_dedup_key() {
+        let service = make_service();
+        let capture = seed_capture(&service, 1_710_000_000_000, "会议", "存量知识来源");
+        let timeline_id = seed_knowledge(&service, "meeting", capture, 5, 1);
+        link_captures_to_timeline(&service, timeline_id, &[capture]);
+
+        // 存量行三列为 NULL，不参与匹配，也不会被回填或降级
+        let legacy_id = service
+            .storage
+            .insert_bake_knowledge(&NewBakeKnowledge {
+                timeline_id: 0,
+                title: "存量知识".to_string(),
+                summary: "存量摘要".to_string(),
+                content: None,
+                detailed_content: None,
+                entities: "[]".to_string(),
+                importance: 5,
+                source_capture_ids: Some("[]".to_string()),
+                ..Default::default()
+            })
+            .expect("插入存量知识失败");
+        let payload = reuse_gate_payload(json!({}));
+        let dedup_key = knowledge_dedup_key(&payload).expect("应产出语义身份键");
+        assert_eq!(
+            service
+                .storage
+                .find_recent_bake_knowledge_by_dedup_key(&dedup_key, 0)
+                .unwrap(),
+            None,
+            "dedup_key 为 NULL 的存量行不得参与近重复匹配"
+        );
+
+        // 同一 key 写入后才能被查到，且取窗口内最新一条
+        let recent_id = service
+            .storage
+            .insert_bake_knowledge(&NewBakeKnowledge {
+                timeline_id,
+                title: "新知识".to_string(),
+                summary: "新摘要".to_string(),
+                content: None,
+                detailed_content: None,
+                entities: "[]".to_string(),
+                importance: 5,
+                source_capture_ids: Some("[]".to_string()),
+                dedup_key: Some(dedup_key.clone()),
+                quality_score: Some(0.96),
+                gate_rule_version: Some(KNOWLEDGE_DECISION_RULE_VERSION.to_string()),
+            })
+            .expect("插入新知识失败");
+        assert_eq!(
+            service
+                .storage
+                .find_recent_bake_knowledge_by_dedup_key(&dedup_key, 0)
+                .unwrap(),
+            Some(recent_id)
+        );
+        // 窗口外的旧条目不得被当成近重复
+        assert_eq!(
+            service
+                .storage
+                .find_recent_bake_knowledge_by_dedup_key(&dedup_key, now_ms() + 1_000)
+                .unwrap(),
+            None
+        );
+        assert_ne!(legacy_id, recent_id);
     }
 
     #[test]
@@ -9663,7 +11809,7 @@ mod tests {
             .unwrap();
 
         let mut candidate = make_candidate(&service, timeline_id);
-        candidate.capture_url = Some(format!("{document_url}?from=home"));
+        candidate.capture_url = Some(format!("{document_url}?ro=false"));
 
         // URL 带 query 变体也应命中已有文档并立即登记，不进延迟列表
         let mut deferred: Vec<BakeMemorySourceRecord> = Vec::new();
@@ -9681,6 +11827,92 @@ mod tests {
         assert!(source_memory_ids.contains(&timeline_id.to_string()));
         let source_capture_ids = parse_json_vec_string(&updated.source_capture_ids);
         assert!(source_capture_ids.contains(&primary.to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_document_decode_failure_logs_only_typed_diagnostics() {
+        use std::io::Write;
+        use tracing::instrument::WithSubscriber;
+        #[derive(Clone)]
+        struct LogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for LogWriter {
+            fn write(&mut self,bytes:&[u8])->std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);Ok(bytes.len())
+            }
+            fn flush(&mut self)->std::io::Result<()> {Ok(())}
+        }
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address=listener.local_addr().unwrap();
+        let server=tokio::spawn(async move {
+            axum::serve(listener,axum::Router::new().route("/bake/extract",axum::routing::post(||async {
+                axum::Json(serde_json::json!({"knowledge":"PRIVATE_BODY https://docs.example.com/private?token=SECRET"}))
+            }))).await.unwrap();
+        });
+        let service=BakeService::new(StorageManager::open_in_memory().unwrap(),&format!("http://{}",address));
+        let capture=seed_capture(&service,1_710_000_200_000,"Google Chrome","PRIVATE_TITLE");
+        let timeline=seed_knowledge(&service,"document",capture,4,2);
+        let candidate=make_candidate(&service,timeline);
+        let output=std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer=LogWriter(output.clone());
+        let subscriber=tracing_subscriber::fmt().without_time().with_ansi(false)
+            .with_max_level(tracing::Level::WARN).with_writer(move ||writer.clone()).finish();
+        let error=service.extract_candidate("test",&candidate).with_subscriber(subscriber).await.err().unwrap();
+        server.abort();
+        assert_eq!(bake_retry_error_code(&error),"BAKE_SIDECAR_RESPONSE_INVALID");
+        let logged=String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(logged.contains("decode_error=true"),"expected typed decode event");
+        for sensitive in ["PRIVATE_BODY","PRIVATE_TITLE","SECRET","https://docs.example.com"] {
+            assert!(!logged.contains(sensitive));
+            assert!(!bake_retry_failure_summary(&error).contains(sensitive));
+        }
+    }
+
+    #[test]
+    fn artifact_decision_logs_exclude_model_reason_but_preserve_business_audit() {
+        #[derive(Clone)]
+        struct Writer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Writer {
+            fn write(&mut self, bytes:&[u8])->std::io::Result<usize> {self.0.lock().unwrap().extend_from_slice(bytes);Ok(bytes.len())}
+            fn flush(&mut self)->std::io::Result<()> {Ok(())}
+        }
+        let service=make_service();
+        let capture=seed_capture(&service,now_ms(),"Editor","fixture");
+        let timeline=seed_knowledge(&service,"document",capture,4,1);
+        let candidate=make_candidate(&service,timeline);
+        let run=service.storage.insert_bake_run(&NewBakeRun{trigger_reason:"test".into(),status:"running".into(),started_at:now_ms()}).unwrap();
+        let secret="PRIVATE_BODY https://example.com/private?token=SECRET";
+        let extraction:BakeExtractResponse=serde_json::from_value(json!({
+            "knowledge":{"accepted":false,"reason":secret},
+            "design":{"accepted":false,"reason":secret},
+            "sop":{"accepted":false,"reason":secret}
+        })).unwrap();
+        let output=std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer=Writer(output.clone());
+        let subscriber=tracing_subscriber::fmt().without_time().with_ansi(false)
+            .with_max_level(tracing::Level::INFO).with_writer(move ||writer.clone()).finish();
+        tracing::subscriber::with_default(subscriber,||service.record_artifact_extraction_audits(run,&candidate,&extraction).unwrap());
+        let log=String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("bake artifact decision"));
+        assert!(!log.contains("PRIVATE_BODY") && !log.contains("SECRET"));
+        service.storage.with_conn(|c| {
+            let reason:String=c.query_row("SELECT model_reason FROM bake_artifact_audits WHERE run_id=?1 AND artifact_kind='document'",[run],|r|r.get(0))?;
+            assert_eq!(reason,secret);Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn test_bake_failure_diagnostics_exclude_upstream_payload_and_private_urls() {
+        let private="secret body https://docs.example.com/private?token=secret";
+        for error in [ApiError::Internal(private.into()),ApiError::BadRequest(private.into()),
+            ApiError::NotFound(private.into()),ApiError::Upstream {status:StatusCode::BAD_GATEWAY,
+                code:"BAKE_SIDECAR_RESPONSE_INVALID",message:private.into()}] {
+            let diagnostic=bake_retry_failure_summary(&error);
+            assert!(diagnostic.starts_with("bake_error code="));
+            assert!(!diagnostic.contains("secret"));
+            assert!(!diagnostic.contains("https://"));
+        }
+        assert_eq!(bake_retry_failure_summary(&ApiError::Upstream {status:StatusCode::GATEWAY_TIMEOUT,
+            code:"INFERENCE_TIMEOUT",message:private.into()}),"bake_error code=INFERENCE_TIMEOUT status=504");
     }
 
     #[test]
@@ -9729,17 +11961,32 @@ mod tests {
             content_origin: None,
             activity_type: None,
             evidence_strength: None,
-            evidence_summary: None,
+            evidence_summary: Some("来源明确记录了本地接口的调用方式".to_string()),
             future_question: Some("未来应参考什么知识？".to_string()),
             decision_reason: Some("该事实对后续执行有直接参考价值".to_string()),
+            irreplaceability: Some("only_here".to_string()),
+            irreplaceability_reason: Some("结论只在当次会议现场给出，无其他副本".to_string()),
+            reuse_audience: Some("team_or_stakeholders".to_string()),
+            validity_horizon: Some("months_or_more".to_string()),
+            // 故意不填出处性质：标题构造用例不关心门禁，同时钉住「缺失不否决」的 fail-open 行为。
+            source_publicity: None,
+            subject_key: Some("本地接口约定".to_string()),
+            predicate_key: Some("调用方式已确认".to_string()),
             match_score: Some(0.9),
             match_level: Some("high".to_string()),
             review_status: Some("auto_created".to_string()),
         };
 
+        let decision = resolve_knowledge_decision(
+            &payload,
+            candidate.timeline.importance,
+            &KnowledgeGateConfig::default(),
+        );
+        assert_eq!(decision.state, "published");
         let record = build_bake_knowledge_entry(
             &candidate,
             &payload,
+            &decision,
             "auto_created",
             "test",
             &source_capture_ids,
@@ -9751,6 +11998,16 @@ mod tests {
         assert_eq!(
             parse_optional_json_vec_string(&record.source_capture_ids),
             vec![primary.to_string()]
+        );
+        // 语义身份与门禁得分必须随产物一同落库，否则事后无法归因
+        assert_eq!(record.quality_score, decision.score);
+        assert_eq!(
+            record.gate_rule_version.as_deref(),
+            Some(KNOWLEDGE_DECISION_RULE_VERSION)
+        );
+        assert_eq!(
+            record.dedup_key.as_deref(),
+            knowledge_dedup_key(&payload).as_deref()
         );
     }
 
@@ -9772,6 +12029,7 @@ mod tests {
                 entities: r#"["旧实体"]"#.to_string(),
                 importance: 3,
                 source_capture_ids: Some(to_json_string(&vec![primary.to_string()]).unwrap()),
+                ..Default::default()
             })
             .expect("插入旧知识失败");
         let candidate = make_candidate(&service, timeline_id);
@@ -9787,6 +12045,12 @@ mod tests {
                 "evidence_summary": "来源记录了知识更新内容",
                 "future_question": "后续应采用哪版知识？",
                 "decision_reason": "新内容会直接影响后续执行",
+                "irreplaceability": "only_here",
+                "irreplaceability_reason": "结论只在当时评审现场给出，无其他副本",
+                "reuse_audience": "team_or_stakeholders",
+                "validity_horizon": "months_or_more",
+                "subject_key": "知识版本约定",
+                "predicate_key": "已更新为新版",
                 "match_score": 0.91,
                 "match_level": "high",
                 "review_status": "auto_created"
@@ -9859,6 +12123,12 @@ mod tests {
                 "evidence_summary": "两条时间线来自同一事实来源",
                 "future_question": "该来源已经沉淀了什么知识？",
                 "decision_reason": "可避免重复沉淀并支持后续执行",
+                "irreplaceability": "only_here",
+                "irreplaceability_reason": "事实来源只在这两条时间线现场出现，无其他副本",
+                "reuse_audience": "team_or_stakeholders",
+                "validity_horizon": "months_or_more",
+                "subject_key": "同一事实来源",
+                "predicate_key": "已沉淀为单条知识",
                 "match_score": 0.9
             })),
         };
@@ -9991,6 +12261,12 @@ mod tests {
         assert_eq!(page.total, 1);
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].id, hit_id.to_string());
+
+        let multi_term_page = service
+            .list_sops_paginated(sop_filter_with_query("知识 bake_sop"))
+            .unwrap();
+        assert_eq!(multi_term_page.total, 1);
+        assert_eq!(multi_term_page.items[0].id, hit_id.to_string());
     }
 
     #[test]

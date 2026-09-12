@@ -1,0 +1,202 @@
+{
+  "model": "qwen3.5:4b",
+  "cases": [
+    {
+      "case": "legacy_business_sota_1",
+      "checks": {
+        "model_decision": true,
+        "operation": true,
+        "no_wrong_workflow": true
+      },
+      "details": {
+        "initial_kind": "generate",
+        "kind": "generate",
+        "identity": {
+          "title": "快手灵机非L0商家爆款视频增长方案",
+          "source": "generated",
+          "evidence_hash": "8c3651cfe927c9ea"
+        },
+        "admission": []
+      },
+      "seconds": 44.76,
+      "passed": true
+    },
+    {
+      "case": "legacy_business_sota_2",
+      "checks": {
+        "model_decision": true,
+        "operation": true,
+        "no_wrong_workflow": true
+      },
+      "details": {
+        "initial_kind": "generate",
+        "kind": "generate",
+        "identity": {
+          "title": "快手灵机非L0商家爆款视频增长方案",
+          "source": "generated",
+          "evidence_hash": "8c3651cfe927c9ea"
+        },
+        "admission": []
+      },
+      "seconds": 137.34,
+      "passed": true
+    },
+    {
+      "case": "repaired_business_sota",
+      "checks": {
+        "model_decision": true,
+        "operation": true,
+        "no_wrong_workflow": true
+      },
+      "details": {
+        "initial_kind": "generate",
+        "kind": "generate",
+        "identity": {
+          "title": "快手灵机非L0商家爆款视频增长与SOTA模型应用方案",
+          "source": "generated",
+          "evidence_hash": "8c3651cfe927c9ea"
+        },
+        "admission": []
+      },
+      "seconds": 30.0,
+      "passed": true
+    },
+    {
+      "case": "business_without_sota",
+      "checks": {
+        "model_decision": true,
+        "operation": true,
+        "no_wrong_workflow": true
+      },
+      "details": {
+        "initial_kind": "generate",
+        "kind": "generate",
+        "identity": {
+          "title": "快手灵机非L0商家爆款视频与GMV提升执行方案",
+          "source": "generated",
+          "evidence_hash": "df8f5cb1e6502bad"
+        },
+        "admission": []
+      },
+      "seconds": 53.51,
+      "passed": true
+    },
+    {
+      "case": "technical_architecture",
+      "checks": {
+        "model_decision": true,
+        "operation": true,
+        "positive_admission": true,
+        "no_wrong_workflow": true
+      },
+      "details": {
+        "initial_kind": "generate",
+        "kind": "generate",
+        "identity": {
+          "title": "视频生成平台技术架构评审",
+          "source": "generated",
+          "evidence_hash": "35d1b2734f8e3db6"
+        },
+        "admission": [],
+        "positive_admission": [
+          {
+            "skill_id": "creation-skill-general-solution-review-doc",
+            "fingerprint": "dd4dfc305d59e819bd9852737bae32114fcecc3dd420fe1f9ad5a02083d680ec",
+            "source": "automatic",
+            "admitted": true,
+            "code": "applicable"
+          }
+        ]
+      },
+      "seconds": 115.26,
+      "passed": true
+    },
+    {
+      "case": "explicit_skill_business",
+      "checks": {
+        "model_decision": true,
+        "operation": true,
+        "no_wrong_workflow": true,
+        "title": true
+      },
+      "details": {
+        "initial_kind": "generate",
+        "kind": "execute_skill",
+        "identity": {
+          "title": "灵机商家增长试点方案",
+          "source": "user",
+          "evidence_hash": "3b43a5b4486e3868"
+        },
+        "admission": [
+          {
+            "skill_id": "creation-skill-general-solution-review-doc",
+            "fingerprint": "dd4dfc305d59e819bd9852737bae32114fcecc3dd420fe1f9ad5a02083d680ec",
+            "source": "user",
+            "admitted": true,
+            "code": "explicit_selection"
+          }
+        ]
+      },
+      "seconds": 100.63,
+      "passed": true
+    },
+    {
+      "case": "no_skill",
+      "checks": {
+        "model_decision": true,
+        "operation": true,
+        "no_wrong_workflow": true,
+        "title": true
+      },
+      "details": {
+        "initial_kind": "generate",
+        "kind": "generate",
+        "identity": {
+          "title": "商家视频试点方案",
+          "source": "user",
+          "evidence_hash": "db5c344a0ae27b39"
+        },
+        "admission": []
+      },
+      "seconds": 37.64,
+      "passed": true
+    },
+    {
+      "case": "local_edit",
+      "checks": {
+        "model_decision": true,
+        "operation": true,
+        "no_wrong_workflow": true
+      },
+      "details": {
+        "initial_kind": "patch",
+        "kind": "patch",
+        "identity": null,
+        "admission": []
+      },
+      "seconds": 7.21,
+      "passed": true
+    },
+    {
+      "case": "template_question",
+      "checks": {
+        "model_decision": true,
+        "operation": true,
+        "no_wrong_workflow": true
+      },
+      "details": {
+        "initial_kind": "respond",
+        "kind": "respond",
+        "identity": null,
+        "admission": []
+      },
+      "seconds": 8.57,
+      "passed": true
+    }
+  ],
+  "provenance": {
+    "base": "creation-skill-governance-attempt3-2026-09-06.json",
+    "positive_admission": "creation-skill-governance-technical-2026-09-06.json",
+    "technical_acceptance": "Generation or suitable skill is valid; independent real review and automatic gate must accept the suitable technical workflow."
+  }
+}

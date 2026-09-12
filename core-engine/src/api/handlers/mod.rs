@@ -4,6 +4,7 @@ pub mod action;
 pub mod bake;
 pub mod breadcrumbs;
 pub mod browser_extension;
+pub(crate) mod browser_script_control;
 pub mod capture_health;
 pub mod captures;
 pub mod config_checks;
@@ -26,3 +27,5 @@ pub mod runtime;
 pub mod snapshot;
 pub mod tasks;
 pub mod work_profile;
+
+pub mod permissions;

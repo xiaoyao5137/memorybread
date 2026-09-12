@@ -196,6 +196,28 @@ def test_cold_sandbox_reinstalls_every_component_without_touching_normal_environ
             "disk_free_gb": 100.0,
         },
     )
+    def install_fake_capture_model(mode):
+        manager._http_json(
+            manager._ollama_base_url(mode) + "/api/pull",
+            json.dumps({"name": "qwen3.5:4b"}).encode("utf-8"),
+        )
+
+    def download_fake_embedding(target):
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "verified.marker").write_text("verified", encoding="utf-8")
+        return []
+
+    monkeypatch.setattr(manager, "_install_pinned_capture_model", install_fake_capture_model)
+    monkeypatch.setattr(
+        manager,
+        "_embedding_ready",
+        lambda mode: (manager._embedding_model_dir(mode) / "verified.marker").is_file(),
+    )
+    monkeypatch.setattr(manager, "_probe_local_embedding", lambda _mode: None)
+    monkeypatch.setattr(
+        "embedding.model_sources.download_embedding_model",
+        download_fake_embedding,
+    )
 
     normal_runtime = base_dir / "initialization" / "runtime" / "ollama" / "normal.sentinel"
     normal_models = base_dir / "initialization" / "models" / "normal.sentinel"
@@ -231,7 +253,7 @@ def test_cold_sandbox_reinstalls_every_component_without_touching_normal_environ
         sandbox_models = json.loads(
             (manager._models_root("sandbox") / "fake-models.json").read_text(encoding="utf-8")
         )
-        assert len(sandbox_models) == 2
+        assert sandbox_models == ["qwen3.5:4b"]
         assert manager._managed_ollama_executable("sandbox") is not None
         assert manager._database_path("sandbox").is_file()
         assert (manager.sandbox_root / "skills-tools.json").is_file()

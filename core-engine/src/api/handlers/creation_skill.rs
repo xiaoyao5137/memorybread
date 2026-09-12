@@ -523,11 +523,12 @@ pub async fn save_creation_skill(
     State(state): State<Arc<AppState>>,
     request: Request,
 ) -> Result<(StatusCode, Json<CreationSkillRecord>), ApiError> {
-    let skill = parse_skill_json(request).await?;
+    let mut skill = parse_skill_json(request).await?;
     validate_persisted_source(&skill.source_kind, &skill.source_id)
         .map_err(|error| log_skill_validation("POST /api/creation/skills", &skill, error))?;
     validate_skill_input(&skill)
         .map_err(|error| log_skill_validation("POST /api/creation/skills", &skill, error))?;
+    review_skill_before_save(&state, &mut skill).await;
     let saved = state
         .storage
         .upsert_creation_skill(&skill)
@@ -550,11 +551,30 @@ pub async fn update_creation_skill(
     skill.client_skill_key = existing.client_skill_key;
     validate_skill_input(&skill)
         .map_err(|error| log_skill_validation("PUT /api/creation/skills/:id", &skill, error))?;
+    review_skill_before_save(&state, &mut skill).await;
     state
         .storage
         .upsert_creation_skill(&skill)
         .map(Json)
         .map_err(|error| skill_storage_error("PUT /api/creation/skills/:id", &error))
+}
+
+/// Saved/imported metadata is reviewed locally. A failed review never destroys
+/// edits or falsely marks a skill consistent; automatic execution rechecks it.
+async fn review_skill_before_save(state: &AppState, skill: &mut UpsertCreationSkill) {
+    skill.skill_description.metadata_review = None;
+    let profile = serde_json::json!({"id":skill.client_skill_key, "title":skill.title,
+        "summary":skill.summary, "skill_description":skill.skill_description,
+        "execution_steps":skill.execution_steps});
+    let review = match reqwest::Client::new()
+        .post(format!("{}/creation/skills/review", state.creation_sidecar_url.trim_end_matches('/')))
+        .timeout(std::time::Duration::from_secs(65))
+        .json(&profile).send().await {
+        Ok(response) if response.status().is_success() => response.json::<serde_json::Value>().await.ok(),
+        _ => None,
+    };
+    skill.skill_description.metadata_review = Some(review.unwrap_or_else(||
+        serde_json::json!({"status":"unreviewed", "metadata_consistent":false, "conflicts":["review_unavailable"]})));
 }
 
 fn log_skill_validation(endpoint: &str, skill: &UpsertCreationSkill, error: ApiError) -> ApiError {
@@ -1271,6 +1291,7 @@ mod tests {
     #[test]
     fn limits_each_skill_step_to_four_agent_and_tool_resources() {
         let mut step = CreationSkillExecutionStep {
+            output_role: String::new(),
             id: "research".into(),
             title: "开展调研".into(),
             objective: "收集并分析证据。".into(),

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 from enum import Enum
+from runtime_endpoints import service_base_url
 
 try:
     from runtime_process_guard import enforce_runtime_guards, shutdown_all_managed_serves
@@ -36,7 +37,7 @@ except ImportError:  # 测试环境或独立调用时守卫不可用不阻断主
 logger = logging.getLogger(__name__)
 
 MIN_MACOS_MAJOR_FOR_OLLAMA = 12  # DMG 内嵌 Ollama 支持 macOS 12+
-OLLAMA_API_BASE = "http://localhost:11434"
+OLLAMA_API_BASE = service_base_url("ollama")
 OLLAMA_MACOS_DOWNLOAD_URL = "https://ollama.com/download/mac"
 # Ollama 安装/运行状态探测结果缓存窗口，避免模型页一次打开重复触发子进程与 HTTP 探测
 SETUP_STATUS_CACHE_TTL_S = 5.0
@@ -52,6 +53,7 @@ MODEL_ID_ALIASES = {
     "bge-m3": "bge-small-zh",
     "bge-small": "bge-small-zh",
     "text-embedding-3-small": "bge-small-zh",
+    "mbemb-v2-local": "bge-small-zh",
 }
 
 
@@ -103,10 +105,10 @@ AVAILABLE_MODELS = {
         id="bge-small-zh",
         name="MBEMB V1.0",
         type=ModelType.EMBEDDING,
-        provider="ollama",
-        model_id="qllama/bge-small-zh-v1.5:q4_k_m",
-        size_gb=0.05,
-        description="MemoryBread向量模型",
+        provider="huggingface",
+        model_id="BAAI/bge-small-zh-v1.5",
+        size_gb=0.10,
+        description="MemoryBread 本地 CPU 向量模型",
         is_default=True
     ),
 }
@@ -615,6 +617,14 @@ class ModelManager:
 
     def _check_huggingface_model(self, model_id: str) -> ModelStatus:
         """检查 HuggingFace 模型是否已下载"""
+        if model_id == "BAAI/bge-small-zh-v1.5":
+            from embedding.model_sources import app_model_dir, embedding_model_complete
+
+            return (
+                ModelStatus.INSTALLED
+                if embedding_model_complete(app_model_dir())
+                else ModelStatus.NOT_INSTALLED
+            )
         # 转换模型 ID 为缓存路径
         cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
         model_dir = cache_dir / f"models--{model_id.replace('/', '--')}"
@@ -661,7 +671,7 @@ class ModelManager:
                 self._download_errors.pop(model_info.id, None)
 
             def download_thread():
-                url = "http://localhost:11434/api/pull"
+                url = service_base_url("ollama") + "/api/pull"
                 data = json.dumps({"name": model_info.model_id}).encode('utf-8')
 
                 try:
@@ -737,10 +747,28 @@ class ModelManager:
 
     def _download_huggingface_model(self, model_info: ModelInfo) -> Dict:
         """下载 HuggingFace 模型"""
-        # HuggingFace 模型会在首次使用时自动下载
+        if model_info.model_id != "BAAI/bge-small-zh-v1.5":
+            return {"status": "error", "message": "不支持的本地向量模型"}
+
+        def download_thread():
+            from embedding.model_sources import app_model_dir, download_embedding_model
+
+            with self._download_lock:
+                self._download_progress[model_info.id] = 1
+                self._download_errors.pop(model_info.id, None)
+            errors = download_embedding_model(app_model_dir())
+            installed = self._check_model_status(model_info) == ModelStatus.INSTALLED
+            with self._download_lock:
+                self._download_progress.pop(model_info.id, None)
+                if not installed:
+                    self._download_errors[model_info.id] = (
+                        "下载失败，请检查网络后重试" + ("：" + errors[-1] if errors else "")
+                    )
+
+        threading.Thread(target=download_thread, daemon=True).start()
         return {
-            "status": "pending",
-            "message": f"{model_info.name} 将在首次使用时自动下载"
+            "status": "downloading",
+            "message": f"正在后台下载 {model_info.name}，请稍候..."
         }
 
     def set_active_model(self, model_id: str) -> Dict:
@@ -998,8 +1026,7 @@ class ModelManager:
             aliases = self._ollama_names_for_model(model_id)
             return any(alias == name or name.startswith(f"{alias}:") for alias in aliases for name in names)
         elif info.provider == 'huggingface':
-            hf_dir = Path.home() / '.cache' / 'huggingface' / 'hub'
-            return any(hf_dir.glob(f"*{model_id}*"))
+            return self._check_model_status(info) == ModelStatus.INSTALLED
         elif info.requires_api_key:
             # 商业模型：有 api_key 配置即视为"已安装"
             cfg = self.config.get('model_configs', {}).get(model_id, {})

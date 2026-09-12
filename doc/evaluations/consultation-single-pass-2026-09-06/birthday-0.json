@@ -1,0 +1,567 @@
+{
+  "seconds": 26.46,
+  "events": [
+    {
+      "type": "status",
+      "stage": "queued",
+      "message": "咨询任务已接收",
+      "progress": 18
+    },
+    {
+      "type": "status",
+      "stage": "understanding",
+      "message": "正在理解当前问题",
+      "progress": 28
+    },
+    {
+      "type": "status",
+      "stage": "retrieving",
+      "message": "正在召回相关资料",
+      "progress": 42
+    },
+    {
+      "type": "references",
+      "contexts": []
+    },
+    {
+      "type": "status",
+      "stage": "waiting_generation",
+      "message": "资料已就绪，正在等待生成",
+      "progress": 54
+    },
+    {
+      "type": "status",
+      "stage": "answering",
+      "message": "正在生成答案",
+      "progress": 62
+    },
+    {
+      "type": "delta",
+      "text": "##"
+    },
+    {
+      "type": "delta",
+      "text": " 用户"
+    },
+    {
+      "type": "delta",
+      "text": "问题"
+    },
+    {
+      "type": "delta",
+      "text": "理解"
+    },
+    {
+      "type": "delta",
+      "text": "\n屏幕"
+    },
+    {
+      "type": "delta",
+      "text": "上的"
+    },
+    {
+      "type": "delta",
+      "text": "文字"
+    },
+    {
+      "type": "delta",
+      "text": "“"
+    },
+    {
+      "type": "delta",
+      "text": "今天"
+    },
+    {
+      "type": "delta",
+      "text": "生日"
+    },
+    {
+      "type": "delta",
+      "text": "："
+    },
+    {
+      "type": "delta",
+      "text": "小"
+    },
+    {
+      "type": "delta",
+      "text": "陈"
+    },
+    {
+      "type": "delta",
+      "text": "”"
+    },
+    {
+      "type": "delta",
+      "text": "表达了"
+    },
+    {
+      "type": "delta",
+      "text": "发送"
+    },
+    {
+      "type": "delta",
+      "text": "者"
+    },
+    {
+      "type": "delta",
+      "text": "对小"
+    },
+    {
+      "type": "delta",
+      "text": "陈"
+    },
+    {
+      "type": "delta",
+      "text": "今日"
+    },
+    {
+      "type": "delta",
+      "text": "过生日"
+    },
+    {
+      "type": "delta",
+      "text": "这一"
+    },
+    {
+      "type": "delta",
+      "text": "事实"
+    },
+    {
+      "type": "delta",
+      "text": "的记录"
+    },
+    {
+      "type": "delta",
+      "text": "与"
+    },
+    {
+      "type": "delta",
+      "text": "提醒"
+    },
+    {
+      "type": "delta",
+      "text": "，"
+    },
+    {
+      "type": "delta",
+      "text": "意图"
+    },
+    {
+      "type": "delta",
+      "text": "是"
+    },
+    {
+      "type": "delta",
+      "text": "告知"
+    },
+    {
+      "type": "delta",
+      "text": "接收"
+    },
+    {
+      "type": "delta",
+      "text": "者"
+    },
+    {
+      "type": "delta",
+      "text": "需"
+    },
+    {
+      "type": "delta",
+      "text": "执行"
+    },
+    {
+      "type": "delta",
+      "text": "送"
+    },
+    {
+      "type": "delta",
+      "text": "贺卡"
+    },
+    {
+      "type": "delta",
+      "text": "的任务"
+    },
+    {
+      "type": "delta",
+      "text": "。"
+    },
+    {
+      "type": "delta",
+      "text": "\n\n##"
+    },
+    {
+      "type": "delta",
+      "text": " 回答"
+    },
+    {
+      "type": "delta",
+      "text": "\n-"
+    },
+    {
+      "type": "delta",
+      "text": " **"
+    },
+    {
+      "type": "delta",
+      "text": "核心"
+    },
+    {
+      "type": "delta",
+      "text": "结论"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "："
+    },
+    {
+      "type": "delta",
+      "text": "用户"
+    },
+    {
+      "type": "delta",
+      "text": "在小"
+    },
+    {
+      "type": "delta",
+      "text": "陈"
+    },
+    {
+      "type": "delta",
+      "text": "的"
+    },
+    {
+      "type": "delta",
+      "text": "生日"
+    },
+    {
+      "type": "delta",
+      "text": "当天"
+    },
+    {
+      "type": "delta",
+      "text": "（"
+    },
+    {
+      "type": "delta",
+      "text": "或"
+    },
+    {
+      "type": "delta",
+      "text": "作为"
+    },
+    {
+      "type": "delta",
+      "text": "日期"
+    },
+    {
+      "type": "delta",
+      "text": "记录"
+    },
+    {
+      "type": "delta",
+      "text": "），"
+    },
+    {
+      "type": "delta",
+      "text": "表达"
+    },
+    {
+      "type": "delta",
+      "text": "了对"
+    },
+    {
+      "type": "delta",
+      "text": "该"
+    },
+    {
+      "type": "delta",
+      "text": "事件的"
+    },
+    {
+      "type": "delta",
+      "text": "确认"
+    },
+    {
+      "type": "delta",
+      "text": "及"
+    },
+    {
+      "type": "delta",
+      "text": "后续"
+    },
+    {
+      "type": "delta",
+      "text": "行动"
+    },
+    {
+      "type": "delta",
+      "text": "指令"
+    },
+    {
+      "type": "delta",
+      "text": "——"
+    },
+    {
+      "type": "delta",
+      "text": "需要"
+    },
+    {
+      "type": "delta",
+      "text": "给"
+    },
+    {
+      "type": "delta",
+      "text": "小"
+    },
+    {
+      "type": "delta",
+      "text": "陈"
+    },
+    {
+      "type": "delta",
+      "text": "一张"
+    },
+    {
+      "type": "delta",
+      "text": "生日"
+    },
+    {
+      "type": "delta",
+      "text": "贺卡"
+    },
+    {
+      "type": "delta",
+      "text": "。"
+    },
+    {
+      "type": "delta",
+      "text": "\n-"
+    },
+    {
+      "type": "delta",
+      "text": " **"
+    },
+    {
+      "type": "delta",
+      "text": "关键"
+    },
+    {
+      "type": "delta",
+      "text": "依据"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "："
+    },
+    {
+      "type": "delta",
+      "text": "屏幕"
+    },
+    {
+      "type": "delta",
+      "text": " OCR"
+    },
+    {
+      "type": "delta",
+      "text": " 文本"
+    },
+    {
+      "type": "delta",
+      "text": "明确"
+    },
+    {
+      "type": "delta",
+      "text": "记载"
+    },
+    {
+      "type": "delta",
+      "text": "“"
+    },
+    {
+      "type": "delta",
+      "text": "今天"
+    },
+    {
+      "type": "delta",
+      "text": "生日"
+    },
+    {
+      "type": "delta",
+      "text": "："
+    },
+    {
+      "type": "delta",
+      "text": "小"
+    },
+    {
+      "type": "delta",
+      "text": "陈"
+    },
+    {
+      "type": "delta",
+      "text": "”，"
+    },
+    {
+      "type": "delta",
+      "text": "并"
+    },
+    {
+      "type": "delta",
+      "text": "紧接着"
+    },
+    {
+      "type": "delta",
+      "text": "提出"
+    },
+    {
+      "type": "delta",
+      "text": "动作"
+    },
+    {
+      "type": "delta",
+      "text": "要求"
+    },
+    {
+      "type": "delta",
+      "text": "“"
+    },
+    {
+      "type": "delta",
+      "text": "记得"
+    },
+    {
+      "type": "delta",
+      "text": "送"
+    },
+    {
+      "type": "delta",
+      "text": "他们"
+    },
+    {
+      "type": "delta",
+      "text": "一张"
+    },
+    {
+      "type": "delta",
+      "text": "贺卡"
+    },
+    {
+      "type": "delta",
+      "text": "”。"
+    },
+    {
+      "type": "delta",
+      "text": "\n-"
+    },
+    {
+      "type": "delta",
+      "text": " **"
+    },
+    {
+      "type": "delta",
+      "text": "可"
+    },
+    {
+      "type": "delta",
+      "text": "复制"
+    },
+    {
+      "type": "delta",
+      "text": "文本"
+    },
+    {
+      "type": "delta",
+      "text": "**"
+    },
+    {
+      "type": "delta",
+      "text": "：“"
+    },
+    {
+      "type": "delta",
+      "text": "今天"
+    },
+    {
+      "type": "delta",
+      "text": "生日"
+    },
+    {
+      "type": "delta",
+      "text": "："
+    },
+    {
+      "type": "delta",
+      "text": "小"
+    },
+    {
+      "type": "delta",
+      "text": "陈"
+    },
+    {
+      "type": "delta",
+      "text": "。"
+    },
+    {
+      "type": "delta",
+      "text": "记得"
+    },
+    {
+      "type": "delta",
+      "text": "送"
+    },
+    {
+      "type": "delta",
+      "text": "他们"
+    },
+    {
+      "type": "delta",
+      "text": "一张"
+    },
+    {
+      "type": "delta",
+      "text": "贺卡"
+    },
+    {
+      "type": "delta",
+      "text": "。”"
+    },
+    {
+      "type": "references",
+      "contexts": []
+    },
+    {
+      "type": "done",
+      "answer": "## 用户问题理解\n屏幕上的文字“今天生日：小陈”表达了发送者对小陈今日过生日这一事实的记录与提醒，意图是告知接收者需执行送贺卡的任务。\n\n## 回答\n- **核心结论**：用户在小陈的生日当天（或作为日期记录），表达了对该事件的确认及后续行动指令——需要给小陈一张生日贺卡。\n- **关键依据**：屏幕 OCR 文本明确记载“今天生日：小陈”，并紧接着提出动作要求“记得送他们一张贺卡”。\n- **可复制文本**：“今天生日：小陈。记得送他们一张贺卡。”",
+      "contexts": [
+        {
+          "capture_id": 0,
+          "doc_key": "floating-assist:1788692512608",
+          "text": "今天生日：小陈。记得送他们一张贺卡。",
+          "score": 1.0,
+          "source": "floating_assist",
+          "source_type": "floating_assist",
+          "title": "咨询附件",
+          "screenshot_path": null,
+          "screenshot_width": null,
+          "screenshot_height": null,
+          "attachments": []
+        }
+      ],
+      "model": "mbem-v1-local",
+      "done_reason": "stop",
+      "output_truncated": false,
+      "elapsed_ms": 26434,
+      "inference_elapsed_ms": 12244
+    }
+  ]
+}

@@ -38,3 +38,29 @@ export function toLocalApiError(error: unknown, fallback: string): string {
   }
   return message.length > 240 ? `${message.slice(0, 240)}…` : message
 }
+
+/**
+ * 创作 Agent 的失败原因。sidecar 已把异常收敛为不含供应商信息的稳定文案，
+ * 并随 run.failed 下发 CREATION_* 错误码。这类文案常出现 Token、source_id
+ * 等四个以上字母的技术词，如果走 toUserFacingError 会被敏感词过滤吞成
+ * “生成失败，请稍后重试”，用户因此丢掉唯一的可执行修正线索。
+ * 仅对带稳定错误码的本地创作失败直接展示，其他异常仍走通用过滤。
+ */
+export function toCreationFailureMessage(error: unknown, fallback: string): string {
+  const code = String((error as { errorCode?: unknown } | null | undefined)?.errorCode || '')
+  const message = extractMessage(error).trim()
+  if (!message || !/^CREATION_[A-Z0-9_]*$/.test(code)) return toUserFacingError(error, fallback)
+  if (/failed to fetch|networkerror|load failed|connection refused|econnrefused/i.test(message)) {
+    return fallback
+  }
+  return message.length > 200 ? `${message.slice(0, 200)}…` : message
+}
+
+/**
+ * 只有服务端标为可重试的失败才提示“重试继续”。确定性失败（如正文未通过
+ * 验收）再喊重试，只会让用户对着同一个结果原地打转。
+ */
+export function recoverableCreationHint(error: unknown): string {
+  const retryable = (error as { retryable?: unknown } | null | undefined)?.retryable
+  return retryable === true ? '，可重试继续' : ''
+}

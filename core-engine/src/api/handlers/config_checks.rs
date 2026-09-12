@@ -443,7 +443,7 @@ fn chrome_steps() -> Vec<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn run_osascript(script: &str, timeout: Duration) -> Result<String, String> {
+pub(super) fn run_osascript(script: &str, timeout: Duration) -> Result<String, String> {
     let mut child = Command::new("osascript")
         .arg("-e")
         .arg(script)
@@ -478,13 +478,14 @@ fn run_osascript(script: &str, timeout: Duration) -> Result<String, String> {
     }
 }
 
-fn open_url(url: &str) -> Result<(), ApiError> {
+pub(super) fn open_url(url: &str) -> Result<(), ApiError> {
     #[cfg(target_os = "macos")]
     {
-        Command::new("open")
+        let status = Command::new("open")
             .arg(url)
             .status()
             .map_err(|e| ApiError::Internal(format!("打开系统设置失败: {e}")))?;
+        if !status.success() { return Err(ApiError::Internal("打开系统设置失败".into())); }
         Ok(())
     }
     #[cfg(not(target_os = "macos"))]

@@ -133,7 +133,7 @@ describe('沉淀技能', () => {
       expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ status: 'draft', installed: false }))
     }, { timeout: 2500 })
     expect(screen.queryByText('把这份文档的写法提炼成可复用的创作配方；所有分析先在本机完成。')).not.toBeInTheDocument()
-    expect(screen.queryAllByRole('combobox')).toHaveLength(0)
+    expect(screen.queryAllByRole('combobox').every(item => item.getAttribute('aria-label')?.includes('产出用途'))).toBe(true)
     // 创作类目默认折叠且默认值为“私有”，不再自动建议类目，也不再展示私有提示文案
     expect(screen.queryByText('私有（仅本机可用）')).not.toBeInTheDocument()
     expect(screen.queryByText('默认私有，发布到市场需选择具体类目')).not.toBeInTheDocument()
@@ -241,7 +241,7 @@ describe('沉淀技能', () => {
     expect(summaryInput).toHaveValue('用于技术架构设计。')
     expect(screen.queryByText('把这份文档的写法提炼成可复用的创作配方；所有分析先在本机完成。')).not.toBeInTheDocument()
     await waitFor(() => expect(screen.getByRole('option', { name: '企业服务', hidden: true })).toHaveAttribute('aria-selected', 'true'))
-    expect(screen.queryAllByRole('combobox')).toHaveLength(0)
+    expect(screen.queryAllByRole('combobox').every(item => item.getAttribute('aria-label')?.includes('产出用途'))).toBe(true)
     expect(screen.queryByRole('button', { name: /发布|开放到市场|更新市场版本|下架市场/ })).not.toBeInTheDocument()
     expect(screen.queryByText('发布边界')).not.toBeInTheDocument()
     expect(screen.getByDisplayValue('定义先行')).toBeInTheDocument()
@@ -251,15 +251,24 @@ describe('沉淀技能', () => {
     expect(screenshotOption).toBeChecked()
     expect(screen.queryByText(/默认开启；关闭后仍优先通过 AX\/DOM 精确读取/)).not.toBeInTheDocument()
     fireEvent.change(summaryInput, { target: { value: '把算力数据整理成可复核的分析文档。' } })
+    fireEvent.click(screen.getByText('适用范围与交付物'))
+    fireEvent.change(screen.getByLabelText('不适用场景'), { target: { value: '商家招商方案' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
+    expect(await screen.findByText('填写适用范围时，请至少填写一个适用场景')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('适用场景'), { target: { value: '算力经营分析' } })
+    fireEvent.change(screen.getByLabelText('不适用场景'), { target: { value: '商家招商方案' } })
+    fireEvent.change(screen.getByLabelText('最终文档结构'), { target: { value: '分析结论\n执行建议' } })
+    fireEvent.change(screen.getByLabelText('执行步骤 1 产出用途'), { target: { value: 'document' } })
     fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
     await waitFor(() => {
       expect(savedBody).toMatchObject({
         summary: '把算力数据整理成可复核的分析文档。',
         skill_description: {
           purpose: '把算力数据整理成可复核的分析文档。',
+          applicability: { version: 1, use_when: ['算力经营分析'], not_for: ['商家招商方案'], required_inputs: [], output_structure: ['分析结论', '执行建议'] },
           problems: ['把算力数据整理成可复核的分析文档。'],
         },
-        execution_steps: [expect.objectContaining({ retain_webpage_screenshot: true })],
+        execution_steps: [expect.objectContaining({ retain_webpage_screenshot: true, output_role: 'document' })],
       })
       expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({
         summary: '把算力数据整理成可复核的分析文档。',

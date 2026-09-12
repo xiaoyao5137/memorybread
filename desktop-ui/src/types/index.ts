@@ -102,9 +102,14 @@ export interface RagContext {
   importance?: number | null
   source_timeline_ids?: string[] | null
   linked_knowledge_ids?: string[] | null
+  attachments?: Array<{ id: string; name: string; type: string; size: number; path?: string; data_url?: string }>
   screenshot_path?: string | null
   screenshot_width?: number | null
   screenshot_height?: number | null
+  /** 本次答案是否实际采用了这条召回记忆（模型标注 [M编号] 时为 true） */
+  cited?: boolean | null
+  /** 召回序号，对应答案中的 [记忆N] */
+  recall_index?: number | null
 }
 
 export interface RagHistoryItem {
@@ -603,6 +608,7 @@ export interface ArticleTemplate {
   replacementRules: ReplacementRule[]
   summary?: string
   fullContent?: string
+  contentFormat?: 'plain_text' | 'markdown'
   sourceUrl?: string
   diagramCode?: string
   imageAssets?: string[]
@@ -611,6 +617,22 @@ export interface ArticleTemplate {
   reviewStatus: string
   matchScore?: number
   matchLevel?: string
+  sourceCollection?: {
+    state: 'pending' | 'running' | 'blocked' | 'completed'
+    attempts: number
+    next_attempt_at_ms: number
+    last_error?: string | null
+    updated_at_ms: number
+  }
+  summaryStatus?: {
+    can_regenerate?: boolean
+    state: 'pending' | 'running' | 'blocked' | 'ready' | 'unverified'
+    paused?: boolean
+    attempts: number
+    next_attempt_at_ms: number
+    last_error?: string | null
+    generation_version?: string | null
+  }
   refreshPolicy?: 'auto' | 'always' | 'never'
   lastRefreshCheckedAtMs?: number
   lastRefreshError?: string

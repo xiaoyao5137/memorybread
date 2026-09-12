@@ -1,6 +1,9 @@
 <!-- 模型管理面板 -->
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
+import { getLocalServiceBaseUrl } from '../utils/localServices'
+
+const modelApiBaseUrl = getLocalServiceBaseUrl('model_api')
 
 interface Model {
   id: string
@@ -32,7 +35,7 @@ const filteredModels = computed(() => {
 async function fetchModels() {
   loading.value = true
   try {
-    const response = await fetch('http://localhost:7071/api/models')
+    const response = await fetch(`${modelApiBaseUrl}/api/models`)
     const data = await response.json()
     if (data.status === 'ok') {
       models.value = data.models
@@ -58,7 +61,7 @@ async function downloadModel(modelId: string) {
 
   try {
     model.status = 'downloading'
-    const response = await fetch(`http://localhost:7071/api/models/${modelId}/download`, {
+    const response = await fetch(`${modelApiBaseUrl}/api/models/${modelId}/download`, {
       method: 'POST'
     })
     const data = await response.json()
@@ -80,7 +83,7 @@ async function downloadModel(modelId: string) {
 // 激活模型
 async function activateModel(modelId: string) {
   try {
-    const response = await fetch(`http://localhost:7071/api/models/${modelId}/activate`, {
+    const response = await fetch(`${modelApiBaseUrl}/api/models/${modelId}/activate`, {
       method: 'POST'
     })
     const data = await response.json()
@@ -102,7 +105,7 @@ async function deleteModel(modelId: string) {
   if (!confirm('确定要删除这个模型吗？')) return
 
   try {
-    const response = await fetch(`http://localhost:7071/api/models/${modelId}/delete`, {
+    const response = await fetch(`${modelApiBaseUrl}/api/models/${modelId}/delete`, {
       method: 'DELETE'
     })
     const data = await response.json()
@@ -127,7 +130,7 @@ async function setApiKey() {
   }
 
   try {
-    const response = await fetch('http://localhost:7071/api/models/config/api-key', {
+    const response = await fetch(`${modelApiBaseUrl}/api/models/config/api-key`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

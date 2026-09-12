@@ -9,7 +9,7 @@ use std::{
         Arc, Mutex, OnceLock,
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use axum::{
@@ -36,6 +36,7 @@ use crate::{
     },
 };
 use uuid::Uuid;
+use super::browser_script_control::{self, ScriptControl, ScriptRunError, ScriptScope};
 
 const MAX_SCRAPED_CHARS: usize = 80_000;
 const BROWSER_DATA_READY_POLL_ATTEMPTS: usize = 120;
@@ -314,6 +315,7 @@ struct BrowserForegroundLease {
 #[cfg(target_os = "macos")]
 impl Drop for BrowserForegroundLease {
     fn drop(&mut self) {
+        let _cleanup = ScriptScope::cleanup();
         let _ = run_browser_script(&build_background_browser_restore_focus_script(
             self.adapter,
             &self.previous_front_app,
@@ -761,11 +763,37 @@ pub(crate) async fn scrape_browser_extension_async(
     expected_period_end: Option<String>,
     interaction_plan: Option<PageInteractionPlan>,
 ) -> Result<ScrapeResult, DataToolError> {
-    let timeout = Duration::from_secs(BROWSER_EXTENSION_REFRESH_TIMEOUT_SECONDS);
+    scrape_browser_extension_with_kind_async(broker, url, objective, requested_metrics,
+        expected_period_start, expected_period_end, interaction_plan, "report").await
+}
+
+pub(crate) async fn scrape_browser_extension_with_kind_async(
+    broker: &BrowserExtensionBroker,
+    url: String,
+    objective: Option<String>,
+    requested_metrics: Vec<String>,
+    expected_period_start: Option<String>,
+    expected_period_end: Option<String>,
+    interaction_plan: Option<PageInteractionPlan>,
+    content_kind: &'static str,
+) -> Result<ScrapeResult, DataToolError> {
+    scrape_browser_extension_scoped_async(broker,url,objective,requested_metrics,
+        expected_period_start,expected_period_end,interaction_plan,content_kind,None,None).await
+}
+
+pub(crate) async fn scrape_browser_extension_scoped_async(
+    broker: &BrowserExtensionBroker, url: String, objective: Option<String>,
+    requested_metrics: Vec<String>, expected_period_start: Option<String>,
+    expected_period_end: Option<String>, interaction_plan: Option<PageInteractionPlan>,
+    content_kind: &'static str, cancellation_scope: Option<String>,
+    document_config: Option<&crate::services::document_refresh::DocumentRefreshConfig>,
+) -> Result<ScrapeResult, DataToolError> {
+    let timeout = Duration::from_secs(document_config.map(|c| c.execution_seconds + BROWSER_EXTENSION_RESULT_HEADROOM_SECONDS)
+        .unwrap_or(BROWSER_EXTENSION_REFRESH_TIMEOUT_SECONDS));
     let execution_timeout = browser_extension_execution_timeout(timeout);
     let validation_period_start = expected_period_start.clone();
     let validation_period_end = expected_period_end.clone();
-    let job = BrowserExtensionJob::new(
+    let mut job = BrowserExtensionJob::new(
         url,
         objective,
         requested_metrics,
@@ -774,6 +802,9 @@ pub(crate) async fn scrape_browser_extension_async(
         execution_timeout,
     )
     .with_interaction_plan(interaction_plan);
+    job.content_kind = content_kind;
+    job.cancellation_scope = cancellation_scope;
+    if let Some(config) = document_config { job.max_segments = config.max_steps; }
     let extension = broker.submit(job, timeout).await.map_err(|error| {
         let (code, message) = match error {
             BrowserExtensionError::Unavailable => {
@@ -787,13 +818,12 @@ pub(crate) async fn scrape_browser_extension_async(
                 "BROWSER_EXTENSION_TIMEOUT",
                 "页面在等待时间内未完成后台读取",
             ),
-            BrowserExtensionError::Failed(_, _) => {
-                ("BROWSER_EXTENSION_FAILED", "该页面本次未完成后台读取")
-            }
+            BrowserExtensionError::Failed(code, _) => browser_extension_failure_descriptor(&code),
             BrowserExtensionError::Internal => {
                 ("BROWSER_EXTENSION_INTERNAL", "后台读取服务通信暂未完成")
             }
         };
+        tracing::info!(failure_code=code, content_kind, "browser source read failed");
         DataToolError::new(StatusCode::SERVICE_UNAVAILABLE, code, message)
     })?;
     let transient_preview_url = Some(format!(
@@ -845,6 +875,31 @@ fn browser_extension_execution_timeout(wait_timeout: Duration) -> Duration {
         .checked_sub(headroom)
         .filter(|value| !value.is_zero())
         .unwrap_or(wait_timeout)
+}
+
+fn browser_extension_failure_descriptor(code: &str) -> (&'static str, &'static str) {
+    // Only fixed protocol codes enter diagnostics. Arbitrary page exceptions,
+    // URLs and error messages may contain private content and are not persisted.
+    match code {
+        "SOURCE_REFRESH_CANCELLED" => ("SOURCE_REFRESH_CANCELLED", "页面读取已取消"),
+        "AUTH_REQUIRED" => ("AUTH_REQUIRED", "页面需要恢复登录后重试"),
+        "PERMISSION_DENIED" => ("PERMISSION_DENIED", "当前账号无法读取该页面"),
+        "IDENTITY_MISMATCH" => ("IDENTITY_MISMATCH", "页面身份与来源不一致"),
+        "BODY_NOT_FOUND" => ("BODY_NOT_FOUND", "尚未取得文档正文区域"),
+        "EXTRACTION_FAILED" => ("EXTRACTION_FAILED", "页面正文提取未完成"),
+        "NAVIGATION_TIMEOUT" => ("NAVIGATION_TIMEOUT", "来源页面加载超时"),
+        "JOB_EXECUTION_TIMEOUT" | "JOB_EXPIRED" => ("BROWSER_EXTENSION_TIMEOUT", "页面读取已达到时间预算"),
+        "TAB_CLOSED" => ("TAB_CLOSED", "来源页面在采集完成前关闭"),
+        "BACKGROUND_TAB_BLOCKED" => ("BACKGROUND_TAB_BLOCKED", "浏览器未能创建后台读取页面"),
+        _ => ("BROWSER_EXTENSION_FAILED", "该页面本次未完成后台读取"),
+    }
+}
+
+#[test]
+fn browser_extension_failure_codes_preserve_actionable_reason_without_page_messages() {
+    assert_eq!(browser_extension_failure_descriptor("BODY_NOT_FOUND").0,"BODY_NOT_FOUND");
+    assert_eq!(browser_extension_failure_descriptor("JOB_EXECUTION_TIMEOUT").0,"BROWSER_EXTENSION_TIMEOUT");
+    assert_eq!(browser_extension_failure_descriptor("private page text").0,"BROWSER_EXTENSION_FAILED");
 }
 
 fn ensure_page_interaction_succeeded(structured_data: &Value) -> Result<(), DataToolError> {
@@ -1153,21 +1208,21 @@ pub async fn refresh_data_source(
     .await;
     let snapshot = match snapshot_result {
         Ok(Ok(snapshot)) => snapshot,
-        Ok(Err(error)) => {
+        Ok(Err(_)) => {
             tracing::error!(
                 source_id = id,
                 collector,
-                error = %error,
+                failure_code = "SNAPSHOT_WRITE_FAILED",
                 "网页采集结果写入数据快照失败"
             );
             cleanup_pending_evidence(evidence_capture.as_ref());
             return Err(internal_scrape_error());
         }
-        Err(error) => {
+        Err(_) => {
             tracing::error!(
                 source_id = id,
                 collector,
-                error = %error,
+                failure_code = "SNAPSHOT_TASK_FAILED",
                 "网页采集结果持久化任务异常结束"
             );
             cleanup_pending_evidence(evidence_capture.as_ref());
@@ -1340,7 +1395,20 @@ pub(crate) async fn scrape_browser_async(
     readiness_poll_attempts: usize,
     collect_structured_segments: bool,
 ) -> Result<ScrapeResult, DataToolError> {
+    scrape_browser_controlled_async(url,browser_preference,source_app_name,preview_token,
+        evidence_path,objective,expected_period_start,expected_period_end,interaction_plan,
+        readiness_poll_attempts,collect_structured_segments,None).await
+}
+
+pub(crate) async fn scrape_browser_controlled_async(
+    url: String, browser_preference: String, source_app_name: Option<String>,
+    preview_token: Option<String>, evidence_path: Option<PathBuf>, objective: Option<String>,
+    expected_period_start: Option<String>, expected_period_end: Option<String>,
+    interaction_plan: Option<PageInteractionPlan>, readiness_poll_attempts: usize,
+    collect_structured_segments: bool, control: Option<Arc<ScriptControl>>,
+) -> Result<ScrapeResult, DataToolError> {
     tokio::task::spawn_blocking(move || {
+        let _scope = ScriptScope::enter(control);
         scrape_with_browser(
             &url,
             Some(browser_preference.as_str()),
@@ -1398,10 +1466,15 @@ fn scrape_with_browser(
     {
         // Apple Events 对同一浏览器的窗口、标签和滚动状态不是事务性的。
         // 串行化浏览器取数，避免并发任务误关对方的专用窗口或交叉滚动。
-        let _browser_scrape_guard = BROWSER_SCRAPE_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .map_err(|_| internal_scrape_error())?;
+        let lock = BROWSER_SCRAPE_LOCK.get_or_init(|| Mutex::new(()));
+        let _browser_scrape_guard = loop {
+            browser_script_control::check_current().map_err(script_run_error)?;
+            match lock.try_lock() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::WouldBlock) => thread::sleep(Duration::from_millis(25)),
+                Err(_) => return Err(internal_scrape_error()),
+            }
+        };
         let (adapter, launched_browser) =
             resolve_browser_adapter(browser_candidates(browser_preference, source_app_name))?;
         let javascript = browser_extraction_javascript();
@@ -1550,7 +1623,7 @@ fn scrape_with_browser(
                         "silent_browser_extract"
                     },
                     browser = adapter.id,
-                    error = %stderr.trim(),
+                    failure_code = "FOCUS_POLICY_BLOCKED",
                     "浏览器取数被焦点硬门禁中止"
                 );
                 let message = if preview_token.is_some() {
@@ -1878,64 +1951,20 @@ fn resolve_browser_adapter(
 
 #[cfg(target_os = "macos")]
 fn run_browser_script(script: &str) -> Result<Output, DataToolError> {
-    let mut child = Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|_| {
-            DataToolError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "BROWSER_ATTACH_UNAVAILABLE",
-                "无法附加本机浏览器会话",
-            )
-        })?;
-    // osascript 卡死时不能无限阻塞刷新请求，否则会吃掉客户端的全部超时预算。
-    let deadline = Instant::now() + Duration::from_secs(BROWSER_SCRIPT_TIMEOUT_SECONDS);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout = Vec::new();
-                let mut stderr = Vec::new();
-                if let Some(mut pipe) = child.stdout.take() {
-                    use std::io::Read;
-                    let _ = pipe.read_to_end(&mut stdout);
-                }
-                if let Some(mut pipe) = child.stderr.take() {
-                    use std::io::Read;
-                    let _ = pipe.read_to_end(&mut stderr);
-                }
-                return Ok(Output {
-                    status,
-                    stdout,
-                    stderr,
-                });
-            }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    tracing::warn!(
-                        timeout_seconds = BROWSER_SCRIPT_TIMEOUT_SECONDS,
-                        "浏览器取数脚本超时，已中止 osascript"
-                    );
-                    return Err(DataToolError::new(
-                        StatusCode::GATEWAY_TIMEOUT,
-                        "SCRAPE_TIMEOUT",
-                        "浏览器取数脚本执行超时",
-                    ));
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-            Err(_) => {
-                return Err(DataToolError::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "BROWSER_ATTACH_UNAVAILABLE",
-                    "无法附加本机浏览器会话",
-                ));
-            }
-        }
+    let mut command = Command::new("osascript");
+    command.arg("-e").arg(script);
+    browser_script_control::run_command(command, Duration::from_secs(BROWSER_SCRIPT_TIMEOUT_SECONDS))
+        .map_err(script_run_error)
+}
+
+fn script_run_error(error: ScriptRunError) -> DataToolError {
+    match error {
+        ScriptRunError::Cancelled => DataToolError::new(StatusCode::CONFLICT,
+            "SOURCE_REFRESH_CANCELLED", "本次页面读取已取消"),
+        ScriptRunError::BudgetExceeded => DataToolError::new(StatusCode::GATEWAY_TIMEOUT,
+            "SCRAPE_TIMEOUT", "页面读取已达到时间预算"),
+        ScriptRunError::Io(_error) => DataToolError::new(StatusCode::SERVICE_UNAVAILABLE,
+            "BROWSER_ATTACH_UNAVAILABLE", "无法附加本机浏览器会话"),
     }
 }
 
@@ -2027,6 +2056,7 @@ fn background_browser_window_origin(preview_id: &Uuid) -> (i32, i32) {
 
 #[cfg(target_os = "macos")]
 fn cleanup_background_browser_window(adapter: BrowserAdapter, session: &BrowserWindowSession) {
+    let _cleanup = ScriptScope::cleanup();
     let cleanup_result = run_browser_script(&build_background_browser_cleanup_script(
         adapter,
         &session.apple_script_id,
@@ -2054,6 +2084,7 @@ fn cleanup_orphaned_background_browser_window(
     preview_token: &str,
     launched_browser: bool,
 ) {
+    let _cleanup = ScriptScope::cleanup();
     let _ = run_browser_script(&build_background_browser_orphan_cleanup_script(
         adapter,
         preview_token,
@@ -2157,7 +2188,9 @@ fn capture_background_browser_image_while_visible(
         }
         thread::sleep(Duration::from_millis(100));
     }
-    tracing::warn!(browser = adapter.id, error = %last_error, "后台浏览器窗口截图失败");
+    tracing::warn!(browser = adapter.id, failure_code = if last_error.contains("空白页面") {
+        "SCREENSHOT_BLANK"
+    } else { "SCREENSHOT_FAILED" }, "后台浏览器窗口截图失败");
     Err(DataToolError::new(
         StatusCode::BAD_GATEWAY,
         if last_error.contains("空白页面") {
@@ -3225,7 +3258,7 @@ fn prepare_background_browser_window_for_capture(
     if !output.status.success() {
         tracing::warn!(
             browser = adapter.id,
-            error = %String::from_utf8_lossy(&output.stderr).trim(),
+            failure_code = "SCRAPE_FAILED",
             "一次性前台取数窗口准备失败"
         );
         return Err(DataToolError::new(

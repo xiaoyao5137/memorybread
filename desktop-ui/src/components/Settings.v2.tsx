@@ -12,6 +12,7 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import { useFetchPreferences, useUpdatePreference } from '../hooks/useApi'
 import type { PreferenceRecord } from '../types'
+import { getLocalServiceBaseUrl } from '../utils/localServices'
 
 interface SettingsProps {
   className?: string
@@ -150,7 +151,7 @@ const Settings: React.FC<SettingsProps> = ({ className = '' }) => {
                 className="settings-v2__input"
                 value={apiUrlInput}
                 onChange={(e) => setApiUrlInput(e.target.value)}
-                placeholder="http://localhost:7070"
+                placeholder={getLocalServiceBaseUrl('core')}
               />
               <button
                 data-testid="api-url-save"

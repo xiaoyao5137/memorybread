@@ -1,0 +1,3094 @@
+{
+  "timestamp_utc": "2026-09-10T05:28:02.892522+00:00",
+  "model": "qwen3.5:4b",
+  "source_file_hashes_at_start": {
+    "ai-sidecar/creation/brainstorm.py": "15fd542768b3f2c7c59e9263fd9f20f33e10f3e31e1ddf4e85b088da68f4ce7b",
+    "ai-sidecar/creation/brainstorm_memory_policy.py": "f5a32018414d4a610821b6543de352f8fc57ff86409e5302065276d901c0af36"
+  },
+  "scope": "Synthetic prompts and reference records only; no user session or personal retrieval access.",
+  "transport": "Production CreationService local model stream via global P0 creation queue and shared cross-process slots.",
+  "limits": {
+    "question_batch_limit": 3,
+    "turn_seconds": 150,
+    "model_slots_override": false
+  },
+  "validation_definition": "Run passed means structured coordinator validation succeeded; semantic review is recorded separately.",
+  "runs": [
+    {
+      "name": "bound_independent_extension",
+      "request": {
+        "root_request": "为社区新朋友设计一场轻松的读书交流活动，希望大家愿意表达并听见不同看法。当前只确认采用小组交流，具体破冰、分享方法和材料安排尚未决定。这是独立合成验收场景。",
+        "decisions": [
+          {
+            "question_id": "synthetic-root",
+            "dimension_id": "format",
+            "question": "以什么形式开展交流？",
+            "answer": "小组交流",
+            "answer_source": "user",
+            "selected_option_ids": [
+              "small_group"
+            ]
+          }
+        ],
+        "brief_markdown": "已确认：采用小组交流。其他活动方式尚未决定。",
+        "exploration_stage": "solutions",
+        "focus_hint": "已选择小组交流，探索让新朋友愿意表达的可行方法。",
+        "focus_hint_source": "confirmed_selection",
+        "question_batch_limit": 3,
+        "extension_goal": "小组规模与表达规则设定",
+        "sibling_question_context": [
+          "小组交流中，如何设计破冰与分享机制让新朋友愿意表达？",
+          "如何组织分享环节确保观点被听见"
+        ]
+      },
+      "model_calls": [
+        {
+          "started_utc": "2026-09-10T05:28:02.903408+00:00",
+          "generation_ms": 19274,
+          "raw_response": "{\n  \"status\": \"question\",\n  \"readiness_reason\": \"已确认小组交流形式，但缺乏具体规模与规则设计，需确定可行方案以支撑表达意愿。\",\n  \"open_flags\": [\n    \"小组具体人数范围未定\",\n    \"破冰与发言规则尚未设计\",\n    \"不同表达方式的收益与代价未比较\"\n  ],\n  \"question\": {\n    \"exploration_stage\": \"solutions\",\n    \"dimension_id\": \"extension_08429a4147f9bd1b\",\n    \"dimension\": \"小组规模与表达规则设定\",\n    \"type\": \"multi_choice\",\n    \"prompt\": \"小组交流中，如何设计破冰与发言规则让新朋友愿意表达？\",\n    \"why_now\": \"当前形式已定，需具体规则才能解决新朋友不敢开口的问题。\",\n    \"required\": true,\n    \"allow_custom\": true,\n    \"answer_template\": \"可自定义人数或规则组合，或说明现有资料不足。\",\n    \"options\": [\n      {\n        \"memory_mode\": \"reference\",\n        \"id\": \"small_group_3\",\n        \"label\": \"3人小组轮流发言\",\n        \"description\": \"限制人数减少干扰，强制轮流确保每人开口，收益是秩序好，代价是互动少。\",\n        \"memory_ids\": [\n          \"m1\"\n        ],\n        \"recommended\": true\n      },\n      {\n        \"memory_mode\": \"original\",\n        \"id\": \"small_group_4\",\n        \"label\": \"4-5人随机发言\",\n        \"description\": \"稍大群体增加话题，随机发言避免尴尬，收益是氛围活，代价是易冷场。\",\n        \"memory_ids\": [],\n        \"recommended\": false\n      },\n      {\n        \"memory_mode\": \"original\",\n        \"id\": \"small_group_5\",\n        \"label\": \"2人结对讨论\",\n        \"description\": \"最小单位降低压力，先两两聊再汇总，收益是安全感高，代价是效率低。\",\n        \"memory_ids\": [],\n        \"recommended\": false\n      },\n      {\n        \"memory_mode\": \"original\",\n        \"id\": \"small_group_6\",\n        \"label\": \"自由发言限时\",\n        \"description\": \"不设顺序但限时，平衡自由与秩序，收益是灵活，代价是易跑题。\",\n        \"memory_ids\": [],\n        \"recommended\": false\n      }\n    ]\n  }\n  ,\n  \"sibling_question_goals\": []\n}"
+        }
+      ],
+      "stages": [
+        {
+          "stage": "memory_query",
+          "duration_ms": 0,
+          "count": 1,
+          "error_type": "none"
+        },
+        {
+          "stage": "memory_query",
+          "duration_ms": 0,
+          "count": 1,
+          "error_type": "none"
+        },
+        {
+          "stage": "memory_retrieval",
+          "duration_ms": 0,
+          "count": 1,
+          "error_type": "none"
+        },
+        {
+          "stage": "question_generation",
+          "duration_ms": 19276,
+          "count": 1,
+          "error_type": "none"
+        }
+      ],
+      "queue_wait_ms": 6,
+      "result": {
+        "status": "question",
+        "readiness_reason": "已确认小组交流形式，但缺乏具体规模与规则设计，需确定可行方案以支撑表达意愿。\n本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。",
+        "open_flags": [
+          "小组具体人数范围未定",
+          "破冰与发言规则尚未设计",
+          "不同表达方式的收益与代价未比较"
+        ],
+        "continuation_directions": [],
+        "question": {
+          "id": "q_b17bdc06d80b",
+          "dimension_id": "extension_08429a4147f9bd1b",
+          "exploration_stage": "solutions",
+          "dimension": "小组规模与表达规则设定",
+          "type": "multi_choice",
+          "single_choice_reason": "",
+          "prompt": "小组交流中，如何设计破冰与发言规则让新朋友愿意表达？",
+          "why_now": "当前形式已定，需具体规则才能解决新朋友不敢开口的问题。",
+          "required": true,
+          "allow_custom": true,
+          "options": [
+            {
+              "id": "small_group_3",
+              "label": "3人小组轮流发言",
+              "description": "限制人数减少干扰，强制轮流确保每人开口，收益是秩序好，代价是互动少。",
+              "recommended": true,
+              "details": "记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+            },
+            {
+              "id": "small_group_4",
+              "label": "4-5人随机发言",
+              "description": "稍大群体增加话题，随机发言避免尴尬，收益是氛围活，代价是易冷场。",
+              "recommended": false,
+              "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+            },
+            {
+              "id": "small_group_5",
+              "label": "2人结对讨论",
+              "description": "最小单位降低压力，先两两聊再汇总，收益是安全感高，代价是效率低。",
+              "recommended": false,
+              "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+            },
+            {
+              "id": "small_group_6",
+              "label": "自由发言限时",
+              "description": "不设顺序但限时，平衡自由与秩序，收益是灵活，代价是易跑题。",
+              "recommended": false,
+              "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+            }
+          ],
+          "answer_template": "可自定义人数或规则组合，或说明现有资料不足。",
+          "context_details": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+        },
+        "sibling_question_goals": [],
+        "memory_brief": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。\n记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+      },
+      "passed": true,
+      "input_unchanged": true,
+      "sibling_goal_count": 0,
+      "option_count": 4,
+      "query_count": 2,
+      "memory_modes": [
+        "reference",
+        "original",
+        "original",
+        "original"
+      ],
+      "raw_question_plan": null,
+      "raw_plan_count": null,
+      "raw_sibling_goal_count": 0,
+      "planned_additional_goal_count": 0,
+      "accepted_sibling_goal_count": 0,
+      "filtered_out_goals": [],
+      "total_ms": 19285
+    }
+  ],
+  "previous_evaluation": {
+    "timestamp_utc": "2026-09-10T05:20:34.645157+00:00",
+    "model": "qwen3.5:4b",
+    "source_file_hashes_at_start": {
+      "ai-sidecar/creation/brainstorm.py": "b9d6bdf901bc3bef47cc4c5b24d2a3985d4f9b441d6f02d781dc302071923605",
+      "ai-sidecar/creation/brainstorm_memory_policy.py": "f5a32018414d4a610821b6543de352f8fc57ff86409e5302065276d901c0af36"
+    },
+    "scope": "Synthetic prompts and reference records only; no user session or personal retrieval access.",
+    "transport": "Production CreationService local model stream via global P0 creation queue and shared cross-process slots.",
+    "limits": {
+      "question_batch_limit": 3,
+      "turn_seconds": 150,
+      "model_slots_override": false
+    },
+    "validation_definition": "Run passed means structured coordinator validation succeeded; semantic review is recorded separately.",
+    "runs": [
+      {
+        "name": "broad_branch_with_optional_synthetic_memory",
+        "request": {
+          "root_request": "为社区新朋友设计一场轻松的读书交流活动，希望大家愿意表达并听见不同看法。当前只确认采用小组交流，具体破冰、分享方法和材料安排尚未决定。这是独立合成验收场景。",
+          "decisions": [
+            {
+              "question_id": "synthetic-root",
+              "dimension_id": "format",
+              "question": "以什么形式开展交流？",
+              "answer": "小组交流",
+              "answer_source": "user",
+              "selected_option_ids": [
+                "small_group"
+              ]
+            }
+          ],
+          "brief_markdown": "已确认：采用小组交流。其他活动方式尚未决定。",
+          "exploration_stage": "solutions",
+          "focus_hint": "已选择小组交流，探索让新朋友愿意表达的可行方法。",
+          "focus_hint_source": "confirmed_selection",
+          "question_batch_limit": 3
+        },
+        "model_calls": [
+          {
+            "started_utc": "2026-09-10T05:20:34.655484+00:00",
+            "generation_ms": 9505,
+            "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体设计破冰与分享机制以解决新朋友不敢开口的问题\",\"open_flags\":[\"破冰方法\",\"分享方法\",\"小组规模\",\"表达规则\"],\"question_plan\":[\n  \"如何设计破冰环节让新朋友开口\",\n  \"如何组织分享环节确保观点被听见\",\n  \"小组规模与表达规则设定\"\n], \"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"interaction_design\",\"dimension\":\"破冰与分享机制设计\",\"type\":\"multi_choice\",\"prompt\":\"小组交流中，如何设计破冰与分享机制让新朋友愿意表达？\",\"why_now\":\"已选小组形式，需具体方案解决表达意愿低的问题\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"可自定义组合或调整上述机制\",\"options\":[{\"memory_mode\":\"reference\",\"id\":\"option_1\",\"label\":\"随机配对发言\",\"description\":\"随机配对强制互动，打破沉默，但可能增加社交压力。\",\"memory_ids\":[\"m1\"],\"recommended\":true},{\"memory_mode\":\"original\",\"id\":\"option_2\",\"label\":\"主题卡片讨论\",\"description\":\"提供预设话题卡片，降低开口门槛，便于控制讨论节奏。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"option_3\",\"label\":\"轮流发言制\",\"description\":\"严格轮流发言，确保每人机会，避免被他人主导，但可能缺乏自然感。\",\"memory_ids\":[],\"recommended\":false}]}}",
+            "raw_question_plan": [
+              "如何设计破冰环节让新朋友开口",
+              "如何组织分享环节确保观点被听见",
+              "小组规模与表达规则设定"
+            ],
+            "raw_plan_count": 3,
+            "question_prompt": "小组交流中，如何设计破冰与分享机制让新朋友愿意表达？",
+            "question_dimension": "破冰与分享机制设计"
+          }
+        ],
+        "stages": [
+          {
+            "stage": "memory_query",
+            "duration_ms": 0,
+            "count": 1,
+            "error_type": "none"
+          },
+          {
+            "stage": "memory_query",
+            "duration_ms": 0,
+            "count": 1,
+            "error_type": "none"
+          },
+          {
+            "stage": "memory_retrieval",
+            "duration_ms": 1,
+            "count": 1,
+            "error_type": "none"
+          },
+          {
+            "stage": "question_generation",
+            "duration_ms": 9507,
+            "count": 1,
+            "error_type": "none"
+          }
+        ],
+        "queue_wait_ms": 5,
+        "result": {
+          "status": "question",
+          "readiness_reason": "已确认小组交流形式，需具体设计破冰与分享机制以解决新朋友不敢开口的问题\n本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。",
+          "open_flags": [
+            "破冰方法",
+            "分享方法",
+            "小组规模",
+            "表达规则"
+          ],
+          "continuation_directions": [],
+          "question": {
+            "id": "q_785a13b3458e",
+            "dimension_id": "interaction_design",
+            "exploration_stage": "solutions",
+            "dimension": "破冰与分享机制设计",
+            "type": "multi_choice",
+            "single_choice_reason": "",
+            "prompt": "小组交流中，如何设计破冰与分享机制让新朋友愿意表达？",
+            "why_now": "已选小组形式，需具体方案解决表达意愿低的问题",
+            "required": true,
+            "allow_custom": true,
+            "options": [
+              {
+                "id": "option_1",
+                "label": "随机配对发言",
+                "description": "随机配对强制互动，打破沉默，但可能增加社交压力。",
+                "recommended": true,
+                "details": "记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+              },
+              {
+                "id": "option_2",
+                "label": "主题卡片讨论",
+                "description": "提供预设话题卡片，降低开口门槛，便于控制讨论节奏。",
+                "recommended": false,
+                "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+              },
+              {
+                "id": "option_3",
+                "label": "轮流发言制",
+                "description": "严格轮流发言，确保每人机会，避免被他人主导，但可能缺乏自然感。",
+                "recommended": false,
+                "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+              }
+            ],
+            "answer_template": "可自定义组合或调整上述机制",
+            "context_details": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+          },
+          "sibling_question_goals": [
+            "如何组织分享环节确保观点被听见",
+            "小组规模与表达规则设定"
+          ],
+          "memory_brief": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。\n记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+        },
+        "passed": true,
+        "input_unchanged": true,
+        "sibling_goal_count": 2,
+        "option_count": 3,
+        "query_count": 2,
+        "memory_modes": [
+          "reference",
+          "original",
+          "original"
+        ],
+        "raw_question_plan": [
+          "如何设计破冰环节让新朋友开口",
+          "如何组织分享环节确保观点被听见",
+          "小组规模与表达规则设定"
+        ],
+        "raw_plan_count": 3,
+        "raw_sibling_goal_count": null,
+        "planned_additional_goal_count": 2,
+        "accepted_sibling_goal_count": 2,
+        "filtered_out_goals": [],
+        "total_ms": 9517
+      },
+      {
+        "name": "independent_extension_1",
+        "request": {
+          "root_request": "为社区新朋友设计一场轻松的读书交流活动，希望大家愿意表达并听见不同看法。当前只确认采用小组交流，具体破冰、分享方法和材料安排尚未决定。这是独立合成验收场景。",
+          "decisions": [
+            {
+              "question_id": "synthetic-root",
+              "dimension_id": "format",
+              "question": "以什么形式开展交流？",
+              "answer": "小组交流",
+              "answer_source": "user",
+              "selected_option_ids": [
+                "small_group"
+              ]
+            }
+          ],
+          "brief_markdown": "已确认：采用小组交流。其他活动方式尚未决定。",
+          "exploration_stage": "solutions",
+          "focus_hint": "已选择小组交流，探索让新朋友愿意表达的可行方法。",
+          "focus_hint_source": "confirmed_selection",
+          "question_batch_limit": 3,
+          "extension_goal": "如何组织分享环节确保观点被听见",
+          "sibling_question_context": [
+            "小组交流中，如何设计破冰与分享机制让新朋友愿意表达？",
+            "小组规模与表达规则设定"
+          ]
+        },
+        "model_calls": [
+          {
+            "started_utc": "2026-09-10T05:20:44.176821+00:00",
+            "generation_ms": 9687,
+            "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体设计破冰与分享机制来确保新朋友愿意表达\",\"open_flags\":[\"破冰方式\",\"分享规则\",\"表达安全感\",\"互动节奏\"],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"interaction_design\",\"dimension\":\"破冰与分享机制设计\",\"type\":\"multi_choice\",\"prompt\":\"小组交流中，如何设计破冰与分享机制让新朋友愿意表达？\",\"why_now\":\"需从通用方案中提供具体做法，而非继续询问问题\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"选择最符合当前场地与人群的方案\",\"options\":[{\"memory_mode\":\"reference\",\"id\":\"option1\",\"label\":\"随机发言卡\",\"description\":\"通过卡片随机抽取话题，降低社交压力，确保每人都有话可说。\",\"memory_ids\":[\"m1\"],\"recommended\":true},{\"memory_mode\":\"reference\",\"id\":\"option2\",\"label\":\"轮流发言制\",\"description\":\"按顺序每人发言，避免冷场，但可能抑制即兴观点的碰撞。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"option3\",\"label\":\"伙伴互助法\",\"description\":\"两人一组先讨论再分享，利用同伴支持建立安全感，适合新人。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"option4\",\"label\":\"匿名便签墙\",\"description\":\"将观点写在便签上张贴，消除当面发言的顾虑，便于收集多元看法。\",\"memory_ids\":[],\"recommended\":false}]},\n\"sibling_question_goals\":[]}",
+            "raw_question_plan": null,
+            "raw_plan_count": null,
+            "question_prompt": "小组交流中，如何设计破冰与分享机制让新朋友愿意表达？",
+            "question_dimension": "破冰与分享机制设计",
+            "repeats_head_question_exactly": true
+          },
+          {
+            "started_utc": "2026-09-10T05:20:53.863519+00:00",
+            "generation_ms": 9627,
+            "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体设计破冰与分享机制以解决新朋友不敢开口的问题\",\"open_flags\":[\"破冰方式\",\"分享规则\",\"表达安全感\"],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"interaction_design\",\"dimension\":\"破冰与分享机制设计\",\"type\":\"multi_choice\",\"prompt\":\"小组交流中，如何设计破冰与分享机制让新朋友愿意表达？\",\"why_now\":\"需从通用破冰法中选出具体机制，直接解决新人不敢开口的问题\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"选择最符合当前场地与新人心理的机制\",\"options\":[{\"memory_mode\":\"reference\",\"id\":\"option_1\",\"label\":\"随机发言卡\",\"description\":\"抽取随机话题降低社交压力，确保每人都有话可说。\",\"memory_ids\":[\"m1\"],\"recommended\":true},{\"memory_mode\":\"original\",\"id\":\"option_2\",\"label\":\"伙伴互助法\",\"description\":\"两人一组先讨论再分享，利用同伴支持建立安全感。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"option_3\",\"label\":\"匿名便签墙\",\"description\":\"将观点写在便签上张贴，消除当面发言顾虑。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"option_4\",\"label\":\"轮流发言制\",\"description\":\"按顺序每人发言避免冷场，但可能抑制即兴观点碰撞。\",\"memory_ids\":[],\"recommended\":false}]}\n,\"sibling_question_goals\":[]}",
+            "raw_question_plan": null,
+            "raw_plan_count": null,
+            "question_prompt": "小组交流中，如何设计破冰与分享机制让新朋友愿意表达？",
+            "question_dimension": "破冰与分享机制设计",
+            "repeats_head_question_exactly": true
+          },
+          {
+            "started_utc": "2026-09-10T05:21:03.490768+00:00",
+            "generation_ms": 9774,
+            "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体设计破冰与分享机制以解决新朋友不敢开口的问题\",\"open_flags\":[\"破冰方式\",\"分享规则\",\"表达安全感\"],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"interaction_design\",\"dimension\":\"破冰与分享机制设计\",\"type\":\"multi_choice\",\"prompt\":\"小组交流中，如何设计破冰与分享机制让新朋友愿意表达？\",\"why_now\":\"需从通用破冰法中选出具体机制，直接解决新人不敢开口的问题\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"选择一种机制，后续将讨论其具体执行细节\",\"options\":[{\"memory_mode\":\"original\",\"id\":\"option_1\",\"label\":\"伙伴互助法\",\"description\":\"两人一组先讨论再分享，利用同伴支持建立安全感，适合新人。\",\"memory_ids\":[],\"recommended\":true},{\"memory_mode\":\"original\",\"id\":\"option_2\",\"label\":\"匿名便签墙\",\"description\":\"将观点写在便签上张贴，消除当面发言顾虑，便于收集多元看法。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"option_3\",\"label\":\"轮流发言制\",\"description\":\"按顺序每人发言避免冷场，但可能抑制即兴观点的碰撞。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"option_4\",\"label\":\"随机发言卡\",\"description\":\"抽取随机话题降低社交压力，确保每人都有话可说。\",\"memory_ids\":[],\"recommended\":false}]}\n  \t\t,\n  \"sibling_question_goals\": []\n}",
+            "raw_question_plan": null,
+            "raw_plan_count": null,
+            "question_prompt": "小组交流中，如何设计破冰与分享机制让新朋友愿意表达？",
+            "question_dimension": "破冰与分享机制设计",
+            "repeats_head_question_exactly": true
+          }
+        ],
+        "stages": [
+          {
+            "stage": "memory_query",
+            "duration_ms": 0,
+            "count": 1,
+            "error_type": "none"
+          },
+          {
+            "stage": "memory_query",
+            "duration_ms": 0,
+            "count": 1,
+            "error_type": "none"
+          },
+          {
+            "stage": "memory_retrieval",
+            "duration_ms": 0,
+            "count": 1,
+            "error_type": "none"
+          },
+          {
+            "stage": "question_generation",
+            "duration_ms": 9687,
+            "count": 1,
+            "error_type": "BrainstormGenerationError"
+          },
+          {
+            "stage": "question_generation",
+            "duration_ms": 9627,
+            "count": 2,
+            "error_type": "BrainstormGenerationError"
+          },
+          {
+            "stage": "question_generation",
+            "duration_ms": 9774,
+            "count": 3,
+            "error_type": "BrainstormGenerationError"
+          }
+        ],
+        "queue_wait_ms": 10,
+        "passed": false,
+        "error_type": "BrainstormGenerationError",
+        "error_code": "BRAINSTORM_MODEL_OUTPUT_INVALID",
+        "error_message": "本地模型连续 3 次未能生成合格的方向选项，请重试",
+        "total_ms": 29110,
+        "accepted_sibling_goal_count": 0,
+        "filter_reason": "No extension result accepted; generation attempts were rejected, not optional planning filtered."
+      },
+      {
+        "name": "independent_extension_2",
+        "request": {
+          "root_request": "为社区新朋友设计一场轻松的读书交流活动，希望大家愿意表达并听见不同看法。当前只确认采用小组交流，具体破冰、分享方法和材料安排尚未决定。这是独立合成验收场景。",
+          "decisions": [
+            {
+              "question_id": "synthetic-root",
+              "dimension_id": "format",
+              "question": "以什么形式开展交流？",
+              "answer": "小组交流",
+              "answer_source": "user",
+              "selected_option_ids": [
+                "small_group"
+              ]
+            }
+          ],
+          "brief_markdown": "已确认：采用小组交流。其他活动方式尚未决定。",
+          "exploration_stage": "solutions",
+          "focus_hint": "已选择小组交流，探索让新朋友愿意表达的可行方法。",
+          "focus_hint_source": "confirmed_selection",
+          "question_batch_limit": 3,
+          "extension_goal": "小组规模与表达规则设定",
+          "sibling_question_context": [
+            "小组交流中，如何设计破冰与分享机制让新朋友愿意表达？",
+            "如何组织分享环节确保观点被听见"
+          ]
+        },
+        "model_calls": [
+          {
+            "started_utc": "2026-09-10T05:21:13.279598+00:00",
+            "generation_ms": 8022,
+            "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体设计破冰与分享机制以解决新朋友不敢开口的问题\",\"open_flags\":[\"破冰方式\",\"分享规则\"],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"expression_mechanism\",\"dimension\":\"破冰与分享机制设计\",\"type\":\"multi_choice\",\"prompt\":\"小组交流中，如何设计破冰与分享机制让新朋友愿意表达？\",\"why_now\":\"需从通用破冰法中筛选适合无投影、低经验场景的具体做法\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"选择最匹配当前场地与人群特征的机制\",\"options\":[{\"memory_mode\":\"original\",\"id\":\"option_1\",\"label\":\"随机抽取发言\",\"description\":\"通过随机点名打破沉默，但可能引发紧张感。\",\"memory_ids\":[],\"recommended\":true},{\"memory_mode\":\"original\",\"id\":\"option_2\",\"label\":\"卡片式匿名分享\",\"description\":\"利用纸笔匿名书写观点，降低表达压力，适合无投影环境。\",\"memory_ids\":[\"m1\"],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"option_3\",\"label\":\"轮流发言制\",\"description\":\"按顺序发言确保每人机会，但可能限制观点多样性。\",\"memory_ids\":[],\"recommended\":false}]},\"sibling_question_goals\":[]}",
+            "raw_question_plan": null,
+            "raw_plan_count": null,
+            "question_prompt": "小组交流中，如何设计破冰与分享机制让新朋友愿意表达？",
+            "question_dimension": "破冰与分享机制设计",
+            "repeats_head_question_exactly": true
+          },
+          {
+            "started_utc": "2026-09-10T05:21:21.301952+00:00",
+            "generation_ms": 9538,
+            "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体设计破冰与分享机制以解决新朋友不敢开口的问题\",\"open_flags\":[\"破冰方式\",\"分享规则\",\"表达压力\",\"场地限制\"],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"expression_mechanism\",\"dimension\":\"破冰与分享机制设计\",\"type\":\"multi_choice\",\"prompt\":\"小组交流中，如何设计破冰与分享机制让新朋友愿意表达？\",\"why_now\":\"需从通用破冰法中筛选适合无投影、低压力场景的具体做法\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"选择最符合当前场地与新人心理的方案\",\"options\":[{\"memory_mode\":\"original\",\"id\":\"anonymous_cards\",\"label\":\"匿名卡片分享\",\"description\":\"新人匿名写观点后展示，降低表达压力，适合无投影环境。\",\"memory_ids\":[],\"recommended\":true},{\"memory_mode\":\"original\",\"id\":\"round_robin\",\"label\":\"轮流发言制\",\"description\":\"按顺序发言确保每人机会，但可能限制观点多样性。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"random_draw\",\"label\":\"随机抽取发言\",\"description\":\"通过随机点名打破沉默，但可能引发紧张感。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"pair_share\",\"label\":\"两人先分享\",\"description\":\"新人先与同伴讨论再上台，降低直接面对全场的压力。\",\"memory_ids\":[],\"recommended\":false}]},\n\"sibling_question_goals\":[]}",
+            "raw_question_plan": null,
+            "raw_plan_count": null,
+            "question_prompt": "小组交流中，如何设计破冰与分享机制让新朋友愿意表达？",
+            "question_dimension": "破冰与分享机制设计",
+            "repeats_head_question_exactly": true
+          },
+          {
+            "started_utc": "2026-09-10T05:21:30.839689+00:00",
+            "generation_ms": 9148,
+            "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体设计破冰与分享机制以解决新人不敢开口的问题\",\"open_flags\":[\"破冰方式\",\"分享规则\"],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"expression_mechanism\",\"dimension\":\"破冰与分享机制设计\",\"type\":\"multi_choice\",\"prompt\":\"小组交流中，如何设计破冰与分享机制让新朋友愿意表达？\",\"why_now\":\"新人沉默是核心痛点，需对比不同机制对表达意愿的影响\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"可自定义组合或调整规则\",\"options\":[{\"memory_mode\":\"original\",\"id\":\"anonymous_cards\",\"label\":\"匿名卡片分享\",\"description\":\"新人匿名写观点后展示，降低表达压力，适合无投影环境。\",\"memory_ids\":[],\"recommended\":true},{\"memory_mode\":\"original\",\"id\":\"pair_share\",\"label\":\"两人先分享\",\"description\":\"新人先与同伴讨论再上台，降低直接面对全场的压力。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"random_pick\",\"label\":\"随机抽取发言\",\"description\":\"通过随机点名打破沉默，但可能引发紧张感。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"guided_discussion\",\"label\":\"引导式讨论\",\"description\":\"由主持人提问引导，避免冷场，但依赖主持人控场能力。\",\"memory_ids\":[],\"recommended\":false}]},\"sibling_question_goals\":[]}",
+            "raw_question_plan": null,
+            "raw_plan_count": null,
+            "question_prompt": "小组交流中，如何设计破冰与分享机制让新朋友愿意表达？",
+            "question_dimension": "破冰与分享机制设计",
+            "repeats_head_question_exactly": true
+          }
+        ],
+        "stages": [
+          {
+            "stage": "memory_query",
+            "duration_ms": 0,
+            "count": 1,
+            "error_type": "none"
+          },
+          {
+            "stage": "memory_query",
+            "duration_ms": 0,
+            "count": 1,
+            "error_type": "none"
+          },
+          {
+            "stage": "memory_retrieval",
+            "duration_ms": 0,
+            "count": 1,
+            "error_type": "none"
+          },
+          {
+            "stage": "question_generation",
+            "duration_ms": 8022,
+            "count": 1,
+            "error_type": "BrainstormGenerationError"
+          },
+          {
+            "stage": "question_generation",
+            "duration_ms": 9538,
+            "count": 2,
+            "error_type": "BrainstormGenerationError"
+          },
+          {
+            "stage": "question_generation",
+            "duration_ms": 9148,
+            "count": 3,
+            "error_type": "BrainstormGenerationError"
+          }
+        ],
+        "queue_wait_ms": 29109,
+        "passed": false,
+        "error_type": "BrainstormGenerationError",
+        "error_code": "BRAINSTORM_MODEL_OUTPUT_INVALID",
+        "error_message": "本地模型连续 3 次未能生成合格的方向选项，请重试",
+        "total_ms": 55819,
+        "accepted_sibling_goal_count": 0,
+        "filter_reason": "No extension result accepted; generation attempts were rejected, not optional planning filtered."
+      }
+    ],
+    "previous_evaluation": {
+      "timestamp_utc": "2026-09-10T05:14:47.053216+00:00",
+      "model": "qwen3.5:4b",
+      "source_file_hashes_at_start": {
+        "ai-sidecar/creation/brainstorm.py": "280a93f22f5a56b411f1f7776e393f93392fdef80aadd537d4b2b059ddd5b30f",
+        "ai-sidecar/creation/brainstorm_memory_policy.py": "f5a32018414d4a610821b6543de352f8fc57ff86409e5302065276d901c0af36"
+      },
+      "scope": "Synthetic prompts and reference records only; no user session or personal retrieval access.",
+      "transport": "Production CreationService local model stream via global P0 creation queue and shared cross-process slots.",
+      "limits": {
+        "question_batch_limit": 3,
+        "turn_seconds": 150,
+        "model_slots_override": false
+      },
+      "validation_definition": "Run passed means structured coordinator validation succeeded; semantic review is recorded separately.",
+      "runs": [
+        {
+          "name": "broad_branch_with_optional_synthetic_memory",
+          "request": {
+            "root_request": "为社区新朋友设计一场轻松的读书交流活动，希望大家愿意表达并听见不同看法。当前只确认采用小组交流，具体破冰、分享方法和材料安排尚未决定。这是独立合成验收场景。",
+            "decisions": [
+              {
+                "question_id": "synthetic-root",
+                "dimension_id": "format",
+                "question": "以什么形式开展交流？",
+                "answer": "小组交流",
+                "answer_source": "user",
+                "selected_option_ids": [
+                  "small_group"
+                ]
+              }
+            ],
+            "brief_markdown": "已确认：采用小组交流。其他活动方式尚未决定。",
+            "exploration_stage": "solutions",
+            "focus_hint": "已选择小组交流，探索让新朋友愿意表达的可行方法。",
+            "focus_hint_source": "confirmed_selection",
+            "question_batch_limit": 3
+          },
+          "model_calls": [
+            {
+              "started_utc": "2026-09-10T05:14:47.165005+00:00",
+              "generation_ms": 8907,
+              "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体化破冰与分享机制以解决表达意愿问题\",\"open_flags\":[\"破冰方法\",\"分享方法\",\"材料安排\"],\"question_plan\":[\n  \"如何设计破冰环节促进新朋友开口？\",\n  \"如何设计分享环节鼓励不同看法？\",\n  \"如何安排材料支持低门槛表达？\"\n], \"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"interaction_design\",\"dimension\":\"破冰与分享机制设计\",\"type\":\"multi_choice\",\"prompt\":\"小组交流中，如何设计破冰与分享机制促进表达？\",\"why_now\":\"需从问题诊断转向具体方案，解决新朋友不愿开口痛点\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"选择一种机制或组合\",\"options\":[{\"memory_mode\":\"original\",\"id\":\"option_1\",\"label\":\"随机搭档发言\",\"description\":\"随机配对降低防备，但需额外组织时间。\",\"memory_ids\":[],\"recommended\":true},{\"memory_mode\":\"original\",\"id\":\"option_2\",\"label\":\"主题卡片讨论\",\"description\":\"提供预设话题降低开口难度，依赖材料准备。\",\"memory_ids\":[],\"recommended\":true},{\"memory_mode\":\"original\",\"id\":\"option_3\",\"label\":\"匿名纸条收集\",\"description\":\"匿名形式消除顾虑，但无法即时互动。\",\"memory_ids\":[],\"recommended\":true}]}}",
+              "raw_question_plan": [
+                "如何设计破冰环节促进新朋友开口？",
+                "如何设计分享环节鼓励不同看法？",
+                "如何安排材料支持低门槛表达？"
+              ],
+              "raw_plan_count": 3,
+              "question_dimension": "破冰与分享机制设计",
+              "question_prompt": "小组交流中，如何设计破冰与分享机制促进表达？"
+            },
+            {
+              "started_utc": "2026-09-10T05:14:56.073192+00:00",
+              "generation_ms": 9834,
+              "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体设计破冰与分享机制以解决新朋友开口难的问题\",\"open_flags\":[\"破冰方式\",\"分享机制\",\"表达门槛\",\"互动节奏\"],\"question_plan\":[\"破冰方式\",\"分享机制\",\"表达门槛\",\"互动节奏\"],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"interaction_design\",\"dimension\":\"破冰与分享机制设计\",\"type\":\"multi_choice\",\"prompt\":\"小组交流中，如何设计破冰与分享机制促进表达？\",\"why_now\":\"需从通用破冰法中选出能降低新人防备的具体机制\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"选择最符合当前场地条件的方案\",\"options\":[{\"memory_mode\":\"reference\",\"id\":\"option_1\",\"label\":\"随机搭档发言\",\"description\":\"随机配对降低防备，但需额外组织时间。\",\"memory_ids\":[\"m1\"],\"recommended\":true},{\"memory_mode\":\"original\",\"id\":\"option_2\",\"label\":\"主题卡片讨论\",\"description\":\"提供预设话题降低开口难度，依赖材料准备。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"option_3\",\"label\":\"匿名纸条收集\",\"description\":\"匿名形式消除顾虑，但无法即时互动。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"option_4\",\"label\":\"轮流发言轮次\",\"description\":\"固定轮次避免冷场，但可能抑制自发交流。\",\"memory_ids\":[],\"recommended\":false}]}\n}",
+              "raw_question_plan": [
+                "破冰方式",
+                "分享机制",
+                "表达门槛",
+                "互动节奏"
+              ],
+              "raw_plan_count": 4,
+              "question_dimension": "破冰与分享机制设计",
+              "question_prompt": "小组交流中，如何设计破冰与分享机制促进表达？"
+            },
+            {
+              "started_utc": "2026-09-10T05:15:05.907047+00:00",
+              "generation_ms": 10234,
+              "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体设计破冰与分享机制来落实让新朋友愿意表达的目标\",\"open_flags\":[\"破冰方式\",\"分享机制\",\"表达门槛\",\"互动节奏\"],\"question_plan\":[\"破冰方式\",\"分享机制\",\"表达门槛\",\"互动节奏\"],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"interaction_design\",\"dimension\":\"破冰与分享机制设计\",\"type\":\"multi_choice\",\"prompt\":\"小组交流中，如何设计破冰与分享机制促进表达？\",\"why_now\":\"需从抽象形式进入具体做法，比较不同机制对新人开口意愿的影响\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"选择最符合当前场地与人数预期的方案\",\"options\":[{\"memory_mode\":\"original\",\"id\":\"option_1\",\"label\":\"随机搭档发言\",\"description\":\"随机配对降低防备，但需额外组织时间。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"option_2\",\"label\":\"主题卡片讨论\",\"description\":\"提供预设话题降低开口难度，依赖材料准备。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"option_3\",\"label\":\"匿名纸条收集\",\"description\":\"匿名形式消除顾虑，但无法即时互动。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"option_4\",\"label\":\"轮流发言轮次\",\"description\":\"固定轮次避免冷场，但可能抑制自发交流。\",\"memory_ids\":[],\"recommended\":false}]}\n}",
+              "raw_question_plan": [
+                "破冰方式",
+                "分享机制",
+                "表达门槛",
+                "互动节奏"
+              ],
+              "raw_plan_count": 4,
+              "question_dimension": "破冰与分享机制设计",
+              "question_prompt": "小组交流中，如何设计破冰与分享机制促进表达？"
+            }
+          ],
+          "stages": [
+            {
+              "stage": "memory_query",
+              "duration_ms": 0,
+              "count": 1,
+              "error_type": "none"
+            },
+            {
+              "stage": "memory_query",
+              "duration_ms": 0,
+              "count": 1,
+              "error_type": "none"
+            },
+            {
+              "stage": "memory_retrieval",
+              "duration_ms": 1,
+              "count": 1,
+              "error_type": "none"
+            },
+            {
+              "stage": "question_generation",
+              "duration_ms": 8908,
+              "count": 1,
+              "error_type": "BrainstormGenerationError"
+            },
+            {
+              "stage": "question_generation",
+              "duration_ms": 9834,
+              "count": 2,
+              "error_type": "BrainstormGenerationError"
+            },
+            {
+              "stage": "question_generation",
+              "duration_ms": 10235,
+              "count": 3,
+              "error_type": "BrainstormGenerationError"
+            }
+          ],
+          "queue_wait_ms": 107,
+          "passed": false,
+          "error_type": "BrainstormGenerationError",
+          "error_code": "BRAINSTORM_MODEL_OUTPUT_INVALID",
+          "error_message": "本地模型连续 3 次未能生成合格的方向选项，请重试",
+          "total_ms": 29101,
+          "accepted_sibling_goal_count": 0,
+          "filtered_out_goals": null,
+          "filter_reason": "No candidate was accepted; this is a generation/plan-binding failure, not normal goal filtering."
+        }
+      ],
+      "previous_evaluation": {
+        "timestamp_utc": "2026-09-10T05:09:15.243419+00:00",
+        "model": "qwen3.5:4b",
+        "source_file_hashes_at_start": {
+          "ai-sidecar/creation/brainstorm.py": "fe0c6f95ba52565e68d9f7f0858b919841dab4861170fb202af58bf0cd0e751a",
+          "ai-sidecar/creation/brainstorm_memory_policy.py": "f5a32018414d4a610821b6543de352f8fc57ff86409e5302065276d901c0af36"
+        },
+        "scope": "Synthetic prompts and reference records only; no user session or personal retrieval access.",
+        "transport": "Production CreationService local model stream via global P0 creation queue and shared cross-process slots.",
+        "limits": {
+          "question_batch_limit": 3,
+          "turn_seconds": 150,
+          "model_slots_override": false
+        },
+        "validation_definition": "Run passed means structured coordinator validation succeeded; semantic review is recorded separately.",
+        "runs": [
+          {
+            "name": "wide_self_service_book_exchange",
+            "request": {
+              "root_request": "为社区居民设计一次自助换书活动，已确认以自助交换为主要形式。现在希望完整展开这一思路：交换如何成立、现场如何让居民顺畅参与、活动结束后未交换书如何处理都还没有决定。请主动比较可行方法与取舍。这是独立合成验收场景。",
+              "decisions": [
+                {
+                  "question_id": "synthetic-root",
+                  "dimension_id": "format",
+                  "question": "主要采用什么活动形式？",
+                  "answer": "自助换书",
+                  "answer_source": "user",
+                  "selected_option_ids": [
+                    "self_service_exchange"
+                  ]
+                }
+              ],
+              "brief_markdown": "已确认自助换书。交换方式、现场参与方式和未交换书处理都尚未决定。",
+              "exploration_stage": "solutions",
+              "focus_hint": "已选择自助换书，完整探索这条活动思路的可行方法与取舍。",
+              "focus_hint_source": "confirmed_selection",
+              "question_batch_limit": 3
+            },
+            "model_calls": [
+              {
+                "started_utc": "2026-09-10T05:09:15.355785+00:00",
+                "generation_ms": 9043,
+                "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已选定自助换书，需进入方案探索阶段，比较具体机制与收益代价\",\"open_flags\":[\"交换规则如何设计\",\"居民参与流程如何安排\",\"未交换书后续处理方案\"],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"solution_architecture\",\"dimension\":\"自助换书活动核心机制\",\"type\":\"multi_choice\",\"prompt\":\"自助换书活动如何设计核心交换机制？\",\"why_now\":\"需确定具体规则以支撑现场顺畅参与，避免流程混乱\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"自定义交换规则\",\"options\":[{\"memory_mode\":\"original\",\"id\":\"option1\",\"label\":\"限时兑换制\",\"description\":\"设定固定时间窗口，确保公平与秩序。\",\"memory_ids\":[],\"recommended\":true},{\"memory_mode\":\"original\",\"id\":\"option2\",\"label\":\"积分兑换制\",\"description\":\"建立积分体系，激励居民多带书参与。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"option3\",\"label\":\"自由交换制\",\"description\":\"不设限制，依赖居民自发协商，灵活性高。\",\"memory_ids\":[],\"recommended\":false}]},\"sibling_question_goals\":[]}"
+              }
+            ],
+            "stages": [
+              {
+                "stage": "memory_query",
+                "duration_ms": 0,
+                "count": 1,
+                "error_type": "none"
+              },
+              {
+                "stage": "memory_query",
+                "duration_ms": 0,
+                "count": 1,
+                "error_type": "none"
+              },
+              {
+                "stage": "memory_retrieval",
+                "duration_ms": 0,
+                "count": 1,
+                "error_type": "none"
+              },
+              {
+                "stage": "question_generation",
+                "duration_ms": 9045,
+                "count": 1,
+                "error_type": "none"
+              }
+            ],
+            "queue_wait_ms": 107,
+            "result": {
+              "status": "question",
+              "readiness_reason": "已选定自助换书，需进入方案探索阶段，比较具体机制与收益代价\n本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。",
+              "open_flags": [
+                "交换规则如何设计",
+                "居民参与流程如何安排",
+                "未交换书后续处理方案"
+              ],
+              "continuation_directions": [],
+              "question": {
+                "id": "q_1a9f29f87221",
+                "dimension_id": "solution_architecture",
+                "exploration_stage": "solutions",
+                "dimension": "自助换书活动核心机制",
+                "type": "multi_choice",
+                "single_choice_reason": "",
+                "prompt": "自助换书活动如何设计核心交换机制？",
+                "why_now": "需确定具体规则以支撑现场顺畅参与，避免流程混乱",
+                "required": true,
+                "allow_custom": true,
+                "options": [
+                  {
+                    "id": "option1",
+                    "label": "限时兑换制",
+                    "description": "设定固定时间窗口，确保公平与秩序。",
+                    "recommended": true,
+                    "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                  },
+                  {
+                    "id": "option2",
+                    "label": "积分兑换制",
+                    "description": "建立积分体系，激励居民多带书参与。",
+                    "recommended": false,
+                    "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                  },
+                  {
+                    "id": "option3",
+                    "label": "自由交换制",
+                    "description": "不设限制，依赖居民自发协商，灵活性高。",
+                    "recommended": false,
+                    "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                  }
+                ],
+                "answer_template": "自定义交换规则",
+                "context_details": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+              },
+              "sibling_question_goals": [],
+              "memory_brief": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+            },
+            "passed": true,
+            "input_unchanged": true,
+            "sibling_goal_count": 0,
+            "option_count": 3,
+            "query_count": 2,
+            "memory_modes": [
+              "original",
+              "original",
+              "original"
+            ],
+            "total_ms": 9156,
+            "raw_sibling_goal_count": 0,
+            "accepted_sibling_goal_count": 0,
+            "filtered_out_goals": [],
+            "filter_reason": "No filtering; model itself returned an empty goal array."
+          }
+        ],
+        "previous_evaluation": {
+          "timestamp_utc": "2026-09-10T05:05:34.697319+00:00",
+          "model": "qwen3.5:4b",
+          "source_file_hashes_at_start": {
+            "ai-sidecar/creation/brainstorm.py": "8bd9866c4c6aea876dbe76d920a27788b10e04f5743f1958947896d847e2f05d",
+            "ai-sidecar/creation/brainstorm_memory_policy.py": "f5a32018414d4a610821b6543de352f8fc57ff86409e5302065276d901c0af36"
+          },
+          "scope": "Synthetic prompts and reference records only; no user session or personal retrieval access.",
+          "transport": "Production CreationService local model stream via global P0 creation queue and shared cross-process slots.",
+          "limits": {
+            "question_batch_limit": 3,
+            "turn_seconds": 150,
+            "model_slots_override": false
+          },
+          "validation_definition": "Run passed means structured coordinator validation succeeded; semantic review is recorded separately.",
+          "runs": [
+            {
+              "name": "wide_self_service_book_exchange",
+              "request": {
+                "root_request": "为社区居民设计一次自助换书活动，已确认以自助交换为主要形式。现在希望完整展开这一思路：交换如何成立、现场如何让居民顺畅参与、活动结束后未交换书如何处理都还没有决定。请主动比较可行方法与取舍。这是独立合成验收场景。",
+                "decisions": [
+                  {
+                    "question_id": "synthetic-root",
+                    "dimension_id": "format",
+                    "question": "主要采用什么活动形式？",
+                    "answer": "自助换书",
+                    "answer_source": "user",
+                    "selected_option_ids": [
+                      "self_service_exchange"
+                    ]
+                  }
+                ],
+                "brief_markdown": "已确认自助换书。交换方式、现场参与方式和未交换书处理都尚未决定。",
+                "exploration_stage": "solutions",
+                "focus_hint": "已选择自助换书，完整探索这条活动思路的可行方法与取舍。",
+                "focus_hint_source": "confirmed_selection",
+                "question_batch_limit": 3
+              },
+              "model_calls": [
+                {
+                  "started_utc": "2026-09-10T05:05:34.705668+00:00",
+                  "generation_ms": 10300,
+                  "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已选定自助换书形式，需进入解决方案阶段，主动提供具体操作机制与收益代价，而非继续询问抽象问题。\",\"open_flags\":[\"如何确保居民能顺利找到想交换的书？\",\"现场如何防止居民因找不到书而放弃参与？\",\"未交换的书如何避免占用空间或引发纠纷？\"],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"solution_architecture\",\"dimension\":\"自助换书的具体操作流程\",\"type\":\"multi_choice\",\"prompt\":\"如何设计让居民顺畅参与换书的核心流程？\",\"why_now\":\"需将抽象形式转化为具体操作步骤，解决‘如何成立’与‘如何顺畅’的缺口。\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"简述您最看重的流程环节。\",\"options\":[{\"memory_mode\":\"original\",\"id\":\"option_a\",\"label\":\"自助扫码匹配\",\"description\":\"居民扫码自助配对，减少人工干预，提升效率但依赖网络与设备。\",\"memory_ids\":[],\"recommended\":true},{\"memory_mode\":\"original\",\"id\":\"option_b\",\"label\":\"人工柜台辅助\",\"description\":\"设置人工台协助配对，降低门槛但增加人力成本与排队时间。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"option_c\",\"label\":\"自由书架交换\",\"description\":\"居民自行寻找目标书交换，零成本但易引发纠纷且效率低。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"option_d\",\"label\":\"预约制交换\",\"description\":\"提前预约交换时间，保证秩序但牺牲灵活性，增加居民准备成本。\",\"memory_ids\":[],\"recommended\":false}]},\n\"sibling_question_goals\":[]\n}"
+                }
+              ],
+              "stages": [
+                {
+                  "stage": "memory_query",
+                  "duration_ms": 0,
+                  "count": 1,
+                  "error_type": "none"
+                },
+                {
+                  "stage": "memory_query",
+                  "duration_ms": 0,
+                  "count": 1,
+                  "error_type": "none"
+                },
+                {
+                  "stage": "memory_retrieval",
+                  "duration_ms": 0,
+                  "count": 1,
+                  "error_type": "none"
+                },
+                {
+                  "stage": "question_generation",
+                  "duration_ms": 10302,
+                  "count": 1,
+                  "error_type": "none"
+                }
+              ],
+              "queue_wait_ms": 4,
+              "result": {
+                "status": "question",
+                "readiness_reason": "已选定自助换书形式，需进入解决方案阶段，主动提供具体操作机制与收益代价，而非继续询问抽象问题。\n本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。",
+                "open_flags": [
+                  "如何确保居民能顺利找到想交换的书？",
+                  "现场如何防止居民因找不到书而放弃参与？",
+                  "未交换的书如何避免占用空间或引发纠纷？"
+                ],
+                "continuation_directions": [],
+                "question": {
+                  "id": "q_167488021d22",
+                  "dimension_id": "solution_architecture",
+                  "exploration_stage": "solutions",
+                  "dimension": "自助换书的具体操作流程",
+                  "type": "multi_choice",
+                  "single_choice_reason": "",
+                  "prompt": "如何设计让居民顺畅参与换书的核心流程？",
+                  "why_now": "需将抽象形式转化为具体操作步骤，解决‘如何成立’与‘如何顺畅’的缺口。",
+                  "required": true,
+                  "allow_custom": true,
+                  "options": [
+                    {
+                      "id": "option_a",
+                      "label": "自助扫码匹配",
+                      "description": "居民扫码自助配对，减少人工干预，提升效率但依赖网络与设备。",
+                      "recommended": true,
+                      "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                    },
+                    {
+                      "id": "option_b",
+                      "label": "人工柜台辅助",
+                      "description": "设置人工台协助配对，降低门槛但增加人力成本与排队时间。",
+                      "recommended": false,
+                      "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                    },
+                    {
+                      "id": "option_c",
+                      "label": "自由书架交换",
+                      "description": "居民自行寻找目标书交换，零成本但易引发纠纷且效率低。",
+                      "recommended": false,
+                      "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                    },
+                    {
+                      "id": "option_d",
+                      "label": "预约制交换",
+                      "description": "提前预约交换时间，保证秩序但牺牲灵活性，增加居民准备成本。",
+                      "recommended": false,
+                      "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                    }
+                  ],
+                  "answer_template": "简述您最看重的流程环节。",
+                  "context_details": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                },
+                "sibling_question_goals": [],
+                "memory_brief": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+              },
+              "passed": true,
+              "input_unchanged": true,
+              "sibling_goal_count": 0,
+              "option_count": 4,
+              "query_count": 2,
+              "memory_modes": [
+                "original",
+                "original",
+                "original",
+                "original"
+              ],
+              "total_ms": 10310,
+              "raw_sibling_goal_count": 0,
+              "accepted_sibling_goal_count": 0,
+              "filtered_out_goals": [],
+              "filter_reason": "No filtering; model itself returned an empty goal array."
+            }
+          ],
+          "previous_evaluation": {
+            "timestamp_utc": "2026-09-10T05:03:33.257180+00:00",
+            "model": "qwen3.5:4b",
+            "source_file_hashes_at_start": {
+              "ai-sidecar/creation/brainstorm.py": "e2fd25e5bd5e7fba9b4486281b006b4d324414bb4e5c22b58619606451d902df",
+              "ai-sidecar/creation/brainstorm_memory_policy.py": "f5a32018414d4a610821b6543de352f8fc57ff86409e5302065276d901c0af36"
+            },
+            "scope": "Synthetic prompts and reference records only; no user session or personal retrieval access.",
+            "transport": "Production CreationService local model stream via global P0 creation queue and shared cross-process slots.",
+            "limits": {
+              "question_batch_limit": 3,
+              "turn_seconds": 150,
+              "model_slots_override": false
+            },
+            "validation_definition": "Run passed means structured coordinator validation succeeded; semantic review is recorded separately.",
+            "runs": [
+              {
+                "name": "broad_branch_with_optional_synthetic_memory",
+                "request": {
+                  "root_request": "为社区新朋友设计一场轻松的读书交流活动，希望大家愿意表达并听见不同看法。当前只确认采用小组交流，具体破冰、分享方法和材料安排尚未决定。这是独立合成验收场景。",
+                  "decisions": [
+                    {
+                      "question_id": "synthetic-root",
+                      "dimension_id": "format",
+                      "question": "以什么形式开展交流？",
+                      "answer": "小组交流",
+                      "answer_source": "user",
+                      "selected_option_ids": [
+                        "small_group"
+                      ]
+                    }
+                  ],
+                  "brief_markdown": "已确认：采用小组交流。其他活动方式尚未决定。",
+                  "exploration_stage": "solutions",
+                  "focus_hint": "已选择小组交流，探索让新朋友愿意表达的可行方法。",
+                  "focus_hint_source": "confirmed_selection",
+                  "question_batch_limit": 3
+                },
+                "model_calls": [
+                  {
+                    "started_utc": "2026-09-10T05:03:33.378302+00:00",
+                    "generation_ms": 9221,
+                    "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体破冰方案促进新人开口\",\"open_flags\":[\"破冰方法\",\"破冰机制\",\"破冰成本\"],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"interaction_design\",\"dimension\":\"破冰方法\",\"type\":\"multi_choice\",\"prompt\":\"小组交流中，如何设计破冰让新人开口？\",\"why_now\":\"新人沉默是核心痛点，需具体破冰手段而非抽象目标\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"可结合场地限制（无投影音响）调整方案\",\"options\":[{\"memory_mode\":\"reference\",\"id\":\"option_1\",\"label\":\"轮流发言\",\"description\":\"每人限时发言，避免冷场，依赖规则降低社交压力。\",\"memory_ids\":[\"m1\"],\"recommended\":true},{\"memory_mode\":\"reference\",\"id\":\"option_2\",\"label\":\"匿名纸条\",\"description\":\"新人写观点投箱，减少当众压力，依赖场地限制。\",\"memory_ids\":[\"m1\"],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"option_3\",\"label\":\"搭档互助\",\"description\":\"两人一组讨论再发言，降低个人表达焦虑，依赖人际互动。\",\"memory_ids\":[],\"recommended\":false}]},\"sibling_question_goals\":[]}"
+                  }
+                ],
+                "stages": [
+                  {
+                    "stage": "memory_query",
+                    "duration_ms": 0,
+                    "count": 1,
+                    "error_type": "none"
+                  },
+                  {
+                    "stage": "memory_query",
+                    "duration_ms": 0,
+                    "count": 1,
+                    "error_type": "none"
+                  },
+                  {
+                    "stage": "memory_retrieval",
+                    "duration_ms": 0,
+                    "count": 1,
+                    "error_type": "none"
+                  },
+                  {
+                    "stage": "question_generation",
+                    "duration_ms": 9223,
+                    "count": 1,
+                    "error_type": "none"
+                  }
+                ],
+                "queue_wait_ms": 115,
+                "result": {
+                  "status": "question",
+                  "readiness_reason": "已确认小组交流形式，需具体破冰方案促进新人开口\n本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。",
+                  "open_flags": [
+                    "破冰方法",
+                    "破冰机制",
+                    "破冰成本"
+                  ],
+                  "continuation_directions": [],
+                  "question": {
+                    "id": "q_b85af604a913",
+                    "dimension_id": "interaction_design",
+                    "exploration_stage": "solutions",
+                    "dimension": "破冰方法",
+                    "type": "multi_choice",
+                    "single_choice_reason": "",
+                    "prompt": "小组交流中，如何设计破冰让新人开口？",
+                    "why_now": "新人沉默是核心痛点，需具体破冰手段而非抽象目标",
+                    "required": true,
+                    "allow_custom": true,
+                    "options": [
+                      {
+                        "id": "option_1",
+                        "label": "轮流发言",
+                        "description": "每人限时发言，避免冷场，依赖规则降低社交压力。",
+                        "recommended": true,
+                        "details": "记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+                      },
+                      {
+                        "id": "option_2",
+                        "label": "匿名纸条",
+                        "description": "新人写观点投箱，减少当众压力，依赖场地限制。",
+                        "recommended": false,
+                        "details": "记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+                      },
+                      {
+                        "id": "option_3",
+                        "label": "搭档互助",
+                        "description": "两人一组讨论再发言，降低个人表达焦虑，依赖人际互动。",
+                        "recommended": false,
+                        "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                      }
+                    ],
+                    "answer_template": "可结合场地限制（无投影音响）调整方案",
+                    "context_details": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                  },
+                  "sibling_question_goals": [],
+                  "memory_brief": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。\n记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+                },
+                "passed": true,
+                "input_unchanged": true,
+                "sibling_goal_count": 0,
+                "option_count": 3,
+                "query_count": 2,
+                "memory_modes": [
+                  "reference",
+                  "reference",
+                  "original"
+                ],
+                "total_ms": 9344,
+                "raw_sibling_goal_count": 0,
+                "accepted_sibling_goal_count": 0,
+                "filtered_out_goals": [],
+                "filter_reason": "No filtering; model itself returned an empty goal array."
+              },
+              {
+                "name": "narrow_original_only_branch",
+                "request": {
+                  "root_request": "为社区读书活动构思一种简短的开场破冰方法，已确认只让每人分享书中一句话。本次只比较分享这句话的呈现方法，不扩展主持、材料、分组或效果验证。只用当前输入，不检索历史记忆。这是独立合成验收场景。",
+                  "decisions": [
+                    {
+                      "question_id": "synthetic-root",
+                      "dimension_id": "format",
+                      "question": "以什么形式开展交流？",
+                      "answer": "每人分享书中一句话",
+                      "answer_source": "user",
+                      "selected_option_ids": [
+                        "quote"
+                      ]
+                    }
+                  ],
+                  "brief_markdown": "已确认每人分享书中一句话，其他活动设计本次不讨论。",
+                  "exploration_stage": "solutions",
+                  "focus_hint": "已选择每人分享书中一句话，只比较这句话的呈现方法。",
+                  "focus_hint_source": "confirmed_selection",
+                  "question_batch_limit": 3
+                },
+                "model_calls": [
+                  {
+                    "started_utc": "2026-09-10T05:03:42.629507+00:00",
+                    "generation_ms": 8141,
+                    "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认分享内容，需具体呈现方案来验证破冰效果\",\"open_flags\":[\"如何呈现一句话能最大化参与感\"],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"solution_architecture\",\"dimension\":\"分享呈现方式\",\"type\":\"multi_choice\",\"prompt\":\"如何呈现书中一句话能最大化参与感？\",\"why_now\":\"需对比不同呈现方式对破冰效果的影响\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"自定义呈现形式\",\"options\":[{\"memory_mode\":\"original\",\"id\":\"option_1\",\"label\":\"卡片朗读\",\"description\":\"每人手持卡片朗读，增加仪式感与专注度。\",\"memory_ids\":[],\"recommended\":true},{\"memory_mode\":\"original\",\"id\":\"option_2\",\"label\":\"手势配合\",\"description\":\"配合手势动作，降低表达门槛，活跃气氛。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"option_3\",\"label\":\"匿名投屏\",\"description\":\"匿名展示，消除顾虑，鼓励内向者发言。\",\"memory_ids\":[],\"recommended\":false}]}\n,\"sibling_question_goals\":[]}"
+                  }
+                ],
+                "stages": [
+                  {
+                    "stage": "memory_retrieval",
+                    "duration_ms": 0,
+                    "count": 0,
+                    "error_type": "none"
+                  },
+                  {
+                    "stage": "question_generation",
+                    "duration_ms": 8141,
+                    "count": 1,
+                    "error_type": "none"
+                  }
+                ],
+                "queue_wait_ms": 20,
+                "result": {
+                  "status": "question",
+                  "readiness_reason": "已确认分享内容，需具体呈现方案来验证破冰效果\n本轮按你的资料范围要求未检索历史记忆，仅依据当前输入展开。",
+                  "open_flags": [
+                    "如何呈现一句话能最大化参与感"
+                  ],
+                  "continuation_directions": [],
+                  "question": {
+                    "id": "q_3d3e86e628c4",
+                    "dimension_id": "solution_architecture",
+                    "exploration_stage": "solutions",
+                    "dimension": "分享呈现方式",
+                    "type": "multi_choice",
+                    "single_choice_reason": "",
+                    "prompt": "如何呈现书中一句话能最大化参与感？",
+                    "why_now": "需对比不同呈现方式对破冰效果的影响",
+                    "required": true,
+                    "allow_custom": true,
+                    "options": [
+                      {
+                        "id": "option_1",
+                        "label": "卡片朗读",
+                        "description": "每人手持卡片朗读，增加仪式感与专注度。",
+                        "recommended": true,
+                        "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                      },
+                      {
+                        "id": "option_2",
+                        "label": "手势配合",
+                        "description": "配合手势动作，降低表达门槛，活跃气氛。",
+                        "recommended": false,
+                        "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                      },
+                      {
+                        "id": "option_3",
+                        "label": "匿名投屏",
+                        "description": "匿名展示，消除顾虑，鼓励内向者发言。",
+                        "recommended": false,
+                        "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                      }
+                    ],
+                    "answer_template": "自定义呈现形式",
+                    "context_details": "本轮按你的资料范围要求未检索历史记忆，仅依据当前输入展开。"
+                  },
+                  "sibling_question_goals": [],
+                  "memory_brief": "本轮按你的资料范围要求未检索历史记忆，仅依据当前输入展开。"
+                },
+                "passed": true,
+                "input_unchanged": true,
+                "sibling_goal_count": 0,
+                "option_count": 3,
+                "query_count": 0,
+                "memory_modes": [
+                  "original",
+                  "original",
+                  "original"
+                ],
+                "total_ms": 8164,
+                "raw_sibling_goal_count": 0,
+                "accepted_sibling_goal_count": 0,
+                "filtered_out_goals": [],
+                "filter_reason": "No filtering; model itself returned an empty goal array."
+              },
+              {
+                "name": "reference_applicable_branch",
+                "request": {
+                  "root_request": "沿用合成读书活动记录中的场地和材料条件，为小组交流设计具体呈现方法。需要比较能在既有条件下开展的方式，也欢迎有适用前提的新思路。这是独立合成验收场景。",
+                  "decisions": [
+                    {
+                      "question_id": "synthetic-root",
+                      "dimension_id": "format",
+                      "question": "以什么形式开展交流？",
+                      "answer": "小组交流",
+                      "answer_source": "user",
+                      "selected_option_ids": [
+                        "small_group"
+                      ]
+                    }
+                  ],
+                  "brief_markdown": "已确认：采用小组交流。其他活动方式尚未决定。",
+                  "exploration_stage": "solutions",
+                  "focus_hint": "已选择小组交流，探索让新朋友愿意表达的可行方法。",
+                  "focus_hint_source": "confirmed_selection",
+                  "question_batch_limit": 3
+                },
+                "model_calls": [
+                  {
+                    "started_utc": "2026-09-10T05:03:50.785100+00:00",
+                    "generation_ms": 8942,
+                    "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认交流形式，需具体方案解决新朋友开口难的问题\",\"open_flags\":[\"如何在新朋友沉默时引导发言\"],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"expression_method\",\"dimension\":\"让新朋友愿意表达的具体方法\",\"type\":\"multi_choice\",\"prompt\":\"面对新朋友沉默，采用什么引导方式？\",\"why_now\":\"需比较不同引导机制对新人开口意愿的影响\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"可结合场地限制提出新做法\",\"options\":[{\"memory_mode\":\"reference\",\"id\":\"low_stakes\",\"label\":\"匿名纸条发言\",\"description\":\"利用纸笔匿名，降低开口压力，适合新人。\",\"memory_ids\":[\"m1\"],\"recommended\":true},{\"memory_mode\":\"reference\",\"id\":\"pair_share\",\"label\":\"两人结对讨论\",\"description\":\"先与熟人搭档，建立安全感后再发言。\",\"memory_ids\":[\"m1\"],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"role_play\",\"label\":\"角色代入发言\",\"description\":\"预设特定身份，减少自我暴露焦虑。\",\"memory_ids\":[],\"recommended\":false},{\"memory_mode\":\"original\",\"id\":\"silent_vote\",\"label\":\"静默举手表决\",\"description\":\"仅用于决策，无法获取具体观点。\",\"memory_ids\":[],\"recommended\":false}]},\"sibling_question_goals\":[]}"
+                  }
+                ],
+                "stages": [
+                  {
+                    "stage": "memory_query",
+                    "duration_ms": 0,
+                    "count": 1,
+                    "error_type": "none"
+                  },
+                  {
+                    "stage": "memory_query",
+                    "duration_ms": 0,
+                    "count": 1,
+                    "error_type": "none"
+                  },
+                  {
+                    "stage": "memory_retrieval",
+                    "duration_ms": 0,
+                    "count": 1,
+                    "error_type": "none"
+                  },
+                  {
+                    "stage": "question_generation",
+                    "duration_ms": 8942,
+                    "count": 1,
+                    "error_type": "none"
+                  }
+                ],
+                "queue_wait_ms": 11,
+                "result": {
+                  "status": "question",
+                  "readiness_reason": "已确认交流形式，需具体方案解决新朋友开口难的问题\n本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。",
+                  "open_flags": [
+                    "如何在新朋友沉默时引导发言"
+                  ],
+                  "continuation_directions": [],
+                  "question": {
+                    "id": "q_c507e748dce4",
+                    "dimension_id": "expression_method",
+                    "exploration_stage": "solutions",
+                    "dimension": "让新朋友愿意表达的具体方法",
+                    "type": "multi_choice",
+                    "single_choice_reason": "",
+                    "prompt": "面对新朋友沉默，采用什么引导方式？",
+                    "why_now": "需比较不同引导机制对新人开口意愿的影响",
+                    "required": true,
+                    "allow_custom": true,
+                    "options": [
+                      {
+                        "id": "low_stakes",
+                        "label": "匿名纸条发言",
+                        "description": "利用纸笔匿名，降低开口压力，适合新人。",
+                        "recommended": true,
+                        "details": "记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+                      },
+                      {
+                        "id": "pair_share",
+                        "label": "两人结对讨论",
+                        "description": "先与熟人搭档，建立安全感后再发言。",
+                        "recommended": false,
+                        "details": "记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+                      },
+                      {
+                        "id": "role_play",
+                        "label": "角色代入发言",
+                        "description": "预设特定身份，减少自我暴露焦虑。",
+                        "recommended": false,
+                        "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                      },
+                      {
+                        "id": "silent_vote",
+                        "label": "静默举手表决",
+                        "description": "仅用于决策，无法获取具体观点。",
+                        "recommended": false,
+                        "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                      }
+                    ],
+                    "answer_template": "可结合场地限制提出新做法",
+                    "context_details": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                  },
+                  "sibling_question_goals": [],
+                  "memory_brief": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。\n记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+                },
+                "passed": true,
+                "input_unchanged": true,
+                "sibling_goal_count": 0,
+                "option_count": 4,
+                "query_count": 2,
+                "memory_modes": [
+                  "reference",
+                  "reference",
+                  "original",
+                  "original"
+                ],
+                "total_ms": 8955,
+                "raw_sibling_goal_count": 0,
+                "accepted_sibling_goal_count": 0,
+                "filtered_out_goals": [],
+                "filter_reason": "No filtering; model itself returned an empty goal array."
+              }
+            ],
+            "previous_evaluation": {
+              "timestamp_utc": "2026-09-10T04:56:40.122048+00:00",
+              "model": "qwen3.5:4b",
+              "scope": "Synthetic prompts and reference records only; no user session or personal retrieval access.",
+              "transport": "Production CreationService local model stream via global P0 creation queue and shared cross-process slots.",
+              "limits": {
+                "question_batch_limit": 3,
+                "turn_seconds": 150,
+                "model_slots_override": false
+              },
+              "validation_definition": "Run passed means structured coordinator validation succeeded; semantic review is recorded separately.",
+              "runs": [
+                {
+                  "name": "broad_branch_with_optional_synthetic_memory",
+                  "request": {
+                    "root_request": "为社区新朋友设计一场轻松的读书交流活动，希望大家愿意表达并听见不同看法。当前只确认采用小组交流，具体破冰、分享方法和材料安排尚未决定。这是独立合成验收场景。",
+                    "decisions": [
+                      {
+                        "question_id": "synthetic-root",
+                        "dimension_id": "format",
+                        "question": "以什么形式开展交流？",
+                        "answer": "小组交流",
+                        "answer_source": "user",
+                        "selected_option_ids": [
+                          "small_group"
+                        ]
+                      }
+                    ],
+                    "brief_markdown": "已确认：采用小组交流。其他活动方式尚未决定。",
+                    "exploration_stage": "solutions",
+                    "focus_hint": "已选择小组交流，探索让新朋友愿意表达的可行方法。",
+                    "focus_hint_source": "confirmed_selection",
+                    "question_batch_limit": 3
+                  },
+                  "model_calls": [
+                    {
+                      "started_utc": "2026-09-10T04:56:40.234637+00:00",
+                      "generation_ms": 15752,
+                      "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体破冰方案促进新人开口\",\"open_flags\":[\"破冰方法\",\"分享规则\",\"材料准备\",\"场地限制\",\"成功标准\"],\"sibling_question_goals\":[\"破冰方法\",\"分享规则\"],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"interaction_design\",\"dimension\":\"破冰与表达促进\",\"type\":\"multi_choice\",\"prompt\":\"小组交流中如何破冰让新人开口？\",\"why_now\":\"需具体方案而非抽象问题，且受场地限制\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"可结合场地限制调整\",\"options\":[{\"id\":\"icebreaker_cards\",\"label\":\"分发引导卡片\",\"description\":\"提供预设话题卡降低开口门槛，收益是降低社交压力，代价是需额外准备材料。\",\"memory_ids\":[\"m1\"],\"recommended\":true,\"memory_mode\":\"reference\"},{\"id\":\"silent_round\",\"label\":\"静默轮流发言\",\"description\":\"每人限时发言避免冷场，收益是保证每人被听见，代价是节奏较机械。\",\"memory_ids\":[],\"recommended\":false,\"memory_mode\":\"original\"},{\"id\":\"pair_share\",\"label\":\"先两人再小组\",\"description\":\"先结对分享再汇整，收益是降低公开焦虑，代价是需额外组织时间。\",\"memory_ids\":[\"m1\"],\"recommended\":false,\"memory_mode\":\"reference\"}]}}"
+                    }
+                  ],
+                  "stages": [
+                    {
+                      "stage": "memory_query",
+                      "duration_ms": 0,
+                      "count": 1,
+                      "error_type": "none"
+                    },
+                    {
+                      "stage": "memory_query",
+                      "duration_ms": 0,
+                      "count": 1,
+                      "error_type": "none"
+                    },
+                    {
+                      "stage": "memory_retrieval",
+                      "duration_ms": 0,
+                      "count": 1,
+                      "error_type": "none"
+                    },
+                    {
+                      "stage": "question_generation",
+                      "duration_ms": 15753,
+                      "count": 1,
+                      "error_type": "none"
+                    }
+                  ],
+                  "queue_wait_ms": 109,
+                  "result": {
+                    "status": "question",
+                    "readiness_reason": "已确认小组交流形式，需具体破冰方案促进新人开口\n本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。",
+                    "open_flags": [
+                      "破冰方法",
+                      "分享规则",
+                      "材料准备",
+                      "场地限制",
+                      "成功标准"
+                    ],
+                    "continuation_directions": [],
+                    "question": {
+                      "id": "q_91e43bed2fcc",
+                      "dimension_id": "interaction_design",
+                      "exploration_stage": "solutions",
+                      "dimension": "破冰与表达促进",
+                      "type": "multi_choice",
+                      "single_choice_reason": "",
+                      "prompt": "小组交流中如何破冰让新人开口？",
+                      "why_now": "需具体方案而非抽象问题，且受场地限制",
+                      "required": true,
+                      "allow_custom": true,
+                      "options": [
+                        {
+                          "id": "icebreaker_cards",
+                          "label": "分发引导卡片",
+                          "description": "提供预设话题卡降低开口门槛，收益是降低社交压力，代价是需额外准备材料。",
+                          "recommended": true,
+                          "details": "记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+                        },
+                        {
+                          "id": "silent_round",
+                          "label": "静默轮流发言",
+                          "description": "每人限时发言避免冷场，收益是保证每人被听见，代价是节奏较机械。",
+                          "recommended": false,
+                          "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                        },
+                        {
+                          "id": "pair_share",
+                          "label": "先两人再小组",
+                          "description": "先结对分享再汇整，收益是降低公开焦虑，代价是需额外组织时间。",
+                          "recommended": false,
+                          "details": "记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+                        }
+                      ],
+                      "answer_template": "可结合场地限制调整",
+                      "context_details": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                    },
+                    "sibling_question_goals": [
+                      "破冰方法",
+                      "分享规则"
+                    ],
+                    "memory_brief": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。\n记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+                  },
+                  "passed": true,
+                  "input_unchanged": true,
+                  "sibling_goal_count": 2,
+                  "option_count": 3,
+                  "query_count": 2,
+                  "memory_modes": [
+                    "reference",
+                    "original",
+                    "reference"
+                  ],
+                  "total_ms": 15866,
+                  "raw_sibling_goal_count": 2,
+                  "accepted_sibling_goal_count": 2,
+                  "filtered_out_goals": [],
+                  "filter_reason": "No goals removed."
+                },
+                {
+                  "name": "independent_extension_1",
+                  "request": {
+                    "root_request": "为社区新朋友设计一场轻松的读书交流活动，希望大家愿意表达并听见不同看法。当前只确认采用小组交流，具体破冰、分享方法和材料安排尚未决定。这是独立合成验收场景。",
+                    "decisions": [
+                      {
+                        "question_id": "synthetic-root",
+                        "dimension_id": "format",
+                        "question": "以什么形式开展交流？",
+                        "answer": "小组交流",
+                        "answer_source": "user",
+                        "selected_option_ids": [
+                          "small_group"
+                        ]
+                      }
+                    ],
+                    "brief_markdown": "已确认：采用小组交流。其他活动方式尚未决定。",
+                    "exploration_stage": "solutions",
+                    "focus_hint": "已选择小组交流，探索让新朋友愿意表达的可行方法。",
+                    "focus_hint_source": "confirmed_selection",
+                    "question_batch_limit": 3,
+                    "extension_goal": "破冰方法",
+                    "sibling_question_context": [
+                      "小组交流中如何破冰让新人开口？",
+                      "分享规则"
+                    ]
+                  },
+                  "model_calls": [
+                    {
+                      "started_utc": "2026-09-10T04:56:55.995808+00:00",
+                      "generation_ms": 8011,
+                      "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体破冰方案以解决新人不敢开口的问题\",\"open_flags\":[\"破冰方法的具体机制与收益\",\"破冰方法的实施成本与场地限制\"],\"sibling_question_goals\":[],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"破冰方法\",\"dimension\":\"小组交流中的破冰策略\",\"type\":\"multi_choice\",\"prompt\":\"小组交流中，如何设计破冰让新人愿意开口？\",\"why_now\":\"需从自由发言失败经验中，提供具体破冰机制而非继续诊断\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"选择最符合当前场地条件的方案\",\"options\":[{\"id\":\"recommended_option\",\"label\":\"围坐圆桌配纸笔\",\"description\":\"利用现有纸笔资源，降低发言门槛，促进平等交流。\",\"memory_ids\":[\"m1\"],\"recommended\":true,\"memory_mode\":\"reference\"},{\"id\":\"alternative_option\",\"label\":\"轮流发言制\",\"description\":\"通过固定顺序避免冷场，但可能抑制自发互动。\",\"memory_ids\":[],\"recommended\":false,\"memory_mode\":\"original\"},{\"id\":\"alternative_option\",\"label\":\"匿名纸条收集\",\"description\":\"保护新人隐私，但可能削弱面对面互动的真实感。\",\"memory_ids\":[],\"recommended\":false,\"memory_mode\":\"original\"}]}}"
+                    }
+                  ],
+                  "stages": [
+                    {
+                      "stage": "memory_query",
+                      "duration_ms": 0,
+                      "count": 1,
+                      "error_type": "none"
+                    },
+                    {
+                      "stage": "memory_query",
+                      "duration_ms": 0,
+                      "count": 1,
+                      "error_type": "none"
+                    },
+                    {
+                      "stage": "memory_retrieval",
+                      "duration_ms": 0,
+                      "count": 1,
+                      "error_type": "none"
+                    },
+                    {
+                      "stage": "question_generation",
+                      "duration_ms": 8012,
+                      "count": 1,
+                      "error_type": "none"
+                    }
+                  ],
+                  "queue_wait_ms": 5,
+                  "result": {
+                    "status": "question",
+                    "readiness_reason": "已确认小组交流形式，需具体破冰方案以解决新人不敢开口的问题\n本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。",
+                    "open_flags": [
+                      "破冰方法的具体机制与收益",
+                      "破冰方法的实施成本与场地限制"
+                    ],
+                    "continuation_directions": [],
+                    "question": {
+                      "id": "q_09ee8bdec94c",
+                      "dimension_id": "dynamic_dimension",
+                      "exploration_stage": "solutions",
+                      "dimension": "小组交流中的破冰策略",
+                      "type": "multi_choice",
+                      "single_choice_reason": "",
+                      "prompt": "小组交流中，如何设计破冰让新人愿意开口？",
+                      "why_now": "需从自由发言失败经验中，提供具体破冰机制而非继续诊断",
+                      "required": true,
+                      "allow_custom": true,
+                      "options": [
+                        {
+                          "id": "recommended_option",
+                          "label": "围坐圆桌配纸笔",
+                          "description": "利用现有纸笔资源，降低发言门槛，促进平等交流。",
+                          "recommended": true,
+                          "details": "记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+                        },
+                        {
+                          "id": "alternative_option",
+                          "label": "轮流发言制",
+                          "description": "通过固定顺序避免冷场，但可能抑制自发互动。",
+                          "recommended": false,
+                          "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                        },
+                        {
+                          "id": "option_3",
+                          "label": "匿名纸条收集",
+                          "description": "保护新人隐私，但可能削弱面对面互动的真实感。",
+                          "recommended": false,
+                          "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                        }
+                      ],
+                      "answer_template": "选择最符合当前场地条件的方案",
+                      "context_details": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                    },
+                    "sibling_question_goals": [],
+                    "memory_brief": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。\n记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+                  },
+                  "passed": true,
+                  "input_unchanged": true,
+                  "sibling_goal_count": 0,
+                  "option_count": 3,
+                  "query_count": 2,
+                  "memory_modes": [
+                    "reference",
+                    "original",
+                    "original"
+                  ],
+                  "total_ms": 8018,
+                  "raw_sibling_goal_count": 0,
+                  "accepted_sibling_goal_count": 0,
+                  "filtered_out_goals": [],
+                  "filter_reason": "No filtering; model itself returned an empty goal array."
+                },
+                {
+                  "name": "independent_extension_2",
+                  "request": {
+                    "root_request": "为社区新朋友设计一场轻松的读书交流活动，希望大家愿意表达并听见不同看法。当前只确认采用小组交流，具体破冰、分享方法和材料安排尚未决定。这是独立合成验收场景。",
+                    "decisions": [
+                      {
+                        "question_id": "synthetic-root",
+                        "dimension_id": "format",
+                        "question": "以什么形式开展交流？",
+                        "answer": "小组交流",
+                        "answer_source": "user",
+                        "selected_option_ids": [
+                          "small_group"
+                        ]
+                      }
+                    ],
+                    "brief_markdown": "已确认：采用小组交流。其他活动方式尚未决定。",
+                    "exploration_stage": "solutions",
+                    "focus_hint": "已选择小组交流，探索让新朋友愿意表达的可行方法。",
+                    "focus_hint_source": "confirmed_selection",
+                    "question_batch_limit": 3,
+                    "extension_goal": "分享规则",
+                    "sibling_question_context": [
+                      "小组交流中如何破冰让新人开口？",
+                      "破冰方法"
+                    ]
+                  },
+                  "model_calls": [
+                    {
+                      "started_utc": "2026-09-10T04:57:04.011039+00:00",
+                      "generation_ms": 8375,
+                      "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体破冰方案来落实新人开口目标\",\"open_flags\":[\"破冰方法的具体机制\",\"破冰方案的收益与代价\"],\"sibling_question_goals\":[],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"破冰方法\",\"dimension\":\"小组交流中的破冰方法\",\"type\":\"multi_choice\",\"prompt\":\"小组交流中，如何设计破冰让新人愿意开口？\",\"why_now\":\"需从自由发言失败经验中，提供具体破冰机制而非继续诊断\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"可结合场地限制（无投影音响）调整方案\",\"options\":[{\"id\":\"recommended_option\",\"label\":\"随机搭档发言\",\"description\":\"强制配对打破沉默，利用纸笔记录降低表达压力。\",\"memory_ids\":[\"m1\"],\"recommended\":true,\"memory_mode\":\"reference\"},{\"id\":\"alternative_option\",\"label\":\"主题卡片引导\",\"description\":\"提供预设话题卡片，降低即兴发言难度，适合无投影环境。\",\"memory_ids\":[],\"recommended\":false,\"memory_mode\":\"original\"},{\"id\":\"alternative_option_2\",\"label\":\"轮流发言制\",\"description\":\"按顺序发言避免抢话，但可能抑制自发互动意愿。\",\"memory_ids\":[],\"recommended\":false,\"memory_mode\":\"original\"}]}}"
+                    },
+                    {
+                      "started_utc": "2026-09-10T04:57:12.386582+00:00",
+                      "generation_ms": 8957,
+                      "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体破冰方案以解决新人沉默问题\",\"open_flags\":[\"破冰方法的具体机制\",\"破冰方案的适用代价\"],\"sibling_question_goals\":[],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"破冰方法\",\"dimension\":\"小组交流中的破冰策略\",\"type\":\"multi_choice\",\"prompt\":\"小组交流中，如何设计破冰让新人愿意开口？\",\"why_now\":\"需从自由发言失败经验中，提供具体可执行的破冰机制\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"自定义答案提示\",\"options\":[{\"id\":\"recommended_option\",\"label\":\"随机搭档发言\",\"description\":\"强制配对打破沉默，利用纸笔记录降低表达压力。\",\"memory_ids\":[\"m1\"],\"recommended\":true,\"memory_mode\":\"reference\"},{\"id\":\"alternative_option_1\",\"label\":\"主题卡片引导\",\"description\":\"提供预设话题卡片，降低即兴发言难度，适合无投影环境。\",\"memory_ids\":[\"m1\"],\"recommended\":false,\"memory_mode\":\"reference\"},{\"id\":\"alternative_option_2\",\"label\":\"轮流发言制\",\"description\":\"按顺序发言避免抢话，但可能抑制自发互动意愿。\",\"memory_ids\":[],\"recommended\":false,\"memory_mode\":\"original\"}]}}"
+                    }
+                  ],
+                  "stages": [
+                    {
+                      "stage": "memory_query",
+                      "duration_ms": 0,
+                      "count": 1,
+                      "error_type": "none"
+                    },
+                    {
+                      "stage": "memory_query",
+                      "duration_ms": 0,
+                      "count": 1,
+                      "error_type": "none"
+                    },
+                    {
+                      "stage": "memory_retrieval",
+                      "duration_ms": 0,
+                      "count": 1,
+                      "error_type": "none"
+                    },
+                    {
+                      "stage": "question_generation",
+                      "duration_ms": 8376,
+                      "count": 1,
+                      "error_type": "BrainstormGenerationError"
+                    },
+                    {
+                      "stage": "question_generation",
+                      "duration_ms": 8957,
+                      "count": 2,
+                      "error_type": "none"
+                    }
+                  ],
+                  "queue_wait_ms": 8019,
+                  "result": {
+                    "status": "question",
+                    "readiness_reason": "已确认小组交流形式，需具体破冰方案以解决新人沉默问题\n本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。",
+                    "open_flags": [
+                      "破冰方法的具体机制",
+                      "破冰方案的适用代价"
+                    ],
+                    "continuation_directions": [],
+                    "question": {
+                      "id": "q_9e1c0d77569d",
+                      "dimension_id": "dynamic_dimension",
+                      "exploration_stage": "solutions",
+                      "dimension": "小组交流中的破冰策略",
+                      "type": "multi_choice",
+                      "single_choice_reason": "",
+                      "prompt": "小组交流中，如何设计破冰让新人愿意开口？",
+                      "why_now": "需从自由发言失败经验中，提供具体可执行的破冰机制",
+                      "required": true,
+                      "allow_custom": true,
+                      "options": [
+                        {
+                          "id": "recommended_option",
+                          "label": "随机搭档发言",
+                          "description": "强制配对打破沉默，利用纸笔记录降低表达压力。",
+                          "recommended": true,
+                          "details": "记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+                        },
+                        {
+                          "id": "alternative_option_1",
+                          "label": "主题卡片引导",
+                          "description": "提供预设话题卡片，降低即兴发言难度，适合无投影环境。",
+                          "recommended": false,
+                          "details": "记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+                        },
+                        {
+                          "id": "alternative_option_2",
+                          "label": "轮流发言制",
+                          "description": "按顺序发言避免抢话，但可能抑制自发互动意愿。",
+                          "recommended": false,
+                          "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                        }
+                      ],
+                      "answer_template": "自定义答案提示",
+                      "context_details": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                    },
+                    "sibling_question_goals": [],
+                    "memory_brief": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。\n记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+                  },
+                  "passed": true,
+                  "input_unchanged": true,
+                  "sibling_goal_count": 0,
+                  "option_count": 3,
+                  "query_count": 2,
+                  "memory_modes": [
+                    "reference",
+                    "reference",
+                    "original"
+                  ],
+                  "total_ms": 25355,
+                  "raw_sibling_goal_count": 0,
+                  "accepted_sibling_goal_count": 0,
+                  "filtered_out_goals": [],
+                  "filter_reason": "No filtering; model itself returned an empty goal array."
+                },
+                {
+                  "name": "narrow_original_only_branch",
+                  "request": {
+                    "root_request": "为社区读书活动构思一种简短的开场破冰方法，已确认只让每人分享书中一句话。本次只比较分享这句话的呈现方法，不扩展主持、材料、分组或效果验证。只用当前输入，不检索历史记忆。这是独立合成验收场景。",
+                    "decisions": [
+                      {
+                        "question_id": "synthetic-root",
+                        "dimension_id": "format",
+                        "question": "以什么形式开展交流？",
+                        "answer": "每人分享书中一句话",
+                        "answer_source": "user",
+                        "selected_option_ids": [
+                          "quote"
+                        ]
+                      }
+                    ],
+                    "brief_markdown": "已确认每人分享书中一句话，其他活动设计本次不讨论。",
+                    "exploration_stage": "solutions",
+                    "focus_hint": "已选择每人分享书中一句话，只比较这句话的呈现方法。",
+                    "focus_hint_source": "confirmed_selection",
+                    "question_batch_limit": 3
+                  },
+                  "model_calls": [
+                    {
+                      "started_utc": "2026-09-10T04:57:22.165974+00:00",
+                      "generation_ms": 13039,
+                      "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认分享一句话，需比较不同呈现机制对破冰效果的具体影响\",\"open_flags\":[\"如何呈现这句话能最大化参与感\"],\"sibling_question_goals\":[],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"solution_architecture\",\"dimension\":\"呈现方式与互动机制\",\"type\":\"multi_choice\",\"prompt\":\"如何呈现这句话能最大化参与感？\",\"why_now\":\"需比较不同呈现方式对破冰效果的差异\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"可自定义其他呈现形式\",\"options\":[{\"id\":\"visual_prompt\",\"label\":\"视觉卡片引导\",\"description\":\"配合投影或实体卡片，降低记忆负担，提升专注度。\",\"memory_ids\":[],\"recommended\":true,\"memory_mode\":\"original\"},{\"id\":\"verbal_challenge\",\"label\":\"口头挑战模式\",\"description\":\"要求大声朗读或即兴接龙，增加互动张力，但可能引发紧张。\",\"memory_ids\":[],\"recommended\":false,\"memory_mode\":\"original\"},{\"id\":\"silent_write\",\"label\":\"静默书写后读\",\"description\":\"先独立书写再分享，减少社交压力，但耗时较长。\",\"memory_ids\":[],\"recommended\":false,\"memory_mode\":\"original\"}]}}"
+                    }
+                  ],
+                  "stages": [
+                    {
+                      "stage": "memory_retrieval",
+                      "duration_ms": 0,
+                      "count": 0,
+                      "error_type": "none"
+                    },
+                    {
+                      "stage": "question_generation",
+                      "duration_ms": 13040,
+                      "count": 1,
+                      "error_type": "none"
+                    }
+                  ],
+                  "queue_wait_ms": 442,
+                  "result": {
+                    "status": "question",
+                    "readiness_reason": "已确认分享一句话，需比较不同呈现机制对破冰效果的具体影响\n本轮按你的资料范围要求未检索历史记忆，仅依据当前输入展开。",
+                    "open_flags": [
+                      "如何呈现这句话能最大化参与感"
+                    ],
+                    "continuation_directions": [],
+                    "question": {
+                      "id": "q_432c295d234d",
+                      "dimension_id": "solution_architecture",
+                      "exploration_stage": "solutions",
+                      "dimension": "呈现方式与互动机制",
+                      "type": "multi_choice",
+                      "single_choice_reason": "",
+                      "prompt": "如何呈现这句话能最大化参与感？",
+                      "why_now": "需比较不同呈现方式对破冰效果的差异",
+                      "required": true,
+                      "allow_custom": true,
+                      "options": [
+                        {
+                          "id": "visual_prompt",
+                          "label": "视觉卡片引导",
+                          "description": "配合投影或实体卡片，降低记忆负担，提升专注度。",
+                          "recommended": true,
+                          "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                        },
+                        {
+                          "id": "verbal_challenge",
+                          "label": "口头挑战模式",
+                          "description": "要求大声朗读或即兴接龙，增加互动张力，但可能引发紧张。",
+                          "recommended": false,
+                          "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                        },
+                        {
+                          "id": "silent_write",
+                          "label": "静默书写后读",
+                          "description": "先独立书写再分享，减少社交压力，但耗时较长。",
+                          "recommended": false,
+                          "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                        }
+                      ],
+                      "answer_template": "可自定义其他呈现形式",
+                      "context_details": "本轮按你的资料范围要求未检索历史记忆，仅依据当前输入展开。"
+                    },
+                    "sibling_question_goals": [],
+                    "memory_brief": "本轮按你的资料范围要求未检索历史记忆，仅依据当前输入展开。"
+                  },
+                  "passed": true,
+                  "input_unchanged": true,
+                  "sibling_goal_count": 0,
+                  "option_count": 3,
+                  "query_count": 0,
+                  "memory_modes": [
+                    "original",
+                    "original",
+                    "original"
+                  ],
+                  "total_ms": 13484,
+                  "raw_sibling_goal_count": 0,
+                  "accepted_sibling_goal_count": 0,
+                  "filtered_out_goals": [],
+                  "filter_reason": "No filtering; model itself returned an empty goal array."
+                },
+                {
+                  "name": "reference_applicable_branch",
+                  "request": {
+                    "root_request": "沿用合成读书活动记录中的场地和材料条件，为小组交流设计具体呈现方法。需要比较能在既有条件下开展的方式，也欢迎有适用前提的新思路。这是独立合成验收场景。",
+                    "decisions": [
+                      {
+                        "question_id": "synthetic-root",
+                        "dimension_id": "format",
+                        "question": "以什么形式开展交流？",
+                        "answer": "小组交流",
+                        "answer_source": "user",
+                        "selected_option_ids": [
+                          "small_group"
+                        ]
+                      }
+                    ],
+                    "brief_markdown": "已确认：采用小组交流。其他活动方式尚未决定。",
+                    "exploration_stage": "solutions",
+                    "focus_hint": "已选择小组交流，探索让新朋友愿意表达的可行方法。",
+                    "focus_hint_source": "confirmed_selection",
+                    "question_batch_limit": 3
+                  },
+                  "model_calls": [
+                    {
+                      "started_utc": "2026-09-10T04:57:35.217514+00:00",
+                      "generation_ms": 9300,
+                      "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已选定小组交流，需对比不同引导策略对新人开口意愿的实际影响\",\"open_flags\":[\"哪种引导方式能显著提升新人发言率\"],\"sibling_question_goals\":[],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"expression_method\",\"dimension\":\"新人开口引导策略\",\"type\":\"multi_choice\",\"prompt\":\"在现有场地条件下，哪种引导方式最能激发新人发言？\",\"why_now\":\"需对比具体策略对新人心理门槛的影响\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"若有特殊限制可自定义\",\"options\":[{\"id\":\"structured_turntaking\",\"label\":\"轮流发言制\",\"description\":\"按顺序发言减少等待焦虑，但可能抑制即兴互动。\",\"memory_ids\":[],\"recommended\":true,\"memory_mode\":\"original\"},{\"id\":\"guided_discussion\",\"label\":\"主题引导讨论\",\"description\":\"预设话题降低开口难度，但依赖主持人控场能力。\",\"memory_ids\":[],\"recommended\":false,\"memory_mode\":\"original\"},{\"id\":\"anonymous_input\",\"label\":\"匿名纸条收集\",\"description\":\"匿名提交消除顾虑，适合内向者，但缺乏即时反馈。\",\"memory_ids\":[],\"recommended\":false,\"memory_mode\":\"original\"},{\"id\":\"pair_share\",\"label\":\"两人小组分享\",\"description\":\"先结对交流再上台，降低公开压力，但需额外组织时间。\",\"memory_ids\":[],\"recommended\":false,\"memory_mode\":\"original\"}]}}"
+                    }
+                  ],
+                  "stages": [
+                    {
+                      "stage": "memory_query",
+                      "duration_ms": 0,
+                      "count": 1,
+                      "error_type": "none"
+                    },
+                    {
+                      "stage": "memory_query",
+                      "duration_ms": 0,
+                      "count": 1,
+                      "error_type": "none"
+                    },
+                    {
+                      "stage": "memory_retrieval",
+                      "duration_ms": 0,
+                      "count": 1,
+                      "error_type": "none"
+                    },
+                    {
+                      "stage": "question_generation",
+                      "duration_ms": 9300,
+                      "count": 1,
+                      "error_type": "none"
+                    }
+                  ],
+                  "queue_wait_ms": 8,
+                  "result": {
+                    "status": "question",
+                    "readiness_reason": "已选定小组交流，需对比不同引导策略对新人开口意愿的实际影响\n本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。",
+                    "open_flags": [
+                      "哪种引导方式能显著提升新人发言率"
+                    ],
+                    "continuation_directions": [],
+                    "question": {
+                      "id": "q_f5e93a069af6",
+                      "dimension_id": "expression_method",
+                      "exploration_stage": "solutions",
+                      "dimension": "新人开口引导策略",
+                      "type": "multi_choice",
+                      "single_choice_reason": "",
+                      "prompt": "在现有场地条件下，哪种引导方式最能激发新人发言？",
+                      "why_now": "需对比具体策略对新人心理门槛的影响",
+                      "required": true,
+                      "allow_custom": true,
+                      "options": [
+                        {
+                          "id": "structured_turntaking",
+                          "label": "轮流发言制",
+                          "description": "按顺序发言减少等待焦虑，但可能抑制即兴互动。",
+                          "recommended": true,
+                          "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                        },
+                        {
+                          "id": "guided_discussion",
+                          "label": "主题引导讨论",
+                          "description": "预设话题降低开口难度，但依赖主持人控场能力。",
+                          "recommended": false,
+                          "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                        },
+                        {
+                          "id": "anonymous_input",
+                          "label": "匿名纸条收集",
+                          "description": "匿名提交消除顾虑，适合内向者，但缺乏即时反馈。",
+                          "recommended": false,
+                          "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                        },
+                        {
+                          "id": "pair_share",
+                          "label": "两人小组分享",
+                          "description": "先结对交流再上台，降低公开压力，但需额外组织时间。",
+                          "recommended": false,
+                          "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                        }
+                      ],
+                      "answer_template": "若有特殊限制可自定义",
+                      "context_details": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                    },
+                    "sibling_question_goals": [],
+                    "memory_brief": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                  },
+                  "passed": true,
+                  "input_unchanged": true,
+                  "sibling_goal_count": 0,
+                  "option_count": 4,
+                  "query_count": 2,
+                  "memory_modes": [
+                    "original",
+                    "original",
+                    "original",
+                    "original"
+                  ],
+                  "total_ms": 9310,
+                  "raw_sibling_goal_count": 0,
+                  "accepted_sibling_goal_count": 0,
+                  "filtered_out_goals": [],
+                  "filter_reason": "No filtering; model itself returned an empty goal array."
+                },
+                {
+                  "name": "preserve_proven_synthetic_methods",
+                  "model_calls": [
+                    {
+                      "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认保留核心体验，需对比新旧方法的具体执行机制与时长影响\",\"open_flags\":[\"新方法的预计耗时是否显著低于旧方法\",\"新方法能否在不牺牲体验的前提下实现时长缩短\"],\"sibling_question_goals\":[],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"solution_architecture\",\"dimension\":\"活动流程优化方案\",\"type\":\"multi_choice\",\"prompt\":\"针对缩短时长的目标，推荐哪种具体执行方案？\",\"why_now\":\"需对比不同方案对时长的实际影响及体验保留程度\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"可自定义其他缩短时长的创意\",\"options\":[{\"id\":\"opt1\",\"label\":\"保留匿名交换，简化流程\",\"description\":\"移除抢答环节，仅保留书签交换与简短讨论，预计缩短30%时长。\",\"memory_ids\":[\"m1\"],\"recommended\":true,\"memory_mode\":\"reference\"},{\"id\":\"opt2\",\"label\":\"引入数字工具辅助交换\",\"description\":\"使用在线平台自动匹配书签，减少人工组织时间，但需确认用户设备兼容性。\",\"memory_ids\":[],\"recommended\":false,\"memory_mode\":\"original\"},{\"id\":\"opt3\",\"label\":\"保留接力续写，压缩互动深度\",\"description\":\"维持接力续写形式但限制字数与讨论轮次，牺牲部分深度以换取速度。\",\"memory_ids\":[\"m1\"],\"recommended\":false,\"memory_mode\":\"reference\"}]}}",
+                      "generation_ms": 8367
+                    }
+                  ],
+                  "request": {
+                    "root_request": "根据合成活动试行记录讨论下次读书活动：保留已经决定继续采用的方法，同时比较尚待决定的旧方法与新替代方法。不要把待定事项当成已经采用。这是独立合成验收场景。",
+                    "decisions": [
+                      {
+                        "question_id": "synthetic-root",
+                        "question": "下一次活动主要改善什么？",
+                        "answer": "保留有效体验并缩短活动时长",
+                        "answer_source": "user"
+                      }
+                    ],
+                    "brief_markdown": "已确认：保留有效体验并缩短活动时长。",
+                    "exploration_stage": "solutions",
+                    "focus_hint": "保留有效体验并缩短活动时长，比较具体活动方法。",
+                    "focus_hint_source": "confirmed_selection",
+                    "question_batch_limit": 1
+                  },
+                  "queue_wait_ms": 3,
+                  "result": {
+                    "status": "question",
+                    "readiness_reason": "已确认保留核心体验，需对比新旧方法的具体执行机制与时长影响\n本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。",
+                    "open_flags": [
+                      "新方法的预计耗时是否显著低于旧方法",
+                      "新方法能否在不牺牲体验的前提下实现时长缩短"
+                    ],
+                    "continuation_directions": [],
+                    "question": {
+                      "id": "q_e28723c622db",
+                      "dimension_id": "solution_architecture",
+                      "exploration_stage": "solutions",
+                      "dimension": "活动流程优化方案",
+                      "type": "multi_choice",
+                      "single_choice_reason": "",
+                      "prompt": "针对缩短时长的目标，推荐哪种具体执行方案？",
+                      "why_now": "需对比不同方案对时长的实际影响及体验保留程度",
+                      "required": true,
+                      "allow_custom": true,
+                      "options": [
+                        {
+                          "id": "opt1",
+                          "label": "保留匿名交换，简化流程",
+                          "description": "移除抢答环节，仅保留书签交换与简短讨论，预计缩短30%时长。",
+                          "recommended": true,
+                          "details": "记忆依据：《合成活动试行记录》 · 2026-09-10 · document:1「合成活动试行记录：上次已经试过“匿名书签交换”，参与者在书签写一句推荐语，匿名交换后讨论。主持团队决定保留“匿名书签交换”，但放弃抢答积分。另一项试过的“接力续写结尾”耗时较长，是否保留尚未决定。这些都是人工编写的测试资料。」"
+                        },
+                        {
+                          "id": "opt2",
+                          "label": "引入数字工具辅助交换",
+                          "description": "使用在线平台自动匹配书签，减少人工组织时间，但需确认用户设备兼容性。",
+                          "recommended": false,
+                          "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+                        },
+                        {
+                          "id": "opt3",
+                          "label": "保留接力续写，压缩互动深度",
+                          "description": "维持接力续写形式但限制字数与讨论轮次，牺牲部分深度以换取速度。",
+                          "recommended": false,
+                          "details": "记忆依据：《合成活动试行记录》 · 2026-09-10 · document:1「合成活动试行记录：上次已经试过“匿名书签交换”，参与者在书签写一句推荐语，匿名交换后讨论。主持团队决定保留“匿名书签交换”，但放弃抢答积分。另一项试过的“接力续写结尾”耗时较长，是否保留尚未决定。这些都是人工编写的测试资料。」"
+                        }
+                      ],
+                      "answer_template": "可自定义其他缩短时长的创意",
+                      "context_details": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                    },
+                    "sibling_question_goals": [],
+                    "memory_brief": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。\n记忆依据：《合成活动试行记录》 · 2026-09-10 · document:1「合成活动试行记录：上次已经试过“匿名书签交换”，参与者在书签写一句推荐语，匿名交换后讨论。主持团队决定保留“匿名书签交换”，但放弃抢答积分。另一项试过的“接力续写结尾”耗时较长，是否保留尚未决定。这些都是人工编写的测试资料。」"
+                  },
+                  "passed": true,
+                  "used_reference_count": 2,
+                  "total_ms": 8375,
+                  "raw_sibling_goal_count": 0,
+                  "accepted_sibling_goal_count": 0,
+                  "filtered_out_goals": [],
+                  "filter_reason": "No filtering; model itself returned an empty goal array."
+                }
+              ],
+              "previous_evaluation": {
+                "timestamp_utc": "2026-09-10T04:50:39.180938+00:00",
+                "model": "qwen3.5:4b",
+                "scope": "Synthetic prompts and reference records only; no user session or personal retrieval access.",
+                "transport": "Production CreationService local model stream via global P0 creation queue and shared cross-process slots.",
+                "limits": {
+                  "question_batch_limit": 3,
+                  "turn_seconds": 150,
+                  "model_slots_override": false
+                },
+                "runs": [
+                  {
+                    "name": "broad_branch_with_optional_synthetic_memory",
+                    "request": {
+                      "root_request": "为社区新朋友设计一场轻松的读书交流活动，希望大家愿意表达并听见不同看法。当前只确认采用小组交流，具体破冰、分享方法和材料安排尚未决定。这是独立合成验收场景。",
+                      "decisions": [
+                        {
+                          "question_id": "synthetic-root",
+                          "dimension_id": "format",
+                          "question": "以什么形式开展交流？",
+                          "answer": "小组交流",
+                          "answer_source": "user",
+                          "selected_option_ids": [
+                            "small_group"
+                          ]
+                        }
+                      ],
+                      "brief_markdown": "已确认：采用小组交流。其他活动方式尚未决定。",
+                      "exploration_stage": "solutions",
+                      "focus_hint": "已选择小组交流，探索让新朋友愿意表达的可行方法。",
+                      "focus_hint_source": "confirmed_selection",
+                      "question_batch_limit": 3
+                    },
+                    "model_calls": [
+                      {
+                        "started_utc": "2026-09-10T04:50:39.298909+00:00",
+                        "generation_ms": 13255,
+                        "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体化破冰与分享机制以解决表达意愿问题\",\"open_flags\":[\"破冰方法\",\"分享方法\",\"材料安排\"],\"sibling_question_goals\":[\"破冰方法\",\"分享方法\"],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"expression_facilitation\",\"dimension\":\"破冰与分享方法设计\",\"type\":\"multi_choice\",\"prompt\":\"如何设计破冰与分享方法促进表达？\",\"why_now\":\"需具体方案而非形式，直接决定活动流程\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"可自定义组合方式\",\"options\":[{\"id\":\"icebreak_card\",\"label\":\"随机卡片破冰\",\"description\":\"抽卡决定发言主题，降低社交压力，适合陌生人。\",\"memory_ids\":[],\"recommended\":true},{\"id\":\"round_robin\",\"label\":\"轮流发言制\",\"description\":\"按顺序发言避免冷场，但可能抑制即兴互动。\",\"memory_ids\":[],\"recommended\":false},{\"id\":\"silent_write\",\"label\":\"先写后说\",\"description\":\"书面表达缓冲紧张感，适合内向者，但耗时较长。\",\"memory_ids\":[],\"recommended\":false},{\"id\":\"pair_share\",\"label\":\"两人小组讨论\",\"description\":\"先结对再分享，降低公开焦虑，但需额外组织时间。\",\"memory_ids\":[],\"recommended\":false}]}}"
+                      }
+                    ],
+                    "stages": [
+                      {
+                        "stage": "memory_query",
+                        "duration_ms": 0,
+                        "count": 1,
+                        "error_type": "none"
+                      },
+                      {
+                        "stage": "memory_query",
+                        "duration_ms": 0,
+                        "count": 1,
+                        "error_type": "none"
+                      },
+                      {
+                        "stage": "memory_retrieval",
+                        "duration_ms": 0,
+                        "count": 1,
+                        "error_type": "none"
+                      },
+                      {
+                        "stage": "question_generation",
+                        "duration_ms": 13256,
+                        "count": 1,
+                        "error_type": "none"
+                      }
+                    ],
+                    "queue_wait_ms": 113,
+                    "result": {
+                      "status": "question",
+                      "readiness_reason": "已确认小组交流形式，需具体化破冰与分享机制以解决表达意愿问题\n本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。",
+                      "open_flags": [
+                        "破冰方法",
+                        "分享方法",
+                        "材料安排"
+                      ],
+                      "continuation_directions": [],
+                      "question": {
+                        "id": "q_28347a661a0c",
+                        "dimension_id": "expression_facilitation",
+                        "exploration_stage": "solutions",
+                        "dimension": "破冰与分享方法设计",
+                        "type": "multi_choice",
+                        "single_choice_reason": "",
+                        "prompt": "如何设计破冰与分享方法促进表达？",
+                        "why_now": "需具体方案而非形式，直接决定活动流程",
+                        "required": true,
+                        "allow_custom": true,
+                        "options": [
+                          {
+                            "id": "icebreak_card",
+                            "label": "随机卡片破冰",
+                            "description": "抽卡决定发言主题，降低社交压力，适合陌生人。",
+                            "recommended": true,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          },
+                          {
+                            "id": "round_robin",
+                            "label": "轮流发言制",
+                            "description": "按顺序发言避免冷场，但可能抑制即兴互动。",
+                            "recommended": false,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          },
+                          {
+                            "id": "silent_write",
+                            "label": "先写后说",
+                            "description": "书面表达缓冲紧张感，适合内向者，但耗时较长。",
+                            "recommended": false,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          },
+                          {
+                            "id": "pair_share",
+                            "label": "两人小组讨论",
+                            "description": "先结对再分享，降低公开焦虑，但需额外组织时间。",
+                            "recommended": false,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          }
+                        ],
+                        "answer_template": "可自定义组合方式",
+                        "context_details": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                      },
+                      "sibling_question_goals": [
+                        "破冰方法",
+                        "分享方法"
+                      ],
+                      "memory_brief": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                    },
+                    "passed": true,
+                    "input_unchanged": true,
+                    "sibling_goal_count": 2,
+                    "option_count": 4,
+                    "query_count": 2,
+                    "memory_modes": [
+                      "omitted",
+                      "omitted",
+                      "omitted",
+                      "omitted"
+                    ],
+                    "total_ms": 13376,
+                    "raw_sibling_goal_count": 2,
+                    "accepted_sibling_goal_count": 2,
+                    "filtered_out_goals": [],
+                    "filter_reason": "No goals removed."
+                  },
+                  {
+                    "name": "independent_extension_1",
+                    "request": {
+                      "root_request": "为社区新朋友设计一场轻松的读书交流活动，希望大家愿意表达并听见不同看法。当前只确认采用小组交流，具体破冰、分享方法和材料安排尚未决定。这是独立合成验收场景。",
+                      "decisions": [
+                        {
+                          "question_id": "synthetic-root",
+                          "dimension_id": "format",
+                          "question": "以什么形式开展交流？",
+                          "answer": "小组交流",
+                          "answer_source": "user",
+                          "selected_option_ids": [
+                            "small_group"
+                          ]
+                        }
+                      ],
+                      "brief_markdown": "已确认：采用小组交流。其他活动方式尚未决定。",
+                      "exploration_stage": "solutions",
+                      "focus_hint": "已选择小组交流，探索让新朋友愿意表达的可行方法。",
+                      "focus_hint_source": "confirmed_selection",
+                      "question_batch_limit": 3,
+                      "extension_goal": "破冰方法"
+                    },
+                    "model_calls": [
+                      {
+                        "started_utc": "2026-09-10T04:50:52.917341+00:00",
+                        "generation_ms": 7896,
+                        "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体破冰方案来降低新人表达门槛\",\"open_flags\":[\"破冰方法\",\"破冰工具\",\"破冰规则\"],\"sibling_question_goals\":[],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"icebreaking\",\"dimension\":\"破冰方法\",\"type\":\"multi_choice\",\"prompt\":\"小组交流中，如何设计破冰让新人愿意开口？\",\"why_now\":\"新人沉默是核心痛点，需对比不同破冰机制的实际效果\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"可自定义破冰方式\",\"options\":[{\"id\":\"random_pair\",\"label\":\"随机配对\",\"description\":\"打乱座位强制互动，打破舒适圈，但可能引发尴尬。\",\"memory_ids\":[],\"recommended\":true},{\"id\":\"topic_card\",\"label\":\"话题卡片\",\"description\":\"提供具体讨论题，降低开口难度，但依赖题目质量。\",\"memory_ids\":[],\"recommended\":false},{\"id\":\"silent_start\",\"label\":\"静默开场\",\"description\":\"先独立写想法再分享，减少当众压力，但耗时较长。\",\"memory_ids\":[],\"recommended\":false}]}}"
+                      }
+                    ],
+                    "stages": [
+                      {
+                        "stage": "memory_query",
+                        "duration_ms": 0,
+                        "count": 1,
+                        "error_type": "none"
+                      },
+                      {
+                        "stage": "memory_query",
+                        "duration_ms": 0,
+                        "count": 1,
+                        "error_type": "none"
+                      },
+                      {
+                        "stage": "memory_retrieval",
+                        "duration_ms": 0,
+                        "count": 1,
+                        "error_type": "none"
+                      },
+                      {
+                        "stage": "question_generation",
+                        "duration_ms": 7896,
+                        "count": 1,
+                        "error_type": "none"
+                      }
+                    ],
+                    "queue_wait_ms": 175,
+                    "result": {
+                      "status": "question",
+                      "readiness_reason": "已确认小组交流形式，需具体破冰方案来降低新人表达门槛\n本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。",
+                      "open_flags": [
+                        "破冰方法",
+                        "破冰工具",
+                        "破冰规则"
+                      ],
+                      "continuation_directions": [],
+                      "question": {
+                        "id": "q_43abe7f1e70b",
+                        "dimension_id": "icebreaking",
+                        "exploration_stage": "solutions",
+                        "dimension": "破冰方法",
+                        "type": "multi_choice",
+                        "single_choice_reason": "",
+                        "prompt": "小组交流中，如何设计破冰让新人愿意开口？",
+                        "why_now": "新人沉默是核心痛点，需对比不同破冰机制的实际效果",
+                        "required": true,
+                        "allow_custom": true,
+                        "options": [
+                          {
+                            "id": "random_pair",
+                            "label": "随机配对",
+                            "description": "打乱座位强制互动，打破舒适圈，但可能引发尴尬。",
+                            "recommended": true,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          },
+                          {
+                            "id": "topic_card",
+                            "label": "话题卡片",
+                            "description": "提供具体讨论题，降低开口难度，但依赖题目质量。",
+                            "recommended": false,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          },
+                          {
+                            "id": "silent_start",
+                            "label": "静默开场",
+                            "description": "先独立写想法再分享，减少当众压力，但耗时较长。",
+                            "recommended": false,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          }
+                        ],
+                        "answer_template": "可自定义破冰方式",
+                        "context_details": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                      },
+                      "sibling_question_goals": [],
+                      "memory_brief": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                    },
+                    "passed": true,
+                    "input_unchanged": true,
+                    "sibling_goal_count": 0,
+                    "option_count": 3,
+                    "query_count": 2,
+                    "memory_modes": [
+                      "omitted",
+                      "omitted",
+                      "omitted"
+                    ],
+                    "total_ms": 8074,
+                    "raw_sibling_goal_count": 0,
+                    "accepted_sibling_goal_count": 0,
+                    "filtered_out_goals": [],
+                    "filter_reason": "No filtering; model itself returned an empty goal array."
+                  },
+                  {
+                    "name": "independent_extension_2",
+                    "request": {
+                      "root_request": "为社区新朋友设计一场轻松的读书交流活动，希望大家愿意表达并听见不同看法。当前只确认采用小组交流，具体破冰、分享方法和材料安排尚未决定。这是独立合成验收场景。",
+                      "decisions": [
+                        {
+                          "question_id": "synthetic-root",
+                          "dimension_id": "format",
+                          "question": "以什么形式开展交流？",
+                          "answer": "小组交流",
+                          "answer_source": "user",
+                          "selected_option_ids": [
+                            "small_group"
+                          ]
+                        }
+                      ],
+                      "brief_markdown": "已确认：采用小组交流。其他活动方式尚未决定。",
+                      "exploration_stage": "solutions",
+                      "focus_hint": "已选择小组交流，探索让新朋友愿意表达的可行方法。",
+                      "focus_hint_source": "confirmed_selection",
+                      "question_batch_limit": 3,
+                      "extension_goal": "分享方法"
+                    },
+                    "model_calls": [
+                      {
+                        "started_utc": "2026-09-10T04:51:00.993723+00:00",
+                        "generation_ms": 9204,
+                        "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体设计破冰与分享机制以解决新朋友不敢开口的问题\",\"open_flags\":[\"破冰方法\",\"分享方法\",\"材料安排\"],\"sibling_question_goals\":[],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"interaction_design\",\"dimension\":\"破冰与分享方法设计\",\"type\":\"multi_choice\",\"prompt\":\"针对新朋友不敢开口，具体采用什么破冰与分享机制？\",\"why_now\":\"小组交流已定，需落地具体互动规则以激活表达\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"可结合场地限制（无投影音响）调整方案\",\"options\":[{\"id\":\"low_stakes_sharing\",\"label\":\"匿名纸条分享\",\"description\":\"先匿名写纸条再朗读，降低开口压力，适合冷场破冰。\",\"memory_ids\":[],\"recommended\":true},{\"id\":\"pair_first_share\",\"label\":\"两人先分享\",\"description\":\"先两人一组交换观点，再小组讨论，减少当众发言焦虑。\",\"memory_ids\":[],\"recommended\":false},{\"id\":\"guided_discussion\",\"label\":\"引导式提问\",\"description\":\"用预设问题引导发言，避免冷场，但依赖主持人控场能力。\",\"memory_ids\":[],\"recommended\":false},{\"id\":\"open_floor_time\",\"label\":\"自由发言时段\",\"description\":\"预留固定时间自由发言，但可能加剧内向者沉默。\",\"memory_ids\":[],\"recommended\":false}]}}"
+                      }
+                    ],
+                    "stages": [
+                      {
+                        "stage": "memory_query",
+                        "duration_ms": 0,
+                        "count": 1,
+                        "error_type": "none"
+                      },
+                      {
+                        "stage": "memory_query",
+                        "duration_ms": 0,
+                        "count": 1,
+                        "error_type": "none"
+                      },
+                      {
+                        "stage": "memory_retrieval",
+                        "duration_ms": 0,
+                        "count": 1,
+                        "error_type": "none"
+                      },
+                      {
+                        "stage": "question_generation",
+                        "duration_ms": 9204,
+                        "count": 1,
+                        "error_type": "none"
+                      }
+                    ],
+                    "queue_wait_ms": 8143,
+                    "result": {
+                      "status": "question",
+                      "readiness_reason": "已确认小组交流形式，需具体设计破冰与分享机制以解决新朋友不敢开口的问题\n本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。",
+                      "open_flags": [
+                        "破冰方法",
+                        "分享方法",
+                        "材料安排"
+                      ],
+                      "continuation_directions": [],
+                      "question": {
+                        "id": "q_eba374998431",
+                        "dimension_id": "interaction_design",
+                        "exploration_stage": "solutions",
+                        "dimension": "破冰与分享方法设计",
+                        "type": "multi_choice",
+                        "single_choice_reason": "",
+                        "prompt": "针对新朋友不敢开口，具体采用什么破冰与分享机制？",
+                        "why_now": "小组交流已定，需落地具体互动规则以激活表达",
+                        "required": true,
+                        "allow_custom": true,
+                        "options": [
+                          {
+                            "id": "low_stakes_sharing",
+                            "label": "匿名纸条分享",
+                            "description": "先匿名写纸条再朗读，降低开口压力，适合冷场破冰。",
+                            "recommended": true,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          },
+                          {
+                            "id": "pair_first_share",
+                            "label": "两人先分享",
+                            "description": "先两人一组交换观点，再小组讨论，减少当众发言焦虑。",
+                            "recommended": false,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          },
+                          {
+                            "id": "guided_discussion",
+                            "label": "引导式提问",
+                            "description": "用预设问题引导发言，避免冷场，但依赖主持人控场能力。",
+                            "recommended": false,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          },
+                          {
+                            "id": "open_floor_time",
+                            "label": "自由发言时段",
+                            "description": "预留固定时间自由发言，但可能加剧内向者沉默。",
+                            "recommended": false,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          }
+                        ],
+                        "answer_template": "可结合场地限制（无投影音响）调整方案",
+                        "context_details": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                      },
+                      "sibling_question_goals": [],
+                      "memory_brief": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                    },
+                    "passed": true,
+                    "input_unchanged": true,
+                    "sibling_goal_count": 0,
+                    "option_count": 4,
+                    "query_count": 2,
+                    "memory_modes": [
+                      "omitted",
+                      "omitted",
+                      "omitted",
+                      "omitted"
+                    ],
+                    "total_ms": 17349,
+                    "raw_sibling_goal_count": 0,
+                    "accepted_sibling_goal_count": 0,
+                    "filtered_out_goals": [],
+                    "filter_reason": "No filtering; model itself returned an empty goal array."
+                  },
+                  {
+                    "name": "narrow_original_only_branch",
+                    "request": {
+                      "root_request": "为社区读书活动构思一种简短的开场破冰方法，已确认只让每人分享书中一句话。本次只比较分享这句话的呈现方法，不扩展主持、材料、分组或效果验证。只用当前输入，不检索历史记忆。这是独立合成验收场景。",
+                      "decisions": [
+                        {
+                          "question_id": "synthetic-root",
+                          "dimension_id": "format",
+                          "question": "以什么形式开展交流？",
+                          "answer": "每人分享书中一句话",
+                          "answer_source": "user",
+                          "selected_option_ids": [
+                            "quote"
+                          ]
+                        }
+                      ],
+                      "brief_markdown": "已确认每人分享书中一句话，其他活动设计本次不讨论。",
+                      "exploration_stage": "solutions",
+                      "focus_hint": "已选择每人分享书中一句话，只比较这句话的呈现方法。",
+                      "focus_hint_source": "confirmed_selection",
+                      "question_batch_limit": 3
+                    },
+                    "model_calls": [
+                      {
+                        "started_utc": "2026-09-10T04:51:10.204030+00:00",
+                        "generation_ms": 8214,
+                        "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认分享一句话，需比较不同呈现方式对破冰效果的具体作用机制与收益代价\",\"open_flags\":[\"哪种呈现方式能最自然引发听众互动\"],\"sibling_question_goals\":[],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"solution_architecture\",\"dimension\":\"分享呈现方式\",\"type\":\"multi_choice\",\"prompt\":\"针对‘每人分享书中一句话’，哪种呈现方式能最自然引发听众互动？\",\"why_now\":\"需比较不同呈现方式对破冰效果的具体作用机制与收益代价\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"选择后我们将分析其互动机制\",\"options\":[{\"id\":\"visual_highlight\",\"label\":\"视觉高亮法\",\"description\":\"用不同颜色字体突出关键词，降低阅读门槛，提升注意力集中。\",\"memory_ids\":[],\"recommended\":true},{\"id\":\"audio_emphasis\",\"label\":\"语音重音法\",\"description\":\"通过语调停顿强调核心词，利用听觉记忆增强情感共鸣。\",\"memory_ids\":[],\"recommended\":false},{\"id\":\"peer_exchange\",\"label\":\"同伴互评法\",\"description\":\"邀请听众先评价再分享，增加参与感，但可能增加时间成本。\",\"memory_ids\":[],\"recommended\":false}]}}"
+                      }
+                    ],
+                    "stages": [
+                      {
+                        "stage": "memory_retrieval",
+                        "duration_ms": 0,
+                        "count": 0,
+                        "error_type": "none"
+                      },
+                      {
+                        "stage": "question_generation",
+                        "duration_ms": 8214,
+                        "count": 1,
+                        "error_type": "none"
+                      }
+                    ],
+                    "queue_wait_ms": 4,
+                    "result": {
+                      "status": "question",
+                      "readiness_reason": "已确认分享一句话，需比较不同呈现方式对破冰效果的具体作用机制与收益代价\n本轮按你的资料范围要求未检索历史记忆，仅依据当前输入展开。",
+                      "open_flags": [
+                        "哪种呈现方式能最自然引发听众互动"
+                      ],
+                      "continuation_directions": [],
+                      "question": {
+                        "id": "q_18ed679161fd",
+                        "dimension_id": "solution_architecture",
+                        "exploration_stage": "solutions",
+                        "dimension": "分享呈现方式",
+                        "type": "multi_choice",
+                        "single_choice_reason": "",
+                        "prompt": "针对‘每人分享书中一句话’，哪种呈现方式能最自然引发听众互动？",
+                        "why_now": "需比较不同呈现方式对破冰效果的具体作用机制与收益代价",
+                        "required": true,
+                        "allow_custom": true,
+                        "options": [
+                          {
+                            "id": "visual_highlight",
+                            "label": "视觉高亮法",
+                            "description": "用不同颜色字体突出关键词，降低阅读门槛，提升注意力集中。",
+                            "recommended": true,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          },
+                          {
+                            "id": "audio_emphasis",
+                            "label": "语音重音法",
+                            "description": "通过语调停顿强调核心词，利用听觉记忆增强情感共鸣。",
+                            "recommended": false,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          },
+                          {
+                            "id": "peer_exchange",
+                            "label": "同伴互评法",
+                            "description": "邀请听众先评价再分享，增加参与感，但可能增加时间成本。",
+                            "recommended": false,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          }
+                        ],
+                        "answer_template": "选择后我们将分析其互动机制",
+                        "context_details": "本轮按你的资料范围要求未检索历史记忆，仅依据当前输入展开。"
+                      },
+                      "sibling_question_goals": [],
+                      "memory_brief": "本轮按你的资料范围要求未检索历史记忆，仅依据当前输入展开。"
+                    },
+                    "passed": true,
+                    "input_unchanged": true,
+                    "sibling_goal_count": 0,
+                    "option_count": 3,
+                    "query_count": 0,
+                    "memory_modes": [
+                      "omitted",
+                      "omitted",
+                      "omitted"
+                    ],
+                    "total_ms": 8220,
+                    "raw_sibling_goal_count": 0,
+                    "accepted_sibling_goal_count": 0,
+                    "filtered_out_goals": [],
+                    "filter_reason": "No filtering; model itself returned an empty goal array."
+                  },
+                  {
+                    "name": "reference_applicable_branch",
+                    "request": {
+                      "root_request": "沿用合成读书活动记录中的场地和材料条件，为小组交流设计具体呈现方法。需要比较能在既有条件下开展的方式，也欢迎有适用前提的新思路。这是独立合成验收场景。",
+                      "decisions": [
+                        {
+                          "question_id": "synthetic-root",
+                          "dimension_id": "format",
+                          "question": "以什么形式开展交流？",
+                          "answer": "小组交流",
+                          "answer_source": "user",
+                          "selected_option_ids": [
+                            "small_group"
+                          ]
+                        }
+                      ],
+                      "brief_markdown": "已确认：采用小组交流。其他活动方式尚未决定。",
+                      "exploration_stage": "solutions",
+                      "focus_hint": "已选择小组交流，探索让新朋友愿意表达的可行方法。",
+                      "focus_hint_source": "confirmed_selection",
+                      "question_batch_limit": 3
+                    },
+                    "model_calls": [
+                      {
+                        "started_utc": "2026-09-10T04:51:18.425312+00:00",
+                        "generation_ms": 8623,
+                        "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认小组交流形式，需具体化让新朋友开口的方法\",\"open_flags\":[\"如何降低新朋友发言的心理门槛\"],\"sibling_question_goals\":[\"如何平衡新老成员发言机会\"],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"expression_method\",\"dimension\":\"降低发言门槛的具体方法\",\"type\":\"multi_choice\",\"prompt\":\"在现有场地条件下，有哪些方法能让新朋友更愿意开口？\",\"why_now\":\"需从自由发言的失败经验中，设计能降低心理门槛的具体机制\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"可结合场地限制（无投影音响）提出创意\",\"options\":[{\"id\":\"structured_turns\",\"label\":\"结构化轮流发言\",\"description\":\"按顺序发言减少竞争，确保每人都有机会表达。\",\"memory_ids\":[],\"recommended\":true},{\"id\":\"pair_share\",\"label\":\"两人结对分享\",\"description\":\"先与熟人讨论再发言，降低独自面对全组的压力。\",\"memory_ids\":[],\"recommended\":false},{\"id\":\"silent_write\",\"label\":\"先写后说\",\"description\":\"允许先书写再口头表达，给内向者更多准备时间。\",\"memory_ids\":[],\"recommended\":false},{\"id\":\"role_based\",\"label\":\"角色引导发言\",\"description\":\"分配不同角色（如总结者）激发特定成员参与。\",\"memory_ids\":[],\"recommended\":false}]}}"
+                      }
+                    ],
+                    "stages": [
+                      {
+                        "stage": "memory_query",
+                        "duration_ms": 0,
+                        "count": 1,
+                        "error_type": "none"
+                      },
+                      {
+                        "stage": "memory_query",
+                        "duration_ms": 0,
+                        "count": 1,
+                        "error_type": "none"
+                      },
+                      {
+                        "stage": "memory_retrieval",
+                        "duration_ms": 0,
+                        "count": 1,
+                        "error_type": "none"
+                      },
+                      {
+                        "stage": "question_generation",
+                        "duration_ms": 8623,
+                        "count": 1,
+                        "error_type": "none"
+                      }
+                    ],
+                    "queue_wait_ms": 5,
+                    "result": {
+                      "status": "question",
+                      "readiness_reason": "已确认小组交流形式，需具体化让新朋友开口的方法\n本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。",
+                      "open_flags": [
+                        "如何降低新朋友发言的心理门槛"
+                      ],
+                      "continuation_directions": [],
+                      "question": {
+                        "id": "q_5e906fdbd2cf",
+                        "dimension_id": "expression_method",
+                        "exploration_stage": "solutions",
+                        "dimension": "降低发言门槛的具体方法",
+                        "type": "multi_choice",
+                        "single_choice_reason": "",
+                        "prompt": "在现有场地条件下，有哪些方法能让新朋友更愿意开口？",
+                        "why_now": "需从自由发言的失败经验中，设计能降低心理门槛的具体机制",
+                        "required": true,
+                        "allow_custom": true,
+                        "options": [
+                          {
+                            "id": "structured_turns",
+                            "label": "结构化轮流发言",
+                            "description": "按顺序发言减少竞争，确保每人都有机会表达。",
+                            "recommended": true,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          },
+                          {
+                            "id": "pair_share",
+                            "label": "两人结对分享",
+                            "description": "先与熟人讨论再发言，降低独自面对全组的压力。",
+                            "recommended": false,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          },
+                          {
+                            "id": "silent_write",
+                            "label": "先写后说",
+                            "description": "允许先书写再口头表达，给内向者更多准备时间。",
+                            "recommended": false,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          },
+                          {
+                            "id": "role_based",
+                            "label": "角色引导发言",
+                            "description": "分配不同角色（如总结者）激发特定成员参与。",
+                            "recommended": false,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          }
+                        ],
+                        "answer_template": "可结合场地限制（无投影音响）提出创意",
+                        "context_details": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                      },
+                      "sibling_question_goals": [
+                        "如何平衡新老成员发言机会"
+                      ],
+                      "memory_brief": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                    },
+                    "passed": true,
+                    "input_unchanged": true,
+                    "sibling_goal_count": 1,
+                    "option_count": 4,
+                    "query_count": 2,
+                    "memory_modes": [
+                      "omitted",
+                      "omitted",
+                      "omitted",
+                      "omitted"
+                    ],
+                    "total_ms": 8632,
+                    "raw_sibling_goal_count": 1,
+                    "accepted_sibling_goal_count": 1,
+                    "filtered_out_goals": [],
+                    "filter_reason": "No goals removed."
+                  },
+                  {
+                    "name": "preserve_proven_synthetic_methods",
+                    "model_calls": [
+                      {
+                        "raw_response": "{\"status\":\"question\",\"readiness_reason\":\"已确认保留核心机制，需对比不同执行方案对时长的具体影响\",\"open_flags\":[\"各方案预计耗时\",\"有效体验的保留程度\"],\"sibling_question_goals\":[],\"question\":{\"exploration_stage\":\"solutions\",\"dimension_id\":\"solution_architecture\",\"dimension\":\"缩短时长的具体执行方案\",\"type\":\"multi_choice\",\"prompt\":\"下次活动如何缩短时长？\",\"why_now\":\"需对比不同执行方案对时长的具体影响\",\"required\":true,\"allow_custom\":true,\"answer_template\":\"选择最符合预期的方案\",\"options\":[{\"id\":\"opt1\",\"label\":\"保留核心机制\",\"description\":\"保留匿名书签交换，仅移除抢答积分，预计耗时减少20%。\",\"memory_ids\":[],\"recommended\":true},{\"id\":\"opt2\",\"label\":\"简化互动流程\",\"description\":\"保留匿名书签交换，改为小组内快速交换，预计耗时减少40%。\",\"memory_ids\":[],\"recommended\":false},{\"id\":\"opt3\",\"label\":\"完全移除互动\",\"description\":\"仅保留书签书写，取消交换环节，预计耗时减少60%但体验可能下降。\",\"memory_ids\":[],\"recommended\":false}]}}",
+                        "generation_ms": 8315
+                      }
+                    ],
+                    "request": {
+                      "root_request": "根据合成活动试行记录讨论下次读书活动：保留已经决定继续采用的方法，同时比较尚待决定的旧方法与新替代方法。不要把待定事项当成已经采用。这是独立合成验收场景。",
+                      "decisions": [
+                        {
+                          "question_id": "synthetic-root",
+                          "question": "下一次活动主要改善什么？",
+                          "answer": "保留有效体验并缩短活动时长",
+                          "answer_source": "user"
+                        }
+                      ],
+                      "brief_markdown": "已确认：保留有效体验并缩短活动时长。",
+                      "exploration_stage": "solutions",
+                      "focus_hint": "保留有效体验并缩短活动时长，比较具体活动方法。",
+                      "focus_hint_source": "confirmed_selection",
+                      "question_batch_limit": 1
+                    },
+                    "queue_wait_ms": 107,
+                    "result": {
+                      "status": "question",
+                      "readiness_reason": "已确认保留核心机制，需对比不同执行方案对时长的具体影响\n本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。",
+                      "open_flags": [
+                        "各方案预计耗时",
+                        "有效体验的保留程度"
+                      ],
+                      "continuation_directions": [],
+                      "question": {
+                        "id": "q_15bf18edb7c5",
+                        "dimension_id": "solution_architecture",
+                        "exploration_stage": "solutions",
+                        "dimension": "缩短时长的具体执行方案",
+                        "type": "multi_choice",
+                        "single_choice_reason": "",
+                        "prompt": "下次活动如何缩短时长？",
+                        "why_now": "需对比不同执行方案对时长的具体影响",
+                        "required": true,
+                        "allow_custom": true,
+                        "options": [
+                          {
+                            "id": "opt1",
+                            "label": "保留核心机制",
+                            "description": "保留匿名书签交换，仅移除抢答积分，预计耗时减少20%。",
+                            "recommended": true,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          },
+                          {
+                            "id": "opt2",
+                            "label": "简化互动流程",
+                            "description": "保留匿名书签交换，改为小组内快速交换，预计耗时减少40%。",
+                            "recommended": false,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          },
+                          {
+                            "id": "opt3",
+                            "label": "完全移除互动",
+                            "description": "仅保留书签书写，取消交换环节，预计耗时减少60%但体验可能下降。",
+                            "recommended": false,
+                            "details": "新思路：基于当前需求与通用知识构思，暂无直接记忆依据。"
+                          }
+                        ],
+                        "answer_template": "选择最符合预期的方案",
+                        "context_details": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                      },
+                      "sibling_question_goals": [],
+                      "memory_brief": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+                    },
+                    "passed": true,
+                    "used_reference_count": 0,
+                    "total_ms": 8428,
+                    "raw_sibling_goal_count": 0,
+                    "accepted_sibling_goal_count": 0,
+                    "filtered_out_goals": [],
+                    "filter_reason": "No filtering; model itself returned an empty goal array."
+                  }
+                ],
+                "summary": {
+                  "observed_sibling_goal_counts": [
+                    0,
+                    1,
+                    2
+                  ],
+                  "observed_memory_modes": [
+                    "omitted"
+                  ],
+                  "user_sessions_accessed_or_modified": false,
+                  "parallel_extension_submission_count": 2,
+                  "all_runs_structurally_valid": true
+                },
+                "review": {
+                  "status": "needs_quality_and_reference_repair",
+                  "finding": "Initial broad head question covers both sibling topics, and generated extension questions repeat the same decision area. Structured validation success does not establish complementary independent questions.",
+                  "original_options_with_retrieved_candidates": true,
+                  "explicit_memory_modes_emitted": false,
+                  "adoption_signal": "All initial live options have empty memory_ids; no option cites a reference.",
+                  "reference_adoption_finding": "Supplemental retained-methods output copies fixture-specific historical methods while emitting empty memory_ids and invents unsupported 20/40/60 percent time savings. This case fails semantic evidence review."
+                },
+                "reference_fixtures": {
+                  "community": "前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。",
+                  "retained_methods": "合成活动试行记录：上次已经试过“匿名书签交换”，参与者在书签写一句推荐语，匿名交换后讨论。主持团队决定保留“匿名书签交换”，但放弃抢答积分。另一项试过的“接力续写结尾”耗时较长，是否保留尚未决定。这些都是人工编写的测试资料。"
+                }
+              },
+              "summary": {
+                "all_runs_structurally_valid": true,
+                "observed_sibling_goal_counts": [
+                  0,
+                  2
+                ],
+                "observed_memory_modes": [
+                  "original",
+                  "reference"
+                ],
+                "user_sessions_accessed_or_modified": false,
+                "parallel_extension_submission_count": 2
+              },
+              "review": {
+                "status": "needs_complementarity_repair",
+                "finding": "The broad head asks how to break the ice; sibling icebreaking topic repeats this decision. Extensions 1 and 2 ultimately return identical prompts despite sibling context. Exact/containment validation is insufficient.",
+                "memory_adoption": "Actual required memory_mode outputs now include reference and original, and retained-methods probe attaches real synthetic-source excerpts to 2 options. No citation is presented neutrally.",
+                "original_without_citations": "Initial broad scenario offers 4 generic new methods with retrieved synthetic references; latest narrow explicitly no-history scenario emits original for all options. Empty IDs alone are not proof of no historical adoption."
+              }
+            },
+            "summary": {
+              "all_runs_structurally_valid": true,
+              "observed_sibling_goal_counts": [
+                0
+              ],
+              "observed_memory_modes": [
+                "original",
+                "reference"
+              ],
+              "user_sessions_accessed_or_modified": false,
+              "parallel_extension_submission_count": 0
+            }
+          },
+          "reference_fixtures": {
+            "unrelated_community_activity": "前次社区读书讨论活动采用自由发言，新朋友很少主动开口。该记录没有讨论换书活动，不能据此认定换书安排。这是合成参考材料。"
+          },
+          "summary": {
+            "all_runs_structurally_valid": true,
+            "observed_sibling_goal_counts": [
+              0
+            ],
+            "observed_memory_modes": [
+              "original"
+            ],
+            "user_sessions_accessed_or_modified": false,
+            "parallel_extension_submission_count": 0
+          },
+          "review": {
+            "status": "multi_question_runtime_not_yet_verified_on_final_ordering",
+            "finding": "Final schema ordering generated only one question in the original broad, narrow, reference-applicable, and newly broad self-service book-exchange scenarios. All raw sibling arrays were empty; the guard did not remove any themes.",
+            "original_adoption_review": "Latest book-exchange fixture describes an unrelated historical discussion activity. The four generated exchange mechanisms are generic proposals, all explicitly original with empty memory_ids; no fixture-specific arrangement was adopted in the options.",
+            "reference_adoption_review": "Earlier same-policy runs explicitly reference synthetic source m1 for adopted prior methods and available constraints, with matching source excerpts; no-citation choices use neutral details.",
+            "remaining_semantic_limit": "An earlier retained-methods run invented a 30 percent time reduction despite a true source citation. Citation correctness alone does not verify new-plan effects; no real-world effectiveness is claimed.",
+            "user_sessions_accessed_or_modified": false
+          }
+        },
+        "reference_fixtures": {
+          "unrelated_community_activity": "前次社区读书讨论活动采用自由发言，新朋友很少主动开口。该记录没有讨论换书活动，不能据此认定换书安排。这是合成参考材料。"
+        },
+        "summary": {
+          "all_runs_structurally_valid": true,
+          "observed_sibling_goal_counts": [
+            0
+          ],
+          "observed_memory_modes": [
+            "original"
+          ],
+          "user_sessions_accessed_or_modified": false,
+          "parallel_extension_submission_count": 0
+        },
+        "review": {
+          "status": "partial_runtime_evidence",
+          "latest_wide_scenario": "One authorized repeat with stronger batch guidance still produced zero sibling goals before and after normalization. The main question is specific, but other independent open items were not planned into additional topics.",
+          "memory_original_proof": "Latest unrelated-memory-hit book-exchange scenario emits only original modes with empty citations and generic exchange mechanisms; the unrelated discussion record does not supply these methods.",
+          "memory_reference_proof": "Saved preceding evaluations contain actual reference/original mixtures; reference options carry the synthetic source ID and matching source excerpts. The policy and schema require explicit adoption mode for new generation and retain parser compatibility for omission.",
+          "earlier_multi_question_findings": "Earlier versions produced zero, one, and two sibling goals and completed extension requests, but manual review found overlapping/duplicate questions. Those runs remain preserved as failed semantic evidence, not positive acceptance of final behavior.",
+          "multi_question_acceptance_boundary": "Final contract and regression checks cover multiple questions; final live local-model complementary multi-question output is not yet verified.",
+          "effectiveness_boundary": "A prior retained-methods sample invented an unsupported 30 percent time reduction despite quoting true source text. Citation integrity does not prove the effect of a newly proposed plan.",
+          "runtime_scope": "Direct import of current BrainstormCoordinator through the production global model queue; this subagent did not restart the desktop sidecar or exercise the desktop UI.",
+          "user_sessions_accessed_or_modified": false
+        }
+      },
+      "reference_fixtures": {
+        "community": "前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。"
+      },
+      "summary": {
+        "all_runs_structurally_valid": false,
+        "observed_sibling_goal_counts": [
+          0
+        ],
+        "observed_memory_modes": [],
+        "user_sessions_accessed_or_modified": false,
+        "parallel_extension_submission_count": 0
+      },
+      "review": {
+        "status": "question_plan_generation_failed",
+        "fixed_scenario": "Original broader group-discussion request and sources were replayed unchanged.",
+        "first_attempt": "Model correctly planned three topics (icebreaking, sharing different views, materials), but generated a combined icebreaking-and-sharing question rather than binding to the first topic.",
+        "repairs": "Second and third attempts each planned four topics despite a batch limit of three, retained the combined head question, and exhausted the existing three-attempt budget.",
+        "runtime_outcome": "No result or extension was accepted. The queue was released after about 29.1 seconds; no user session was accessed or modified.",
+        "memory_policy_status": "Independent tests and prior actual-model runs verify that new generation can declare original/reference, retain matching source excerpts, and accept original options with retrieved but unrelated candidates. Missing citations use neutral explanatory text.",
+        "next_step_boundary": "Further live calls paused pending the parent decision. This latest generator version does not have a passing live multi-question result."
+      }
+    },
+    "reference_fixtures": {
+      "community": "前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。"
+    },
+    "summary": {
+      "all_runs_structurally_valid": false,
+      "observed_sibling_goal_counts": [
+        0,
+        2
+      ],
+      "observed_memory_modes": [
+        "original",
+        "reference"
+      ],
+      "user_sessions_accessed_or_modified": false,
+      "parallel_extension_submission_count": 2
+    },
+    "review": {
+      "status": "extensions_repeated_head_question",
+      "head_question": "小组交流中，如何设计破冰与分享机制让新朋友愿意表达？",
+      "head_review": "The head offers an explicit comparison between facilitation mechanisms and is accepted unchanged. It is not rejected merely for mentioning both icebreaking and sharing.",
+      "plan_counts": {
+        "raw_question_plan": 3,
+        "mapped_sibling_goals": 2,
+        "filtered_out_goals": 0
+      },
+      "extension_review": "Both requested extension topics returned the exact head prompt in all three attempts; all six candidates therefore reasked the head decision rather than extending it.",
+      "exact_head_repetition_attempts": 6,
+      "citation_mode_guards": "The first attempt of one extension declared reference with no ID, and the other declared original with a real ID. Both contradictory results were rejected before publication; later repaired modes still repeated the head question.",
+      "runtime_outcome": "The head completed in about 9.5 seconds. Both extension requests were submitted together through the existing queue, whose current one-slot setting serialized actual inference. No extensions were accepted.",
+      "user_sessions_accessed_or_modified": false,
+      "next_step_boundary": "Live calls paused after the authorized fixed-scenario run; awaited parent decision on binding the extension generation goal."
+    }
+  },
+  "anchor_head_question": {
+    "id": "q_785a13b3458e",
+    "dimension_id": "interaction_design",
+    "exploration_stage": "solutions",
+    "dimension": "破冰与分享机制设计",
+    "type": "multi_choice",
+    "single_choice_reason": "",
+    "prompt": "小组交流中，如何设计破冰与分享机制让新朋友愿意表达？",
+    "why_now": "已选小组形式，需具体方案解决表达意愿低的问题",
+    "required": true,
+    "allow_custom": true,
+    "options": [
+      {
+        "id": "option_1",
+        "label": "随机配对发言",
+        "description": "随机配对强制互动，打破沉默，但可能增加社交压力。",
+        "recommended": true,
+        "details": "记忆依据：《合成读书活动记录》 · 2026-09-10 · document:1「前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。」"
+      },
+      {
+        "id": "option_2",
+        "label": "主题卡片讨论",
+        "description": "提供预设话题卡片，降低开口门槛，便于控制讨论节奏。",
+        "recommended": false,
+        "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+      },
+      {
+        "id": "option_3",
+        "label": "轮流发言制",
+        "description": "严格轮流发言，确保每人机会，避免被他人主导，但可能缺乏自然感。",
+        "recommended": false,
+        "details": "本项未附历史记忆引用，可结合当前需求继续探索。"
+      }
+    ],
+    "answer_template": "可自定义组合或调整上述机制",
+    "context_details": "本轮已检索历史记忆，由模型按适用性采纳；原创思路无需引用。"
+  },
+  "reference_fixtures": {
+    "community": "前次社区读书活动采用自由发言，新朋友很少主动开口。本次可用一张大桌和纸笔，场地不提供投影或音响。记录只是合成验收资料，不属于真实用户。"
+  },
+  "summary": {
+    "status": "passed_for_one_bound_independent_extension",
+    "head_raw_plan_count": 3,
+    "head_public_sibling_goal_count": 2,
+    "latest_verified_extension_count": 1,
+    "latest_extension_generation_ms": 19274,
+    "latest_extension_total_ms": 19285,
+    "latest_extension_model_attempts": 1,
+    "configured_global_inference_slots": 1,
+    "user_sessions_accessed_or_modified": false,
+    "latest_extension_queue_execution_ms": 19279,
+    "latest_extension_queue_execution_seconds": 19.28
+  },
+  "review": {
+    "status": "passed_for_one_bound_independent_extension",
+    "acceptance_scope": "The accepted head question and its existing plan were preserved, and exactly one already-planned independent extension was replayed against the final strong-goal generation path. No additional model requests were made afterward.",
+    "head_plan_to_extension": {
+      "raw_question_plan": [
+        "如何设计破冰环节让新朋友开口",
+        "如何组织分享环节确保观点被听见",
+        "小组规模与表达规则设定"
+      ],
+      "raw_plan_count": 3,
+      "public_sibling_question_goals": [
+        "如何组织分享环节确保观点被听见",
+        "小组规模与表达规则设定"
+      ],
+      "public_sibling_goal_count": 2,
+      "latest_verified_extension_goals": [
+        "小组规模与表达规则设定"
+      ],
+      "latest_verified_extension_count": 1,
+      "other_planned_goals_not_retested_on_final_code": [
+        "如何组织分享环节确保观点被听见"
+      ]
+    },
+    "timing": {
+      "model_generation_ms": 19274,
+      "model_generation_seconds": 19.27,
+      "total_ms": 19285,
+      "queue_wait_ms": 6,
+      "model_attempts": 1,
+      "automatic_retries": 0,
+      "queue_execution_ms": 19279,
+      "queue_execution_seconds": 19.28,
+      "queue_execution_measurement": "Production InferenceQueue completion log: exec_ms=19279."
+    },
+    "execution": {
+      "configured_global_inference_slots": 1,
+      "queue_lane": "P0 / p0_creation",
+      "parallel_request_scheduling_is_distinct_from_simultaneous_model_execution": true,
+      "actual_simultaneous_model_inference_was_not_claimed": true
+    },
+    "content_review": {
+      "head_prompt": "小组交流中，如何设计破冰与分享机制让新朋友愿意表达？",
+      "extension_prompt": "小组交流中，如何设计破冰与发言规则让新朋友愿意表达？",
+      "head_options": [
+        "随机配对发言",
+        "主题卡片讨论",
+        "轮流发言制"
+      ],
+      "extension_options": [
+        "3人小组轮流发言",
+        "4-5人随机发言",
+        "2人结对讨论",
+        "自由发言限时"
+      ],
+      "finding": "The wording still resembles the head facilitation question, but the extension options introduce concrete group-size and speaking-rule combinations. This is a substantive additional choice, not acceptance based on dimension metadata alone.",
+      "unanswered_head_choices_were_not_recorded_as_user_decisions": true,
+      "proposed_group_sizes_are_options_not_historical_facts_or_verified_effectiveness": true
+    },
+    "memory_adoption": {
+      "actual_modes": [
+        "reference",
+        "original",
+        "original",
+        "original"
+      ],
+      "reference_options": 1,
+      "original_options": 3,
+      "reference_source_ids": [
+        [
+          "m1"
+        ]
+      ],
+      "matching_synthetic_source_excerpt_attached": true,
+      "source_citation_proves_reference_provenance_not_new_plan_effects": true
+    },
+    "previous_evaluations": "Every prior raw output, failed attempt, goal-filtering observation, and review is retained recursively under previous_evaluation. Earlier duplicate-question and unsupported-effect samples are not counted as passing semantic evidence.",
+    "user_sessions_accessed_or_modified": false,
+    "runtime_scope": "Direct BrainstormCoordinator import through production local model transport and shared queue. This subagent did not restart the desktop sidecar or claim desktop UI acceptance."
+  },
+  "post_live_regression": {
+    "change": "Broad dimension labels only participate in exact duplicate matching; generation_goal path unchanged.",
+    "final_normalizer_replay_of_successful_raw_model_output": "passed",
+    "new_model_requests_after_recorded_probe": 0,
+    "sidecar_regression": {
+      "passed": 518,
+      "skipped": 1,
+      "duration_seconds": 33.84
+    },
+    "python_39": {
+      "version": "3.9.25",
+      "checked_files": 10,
+      "compile_and_syntax": "passed",
+      "pep604_annotation_scan": "passed"
+    },
+    "final_source_sha256": {
+      "ai-sidecar/creation/brainstorm.py": "031242d862eaf1aa03e8bacdbcfaf3ad833c4f6df7312361402f7fc0113e6c02",
+      "ai-sidecar/creation/brainstorm_memory_policy.py": "f5a32018414d4a610821b6543de352f8fc57ff86409e5302065276d901c0af36",
+      "ai-sidecar/inference_queue.py": "8adff6bf1d7c1894cae730f7d6b547bfc819c6e1dc32c4511845ddb8615b4ccb",
+      "ai-sidecar/creation/app.py": "b1639a53f7ed0135768362b7f5079f918ad634c94a02efb5dd67ee31d2d28b56"
+    }
+  },
+  "runtime_validation": {
+    "checked_at": "2026-09-10T13:37:51.941808+08:00",
+    "services": {
+      "core": {
+        "pid": 40936,
+        "port": 7070,
+        "started_at_local": "Thu Sep 10 13:37:28 2026",
+        "health_http_status": 200,
+        "managed_pid_matches_listener": true,
+        "process_started_after_checked_sources": true,
+        "checked_files": [
+          "core-engine/target/release/memory-bread"
+        ]
+      },
+      "creation": {
+        "pid": 40572,
+        "port": 8001,
+        "started_at_local": "Thu Sep 10 13:37:13 2026",
+        "health_http_status": 200,
+        "managed_pid_matches_listener": true,
+        "process_started_after_checked_sources": true,
+        "checked_files": [
+          "ai-sidecar/creation/brainstorm.py",
+          "ai-sidecar/creation/brainstorm_memory_policy.py",
+          "ai-sidecar/inference_queue.py",
+          "ai-sidecar/creation/app.py"
+        ]
+      }
+    },
+    "original_brainstorm_sessions": 18,
+    "before_after_revision_phase_state_sha256_identical": true,
+    "session_body_not_included_in_evaluation": true,
+    "desktop_process_not_restarted": true,
+    "new_brainstorm_request_schema_fields_verified": [
+      "question_batch_limit",
+      "extension_goal",
+      "sibling_question_context"
+    ],
+    "managed_services_stable_on_followup": true,
+    "original_sessions_match_on_followup": true
+  }
+}
