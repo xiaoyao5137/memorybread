@@ -64,6 +64,42 @@ async def test_long_review_batches_direct_text_with_complete_body_and_materials(
     assert validate_review(result, with_source_scope_check(contract()), document)['status'] == 'pass'
 
 
+async def test_delivery_review_compresses_duplicate_evidence_and_reserves_output_budget():
+    from creation.prompt_evidence import creation_context_window_tokens
+    from monitor.llm_tracker import estimate_tokens
+    document = long_document()
+    environment = {
+        'data_results': [{
+            'source_id': 'report-{}'.format(index),
+            'title': '报表{}'.format(index),
+            'source_kind': 'report_url',
+            'can_use': True,
+            'content_excerpt': 'GPU利用率{}%，统计周期为2026年第{}周。'.format(index, index) * 30,
+            'structured_data': {'metric': 'GPU利用率', 'value': index, 'period': '2026-W{}'.format(index)},
+        } for index in range(30)],
+        'references': [{
+            'source_id': index,
+            'title': '参考资料{}'.format(index),
+            'content': '成本优化事实{}。'.format(index) * 200,
+            'can_use': True,
+        } for index in range(16)],
+        'input_context': {'root_request': '生成GPU成本优化周报'},
+    }
+    before = copy.deepcopy(environment)
+    service = BatchService()
+    await review_delivery(service, '生成GPU成本优化周报', document, contract(), environment)
+    call = service.calls[0]
+    payload = json.JSONDecoder().raw_decode(call['user_prompt'])[0]
+    prompt_tokens = estimate_tokens(call['system_prompt'] + '\n\n' + call['user_prompt']) + 256
+    inventory = payload['provided_materials']['retrieved_evidence']
+    assert prompt_tokens + call['num_predict'] + 512 < creation_context_window_tokens()
+    assert 'structured_data' not in inventory['data_results'][0]
+    assert 'content_excerpt' not in inventory['data_results'][0]
+    assert payload['source_catalog']
+    assert any('GPU利用率' in item['text'] for item in payload['source_catalog'].values())
+    assert environment == before
+
+
 async def test_short_review_keeps_existing_prompt_representation():
     service = StreamService([json.dumps(review_for_model(document='line-1'))])
     result = await review_delivery(service, '保留正文', '现有正文。', contract(), {})

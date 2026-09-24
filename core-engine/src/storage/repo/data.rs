@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::{json, Value};
@@ -27,6 +28,11 @@ const EPOCH_FIRST_MONDAY_MILLIS: i64 = 4 * 24 * 60 * 60 * 1000;
 const DATA_HISTORY_LIMIT: usize = 16;
 const TIMELINE_DATASET_MAX_ROWS: usize = 50;
 const TIMELINE_DATASET_MAX_PARTS: usize = 3;
+const CURRENT_SEMANTIC_SOURCE_KEY_LIKE: &str = "memory:semantic:data-memory.v16:%";
+// 旧版单指标数据源可能有上千条。清理属于可延后维护，必须限制每轮工作量，
+// 避免一次数据物化请求长时间占满一个 CPU 核心。
+const LEGACY_DATA_CLEANUP_BATCH_SIZE: usize = 8;
+const LEGACY_DATA_CLEANUP_BUDGET: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 struct DataPeriodTag {
@@ -212,11 +218,10 @@ impl StorageManager {
             if let Some(id) = exact_id {
                 candidates.retain(|source| source.id == id);
             }
-            for record in &mut candidates {
-                // 列表搜索必须保持中文子串完整性。默认 FTS tokenizer 不能保证任意
-                // 中文子串都进入候选集，因此这里加载最新快照后再执行统一 AND 校验。
-                record.latest_snapshot = latest_snapshot(conn, record)?;
-            }
+            // 列表搜索必须保持中文子串完整性。默认 FTS tokenizer 不能保证任意
+            // 中文子串都进入候选集，因此这里批量加载最新快照后再执行统一 AND 校验。
+            // 批量读取避免按数据源逐个查询快照和关联造成 N+1 放大。
+            hydrate_latest_snapshots(conn, &mut candidates)?;
             candidates.retain(is_presentable_data_source);
             if let Some(source_kind) = source_kind.map(str::trim).filter(|value| !value.is_empty())
             {
@@ -3032,7 +3037,11 @@ fn cleanup_legacy_timeline_data_sources(
            AND link.link_kind = 'work_memory'
            AND source.source_kind = 'work_memory'
            AND source.deleted_at IS NULL
-           AND source.canonical_key LIKE 'memory:semantic:%'
+           AND (
+               (source.canonical_key LIKE 'memory:semantic:%'
+                AND source.canonical_key NOT LIKE 'memory:semantic:data-memory.v16:%')
+               OR source.canonical_key LIKE 'memory:timeline-dataset:%'
+           )
            AND NOT EXISTS (
                SELECT 1 FROM data_source_links other
                WHERE other.source_id = source.id
@@ -3074,6 +3083,7 @@ fn cleanup_legacy_timeline_data_sources(
              WHERE id = ?1 AND deleted_at IS NULL",
             params![source_id, now],
         )?;
+        purge_retired_data_source_if_unreferenced(conn, source_id)?;
     }
     Ok(())
 }
@@ -3082,46 +3092,108 @@ fn legacy_source_rows_fully_covered(
     conn: &Connection,
     source_id: i64,
 ) -> Result<bool, StorageError> {
-    let (row_count, unmatched_count): (i64, i64) = conn.query_row(
-        "WITH old_rows AS (
-             SELECT DISTINCT
-                    LOWER(TRIM(json_extract(metric_row.value, '$.metric'))) AS metric,
-                    LOWER(TRIM(json_extract(metric_row.value, '$.value'))) AS value
-             FROM data_snapshots snapshot,
-                  json_each(snapshot.structured_data, '$.metric_rows') metric_row
-             WHERE snapshot.source_id = ?1
-               AND snapshot.id = (
-                   SELECT latest.id FROM data_snapshots latest
-                   WHERE latest.source_id = ?1
-                   ORDER BY latest.collected_at DESC, latest.id DESC LIMIT 1
-               )
-               AND TRIM(COALESCE(json_extract(metric_row.value, '$.metric'), '')) <> ''
-               AND TRIM(COALESCE(json_extract(metric_row.value, '$.value'), '')) <> ''
+    let old_rows = load_latest_metric_value_pairs(conn, source_id)?;
+    if old_rows.is_empty() {
+        return Ok(false);
+    }
+
+    // 先限定与旧源共享 timeline 的当前 v16 semantic 数据源，再只解析其最新快照。
+    // 避免旧实现对每一条 old_row 重复展开全量 JSON 和关联表。
+    let mut stmt = conn.prepare(
+        "WITH candidate_datasets AS (
+             SELECT DISTINCT dataset.id AS source_id
+             FROM data_source_links legacy_link
+             JOIN data_source_links dataset_link
+               ON dataset_link.timeline_id = legacy_link.timeline_id
+              AND dataset_link.link_kind = 'work_memory'
+             JOIN data_sources dataset ON dataset.id = dataset_link.source_id
+             WHERE legacy_link.source_id = ?1
+               AND legacy_link.timeline_id IS NOT NULL
+               AND dataset.deleted_at IS NULL
+               AND dataset.canonical_key LIKE ?2
+         ), latest_snapshots AS (
+             SELECT snapshot.structured_data
+             FROM candidate_datasets candidate
+             JOIN data_snapshots snapshot ON snapshot.source_id = candidate.source_id
+             WHERE snapshot.id = (
+                 SELECT latest.id
+                 FROM data_snapshots latest
+                 WHERE latest.source_id = candidate.source_id
+                 ORDER BY latest.collected_at DESC, latest.id DESC
+                 LIMIT 1
+             )
          )
-         SELECT COUNT(*),
-                SUM(CASE WHEN NOT EXISTS (
-                    SELECT 1
-                    FROM data_source_links legacy_link
-                    JOIN data_source_links dataset_link
-                      ON dataset_link.timeline_id = legacy_link.timeline_id
-                     AND dataset_link.link_kind = 'work_memory'
-                    JOIN data_sources dataset ON dataset.id = dataset_link.source_id
-                    JOIN data_snapshots dataset_snapshot ON dataset_snapshot.source_id = dataset.id
-                    JOIN json_each(dataset_snapshot.structured_data, '$.metric_rows') dataset_row
-                    WHERE legacy_link.source_id = ?1
-                      AND dataset.deleted_at IS NULL
-                      AND dataset.canonical_key LIKE 'memory:timeline-dataset:data-memory.v16:%'
-                      AND LOWER(TRIM(json_extract(dataset_row.value, '$.metric'))) = old_rows.metric
-                      AND LOWER(TRIM(json_extract(dataset_row.value, '$.value'))) = old_rows.value
-                ) THEN 1 ELSE 0 END)
-         FROM old_rows",
-        [source_id],
-        |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+         SELECT DISTINCT
+                LOWER(TRIM(json_extract(metric_row.value, '$.metric'))) AS metric,
+                LOWER(TRIM(json_extract(metric_row.value, '$.value'))) AS value
+         FROM latest_snapshots,
+              json_each(latest_snapshots.structured_data, '$.metric_rows') metric_row
+         WHERE TRIM(COALESCE(json_extract(metric_row.value, '$.metric'), '')) <> ''
+           AND TRIM(COALESCE(json_extract(metric_row.value, '$.value'), '')) <> ''",
     )?;
-    Ok(row_count > 0 && unmatched_count == 0)
+    let dataset_rows = stmt
+        .query_map(
+            params![source_id, CURRENT_SEMANTIC_SOURCE_KEY_LIKE],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<Result<HashSet<_>, _>>()?;
+    Ok(old_rows.is_subset(&dataset_rows))
+}
+
+fn load_latest_metric_value_pairs(
+    conn: &Connection,
+    source_id: i64,
+) -> Result<HashSet<(String, String)>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT
+                LOWER(TRIM(json_extract(metric_row.value, '$.metric'))) AS metric,
+                LOWER(TRIM(json_extract(metric_row.value, '$.value'))) AS value
+         FROM data_snapshots snapshot,
+              json_each(snapshot.structured_data, '$.metric_rows') metric_row
+         WHERE snapshot.source_id = ?1
+           AND snapshot.id = (
+               SELECT latest.id FROM data_snapshots latest
+               WHERE latest.source_id = ?1
+               ORDER BY latest.collected_at DESC, latest.id DESC LIMIT 1
+           )
+           AND TRIM(COALESCE(json_extract(metric_row.value, '$.metric'), '')) <> ''
+           AND TRIM(COALESCE(json_extract(metric_row.value, '$.value'), '')) <> ''",
+    )?;
+    let rows = stmt
+        .query_map([source_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<HashSet<_>, _>>()?;
+    Ok(rows)
 }
 
 fn cleanup_fully_covered_legacy_data_sources(conn: &Connection) -> Result<(), StorageError> {
+    let deadline = Instant::now() + LEGACY_DATA_CLEANUP_BUDGET;
+    conn.progress_handler(1_000, Some(move || Instant::now() >= deadline));
+    let result = cleanup_fully_covered_legacy_data_sources_bounded(conn);
+    conn.progress_handler(0, None::<fn() -> bool>);
+    match result {
+        Err(StorageError::Sqlite(rusqlite::Error::SqliteFailure(code, _)))
+            if code.code == rusqlite::ErrorCode::OperationInterrupted =>
+        {
+            tracing::warn!(
+                budget_ms = LEGACY_DATA_CLEANUP_BUDGET.as_millis(),
+                "旧版数据源清理达到单轮时间预算，已安全让出 CPU"
+            );
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+fn cleanup_fully_covered_legacy_data_sources_bounded(
+    conn: &Connection,
+) -> Result<(), StorageError> {
+    let cursor: i64 = conn.query_row(
+        "SELECT cursor_source_id FROM data_legacy_cleanup_state WHERE singleton_id = 1",
+        [],
+        |row| row.get(0),
+    )?;
     let mut stmt = conn.prepare(
         "SELECT source.id,
                 EXISTS(
@@ -3132,35 +3204,28 @@ fn cleanup_fully_covered_legacy_data_sources(conn: &Connection) -> Result<(), St
          FROM data_sources source
          WHERE source.source_kind = 'work_memory'
            AND source.deleted_at IS NULL
-           AND source.canonical_key LIKE 'memory:semantic:%'
+           AND (
+               (source.canonical_key LIKE 'memory:semantic:%'
+                AND source.canonical_key NOT LIKE 'memory:semantic:data-memory.v16:%')
+               OR source.canonical_key LIKE 'memory:timeline-dataset:%'
+           )
+           AND source.id > ?1
            AND EXISTS (
                SELECT 1 FROM data_source_links link
                WHERE link.source_id = source.id AND link.timeline_id IS NOT NULL
            )
-           AND NOT EXISTS (
-               SELECT 1
-               FROM data_source_links legacy_link
-               WHERE legacy_link.source_id = source.id
-                 AND legacy_link.timeline_id IS NOT NULL
-                 AND NOT EXISTS (
-                     SELECT 1
-                     FROM data_source_links dataset_link
-                     JOIN data_sources dataset ON dataset.id = dataset_link.source_id
-                     WHERE dataset_link.timeline_id = legacy_link.timeline_id
-                       AND dataset_link.link_kind = 'work_memory'
-                       AND dataset.deleted_at IS NULL
-                       AND dataset.canonical_key LIKE 'memory:timeline-dataset:data-memory.v16:%'
-                 )
-           )",
+           ORDER BY source.id
+           LIMIT ?2",
     )?;
     let covered = stmt
-        .query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
-        })?
+        .query_map(
+            params![cursor, LEGACY_DATA_CLEANUP_BATCH_SIZE as i64],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+        )?
         .collect::<Result<Vec<_>, _>>()?;
     drop(stmt);
     let now = current_ts_ms();
-    for (source_id, is_favorite) in covered {
+    for &(source_id, is_favorite) in &covered {
         if !legacy_source_rows_fully_covered(conn, source_id)? {
             continue;
         }
@@ -3177,8 +3242,8 @@ fn cleanup_fully_covered_legacy_data_sources(conn: &Connection) -> Result<(), St
                  JOIN data_sources dataset ON dataset.id = dataset_link.source_id
                  WHERE legacy_link.source_id = ?1
                    AND dataset.deleted_at IS NULL
-                   AND dataset.canonical_key LIKE 'memory:timeline-dataset:data-memory.v16:%'",
-                params![source_id, now],
+                   AND dataset.canonical_key LIKE ?3",
+                params![source_id, now, CURRENT_SEMANTIC_SOURCE_KEY_LIKE],
             )?;
             conn.execute(
                 "DELETE FROM memory_favorites
@@ -3192,7 +3257,41 @@ fn cleanup_fully_covered_legacy_data_sources(conn: &Connection) -> Result<(), St
              WHERE id = ?1 AND deleted_at IS NULL",
             params![source_id, now],
         )?;
+        purge_retired_data_source_if_unreferenced(conn, source_id)?;
     }
+    let next_cursor = if covered.len() < LEGACY_DATA_CLEANUP_BATCH_SIZE {
+        0
+    } else {
+        covered.last().map(|(source_id, _)| *source_id).unwrap_or(0)
+    };
+    conn.execute(
+        "UPDATE data_legacy_cleanup_state
+         SET cursor_source_id = ?1, updated_at = ?2
+         WHERE singleton_id = 1",
+        params![next_cursor, now],
+    )?;
+    Ok(())
+}
+
+fn purge_retired_data_source_if_unreferenced(
+    conn: &Connection,
+    source_id: i64,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "DELETE FROM data_sources
+         WHERE id = ?1
+           AND deleted_at IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM memory_favorites favorite
+               WHERE favorite.resource_kind = 'data'
+                 AND favorite.resource_id = data_sources.id
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM creation_evidence_assets evidence
+               WHERE evidence.source_id = data_sources.id
+           )",
+        [source_id],
+    )?;
     Ok(())
 }
 
@@ -7531,32 +7630,118 @@ fn latest_snapshot(
         snapshot.source_capture_ids.dedup();
         snapshot.source_timeline_ids.sort_unstable();
         snapshot.source_timeline_ids.dedup();
-        let is_timeline_dataset = snapshot
-            .structured_data
-            .get("semantic_identity")
-            .and_then(Value::as_str)
-            .is_some_and(|identity| identity.starts_with("timeline-dataset:"));
-        if !is_timeline_dataset
-            && snapshot
-                .structured_data
-                .get("manual_entry")
-                .and_then(Value::as_bool)
-                != Some(true)
-        {
-            let semantic_context = semantic_context_for_source(
-                source,
-                None,
-                snapshot
-                    .structured_data
-                    .get("semantic_subject")
-                    .and_then(Value::as_str),
-            );
-            let semantic = semantic_view_for_snapshot(snapshot, &semantic_context)
-                .unwrap_or_else(|| rejected_semantic_view_json("no_semantic_metric"));
-            merge_semantic_view(&mut snapshot.structured_data, semantic);
-        }
+        finalize_snapshot_for_source(source, snapshot);
     }
     Ok(snapshot)
+}
+
+fn hydrate_latest_snapshots(
+    conn: &Connection,
+    sources: &mut [DataSourceRecord],
+) -> Result<(), StorageError> {
+    if sources.is_empty() {
+        return Ok(());
+    }
+
+    let source_indexes = sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| (source.id, index))
+        .collect::<HashMap<_, _>>();
+    let mut snapshots = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT snapshot.id, snapshot.source_id, snapshot.collected_at,
+                snapshot.observed_at, snapshot.collector, snapshot.content_text,
+                snapshot.structured_data, snapshot.content_hash,
+                snapshot.freshness_ttl_seconds, snapshot.provenance,
+                snapshot.source_capture_ids, snapshot.source_timeline_ids,
+                snapshot.status, snapshot.period_granularity, snapshot.period_key,
+                snapshot.period_start_at, snapshot.period_end_at
+         FROM data_snapshots snapshot
+         JOIN data_sources source ON source.id = snapshot.source_id
+         WHERE source.deleted_at IS NULL
+           AND snapshot.id = (
+               SELECT latest.id
+               FROM data_snapshots latest
+               WHERE latest.source_id = snapshot.source_id
+               ORDER BY latest.collected_at DESC, latest.id DESC
+               LIMIT 1
+           )",
+    )?;
+    let rows = stmt.query_map([], map_data_snapshot_row)?;
+    for row in rows {
+        let snapshot = row?;
+        if source_indexes.contains_key(&snapshot.source_id) {
+            snapshots.insert(snapshot.source_id, snapshot);
+        }
+    }
+    drop(stmt);
+
+    let mut stmt = conn.prepare(
+        "SELECT link.source_id, link.capture_id, link.timeline_id
+         FROM data_source_links link
+         JOIN data_sources source ON source.id = link.source_id
+         WHERE source.deleted_at IS NULL
+         ORDER BY link.source_id, link.observed_at DESC, link.id DESC",
+    )?;
+    let links = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<i64>>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+        ))
+    })?;
+    for link in links {
+        let (source_id, capture_id, timeline_id) = link?;
+        let Some(snapshot) = snapshots.get_mut(&source_id) else {
+            continue;
+        };
+        if let Some(capture_id) = capture_id {
+            snapshot.source_capture_ids.push(capture_id);
+        }
+        if let Some(timeline_id) = timeline_id {
+            snapshot.source_timeline_ids.push(timeline_id);
+        }
+    }
+    drop(stmt);
+
+    for (source_id, mut snapshot) in snapshots {
+        snapshot.source_capture_ids.sort_unstable();
+        snapshot.source_capture_ids.dedup();
+        snapshot.source_timeline_ids.sort_unstable();
+        snapshot.source_timeline_ids.dedup();
+        let index = source_indexes[&source_id];
+        finalize_snapshot_for_source(&sources[index], &mut snapshot);
+        sources[index].latest_snapshot = Some(snapshot);
+    }
+    Ok(())
+}
+
+fn finalize_snapshot_for_source(source: &DataSourceRecord, snapshot: &mut DataSnapshotRecord) {
+    let is_timeline_dataset = snapshot
+        .structured_data
+        .get("semantic_identity")
+        .and_then(Value::as_str)
+        .is_some_and(|identity| identity.starts_with("timeline-dataset:"));
+    if !is_timeline_dataset
+        && snapshot
+            .structured_data
+            .get("manual_entry")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        let semantic_context = semantic_context_for_source(
+            source,
+            None,
+            snapshot
+                .structured_data
+                .get("semantic_subject")
+                .and_then(Value::as_str),
+        );
+        let semantic = semantic_view_for_snapshot(snapshot, &semantic_context)
+            .unwrap_or_else(|| rejected_semantic_view_json("no_semantic_metric"));
+        merge_semantic_view(&mut snapshot.structured_data, semantic);
+    }
 }
 
 fn merge_semantic_view(structured: &mut Value, semantic: Value) {
@@ -8743,6 +8928,356 @@ mod tests {
 
         assert_eq!(datasets.len(), 3);
         assert!(datasets.iter().all(|dataset| dataset.rows.len() == 50));
+    }
+
+    #[test]
+    fn legacy_coverage_compares_latest_metric_sets_without_cross_product_scan() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    r#"
+                    INSERT INTO captures (
+                        id, ts, app_name, win_title, event_type,
+                        is_sensitive, pii_scrubbed
+                    ) VALUES (1, 1, 'test', 'test', 'manual', 0, 0);
+                    INSERT INTO timelines (
+                        id, capture_id, summary, entities, category, importance,
+                        created_at_ms, updated_at_ms
+                    ) VALUES (7, 1, 'test', '[]', 'data', 1, 1, 1);
+                    UPDATE captures SET timeline_id = 7 WHERE id = 1;
+                    INSERT INTO data_sources (
+                        id, canonical_key, title, source_kind, access_mode, refresh_policy,
+                        realtime_level, tags, first_seen_at, last_seen_at, status,
+                        created_at, updated_at
+                    ) VALUES
+                        (1, 'memory:semantic:data-memory.v7:legacy', 'legacy',
+                         'work_memory', 'memory_only', 'never', 'observed', '[]',
+                         1, 1, 'active', 1, 1),
+                        (2, 'memory:semantic:data-memory.v16:test', 'dataset',
+                         'work_memory', 'memory_only', 'never', 'observed', '[]',
+                         1, 1, 'active', 1, 1);
+                    INSERT INTO data_source_links (
+                        source_id, source_ref_key, timeline_id, link_kind, observed_at, created_at
+                    ) VALUES
+                        (1, 'legacy:1', 7, 'work_memory', 1, 1),
+                        (2, 'dataset:2', 7, 'work_memory', 1, 1);
+                    INSERT INTO data_snapshots (
+                        source_id, collected_at, observed_at, collector, content_text,
+                        structured_data, content_hash, freshness_ttl_seconds, provenance,
+                        source_capture_ids, source_timeline_ids, status, created_at, period_key
+                    ) VALUES
+                        (1, 1, 1, 'memory_extract', '',
+                         '{"metric_rows":[{"metric":"订单量","value":"1200"},{"metric":"增长率","value":"8%"}]}',
+                         'legacy-1', 0, '{}', '[]', '[7]', 'success', 1, 'week:1'),
+                        (2, 1, 1, 'memory_extract', '',
+                         '{"metric_rows":[{"metric":"订单量","value":"1200"}]}',
+                         'dataset-old', 0, '{}', '[]', '[7]', 'success', 1, 'week:1'),
+                        (2, 2, 2, 'memory_extract', '',
+                         '{"metric_rows":[{"metric":"订单量","value":"1200"},{"metric":"增长率","value":"8%"}]}',
+                         'dataset-latest', 0, '{}', '[]', '[7]', 'success', 2, 'week:2');
+                    "#,
+                )?;
+                assert!(legacy_source_rows_fully_covered(conn, 1)?);
+                conn.execute(
+                    "INSERT INTO data_snapshots (
+                        source_id, collected_at, observed_at, collector, content_text,
+                        structured_data, content_hash, freshness_ttl_seconds, provenance,
+                        source_capture_ids, source_timeline_ids, status, created_at, period_key
+                     ) VALUES (2, 3, 3, 'memory_extract', '',
+                        '{\"metric_rows\":[{\"metric\":\"订单量\",\"value\":\"1200\"}]}',
+                        'dataset-new-incomplete', 0, '{}', '[]', '[7]', 'success', 3, 'week:3')",
+                    [],
+                )?;
+                assert!(!legacy_source_rows_fully_covered(conn, 1)?);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn legacy_cleanup_is_resumable_and_bounded_per_run() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    r#"
+                    INSERT INTO captures (
+                        id, ts, app_name, win_title, event_type,
+                        is_sensitive, pii_scrubbed
+                    ) VALUES (1, 1, 'test', 'test', 'manual', 0, 0);
+                    INSERT INTO timelines (
+                        id, capture_id, summary, entities, category, importance,
+                        created_at_ms, updated_at_ms
+                    ) VALUES (7, 1, 'test', '[]', 'data', 1, 1, 1);
+                    UPDATE captures SET timeline_id = 7 WHERE id = 1;
+                    INSERT INTO data_sources (
+                        id, canonical_key, title, source_kind, access_mode, refresh_policy,
+                        realtime_level, tags, first_seen_at, last_seen_at, status,
+                        created_at, updated_at
+                    ) VALUES (100, 'memory:semantic:data-memory.v16:test', 'dataset',
+                        'work_memory', 'memory_only', 'never', 'observed', '[]',
+                        1, 1, 'active', 1, 1);
+                    INSERT INTO data_source_links (
+                        source_id, source_ref_key, timeline_id, link_kind, observed_at, created_at
+                    ) VALUES (100, 'dataset:100', 7, 'work_memory', 1, 1);
+                    INSERT INTO data_snapshots (
+                        source_id, collected_at, observed_at, collector, content_text,
+                        structured_data, content_hash, freshness_ttl_seconds, provenance,
+                        source_capture_ids, source_timeline_ids, status, created_at
+                    ) VALUES (100, 1, 1, 'memory_extract', '',
+                        '{"metric_rows":[{"metric":"订单量","value":"1200"}]}',
+                        'dataset', 0, '{}', '[]', '[7]', 'success', 1);
+                    "#,
+                )?;
+                for source_id in 1_i64..=10 {
+                    conn.execute(
+                        "INSERT INTO data_sources (
+                            id, canonical_key, title, source_kind, access_mode, refresh_policy,
+                            realtime_level, tags, first_seen_at, last_seen_at, status,
+                            created_at, updated_at
+                         ) VALUES (?1, ?2, 'legacy', 'work_memory', 'memory_only', 'never',
+                            'observed', '[]', 1, 1, 'active', 1, 1)",
+                        params![source_id, format!("memory:semantic:v7:{source_id}")],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO data_source_links (
+                            source_id, source_ref_key, timeline_id, link_kind, observed_at, created_at
+                         ) VALUES (?1, ?2, 7, 'work_memory', 1, 1)",
+                        params![source_id, format!("legacy:{source_id}")],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO data_snapshots (
+                            source_id, collected_at, observed_at, collector, content_text,
+                            structured_data, content_hash, freshness_ttl_seconds, provenance,
+                            source_capture_ids, source_timeline_ids, status, created_at
+                         ) VALUES (?1, 1, 1, 'memory_extract', '',
+                            '{\"metric_rows\":[{\"metric\":\"订单量\",\"value\":\"1200\"}]}',
+                            ?2, 0, '{}', '[]', '[7]', 'success', 1)",
+                        params![source_id, format!("legacy-{source_id}")],
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO memory_favorites (
+                        resource_kind, resource_id, created_at, updated_at
+                     ) VALUES ('data', 1, 1, 1)",
+                    [],
+                )?;
+
+                cleanup_fully_covered_legacy_data_sources(conn)?;
+                let active_after_first: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM data_sources
+                     WHERE canonical_key LIKE 'memory:semantic:%' AND deleted_at IS NULL",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let cursor_after_first: i64 = conn.query_row(
+                    "SELECT cursor_source_id FROM data_legacy_cleanup_state WHERE singleton_id=1",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(active_after_first, 3);
+                assert_eq!(cursor_after_first, 8);
+                let old_favorite_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM memory_favorites
+                     WHERE resource_kind = 'data' AND resource_id = 1",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let dataset_favorite_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM memory_favorites
+                     WHERE resource_kind = 'data' AND resource_id = 100",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(old_favorite_count, 0);
+                assert_eq!(dataset_favorite_count, 1);
+
+                cleanup_fully_covered_legacy_data_sources(conn)?;
+                let active_after_second: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM data_sources
+                     WHERE canonical_key LIKE 'memory:semantic:%' AND deleted_at IS NULL",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let cursor_after_second: i64 = conn.query_row(
+                    "SELECT cursor_source_id FROM data_legacy_cleanup_state WHERE singleton_id=1",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(active_after_second, 1);
+                assert_eq!(cursor_after_second, 0);
+                let current_source_active: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM data_sources
+                     WHERE id = 100 AND deleted_at IS NULL",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(current_source_active, 1);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn retired_source_migration_purges_only_unreferenced_data_and_normalizes_links() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    r#"
+                    INSERT INTO data_sources (
+                        id, canonical_key, title, source_kind, access_mode, refresh_policy,
+                        realtime_level, tags, first_seen_at, last_seen_at, status,
+                        created_at, updated_at, deleted_at
+                    ) VALUES
+                        (9101, 'retired:unreferenced', 'retired', 'work_memory',
+                         'memory_only', 'never', 'observed', '[]', 1, 1, 'disabled', 1, 1, 2),
+                        (9102, 'retired:favorite', 'favorite', 'work_memory',
+                         'memory_only', 'never', 'observed', '[]', 1, 1, 'disabled', 1, 1, 2);
+                    INSERT INTO data_snapshots (
+                        source_id, collected_at, collector, content_text, structured_data,
+                        content_hash, provenance, source_capture_ids, source_timeline_ids,
+                        status, created_at
+                    ) VALUES
+                        (9101, 1, 'memory_extract', 'purge me', '{}', 'purge', '{}', '[]', '[]', 'success', 1),
+                        (9102, 1, 'memory_extract', 'keep me', '{}', 'keep', '{}', '[]', '[]', 'success', 1);
+                    INSERT INTO memory_favorites (
+                        resource_kind, resource_id, created_at, updated_at
+                    ) VALUES ('data', 9102, 1, 1);
+                    "#,
+                )?;
+                conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+                conn.execute(
+                    "INSERT INTO data_source_links (
+                        source_id, source_ref_key, capture_id, link_kind, observed_at, created_at
+                     ) VALUES (9102, 'retired:missing-capture', 999999, 'work_memory', 1, 1)",
+                    [],
+                )?;
+                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+
+                conn.execute_batch(include_str!(
+                    "../migrations/133_normalize_retired_data_sources.sql"
+                ))?;
+
+                let purged: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM data_sources WHERE id = 9101",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let kept: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM data_sources WHERE id = 9102",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let purged_snapshots: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM data_snapshots WHERE source_id = 9101",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let normalized_capture: Option<i64> = conn.query_row(
+                    "SELECT capture_id FROM data_source_links WHERE source_id = 9102",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(purged, 0);
+                assert_eq!(kept, 1);
+                assert_eq!(purged_snapshots, 0);
+                assert_eq!(normalized_capture, None);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn optional_production_copy_cleanup_respects_budget_and_integrity() {
+        let Ok(db_path) = std::env::var("MEMORY_BREAD_LEGACY_CLEANUP_E2E_DB") else {
+            return;
+        };
+        let rounds = std::env::var("MEMORY_BREAD_LEGACY_CLEANUP_E2E_ROUNDS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1)
+            .clamp(1, 100);
+        let storage = StorageManager::open(std::path::Path::new(&db_path)).unwrap();
+        let (active_before, foreign_keys_before) = storage
+            .with_conn(|conn| {
+                Ok((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM data_sources
+                         WHERE source_kind = 'work_memory'
+                           AND deleted_at IS NULL
+                           AND (
+                               (canonical_key LIKE 'memory:semantic:%'
+                                AND canonical_key NOT LIKE 'memory:semantic:data-memory.v16:%')
+                               OR canonical_key LIKE 'memory:timeline-dataset:%'
+                           )",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )?,
+                    conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?,
+                ))
+            })
+            .unwrap();
+
+        let started = Instant::now();
+        let mut max_round_elapsed = Duration::ZERO;
+        for _ in 0..rounds {
+            let round_started = Instant::now();
+            storage
+                .with_conn(cleanup_fully_covered_legacy_data_sources)
+                .unwrap();
+            max_round_elapsed = max_round_elapsed.max(round_started.elapsed());
+        }
+        let elapsed = started.elapsed();
+        let (active_after, foreign_keys_after, cursor) = storage
+            .with_conn(|conn| {
+                Ok((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM data_sources
+                         WHERE source_kind = 'work_memory'
+                           AND deleted_at IS NULL
+                           AND (
+                               (canonical_key LIKE 'memory:semantic:%'
+                                AND canonical_key NOT LIKE 'memory:semantic:data-memory.v16:%')
+                               OR canonical_key LIKE 'memory:timeline-dataset:%'
+                           )",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )?,
+                    conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?,
+                    conn.query_row(
+                        "SELECT cursor_source_id FROM data_legacy_cleanup_state
+                         WHERE singleton_id = 1",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )?,
+                ))
+            })
+            .unwrap();
+
+        eprintln!(
+            "legacy_cleanup_copy rounds={} elapsed_ms={} max_round_ms={} active_before={} active_after={} cursor={} fk_before={} fk_after={}",
+            rounds,
+            elapsed.as_millis(),
+            max_round_elapsed.as_millis(),
+            active_before,
+            active_after,
+            cursor,
+            foreign_keys_before,
+            foreign_keys_after
+        );
+        assert!(max_round_elapsed <= LEGACY_DATA_CLEANUP_BUDGET + Duration::from_secs(1));
+        assert!(active_after <= active_before);
+        assert!(
+            active_before - active_after
+                <= (LEGACY_DATA_CLEANUP_BATCH_SIZE.saturating_mul(rounds)) as i64
+        );
+        assert_eq!(foreign_keys_after, foreign_keys_before);
     }
 
     #[test]

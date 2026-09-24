@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// Shared optimistic-concurrency guard for conversational and selection edits.
 /// Call again inside the transaction immediately before committing a result.
@@ -485,6 +486,77 @@ pub fn start_progress(
     .optional()
 }
 
+/// Settle work that belonged to a previous process/request and can no longer be
+/// live. Brainstorm records without Agent events are idle conversations waiting
+/// for the user, not failed document runs. Durable operations remain resumable.
+pub fn settle_stale_running(
+    conn: &Connection,
+    cutoff_ms: i64,
+    active_sessions: &HashSet<String>,
+) -> Result<(usize, usize)> {
+    let history_candidates = {
+        let mut stmt = conn.prepare(
+            "SELECT id,COALESCE(session_id,''),creation_mode,COALESCE(agent_trace_json,'[]')
+             FROM creation_history WHERE lifecycle_status='running' AND updated_at<?1",
+        )?;
+        let rows = stmt.query_map(params![cutoff_ms], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>>>()?;
+        rows
+    };
+    let operation_candidates = {
+        let mut stmt = conn.prepare(
+            "SELECT operation_id,session_id FROM creation_operations
+             WHERE status='running' AND updated_at<?1",
+        )?;
+        let rows = stmt.query_map(params![cutoff_ms], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>>>()?;
+        rows
+    };
+
+    let tx = conn.unchecked_transaction()?;
+    let mut settled_histories = 0;
+    for (id, session_id, creation_mode, trace_json) in history_candidates {
+        if active_sessions.contains(&session_id) {
+            continue;
+        }
+        let has_agent_events = serde_json::from_str::<Vec<serde_json::Value>>(&trace_json)
+            .map(|events| !events.is_empty())
+            .unwrap_or(true);
+        let status = if creation_mode == "brainstorm" && !has_agent_events {
+            "completed"
+        } else {
+            "failed"
+        };
+        settled_histories += tx.execute(
+            "UPDATE creation_history SET lifecycle_status=?2,updated_at=?3
+             WHERE id=?1 AND lifecycle_status='running'",
+            params![id, status, chrono::Utc::now().timestamp_millis()],
+        )?;
+    }
+    let mut settled_operations = 0;
+    for (operation_id, session_id) in operation_candidates {
+        if active_sessions.contains(&session_id) {
+            continue;
+        }
+        settled_operations += tx.execute(
+            "UPDATE creation_operations SET status='waiting',updated_at=?2
+             WHERE operation_id=?1 AND status='running'",
+            params![operation_id, chrono::Utc::now().timestamp_millis()],
+        )?;
+    }
+    tx.commit()?;
+    Ok((settled_histories, settled_operations))
+}
+
 fn map_history_row(row: &rusqlite::Row<'_>) -> Result<CreationHistory> {
     Ok(CreationHistory {
         id: row.get(0)?,
@@ -580,6 +652,12 @@ mod tests {
                 , creation_brief_json TEXT
                 , brainstorm_revision INTEGER
                 , progress_epoch INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE creation_operations (
+                operation_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
             );",
         )
         .unwrap();
@@ -614,6 +692,31 @@ mod tests {
         assert_eq!(total, 2);
         assert_eq!(second_page.len(), 1);
         assert_ne!(first_page[0].id, second_page[0].id);
+    }
+
+    #[test]
+    fn stale_runs_settle_without_turning_idle_brainstorm_into_a_failure() {
+        let conn = connection();
+        conn.execute(
+            "INSERT INTO creation_history
+             (prompt,generated_content,session_id,agent_trace_json,lifecycle_status,creation_mode,created_at,updated_at)
+             VALUES ('等待回答','','idle','[]','running','brainstorm',0,0),
+                    ('中断修订','saved','interrupted','[{\"type\":\"tool.started\"}]','running','brainstorm',0,0),
+                    ('仍在执行','saved','active','[{\"type\":\"run.started\"}]','running','direct',0,0)",
+            [],
+        ).unwrap();
+        let active = HashSet::from(["active".to_string()]);
+        let (histories, operations) = settle_stale_running(&conn, 1, &active).unwrap();
+        assert_eq!((histories, operations), (2, 0));
+        let statuses = ["idle", "interrupted", "active"].map(|session| {
+            conn.query_row(
+                "SELECT lifecycle_status FROM creation_history WHERE session_id=?1",
+                params![session],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+        });
+        assert_eq!(statuses, ["completed", "failed", "running"]);
     }
 
     #[test]

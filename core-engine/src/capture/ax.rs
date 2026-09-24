@@ -387,6 +387,26 @@ fn browser_identity_is_consistent(bundle_id: Option<&str>, app_name: Option<&str
     }
 }
 
+fn browser_page_matches_front_window(
+    front_window_title: Option<&str>,
+    page_title: &str,
+) -> bool {
+    fn normalized(value: &str) -> String {
+        value
+            .to_lowercase()
+            .chars()
+            .filter(|ch| ch.is_alphanumeric())
+            .collect()
+    }
+
+    let Some(window_title) = front_window_title.map(str::trim).filter(|v| !v.is_empty()) else {
+        return false;
+    };
+    let window = normalized(window_title);
+    let page = normalized(page_title.trim());
+    page.chars().count() >= 2 && (window.contains(&page) || page.contains(&window))
+}
+
 fn chromium_app_name(bundle_id: Option<&str>, app_name: Option<&str>) -> Option<&'static str> {
     match bundle_id {
         Some("com.google.Chrome") => return Some("Google Chrome"),
@@ -692,9 +712,10 @@ pub async fn get_frontmost_info_async() -> Option<AXInfo> {
 #[cfg(all(target_os = "macos", not(test)))]
 mod macos_impl {
     use super::{
-        browser_identity_is_consistent, chromium_app_name, fallback_extractor_for_context,
-        parse_keyed_quoted_value, sanitize_extracted_text_with_reason, AXInfo, ExtractedText,
-        TextExtractor, AX_CACHE_TTL_SECS, AX_SUPPORT_CACHE, EXTRACTED_TEXT_MAX_CHARS,
+        browser_identity_is_consistent, browser_page_matches_front_window, chromium_app_name,
+        fallback_extractor_for_context, parse_keyed_quoted_value,
+        sanitize_extracted_text_with_reason, AXInfo, ExtractedText, TextExtractor,
+        AX_CACHE_TTL_SECS, AX_SUPPORT_CACHE, EXTRACTED_TEXT_MAX_CHARS,
         GENERIC_ALL_UI_ITEM_LIMIT, GENERIC_FOCUS_MIN_CHARS, GENERIC_STATIC_ITEM_LIMIT,
         GENERIC_WINDOW_MIN_CHARS,
     };
@@ -840,8 +861,13 @@ mod macos_impl {
             fallback_extractor_for_context(app_bundle_id.as_deref(), Some(&app_name)),
             Some(TextExtractor::Chrome | TextExtractor::Safari)
         );
+        let front_window_title = get_frontmost_window_title();
         let (url, webpage_title) =
-            get_browser_page_metadata(app_bundle_id.as_deref(), Some(&app_name))
+            get_browser_page_metadata_for_window(
+                app_bundle_id.as_deref(),
+                Some(&app_name),
+                front_window_title.as_deref(),
+            )
                 .map(|(url, title)| (Some(url), Some(title)))
                 .unwrap_or((None, None));
 
@@ -853,7 +879,7 @@ mod macos_impl {
         Some(AXInfo {
             app_name: Some(app_name),
             app_bundle_id,
-            win_title: webpage_title.clone(),
+            win_title: front_window_title.or_else(|| webpage_title.clone()),
             url,
             webpage_title,
             ..Default::default()
@@ -865,8 +891,11 @@ mod macos_impl {
         let app_name = info.app_name.clone();
         let app_bundle_id = info.app_bundle_id.clone();
         let win_title = info.win_title.clone();
-        let browser_metadata_before =
-            get_browser_page_metadata(app_bundle_id.as_deref(), app_name.as_deref());
+        let browser_metadata_before = get_browser_page_metadata_for_window(
+            app_bundle_id.as_deref(),
+            app_name.as_deref(),
+            win_title.as_deref(),
+        );
         info.extracted_text = extract_ax_text_for_context(
             app_name.as_deref(),
             app_bundle_id.as_deref(),
@@ -874,8 +903,11 @@ mod macos_impl {
         )
         .map(|result| result.text);
         if browser_metadata_before.is_some() {
-            let browser_metadata_after =
-                get_browser_page_metadata(app_bundle_id.as_deref(), app_name.as_deref());
+            let browser_metadata_after = get_browser_page_metadata_for_window(
+                app_bundle_id.as_deref(),
+                app_name.as_deref(),
+                win_title.as_deref(),
+            );
             if browser_metadata_before != browser_metadata_after {
                 debug!("浏览器标签页在正文提取期间发生变化，丢弃本轮错配上下文");
                 return None;
@@ -976,7 +1008,11 @@ end tell"#,
         };
 
         let (url, webpage_title) =
-            get_browser_page_metadata(app_bundle_id.as_deref(), Some(&app_name))
+            get_browser_page_metadata_for_window(
+                app_bundle_id.as_deref(),
+                Some(&app_name),
+                win_title.as_deref(),
+            )
                 .map(|(url, title)| (Some(url), Some(title)))
                 .unwrap_or((None, None));
 
@@ -1007,6 +1043,47 @@ end tell"#,
             TextExtractor::Safari => get_safari_page_metadata(),
             _ => None,
         }
+    }
+
+    /// Chrome 的 AppleScript `front window` 在多窗口/多 Space 场景下可能与
+    /// macOS 真正的 AX 前台窗口不同。只有页面标题与 AX 窗口标题能互相印证时，
+    /// 才允许把 URL 写入采集记录，避免把另一个窗口的 URL 绑定到当前正文。
+    fn get_browser_page_metadata_for_window(
+        bundle_id: Option<&str>,
+        app_name: Option<&str>,
+        front_window_title: Option<&str>,
+    ) -> Option<(String, String)> {
+        let metadata = get_browser_page_metadata(bundle_id, app_name)?;
+        if !browser_page_matches_front_window(front_window_title, &metadata.1) {
+            warn!(
+                app = ?app_name,
+                front_window_title = ?front_window_title,
+                browser_page_title = %metadata.1,
+                "浏览器元数据与 AX 前台窗口不一致，丢弃跨窗口 URL"
+            );
+            return None;
+        }
+        Some(metadata)
+    }
+
+    fn get_frontmost_window_title() -> Option<String> {
+        let script = r#"
+            tell application "System Events"
+                set front_process to first application process whose frontmost is true
+                try
+                    return name of front window of front_process
+                end try
+            end tell
+            return ""
+        "#;
+        run_osascript_with_timeout(
+            script,
+            "front_window_title_snapshot",
+            Duration::from_millis(1200),
+        )
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
     }
 
     fn get_chromium_page_metadata(app_name: &str) -> Option<(String, String)> {
@@ -1592,6 +1669,20 @@ mod tests {
             Some("com.apple.finder"),
             Some("访达")
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn browser_metadata_requires_same_front_window_title() {
+        assert!(browser_page_matches_front_window(
+            Some("灵机视频质量提升方案 - 讨论稿 - 云文档 - Google Chrome"),
+            "灵机视频质量提升方案 - 讨论稿 - 云文档",
+        ));
+        assert!(!browser_page_matches_front_window(
+            Some("灵机视频质量提升方案 - 讨论稿 - 云文档 - Google Chrome"),
+            "vedio-aigc",
+        ));
+        assert!(!browser_page_matches_front_window(None, "vedio-aigc"));
     }
 
     #[test]

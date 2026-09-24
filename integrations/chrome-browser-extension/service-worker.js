@@ -146,7 +146,7 @@ async function executeJob(job) {
     if (tabId == null) throw jobError('BACKGROUND_TAB_BLOCKED', '无法创建后台标签')
     activeJobTabs.set(job.browser_job_id, tabId)
     if (cancelledJobIds.has(job.browser_job_id)) throw jobError('SOURCE_REFRESH_CANCELLED', '页面读取已取消')
-    preview = await startLivePreview(job, tabId)
+    preview = await startJobPreview(job, tabId)
     if (cancelledJobIds.has(job.browser_job_id)) throw jobError('SOURCE_REFRESH_CANCELLED', '页面读取已取消')
     preview.setStage('loading')
     await waitForTab(tabId, Math.min(30000, Math.max(1000, job.deadline_ms - Date.now())))
@@ -192,6 +192,25 @@ async function closeActiveJobTab(jobId) {
       () => jobError('TAB_CLOSE_TIMEOUT', '后台标签关闭超时'),
     )
   } catch {}
+}
+
+async function startJobPreview(job, tabId) {
+  if (job.live_preview_enabled !== false) return startLivePreview(job, tabId)
+
+  let stage = 'opening'
+  let title = ''
+  let url = job.url
+  sendProgress(job, {stage, title, url})
+  return {
+    capture: async () => {},
+    setStage: (nextStage, nextTitle = title, nextUrl = url) => {
+      stage = nextStage
+      title = nextTitle
+      url = nextUrl
+      sendProgress(job, {stage, title, url})
+    },
+    stop: async () => {},
+  }
 }
 
 async function startLivePreview(job, tabId) {

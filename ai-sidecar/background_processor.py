@@ -954,6 +954,11 @@ class BackgroundProcessor:
             )
         return result
 
+    def _data_extraction_is_due(self, now: Optional[float] = None) -> bool:
+        """限制全库数据物化维护的触发频率，避免新 capture 持续绕过冷却。"""
+        current = time.monotonic() if now is None else now
+        return current - self._last_data_extraction_at >= _DATA_EXTRACTION_INTERVAL_SECS
+
     async def _trigger_data_extraction(self, limit: int = 200) -> dict:
         """让 Core 以 timeline 为入口识别数据源和工作数据记忆。
 
@@ -3791,12 +3796,7 @@ class BackgroundProcessor:
                 processed = int(batch_result.get('processed_count', 0))
                 self._touch_status_file()
 
-                data_extraction_due = (
-                    processed > 0
-                    or time.monotonic() - self._last_data_extraction_at
-                    >= _DATA_EXTRACTION_INTERVAL_SECS
-                )
-                if data_extraction_due:
+                if self._data_extraction_is_due():
                     batch_result['data_extraction'] = await self._trigger_data_extraction(
                         limit=max(100, min(200, timeline_batch_limit * 4)),
                     )

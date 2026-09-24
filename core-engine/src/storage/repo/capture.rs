@@ -265,6 +265,12 @@ impl StorageManager {
             )?;
             vector_tx.commit()?;
 
+            // timeline 仍保留为上层资产；删除 capture 前主动断开数据源的直接
+            // capture 外键，避免临时关闭外键后留下悬空引用。
+            conn.execute(
+                "UPDATE data_source_links SET capture_id = NULL WHERE capture_id = ?1",
+                params![id],
+            )?;
             conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
             let delete_result = conn.execute("DELETE FROM captures WHERE id = ?1", params![id]);
             let restore_result = conn.execute_batch("PRAGMA foreign_keys = ON;");

@@ -188,6 +188,10 @@ pub struct BrowserExtensionJob {
     pub deadline_ms: i64,
     pub focus_policy: &'static str,
     pub content_kind: &'static str,
+    /// Live screenshots require `chrome.debugger` and make Chrome show a
+    /// browser-wide debugging banner. Keep them opt-in per job so background
+    /// document maintenance can use tabs/scripting without attaching CDP.
+    pub live_preview_enabled: bool,
     #[serde(skip)]
     pub cancellation_scope: Option<String>,
 }
@@ -215,12 +219,18 @@ impl BrowserExtensionJob {
             deadline_ms: now_ms() + timeout.as_millis() as i64,
             focus_policy: "never",
             content_kind: "report",
+            live_preview_enabled: true,
             cancellation_scope: None,
         }
     }
 
     pub fn with_interaction_plan(mut self, plan: Option<PageInteractionPlan>) -> Self {
         self.interaction_plan = plan;
+        self
+    }
+
+    pub fn with_live_preview(mut self, enabled: bool) -> Self {
+        self.live_preview_enabled = enabled;
         self
     }
 }

@@ -4,7 +4,8 @@ from itertools import permutations
 import pytest
 
 from creation.agent_loop import CreationAgentLoop
-from creation.operations import OperationError, apply_patches, document_nodes, resolve_target
+from creation.operations import (OperationError, apply_patches, document_nodes,
+                                 repair_generated_literal_selectors, resolve_target)
 from creation.service import CreationOptions, CreationService
 from creation.tools import fallback_routing_decision
 
@@ -38,6 +39,23 @@ def test_setext_and_exact_occurrence():
     assert "value new" in result
 
 
+def test_exact_line_selector_wins_over_shorter_prefix_matches():
+    doc = "- populated item\n\n- \n\n### Pending\n"
+    result, _ = apply_patches(
+        doc,
+        [{"action": "delete", "target": {"text": "- ", "occurrence": 1}}],
+    )
+    assert result == "- populated item\n\n\n\n### Pending\n"
+
+
+def test_literal_selector_keeps_substring_semantics_without_an_exact_line():
+    result, _ = apply_patches(
+        "prefix value suffix\n",
+        [{"action": "replace", "target": {"text": "value", "occurrence": 1}, "content": "new"}],
+    )
+    assert result == "prefix new suffix\n"
+
+
 def test_move_insert_and_replace_bind_to_same_base():
     doc = "## A\na\n## B\nb\n## C\nc\n"
     a, b, c = document_nodes(doc)
@@ -46,6 +64,127 @@ def test_move_insert_and_replace_bind_to_same_base():
     assert result == "## C\nc\n## A\na\n## B\nBB\n"
     result, _ = apply_patches(doc, [{"action": "insert", "target": b["id"], "position": "before", "content": "## New\nnew\n"}])
     assert result == "## A\na\n## New\nnew\n## B\nb\n## C\nc\n"
+
+
+def test_generated_patch_restores_heading_boundary_without_changing_literal_patch_contract():
+    from creation.operations import normalize_generated_patch_markdown
+    patches = [{"action": "replace", "target": {"text": "待确认"},
+                "content": "待确认### 执行步骤\n\n内容"}]
+    normalized = normalize_generated_patch_markdown(patches)
+    assert normalized[0]["content"] == "待确认\n\n### 执行步骤\n\n内容"
+    assert patches[0]["content"] == "待确认### 执行步骤\n\n内容"
+    literal, _ = apply_patches("待确认", patches)
+    assert literal == "待确认### 执行步骤\n\n内容"
+
+
+def test_generated_section_insert_after_document_without_trailing_newline_gets_boundary():
+    from creation.operations import normalize_generated_patch_markdown
+    document = "# 方案\n\n## 现有内容\n\n结尾无换行"
+    root = document_nodes(document)[0]
+    patches = [{"action": "insert", "target": root["id"], "position": "after",
+                "content": "## 工作定义\n\n正文"}]
+    normalized = normalize_generated_patch_markdown(patches, document)
+    result, _ = apply_patches(document, normalized, [root["id"]])
+    assert result == document + "\n\n## 工作定义\n\n正文"
+
+
+def test_generated_insert_cannot_repeat_existing_document_as_new_fragment():
+    from creation.operations import generated_patch_problems
+    document = (
+        "# 方案\n\n## 范围\n\n这是第一段已经存在且长度足够的正文内容。\n\n"
+        "## 路径\n\n这是第二段已经存在且长度足够的正文内容。\n\n"
+        "## 验证\n\n这是第三段已经存在且长度足够的正文内容。\n"
+    )
+    duplicated = document.replace("## 范围", "## 范围\n\n新增定义", 1)
+    assert generated_patch_problems(document, [{
+        "action": "insert", "target": document_nodes(document)[0]["id"],
+        "position": "after", "content": duplicated,
+    }]) == ["insert_repeats_existing_content"]
+    assert generated_patch_problems(document, [{
+        "action": "insert", "target": document_nodes(document)[0]["id"],
+        "position": "after", "content": "\n\n## 新增定义\n\n仅新增内容",
+    }]) == []
+    small_context_copy = (
+        "## 新定义\n\n新增内容。\n\n这是第一段已经存在且长度足够的正文内容。\n\n"
+        "这是第二段已经存在且长度足够的正文内容。"
+    )
+    assert generated_patch_problems(document, [{
+        "action": "insert", "target": document_nodes(document)[0]["id"],
+        "position": "after", "content": small_context_copy,
+    }], "增加定义") == ["insert_repeats_existing_content"]
+    assert generated_patch_problems(document, [{
+        "action": "insert", "target": document_nodes(document)[0]["id"],
+        "position": "after", "content": small_context_copy,
+    }], "复制两段原文到附录") == []
+
+
+def test_generated_full_target_insert_is_recovered_as_insertion_only_replace():
+    from creation.operations import recover_generated_insert_supersequence
+    document = "# 方案\n\n## 范围\n\n原有范围。\n\n## 路径\n\n原有路径。\n"
+    root = document_nodes(document)[0]
+    candidate = document.replace("## 路径", "## L0 商家工作定义\n\n新增定义。\n\n## 路径")
+    recovered, changed = recover_generated_insert_supersequence(document, [{
+        "action": "insert", "target": root["id"], "position": "after",
+        "content": candidate,
+    }], [root["id"]])
+    assert changed is True
+    assert recovered == [{
+        "action": "replace", "target": root["id"], "content": candidate,
+    }]
+    assert apply_patches(document, recovered, [root["id"]])[0] == candidate
+
+
+def test_generated_insert_recovery_rejects_rewritten_or_partial_base():
+    from creation.operations import recover_generated_insert_supersequence
+    document = "# 方案\n\n## 范围\n\n原有范围。\n\n## 路径\n\n原有路径。\n"
+    root = document_nodes(document)[0]
+    for candidate in (
+        document.replace("原有范围。", "改写范围。"),
+        "## 新定义\n\n新增内容。\n\n## 路径\n\n原有路径。",
+    ):
+        patches = [{"action": "insert", "target": root["id"],
+                    "position": "after", "content": candidate}]
+        recovered, changed = recover_generated_insert_supersequence(
+            document, patches, [root["id"]]
+        )
+        assert changed is False
+        assert recovered == patches
+
+
+def test_allowed_root_scope_rebinds_to_candidate_with_same_heading_identity():
+    from creation.operations import rebind_targets_to_document
+    base = "# 方案\n\n## 范围\n\n原始范围。\n"
+    candidate = base + "\n## 待确认\n\n- 账号关系待确认\n"
+    base_root = document_nodes(base)[0]
+    candidate_root = document_nodes(candidate)[0]
+    assert rebind_targets_to_document(
+        base, candidate, [base_root["id"]]
+    ) == [candidate_root["id"]]
+
+
+def test_allowed_scope_rebind_fails_when_heading_identity_is_ambiguous_or_removed():
+    from creation.operations import rebind_targets_to_document
+    base = "# 方案\n\n## 范围\n\n原始范围。\n"
+    root, section = document_nodes(base)
+    assert rebind_targets_to_document(base, "# 新方案\n", [root["id"]]) is None
+    assert rebind_targets_to_document(base, "# 方案\n\n## 其他\n\n正文。\n", [section["id"]]) is None
+
+
+def test_generated_append_rebinds_new_heading_only_with_whole_document_scope():
+    from creation.operations import rebind_generated_append_target
+    document = "# 方案\n\n## 现有章节\n\n正文\n"
+    root, section = document_nodes(document)
+    patch = {"action": "insert", "target": {"text": "## 尚未存在的定义"},
+             "position": "before", "content": "## 尚未存在的定义\n\n正文"}
+    rebound = rebind_generated_append_target(
+        [patch], document, [root["id"]], "增加定义介绍"
+    )
+    assert rebound[0]["target"] == root["id"]
+    assert rebound[0]["position"] == "after"
+    unchanged = rebind_generated_append_target(
+        [patch], document, [section["id"]], "增加定义介绍"
+    )
+    assert unchanged == [patch]
 
 
 def test_overlapping_and_stale_targets_do_not_change_base():
@@ -147,6 +286,7 @@ def test_production_prompt_discloses_operation_and_no_required_memory():
     assert "patch|transform|generate|respond|answer|resume|undo|execute_skill" in system
     assert "memory_search" in system
     assert "结构性能力，不需要你决策" not in system
+    assert "不得擅自从待确认事项或未提交选项中挑一项" in system
 
 
 @pytest.mark.asyncio
@@ -242,6 +382,34 @@ async def test_invalid_model_contract_retries_interpretation_without_tool_execut
     assert decision['tools'] == []
     assert len(calls) == 2
     assert '未通过操作契约校验' in calls[1]['user_prompt']
+
+
+@pytest.mark.asyncio
+async def test_route_rejects_operation_kind_not_offered_by_current_intent_and_repairs_it():
+    service = object.__new__(CreationService)
+    service.model = 'test'
+    calls = []
+    document = '# 方案\n\n已有内容。'
+    target = document_nodes(document)[0]['id']
+
+    async def completion(**kwargs):
+        calls.append(kwargs)
+        operation = ({'kind': 'resume', 'operation_id': 'stale-operation'}
+                     if len(calls) == 1 else {'kind': 'transform', 'targets': [target]})
+        yield json.dumps({'operation': operation, 'tools': [], 'agents': [], 'reasoning': '继续当前正文'})
+
+    service._stream_direct_completion = completion
+    service._log_creation_usage = lambda **kwargs: None
+    decision = await service.route_capabilities(query='继续生成', requirement={
+        'task_intent': {'action': 'edit'},
+        'operation_context': {
+            'current_document': document,
+            'pending_operations': [{'operation_id': 'stale-operation', 'instruction': '旧任务'}],
+        },
+    })
+    assert len(calls) == 2
+    assert decision['operation'] == {'kind': 'transform', 'targets': [target]}
+    assert '不属于本轮意图和当前状态允许的操作' in calls[1]['user_prompt']
 
 
 @pytest.mark.asyncio
@@ -516,3 +684,38 @@ def test_move_requires_both_source_and_destination_to_be_in_scope():
         apply_patches(doc, [{'action': 'move', 'target': source['id'],
                             'destination': destination['id'], 'position': 'after'}], [source['id']])
     assert error.value.code == 'CREATION_PATCH_OUT_OF_SCOPE'
+
+
+def test_generated_selector_repair_accepts_unique_spacing_and_trailing_note_drift():
+    doc = (
+        '# 方案\n\n## 爆款视频生成执行模式\n\n'
+        '- 矩阵增量账号模式：利用“原号+新号”双轨制，新号全量AI生成。\n'
+        '- 商家对运营介入程度（托管vs辅助）的偏好\n'
+        '- 新品牌号与主号关联机制的具体设计\n\n## 其他\n\n保留。\n'
+    )
+    scope = document_nodes(doc)[1]['id']
+    patches = [
+        {'action': 'replace', 'target': {'text': '- 矩阵增量账号模式：利用“原号 + 新号”双轨制，新号全量 AI 生成。', 'occurrence': 1},
+         'content': '- 矩阵增量账号模式：利用“原号+新号”双轨制，新号全量AI生成。\n- 全托管模式：平台自动完成。'},
+        {'action': 'replace', 'target': {'text': '- 商家对运营介入程度（托管 vs 辅助）的偏好\n- 新品牌号与主号关联机制的具体设计（待确认）', 'occurrence': 1},
+         'content': '- 新品牌号与主号关联机制的具体设计（待确认）'},
+        {'action': 'delete', 'target': {'text': '- 商家对运营介入程度（托管 vs 辅助）的偏好\n', 'occurrence': 1}},
+    ]
+    repaired, changed = repair_generated_literal_selectors(doc, patches, [scope])
+    assert changed is True
+    assert len(repaired) == 2
+    updated, _ = apply_patches(doc, repaired, [scope])
+    assert '全托管模式' in updated
+    assert '运营介入程度' not in updated
+    assert '## 其他\n\n保留。' in updated
+
+
+def test_generated_selector_repair_fails_closed_when_spacing_match_is_ambiguous():
+    doc = '# 方案\n\n## 范围\n\n- 原号+新号\n- 原号 + 新号\n'
+    scope = document_nodes(doc)[1]['id']
+    patches = [{'action': 'delete', 'target': {'text': '- 原号  +  新号', 'occurrence': 1}}]
+    repaired, changed = repair_generated_literal_selectors(doc, patches, [scope])
+    assert changed is False
+    with pytest.raises(OperationError) as error:
+        apply_patches(doc, repaired, [scope])
+    assert error.value.code == 'CREATION_TARGET_MISSING'

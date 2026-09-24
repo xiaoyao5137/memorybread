@@ -356,6 +356,54 @@ async def test_creation_agent_loop_runs_in_interactive_p0_lane(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_creation_agent_stream_keeps_sidecar_hop_alive_during_long_step(monkeypatch):
+    async def delayed_agent_run(**_kwargs):
+        await asyncio.sleep(0.04)
+        yield {
+            "schema_version": "creation.agent.v1",
+            "event_id": "event-completed",
+            "session_id": "session-heartbeat",
+            "run_id": "run-heartbeat",
+            "sequence": 1,
+            "timestamp": 1,
+            "type": "run.completed",
+            "status": "completed",
+            "actor": {"kind": "agent", "id": "creation_main_agent", "name": "创作 Agent"},
+            "summary": "完成",
+            "goal": {"status": "complete"},
+            "environment_patch": {},
+            "data": {"document": "# 方案"},
+        }
+
+    class ThreadQueue:
+        def submit(self, _priority, fn, lane=None):
+            future = concurrent.futures.Future()
+
+            def run():
+                try:
+                    future.set_result(fn())
+                except Exception as exc:
+                    future.set_exception(exc)
+
+            threading.Thread(target=run, daemon=True).start()
+            return future
+
+    monkeypatch.setattr(creation_app.creation_agent_loop, "run", delayed_agent_run)
+    monkeypatch.setattr(creation_app, "get_global_queue", lambda: ThreadQueue())
+    monkeypatch.setattr(creation_app, "CREATION_AGENT_STREAM_HEARTBEAT_SECONDS", 0.01)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=creation_app.app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/creation/agent/run",
+            json={"user_prompt": "生成方案", "design_templates": []},
+        )
+
+    assert ": keep-alive" in response.text
+    assert parse_sse_events(response)[-1]["type"] == "run.completed"
+
+
+@pytest.mark.asyncio
 async def test_creation_agent_loop_failure_keeps_event_contract(monkeypatch):
     async def failing_agent_run(**_kwargs):
         if False:
@@ -455,3 +503,17 @@ def test_model_rejection_has_safe_actionable_failure_details(status):
     assert "private" not in summary
     assert "request_id" not in summary
     assert retryable is False
+
+
+def test_retryable_operation_error_preserves_checkpoint_retry_contract():
+    from creation.operations import OperationError
+    code, summary, retryable = creation_app._creation_failure_details(
+        OperationError(
+            "CREATION_DELIVERY_UNVERIFIED",
+            "交付验收自动压缩后仍未完成，可从已保存断点重试验收",
+            retryable=True,
+        )
+    )
+    assert code == "CREATION_DELIVERY_UNVERIFIED"
+    assert "已保存断点" in summary
+    assert retryable is True

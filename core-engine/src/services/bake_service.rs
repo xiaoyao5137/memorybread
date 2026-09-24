@@ -3351,6 +3351,8 @@ impl BakeService {
         let mut completed_artifacts = 0_i64;
         let mut first_error: Option<ApiError> = None;
         let mut document_persist_error_code: Option<String> = None;
+        let repairing_document_identity = candidate.retry_error_code.as_deref()
+            == Some("DOCUMENT_SOURCE_IDENTITY_MISMATCH");
         let model_document_payload_valid = extracted.document.accepted
             && extracted.document.payload.as_ref().is_some_and(|payload| {
                 parse_bake_document_payload(payload.clone(), candidate).is_ok()
@@ -3359,7 +3361,7 @@ impl BakeService {
             && candidate.retry_failure_count >= MAX_BAKE_RETRY_FAILURES - 1
             && document_evidence(candidate).allows_auto_create
             && !model_document_payload_valid
-            && !self.document_already_persisted(candidate)?
+            && (repairing_document_identity || !self.document_already_persisted(candidate)?)
         {
             deterministic_document_recovery(candidate)
         } else {
@@ -3968,7 +3970,7 @@ impl BakeService {
     ) -> Result<BakeDocumentEvidencePayload, ApiError> {
         use crate::storage::repo::document_candidate_quality::DocumentCandidateQualityEvaluation;
         let evidence = document_evidence(candidate);
-        let document = match candidate.capture_url.as_deref() {
+        let document = match substantive_document_url(candidate).as_deref() {
             Some(url) => self.storage.find_document_by_source_url(url)?,
             None => None,
         }.or(self.storage.find_bake_document_by_source_memory_id(candidate.timeline.id)?);
@@ -4003,9 +4005,11 @@ impl BakeService {
     ) -> Result<CandidatePersistResult, ApiError> {
         let evidence = self.audit_document_candidate(candidate, audit_run_id,
             crate::storage::repo::document_candidate_quality::DocumentEvaluationStage::Persistence)?;
+        let repairing_document_identity = candidate.retry_error_code.as_deref()
+            == Some("DOCUMENT_SOURCE_IDENTITY_MISMATCH");
         // Revisited URLs are observations of a potentially new revision. Never
         // ask a model to union them with an authoritative source (or old shell).
-        if let Some(url) = candidate.capture_url.as_deref() {
+        if let Some(url) = substantive_document_url(candidate).as_deref() {
             if let Some(existing) = self.storage.find_document_by_source_url(url)? {
                 if let Some(result) = self.queue_existing_document_observation(candidate, &existing)? {
                     return Ok(result);
@@ -4025,7 +4029,10 @@ impl BakeService {
             return Ok(CandidatePersistResult::discarded());
         }
 
-        if existing_sources.contains(&candidate.timeline.id) {
+        // The recovery lane exists precisely because the historical source link is
+        // untrusted.  Reusing it here would attach the candidate to the polluted
+        // document again and make the repair self-reverting.
+        if existing_sources.contains(&candidate.timeline.id) && !repairing_document_identity {
             if extraction.accepted {
                 if let Some(existing_doc) = self
                     .storage
@@ -4052,11 +4059,7 @@ impl BakeService {
             );
             return Ok(CandidatePersistResult::discarded());
         }
-        let candidate_url_norm = candidate
-            .capture_url
-            .as_deref()
-            .map(normalize_doc_url)
-            .filter(|s| !s.is_empty());
+        let candidate_url_norm = substantive_document_url(candidate);
 
         // URL 已存在：查询数据库中是否有该 URL 的文档，尝试合并而不是丢弃
         if let Some(ref u) = candidate_url_norm {
@@ -4097,7 +4100,7 @@ impl BakeService {
             {
                 if document_urls_compatible_for_title_match(
                     existing_doc.source_url.as_deref(),
-                    candidate.capture_url.as_deref(),
+                    substantive_document_url(candidate).as_deref(),
                 ) {
                     if extraction.accepted {
                         if let Some(result) = self.queue_existing_document_observation(candidate, &existing_doc)? {
@@ -6556,12 +6559,21 @@ fn deterministic_document_recovery(
         return None;
     }
     let title = document_source_title(candidate)?;
-    let full_content = candidate
-        .url_aggregated_text
-        .as_deref()
-        .or(candidate.capture_ax_text.as_deref())
-        .or(candidate.capture_ocr_text.as_deref())
+    // Aggregation can legitimately be shorter than the primary OCR snapshot after
+    // cross-window frames are excluded.  Choose the longest trustworthy captured
+    // body; selecting the first non-empty field can suppress an otherwise valid
+    // deterministic recovery.
+    let full_content = [
+        candidate.url_aggregated_text.as_deref(),
+        candidate.capture_ax_text.as_deref(),
+        candidate.capture_ocr_text.as_deref(),
+        candidate.capture_input_text.as_deref(),
+        candidate.capture_audio_text.as_deref(),
+    ]
+        .into_iter()
+        .flatten()
         .map(str::trim)
+        .max_by_key(|text| text.chars().count())
         .filter(|text| text.chars().count() >= 200)?
         .to_string();
     Some(BakeArtifactExtraction {
@@ -6646,7 +6658,7 @@ fn build_bake_document(
         source_app_name: source.capture_app_name.clone(),
         source_win_title: document_source_title(source)
             .or_else(|| source.capture_win_title.clone()),
-        source_url: source.capture_url.clone(),
+        source_url: substantive_document_url(source),
         content_hash,
         language: None,
         usage_count: 0,
@@ -7644,18 +7656,24 @@ fn document_evidence(candidate: &BakeMemorySourceRecord) -> BakeDocumentEvidence
         .capture_webpage_title
         .as_deref()
         .is_some_and(|title| browser_title_matches_document_body(title, body));
-    let captured_page_title_is_missing_or_generic = candidate
-        .capture_webpage_title
-        .as_deref()
-        .map(is_generic_document_source_title)
-        .unwrap_or(true);
     let preferred_title_matches = candidate
         .preferred_source_title
         .as_deref()
         .is_some_and(|title| browser_title_matches_document_body(title, body));
-    let has_structured_web_title = captured_page_title_matches
-        || (captured_page_title_is_missing_or_generic && preferred_title_matches);
-    let has_document_url = has_valid_web_url && has_structured_web_title;
+    let stable_member_title_matches = preferred_title_matches
+        && candidate
+            .capture_win_title
+            .as_deref()
+            .is_some_and(|title| browser_title_matches_document_body(title, body));
+    // 稳定成员标题可以证明“这是一份浏览器文档”，但只有与 URL 同帧采集的
+    // webpage_title 能证明 URL 属于这份正文。两者不能混用，否则多窗口下另一个
+    // 标签页的 URL 会借当前窗口标题通过身份门禁。
+    // preferred_source_title is aggregated across member captures. Require the
+    // current window title to corroborate it before treating it as browser
+    // document evidence; otherwise a stale title from another window can lend
+    // document identity to unrelated content.
+    let has_structured_web_title = captured_page_title_matches || stable_member_title_matches;
+    let has_document_url = has_valid_web_url && captured_page_title_matches;
     let has_meaningful_native_title = [
         candidate.preferred_source_title.as_deref(),
         candidate.capture_win_title.as_deref(),
@@ -7672,10 +7690,7 @@ fn document_evidence(candidate: &BakeMemorySourceRecord) -> BakeDocumentEvidence
         BakeDocumentEvidenceKind::Insufficient
     } else if has_document_url && has_structured_document_body {
         BakeDocumentEvidenceKind::DocumentUrl
-    } else if candidate.capture_webpage_title.is_some()
-        && has_structured_web_title
-        && has_structured_document_body
-    {
+    } else if has_structured_web_title && has_structured_document_body {
         BakeDocumentEvidenceKind::BrowserDocument
     } else if has_meaningful_native_title {
         BakeDocumentEvidenceKind::NativeDocument
@@ -7794,7 +7809,7 @@ fn has_document_body_structure(body: &str) -> bool {
 }
 
 fn substantive_document_url(candidate: &BakeMemorySourceRecord) -> Option<String> {
-    if !is_substantive_document_candidate(candidate) {
+    if !document_evidence(candidate).has_document_url {
         return None;
     }
     candidate
@@ -8983,8 +8998,12 @@ mod tests {
         let capture = seed_capture(&service, 1_710_000_000_000, "Google Chrome", "新正文");
         let timeline = seed_knowledge(&service,"文档",capture,4,1);
         let mut candidate = make_candidate(&service,timeline);
+        candidate.capture_app_name = Some("Google Chrome".to_string());
+        candidate.capture_win_title = Some("完整来源 - 云文档 - Google Chrome".to_string());
         candidate.capture_url = Some(url.to_string());
-        candidate.capture_ax_text = Some("后续回访只有部分内容。".repeat(20));
+        candidate.capture_webpage_title = Some("完整来源".to_string());
+        candidate.preferred_source_title = Some("完整来源 - 云文档".to_string());
+        candidate.capture_ax_text = Some("# 完整来源\n后续回访只有部分内容。".repeat(20));
         let outcome = service.persist_document_artifact(None,Some(123),&candidate,
             &BakeArtifactExtraction { accepted:false,reason:None,payload:None },None,
             &mut HashSet::new(),&mut HashSet::new(),None).await.unwrap();
@@ -9015,6 +9034,113 @@ mod tests {
             assert!(evidence["capture_ids"].as_array().unwrap().contains(&json!(capture)));
             Ok(())
         }).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_cross_window_url_cannot_merge_native_document_into_existing_url() {
+        let service = make_service();
+        let stale_url = "http://127.0.0.1:5173/";
+        let original = service
+            .create_document(test_document_request("vedio-aigc", "document", Some(stale_url)))
+            .unwrap();
+        let original_id: i64 = original.id.parse().unwrap();
+        let capture = seed_capture(
+            &service,
+            1_710_000_000_000,
+            "Google Chrome",
+            "灵机视频质量提升方案 - 讨论稿 - 云文档 - Google Chrome",
+        );
+        let timeline = seed_knowledge(&service, "文档", capture, 4, 1);
+        let mut candidate = make_candidate(&service, timeline);
+        candidate.capture_app_name = Some("Google Chrome".to_string());
+        candidate.capture_win_title = Some(
+            "灵机视频质量提升方案 - 讨论稿 - 云文档 - Google Chrome".to_string(),
+        );
+        candidate.preferred_source_title =
+            Some("灵机视频质量提升方案 - 讨论稿 - 云文档".to_string());
+        candidate.capture_url = Some(stale_url.to_string());
+        candidate.capture_webpage_title = Some("vedio-aigc".to_string());
+        candidate.capture_ax_text = None;
+        candidate.capture_ocr_text = Some(
+            "# 灵机视频质量提升方案\n本文说明视频质量目标。剧本设计包含明确步骤。验收需要核对观感和可用率。".repeat(20),
+        );
+        candidate.url_aggregated_text = None;
+
+        let evidence = document_evidence(&candidate);
+        assert_eq!(evidence.kind, BakeDocumentEvidenceKind::BrowserDocument);
+        assert!(!evidence.has_document_url);
+        assert!(substantive_document_url(&candidate).is_none());
+
+        let extraction = BakeArtifactExtraction {
+            accepted: true,
+            reason: None,
+            payload: Some(json!({
+                "name": "灵机视频质量提升方案 - 讨论稿",
+                "full_content": "# 灵机视频质量提升方案\n视频质量优化正文。",
+                "match_score": 0.98,
+                "match_level": "high"
+            })),
+        };
+        let result = service
+            .persist_document_artifact(
+                None,
+                None,
+                &candidate,
+                &extraction,
+                None,
+                &mut HashSet::new(),
+                &mut HashSet::new(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.document_created_count, 1);
+        let documents = service.storage.list_bake_documents().unwrap();
+        assert_eq!(documents.len(), 2);
+        let recovered = documents
+            .iter()
+            .find(|document| document.id != original_id)
+            .unwrap();
+        assert_eq!(recovered.title, "灵机视频质量提升方案 - 讨论稿 - 云文档");
+        assert!(recovered.source_url.is_none());
+        assert_eq!(
+            service.storage.get_bake_document(original_id).unwrap().unwrap().source_memory_ids,
+            "[]"
+        );
+    }
+
+    #[test]
+    fn trusted_member_title_can_prove_browser_document_without_stale_page_metadata() {
+        let service = make_service();
+        let capture = seed_capture(
+            &service,
+            1_710_000_000_000,
+            "Google Chrome",
+            "风格剧本Agent设计-讨论稿 - 云文档 - Google Chrome",
+        );
+        let timeline = seed_knowledge(&service, "文档", capture, 4, 1);
+        let mut candidate = make_candidate(&service, timeline);
+        candidate.capture_app_name = Some("Google Chrome".to_string());
+        candidate.capture_win_title =
+            Some("风格剧本Agent设计-讨论稿 - 云文档 - Google Chrome".to_string());
+        candidate.capture_url = None;
+        candidate.capture_webpage_title = None;
+        candidate.preferred_source_title =
+            Some("风格剧本Agent设计-讨论稿 - 云文档".to_string());
+        candidate.capture_ax_text = Some(
+            "# 风格剧本Agent设计-讨论稿\n本文说明设计目标。\n执行步骤保持清晰。\n验收标准需要逐项核对。"
+                .repeat(30),
+        );
+        candidate.capture_ocr_text = None;
+        candidate.url_aggregated_text = None;
+
+        let evidence = document_evidence(&candidate);
+        assert_eq!(evidence.kind, BakeDocumentEvidenceKind::BrowserDocument);
+        assert_eq!(evidence.source_surface, BakeSourceSurface::Browser);
+        assert!(!evidence.has_document_url);
+        assert!(evidence.has_document_page_title);
+        assert!(evidence.allows_auto_create);
     }
 
     #[tokio::test]

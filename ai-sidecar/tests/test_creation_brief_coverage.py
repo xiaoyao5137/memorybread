@@ -3,8 +3,9 @@ import copy
 import json
 import pytest
 from creation.agent_loop import CreationAgentLoop, MAX_BRAINSTORM_CONTEXT_CHARS
-from creation.brief_context import effective_brief_decisions
-from creation.delivery_contract import review_delivery, with_brainstorm_coverage
+from creation.brief_context import effective_brief_decisions, effective_brief_open_flags
+from creation.delivery_contract import (review_delivery, with_brainstorm_coverage,
+                                        with_brainstorm_open_flag_safety)
 from creation.operations import OperationError
 from tests.test_creation_delivery_contract import DeliveryService, StreamService, contract, review_for_model
 from tests.test_creation_operations import run_args
@@ -53,6 +54,36 @@ def test_generated_contract_is_complete_idempotent_and_ignores_non_user_entries(
     assert all(check["id"] not in {"excluded", "assumption"} for check in bound["acceptance"])
 
 
+def test_open_flags_are_preserved_as_questions_not_turned_into_implicit_answers():
+    original = contract()
+    flags = ["预售目标是多少？", "- 可用预算是多少？", "预售目标是多少？"]
+    bound = with_brainstorm_open_flag_safety(original, flags)
+    assert original == contract()
+    assert bound == with_brainstorm_open_flag_safety(bound, flags)
+    assert all("不得因未代用户回答而判失败" in item["criterion"]
+               for item in bound["acceptance"] if item["id"] != "brainstorm_open_flags")
+    assert bound["acceptance"][-1] == {"id": "brainstorm_open_flags", "criterion":
+        "以待确认状态保留这些未回答问题，不得写成用户已选方案或既定事实：预售目标是多少？；可用预算是多少？"}
+
+
+def test_resolved_open_flags_remove_their_obsolete_acceptance_contract():
+    stale = with_brainstorm_open_flag_safety(contract(), ["自动化边界选哪一种？"])
+    assert stale["acceptance"][-1]["id"] == "brainstorm_open_flags"
+    rebound = with_brainstorm_open_flag_safety(stale, [])
+    assert all(item["id"] != "brainstorm_open_flags" for item in rebound["acceptance"])
+    assert "open_flags" not in json.dumps(rebound["acceptance"], ensure_ascii=False)
+
+
+def test_generic_continue_does_not_turn_open_flags_into_data_dependencies():
+    original = contract()
+    original["inputs"].append({"id": "business_data", "source": "business_data",
+        "need": "预算", "reason": "开放项推导", "state": "missing", "evidence": "", "query": "查询预算"})
+    bound = with_brainstorm_open_flag_safety(original, ["预算是多少？"], "transform", "继续生成")
+    assert bound["inputs"][0]["state"] == "not_needed" and not bound["inputs"][0]["query"]
+    explicit = with_brainstorm_open_flag_safety(original, ["预算是多少？"], "transform", "继续生成并查询预算")
+    assert explicit["inputs"][0]["state"] == "missing" and explicit["inputs"][0]["query"] == "查询预算"
+
+
 @pytest.mark.parametrize("operation", ["transform", "answer", "patch", "execute_skill"])
 def test_partial_operations_do_not_acquire_full_brief_rewrite_requirements(operation):
     original = contract()
@@ -85,7 +116,7 @@ def test_legacy_checkpoint_upgrades_brief_contract_and_invalidates_old_pass(cont
     assert context["root_request"] == "旧上下文根目标"
     assert "执行参数0，每批100份。" in context["creation_brief"]
     assert len(context["brainstorm_decisions"]) == 27
-    assert context["brainstorm_context_version"] == 3
+    assert context["brainstorm_context_version"] == 4
     assert "delivery_checked_hash" not in state.environment
     bound = copy.deepcopy(state.environment["input_contract"])
     loop._input_context(state)
@@ -95,6 +126,46 @@ def test_legacy_checkpoint_upgrades_brief_contract_and_invalidates_old_pass(cont
     state.root_request = "超长根需求" * 14000
     prompt = loop._prompt_environment(state)
     assert "执行参数0，每批100份。" in prompt and "执行参数26，每批126份。" in prompt
+
+
+def test_open_flag_contract_upgrade_discards_failures_from_obsolete_acceptance():
+    loop = CreationAgentLoop(DeliveryService())
+    brief = brief_fixture(1)
+    brief["open_flags"] = ["预算是多少？"]
+    state = loop._new_state(**run_args("已有正文", "继续生成"), model_mode="local",
+                            creation_mode="brainstorm", creation_brief=brief)
+    state.environment.update(input_contract=contract(), operation={"kind": "transform"},
+        brainstorm_acceptance_version=3, delivery_repair_count=2,
+        delivery_review={"status": "revise"}, delivery_pending_review={"checks": []},
+        delivery_last_revise={"corrections": ["旧规则要求代答"]}, delivery_checked_hash="stale")
+    loop._input_context(state)
+    assert state.environment["brainstorm_acceptance_version"] == 7
+    assert state.environment["delivery_repair_count"] == 0
+    assert "delivery_review" not in state.environment
+    assert "delivery_pending_review" not in state.environment
+    assert "delivery_last_revise" not in state.environment
+    assert "delivery_checked_hash" not in state.environment
+    assert state.environment["input_contract"]["acceptance"][-1]["id"] == "brainstorm_open_flags"
+
+
+def test_repeated_current_question_cannot_restore_flags_over_confirmed_choice():
+    brief = brief_fixture(1)
+    selected = brief["history"][0]["question"]["options"][0]
+    brief["current_question"] = {
+        "id": "stale-repeat", "prompt": "换种说法再次确认同一选择？",
+        "options": [
+            {"id": "renamed", "label": selected["label"], "description": selected["description"]},
+            {"id": "other", "label": "另一个方向", "description": "这是另一个足够具体的候选方向说明。"},
+        ],
+    }
+    brief["open_flags"] = ["同一选择是否仍待确认", "同一模式之间的影响差异"]
+    assert effective_brief_open_flags(brief) == []
+    prompt = CreationAgentLoop._brainstorm_prompt_context(brief)
+    assert "开放事项：\n" not in prompt and "同一选择是否仍待确认" not in prompt
+
+    # A manual edit is explicit user input and must win over stale-state cleanup.
+    brief["brief_edits"] = {"open_flags": "用户明确保留的问题"}
+    assert effective_brief_open_flags(brief) == ["用户明确保留的问题"]
 
 
 @pytest.mark.asyncio

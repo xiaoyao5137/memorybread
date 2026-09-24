@@ -1072,7 +1072,7 @@ impl StorageManager {
                  OR (COALESCE(r.failure_count, 0) > 0 AND COALESCE(r.last_error_code,'')<>'DOCUMENT_AUTOMATIC_WRITES_PAUSED'))
                 AND r.failure_count < ?3
                 AND COALESCE(r.next_retry_at_ms, 0) <= ?4
-                AND (r.last_error_code IN ('BAKE_DOCUMENT_MERGE_PENDING','DOCUMENT_AUTOMATIC_WRITES_PAUSED') OR (
+                AND (r.last_error_code IN ('BAKE_DOCUMENT_MERGE_PENDING','DOCUMENT_AUTOMATIC_WRITES_PAUSED','DOCUMENT_SOURCE_IDENTITY_MISMATCH') OR (
                     NOT EXISTS (SELECT 1 FROM bake_knowledge bk WHERE bk.timeline_id = k.id)
                     AND NOT EXISTS (SELECT 1 FROM bake_sops bs WHERE bs.timeline_id = k.id)
                     AND CAST(k.id AS TEXT) NOT IN (SELECT tid FROM produced_doc_timelines)
@@ -1204,7 +1204,17 @@ impl StorageManager {
                     record.timeline.capture_id,
                 )?;
 
-                if record.capture_url.is_none() {
+                let primary_browser_metadata_coherent = capture_page_matches_window_title(
+                    record.capture_webpage_title.as_deref(),
+                    record.capture_win_title.as_deref(),
+                    record.capture_app_name.as_deref(),
+                );
+                if !primary_browser_metadata_coherent {
+                    record.capture_url = None;
+                    record.capture_webpage_title = None;
+                }
+
+                if record.capture_url.is_none() && primary_browser_metadata_coherent {
                     let preferred_titles = [
                         record.capture_webpage_title.as_deref(),
                         record.capture_win_title.as_deref(),
@@ -1218,6 +1228,34 @@ impl StorageManager {
                         record.timeline.id,
                         &preferred_titles,
                     )?;
+                }
+
+                // A timeline may begin on one browser tab and then switch to another while
+                // the browser bridge still reports the first tab's URL/title.  Per-frame
+                // coherence is insufficient in that case: the primary frame can be internally
+                // coherent even though it no longer identifies the timeline's dominant source.
+                // Require the retained page title to agree with the preferred member title too.
+                let timeline_browser_metadata_coherent = capture_page_matches_window_title(
+                    record.capture_webpage_title.as_deref(),
+                    record
+                        .preferred_source_title
+                        .as_deref()
+                        .or(record.capture_win_title.as_deref()),
+                    record.capture_app_name.as_deref(),
+                );
+                if record.capture_url.is_some() && !timeline_browser_metadata_coherent {
+                    record.capture_url = None;
+                    record.capture_webpage_title = None;
+                }
+                // A single proven browser-bridge/window disagreement invalidates the URL for
+                // the whole timeline.  Counting titles is unsafe here: a short interval can
+                // contain several captures from the stale tab before/after the real document
+                // window is observed, so the polluted title may still win the frequency vote.
+                if record.capture_url.is_some()
+                    && timeline_has_cross_window_page_mismatch(conn, &full_member_ids)?
+                {
+                    record.capture_url = None;
+                    record.capture_webpage_title = None;
                 }
 
                 // 优先聚合 timeline 全部成员 capture 的内容（含文档型成员的正文），
@@ -1873,7 +1911,7 @@ fn aggregate_member_capture_text(
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        "SELECT id, ts, ax_text, ocr_text, input_text, url, webpage_title
+        "SELECT id, ts, ax_text, ocr_text, input_text, url, webpage_title, win_title, app_name
          FROM captures
          WHERE id IN ({placeholders})
          ORDER BY ts ASC
@@ -1893,6 +1931,8 @@ fn aggregate_member_capture_text(
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<String>>(5)?,
             row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+            row.get::<_, Option<String>>(8)?,
         ))
     })?;
 
@@ -1904,7 +1944,7 @@ fn aggregate_member_capture_text(
     }
     let mut members: Vec<Member> = Vec::new();
     for row in rows {
-        let (cap_id, ts, ax_text, ocr_text, input_text, url, webpage_title) =
+        let (cap_id, ts, ax_text, ocr_text, input_text, url, webpage_title, win_title, app_name) =
             row.map_err(StorageError::Sqlite)?;
         let combined = combine_capture_text_for_url(
             ax_text.as_deref(),
@@ -1914,10 +1954,20 @@ fn aggregate_member_capture_text(
         if combined.is_empty() {
             continue;
         }
-        if capture_text_conflicts_with_page_title(&combined, webpage_title.as_deref()) {
+        let metadata_coherent = capture_page_matches_window_title(
+            webpage_title.as_deref(),
+            win_title.as_deref(),
+            app_name.as_deref(),
+        );
+        let trusted_title = if metadata_coherent {
+            webpage_title.as_deref().or(win_title.as_deref())
+        } else {
+            win_title.as_deref()
+        };
+        if capture_text_conflicts_with_page_title(&combined, trusted_title) {
             continue;
         }
-        let is_doc = url.as_deref().map(is_document_url).unwrap_or(false);
+        let is_doc = metadata_coherent && url.as_deref().map(is_document_url).unwrap_or(false);
         members.push(Member {
             cap_id,
             ts,
@@ -2051,10 +2101,18 @@ fn preferred_member_source_title(
     for row in rows {
         let (ts, app_name, webpage_title, win_title) = row.map_err(StorageError::Sqlite)?;
         let mut identities_in_capture = std::collections::HashSet::new();
+        let metadata_coherent = capture_page_matches_window_title(
+            webpage_title.as_deref(),
+            win_title.as_deref(),
+            app_name.as_deref(),
+        );
         for (raw_title, is_webpage_title) in [
             (webpage_title.as_deref(), true),
             (win_title.as_deref(), false),
         ] {
+            if is_webpage_title && !metadata_coherent {
+                continue;
+            }
             let Some(display) = raw_title
                 .and_then(|title| canonical_document_source_title(title, app_name.as_deref()))
             else {
@@ -2100,6 +2158,58 @@ fn preferred_member_source_title(
                 )
         })
         .map(|candidate| candidate.display))
+}
+
+fn capture_page_matches_window_title(
+    webpage_title: Option<&str>,
+    win_title: Option<&str>,
+    _app_name: Option<&str>,
+) -> bool {
+    let Some(page) = webpage_title
+        .and_then(|title| canonical_document_title_identity(&title))
+    else {
+        return true;
+    };
+    let Some(window) = win_title
+        .and_then(|title| canonical_document_title_identity(&title))
+    else {
+        return true;
+    };
+    page == window
+}
+
+fn timeline_has_cross_window_page_mismatch(
+    conn: &rusqlite::Connection,
+    capture_ids: &[i64],
+) -> Result<bool, StorageError> {
+    if capture_ids.is_empty() {
+        return Ok(false);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT webpage_title, win_title, app_name FROM captures WHERE id = ?1",
+    )?;
+    for capture_id in capture_ids {
+        let metadata = stmt.query_row(params![capture_id], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        });
+        let (webpage_title, win_title, app_name) = match metadata {
+            Ok(value) => value,
+            Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+            Err(error) => return Err(StorageError::Sqlite(error)),
+        };
+        if !capture_page_matches_window_title(
+            webpage_title.as_deref(),
+            win_title.as_deref(),
+            app_name.as_deref(),
+        ) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn to_json_array_string(ids: &[i64]) -> String {
@@ -2159,7 +2269,7 @@ fn aggregate_url_capture_text(
 ) -> Result<Option<(String, i64)>, StorageError> {
     let earliest = anchor_ts.saturating_sub(URL_AGGREGATION_LOOKBACK_MS);
     let mut stmt = conn.prepare(
-        "SELECT id, ts, ax_text, ocr_text, input_text, webpage_title
+        "SELECT id, ts, ax_text, ocr_text, input_text, webpage_title, win_title, app_name
          FROM captures
          WHERE TRIM(COALESCE(url, '')) = ?1
            AND ts >= ?2
@@ -2177,6 +2287,8 @@ fn aggregate_url_capture_text(
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         },
     )?;
@@ -2189,7 +2301,7 @@ fn aggregate_url_capture_text(
     let mut best_by_head: std::collections::HashMap<String, UrlCapture> =
         std::collections::HashMap::new();
     for row in rows {
-        let (cap_id, ts, ax_text, ocr_text, input_text, webpage_title) =
+        let (cap_id, ts, ax_text, ocr_text, input_text, webpage_title, win_title, app_name) =
             row.map_err(StorageError::Sqlite)?;
         let text = combine_capture_text_for_url(
             ax_text.as_deref(),
@@ -2202,7 +2314,17 @@ fn aggregate_url_capture_text(
         // URL/title metadata and AX extraction are collected by separate browser/AX
         // calls. A tab switch between them can attach the previous tab's URL to the
         // next tab's body. Such a frame must never enter same-URL aggregation.
-        if capture_text_conflicts_with_page_title(&text, webpage_title.as_deref()) {
+        let metadata_coherent = capture_page_matches_window_title(
+            webpage_title.as_deref(),
+            win_title.as_deref(),
+            app_name.as_deref(),
+        );
+        let trusted_title = if metadata_coherent {
+            webpage_title.as_deref().or(win_title.as_deref())
+        } else {
+            win_title.as_deref()
+        };
+        if !metadata_coherent || capture_text_conflicts_with_page_title(&text, trusted_title) {
             continue;
         }
         let head: String = text
@@ -3614,6 +3736,20 @@ mod tests {
     }
 
     #[test]
+    fn document_identity_recovery_retry_survives_existing_sibling_artifacts() {
+        let mgr = make_mgr();
+        let timeline_id = mgr.insert_timeline_entry(&sample_entry(&mgr, "document")).unwrap();
+        mgr.with_conn(|conn| {
+            conn.execute("INSERT INTO bake_knowledge (timeline_id, title, summary) VALUES (?1, '已有关联', '旧知识不能阻止文档身份恢复')", params![timeline_id])?;
+            conn.execute("INSERT INTO bake_retry_state (timeline_id, failure_count, last_error, last_failed_at_ms, last_error_code, next_retry_at_ms) VALUES (?1, 1, 'identity mismatch', 1, 'DOCUMENT_SOURCE_IDENTITY_MISMATCH', 0)", params![timeline_id])?;
+            Ok(())
+        }).unwrap();
+        let retry = mgr.list_bake_memory_retry_candidates(10, 3).unwrap();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].timeline.id, timeline_id);
+    }
+
+    #[test]
     fn document_write_deferrals_survive_watermark_and_filter_before_limit() {
         let directory=tempfile::tempdir().unwrap();
         let path=directory.path().join("document-deferrals.db");
@@ -4141,6 +4277,128 @@ mod tests {
             candidate.preferred_source_title.as_deref(),
             Some("商业化大模型例行压测介绍 - 云文档")
         );
+    }
+
+    #[test]
+    fn test_bake_candidate_discards_cross_window_url_and_uses_window_title() {
+        let mgr = make_mgr();
+        let primary = seed_document_capture(
+            &mgr,
+            1_700_000_000_000,
+            "灵机视频质量提升方案正文。目标明确。步骤完整。验收标准清晰。".repeat(40),
+            "http://127.0.0.1:5173/",
+        );
+        let mut timeline = sample_entry(&mgr, "document");
+        timeline.capture_id = primary;
+        let timeline_id = mgr.insert_timeline_entry(&timeline).unwrap();
+        mgr.with_conn(|conn| {
+            conn.execute(
+                "UPDATE captures
+                 SET timeline_id = ?1,
+                     app_name = 'Google Chrome',
+                     webpage_title = 'vedio-aigc',
+                     win_title = '灵机视频质量提升方案 - 讨论稿 - 云文档 - Google Chrome'
+                 WHERE id = ?2",
+                params![timeline_id, primary],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let candidate = mgr
+            .list_bake_memory_init_candidates(0, 10)
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.timeline.id == timeline_id)
+            .unwrap();
+
+        assert!(candidate.capture_url.is_none());
+        assert!(candidate.capture_webpage_title.is_none());
+        assert_eq!(
+            candidate.preferred_source_title.as_deref(),
+            Some("灵机视频质量提升方案 - 讨论稿 - 云文档")
+        );
+    }
+
+    #[test]
+    fn test_bake_candidate_discards_primary_url_after_timeline_switches_tabs() {
+        let mgr = make_mgr();
+        let stale_url = "http://127.0.0.1:5173/";
+        let primary = seed_document_capture(
+            &mgr,
+            1_700_000_000_000,
+            "Meta Prompt 迭代方案。目标明确。步骤完整。验收标准清晰。".repeat(40),
+            stale_url,
+        );
+        let mut timeline = sample_entry(&mgr, "document");
+        timeline.capture_id = primary;
+        let timeline_id = mgr.insert_timeline_entry(&timeline).unwrap();
+        let switched = [
+            seed_document_capture(
+                &mgr,
+                1_700_000_010_000,
+                "Meta Prompt 迭代方案。目标明确。步骤完整。验收标准清晰。".repeat(40),
+                stale_url,
+            ),
+            seed_document_capture(
+                &mgr,
+                1_700_000_020_000,
+                "Meta Prompt 迭代方案。镜头要求。质量门禁。交付标准。".repeat(40),
+                stale_url,
+            ),
+        ];
+        mgr.with_conn(|conn| {
+            conn.execute(
+                "UPDATE captures
+                 SET timeline_id = ?1,
+                     app_name = 'Google Chrome',
+                     webpage_title = 'vedio-aigc',
+                     win_title = 'vedio-aigc - Google Chrome'
+                 WHERE id = ?2",
+                params![timeline_id, primary],
+            )?;
+            for (index, capture_id) in switched.into_iter().enumerate() {
+                conn.execute(
+                    "UPDATE captures
+                     SET timeline_id = ?1,
+                         app_name = 'Google Chrome',
+                         webpage_title = 'vedio-aigc',
+                         win_title = ?3
+                     WHERE id = ?2",
+                    params![
+                        timeline_id,
+                        capture_id,
+                        if index == 0 {
+                            "Meta Prompt迭代/20260908 - 云文档 - Google Chrome"
+                        } else {
+                            "vedio-aigc - Google Chrome"
+                        }
+                    ],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        let candidate = mgr
+            .list_bake_memory_init_candidates(0, 10)
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.timeline.id == timeline_id)
+            .unwrap();
+
+        assert_eq!(candidate.preferred_source_title.as_deref(), Some("vedio-aigc"));
+        assert!(candidate.capture_url.is_none());
+        assert!(candidate.capture_webpage_title.is_none());
+    }
+
+    #[test]
+    fn generic_cloud_home_window_does_not_validate_another_tabs_page_metadata() {
+        assert!(!capture_page_matches_window_title(
+            Some("vedio-aigc"),
+            Some("主页 - 云文档 - Google Chrome"),
+            Some("Google Chrome"),
+        ));
     }
 
     #[test]

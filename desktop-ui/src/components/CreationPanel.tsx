@@ -315,10 +315,25 @@ const isRunTerminalEvent = (event: CreationAgentEvent) => (
   ['run.completed', 'run.failed', 'run.cancelled'].includes(event.type)
 )
 
+const isCreationQualityReviewFailure = (code: unknown) => (
+  ['CREATION_DELIVERY_INCOMPLETE', 'CREATION_DELIVERY_UNVERIFIED', 'CREATION_DOCUMENT_INVALID']
+    .includes(String(code || ''))
+)
+
 const terminalEventForLatestRun = (events: CreationAgentEvent[]) => {
   const latestRunId = [...events].reverse().find(event => event.run_id)?.run_id
   return [...events].reverse().find(event => (
     isRunTerminalEvent(event) && (!latestRunId || event.run_id === latestRunId)
+  ))
+}
+
+const hasInterruptedAgentExecution = (events: CreationAgentEvent[]) => {
+  const latestRunId = [...events].reverse().find(event => event.run_id)?.run_id
+  if (!latestRunId) return false
+  const latestRun = events.filter(event => event.run_id === latestRunId)
+  return !latestRun.some(isRunTerminalEvent) && latestRun.some(event => (
+    ['running', 'waiting'].includes(event.status)
+    || ['run.queued', 'run.started', 'run.paused', 'phase.started', 'thinking.started'].includes(event.type)
   ))
 }
 
@@ -621,6 +636,16 @@ const segmentAgentTrace = (events: CreationAgentEvent[]): TraceSegment[] => {
 
   const closeOpenPhase = (push: boolean) => {
     if (!openPhase) return
+    if (['处理当前步骤', '执行当前步骤', '执行阶段'].includes(openPhase.title)) {
+      const actionTitle = phaseBuffer
+        .map(event => creationActionText(String(event.actor?.name || '').trim()))
+        .find(title => (
+          Boolean(title)
+          && !['生成创作内容', '处理当前步骤', '执行当前步骤'].includes(title)
+          && !/\b(?:Agent|Tool)\b/i.test(title)
+        ))
+      if (actionTitle) openPhase.title = actionTitle
+    }
     openPhase.segments = segmentCoreEvents(phaseBuffer)
     phaseBuffer = []
     if (push) segments.push(openPhase)
@@ -1573,13 +1598,26 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
   const abortRef = useRef<AbortController | null>(null)
   const conversationEpochRef = useRef(0)
   const brainstormAbortRef = useRef<AbortController | null>(null)
-  useEffect(() => () => {
-    conversationEpochRef.current += 1
-    abortRef.current?.abort()
-    brainstormAbortRef.current?.abort()
-    inlineAbortRef.current?.abort()
-    inlineUndoAbortRef.current?.abort()
-    inlineBrainstormAbortRef.current?.abort()
+  const unmountCleanupTimerRef = useRef<number | null>(null)
+  useEffect(() => {
+    // React StrictMode mounts, immediately cleans up, and mounts the same tree again
+    // in development. Defer destructive cleanup by one task so that the second setup
+    // can cancel the synthetic unmount without aborting startup recovery requests.
+    if (unmountCleanupTimerRef.current != null) {
+      window.clearTimeout(unmountCleanupTimerRef.current)
+      unmountCleanupTimerRef.current = null
+    }
+    return () => {
+      unmountCleanupTimerRef.current = window.setTimeout(() => {
+        conversationEpochRef.current += 1
+        abortRef.current?.abort()
+        brainstormAbortRef.current?.abort()
+        inlineAbortRef.current?.abort()
+        inlineUndoAbortRef.current?.abort()
+        inlineBrainstormAbortRef.current?.abort()
+        unmountCleanupTimerRef.current = null
+      }, 0)
+    }
   }, [])
   const inlineAbortRef = useRef<AbortController | null>(null)
   const inlineUndoAbortRef = useRef<AbortController | null>(null)
@@ -5040,7 +5078,11 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
             'failed',
           )
           if (!isRunOwned()) return
-          setError(`${toCreationFailureMessage(err, '创作中断')}；已保存已生成内容${recoverableCreationHint(err)}`)
+          if (!isCreationQualityReviewFailure(
+            (err as Error & { errorCode?: string }).errorCode,
+          )) {
+            setError(`${toCreationFailureMessage(err, '创作中断')}；已保存已生成内容${recoverableCreationHint(err)}`)
+          }
           return
         } catch (persistErr) {
           console.warn('创作中断后保存部分成果失败:', persistErr)
@@ -5108,8 +5150,10 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
 
   // 创作 Loop 运行在桌面页面进程内。应用重启后，数据库里的 running 记录仍在，
   // 但旧 SSE / 模型请求已经不存在；启动时自动认领最近一条手动创作记录，沿用
-  // 同一会话、对话和已生成文档重新拉起。先把旧 run 按中断收口，避免恢复后旧的
-  // 阶段和新 run 同时显示为“进行中”。定时任务由独立 executor 恢复，不在这里抢占。
+  // 同一会话、对话和已生成文档重新拉起。脑暴生成的初稿及后续文档修订也使用
+  // 同一套持久化操作协议，只恢复该文档操作，不会替用户回答或重开未提交的问题。
+  // 先把旧 run 按中断收口，避免恢复后旧的阶段和新 run 同时显示为“进行中”。
+  // 定时任务由独立 executor 恢复，不在这里抢占。
   useEffect(() => {
     if (
       startupRecoveryAttemptedRef.current
@@ -5122,11 +5166,15 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     startupRecoveryAttemptedRef.current = true
     const interrupted = creationHistory.find(item => (
       item.sourceKind === 'creation'
-      && item.creationMode === 'direct'
+      && ['direct', 'brainstorm'].includes(item.creationMode)
       && item.lifecycleStatus === 'running'
       && Boolean(item.sessionId)
       && !isCreationSessionTerminated({ conversation: item.conversation, brainstormState: item.creationBrief })
-      && !terminalEventForLatestRun(item.agentEvents)
+      // A Brainstorm session waiting for the user's answer used to be stored as
+      // lifecycle=running even though no document Agent had started. Only resume
+      // a real interrupted Agent run; otherwise startup would silently turn an
+      // unanswered Brainstorm question into a document-generation instruction.
+      && hasInterruptedAgentExecution(item.agentEvents)
     ))
     if (!interrupted) return
 
@@ -8077,21 +8125,25 @@ export const AgentExecutionTrace = ({
     const terminal = segment.status === 'running' ? terminalByRun.get(segment.runId) : undefined
     const runWasCancelled = terminal?.type === 'run.cancelled'
     const runFailed = terminal?.type === 'run.failed'
+    const qualityReviewFailed = runFailed && isCreationQualityReviewFailure(
+      terminal?.data?.error_code,
+    )
     const isRunning = segment.status === 'running' && !terminalByRun.get(segment.runId)
-    const hasWarning = !isRunning && (runFailed || runWasCancelled || segment.innerSegments.some((inner) => (
+    const hasFailure = !isRunning && qualityReviewFailed
+    const hasWarning = !isRunning && !hasFailure && (runFailed || runWasCancelled || segment.innerSegments.some((inner) => (
       inner.kind === 'step'
         ? ['warning', 'failed'].includes(groupStatusByKey.get(inner.group.key) || '')
         : inner.innerGroups.some(group => (
           ['warning', 'failed'].includes(groupStatusByKey.get(group.key) || '')
         ))
     )))
-    const showBody = isRunning || Boolean(openBlocks[segment.key])
+    const showBody = isRunning || hasFailure || Boolean(openBlocks[segment.key])
     const durationSeconds = segment.durationMs == null
       ? null
       : Math.max(1, Math.round(segment.durationMs / 1000))
     return (
       <div
-        className={`creation-trace-phase${isRunning ? ' is-running' : hasWarning ? ' is-warning' : ' is-completed'}`}
+        className={`creation-trace-phase${isRunning ? ' is-running' : hasFailure ? ' is-failed' : hasWarning ? ' is-warning' : ' is-completed'}`}
         key={segment.key}
       >
         <button
@@ -8101,7 +8153,7 @@ export const AgentExecutionTrace = ({
           aria-expanded={showBody}
         >
           <span
-            className={`creation-trace-phase__dot${isRunning ? '' : hasWarning ? ' is-warning' : ' is-done'}`}
+            className={`creation-trace-phase__dot${isRunning ? '' : hasFailure ? ' is-failed' : hasWarning ? ' is-warning' : ' is-done'}`}
             aria-hidden="true"
           />
           <span className="creation-trace-phase__title">
@@ -8113,7 +8165,7 @@ export const AgentExecutionTrace = ({
               : runWasCancelled
                 ? '已结束'
                 : runFailed
-                  ? '未完成'
+                  ? qualityReviewFailed ? '未通过' : '未完成'
                   : hasWarning
                     ? '有警告'
                     : durationSeconds != null ? `${durationSeconds}s` : '已完成'}

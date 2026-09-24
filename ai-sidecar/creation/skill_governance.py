@@ -127,17 +127,19 @@ role=task 表示用户实际要求执行的成功任务；role=constraint 表示
 
 逐项分类：
 create：另写一份可直接使用的新内容，包括一句话、一小段、表格、通知等，纯复述已有事实也算。
-edit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。
+edit：改动已有正文且需要生成措辞或新内容，包括改写、精简、续写；委婉问句或省略句也能是执行要求。已有正文时，“继续生成”、“继续写”、“接着续写”是继续改动当前正文，属于 edit；不是恢复历史操作。
 patch：修改已有正文但无需生成措辞，逐字使用给定完整文字替换或追加，或删除、移动已有内容。
 answer：查询、解释、核对、评价，只要获知信息而没有要求你替其写成内容成品。
-respond：确认、社交回应或无法确定所指而必须澄清。resume：恢复操作。undo：撤销操作。
+respond：确认、社交回应或无法确定所指而必须澄清。resume：用户明确要求恢复一个已中断、失败或未完成的历史操作；不能仅因“继续”两字或存在 pending_operations 就选择。undo：撤销操作。
 来源和目标要分清：读取材料后另写小结是 create；读取材料后改写当前正文是 edit。has_document 只表示编辑区已有正文，不代表参考资料是否存在。
+has_document=true 时，“增加/补充/新增/添加/加上/完善/扩展/补上某内容”默认是在当前正文中增加内容，属于 edit；只有原文明确要求另写、新建或单独生成另一份成品时才是 create。不能因为要生成一个新章节或新段落就把局部编辑判成另建文档。
 
 例一：原文“先解释标语含义，再拟两句替代文案；资料不全就说明”。输出 requests=[{"request":"解释标语含义","role":"task","action":"answer"},{"request":"拟两句替代文案","role":"task","action":"create"},{"request":"资料不全就说明","role":"failure_fallback","action":"none"}]。
 例二：原文“解释‘拟两句文案’是什么意思，别真的拟文案”。输出 requests=[{"request":"解释‘拟两句文案’是什么意思","role":"task","action":"answer"}]。
 例三：原文“先查资料，再把现有介绍改成两句话”。输出 requests=[{"request":"查资料","role":"task","action":"answer"},{"request":"把现有介绍改成两句话","role":"task","action":"edit"}]。
 例四：原文“出一份修订稿。以当前报告为基础补充已确认的结论。”。输出 requests=[{"request":"出一份修订稿。以当前报告为基础补充已确认的结论。","role":"task","action":"edit"}]。
 例五：原文“另写一份通知，并精简当前报告”。输出 requests=[{"request":"另写一份通知","role":"task","action":"create"},{"request":"精简当前报告","role":"task","action":"edit"}]。
+例六（has_document=true）：原文“继续生成”。输出 requests=[{"request":"继续生成","role":"task","action":"edit"}]。
 只能逐字引用本轮 instruction，不能引用上面示例的文字。requests 最多 16 项。"""
 
 
@@ -326,6 +328,22 @@ async def task_intent(service: Any, instruction: str, has_document: bool) -> Dic
                                 service, instruction, has_document, conflicting, candidate):
                             logger.warning("意图冲突后的合并未通过独立目标关系复核")
                             return {}
+                        # A model can mistake newly authored wording for a new
+                        # deliverable even when the user is plainly appending to
+                        # the open document. Keep the document-scope contract
+                        # deterministic without guessing a business-specific
+                        # section name.
+                        if (has_document and candidate["action"] == "create"
+                                and re.match(
+                                    r"^\s*(?:(?:请|麻烦|帮我|请帮我)\s*)?(?:再|继续)?\s*"
+                                    r"(?:增加|补充|新增|添加|加上|完善|扩展|补上)",
+                                    candidate["primary_goal"],
+                                )
+                                and not re.search(
+                                    r"(?:另写|另建|另做|新建(?:一|1)?份|单独(?:写|生成|创建))",
+                                    candidate["primary_goal"],
+                                )):
+                            candidate = {**candidate, "action": "edit"}
                         return candidate
         logger.warning("意图核验第 %s 次未通过: %s", attempt + 1, reason)
     return {}

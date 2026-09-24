@@ -801,7 +801,11 @@ pub(crate) async fn scrape_browser_extension_scoped_async(
         expected_period_end,
         execution_timeout,
     )
-    .with_interaction_plan(interaction_plan);
+    .with_interaction_plan(interaction_plan)
+    // The creation panel consumes report previews. Document refreshes have no
+    // preview consumer, so attaching chrome.debugger there only exposes a
+    // misleading browser-wide banner during automatic maintenance.
+    .with_live_preview(content_kind != "document");
     job.content_kind = content_kind;
     job.cancellation_scope = cancellation_scope;
     if let Some(config) = document_config { job.max_segments = config.max_steps; }
@@ -4835,6 +4839,7 @@ mod tests {
             let job = broker
                 .poll(Some("0.2.1".to_string()))
                 .expect("extension job queued");
+            assert!(job.live_preview_enabled);
             assert!(
                 broker.complete(crate::browser_extension::BrowserExtensionResult {
                     browser_job_id: job.browser_job_id,
@@ -4864,6 +4869,46 @@ mod tests {
             .as_deref()
             .map(|url| url.ends_with("/preview"))
             .unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn document_extension_job_disables_browser_wide_debugger_preview() {
+        let broker = BrowserExtensionBroker::new();
+        broker.heartbeat(Some("0.2.5".to_string()));
+        let broker_for_scrape = broker.clone();
+        let scrape = tokio::spawn(async move {
+            scrape_browser_extension_with_kind_async(
+                &broker_for_scrape,
+                "https://example.com/document".to_string(),
+                None,
+                Vec::new(),
+                None,
+                None,
+                None,
+                "document",
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        let job = broker
+            .poll(Some("0.2.5".to_string()))
+            .expect("document extension job queued");
+        assert!(!job.live_preview_enabled);
+        assert!(broker.complete(crate::browser_extension::BrowserExtensionResult {
+            browser_job_id: job.browser_job_id,
+            status: "complete".to_string(),
+            title: "文档".to_string(),
+            url: "https://example.com/document".to_string(),
+            content_text: "document body".to_string(),
+            structured_data: json!({}),
+            completeness: json!({"status": "complete"}),
+            error_code: None,
+            error_message: None,
+        }));
+        scrape
+            .await
+            .expect("scrape task joined")
+            .expect("document scrape completed");
     }
 
     #[test]

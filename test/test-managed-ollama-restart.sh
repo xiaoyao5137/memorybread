@@ -125,4 +125,37 @@ ensure_ollama_running
 [ "$(sed -n '3p' "$RECORDED_REUSE")" = "$REAL_MODELS_ROOT" ]
 [ "$(tr -d '[:space:]' < "$OLLAMA_PID_FILE")" = "$MANAGED_PID" ]
 
+# Ollama.app 的登录项可能在初始化完成后重新占回固定端口。开发启动器应与
+# 初始化器一样，只对可验证的 GUI 运行时执行平滑迁移，再启动托管 CLI；
+# 不能把这种可恢复状态永久报成第三方端口冲突。
+kill "$MANAGED_PID" 2>/dev/null || true
+wait "$MANAGED_PID" 2>/dev/null || true
+MANAGED_PID=""
+rm -f "$OLLAMA_PID_FILE" "$MANAGED_OLLAMA_TEST_CAPTURE"
+GUI_RUNNING=true
+GUI_TAKEOVER_CAPTURE="$TEST_ROOT/gui-takeover"
+
+is_ollama_ready() {
+    [ "$GUI_RUNNING" = true ]
+}
+managed_ollama_listener_pid() {
+    return 1
+}
+ollama_listener_is_gui() {
+    [ "$GUI_RUNNING" = true ]
+}
+stop_ollama_gui() {
+    printf 'stopped\n' > "$GUI_TAKEOVER_CAPTURE"
+    GUI_RUNNING=false
+}
+cleanup_port() {
+    [ "$GUI_RUNNING" = false ]
+}
+
+ensure_ollama_running
+MANAGED_PID=$(tr -d '[:space:]' < "$OLLAMA_PID_FILE")
+
+[ "$(tr -d '[:space:]' < "$GUI_TAKEOVER_CAPTURE")" = "stopped" ]
+[ -f "$MANAGED_OLLAMA_TEST_CAPTURE" ]
+
 echo "managed Ollama restart checks passed"

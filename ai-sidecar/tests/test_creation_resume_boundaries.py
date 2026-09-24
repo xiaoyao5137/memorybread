@@ -108,6 +108,29 @@ async def test_external_resume_accepts_its_unchanged_base():
 
 
 @pytest.mark.asyncio
+async def test_resume_replaces_checkpoint_pending_candidates_with_current_core_view():
+    loop = CreationAgentLoop(ResumeService())
+    checkpoint = await paused_route(loop)
+    checkpoint['environment']['operation_context'] = {
+        'pending_operations': [{'operation_id': 'obsolete', 'instruction': 'old'}],
+    }
+    checkpoint['environment']['requirement']['operation_context'] = {
+        'current_document': BASE,
+        'pending_operations': [{'operation_id': 'obsolete', 'instruction': 'old'}],
+    }
+    events = [event async for event in loop.run(
+        **args(),
+        resume_state=checkpoint,
+        model_result=json.dumps(DECISION),
+        operation_context={'operation_id': 'current', 'pending_operations': [], 'undo_candidates': []},
+    )]
+    saved = [event['data']['checkpoint'] for event in events if event['type'] == 'operation.checkpoint'][-1]
+    assert saved['environment']['operation_context']['pending_operations'] == []
+    assert saved['environment']['requirement']['operation_context']['pending_operations'] == []
+    assert saved['environment']['requirement']['operation_context']['operation_id'] == 'current'
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('resume_kind', ['resume_state', 'resume_checkpoint'])
 @pytest.mark.parametrize('brief_change', ['source_limit', 'clear'])
 async def test_resume_cannot_replay_old_sources_after_user_saves_new_brief(resume_kind, brief_change):

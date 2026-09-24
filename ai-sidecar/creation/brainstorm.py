@@ -1818,11 +1818,57 @@ class BrainstormCoordinator:
         fingerprint = cls._question_fingerprint(question.get("prompt"))
         if not fingerprint:
             return False
-        return any(
+        if any(
             cls._question_fingerprint(decision.get("question")) == fingerprint
             for decision in decisions
             if isinstance(decision, dict) and not cls._is_cleared_decision(decision)
-        )
+        ):
+            return True
+
+        # A model can restate an answered choice with a different question and
+        # option ID (for example "how should the new account operate" followed
+        # by "what automation level should distribution use").  The selected
+        # option label and trade-off are stable user evidence, so an exact pair
+        # reappearing among the new choices means the model is asking the user
+        # to choose an answer they already supplied.  Reject the candidate and
+        # spend the existing bounded generation-repair attempt instead of
+        # publishing a contradictory open question.
+        candidate_options = question.get("options")
+        if not isinstance(candidate_options, list):
+            return False
+        candidate_choices = [
+            (
+                cls._question_fingerprint(option.get("label")),
+                cls._question_fingerprint(option.get("description")),
+            )
+            for option in candidate_options
+            if isinstance(option, dict)
+        ]
+        for decision in decisions:
+            if not isinstance(decision, dict) or cls._is_cleared_decision(decision):
+                continue
+            if str(decision.get("answer_source") or decision.get("source") or "") != "user":
+                continue
+            selected = decision.get("selected_options")
+            if not isinstance(selected, list):
+                continue
+            for option in selected:
+                if not isinstance(option, dict):
+                    continue
+                label = cls._question_fingerprint(option.get("label"))
+                tradeoff = cls._question_fingerprint(
+                    option.get("tradeoff", option.get("description"))
+                )
+                if len(label) >= 4 and len(tradeoff) >= 8 and any(
+                    candidate_label == label
+                    and len(candidate_tradeoff) >= 8
+                    and SequenceMatcher(
+                        None, candidate_tradeoff, tradeoff, autojunk=False
+                    ).ratio() >= 0.9
+                    for candidate_label, candidate_tradeoff in candidate_choices
+                ):
+                    return True
+        return False
 
     @classmethod
     def _normalize_directions(cls, value: Any) -> list[dict[str, Any]]:

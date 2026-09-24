@@ -2155,7 +2155,8 @@ describe('创作 Agent 多轮 Loop', () => {
     render(<CreationPanel />)
     fireEvent.change(screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/), { target: { value: '写方案' } })
     fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
-    expect(await screen.findByText(`${reason}；已保存已生成内容`)).toBeInTheDocument()
+    expect(await screen.findByText(reason)).toBeInTheDocument()
+    expect(screen.queryByText(`${reason}；已保存已生成内容`)).not.toBeInTheDocument()
     expect(saved[saved.length - 1].generated_content).toBe(document)
     expect(saved[saved.length - 1].lifecycle_status).toBe('failed')
   })
@@ -2172,9 +2173,14 @@ describe('创作 Agent 多轮 Loop', () => {
       if (url.pathname === '/api/creation/agent/run') return sse([
         event('run.started', 1, '开始执行'),
         event('document.replaced', 2, '正文生成完成', undefined, { content: document }),
+        event('phase.started', 3, '阶段开始：核对交付结果', undefined, {
+          phase_id: 'step:delivery_validation',
+          phase_title: '核对交付结果',
+          phase_kind: 'plan_step',
+        }),
         {
           ...event(
-            'run.failed', 3, deterministicReason, undefined,
+            'run.failed', 4, deterministicReason, undefined,
             { error_code: 'CREATION_DELIVERY_INCOMPLETE', retryable: false },
           ),
           status: 'failed',
@@ -2185,8 +2191,17 @@ describe('创作 Agent 多轮 Loop', () => {
     render(<CreationPanel />)
     fireEvent.change(screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/), { target: { value: '写方案' } })
     fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
-    // 原因里的具体缺口必须完整展示，不能被敏感词过滤吞成兜底文案。
-    expect(await screen.findByText(deterministicReason + '；已保存已生成内容')).toBeInTheDocument()
+    // 质检原因只进入“核对交付结果”阶段，不在输入区下方重复显示成全局错误。
+    const phaseTitle = await screen.findByText('1. 核对交付结果')
+    const phase = phaseTitle.closest('.creation-trace-phase')
+    expect(phase).toHaveClass('is-failed')
+    expect(phase?.querySelector('.creation-trace-phase__dot.is-failed')).toBeTruthy()
+    expect(phase).toHaveTextContent('未通过')
+    expect(await screen.findByText(deterministicReason)).toBeInTheDocument()
+    expect(screen.queryByText(deterministicReason + '；已保存已生成内容')).not.toBeInTheDocument()
+    await waitFor(() => expect(
+      screen.getByPlaceholderText(/继续告诉 Agent 如何修改当前文档/),
+    ).toBeEnabled())
     // 确定性失败再喊“重试”只会让用户对着同一个结果原地打转。
     expect(screen.queryByText(/可重试继续/)).not.toBeInTheDocument()
   })

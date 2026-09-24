@@ -1,13 +1,70 @@
 """Shared bounded source views for document authors and delivery reviewers."""
+import copy
+import os
 from typing import Any, Optional
 
 MAX_PROMPT_DATA_RESULTS_CHARS = 22000
 MAX_PROMPT_REFERENCE_CHARS = 16000
+DEFAULT_CREATION_CONTEXT_TOKENS = 32768
+MIN_CREATION_CONTEXT_TOKENS = 8192
+MAX_CREATION_CONTEXT_TOKENS = 262144
+
+
+def creation_context_window_tokens() -> int:
+    """Return the local creation context contract shared by planning and transport."""
+    raw = os.environ.get("MEMORYBREAD_CREATION_CONTEXT_TOKENS", "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_CREATION_CONTEXT_TOKENS
+    except ValueError:
+        value = DEFAULT_CREATION_CONTEXT_TOKENS
+    return max(MIN_CREATION_CONTEXT_TOKENS, min(MAX_CREATION_CONTEXT_TOKENS, value))
 
 
 class CreationEvidencePrompts:
     data_char_budget = MAX_PROMPT_DATA_RESULTS_CHARS
     reference_char_budget = MAX_PROMPT_REFERENCE_CHARS
+
+    @classmethod
+    def delivery_prompt_materials(cls, provided: dict[str, Any]) -> dict[str, Any]:
+        """Replace duplicated evidence bodies with a lossless source inventory.
+
+        ``source_catalog`` carries the exact, selectable fact text used by delivery
+        review. Repeating the same bodies inside ``provided_materials`` consumed the
+        context window without adding evidence. The inventory intentionally keeps
+        source identity, availability, freshness, and collection state so an omitted
+        body can never be mistaken for an absent or failed source.
+        """
+        result = {
+            key: copy.deepcopy(value)
+            for key, value in provided.items()
+            if key != "retrieved_evidence"
+        }
+        evidence = provided.get("retrieved_evidence") or {}
+        inventory: dict[str, Any] = {
+            "source_view": copy.deepcopy(evidence.get("source_view") or {})
+        }
+        identity_fields = (
+            "id", "source_id", "source_type", "source_kind", "title",
+            "source_url", "observed_at", "collected_at", "can_use",
+            "evidence_status", "evidence_reason", "unavailable_reason",
+            "data_usage_status", "data_use_policy", "data_freshness",
+            "freshness_class", "refresh_status", "refresh_completeness",
+        )
+        for kind in ("references", "data_results", "web_results", "tool_results"):
+            rows = []
+            for raw in evidence.get(kind) or []:
+                if not isinstance(raw, dict):
+                    continue
+                row = {
+                    key: cls._compact_prompt_value(raw.get(key))
+                    for key in identity_fields
+                    if raw.get(key) is not None
+                }
+                if row:
+                    rows.append(row)
+            inventory[kind] = rows
+        result["retrieved_evidence"] = inventory
+        return result
 
     @classmethod
     def _compact_prompt_value(cls, value: Any, depth: int = 0) -> Any:

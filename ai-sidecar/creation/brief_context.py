@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from difflib import SequenceMatcher
 from typing import Any, Dict, List
 
 
@@ -183,3 +184,53 @@ def effective_brief_decisions(creation_brief: Any) -> List[Dict[str, str]]:
         if not values and value:
             result.append(_entry(identity, dimension, "summary", value, source))
     return result
+
+
+def effective_brief_open_flags(creation_brief: Any) -> List[str]:
+    """Return only unresolved flags from the authoritative Brainstorm state.
+
+    A generated current question is not user evidence.  If it repeats an
+    already selected option verbatim (label plus explanation), the whole model
+    turn is stale: its derived flags must not compete with the user's confirmed
+    decision during writing or delivery review.  Manual open-flag edits remain
+    authoritative and are never filtered here.
+    """
+    if not isinstance(creation_brief, dict):
+        return []
+    edits = creation_brief.get("brief_edits")
+    edits = edits if isinstance(edits, dict) else {}
+    if "open_flags" in edits:
+        return [line.strip() for line in str(edits["open_flags"]).splitlines() if line.strip()]
+
+    raw_flags = creation_brief.get("open_flags")
+    flags = [str(item).strip() for item in raw_flags if str(item).strip()] \
+        if isinstance(raw_flags, list) else []
+    current = creation_brief.get("current_question")
+    if not isinstance(current, dict):
+        return flags
+    options = current.get("options")
+    if not isinstance(options, list):
+        return flags
+
+    normalize = lambda value: "".join(
+        character.lower() for character in str(value or "") if character.isalnum()
+    )
+    candidate_choices = [
+        (normalize(option.get("label")), normalize(option.get("description")))
+        for option in options if isinstance(option, dict)
+    ]
+    for decision in effective_brief_decisions(creation_brief):
+        if decision.get("source") != "user":
+            continue
+        label = normalize(decision.get("value"))
+        description = normalize(decision.get("description"))
+        if len(label) >= 4 and len(description) >= 8 and any(
+            candidate_label == label
+            and len(candidate_description) >= 8
+            and SequenceMatcher(
+                None, candidate_description, description, autojunk=False
+            ).ratio() >= 0.9
+            for candidate_label, candidate_description in candidate_choices
+        ):
+            return []
+    return flags

@@ -311,6 +311,25 @@ pid_belongs_to_managed_ollama() {
     esac
 }
 
+pid_belongs_to_ollama_gui() {
+    local pid=$1
+    local executable
+
+    if ! [[ "$pid" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+
+    executable=$(process_executable "$pid")
+    case "$executable" in
+        */Ollama.app/Contents/*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 pid_belongs_to_memorybread() {
     local pid=$1
     pid_belongs_to_project "$pid" \
@@ -596,6 +615,49 @@ managed_ollama_listener_pid() {
     return 1
 }
 
+ollama_listener_is_gui() {
+    local pid
+    local found=false
+
+    while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        found=true
+        pid_belongs_to_ollama_gui "$pid" || return 1
+    done < <(lsof -nP -tiTCP:"$OLLAMA_PORT" -sTCP:LISTEN 2>/dev/null | sort -u || true)
+
+    [ "$found" = true ]
+}
+
+stop_ollama_gui() {
+    local pid
+    local pids=()
+    local deadline=$((SECONDS + 8))
+
+    while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        if pid_belongs_to_ollama_gui "$pid"; then
+            pids+=("$pid")
+        fi
+    done < <(pgrep -f 'Ollama\.app/Contents/' 2>/dev/null | sort -u || true)
+
+    if [ "${#pids[@]}" -eq 0 ]; then
+        log_error "已识别 Ollama 桌面运行时，但无法确认其进程身份"
+        return 1
+    fi
+
+    log_info "检测到 Ollama 桌面应用占用 ${OLLAMA_PORT}，正在平滑切换到 MemoryBread 托管运行时"
+    kill "${pids[@]}" 2>/dev/null || true
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if ! ollama_listener_is_gui; then
+            return 0
+        fi
+        sleep 0.25
+    done
+
+    log_error "Ollama 桌面应用未能在 8 秒内释放端口 ${OLLAMA_PORT}，请退出后重试"
+    return 1
+}
+
 record_managed_ollama_process() {
     local pid=$1
     local executable=$2
@@ -694,6 +756,14 @@ ensure_ollama_running() {
             echo "$listener_pid" > "$OLLAMA_PID_FILE"
             log_info "Ollama 已在运行，已同步托管进程身份 (PID: $listener_pid)"
             return 0
+        fi
+
+        # 初始化器会把 Ollama GUI 平滑迁移到独立托管 CLI。开发启动器必须
+        # 维持同一契约，否则 GUI 登录项重新占回 11434 后，每次 start 都会
+        # 把可恢复状态误报为第三方端口冲突。这里只处理可执行文件明确位于
+        # Ollama.app 包内的进程；其他外部监听仍由 cleanup_port 拒绝终止。
+        if ollama_listener_is_gui; then
+            stop_ollama_gui || return 1
         fi
 
         # 固定端口可能仍被已退出桌面客户端遗留的另一套 MemoryBread 托管

@@ -44,9 +44,15 @@ pub fn get(conn: &Connection, session: &str, id: &str) -> Result<Option<Operatio
 
 pub fn pending(conn: &Connection, session: &str, exclude: &str) -> Result<Vec<Value>> {
     let mut stmt = conn.prepare(
-        "SELECT operation_id,instruction,status FROM creation_operations
-         WHERE session_id=?1 AND operation_id<>?2 AND status IN ('running','waiting','failed','partial')
-         ORDER BY updated_at DESC LIMIT 12")?;
+        "SELECT o.operation_id,o.instruction,o.status FROM creation_operations o
+         JOIN creation_history h ON h.id=o.history_id
+         WHERE o.session_id=?1 AND o.operation_id<>?2
+         AND o.status IN ('running','waiting','failed','partial')
+         AND ((o.base_revision=h.revision_no AND o.base_document=h.generated_content)
+              OR (o.status='failed' AND h.lifecycle_status='failed'
+                  AND h.revision_no=o.base_revision+1
+                  AND json_extract(o.checkpoint_json,'$.current_document')=h.generated_content))
+         ORDER BY o.updated_at DESC LIMIT 12")?;
     let rows = stmt.query_map(params![session, exclude], |row| {
         Ok(json!({
             "operation_id":row.get::<_,String>(0)?, "instruction":row.get::<_,String>(1)?,
@@ -173,6 +179,19 @@ pub fn restart_attempt(
     }
     conn.execute("UPDATE creation_operations SET retry_checkpoint_json=NULL,status='running',last_sequence=-1
         WHERE session_id=?1 AND operation_id=?2 AND status IN ('partial','failed','waiting','running')",params![session,id])?;
+    Ok(())
+}
+
+/// A dropped SSE consumer does not cancel the durable instruction.  Move only
+/// the still-running attempt to a resumable state; completed/failed/cancelled
+/// operations keep the terminal status written by their own event.
+pub fn mark_waiting_if_running(conn: &Connection, session: &str, id: &str) -> Result<()> {
+    let now = chrono::Utc::now().timestamp_millis();
+    conn.execute(
+        "UPDATE creation_operations SET status='waiting',updated_at=?3
+         WHERE session_id=?1 AND operation_id=?2 AND status='running'",
+        params![session, id, now],
+    )?;
     Ok(())
 }
 
@@ -487,6 +506,39 @@ mod tests {
             assert_eq!(saved["sequence"],5);
             assert_eq!(pending(conn,"session","")?[0]["instruction"],"modify document");
             assert!(get(conn,"another-session","op")?.is_none());
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn dropped_stream_marks_only_running_operation_waiting() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage.with_conn(|conn| {
+            fixture(conn);
+            mark_waiting_if_running(conn, "session", "op")?;
+            assert_eq!(get(conn, "session", "op")?.unwrap().status, "waiting");
+
+            conn.execute(
+                "UPDATE creation_operations SET status='completed' WHERE operation_id='op'",
+                [],
+            )?;
+            mark_waiting_if_running(conn, "session", "op")?;
+            assert_eq!(get(conn, "session", "op")?.unwrap().status, "completed");
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn pending_excludes_operations_bound_to_an_obsolete_document_revision() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage.with_conn(|conn| {
+            let id = fixture(conn);
+            assert_eq!(pending(conn, "session", "")?.len(), 1);
+            conn.execute(
+                "UPDATE creation_history SET generated_content='## A\nnewer\n',revision_no=2 WHERE id=?1",
+                params![id],
+            )?;
+            assert!(pending(conn, "session", "")?.is_empty());
             Ok(())
         }).unwrap();
     }

@@ -172,7 +172,8 @@ pub async fn run_document_refresh_worker(state: Arc<AppState>) {
             Ok(config) => config,
             Err(_) => { tracing::warn!("invalid document refresh configuration; worker paused"); continue; }
         };
-        if !config.enabled || !config.automatic_enabled || !config.source_writes_enabled { continue; }
+        if !config.enabled || !config.automatic_enabled || !config.automatic_browser_reads_enabled
+            || !config.source_writes_enabled { continue; }
         if !state.browser_extension.status().connected { continue; }
         let now = chrono::Utc::now().timestamp_millis();
         let job = match state.storage.claim_document_refresh_job_in_scope(now, config.max_attempts, config.rollout_document_ids.as_deref()) {
@@ -1770,7 +1771,10 @@ mod document_refresh_tests {
         assert_eq!(state.storage.document_refresh_observation_state(90001,"new-body").unwrap().as_deref(),Some("pending"));
         assert_eq!(state.browser_extension.status().active_job_count, 0);
         state.storage.upsert_preference(DOCUMENT_REFRESH_CONFIG_KEY, r#"{"enabled":true}"#, "user", 1.0).unwrap();
-        assert!(load_document_refresh_config(&state).unwrap().enabled);
+        let config=load_document_refresh_config(&state).unwrap();
+        assert!(config.enabled);
+        assert!(!config.automatic_browser_reads_enabled);
+        assert_eq!(state.browser_extension.status().active_job_count,0);
     }
 
     #[test]

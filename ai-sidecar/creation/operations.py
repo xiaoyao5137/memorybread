@@ -6,14 +6,16 @@ All edits bind to one immutable base and preserve every byte outside their range
 
 import hashlib
 import re
+from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 from model_schema import decoding_schema
 
 
 class OperationError(ValueError):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, retryable: bool = False):
         super().__init__(message)
         self.code = code
+        self.retryable = retryable
 
 
 def normalize_operation_selectors(document: str, operation: Dict[str, Any]) -> Dict[str, Any]:
@@ -174,6 +176,61 @@ def document_nodes(document: str) -> List[Dict[str, Any]]:
     return nodes
 
 
+APPEND_INSTRUCTION_MARKERS = (
+    "补充", "新增", "增加", "添加", "加入", "写入", "纳入", "加上", "完善", "扩展", "补上",
+)
+
+
+def bind_append_transform_scope(
+    instruction: str,
+    document: str,
+    operation: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Ground append transforms before either routing or execution validation."""
+    if (operation.get("kind") != "transform" or not document.strip()
+            or not any(marker in instruction for marker in APPEND_INSTRUCTION_MARKERS)):
+        return operation
+
+    def normalized(value: str) -> str:
+        return re.sub(r"[\s：:、，,。.!！?？（）()《》“”\"'`#_-]+", "", value).lower()
+
+    message = normalized(instruction)
+    nodes = document_nodes(document)
+    named = [node for node in nodes if node.get("level", 0) >= 2
+             and normalized(str(node.get("title") or "")) in message]
+    # A named section already includes all of its descendant headings. Keeping
+    # both the ancestor and descendants creates overlapping edit scopes and can
+    # tempt a writer to address only the small child nodes. Bind the smallest
+    # set of outer named sections instead. This also keeps a repeated generic
+    # heading such as ``待确认事项`` inside the explicitly named parent section,
+    # rather than accidentally opening every same-titled section for editing.
+    outer_named = [
+        node for node in named
+        if not any(
+            other["start"] <= node["start"] and node["end"] <= other["end"]
+            and other["id"] != node["id"]
+            for other in named
+        )
+    ]
+    contained_titles = {
+        normalized(str(child.get("title") or ""))
+        for parent in outer_named
+        for child in named
+        if parent["id"] != child["id"]
+        and parent["start"] <= child["start"] and child["end"] <= parent["end"]
+    }
+    outer_named = [
+        node for node in outer_named
+        if normalized(str(node.get("title") or "")) not in contained_titles
+    ]
+    targets = [node["id"] for node in outer_named]
+    if not targets:
+        root = next((node for node in nodes if node.get("level") == 1), None)
+        if root:
+            targets = [root["id"]]
+    return {**operation, "targets": targets} if targets else operation
+
+
 def resolve_target(document: str, target: Any) -> Tuple[int, int]:
     _validate_target(target)
     if isinstance(target, dict) and set(target) == {"id"}:
@@ -184,9 +241,21 @@ def resolve_target(document: str, target: Any) -> Tuple[int, int]:
             return matches[0]["start"], matches[0]["end"]
     elif isinstance(target, dict) and set(target) <= {"text", "occurrence"} and isinstance(target.get("text"), str) and target["text"]:
         literal = target["text"]
+        # When the selected literal exists as a complete line, prefer those
+        # spans over shorter substring matches. This keeps selectors such as
+        # "- " bound to an empty Markdown list item instead of the prefix of
+        # an unrelated populated item. Multi-line selections retain their
+        # original byte-exact substring semantics.
+        line_matches = []
+        if "\n" not in literal and "\r" not in literal:
+            line_matches = list(re.finditer(
+                r"(?m)^(" + re.escape(literal) + r")(?=\r?(?:\n|\Z))", document
+            ))
         # Lookaheads include overlapping occurrences ("aa" occurs twice in
         # "aaa"). A missing occurrence must never silently edit the first span.
-        matches = re.finditer(r'(?=(' + re.escape(literal) + r'))', document)
+        matches = iter(line_matches) if line_matches else re.finditer(
+            r'(?=(' + re.escape(literal) + r'))', document
+        )
         occurrence = target.get("occurrence")
         if occurrence is not None:
             for index, match in enumerate(matches, 1):
@@ -199,6 +268,104 @@ def resolve_target(document: str, target: Any) -> Tuple[int, int]:
                     raise OperationError("CREATION_TARGET_AMBIGUOUS", "目标出现多次，需要明确位置")
                 return first.span(1)
     raise OperationError("CREATION_TARGET_MISSING", "目标不在当前文档中，请重新定位")
+
+
+def target_resolves(document: str, target: Any) -> bool:
+    try:
+        resolve_target(document, target)
+        return True
+    except OperationError:
+        return False
+
+
+def repair_generated_literal_selectors(
+    document: str,
+    patches: List[Dict[str, Any]],
+    allowed_targets: List[Any],
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Repair uniquely provable line-copy drift in generated selectors.
+
+    A selector is rebound only when one same-line-count window inside the
+    allowed scope matches after horizontal-space changes or removal of a short
+    trailing parenthetical label. Ambiguous or substantive drift still fails.
+    """
+    allowed_ranges = [resolve_target(document, target) for target in allowed_targets]
+    lines = []
+    offset = 0
+    for raw in re.findall(r'[^\r\n]*(?:\r\n|\r|\n|$)', document):
+        if not raw:
+            continue
+        lines.append((offset, offset + len(raw), raw))
+        offset += len(raw)
+
+    def in_scope(start: int, end: int) -> bool:
+        return any(scope_start <= start and end <= scope_end
+                   for scope_start, scope_end in allowed_ranges)
+
+    def canonical_line(value: str) -> str:
+        return re.sub(r"[ \t]+", "", value.rstrip("\r\n"))
+
+    def line_matches(source: str, candidate: str) -> bool:
+        source_key = canonical_line(source)
+        candidate_key = canonical_line(candidate)
+        if source_key == candidate_key:
+            return True
+        without_note = re.sub(
+            r"(?:（[^（）\r\n]{1,24}）|\([^()\r\n]{1,24}\))$", "", source_key
+        )
+        return without_note == candidate_key
+
+    repaired = []
+    changed = False
+    for patch in patches:
+        item = dict(patch)
+        for key in ("target", "destination"):
+            selector = item.get(key)
+            if not (isinstance(selector, dict) and isinstance(selector.get("text"), str)
+                    and selector["text"] and not target_resolves(document, selector)):
+                continue
+            wanted = selector["text"]
+            wanted_lines = wanted.rstrip("\r\n").splitlines()
+            if not wanted_lines:
+                continue
+            candidates = []
+            for index in range(0, len(lines) - len(wanted_lines) + 1):
+                window = lines[index:index + len(wanted_lines)]
+                start = window[0][0]
+                raw_end = window[-1][1]
+                last = window[-1][2]
+                end = raw_end if wanted.endswith(("\n", "\r")) else raw_end - len(last) + len(last.rstrip("\r\n"))
+                if in_scope(start, end) and all(
+                    line_matches(source, actual[2])
+                    for source, actual in zip(wanted_lines, window)
+                ):
+                    candidates.append(document[start:end])
+            if len(candidates) == 1:
+                item[key] = {**selector, "text": candidates[0]}
+                changed = True
+        repaired.append(item)
+
+    spans = []
+    for index, patch in enumerate(repaired):
+        try:
+            spans.append((index, *resolve_target(document, patch.get("target"))))
+        except OperationError:
+            continue
+    redundant = set()
+    for delete_index, delete_start, delete_end in spans:
+        delete_patch = repaired[delete_index]
+        if delete_patch.get("action") != "delete":
+            continue
+        deleted_text = document[delete_start:delete_end]
+        for replace_index, replace_start, replace_end in spans:
+            replace_patch = repaired[replace_index]
+            if (replace_patch.get("action") == "replace"
+                    and replace_start <= delete_start and delete_end <= replace_end
+                    and deleted_text not in str(replace_patch.get("content") or "")):
+                redundant.add(delete_index)
+                changed = True
+                break
+    return [patch for index, patch in enumerate(repaired) if index not in redundant], changed
 
 
 def _validate_target(target: Any) -> None:
@@ -280,6 +447,200 @@ def apply_patches(document: str, patches: Any, allowed_targets: Optional[List[An
                     "result_hash": document_hash(result), "preserved_untouched": True,
                     "changes": changes, "change_count": len(changes),
                     "summary": "已完成 {} 处文档修改".format(len(changes))}
+
+
+def normalize_generated_patch_markdown(
+    patches: Any, document: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Restore a block boundary when generated patch text glues on a heading.
+
+    This is intentionally limited to model-generated patch content. Literal
+    user patches continue to pass through apply_patches byte-for-byte. Fenced
+    code is protected because examples may contain heading markers as data.
+    """
+    normalized = []
+    for patch in patches:
+        current = dict(patch)
+        content = current.get("content")
+        if isinstance(content, str):
+            parts = re.split(r"(```.*?(?:```|$)|~~~.*?(?:~~~|$))", content, flags=re.S)
+            for index in range(0, len(parts), 2):
+                parts[index] = re.sub(
+                    r"(?m)(?<=[^\n\\#])(#{2,6}[ \t]+\S)", r"\n\n\1", parts[index]
+                )
+            content = "".join(parts)
+            if document is not None and current.get("action") == "insert":
+                start, end = resolve_target(document, current.get("target"))
+                anchor = start if current.get("position") == "before" else end
+                if (anchor > 0 and document[anchor - 1] not in "\r\n"
+                        and re.match(r"^#{1,6}[ \t]+\S", content)):
+                    content = "\n\n" + content
+                if (anchor < len(document) and document[anchor] not in "\r\n"
+                        and content and content[-1] not in "\r\n"):
+                    content += "\n\n"
+            current["content"] = content
+        normalized.append(current)
+    return normalized
+
+
+def rebind_generated_append_target(
+    patches: Any,
+    document: str,
+    allowed_targets: Any,
+    instruction: str,
+) -> List[Dict[str, Any]]:
+    """Recover an insert that incorrectly targets the heading it is creating.
+
+    This fallback is deliberately narrow: the user asked to append, the only
+    allowed scope is the root node spanning the complete document, and the
+    generated selector does not exist.  Appending the fragment after that root
+    preserves every original byte.  Other missing or ambiguous selectors still
+    fail closed.
+    """
+    result = [dict(item) for item in patches] if isinstance(patches, list) else patches
+    if (not isinstance(result, list)
+            or not any(marker in instruction for marker in APPEND_INSTRUCTION_MARKERS)
+            or not isinstance(allowed_targets, list) or len(allowed_targets) != 1):
+        return result
+    try:
+        allowed_start, allowed_end = resolve_target(document, allowed_targets[0])
+    except OperationError:
+        return result
+    if allowed_start != 0 or allowed_end != len(document):
+        return result
+    for patch in result:
+        if not isinstance(patch, dict) or patch.get("action") != "insert":
+            continue
+        try:
+            resolve_target(document, patch.get("target"))
+        except OperationError as error:
+            if error.code != "CREATION_TARGET_MISSING":
+                raise
+            patch["target"] = allowed_targets[0]
+            patch["position"] = "after"
+    return result
+
+
+def generated_patch_problems(
+    document: str, patches: Any, instruction: str = ""
+) -> List[str]:
+    """Reject generated inserts that smuggle a rewritten document as a delta.
+
+    A transform insert must contain the new fragment only.  Model output can
+    occasionally place a near-complete copy of the selected document inside an
+    insert, which preserves the old bytes technically but duplicates the whole
+    body.  Compare substantive existing lines before applying the patch so this
+    cannot be approved later by a semantic delivery reviewer.
+    """
+    permits_copy = bool(re.search(
+        r"复制|拷贝|重复一遍|原样再放|duplicate|copy", instruction, re.I
+    ))
+    existing = {
+        line.strip()
+        for line in document.splitlines()
+        if len(line.strip()) >= 8
+    }
+    for patch in patches if isinstance(patches, list) else []:
+        if not isinstance(patch, dict) or patch.get("action") != "insert":
+            continue
+        content = patch.get("content")
+        if not isinstance(content, str):
+            continue
+        repeated = [
+            line.strip()
+            for line in content.splitlines()
+            if len(line.strip()) >= 8 and line.strip() in existing
+        ]
+        repeated_chars = sum(len(line) for line in repeated)
+        if not permits_copy and len(set(repeated)) >= 2 and repeated_chars >= 32:
+            return ["insert_repeats_existing_content"]
+    return []
+
+
+def recover_generated_insert_supersequence(
+    document: str,
+    patches: Any,
+    allowed_targets: Any,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Convert a copied target plus insertions back into one atomic replace.
+
+    Small local models sometimes obey the requested edit semantically but put
+    the complete selected node in an ``insert`` payload.  Applying that payload
+    would duplicate the original, while simply rejecting it loses a recoverable
+    result.  Recovery is safe only when the candidate contains every byte of the
+    selected target, in order, and differs exclusively by inserted bytes.  Any
+    deletion, rewrite, ambiguous scope, or multi-patch response still fails
+    closed through the normal validators.
+    """
+    result = [dict(item) for item in patches] if isinstance(patches, list) else patches
+    if (not isinstance(result, list) or len(result) != 1
+            or not isinstance(allowed_targets, list) or len(allowed_targets) != 1):
+        return result, False
+    patch = result[0]
+    content = patch.get("content") if isinstance(patch, dict) else None
+    if patch.get("action") != "insert" or not isinstance(content, str):
+        return result, False
+    try:
+        target_start, target_end = resolve_target(document, patch.get("target"))
+        allowed_start, allowed_end = resolve_target(document, allowed_targets[0])
+    except OperationError:
+        return result, False
+    if (target_start, target_end) != (allowed_start, allowed_end):
+        return result, False
+    original = document[target_start:target_end]
+    if not original or content == original:
+        return result, False
+    matcher = SequenceMatcher(None, original, content, autojunk=False)
+    opcodes = matcher.get_opcodes()
+    if (not opcodes or any(tag not in {"equal", "insert"} for tag, *_ in opcodes)
+            or "".join(original[i1:i2] for tag, i1, i2, _, _ in opcodes
+                         if tag == "equal") != original
+            or not any(tag == "insert" and j1 != j2
+                       for tag, _, _, j1, j2 in opcodes)):
+        return result, False
+    return [{"action": "replace", "target": allowed_targets[0], "content": content}], True
+
+
+def rebind_targets_to_document(
+    source_document: str,
+    target_document: str,
+    targets: Any,
+) -> Optional[List[Any]]:
+    """Map an allowed selector scope to a newer candidate document.
+
+    Delivery repair normally regenerates a patch from the immutable input
+    baseline.  If the model instead selects text introduced by the rejected
+    candidate, the repair can still be applied safely to that candidate when
+    the original allowed nodes have a unique title/level counterpart.  Literal
+    selectors already present in the candidate retain their exact semantics.
+    """
+    if not isinstance(targets, list):
+        return None
+    source_nodes = document_nodes(source_document)
+    target_nodes = document_nodes(target_document)
+    rebound: List[Any] = []
+    for target in targets:
+        try:
+            resolve_target(target_document, target)
+            rebound.append(target)
+            continue
+        except OperationError:
+            pass
+        node_id = target.get("id") if isinstance(target, dict) else target
+        source_node = next((item for item in source_nodes if item["id"] == node_id), None)
+        if source_node is None:
+            return None
+        source_matches = [item for item in source_nodes
+                          if item["level"] == source_node["level"]
+                          and item["title"] == source_node["title"]]
+        target_matches = [item for item in target_nodes
+                          if item["level"] == source_node["level"]
+                          and item["title"] == source_node["title"]]
+        if len(source_matches) != len(target_matches):
+            return None
+        ordinal = source_matches.index(source_node)
+        rebound.append(target_matches[ordinal]["id"])
+    return rebound
 
 
 def validate_operation(raw: Any) -> Dict[str, Any]:

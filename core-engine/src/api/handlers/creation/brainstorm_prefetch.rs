@@ -119,7 +119,7 @@ pub(super) fn take(state: &AppState, stored: &BrainstormStoredState, req: &Brain
     let question = result.question.as_mut()?;
     if !apply_brainstorm_question_stage(question, Some(&branch)) { return None; }
     let fingerprint = brainstorm_question_fingerprint(&question.prompt);
-    if effective.turns.iter().any(|turn| brainstorm_questions_overlap(question, &turn.question)) {
+    if effective.turns.iter().any(|turn| brainstorm_question_repeats_answered(turn, question)) {
         log_brainstorm_stage(req, "prefetch_duplicate_discarded", Instant::now());
         return None;
     }

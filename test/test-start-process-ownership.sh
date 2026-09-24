@@ -39,6 +39,9 @@ process_executable() {
         106)
             printf '%s\n' "/Users/test/Library/Application Support/com.memory-bread.app/runtime/.memory-bread/initialization/runtime/ollama/v0.30.8/runtime/ollama"
             ;;
+        107)
+            printf '%s\n' "/Applications/Ollama.app/Contents/Resources/ollama"
+            ;;
         103|104)
             printf '%s\n' "/tmp/unrelated-service"
             ;;
@@ -49,7 +52,13 @@ pid_belongs_to_packaged_app 101
 pid_is_desktop_app 102
 pid_belongs_to_packaged_app 105
 pid_belongs_to_managed_ollama 106
+pid_belongs_to_ollama_gui 107
 pid_belongs_to_memorybread 103
+
+if pid_belongs_to_ollama_gui 104; then
+    echo "foreign executable was incorrectly treated as Ollama GUI" >&2
+    exit 1
+fi
 
 if pid_belongs_to_memorybread 104; then
     echo "foreign process was incorrectly treated as MemoryBread" >&2

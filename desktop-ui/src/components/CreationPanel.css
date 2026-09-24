@@ -1646,6 +1646,10 @@
   background: #d99a00;
 }
 
+.creation-trace-phase__dot.is-failed {
+  background: #d92d20;
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .creation-trace-phase.is-running .creation-trace-phase__dot {
     animation: creation-thinking-breathe 1.6s cubic-bezier(.4, 0, .2, 1) infinite;
@@ -3875,6 +3879,10 @@ h6.creation-latest-change {
 
   .creation-trace-phase__dot.is-warning {
     background: #FFD666;
+  }
+
+  .creation-trace-phase__dot.is-failed {
+    background: #FF6961;
   }
 
   .creation-trace-phase__title {

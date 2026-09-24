@@ -74,6 +74,13 @@ TRANSIENT_REPORT_REFRESH_ERROR_CODES = frozenset(
         "SCRAPE_HTTP_504",
         "SCRAPE_PAGE_ERROR",
         "BROWSER_ATTACH_UNAVAILABLE",
+        # Chrome 扩展已经连通但单次任务未在预算内收敛，或 Native Host
+        # 短暂没有领取/回传任务，均属于通道级瞬态故障。创作链路仍保持
+        # 零焦点策略，只重开一次后台页并回读当前视图，不降级抢占前台。
+        "BROWSER_EXTENSION_TIMEOUT",
+        "BROWSER_EXTENSION_UNRESPONSIVE",
+        "BROWSER_EXTENSION_INTERNAL",
+        "BROWSER_EXTENSION_FAILED",
     }
 )
 MIN_CANVAS_OCR_CONFIDENCE = 0.60
@@ -3904,7 +3911,10 @@ class CreationService:
             "transform 会生成一组完整的原子补丁，支持在一次操作中删除、移动、插入和改写多个位置；混合指令不能把删除留给另一个未安排的操作。targets 必须同时覆盖删除位置和追加位置。"
             "明确需要全文创作才选择 generate。直接回答或目标有歧义用 respond；需要先调用资料工具再回答而不改文档时用 answer。撤销操作用 undo 并绑定 undo_candidates 的 operation_id。"
             "respond 在本次解释中直接给出 response，不再安排写作节点；确认收到、确认理解、简短回应和消歧属于 respond。answer 是需要后续资料或实质推理才能产出答案的操作，不能用于只确认理解的回应。"
-            "继续任务时从 pending_operations 中绑定唯一 operation_id，使用 resume；"
+            "只有用户明确要求恢复已中断、失败或未完成的历史操作时，才从 pending_operations 中绑定唯一 operation_id 并使用 resume。"
+            "‘继续生成’、‘继续写’等对当前正文的续写或改写使用 transform，不得因存在历史候选就使用 resume；"
+            "这类纯继续写作指令未指定局部位置时，transform targets 应绑定现有正文的顶层文档节点，按原始目标和已保存简报继续完善整篇；"
+            "不得擅自从待确认事项或未提交选项中挑一项当作局部修改目标。"
             "无法唯一确定时回应一个消歧问题，不重新按初稿目标创作。"
             "只有本轮需要运行 Skill 工作流时选择 execute_skill，skill_ids 使用给定标识；"
             "Skill 可作为局部编辑约束而无需重跑，此时用 constraint_skill_ids 指定需要加载的规则。标识只能来自给定 Skill 列表，不得臆造。\n"
@@ -4027,6 +4037,10 @@ class CreationService:
             unavailable.add("undo")
         schema["properties"]["operation"]["anyOf"] = [variant for variant in schema["properties"]["operation"]["anyOf"]
             if variant["properties"]["kind"]["const"] not in unavailable]
+        offered_operation_kinds = {
+            variant["properties"]["kind"]["const"]
+            for variant in schema["properties"]["operation"]["anyOf"]
+        }
         # Title provenance is a structural precondition already checked by the
         # validator. Do not offer impossible source values to the decoder.
         from .skill_governance import explicit_title, document_heading
@@ -4061,11 +4075,20 @@ class CreationService:
                 response_text = "".join(parts)
                 try:
                     decision = self.parse_routing_decision(response_text)
-                    from .operations import apply_patches, resolve_target, validate_literal_patch, normalize_operation_selectors
+                    from .operations import (apply_patches, bind_append_transform_scope,
+                                             resolve_target, validate_literal_patch,
+                                             normalize_operation_selectors)
                     context = requirement.get("operation_context") or {}
                     document = context.get("current_document")
                     operation = normalize_operation_selectors(str(document or ""), decision["operation"])
+                    operation = bind_append_transform_scope(query, str(document or ""), operation)
                     decision["operation"] = operation
+                    if operation["kind"] not in offered_operation_kinds:
+                        raise ValueError(
+                            "operation.kind={} 不属于本轮意图和当前状态允许的操作；可用操作为 {}".format(
+                                operation["kind"], ",".join(sorted(offered_operation_kinds))
+                            )
+                        )
                     if isinstance(document, str) and not context.get("document_truncated"):
                         if operation["kind"] == "patch":
                             apply_patches(document, operation["patches"])
@@ -4491,6 +4514,7 @@ class CreationService:
         """
         from .operations import OperationError
 
+        context_guard = bool(kwargs.pop("context_guard", False))
         initial_budget = int(kwargs["num_predict"])
         ceiling = max(initial_budget, 16384)
         budget = initial_budget
@@ -4499,6 +4523,22 @@ class CreationService:
         started_ms = int(time.time() * 1000)
         prompt_text = str(kwargs.get("system_prompt") or "") + "\n\n" + str(kwargs.get("user_prompt") or "")
         model_name = str(kwargs.get("creation_model") or getattr(self, "model", "") or "")
+        if context_guard:
+            from monitor.llm_tracker import estimate_tokens
+            from .prompt_evidence import creation_context_window_tokens
+            prompt_tokens = estimate_tokens(prompt_text) + 256
+            available_output = creation_context_window_tokens() - prompt_tokens - 512
+            # 结构化节点必须保留它声明的首轮输出预算。若只剩一小段空间，
+            # 静默缩小 num_predict 只会制造一次可预见的截断，再由上层重试；
+            # 直接抛出可重试的预算错误，让调用方切换到紧凑提示词。
+            if available_output < max(1024, initial_budget):
+                raise OperationError(
+                    "CREATION_CONTEXT_BUDGET_EXCEEDED",
+                    "压缩后的模型输入未给结构化输出保留声明的输出预算",
+                    retryable=True,
+                )
+            ceiling = min(ceiling, available_output)
+            budget = min(budget, ceiling)
 
         def record_output_usage(status: str, response_text: str, error_msg: Optional[str] = None) -> None:
             # 轻量测试替身与外部创作节点可以只实现传输函数，不带用量埋点能力。
@@ -4533,7 +4573,10 @@ class CreationService:
                         or budget >= ceiling
                         or kwargs.get("creation_api_key")):
                     raise
-                budget = min(ceiling, budget * 4)
+                next_budget = min(ceiling, budget * 4)
+                if next_budget <= budget:
+                    raise
+                budget = next_budget
                 logger.info("Creation output budget exhausted; regenerating candidate budget=%s", budget)
                 continue
             record_output_usage("success", "".join(parts))
@@ -4607,6 +4650,9 @@ class CreationService:
                 },
             }
             endpoint = "/api/chat"
+
+        from .prompt_evidence import creation_context_window_tokens
+        payload["options"]["num_ctx"] = creation_context_window_tokens()
 
         if json_mode or json_schema:
             payload["format"] = json_schema or "json"

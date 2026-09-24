@@ -6,6 +6,7 @@ const {join} = require('node:path')
 
 function loadServiceWorker() {
   const posted = []
+  const debuggerCalls = []
   let disconnectListener = null
   const nativePort = {
     postMessage(message) { posted.push(message) },
@@ -25,6 +26,14 @@ function loadServiceWorker() {
         onAlarm: {addListener() {}},
       },
       tabs: {remove: async () => {}},
+      debugger: {
+        attach: async (...args) => { debuggerCalls.push(['attach', ...args]) },
+        sendCommand: async (...args) => {
+          debuggerCalls.push(['sendCommand', ...args])
+          return {data: 'preview'}
+        },
+        detach: async (...args) => { debuggerCalls.push(['detach', ...args]) },
+      },
     },
     console,
     Date,
@@ -46,9 +55,29 @@ function loadServiceWorker() {
   return {
     context,
     posted,
+    debuggerCalls,
     disconnect: () => disconnectListener(),
   }
 }
+
+test('后台文档任务不附着 Chrome 调试器且仍上报阶段', async () => {
+  const {context, posted, debuggerCalls} = loadServiceWorker()
+  const preview = await context.startJobPreview({
+    browser_job_id: 'background-document',
+    url: 'https://example.com/document',
+    live_preview_enabled: false,
+  }, 7)
+
+  preview.setStage('reading', '文档', 'https://example.com/document')
+  await preview.capture()
+  await preview.stop()
+
+  assert.deepEqual(debuggerCalls, [])
+  assert.deepEqual(posted.filter(message => message.type === 'progress').map(message => message.progress.stage), [
+    'opening',
+    'reading',
+  ])
+})
 
 test('任务执行卡死后会释放 busy 并立即恢复轮询', async () => {
   const {context, posted} = loadServiceWorker()

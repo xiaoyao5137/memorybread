@@ -377,6 +377,35 @@ impl StorageManager {
                 )?;
                 vector_tx.commit()?;
 
+                // 保留 timeline 作为上层溯源，但原始 capture 即将按保留期删除。
+                // 删除路径会临时关闭外键，因此必须显式清空直接引用，不能依赖
+                // ON DELETE SET NULL。
+                conn.execute(
+                    "UPDATE data_source_links
+                     SET capture_id = NULL
+                     WHERE capture_id IN (
+                        SELECT id FROM captures
+                        WHERE ts < ?1
+                          AND (event_type IS NULL OR event_type <> 'snapshot_ref')
+                          AND (
+                              timeline_id IS NOT NULL
+                              OR EXISTS (
+                                  SELECT 1 FROM timelines t
+                                  WHERE t.capture_id = captures.id
+                              )
+                              OR (
+                                  COALESCE(ax_text, '') = ''
+                                  AND COALESCE(ocr_text, '') = ''
+                                  AND COALESCE(input_text, '') = ''
+                                  AND COALESCE(audio_text, '') = ''
+                                  AND COALESCE(url, '') = ''
+                                  AND COALESCE(webpage_title, '') = ''
+                              )
+                          )
+                     )",
+                    params![older_than_ms],
+                )?;
+
                 conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
                 let delete_result = conn.execute(
                     "DELETE FROM captures
@@ -571,6 +600,61 @@ mod tests {
         assert!(!logs.is_empty());
         assert_eq!(logs[0].cleanup_type, "old_captures");
         assert_eq!(logs[0].affected_count, 1);
+    }
+
+    #[test]
+    fn old_capture_cleanup_uses_timeline_capture_index() {
+        let mgr = make_mgr();
+        let plan = mgr
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "EXPLAIN QUERY PLAN
+                     SELECT id, screenshot_path FROM captures
+                     WHERE ts < ?1
+                       AND (event_type IS NULL OR event_type <> 'snapshot_ref')
+                       AND (
+                           timeline_id IS NOT NULL
+                           OR EXISTS (
+                               SELECT 1 FROM timelines t
+                               WHERE t.capture_id = captures.id
+                           )
+                       )",
+                )?;
+                let rows = stmt
+                    .query_map([current_ts_ms()], |row| row.get::<_, String>(3))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .unwrap();
+
+        assert!(plan
+            .iter()
+            .any(|detail| detail.contains("idx_timelines_capture_id")));
+    }
+
+    #[test]
+    fn optional_production_copy_capture_cleanup_finishes_without_full_scans() {
+        let Ok(db_path) = std::env::var("MEMORY_BREAD_CAPTURE_CLEANUP_E2E_DB") else {
+            return;
+        };
+        let mgr = StorageManager::open(std::path::Path::new(&db_path)).unwrap();
+        let captures_dir = tempdir().unwrap();
+        // 生产环境当前保留期为 14 天；副本基准必须覆盖真实候选规模。
+        let cutoff = current_ts_ms() - 14 * 24 * 60 * 60 * 1000;
+        let started = std::time::Instant::now();
+        let (deleted, deleted_screenshots, freed_bytes) = mgr
+            .run_old_captures_cleanup(cutoff, captures_dir.path())
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        eprintln!(
+            "capture_cleanup_copy elapsed_ms={} deleted={} screenshots={} freed_bytes={}",
+            elapsed.as_millis(),
+            deleted,
+            deleted_screenshots,
+            freed_bytes
+        );
+        assert!(elapsed <= Duration::from_secs(3));
     }
 
     #[test]
@@ -909,6 +993,23 @@ mod tests {
                     params![timeline_id, capture_id],
                 )?;
                 conn.execute(
+                    "INSERT INTO data_sources (
+                        canonical_key, title, source_kind, access_mode, refresh_policy,
+                        realtime_level, tags, first_seen_at, last_seen_at, status,
+                        created_at, updated_at
+                     ) VALUES ('manual-delete-source', '保留的数据源', 'work_memory',
+                        'memory_only', 'never', 'observed', '[]', 1, 1, 'active', 1, 1)",
+                    [],
+                )?;
+                let source_id = conn.last_insert_rowid();
+                conn.execute(
+                    "INSERT INTO data_source_links (
+                        source_id, source_ref_key, capture_id, timeline_id, link_kind,
+                        observed_at, created_at
+                     ) VALUES (?1, 'manual-delete-link', ?2, ?3, 'work_memory', 1, 1)",
+                    params![source_id, capture_id, timeline_id],
+                )?;
+                conn.execute(
                     "INSERT INTO vector_index
                      (capture_id, qdrant_point_id, chunk_index, chunk_text, model_name, created_at)
                      VALUES (?1, 'manual-delete-vector', 0, '待删除向量', 'test', ?2)",
@@ -924,7 +1025,7 @@ mod tests {
         assert!(!dir.path().join(relative_path).exists());
         assert!(mgr.get_capture(capture_id).unwrap().is_none());
 
-        let (timeline_count, vector_count, queued_count): (i64, i64, i64) = mgr
+        let (timeline_count, vector_count, queued_count, direct_capture_links): (i64, i64, i64, i64) = mgr
             .with_conn(|conn| {
                 Ok((
                     conn.query_row("SELECT COUNT(*) FROM timelines", [], |row| row.get(0))?,
@@ -936,11 +1037,19 @@ mod tests {
                         [],
                         |row| row.get(0),
                     )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM data_source_links
+                         WHERE source_ref_key = 'manual-delete-link'
+                           AND capture_id IS NOT NULL",
+                        [],
+                        |row| row.get(0),
+                    )?,
                 ))
             })
             .unwrap();
         assert_eq!(timeline_count, 1);
         assert_eq!(vector_count, 0);
         assert_eq!(queued_count, 1);
+        assert_eq!(direct_capture_links, 0);
     }
 }

@@ -152,6 +152,31 @@ def test_ready_or_extension_responses_cannot_add_branch_plans():
                                                 sibling_goal_limit=0)
 
 
+def test_reworded_question_reusing_confirmed_option_is_rejected():
+    value = question("solutions")
+    value["question"].update(
+        prompt="新号内容分发应设定何种自动化程度？",
+        options=[
+            {"id": "renamed", "label": "全量自动分发",
+             "description": "由平台自动完成选品、脚本、制作与发布，商家仅需审核，效率最高。",
+             "details": "当前输入", "recommended": True},
+            {"id": "other", "label": "半自动辅助分发",
+             "description": "商家参与部分流程以平衡效率与控制。",
+             "details": "当前输入", "recommended": False},
+        ],
+    )
+    decisions = [{
+        "question": "新号应如何运营以最大化爆款产出？", "answer_source": "user",
+        "selected_options": [{"id": "old", "label": "全量自动分发",
+                              "tradeoff": "由平台自动完成选品、脚本、制作与发布，商家仅需审核，效率最高。"}],
+    }]
+    with pytest.raises(BrainstormGenerationError, match="重复了已经回答"):
+        BrainstormCoordinator._normalize_result(
+            json.dumps(value, ensure_ascii=False), force_continue=True,
+            expected_exploration_stage="solutions", decisions=decisions,
+        )
+
+
 @pytest.mark.asyncio
 async def test_legacy_question_without_plan_field_remains_compatible():
     service = StubCreationService([json.dumps(question("solutions"))])

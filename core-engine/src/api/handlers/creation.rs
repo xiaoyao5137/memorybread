@@ -119,6 +119,16 @@ const INLINE_EDIT_MAX_SELECTION_BYTES: usize = 12_000;
 const INLINE_EDIT_MAX_CUSTOM_PROMPT_BYTES: usize = 2_000;
 const CREATION_LEASE_TTL_MS: i64 = 15 * 60 * 1000;
 
+fn creation_sidecar_client() -> reqwest::Client {
+    // The creation service is always a loopback process. Inheriting HTTP(S)_PROXY
+    // here lets desktop proxy tools intercept a long-lived SSE stream and can
+    // truncate it with an unexpected EOF even while both local processes live.
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("local creation sidecar client")
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InlineEditSelection {
     pub base_revision_no: i64,
@@ -345,6 +355,20 @@ fn acquire_creation_lease(state: &AppState, session_id: &str, owner: &str) -> bo
     true
 }
 
+fn touch_creation_lease(state: &AppState, session_id: &str, owner: &str) {
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut leases = state
+        .creation_session_leases
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(lease) = leases
+        .get_mut(session_id)
+        .filter(|lease| lease.owner_request_id == owner)
+    {
+        lease.updated_at_ms = now;
+    }
+}
+
 fn release_creation_lease(state: &AppState, session_id: &str, owner: &str) {
     let mut leases = state
         .creation_session_leases
@@ -361,12 +385,25 @@ fn release_creation_lease(state: &AppState, session_id: &str, owner: &str) {
 struct CreationLeaseGuard {
     state: Arc<AppState>,
     session_id: Option<String>,
+    operation_id: Option<String>,
     owner: String,
 }
 
 impl Drop for CreationLeaseGuard {
     fn drop(&mut self) {
         if let Some(session_id) = self.session_id.as_deref() {
+            if let Some(operation_id) = self.operation_id.as_deref() {
+                if let Err(error) = self.state.storage.with_conn(|conn| {
+                    crate::storage::repo::creation_operation::mark_waiting_if_running(
+                        conn,
+                        session_id,
+                        operation_id,
+                    )
+                    .map_err(Into::into)
+                }) {
+                    error!("创作流断开后的可恢复状态保存失败: {}", error);
+                }
+            }
             release_creation_lease(&self.state, session_id, &self.owner);
         }
     }
@@ -821,7 +858,7 @@ pub async fn get_inline_edit_capabilities(
         "{}/creation/inline-edit/capabilities",
         state.creation_sidecar_url.trim_end_matches('/')
     );
-    let sidecar = reqwest::Client::new()
+    let sidecar = creation_sidecar_client()
         .get(sidecar_url)
         .timeout(Duration::from_secs(5))
         .send()
@@ -1177,7 +1214,7 @@ pub async fn run_creation_inline_edit(
         resume_state: req.resume_state.clone(),
         model_result: req.model_result.clone(),
     };
-    let sidecar_response = reqwest::Client::new()
+    let sidecar_response = creation_sidecar_client()
         .post(format!(
             "{}/creation/inline-edit/run",
             state.creation_sidecar_url.trim_end_matches('/')
@@ -1768,7 +1805,7 @@ pub async fn generate_document(
         creation_base_url: req.creation_base_url,
     };
 
-    let client = reqwest::Client::new();
+    let client = creation_sidecar_client();
     let response = client
         .post(format!("{}/creation/generate", state.creation_sidecar_url))
         .json(&payload)
@@ -2087,7 +2124,7 @@ pub async fn run_creation_agent(
         resume_checkpoint,
     };
 
-    let response = reqwest::Client::new()
+    let response = creation_sidecar_client()
         .post(format!(
             "{}/creation/agent/run",
             state.creation_sidecar_url.trim_end_matches('/')
@@ -2119,9 +2156,11 @@ pub async fn run_creation_agent(
     }
 
     let durable_session_id = lease_session_id.clone();
+    let durable_lease_owner = lease_owner.clone();
     let lease_guard = CreationLeaseGuard {
         state: state.clone(),
         session_id: lease_session_id,
+        operation_id: durable_operation_id.clone(),
         owner: lease_owner,
     };
     let stream = async_stream::stream! {
@@ -2132,6 +2171,12 @@ pub async fn run_creation_agent(
         while let Some(chunk) = bytes_stream.next().await {
             match chunk {
                 Ok(bytes) => {
+                    if let Some(session) = durable_session_id.as_deref() {
+                        // Sidecar emits a comment heartbeat during long local searches.
+                        // Renew the in-memory lease on every received chunk so stale-run
+                        // reconciliation cannot misclassify a genuinely active long run.
+                        touch_creation_lease(&state, session, &durable_lease_owner);
+                    }
                     for content in append_sse_chunk(&mut buffer, &bytes) {
                         let mut event = serde_json::from_str::<serde_json::Value>(&content).unwrap_or(serde_json::Value::Null);
                         if let (Some(session),Some(operation_id)) = (durable_session_id.as_deref(),durable_operation_id.as_deref()) {
@@ -2839,7 +2884,7 @@ async fn generate_uncached_brainstorm_step(
         creation_api_key: req.creation_api_key.clone(),
         creation_base_url: req.creation_base_url.clone(),
     };
-    let response = reqwest::Client::new()
+    let response = creation_sidecar_client()
         .post(format!(
             "{}/creation/brainstorm/next",
             state.creation_sidecar_url.trim_end_matches('/')
@@ -3064,6 +3109,49 @@ fn brainstorm_questions_overlap(left: &BrainstormQuestion, right: &BrainstormQue
     previous[b.len()] * 200 >= (a.len() + b.len()) * 90
 }
 
+fn brainstorm_question_repeats_answered(
+    turn: &BrainstormStoredTurn,
+    candidate: &BrainstormQuestion,
+) -> bool {
+    if brainstorm_questions_overlap(&turn.question, candidate) {
+        return true;
+    }
+    if turn.answer.source != "user"
+        || turn.question.parent_question_id.is_none()
+        || turn.question.parent_question_id != candidate.parent_question_id
+        || turn.question.parent_option_id != candidate.parent_option_id
+    {
+        return false;
+    }
+    turn.answer
+        .selected_option_ids
+        .iter()
+        .filter_map(|id| turn.question.options.iter().find(|option| &option.id == id))
+        .any(|selected| {
+            let selected_label = brainstorm_question_fingerprint(&selected.label);
+            let selected_description = brainstorm_question_fingerprint(&selected.description);
+            selected_label.chars().count() >= 4
+                && selected_description.chars().count() >= 8
+                && candidate.options.iter().any(|option| {
+                    let label = brainstorm_question_fingerprint(&option.label);
+                    let description = brainstorm_question_fingerprint(&option.description);
+                    let shorter = selected_description
+                        .chars()
+                        .count()
+                        .min(description.chars().count());
+                    let longer = selected_description
+                        .chars()
+                        .count()
+                        .max(description.chars().count());
+                    label == selected_label
+                        && description.chars().count() >= 8
+                        && shorter * 100 >= longer * 90
+                        && (selected_description.contains(&description)
+                            || description.contains(&selected_description))
+                })
+        })
+}
+
 fn discard_duplicate_brainstorm_questions(stored: &mut BrainstormStoredState) {
     let mut seen = std::collections::HashSet::new();
     let mut invalidated = Vec::new();
@@ -3078,11 +3166,20 @@ fn discard_duplicate_brainstorm_questions(stored: &mut BrainstormStoredState) {
     });
     let duplicate_current = stored.current_question.as_ref().is_some_and(|question| {
         let fingerprint = brainstorm_question_fingerprint(&question.prompt);
-        !fingerprint.is_empty() && seen.contains(&fingerprint)
+        (!fingerprint.is_empty() && seen.contains(&fingerprint))
+            || stored
+                .turns
+                .iter()
+                .any(|turn| brainstorm_question_repeats_answered(turn, question))
     });
     if duplicate_current {
         if let Some(question) = stored.current_question.take() {
             invalidated.push(question.id);
+        }
+        // These flags came from the same rejected model turn.  A manual edit is
+        // independent user input and remains authoritative.
+        if !stored.brief_edits.contains_key("open_flags") {
+            stored.open_flags.clear();
         }
     }
     for question_id in invalidated {
@@ -3996,7 +4093,7 @@ pub async fn preview_references(
         max_references: req.max_references,
     };
 
-    let client = reqwest::Client::new();
+    let client = creation_sidecar_client();
     let response = client
         .post(format!("{}/creation/references", state.creation_sidecar_url))
         .json(&payload)
@@ -5036,9 +5133,33 @@ pub async fn list_history(
         .q
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    let now = chrono::Utc::now().timestamp_millis();
+    let active_sessions = {
+        let mut leases = state
+            .creation_session_leases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        leases.retain(|_, lease| now - lease.updated_at_ms <= CREATION_LEASE_TTL_MS);
+        leases
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>()
+    };
     let (histories, total) = state
         .storage
         .with_conn(|conn| {
+            let (settled_histories, settled_operations) =
+                crate::storage::repo::creation_history::settle_stale_running(
+                    conn,
+                    now.saturating_sub(CREATION_LEASE_TTL_MS),
+                    &active_sessions,
+                )?;
+            if settled_histories > 0 || settled_operations > 0 {
+                info!(
+                    settled_histories,
+                    settled_operations, "已收口无法继续运行的历史创作状态"
+                );
+            }
             crate::storage::repo::creation_history::list_page(conn, query.as_deref(), limit, offset)
                 .map_err(Into::into)
         })
@@ -5817,6 +5938,51 @@ mod tests {
         repeated.parent_option_id = first.parent_option_id.clone();
         repeated.prompt = "如何约定分享时的个人隐私边界？".into();
         assert!(!brainstorm_questions_overlap(&first, &repeated));
+    }
+
+    #[test]
+    fn brainstorm_rewording_with_the_same_choice_contract_is_duplicate() {
+        let mut answered = test_brainstorm_question("multi_choice", true);
+        answered.parent_question_id = Some("root".into());
+        answered.parent_option_id = Some("chosen".into());
+        answered.prompt = "新号应如何运营以最大化爆款产出？".into();
+        answered.options[0].label = "全量自动分发".into();
+        answered.options[0].description = "平台自动完成选品、脚本、制作与发布，商家只审核。".into();
+        let mut repeated = answered.clone();
+        repeated.prompt = "新号内容分发应设定何种自动化程度？".into();
+        repeated.options[0].id = "renamed-option".into();
+        let answered_turn = BrainstormStoredTurn {
+            question: answered.clone(),
+            answer: test_brainstorm_answer(&["recommended"], ""),
+        };
+        assert!(brainstorm_question_repeats_answered(
+            &answered_turn,
+            &repeated
+        ));
+
+        let stored = BrainstormStoredState {
+            turns: vec![answered_turn],
+            current_question: Some(repeated.clone()),
+            open_flags: vec!["自动化边界仍待确认".into(), "不同模式影响仍待确认".into()],
+            ..serde_json::from_value(serde_json::json!({"root_request":"测试"})).unwrap()
+        };
+        let restored = parse_brainstorm_state(&serde_json::to_string(&stored).unwrap()).unwrap();
+        assert!(restored.current_question.is_none());
+        assert!(restored.open_flags.is_empty());
+        assert!(restored.invalidated_question_ids.contains(&repeated.id));
+
+        for (index, option) in repeated.options.iter_mut().enumerate() {
+            option.label = format!("另一决定候选{}", index);
+            option.description = format!("只处理另一项互补决定的具体边界{}。", index);
+        }
+        let distinct_turn = BrainstormStoredTurn {
+            question: answered,
+            answer: test_brainstorm_answer(&["recommended"], ""),
+        };
+        assert!(!brainstorm_question_repeats_answered(
+            &distinct_turn,
+            &repeated
+        ));
     }
 
     #[test]

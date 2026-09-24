@@ -1240,6 +1240,16 @@ def test_data_extraction_failure_enters_cooldown(tmp_path, monkeypatch) -> None:
     assert processor._last_data_extraction_at >= before
 
 
+def test_data_extraction_cooldown_is_not_bypassed_by_new_capture_work(tmp_path) -> None:
+    db_path = str(tmp_path / "captures.db")
+    _init_db(db_path)
+    processor = BackgroundProcessor(db_path=db_path)
+    processor._last_data_extraction_at = 100.0
+
+    assert processor._data_extraction_is_due(now=399.999) is False
+    assert processor._data_extraction_is_due(now=400.0) is True
+
+
 def test_periodic_bake_check_runs_before_long_capture_batch(tmp_path, monkeypatch) -> None:
     db_path = str(tmp_path / "captures.db")
     _init_db(db_path)

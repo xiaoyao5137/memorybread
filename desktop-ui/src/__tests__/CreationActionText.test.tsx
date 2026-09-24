@@ -43,4 +43,24 @@ describe('执行过程动作文案', () => {
       expect(title).not.toHaveTextContent('Agent')
     })
   })
+
+  it('历史的通用阶段标题从内部实际动作恢复具体含义', () => {
+    const event = (sequence: number, type: string, summary: string, actorName = '', data = {}) => ({
+      schema_version: 'creation.agent.v1', event_id: `event-${sequence}`, session_id: 'session',
+      run_id: 'run', sequence, timestamp: sequence * 1000, type, status: 'completed', summary,
+      actor: actorName ? { kind: 'agent', id: 'delivery_repair', name: actorName } : undefined,
+      environment_patch: {}, data,
+    } as CreationAgentEvent)
+    render(<AgentExecutionTrace events={[
+      event(1, 'phase.started', '处理当前步骤', '', {
+        phase_id: 'step:delivery_repair', phase_title: '处理当前步骤', phase_kind: 'plan_step',
+      }),
+      event(2, 'agent.started', '修正已发现的交付问题 开始执行', '修正已发现的交付问题'),
+      event(3, 'agent.completed', '修正已发现的交付问题 已完成', '修正已发现的交付问题'),
+      event(4, 'phase.completed', '处理当前步骤', '', { phase_id: 'step:delivery_repair' }),
+      event(5, 'run.completed', '完成'),
+    ]} onOpenReferences={() => {}} apiBaseUrl="http://localhost:7070" />)
+    expect(screen.getByText('1. 修正已发现的交付问题')).toBeInTheDocument()
+    expect(screen.queryByText(/\d+\. 处理当前步骤/)).not.toBeInTheDocument()
+  })
 })

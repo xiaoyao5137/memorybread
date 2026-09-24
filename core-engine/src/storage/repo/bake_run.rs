@@ -1108,7 +1108,7 @@ impl StorageManager {
                          )
                       )
                       AND (COALESCE(r.last_error_code,'')<>'DOCUMENT_AUTOMATIC_WRITES_PAUSED' OR r.automatic_document_pause_bucket < ?3)
-                      AND (r.last_error_code IN ('BAKE_DOCUMENT_MERGE_PENDING','DOCUMENT_AUTOMATIC_WRITES_PAUSED') OR (
+                      AND (r.last_error_code IN ('BAKE_DOCUMENT_MERGE_PENDING','DOCUMENT_AUTOMATIC_WRITES_PAUSED','DOCUMENT_SOURCE_IDENTITY_MISMATCH') OR (
                           NOT EXISTS (SELECT 1 FROM bake_knowledge bk WHERE bk.timeline_id = t.id)
                           AND NOT EXISTS (SELECT 1 FROM bake_sops bs WHERE bs.timeline_id = t.id)
                           AND CAST(t.id AS TEXT) NOT IN (SELECT tid FROM produced_doc_timelines)

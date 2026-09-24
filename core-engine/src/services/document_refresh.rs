@@ -25,6 +25,9 @@ pub const DOCUMENT_QUALITY_RULE_VERSION: &str = "document-quality.v2";
 pub struct DocumentRefreshConfig {
     pub enabled: bool,
     pub automatic_enabled: bool,
+    /// Active browser reads are more intrusive than local summary/background
+    /// work and therefore require a separate explicit opt-in.
+    pub automatic_browser_reads_enabled: bool,
     /// Stop source content publication, including already-running collectors.
     pub source_writes_enabled: bool,
     pub automatic_document_writes_enabled: bool,
@@ -42,7 +45,12 @@ pub struct DocumentRefreshConfig {
 
 impl Default for DocumentRefreshConfig {
     fn default() -> Self {
-        Self { enabled: true, automatic_enabled: true, source_writes_enabled: true, execution_seconds: 60,
+        // Reading a page is an active browser operation even when the extension
+        // opens the tab in the background. Passive capture/bake must not imply
+        // permission to drive Chrome, so browser automation is opt-in. Explicit
+        // manual refreshes remain available while `enabled` is true.
+        Self { enabled: true, automatic_enabled: true, automatic_browser_reads_enabled: false,
+            source_writes_enabled: true, execution_seconds: 60,
             summary_execution_seconds: 300,
             automatic_document_writes_enabled: true, automatic_document_rollout_percent: 100,
             quality_rule_version: DOCUMENT_QUALITY_RULE_VERSION.into(), rollout_document_ids: None,
@@ -312,6 +320,8 @@ mod tests {
     fn document_refresh_config_validates_budgets_and_defaults() {
         let defaults = DocumentRefreshConfig::parse("{}").unwrap();
         assert_eq!(defaults.execution_seconds,60);
+        assert!(defaults.automatic_enabled);
+        assert!(!defaults.automatic_browser_reads_enabled);
         assert!(defaults.source_writes_enabled);
         assert!(defaults.permits_source_write(953));
         assert!(!DocumentRefreshConfig::parse(r#"{"rollout_document_ids":[]}"#).unwrap().permits_source_write(953));
@@ -321,11 +331,13 @@ mod tests {
         assert!(!DocumentRefreshConfig::parse(r#"{"source_writes_enabled":false}"#).unwrap().source_writes_enabled);
         assert_eq!(defaults.retry_delay_ms(1),30_000);
         assert_eq!(defaults.retry_delay_ms(4),120_000);
-        let changed=DocumentRefreshConfig::parse(r#"{"automatic_enabled":false,"max_steps":8,"retry_seconds":[10]}"#).unwrap();
+        let changed=DocumentRefreshConfig::parse(r#"{"automatic_enabled":false,"automatic_browser_reads_enabled":true,"max_steps":8,"retry_seconds":[10]}"#).unwrap();
         assert!(!changed.automatic_enabled);
+        assert!(changed.automatic_browser_reads_enabled);
         assert!(changed.enabled);
         assert_eq!(changed.max_steps,8);
         assert_eq!(changed.retry_delay_ms(3),10_000);
+        assert!(DocumentRefreshConfig::parse(r#"{"automatic_enabled":true}"#).unwrap().automatic_enabled);
         for invalid in ["null", r#"{"quality_rule_version":"unknown"}"#, r#"{"rollout_document_ids":[0]}"#, r#"{"rollout_document_ids":["953"]}"#, r#"{"source_writes_enabled":"false"}"#, r#"{"enabled":"false"}"#, r#"{"max_steps":0}"#,
             r#"{"execution_seconds":61}"#, r#"{"max_attempts":6}"#, r#"{"retry_seconds":[]}"#,
             r#"{"retry_seconds":[0]}"#, r#"{"unknown":true}"#] {

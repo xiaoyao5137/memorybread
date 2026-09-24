@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from creation.agent_loop import CreationAgentLoop, GoalState, LoopState, MAX_DELIVERY_REPAIR_CYCLES
-from creation.operations import OperationError
+from creation.operations import OperationError, bind_append_transform_scope, document_nodes
 from creation.service import (
     CreationOptions,
     CreationService,
@@ -495,6 +495,45 @@ def test_routing_prompt_discloses_retrieval_scope_beyond_facts():
     # 互联网检索：方法论/最佳实践与参考范例/灵感思路
     assert "最佳实践" in system
     assert "灵感思路" in system
+
+
+def test_new_append_section_uses_document_root_instead_of_arbitrary_nearby_text():
+    document = "# 方案\n\n## 已有范围\n\n**已确认依据**\n\n保留正文。\n"
+    operation = bind_append_transform_scope(
+        "增加内部等级的定义介绍",
+        document,
+        {"kind": "transform", "targets": [{"text": "已确认依据", "occurrence": 1}]},
+    )
+    assert operation["targets"] == [document_nodes(document)[0]["id"]]
+
+
+def test_append_to_explicit_existing_section_keeps_that_section_scope():
+    document = "# 方案\n\n## 范围与约束\n\n保留正文。\n\n## 结论\n\n旧结论。\n"
+    operation = bind_append_transform_scope(
+        "在范围与约束中补充定义说明",
+        document,
+        {"kind": "transform", "targets": [document_nodes(document)[-1]["id"]]},
+    )
+    assert operation["targets"] == [document_nodes(document)[1]["id"]]
+
+
+def test_join_content_to_named_parent_collapses_descendant_and_repeated_scopes():
+    document = (
+        "# 方案\n\n"
+        "## 第一部分\n\n### 执行步骤\n\n旧内容。\n\n### 待确认事项\n\n- 旧问题\n\n"
+        "## 爆款视频生成执行模式\n\n### 执行步骤\n\n保留步骤。\n\n"
+        "### 待确认事项\n\n- 运营介入偏好\n\n## 结论\n\n旧结论。\n"
+    )
+    nodes = document_nodes(document)
+    expected = next(node for node in nodes if node["title"] == "爆款视频生成执行模式")
+    operation = bind_append_transform_scope(
+        "在爆款视频生成执行模式中加入全托管模式，并从待确认事项移除运营介入偏好",
+        document,
+        {"kind": "transform", "targets": [
+            node["id"] for node in nodes if node["title"] in {"执行步骤", "待确认事项"}
+        ]},
+    )
+    assert operation["targets"] == [expected["id"]]
 
 
 def test_routing_prompt_only_discloses_enabled_optional_tools():
@@ -2110,6 +2149,93 @@ async def test_browser_extension_failure_never_escalates_to_foreground(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_browser_extension_timeout_retries_once_without_foreground(monkeypatch):
+    requests = []
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+            self.is_success = 200 <= status_code < 300
+
+        def json(self):
+            return self._payload
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, json):
+            requests.append(dict(json))
+            if len(requests) == 1:
+                return FakeResponse(
+                    503,
+                    {
+                        "error": "BROWSER_EXTENSION_TIMEOUT",
+                        "message": "页面在等待时间内未完成后台读取",
+                    },
+                )
+            return FakeResponse(
+                200,
+                {
+                    "collector": "chrome_attach",
+                    "browser": "chrome",
+                    "interaction_mode": "background_tab",
+                    "focus_policy": "never",
+                    "focus_takeover_count": 0,
+                    "collected_at": 1_776_000_000_000,
+                    "title": "GPU 看板",
+                    "url": "https://bi.example.com/gpu-report",
+                    "content_text": "GPU 利用率 72%",
+                    "structured_data": {},
+                },
+            )
+
+    monkeypatch.setattr(
+        "creation.service.httpx.AsyncClient",
+        lambda **_kwargs: FakeAsyncClient(),
+    )
+    service = CreationService(model="test", enable_vector_recall=False)
+
+    async def validate(*_args, **_kwargs):
+        return {
+            "validation_status": "verified",
+            "validation": {
+                "reason": "requested_metrics_verified",
+                "verified_claims": [{"label": "GPU 利用率", "value": "72%"}],
+            },
+        }
+
+    monkeypatch.setattr(service, "_validate_scrape_evidence", validate)
+    outcome = await service.scrape_data_context(
+        [
+            {
+                "source_id": 1582,
+                "source_kind": "report_url",
+                "source_url": "https://bi.example.com/gpu-report",
+                "title": "GPU 看板",
+                "refresh_required": True,
+                "refresh_policy": "on_demand",
+                "can_use": False,
+            }
+        ],
+        "获取最新 GPU 利用率",
+        {},
+        browser_extension_enabled=True,
+    )
+
+    assert len(requests) == 2
+    assert all(request["allow_foreground_refresh"] is False for request in requests)
+    assert all(request["focus_policy"] == "never" for request in requests)
+    assert requests[1]["interaction_plan"] is None
+    assert outcome["scrapes"][0]["status"] == "completed"
+    assert outcome["scrapes"][0]["collection_attempt"] == "extension_current_view"
+
+
+@pytest.mark.asyncio
 async def test_browser_extension_postcondition_failure_revalidates_current_view(
     monkeypatch,
 ):
@@ -3013,6 +3139,10 @@ def test_refresh_attempt_decision_only_continues_on_transient_errors():
         "extension_background", "INTERACTION_POSTCONDITION_FAILED"
     ) is True
     assert decision("extension_background", "SCRAPE_PAGE_ERROR") is True
+    assert decision("extension_background", "BROWSER_EXTENSION_TIMEOUT") is True
+    assert decision("extension_background", "BROWSER_EXTENSION_UNRESPONSIVE") is True
+    assert decision("extension_background", "BROWSER_EXTENSION_INTERNAL") is True
+    assert decision("extension_background", "BROWSER_EXTENSION_FAILED") is True
     assert decision("extension_background", "BROWSER_EXTENSION_UNAVAILABLE") is False
     # 最后一次前台重试是终点，任何错误都不再续命。
     assert decision("foreground_retry", "SCRAPE_FAILED") is False
@@ -8188,11 +8318,32 @@ def test_agent_phase_titles_describe_actions_and_preserve_actor(agent_id):
     assert CreationAgentLoop._phase_of_step(step)[1] == "梳理业务边界"
 
 
-def test_unknown_agent_phase_uses_objective_or_generic_action():
+def test_unknown_agent_phase_uses_objective_or_specialized_fallback():
     step = {"kind": "agent", "id": "custom_agent", "name": "自定义 Agent"}
-    assert CreationAgentLoop._friendly_phase_title(step) == "处理当前步骤"
+    assert CreationAgentLoop._friendly_phase_title(step) == "执行专项处理"
     step["objective"] = "核对业务边界"
     assert CreationAgentLoop._friendly_phase_title(step) == "核对业务边界"
+
+
+@pytest.mark.parametrize(
+    ("step", "expected"),
+    [
+        (
+            {"kind": "agent", "id": "document_transform", "name": "修改指定内容", "action": "patch_writer"},
+            "修改指定内容",
+        ),
+        (
+            {"kind": "agent", "id": "delivery_repair", "name": "修正已发现的交付问题", "action": "polisher"},
+            "修正已发现的交付问题",
+        ),
+        (
+            {"kind": "agent", "id": "brief-section-1", "name": "撰写「现实约束」", "action": "specialist"},
+            "撰写「现实约束」",
+        ),
+    ],
+)
+def test_dynamic_agent_phase_uses_its_specific_action(step, expected):
+    assert CreationAgentLoop._friendly_phase_title(step) == expected
 
 
 def test_delivery_phase_explains_validation_instead_of_generic_step():

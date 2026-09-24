@@ -6,7 +6,7 @@ import pytest
 from creation.agent_loop import CreationAgentLoop
 from creation.delivery_contract import assess_inputs, review_delivery, with_source_scope_check
 from creation.service import CreationOptions, CreationService
-from creation.operations import OperationError
+from creation.operations import OperationError, document_nodes
 from tests.test_creation_delivery_contract import DeliveryService, StreamService, contract, review_for_model as review
 from tests.test_creation_operations import run_args
 
@@ -70,11 +70,46 @@ async def test_agent_checkpoints_the_exact_context_used_by_assessment():
     assert events[-1]["type"] == "run.completed"
     snapshot = service.checked[0]["input_context"]
     assert {key: snapshot[key] for key in service.context_at_assessment} == service.context_at_assessment
-    assert snapshot["brainstorm_context_version"] == 3
+    assert snapshot["brainstorm_context_version"] == 4
     assert snapshot["brainstorm_decisions"][0]["value"] == "预算上限3000元。"
     assert "3000" in snapshot["creation_brief"]
     assert snapshot["conversation"] == args["conversation"]
     assert snapshot["user_options"] == {"audience": "活动参与者"}
+
+
+@pytest.mark.asyncio
+async def test_transform_assessment_omits_whole_session_context_but_keeps_brainstorm_guards():
+    document = "# 方案\n\n## 正文\n\n已有内容。\n"
+
+    class TransformContextService(DeliveryService):
+        async def assess_creation_inputs(self, *args, **kwargs):
+            self.assessment_args = args
+            self.assessment_kwargs = kwargs
+            return await super().assess_creation_inputs(*args, **kwargs)
+
+    service = TransformContextService(operation={
+        "kind": "transform", "targets": [document_nodes(document)[0]["id"]],
+    })
+    loop = CreationAgentLoop(service)
+    state = loop._new_state(
+        user_message="增加术语定义", root_request="很长的原始创作要求",
+        current_document=document,
+        conversation=[{"role": "user", "content": "很长的历史对话"}],
+        selected_skills=[], options=CreationOptions(), model_mode="local",
+        session_id="session-transform-context", run_id="run-transform-context",
+        creation_mode="brainstorm", creation_brief={"open_flags": [
+            {"question": "官方口径是什么？"},
+        ]},
+    )
+    decision = await service.route_capabilities(query=state.user_message)
+    _ = [event async for event in loop._apply_routing_decision(
+        state, {"id": "creation_main_agent", "name": "创作 Agent", "action": "route"}, decision,
+    )]
+    assert service.assessment_args[3] == []
+    assert service.assessment_kwargs["brief_context"] == ""
+    assert service.assessment_kwargs["root_request"] == ""
+    assert any(item["id"] == "brainstorm_open_flags"
+               for item in state.environment["input_contract"]["acceptance"])
 
 
 @pytest.mark.asyncio

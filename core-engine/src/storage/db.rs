@@ -550,7 +550,26 @@ static MIGRATIONS: &[(&str, &str)] = &[
         "130_document_coalesce_identity",
         include_str!("migrations/130_document_coalesce_identity.sql"),
     ),
-
+    (
+        "131_bound_legacy_data_cleanup",
+        include_str!("migrations/131_bound_legacy_data_cleanup.sql"),
+    ),
+    (
+        "132_index_timeline_capture_cleanup",
+        include_str!("migrations/132_index_timeline_capture_cleanup.sql"),
+    ),
+    (
+        "133_normalize_retired_data_sources",
+        include_str!("migrations/133_normalize_retired_data_sources.sql"),
+    ),
+    (
+        "134_purge_post_migration_retired_data_sources",
+        include_str!("migrations/134_purge_post_migration_retired_data_sources.sql"),
+    ),
+    (
+        "135_normalize_capture_retention_data_links",
+        include_str!("migrations/135_normalize_capture_retention_data_links.sql"),
+    ),
 ];
 
 fn migrate_document_identity_v2(conn: &Connection, sql: &str) -> Result<(), StorageError> {

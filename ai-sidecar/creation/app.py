@@ -58,6 +58,7 @@ app.add_middleware(
 install_fastapi_guard(app)
 creation_service = CreationService()
 creation_agent_loop = CreationAgentLoop(creation_service)
+CREATION_AGENT_STREAM_HEARTBEAT_SECONDS = 10.0
 brainstorm_coordinator = BrainstormCoordinator(creation_service)
 
 
@@ -193,7 +194,7 @@ def _creation_failure_details(exc: Exception) -> tuple[str, str, bool]:
     if isinstance(exc, InferencePreemptedError):
         return "INFERENCE_PREEMPTED", "后台创作已让出模型资源，稍后自动重试", True
     if isinstance(exc, OperationError):
-        return exc.code, str(exc), False
+        return exc.code, str(exc), bool(getattr(exc, "retryable", False))
     if isinstance(exc, httpx.TransportError):
         return (
             "MODEL_TRANSPORT_UNAVAILABLE",
@@ -719,7 +720,20 @@ async def run_creation_agent(request: AgentRunRequest):
         future.add_done_callback(lambda _future: event_queue.put(finished))
         try:
             while True:
-                item = await asyncio.to_thread(event_queue.get)
+                try:
+                    item = await asyncio.to_thread(
+                        event_queue.get,
+                        True,
+                        CREATION_AGENT_STREAM_HEARTBEAT_SECONDS,
+                    )
+                except queue.Empty:
+                    # A memory search can spend several minutes in local model
+                    # scoring without producing a domain event.  Keep the
+                    # sidecar -> Core hop active as well as Core -> WebView;
+                    # otherwise a transport can disappear while the durable
+                    # checkpoint still says that the tool is in flight.
+                    yield ": keep-alive\n\n"
+                    continue
                 if item is finished:
                     break
                 yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"

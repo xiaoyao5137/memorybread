@@ -399,6 +399,41 @@ async def test_intent_source_roles_preserve_operation_classes_without_extra_call
 
 
 @pytest.mark.asyncio
+async def test_continue_generation_with_existing_document_is_an_edit_not_a_resume():
+    service = ScriptedModelService([intent_json(intent_piece("继续生成", "edit"))])
+    result = await task_intent(service, "继续生成", True)
+    assert result == {
+        "action": "edit",
+        "primary_goal": "继续生成",
+        "deliverable": "继续生成",
+        "content_request": "继续生成",
+    }
+    assert "不是恢复历史操作" in service.calls[0]["system_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_append_wording_cannot_be_promoted_to_new_document_when_document_exists():
+    instruction = "增加内部等级的定义介绍"
+    service = ScriptedModelService([intent_json(intent_piece(instruction, "create"))])
+    result = await task_intent(service, instruction, True)
+    assert result == {
+        "action": "edit",
+        "primary_goal": instruction,
+        "deliverable": instruction,
+        "content_request": instruction,
+    }
+    assert "局部编辑判成另建文档" in service.calls[0]["system_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_separate_artifact_remains_create_with_open_document():
+    instruction = "另写一份内部等级的定义介绍"
+    service = ScriptedModelService([intent_json(intent_piece(instruction, "create"))])
+    result = await task_intent(service, instruction, True)
+    assert result["action"] == "create"
+
+
+@pytest.mark.asyncio
 async def test_intent_selects_the_authored_outcome_after_retrieval_and_before_failure_fallback():
     instruction = "读取本地材料，据该文档写一小段小结；只复述已有事实，未取得材料就明确失败。"
     service = ScriptedModelService([intent_json(

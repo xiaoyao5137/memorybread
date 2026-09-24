@@ -24,6 +24,31 @@ def test_allows_short_labels_code_and_two_legitimate_mentions():
     assert not integrity_problems(('状态：待办\n' * 20) + '```text\n' + FACT * 10 + '\n```\n' + FACT * 2)
 
 
+def test_detects_heading_marker_glued_to_previous_markdown_content():
+    malformed = '### 待确认事项\n\n- 运营模式待确认### 执行步骤\n\n按确认结果执行。'
+    assert 'malformed_heading_boundary' in integrity_problems(malformed)
+    assert 'malformed_heading_boundary' not in integrity_problems(
+        '### 待确认事项\n\n- 运营模式待确认\n\n### 执行步骤\n\n按确认结果执行。')
+
+
+@pytest.mark.asyncio
+async def test_local_transform_normalizes_generated_heading_boundary_before_commit():
+    import json
+    base = '### 待确认事项\n\n- 运营模式待确认'
+    state = SimpleNamespace(current_document=base, environment={
+        'operation': {'targets': [{'text': '运营模式待确认'}]}})
+    result = json.dumps({'patches': [{'action': 'replace',
+        'target': {'text': '运营模式待确认'},
+        'content': '运营模式待确认### 执行步骤\n\n按确认结果执行。'}]})
+    loop = CreationAgentLoop(FakeCreationService())
+    loop._event = lambda *args, **kwargs: {'type': args[1], **kwargs}
+    loop._thinking_completed = lambda *args: {'type': 'thinking.completed'}
+    await collect_events(loop._complete_model_step(
+        state, {'id': 'patch_writer', 'name': '改写', 'action': 'patch_writer'}, result))
+    assert state.current_document == base + '\n\n### 执行步骤\n\n按确认结果执行。'
+    assert not integrity_problems(state.current_document)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('candidate', [FACT * 10, '# 文档\n\n## 目标\n仅剩一个章节。'])
 async def test_polish_rejected_atomically_and_base_retained(candidate):
@@ -118,6 +143,58 @@ async def test_local_transform_cannot_commit_repeated_replacement():
     with pytest.raises(OperationError, match='重复正文'):
         await collect_events(CreationAgentLoop(FakeCreationService())._complete_model_step(state, {'id': 'patch_writer', 'name': '改写', 'action': 'patch_writer'}, result))
     assert state.current_document == base
+
+
+@pytest.mark.asyncio
+async def test_local_transform_salvages_full_target_insert_without_duplication():
+    import json
+    base = ('# 方案\n\n## 目标\n这是已经存在且长度足够的原始目标。\n\n'
+            '## 保留\n这是已经存在且长度足够的有效内容。\n')
+    root = __import__('creation.operations', fromlist=['document_nodes']).document_nodes(base)[0]
+    candidate = base.replace('## 目标', '## 工作定义\n\n新增定义。\n\n## 目标')
+    state = SimpleNamespace(current_document=base, user_message='增加工作定义',
+        environment={'operation': {'targets': [root['id']]}})
+    result = json.dumps({'patches': [{'action': 'insert', 'target': root['id'],
+        'position': 'after', 'content': candidate}]})
+    loop = CreationAgentLoop(FakeCreationService())
+    loop._event = lambda *args, **kwargs: {'type': args[1], **kwargs}
+    loop._thinking_completed = lambda *args: {'type': 'thinking.completed'}
+    events = await collect_events(loop._complete_model_step(
+        state, {'id': 'patch_writer', 'name': '改写', 'action': 'patch_writer'}, result))
+    assert state.current_document == candidate
+    assert state.current_document.count('# 方案') == 1
+    assert state.environment['recovered_document_mutations'] == [{
+        'agent_id': 'patch_writer',
+        'reason': 'insert_repeats_existing_content',
+        'recovery': 'replace_insertion_only_supersequence',
+    }]
+    assert any(event['type'] == 'document.mutation.salvaged' for event in events)
+    assert any(event['type'] == 'document.patch.applied' for event in events)
+
+
+@pytest.mark.asyncio
+async def test_delivery_repair_rebinds_candidate_only_selector_and_allowed_root():
+    import json
+    from creation.operations import document_nodes
+    base = '# 方案\n\n## 待确认事项\n\n- 运营模式待确认\n'
+    candidate = base.replace('运营模式待确认', '运营模式：全托管\n- 账号关系待确认')
+    root = document_nodes(base)[0]
+    state = SimpleNamespace(current_document=candidate, user_message='落实全托管并保留账号关系待确认',
+        environment={'operation': {'targets': [root['id']]}, 'input_contract': {'acceptance': []}})
+    result = json.dumps({'patches': [{'action': 'replace',
+        'target': {'text': '- 账号关系待确认'},
+        'content': '- 账号关系及其效果范围待确认'}]})
+    loop = CreationAgentLoop(FakeCreationService())
+    loop._event = lambda *args, **kwargs: {'type': args[1], **kwargs}
+    loop._thinking_completed = lambda *args: {'type': 'thinking.completed'}
+    events = await collect_events(loop._complete_model_step(state, {
+        'id': 'delivery_repair', 'name': '修正', 'action': 'patch_writer',
+        'delivery_repair': True, 'patch_base_document': base,
+    }, result))
+    assert '运营模式：全托管' in state.current_document
+    assert '- 账号关系及其效果范围待确认' in state.current_document
+    assert any(event['type'] == 'document.mutation.salvaged' for event in events)
+    assert state.environment['recovered_document_mutations'][-1]['recovery'] == 'rebind_allowed_scope_to_candidate'
 
 
 def test_several_distinct_risk_sources_do_not_trigger_repetition_guard():

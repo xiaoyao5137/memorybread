@@ -127,6 +127,10 @@ def integrity_problems(document: str, base: str = "", preserve_sections: bool = 
     sentences = Counter(s.strip() for s in re.split(r"[。！？!?\n]", prose) if len(s.strip()) >= 35)
     if any(count >= 5 for count in sentences.values()) and "repeated_content" not in problems:
         problems.append("repeated_content")
+    # A heading marker glued to prose/list content is rendered as plain text,
+    # even though a semantic reviewer may mistake it for a real section.
+    if re.search(r"(?m)(?<=[^\n\\#])#{2,6}[ \t]+\S", prose):
+        problems.append("malformed_heading_boundary")
     if preserve_sections and base.strip():
         def headings(text):
             return [re.sub(r"[*_`\s]", "", h) for h in re.findall(r"^##\s+(.+)$", text, re.M)]

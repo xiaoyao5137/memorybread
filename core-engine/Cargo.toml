@@ -18,7 +18,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # SQLite
-rusqlite   = { version = "0.31", features = ["backup", "bundled"] }
+rusqlite   = { version = "0.31", features = ["backup", "bundled", "hooks"] }
 
 # 异步运行时
 tokio      = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }

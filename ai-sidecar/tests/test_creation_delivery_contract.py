@@ -5,7 +5,9 @@ import json
 import pytest
 from creation.agent_loop import CreationAgentLoop
 from creation.delivery_contract import (CONTRACT_PROMPT, SOURCE_CAPABILITIES, assess_inputs,
-    bind_resources, review_delivery, validate_contract, validate_review)
+    _is_supported_retrieval_provenance_clause, bind_declared_workflow_inputs, bind_resources,
+    delivery_incomplete_message, review_delivery,
+    validate_contract, validate_review, with_brainstorm_transform_delta_coverage)
 from creation.operations import OperationError, document_nodes
 from creation.service import CreationOptions, CreationService
 from tests.test_creation_agent_loop import FakeCreationService
@@ -34,6 +36,101 @@ def review_for_model(status="pass", document="正文"):
         result["checks"].append({"id": check_id, "passed": status == "pass",
                                  "reason": "该项来源边界已独立核对", "evidence": document if status == "pass" else ""})
     return result
+
+
+def test_blocked_delivery_reports_missing_inputs_when_raw_reason_is_not_display_safe():
+    conditions = contract(("business_data", "public_facts"))
+    conditions["inputs"][0]["need"] = "读取 https://example.com/gpu 并核对 2026-09-25 数据"
+    conditions["inputs"][1]["need"] = "读取 TOKEN_USAGE_DAILY 长英文指标"
+    report = {
+        "status": "blocked",
+        "checks": [{"id": "a", "passed": False, "reason": "TOKEN_USAGE_DAILY 未核对", "evidence": ""}],
+        "corrections": [],
+    }
+
+    message = delivery_incomplete_message(report, contract=conditions)
+
+    assert "缺少2项验收所需资料，请补充对应数据或来源" in message
+    assert "正文仍有待核对内容" not in message
+
+
+def test_blocked_delivery_prioritizes_missing_inputs_over_short_source_audit_noise():
+    conditions = contract(("work_context", "business_data"))
+    conditions["inputs"][0]["need"] = "本周会议纪要"
+    conditions["inputs"][1]["need"] = "业务指标数据"
+    report = {
+        "status": "blocked",
+        "checks": [{"id": "a", "passed": False,
+                    "reason": "逐片段来源审计未找到支持或创作授权：本文档基于检索资料生成",
+                    "evidence": "本文档基于检索资料生成"}],
+        "corrections": ["逐片段来源审计未找到支持或创作授权：本文档基于检索资料生成"],
+    }
+
+    message = delivery_incomplete_message(report, contract=conditions)
+
+    assert "缺少资料：本周会议纪要、业务指标数据" in message
+    assert "逐片段来源审计" not in message
+
+
+def test_blocked_delivery_lists_each_named_workflow_input_for_latest_weekly_report_case():
+    conditions = contract(("work_context", "business_data"))
+    conditions["inputs"][0]["need"] = "本周大模型性能成本优化周会会议纪要；AIGC进度总结"
+    conditions["inputs"][1]["need"] = "GPU算力数据；Token数据"
+    report = {"status": "blocked", "checks": [], "corrections": []}
+
+    message = delivery_incomplete_message(report, attempts=1, contract=conditions)
+
+    assert message.startswith("自动修正 1 次后仍未通过验收：缺少资料：")
+    assert "本周大模型性能成本优化周会会议纪要" in message
+    assert "AIGC进度总结" in message
+    assert "GPU算力数据" in message
+    assert "Token数据" in message
+
+
+def test_retrieval_provenance_clause_requires_actual_matching_evidence():
+    clause = "*本文档基于检索到的历史项目周报与会议纪要生成，"
+    provided = {"retrieved_evidence": {
+        "references": [{"title": "项目周报与会议纪要", "content": "历史材料"}],
+        "data_results": [], "web_results": [],
+    }}
+
+    assert _is_supported_retrieval_provenance_clause(clause, provided)
+    assert not _is_supported_retrieval_provenance_clause(
+        "本文档基于检索到的实时运营看板生成，", provided)
+    assert not _is_supported_retrieval_provenance_clause(
+        "本文档基于检索到的历史项目周报与会议纪要生成，未包含2026年9月25日数据。",
+        provided)
+
+
+def test_transform_submission_binds_only_newly_confirmed_brainstorm_choice():
+    conditions = contract()
+    decisions = [
+        {"id": "old-choice", "dimension": "执行模式", "value": "矩阵模式", "source": "user"},
+        {"id": "new-choice", "dimension": "运营介入", "value": "全托管模式", "source": "user"},
+        {"id": "open", "dimension": "账号关系", "value": "签名引流", "source": "agent_assumption"},
+    ]
+    result = with_brainstorm_transform_delta_coverage(
+        conditions,
+        decisions,
+        "## 已确认\n\n- 矩阵模式\n",
+        "请基于刚刚新增并提交的脑暴选择更新文档：落实全托管模式",
+    )
+    checks = {item["id"]: item for item in result["acceptance"]}
+    assert "new-choice" in checks
+    assert "全托管模式" in checks["new-choice"]["criterion"]
+    assert "old-choice" not in checks
+    assert "open" not in checks
+
+
+def test_unrelated_transform_does_not_acquire_missing_brainstorm_choices():
+    conditions = contract()
+    result = with_brainstorm_transform_delta_coverage(
+        conditions,
+        [{"id": "choice", "dimension": "运营介入", "value": "全托管模式", "source": "user"}],
+        "# 方案\n",
+        "修正标题中的错别字",
+    )
+    assert [item["id"] for item in result["acceptance"]] == ["a"]
 
 
 def audited_report(document, basis="unsupported", kind="obligation", source_id=""):
@@ -129,6 +226,25 @@ def test_source_audit_negative_basis_overrides_model_all_pass(basis, kind, expec
     assert result["checks"][0]["id"] == "a" and result["checks"][0]["passed"] is True
     assert document in result["corrections"][0]
     assert "source_audit" not in result
+
+
+def test_source_audit_does_not_reject_verified_retrieval_provenance_note():
+    from creation.delivery_contract import _apply_source_audit, source_audit_segments, with_source_scope_check
+    document = "*本文档基于检索到的历史项目周报与会议纪要生成，"
+    provided = {"retrieved_evidence": {
+        "references": [{"title": "项目周报与会议纪要", "content": "历史材料"}],
+        "data_results": [], "web_results": [],
+    }}
+
+    result = _apply_source_audit(
+        audited_report(document, "unsupported", "attribute"),
+        source_audit_segments(document), provided,
+        with_source_scope_check(contract()), document,
+    )
+
+    assert result["status"] == "pass"
+    assert all(check["passed"] for check in result["checks"])
+    assert result["corrections"] == []
 
 
 @pytest.mark.parametrize("basis", ["reasonable_inference", "unsupported"])
@@ -317,6 +433,32 @@ def test_dependencies_come_from_missing_inputs_not_initial_route(sources):
     assert decision["agents"] == []
 
 
+def test_selected_skill_rebinds_merged_public_gap_to_declared_private_tools():
+    value = contract(("public_facts",))
+    value["inputs"][0].update(
+        need="本周会议纪要、电商 GPU 信息平台数据、Token 看板数据",
+        query=("调用记忆搜索获取本周大模型性能成本优化周会会议纪要；"
+               "调用数据检索获取电商 GPU 信息平台数据；"
+               "调用数据检索获取 LangBridge 模型中心运营看板 Token 数据"),
+    )
+    rebound = bind_declared_workflow_inputs(value, [
+        {"tool_id": "memory_search", "title": "本周会议纪要",
+         "objective": "用记忆搜索获取本周大模型性能成本优化周会会议纪要"},
+        {"tool_id": "data_search", "title": "GPU算力数据",
+         "objective": "用数据检索获取电商 GPU 信息平台数据"},
+        {"tool_id": "data_search", "title": "Token数据",
+         "objective": "用数据检索获取 LangBridge 模型中心运营看板 Token 数据"},
+    ])
+
+    assert [(item["id"], item["source"]) for item in rebound["inputs"]] == [
+        ("workflow_memory_search", "work_context"),
+        ("workflow_data_search", "business_data"),
+    ]
+    assert bind_resources({"tools": []}, rebound)["tools"] == [
+        "memory_search", "data_search",
+    ]
+
+
 @pytest.mark.parametrize("mutation", [
     lambda c: c.update(extra=True), lambda c: c.update(acceptance=[]),
     lambda c: c.update(self_contained_reason=""), lambda c: c.update(inputs="bad"),
@@ -448,6 +590,16 @@ async def test_assessment_prompt_discloses_substantive_gap_and_broadened_sources
 
 
 @pytest.mark.asyncio
+async def test_assessment_prompt_treats_non_official_working_definition_as_self_contained():
+    service = StreamService([json.dumps(contract())])
+    await assess_inputs(service, "增加L0商家的定义介绍", "# 面向非L0商家的方案", "transform", [])
+    system = service.calls[0]["system_prompt"]
+    assert "本文工作定义" in system
+    assert "官方定义不是完成本轮所必需的输入" in system
+    assert "明确要求官方定义" in system
+
+
+@pytest.mark.asyncio
 async def test_failed_source_receipt_blocks_before_review_model():
     service = StreamService([])
     with pytest.raises(OperationError, match="必要资料"):
@@ -469,7 +621,12 @@ class DeliveryService(FakeCreationService):
             assert environment["input_receipts"][SOURCE_CAPABILITIES[source["source"]]] == "completed"
         status = next(self.reports)
         if status == "transport_error": raise RuntimeError("review transport failed")
-        return validate_review(review(status, document), c, document)
+        result = review(status, document)
+        result["checks"] = [{
+            "id": item["id"], "passed": status == "pass", "reason": "逐项检查",
+            "evidence": document if status == "pass" else "",
+        } for item in c["acceptance"]]
+        return validate_review(result, c, document)
     async def stream_agent_document(self, **kwargs):
         self.writes += 1
         text = "# 文档\n\n## 目标\n覆盖本轮需求的正文内容。\n\n## 方法\n按已给定的事实说明具体建议。\n"
@@ -574,12 +731,31 @@ async def test_transform_repair_binds_original_scope_and_preserves_outside():
             "content": "初次改写。" if service.writes == 1 else "符合要求的改写。"}]}, ensure_ascii=False)
     service.stream_agent_document = write
     service.stream_specialist_agent = write
+    writer_prompts = []
     async def run_write(**kwargs):
+        writer_prompts.append(kwargs)
         return "".join([part async for part in write(**kwargs)])
     service.run_specialist_agent = run_write
     events = await execute(service, doc, "改写范围内的原句，其他保持原样")
     assert events[-1]["data"]["document"] == doc.replace("原句。", "符合要求的改写。")
     assert service.writes == 2
+    assert "document 是补丁唯一绑定的不可变基线" in writer_prompts[-1]["system_prompt"]
+    assert "candidate_document 仅用于理解失败内容" in writer_prompts[-1]["system_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_bare_working_definition_uses_safe_patch_without_model_writer():
+    doc = "# 方案\n\n## 原有正文\n\n保持原样。\n"
+    root = document_nodes(doc)[0]["id"]
+    service = DeliveryService(operation={"kind": "transform", "targets": [root]})
+    events = await execute(service, doc, "增加灵机L0商家的定义介绍")
+    completed = next(event for event in events if event["type"] == "run.completed")
+    result = completed["data"]["document"]
+    assert result.startswith(doc)
+    assert "### 灵机L0商家定义" in result
+    assert "不代表平台官方分级标准" in result
+    assert "不以规模、人设、资产、资质、能力或行为特征" in result
+    assert service.writes == 0
 
 @pytest.mark.parametrize("source", list(SOURCE_CAPABILITIES))
 def test_source_groups_require_explicit_coverage_without_forcing_retrieval(source):
@@ -851,6 +1027,64 @@ async def test_contract_nodes_recover_length_without_accepting_partial_json(stag
     assert calls[1]["num_predict"] == calls[0]["num_predict"] * 4
     assert all(call["user_prompt"] == calls[0]["user_prompt"] for call in calls)
     assert all(call["json_schema"] == calls[0]["json_schema"] for call in calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompt_chars", [45000, 50000])
+async def test_contract_context_guard_rejects_request_without_output_room_before_transport(prompt_chars):
+    service = CreationService.__new__(CreationService)
+    service.model = "local-test-model"
+    calls = []
+
+    async def stream(**kwargs):
+        calls.append(kwargs)
+        yield "{}"
+
+    service._stream_direct_completion = stream
+    with pytest.raises(OperationError) as error:
+        async for _ in service._stream_complete_agent_output(
+            system_prompt="验" * prompt_chars,
+            user_prompt="",
+            creation_model=None,
+            creation_api_key=None,
+            creation_base_url=None,
+            num_predict=3200,
+            temperature=0.0,
+            disable_thinking=True,
+            json_mode=True,
+            json_schema={"type": "object"},
+            context_guard=True,
+        ):
+            pass
+    assert error.value.code == "CREATION_CONTEXT_BUDGET_EXCEEDED"
+    assert error.value.retryable is True
+    assert calls == []
+
+
+def test_delivery_prompt_materials_keep_inventory_without_repeating_fact_bodies():
+    from creation.prompt_evidence import CreationEvidencePrompts
+    provided = {
+        "user_instruction_and_supplied_facts": "生成周报",
+        "retrieved_evidence": {
+            "data_results": [{
+                "source_id": "report-1", "title": "GPU报表", "can_use": True,
+                "content_excerpt": "GPU利用率为80%" * 500,
+                "structured_data": {"metric": "GPU利用率", "value": "80%"},
+            }, {
+                "source_id": "report-2", "title": "缺失报表", "can_use": False,
+                "unavailable_reason": "页面未加载",
+            }],
+            "source_view": {"excerpted": True, "counts": {"data_results": {"available": 2, "included": 2}}},
+        },
+    }
+    compact = CreationEvidencePrompts.delivery_prompt_materials(provided)
+    encoded = json.dumps(compact, ensure_ascii=False)
+    assert "GPU利用率为80%" not in encoded
+    assert "structured_data" not in encoded
+    assert compact["retrieved_evidence"]["data_results"][0]["source_id"] == "report-1"
+    assert compact["retrieved_evidence"]["data_results"][0]["can_use"] is True
+    assert compact["retrieved_evidence"]["data_results"][1]["unavailable_reason"] == "页面未加载"
+    assert provided["retrieved_evidence"]["data_results"][0]["structured_data"]["value"] == "80%"
 
 
 @pytest.mark.asyncio
@@ -1431,6 +1665,128 @@ def test_calendar_source_constraint_preserves_authorized_and_nonassertive_review
     assert result["status"] == "pass"
 
 
+def test_document_local_working_definition_is_an_authorized_creation_branch():
+    from creation.delivery_contract import (
+        FACT_GROUNDING_RULE, _apply_source_audit, source_audit_segments,
+        with_source_scope_check,
+    )
+    document = "本文工作定义：A类指本文讨论的目标对象；官方规则与阈值待确认。"
+    instruction = "增加A类的定义介绍"
+    report = audited_report(
+        document, "authorized_creation", "attribute",
+        "user_instruction_and_supplied_facts",
+    )
+    result = _apply_source_audit(
+        report, source_audit_segments(document),
+        {"user_instruction_and_supplied_facts": instruction},
+        with_source_scope_check(contract()), document,
+    )
+    assert result["status"] == "pass"
+    assert "本文工作定义" in FACT_GROUNDING_RULE
+    assert "不是平台官方分级标准" in FACT_GROUNDING_RULE
+    assert "不能反向作为目标群体的定义" in FACT_GROUNDING_RULE
+
+
+def test_transform_contract_cannot_expand_a_local_addition_to_adjacent_categories():
+    from creation.delivery_contract import bind_transform_contract_scope
+    original = contract(["work_context"])
+    original["inputs"][0].update(
+        need="A类定义以及与B类、C类的区别",
+        query="检索A类、B类、C类的正式标准",
+    )
+    original["acceptance"] = [{
+        "id": "expanded",
+        "criterion": "新增A类定义，并与B类、C类进行比较。",
+    }]
+    result = bind_transform_contract_scope(original, "增加A类的定义介绍", "transform")
+    assert [item["id"] for item in result["acceptance"]] == [
+        "transform_instruction", "transform_preserve", "working_definition_boundary",
+    ]
+    assert "B类" not in json.dumps(result, ensure_ascii=False)
+    assert "增加A类的定义介绍" in json.dumps(result, ensure_ascii=False)
+    assert result["inputs"] == []
+    assert "本文工作定义" in result["self_contained_reason"]
+    assert original["acceptance"][0]["id"] == "expanded"
+
+    official = bind_transform_contract_scope(
+        original, "增加A类的官方正式分级定义", "transform"
+    )
+    assert official["inputs"][0]["state"] == "missing"
+    assert official["inputs"][0]["query"] == "增加A类的官方正式分级定义"
+
+
+def test_bare_definition_request_gets_safe_deterministic_working_fragment():
+    from creation.delivery_contract import minimal_working_definition_fragment
+    fragment = minimal_working_definition_fragment("增加灵机L0商家的定义介绍")
+    assert fragment.startswith("### 灵机L0商家定义")
+    assert "不代表平台官方分级标准" in fragment
+    assert "不以规模、人设、资产、资质、能力或行为特征" in fragment
+    assert minimal_working_definition_fragment(
+        "增加灵机L0商家的官方正式分级定义"
+    ) == ""
+    assert minimal_working_definition_fragment(
+        "增加灵机L0商家的定义：指年GMV低于某阈值的商家"
+    ) == ""
+
+
+def test_bare_definition_requirement_survives_legacy_generate_routing():
+    from creation.delivery_contract import (with_bare_working_definition_safety,
+                                             with_brainstorm_open_flag_safety)
+    conditions = with_brainstorm_open_flag_safety(
+        contract(), ["L0 商家的官方准入阈值是什么？"], "generate",
+        "增加灵机L0商家的定义介绍",
+    )
+    conditions = with_bare_working_definition_safety(
+        conditions, "增加灵机L0商家的定义介绍"
+    )
+    checks = {item["id"]: item["criterion"] for item in conditions["acceptance"]}
+    assert "working_definition_boundary" in checks
+    assert "正文必须实际包含" in checks["working_definition_boundary"]
+    assert "不降低或替代本条件" in checks["a"]
+
+    legacy = copy.deepcopy(conditions)
+    legacy["acceptance"][0]["criterion"] = (
+        "覆盖本轮需求 对结构化 open_flags，本条件只核对它们仍明确标注为待确认；"
+        "用户未提交答案时，原样保留即满足，不得要求提出、选择或补写答案，"
+        "也不得因未代用户回答而判失败。"
+    )
+    migrated = with_brainstorm_open_flag_safety(
+        legacy, ["仍待确认"], "generate", "增加灵机L0商家的定义介绍"
+    )
+    assert "本条件只核对" not in migrated["acceptance"][0]["criterion"]
+    assert "不降低或替代本条件" in migrated["acceptance"][0]["criterion"]
+
+
+def test_delivery_gate_inserts_missing_working_definition_without_copying_body():
+    document = (
+        "# 快手灵机方案\n\n## 范围与现实约束\n\n保留原有方案正文。\n\n"
+        "## 待确认事项\n\n- 官方准入阈值待确认\n"
+    )
+    updated, changed = CreationAgentLoop._ensure_bare_working_definition(
+        document, "增加灵机L0商家的定义介绍"
+    )
+    assert changed is True
+    assert updated.count("# 快手灵机方案") == 1
+    assert updated.count("保留原有方案正文。") == 1
+    assert "### 灵机L0商家定义" in updated
+    assert "**本文工作定义**" in updated
+    assert updated.index("### 灵机L0商家定义") < updated.index("## 待确认事项")
+    repeated, changed_again = CreationAgentLoop._ensure_bare_working_definition(
+        updated, "增加灵机L0商家的定义介绍"
+    )
+    assert changed_again is False
+    assert repeated == updated
+
+    misplaced = document + "\n### 灵机L0商家定义\n\n**本文工作定义**：已有定义。\n"
+    relocated, moved = CreationAgentLoop._ensure_bare_working_definition(
+        misplaced, "增加灵机L0商家的定义介绍"
+    )
+    assert moved is True
+    assert relocated.count("### 灵机L0商家定义") == 1
+    assert relocated.index("### 灵机L0商家定义") < relocated.index("## 待确认事项")
+    assert relocated.count("保留原有方案正文。") == 1
+
+
 def test_calendar_conversion_is_not_code_support_and_cannot_clear_independent_failure():
     from creation.delivery_contract import _apply_source_audit, source_audit_segments, with_source_scope_check
     document = "本周三下午"
@@ -1556,6 +1912,10 @@ async def test_real_v22_source_or_consistency_mismatch_uses_original_two_attempt
     if recover:
         result = await review_delivery(service, supplied['user_instruction_and_supplied_facts'], record['candidate_document'], conditions, environment)
         assert result['status'] == 'pass'
+    elif identity == 'accept-explicit-audience-option':
+        result = await review_delivery(service, supplied['user_instruction_and_supplied_facts'], record['candidate_document'], conditions, environment)
+        assert result['status'] == 'revise'
+        assert any('同一事件' in item for item in result['corrections'])
     else:
         with pytest.raises(OperationError, match='无法核验'):
             await review_delivery(service, supplied['user_instruction_and_supplied_facts'], record['candidate_document'], conditions, environment)
@@ -1566,6 +1926,34 @@ async def test_real_v22_source_or_consistency_mismatch_uses_original_two_attempt
         assert '不能证明支持同一事件' in service.calls[1]['user_prompt']
     else:
         assert '来源审计没有同类负面片段' in service.calls[1]['user_prompt']
+
+
+@pytest.mark.asyncio
+async def test_repeated_wrong_calendar_source_becomes_repairable_uncertainty_not_terminal_error():
+    document = '当前支持599个音色。音色库更新于2026-09-12。'
+    conditions = contract()
+    first = audited_report(document, 'source_supported', 'attribute',
+                           'user_instruction_and_supplied_facts')
+    first['checks'] = {check['id']: {
+        key: ('line-1' if key == 'evidence' else value)
+        for key, value in check.items() if key != 'id'
+    } for check in first['checks']}
+    provided = {
+        'input_context': {},
+        'data_results': [{
+            'can_use': True,
+            'content_excerpt': '系统当前支持599个音色，音色库更新于2026-09-12。',
+        }],
+    }
+    service = StreamService([json.dumps(first), json.dumps(first)])
+
+    result = await review_delivery(service, '整理现有材料', document,
+                                   conditions, provided)
+
+    assert result['status'] == 'revise'
+    assert len(service.calls) == 2
+    assert any('来源支持尚未核验' in item for item in result['corrections'])
+    assert any('同一事件' in item for item in result['corrections'])
 
 
 @pytest.mark.asyncio

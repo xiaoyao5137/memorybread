@@ -157,7 +157,7 @@ async def test_old_policy_binding_is_rechecked_even_when_instruction_and_documen
     await execute_route(loop, restored)
 
     assert calls == [(INSTRUCTION, False), (INSTRUCTION, False)]
-    assert restored.environment["requirement"]["task_intent_context"]["schema_version"] == "creation.current-turn-intent.v2"
+    assert restored.environment["requirement"]["task_intent_context"]["schema_version"] == "creation.current-turn-intent.v3"
 
 
 @pytest.mark.asyncio

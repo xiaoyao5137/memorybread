@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { StrictMode } from 'react'
 import CreationPanel from '../components/CreationPanel'
 import { useAppStore } from '../store/useAppStore'
 
@@ -318,6 +319,114 @@ describe('创作记录搜索与分页', () => {
       }),
       expect.objectContaining({ type: 'run.completed', run_id: 'recovered-run' }),
     ]))
+  })
+
+  it('启动后自动恢复脑暴文档的未完成修订且不提交脑暴答案', async () => {
+    const requestedBodies: Record<string, unknown>[] = []
+    const encoder = new TextEncoder()
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history/start') return Response.json({ id: 163 })
+      if (url.pathname === '/api/creation/history/163/progress') return new Response(null, { status: 204 })
+      if (url.pathname === '/api/creation/brainstorm') {
+        throw new Error('自动恢复文档操作时不应提交脑暴答案')
+      }
+      if (url.pathname === '/api/creation/brainstorm/session') {
+        return Response.json({
+          session_id: 'brainstorm-running-session',
+          revision: 2,
+          phase: 'exploring',
+          root_request: '设计招商方案',
+          current_question: null,
+          history: [],
+          decisions: [],
+          open_flags: ['成本仍待确认'],
+          brief_markdown: '# 创作简报',
+        })
+      }
+      if (url.pathname === '/api/creation/agent/run') {
+        requestedBodies.push(JSON.parse(String(init?.body || '{}')))
+        const completed = {
+          schema_version: 'creation.agent.v1', event_id: 'brainstorm-recovered-completed',
+          session_id: 'brainstorm-running-session', run_id: 'brainstorm-recovered-run',
+          sequence: 24, timestamp: 1_720_000_200_000, type: 'run.completed', status: 'completed',
+          actor: { kind: 'agent', id: 'creation_main_agent', name: '创作 Agent' },
+          summary: '脑暴文档修订续跑完成', environment_patch: {},
+          data: { document: '# 方案\n\n## L0 商家定义\n\n已补充。' },
+        }
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(completed)}\n\n`))
+            controller.close()
+          },
+        }), { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      if (url.pathname === '/api/creation/history' && init?.method === 'POST') return Response.json({ id: 163 })
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [{
+          id: 163, prompt: '增加灵机L0商家的定义介绍', root_request: '设计招商方案',
+          generated_content: '# 方案', session_id: 'brainstorm-running-session',
+          lifecycle_status: 'running', creation_mode: 'brainstorm', references_json: '[]',
+          creation_brief_json: JSON.stringify({
+            session_id: 'brainstorm-running-session', revision: 2, phase: 'exploring',
+            root_request: '设计招商方案', current_question: null, history: [], decisions: [],
+            open_flags: ['成本仍待确认'], brief_markdown: '# 创作简报',
+          }),
+          conversation_json: JSON.stringify([{ id: 'instruction-l0', role: 'user', content: '增加灵机L0商家的定义介绍' }]),
+          agent_trace_json: JSON.stringify([{
+            schema_version: 'creation.agent.v1', event_id: 'brainstorm-tool-started',
+            session_id: 'brainstorm-running-session', run_id: 'interrupted-run', sequence: 22,
+            timestamp: 1_720_000_000_000, type: 'tool.started', status: 'running',
+            actor: { kind: 'tool', id: 'memory_search', name: '记忆搜索 Tool' },
+            summary: '记忆搜索 Tool 开始执行', environment_patch: {}, data: {},
+          }]), created_at: 1_720_000_000_000, updated_at: 1_720_000_100_000,
+        }], total: 1, limit: 20, offset: 0 })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<StrictMode><CreationPanel /></StrictMode>)
+    await waitFor(() => expect(requestedBodies).toHaveLength(1))
+    expect(requestedBodies[0]).toMatchObject({
+      session_id: 'brainstorm-running-session',
+      creation_mode: 'brainstorm',
+      user_prompt: '增加灵机L0商家的定义介绍',
+      instruction_id: 'instruction-l0',
+    })
+    await waitFor(() => {
+      expect(useAppStore.getState().creationDraft.generatedContent).toContain('L0 商家定义')
+    })
+  })
+
+  it('不把等待用户回答的旧脑暴会话误当成中断文档执行', async () => {
+    const requestedPaths: string[] = []
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      requestedPaths.push(`${init?.method || 'GET'} ${url.pathname}`)
+      if (url.pathname === '/api/creation/skills') return Response.json([])
+      if (url.pathname === '/api/creation/history') {
+        return Response.json({ items: [{
+          id: 148, prompt: '设计招商方案', root_request: '设计招商方案',
+          generated_content: '', session_id: 'brainstorm-waiting-for-user',
+          lifecycle_status: 'running', creation_mode: 'brainstorm', references_json: '[]',
+          conversation_json: JSON.stringify([{ id: 'root-question', role: 'user', content: '设计招商方案' }]),
+          creation_brief_json: JSON.stringify({
+            session_id: 'brainstorm-waiting-for-user', revision: 1, phase: 'exploring',
+            root_request: '设计招商方案', history: [], decisions: [], open_flags: [],
+            current_question: { id: 'q1', prompt: '先确定目标用户？', options: [] },
+          }),
+          agent_trace_json: '[]', created_at: 1_720_000_000_000, updated_at: 1_720_000_100_000,
+        }], total: 1, limit: 20, offset: 0 })
+      }
+      return new Response('{}', { status: 404 })
+    }))
+
+    render(<CreationPanel />)
+    await waitFor(() => expect(requestedPaths).toContain('GET /api/creation/history'))
+    await new Promise(resolve => window.setTimeout(resolve, 0))
+    expect(requestedPaths).not.toContain('POST /api/creation/agent/run')
+    expect(useAppStore.getState().creationDraft.sessionId).toBeNull()
   })
 
   it('恢复缺少终止事件的失败记录时按中断状态展示', async () => {
