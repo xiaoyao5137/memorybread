@@ -334,6 +334,16 @@ impl Fixture {
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
 
+    async fn release_cancelled_background(&self, index: usize) {
+        let permit = self.mock.call_permits.lock().unwrap().get(&index).cloned().unwrap();
+        permit.add_permits(1);
+        // Core intentionally aborts an unfinished speculative request before a
+        // foreground miss. Depending on the HTTP server version, the mock
+        // handler may be cancelled with the disconnected client and therefore
+        // never mark the synthetic response as returned.
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+
     fn saved(&self) -> (String, i64, String) {
         self.state.storage.with_conn(|conn| Ok(conn.query_row(
             "SELECT phase, revision, state_json FROM creation_brainstorm_sessions WHERE session_id = 'prefetch-session'",
@@ -436,7 +446,7 @@ async fn brainstorm_prefetch_promotes_an_unfinished_sibling_to_foreground_withou
         old.result["question"]["prompt"]
     );
     let saved = fixture.saved();
-    fixture.release_background(index).await;
+    fixture.release_cancelled_background(index).await;
     assert_eq!(
         fixture.saved(),
         saved,
@@ -734,7 +744,7 @@ async fn brainstorm_prefetch_old_restore_cannot_restart_revoked_background_conte
     assert_eq!(restored["revision"], first["revision"]);
     assert_eq!(restored["current_question"], first["current_question"]);
     let saved = fixture.saved();
-    fixture.release_background(index).await;
+    fixture.release_cancelled_background(index).await;
     assert_eq!(fixture.saved(), saved);
     assert_eq!(
         fixture
@@ -884,7 +894,14 @@ async fn brainstorm_extensions_generate_concurrently_and_publish_every_same_leve
     assert_eq!(fixture.saved(), baseline, "parallel preparation must never change user state");
     fixture.mock.gate_background.store(false, Ordering::SeqCst);
     fixture.mock.permits.add_permits(32);
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while fixture.calls().iter().any(|call| call.payload["prefetch"] == true && !call.returned) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.expect("all prepared facets should finish before the synthetic user consumes them");
+    // The mock marks the HTTP response before Core publishes it into the
+    // disposable cache. Wait for that final local handoff as a separate step.
+    tokio::time::sleep(Duration::from_millis(40)).await;
     assert_eq!(fixture.saved(), baseline);
     let mut current = first;
     let mut ids = std::collections::HashSet::new();
@@ -894,7 +911,12 @@ async fn brainstorm_extensions_generate_concurrently_and_publish_every_same_leve
         assert_eq!(question["parent_option_id"], option);
         assert_eq!(question["exploration_stage"], "solutions");
         assert!(ids.insert(question["id"].as_str().unwrap().to_string()));
-        assert_eq!(fixture.foreground_count(), 2, "prepared facets should not request foreground inference");
+        assert_eq!(fixture.foreground_count(), 2,
+            "prepared facets should not request foreground inference: option={option} prompt={} calls={} foreground={:?}",
+            question["prompt"], fixture.calls().len(), fixture.calls().into_iter()
+                .filter(|call| call.payload["prefetch"] != true)
+                .map(|call| (call.payload["focus_hint"].clone(), call.payload["extension_goal"].clone()))
+                .collect::<Vec<_>>());
         current = fixture.answer(&current, json!({"selected_option_ids":["next"]})).await;
         tokio::time::sleep(Duration::from_millis(80)).await;
     }

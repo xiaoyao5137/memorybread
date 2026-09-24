@@ -1329,7 +1329,13 @@ fn seed_knowledge_entry(
 }
 
 fn seed_artifact_ready_timeline(sm: &StorageManager, summary: &str, overview: &str) -> i64 {
-    let document_body = "这是一份用于验证烘焙模板与标准操作流程的完整文档正文。".repeat(12);
+    // The document-identity gate requires the captured page title to match the
+    // beginning of the loaded body. Keep this fixture representative of a real
+    // document page instead of relying on a title from an unrelated frame.
+    let document_body = format!(
+        "周报模板设计文档\n{}",
+        "这是一份用于验证烘焙模板与标准操作流程的完整文档正文。".repeat(12)
+    );
     let first_capture_id = sm
         .insert_capture(&NewCapture {
             ts: 1_710_000_000_000,
@@ -5038,12 +5044,14 @@ async fn test_document_reference_resolves_canonical_url_and_excludes_deleted() {
     let (router, _tmp) = make_test_router().await;
     let req = Request::builder().method(Method::POST).uri("/api/bake/documents")
         .header("content-type", "application/json")
-        .body(Body::from(r#"{"title":"指标说明","doc_type":"技术文档","status":"enabled","source_url":"https://docs.example.com/document/metrics","full_content":"GPU 指标采集说明。","tags":[],"sections":[],"applicable_tasks":[],"style_phrases":[],"replacement_rules":[],"image_assets":[],"usage_count":0}"#)).unwrap();
+        .body(Body::from(r#"{"title":"指标说明","doc_type":"技术文档","status":"enabled","source_url":"https://docs.example.com/d/home/metrics","full_content":"GPU 指标采集说明。","tags":[],"sections":[],"applicable_tasks":[],"style_phrases":[],"replacement_rules":[],"image_assets":[],"usage_count":0}"#)).unwrap();
     let (status, body) = oneshot(router.clone(), req).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let document: serde_json::Value = serde_json::from_str(&body).unwrap();
     let id = document["id"].as_str().unwrap();
-    let uri = "/api/bake/documents?source_url=https%3A%2F%2Fdocs.example.com%2Fdocument%2Fmetrics%3Ffrom%3Dhistory";
+    // Only declared editor view controls are non-identity-bearing. Unknown
+    // query parameters remain part of the resource identity by contract.
+    let uri = "/api/bake/documents?source_url=https%3A%2F%2Fdocs.example.com%2Fd%2Fhome%2Fmetrics%3Fro%3Dfalse";
     let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
     let (status, body) = oneshot(router.clone(), req).await;
     assert_eq!(status, StatusCode::OK);

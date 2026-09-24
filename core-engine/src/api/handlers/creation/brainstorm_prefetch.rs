@@ -119,7 +119,18 @@ pub(super) fn take(state: &AppState, stored: &BrainstormStoredState, req: &Brain
     let question = result.question.as_mut()?;
     if !apply_brainstorm_question_stage(question, Some(&branch)) { return None; }
     let fingerprint = brainstorm_question_fingerprint(&question.prompt);
-    if effective.turns.iter().any(|turn| brainstorm_question_repeats_answered(turn, question)) {
+    let repeats_answered = effective.turns.iter().any(|turn| {
+        // An extension is deliberately another facet of the same branch, so
+        // it may reuse the selected-option vocabulary from the parent turn.
+        // Reject overlapping prompts, but do not collapse a distinct facet
+        // merely because its choices resemble that earlier decision.
+        if branch.extension.is_some() {
+            brainstorm_questions_overlap(&turn.question, question)
+        } else {
+            brainstorm_question_repeats_answered(turn, question)
+        }
+    });
+    if repeats_answered {
         log_brainstorm_stage(req, "prefetch_duplicate_discarded", Instant::now());
         return None;
     }
@@ -187,19 +198,24 @@ fn schedule_current(state: &Arc<AppState>, stored: &BrainstormStoredState, req: 
     }
     let mut snapshot = stored.clone();
     archive_superseded_brainstorm_turns(&mut snapshot);
-    let keys: Vec<_> = pending_brainstorm_branches(&snapshot).iter()
-        .take(limit).map(|branch| branch_key(&snapshot, req, branch)).collect();
+    let all_keys: Vec<_> = pending_brainstorm_branches(&snapshot).iter()
+        .map(|branch| branch_key(&snapshot, req, branch)).collect();
+    let scheduled_keys: Vec<_> = all_keys.iter().take(limit).cloned().collect();
     let mut cache = state.brainstorm_prefetch.lock().unwrap();
     trim(&mut cache, req.session_id.trim());
     let entry = cache.sessions.entry(req.session_id.trim().to_string()).or_insert_with(empty_session);
     if revision < entry.minimum_revision { return; }
     entry.touched = Instant::now();
-    entry.ready.retain(|key, _| keys.contains(key));
+    // The limit bounds new speculative work, not already-completed valid
+    // candidates. Dropping a ready candidate merely because it moved outside
+    // the current scheduling window turns a later breadth-first step back into
+    // foreground inference.
+    entry.ready.retain(|key, _| all_keys.contains(key));
     entry.running.retain(|key, task| {
-        if !keys.contains(key) { task.abort(); return false; }
+        if !all_keys.contains(key) { task.abort(); return false; }
         !task.is_finished()
     });
-    entry.queued = keys.into_iter().filter(|key| !entry.ready.contains_key(key) && !entry.running.contains_key(key))
+    entry.queued = scheduled_keys.into_iter().filter(|key| !entry.ready.contains_key(key) && !entry.running.contains_key(key))
         .map(|key| Job { key, snapshot: snapshot.clone(), request: req.clone() }).collect();
     launch_jobs(state, req.session_id.trim(), entry);
 }

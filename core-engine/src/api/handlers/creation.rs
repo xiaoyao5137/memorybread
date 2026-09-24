@@ -704,6 +704,8 @@ struct BrainstormStoredState {
     #[serde(default)]
     pending_extensions: Vec<BrainstormExtensionPlan>,
     #[serde(default)]
+    current_extension_id: Option<String>,
+    #[serde(default)]
     prefetch_safe_options: std::collections::BTreeMap<String, Vec<String>>,
     #[serde(default)]
     branch_parent_revisions: std::collections::BTreeMap<String, i64>,
@@ -2991,6 +2993,7 @@ fn apply_dynamic_step(
     stored: &mut BrainstormStoredState,
     result: DynamicBrainstormResult,
 ) -> String {
+    stored.current_extension_id = result.consumed_extension_id.clone();
     if let Some(question) = result.question.as_ref() {
         stored.prefetch_safe_options.insert(question.id.clone(), result.prefetch_safe_option_ids.clone());
     }
@@ -3015,6 +3018,7 @@ fn apply_dynamic_step(
     }
     if result.status == "ready" {
         stored.current_question = None;
+        stored.current_extension_id = None;
         stored.continuation_directions = result.continuation_directions;
         "ready".to_string()
     } else {
@@ -3170,12 +3174,19 @@ fn discard_duplicate_brainstorm_questions(stored: &mut BrainstormStoredState) {
             || stored
                 .turns
                 .iter()
-                .any(|turn| brainstorm_question_repeats_answered(turn, question))
+                .any(|turn| {
+                    if stored.current_extension_id.is_some() {
+                        brainstorm_questions_overlap(&turn.question, question)
+                    } else {
+                        brainstorm_question_repeats_answered(turn, question)
+                    }
+                })
     });
     if duplicate_current {
         if let Some(question) = stored.current_question.take() {
             invalidated.push(question.id);
         }
+        stored.current_extension_id = None;
         // These flags came from the same rejected model turn.  A manual edit is
         // independent user input and remains authoritative.
         if !stored.brief_edits.contains_key("open_flags") {
@@ -3200,6 +3211,7 @@ fn parse_brainstorm_state(state_json: &str) -> Result<BrainstormStoredState, ser
         .is_some_and(|question| !is_enumerated_brainstorm_question(question))
     {
         stored.current_question = None;
+        stored.current_extension_id = None;
     }
     // 已回答的旧题只作为历史证据展示，不重新进入模型问题协议。
     for turn in &mut stored.turns {
@@ -3560,6 +3572,7 @@ async fn run_creation_brainstorm_turn_inner(
         }
         let mut stored = BrainstormStoredState {
             pending_extensions: Vec::new(),
+            current_extension_id: None,
             prefetch_safe_options: Default::default(),
             branch_parent_revisions: Default::default(),
             memory_brief: String::new(),
@@ -3712,6 +3725,7 @@ async fn run_creation_brainstorm_turn_inner(
             stored.user_input_revisions.insert(question.id.clone(), session.revision + 1);
             stored.turns.push(BrainstormStoredTurn { question, answer });
             stored.current_question = None;
+            stored.current_extension_id = None;
             let step =
                 generate_dynamic_brainstorm_step(&state, &stored, &req, false, false, "").await?;
             apply_dynamic_step(&mut stored, step)
@@ -3743,6 +3757,7 @@ async fn run_creation_brainstorm_turn_inner(
                 stored.branch_parent_revisions.remove(&turn.question.id);
             }
             stored.current_question = removed.first().map(|turn| turn.question.clone());
+            stored.current_extension_id = None;
             stored
                 .archived_questions
                 .extend(
@@ -3839,6 +3854,7 @@ async fn run_creation_brainstorm_turn_inner(
                 },
             });
             stored.current_question = None;
+            stored.current_extension_id = None;
             let step =
                 generate_dynamic_brainstorm_step(&state, &stored, &req, false, false, "").await?;
             let phase = apply_dynamic_step(&mut stored, step);
@@ -3854,6 +3870,7 @@ async fn run_creation_brainstorm_turn_inner(
                     stored.invalidated_question_ids.push(question.id.clone());
                     stored.archived_questions.push(BrainstormArchivedQuestion {question, answer: None});
                 }
+                stored.current_extension_id = None;
             }
             if stored
                 .current_question
@@ -3876,6 +3893,7 @@ async fn run_creation_brainstorm_turn_inner(
                     stored.open_flags.insert(0, question.prompt);
                 }
             }
+            stored.current_extension_id = None;
             stored.readiness_reason = "用户选择基于当前简报开始生成".to_string();
             stored.continuation_directions.clear();
             "ready".to_string()
@@ -3904,6 +3922,7 @@ async fn run_creation_brainstorm_turn_inner(
                     answer: None,
                 });
             }
+            stored.current_extension_id = None;
             let custom_focus = if req.continuation_direction_id == "__custom__" {
                 let custom = req.focus_hint.trim();
                 if custom.is_empty() || custom.chars().count() > 500 {
@@ -5795,6 +5814,7 @@ mod tests {
 
         let state = BrainstormStoredState {
             pending_extensions: Vec::new(),
+            current_extension_id: None,
             prefetch_safe_options: Default::default(),
             branch_parent_revisions: Default::default(),
             memory_brief: String::new(),
