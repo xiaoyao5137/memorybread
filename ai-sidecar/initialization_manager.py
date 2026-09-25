@@ -58,7 +58,6 @@ MANAGED_OLLAMA_SHA256 = "52acbca4e89c53db9abc586a22b5633fd101db293177264b9a0fe5d
 NORMAL_OLLAMA_PORT = 11434
 SANDBOX_OLLAMA_PORT = 11435
 SANDBOX_CORE_PORT = 17070
-OLLAMA_GUI_APP_ROOT = Path("/Applications/Ollama.app").resolve()
 MIN_FREE_DISK_GB = 6.0
 # 引擎健康检查失败后的降级宽限秒数。应用启动早期本地 AI 引擎可能还未
 # 被拉起，立即把完成状态降级为中断会让用户永久卡在恢复页。
@@ -1967,8 +1966,19 @@ class InitializationManager:
             return False
 
     @staticmethod
+    def _ollama_gui_app_roots() -> tuple[Path, ...]:
+        roots = [Path("/Applications/Ollama.app").resolve()]
+        user_home = os.environ.get("MEMORY_BREAD_USER_HOME") or os.environ.get("HOME")
+        if user_home:
+            user_app = (Path(user_home).expanduser() / "Applications" / "Ollama.app").resolve()
+            if user_app not in roots:
+                roots.append(user_app)
+        return tuple(roots)
+
+    @staticmethod
     def _ollama_gui_processes() -> list[psutil.Process]:
         processes: list[psutil.Process] = []
+        app_roots = InitializationManager._ollama_gui_app_roots()
         for process in psutil.process_iter(["pid", "exe", "cmdline"]):
             try:
                 raw_paths = [process.info.get("exe")]
@@ -1977,7 +1987,7 @@ class InitializationManager:
                     if not raw_path or not str(raw_path).startswith("/"):
                         continue
                     candidate = Path(str(raw_path)).resolve()
-                    if candidate == OLLAMA_GUI_APP_ROOT or OLLAMA_GUI_APP_ROOT in candidate.parents:
+                    if any(root == candidate or root in candidate.parents for root in app_roots):
                         processes.append(process)
                         break
             except (OSError, psutil.Error):

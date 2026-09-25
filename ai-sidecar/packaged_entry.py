@@ -64,13 +64,15 @@ def run_creation_service() -> None:
 def run_diagnostics_self_check() -> None:
     # Import only definitions: no listeners, downloads, model loads or user state writes.
     from initialization_manager import InitializationManager
-    from runtime_download import RuntimeDownloader
+    from runtime_download import RuntimeDownloader, verified_tls_context
     from runtime_readiness import CapabilityWarmup
 
     assert callable(InitializationManager.consultation_readiness)
     assert callable(RuntimeDownloader.download)
     assert callable(CapabilityWarmup.request)
-    print("diagnostics.v2: readiness verified-download resumable-upload")
+    ca_count = verified_tls_context().cert_store_stats().get("x509_ca", 0)
+    assert ca_count > 0
+    print("diagnostics.v3: readiness verified-download tls-ca resumable-upload")
 
 
 def parse_args() -> argparse.Namespace:

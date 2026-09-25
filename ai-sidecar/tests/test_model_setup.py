@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,6 +29,7 @@ def test_setup_status_guides_clean_mac_without_homebrew_to_official_download(mon
     manager = _manager(tmp_path)
     _mock_macos(monkeypatch, "14.6.1")
     monkeypatch.setattr(manager, "_resolve_ollama_command", lambda: None)
+    monkeypatch.setattr(manager, "_resolve_brew_command", lambda: None)
     monkeypatch.setattr(manager, "_is_ollama_running", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(model_manager_module.shutil, "which", lambda _name: None)
 
@@ -167,3 +169,89 @@ def test_download_transport_failure_becomes_terminal_error_status(monkeypatch, t
     assert status["status"] == "error"
     assert status["download_progress"] == 0
     assert "下载失败" in status["error"]
+
+
+def test_brew_formula_command_uses_reported_custom_prefix(monkeypatch, tmp_path):
+    manager = _manager(tmp_path)
+    formula_prefix = tmp_path / "custom-brew" / "opt" / "ollama"
+    ollama_command = formula_prefix / "bin" / "ollama"
+    ollama_command.parent.mkdir(parents=True)
+    ollama_command.write_text("#!/bin/sh\n", encoding="utf-8")
+    ollama_command.chmod(0o755)
+
+    monkeypatch.setattr(
+        model_manager_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=str(formula_prefix) + "\n",
+            stderr="",
+        ),
+    )
+
+    resolved = manager._resolve_brew_formula_command("/custom/bin/brew", "ollama")
+
+    assert resolved == str(ollama_command)
+
+
+def test_resolve_ollama_command_supports_user_applications(monkeypatch, tmp_path):
+    manager = _manager(tmp_path)
+    ollama_command = tmp_path / "Applications" / "Ollama.app" / "Contents" / "Resources" / "ollama"
+    ollama_command.parent.mkdir(parents=True)
+    ollama_command.write_text("#!/bin/sh\n", encoding="utf-8")
+    ollama_command.chmod(0o755)
+    monkeypatch.setenv("HOME", str(tmp_path / "packaged-runtime"))
+    monkeypatch.setenv("MEMORY_BREAD_USER_HOME", str(tmp_path))
+    monkeypatch.setattr(model_manager_module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(manager, "_resolve_brew_command", lambda: None)
+    monkeypatch.setattr(manager, "_ollama_app_roots", lambda: [tmp_path / "Applications" / "Ollama.app"])
+
+    assert manager._resolve_ollama_command() == str(ollama_command)
+
+
+def test_ollama_app_roots_include_real_user_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "packaged-runtime"))
+    monkeypatch.setenv("MEMORY_BREAD_USER_HOME", str(tmp_path / "real-user"))
+
+    roots = ModelManager._ollama_app_roots()
+
+    assert tmp_path / "real-user" / "Applications" / "Ollama.app" in roots
+    assert tmp_path / "packaged-runtime" / "Applications" / "Ollama.app" not in roots
+
+
+def test_upgrade_starts_ollama_from_homebrew_reported_prefix(monkeypatch, tmp_path):
+    manager = _manager(tmp_path)
+    formula_prefix = tmp_path / "custom-brew" / "opt" / "ollama"
+    ollama_command = formula_prefix / "bin" / "ollama"
+    ollama_command.parent.mkdir(parents=True)
+    ollama_command.write_text("#!/bin/sh\n", encoding="utf-8")
+    ollama_command.chmod(0o755)
+    run_calls = []
+    popen_calls = []
+
+    def fake_run(command, **kwargs):
+        run_calls.append(command)
+        if command[1:] == ["--prefix", "ollama"]:
+            return SimpleNamespace(returncode=0, stdout=str(formula_prefix) + "\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(model_manager_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        model_manager_module.subprocess,
+        "Popen",
+        lambda command, **kwargs: popen_calls.append(command),
+    )
+    monkeypatch.setattr(model_manager_module, "shutdown_all_managed_serves", lambda **kwargs: [])
+    monkeypatch.setattr(model_manager_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        manager,
+        "get_ollama_setup_status",
+        lambda force=False: {"ollama_version": "test"},
+    )
+
+    manager._upgrade_ollama_task({"brew_path": "/custom/bin/brew"})
+
+    assert ["/custom/bin/brew", "install", "ollama"] in run_calls
+    assert all("unlink" not in command and "link" not in command for command in run_calls)
+    assert popen_calls == [[str(ollama_command), "serve"]]
+    assert manager.get_upgrade_status()["status"] == "success"

@@ -168,6 +168,13 @@ class TestPaddleBackend:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestAppleVisionBackend:
+    def test_public_export_uses_pyobjc_backend_without_swift_toolchain(self):
+        from ocr import AppleVisionBackend as PublicAppleVisionBackend
+        from ocr.backends import AppleVisionBackend as PublicBackendExport
+
+        assert PublicAppleVisionBackend is PyObjCAppleVisionBackend
+        assert PublicBackendExport is PyObjCAppleVisionBackend
+
     def test_available_on_macos_only(self):
         backend = AppleVisionBackend()
         if sys.platform == "darwin":

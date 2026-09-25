@@ -15,8 +15,9 @@ set -e  # 遇到错误立即退出
 if [ -d "$HOME/.cargo/bin" ]; then
     export PATH="$HOME/.cargo/bin:$PATH"
 fi
-if [ -d "/opt/homebrew/bin" ]; then
-    export PATH="/opt/homebrew/bin:$PATH"
+BREW_COMMAND="$(command -v brew 2>/dev/null || /bin/zsh -lc 'command -v brew' 2>/dev/null || true)"
+if [ -n "$BREW_COMMAND" ] && [ -x "$BREW_COMMAND" ]; then
+    export PATH="$(dirname "$BREW_COMMAND"):$PATH"
 fi
 
 # 颜色输出

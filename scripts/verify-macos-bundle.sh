@@ -78,10 +78,28 @@ for binary in "$MAIN_BIN" "$CORE_BIN" "$BROWSER_BRIDGE_BIN" "$AI_BIN"; do
   file "$binary" | grep -q 'Mach-O' || fail "不是 Mach-O: $binary"
 done
 
+# A signed bundle must be self-contained. Only loader-relative references and
+# macOS system libraries may remain absolute; every other absolute dependency
+# belongs to the build machine and is not repaired by code signing.
+while IFS= read -r -d '' bundled_file; do
+  file "$bundled_file" | grep -q 'Mach-O' || continue
+  while IFS= read -r dependency; do
+    case "$dependency" in
+      @*|/System/Library/*|/usr/lib/*)
+        ;;
+      /*)
+        fail "Mach-O 包含构建机外部依赖: $bundled_file -> $dependency"
+        ;;
+    esac
+  done < <(otool -L "$bundled_file" | tail -n +2 | awk '{print $1}')
+done < <(
+  find "$APP_PATH" -type f \( -perm -111 -o -name '*.dylib' -o -name '*.so' \) -print0
+)
+
 codesign --verify --deep --strict "$APP_PATH"
 
 # Verify the actual bundled helper and native command, not only workspace sources.
-"$AI_BIN" diagnostics-self-check | grep -F 'diagnostics.v2:' >/dev/null \
+"$AI_BIN" diagnostics-self-check | grep -F 'diagnostics.v3:' >/dev/null \
   || fail "打包内 AI helper 缺少新版初始化诊断能力"
 strings "$MAIN_BIN" | grep -F 'upload_customer_log_archive' >/dev/null \
   || fail "打包内桌面主程序缺少原生日志上传命令"

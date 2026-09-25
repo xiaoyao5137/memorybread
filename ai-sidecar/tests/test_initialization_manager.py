@@ -599,6 +599,18 @@ def test_packaged_dynamic_runtime_does_not_modify_user_ollama(
     assert manager._ollama_port('normal') == 43123
 
 
+def test_ollama_gui_roots_include_real_user_applications(monkeypatch, tmp_path):
+    packaged_home = tmp_path / "packaged-runtime"
+    real_user_home = tmp_path / "real-user"
+    monkeypatch.setenv("HOME", str(packaged_home))
+    monkeypatch.setenv("MEMORY_BREAD_USER_HOME", str(real_user_home))
+
+    roots = InitializationManager._ollama_gui_app_roots()
+
+    assert (real_user_home / "Applications" / "Ollama.app").resolve() in roots
+    assert (packaged_home / "Applications" / "Ollama.app").resolve() not in roots
+
+
 def test_download_attempts_use_existing_report_summary_not_new_check_ids(tmp_path):
     import initialization_manager as module
     manager = InitializationManager(base_dir=tmp_path)

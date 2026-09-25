@@ -211,40 +211,71 @@ class ModelManager:
                 if candidate.is_file() and os.access(candidate, os.X_OK):
                     return str(candidate)
 
-        # 检查 DMG 打包版本的内嵌 Ollama
-        dmg_managed_root = Path.home() / "Library" / "Application Support" / "com.memory-bread.app" / "runtime" / ".memory-bread" / "initialization" / "runtime" / "ollama"
-        if dmg_managed_root.exists():
-            dmg_candidates = sorted(
-                [
-                    *dmg_managed_root.glob("v*/runtime/bin/ollama"),
-                    *dmg_managed_root.glob("v*/runtime/ollama"),
-                ],
-                reverse=True,
-            )
-            for candidate in dmg_candidates:
-                if candidate.is_file() and os.access(candidate, os.X_OK):
-                    return str(candidate)
-
         cmd = shutil.which('ollama')
         if cmd:
             return cmd
 
-        arch = platform.machine().lower()
-        candidates = []
-        if arch == 'arm64':
-            candidates.append('/opt/homebrew/bin/ollama')
-            candidates.append('/usr/local/bin/ollama')
-        elif arch == 'x86_64':
-            candidates.append('/usr/local/bin/ollama')
-            candidates.append('/opt/homebrew/bin/ollama')
-        else:
-            candidates.append('/opt/homebrew/bin/ollama')
-            candidates.append('/usr/local/bin/ollama')
-        candidates.append('/Applications/Ollama.app/Contents/Resources/ollama')
+        brew_path = self._resolve_brew_command()
+        if brew_path:
+            brew_ollama = self._resolve_brew_formula_command(brew_path, 'ollama')
+            if brew_ollama:
+                return brew_ollama
 
-        for candidate in candidates:
-            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                return candidate
+        for app_root in self._ollama_app_roots():
+            app_command = app_root / 'Contents' / 'Resources' / 'ollama'
+            if app_command.is_file() and os.access(str(app_command), os.X_OK):
+                return str(app_command)
+        return None
+
+    @staticmethod
+    def _ollama_app_roots() -> List[Path]:
+        app_roots = [Path('/Applications/Ollama.app')]
+        user_home = os.environ.get('MEMORY_BREAD_USER_HOME') or os.environ.get('HOME')
+        if user_home:
+            user_app = Path(user_home).expanduser() / 'Applications' / 'Ollama.app'
+            if user_app not in app_roots:
+                app_roots.append(user_app)
+        return app_roots
+
+    @staticmethod
+    def _resolve_brew_command() -> Optional[str]:
+        """Resolve Homebrew without assuming an architecture-specific prefix."""
+        command = shutil.which('brew')
+        if command:
+            return command
+        if platform.system() != 'Darwin':
+            return None
+        try:
+            result = subprocess.run(
+                ['/bin/zsh', '-lc', 'command -v brew'],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+        except Exception:
+            return None
+        candidate = (result.stdout or '').strip()
+        if result.returncode == 0 and os.path.isabs(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+        return None
+
+    @staticmethod
+    def _resolve_brew_formula_command(brew_path: str, formula: str) -> Optional[str]:
+        """Resolve an installed formula executable from Homebrew's actual prefix."""
+        try:
+            result = subprocess.run(
+                [brew_path, '--prefix', formula],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        candidate = Path((result.stdout or '').strip()) / 'bin' / formula
+        if candidate.is_file() and os.access(str(candidate), os.X_OK):
+            return str(candidate)
         return None
 
     def _is_ollama_running(self, base_url: str = OLLAMA_API_BASE) -> bool:
@@ -310,7 +341,7 @@ class ModelManager:
         # Ollama.app 可以正常运行但尚未把 CLI 链接到 PATH；此时 API 可用也应视为已安装。
         running = self._is_ollama_running()
         installed = bool(ollama_path) or running
-        brew_path = shutil.which('brew')
+        brew_path = self._resolve_brew_command()
         brew_available = bool(brew_path)
 
         # 获取 Ollama 版本
@@ -340,12 +371,7 @@ class ModelManager:
         else:
             message = '未检测到 Ollama 和 Homebrew，请先安装 Homebrew。'
 
-        if arch == 'arm64':
-            recommended = 'brew install ollama (Homebrew: /opt/homebrew/bin)'
-        elif arch == 'x86_64':
-            recommended = 'brew install ollama (Homebrew: /usr/local/bin)'
-        else:
-            recommended = 'brew install ollama'
+        recommended = 'brew install ollama'
 
         can_auto_install = is_macos and version_compatible and (installed or brew_available)
 
@@ -471,19 +497,6 @@ class ModelManager:
         try:
             logger.info("开始升级 Ollama...")
 
-            # 清理手动安装的 ollama 目录
-            with self._upgrade_lock:
-                self._upgrade_status = {'status': 'upgrading', 'message': '清理旧版本...'}
-
-            import shutil
-            opt_dir = '/opt/homebrew/opt/ollama'
-            if os.path.exists(opt_dir) and not os.path.islink(opt_dir):
-                logger.info(f"删除手动安装的目录: {opt_dir}")
-                shutil.rmtree(opt_dir)
-
-            # unlink 可能的旧链接
-            subprocess.run([status['brew_path'], 'unlink', 'ollama'], capture_output=True, timeout=30)
-
             with self._upgrade_lock:
                 self._upgrade_status = {'status': 'upgrading', 'message': '正在执行 brew install ollama...'}
 
@@ -495,10 +508,11 @@ class ModelManager:
             )
 
             if result.returncode == 0:
-                # 确保链接创建
-                with self._upgrade_lock:
-                    self._upgrade_status = {'status': 'upgrading', 'message': '创建符号链接...'}
-                subprocess.run([status['brew_path'], 'link', 'ollama'], capture_output=True, timeout=30)
+                ollama_command = self._resolve_brew_formula_command(status['brew_path'], 'ollama')
+                if not ollama_command:
+                    ollama_command = self._resolve_ollama_command()
+                if not ollama_command:
+                    raise RuntimeError('Homebrew 安装完成，但未找到 ollama 可执行文件')
 
                 # 重启 Ollama 服务（后台启动）
                 with self._upgrade_lock:
@@ -515,7 +529,7 @@ class ModelManager:
                 serve_env = os.environ.copy()
                 serve_env['OLLAMA_MAX_LOADED_MODELS'] = '1'
                 subprocess.Popen(
-                    ['ollama', 'serve'],
+                    [ollama_command, 'serve'],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     env=serve_env,

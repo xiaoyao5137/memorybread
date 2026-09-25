@@ -1117,6 +1117,7 @@ fn spawn_bundled_backend(
     let creation = registry.service("creation")?;
     let vector_search = registry.service("vector_search")?;
     let ollama = registry.service("ollama")?;
+    let user_home = std::env::var_os("HOME");
     let mut command = Command::new(executable);
     command
         .args(args)
@@ -1148,6 +1149,9 @@ fn spawn_bundled_backend(
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr));
+    if let Some(user_home) = user_home {
+        command.env("MEMORY_BREAD_USER_HOME", user_home);
+    }
     let child = command
         .spawn()
         .map_err(|error| format!("启动内置服务 {name} 失败: {error}"))?;

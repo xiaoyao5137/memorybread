@@ -3,20 +3,89 @@ import errno
 import hashlib
 import http.client
 import json
+import os
 import re
 import socket
 import ssl
 import time
 import urllib.error
 import urllib.request
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Iterator, List, Optional
+
+import certifi
 
 
 class DownloadFailure(Exception):
     def __init__(self, code: str):
         super().__init__(code)
         self.code = code
+
+
+def verified_tls_context() -> ssl.SSLContext:
+    """Return a TLS context backed by the CA bundle shipped with the helper.
+
+    The release helper is built with a Homebrew Python whose compiled OpenSSL
+    default points into /opt/homebrew.  That path is not present on a clean
+    customer Mac, so relying on ``ssl.create_default_context()`` without an
+    explicit CA file makes every public HTTPS mirror fail certificate
+    verification.  ``certifi`` is already included in the signed helper; make
+    it the explicit, deterministic trust source for verified downloads.
+    """
+    context = ssl.create_default_context(cafile=certifi.where())
+    if context.cert_store_stats().get('x509_ca', 0) <= 0:
+        raise DownloadFailure('RUNTIME_TLS_FAILED')
+    return context
+
+
+@contextmanager
+def _exclusive_download_lock(path: Path, deadline: float) -> Iterator[None]:
+    """Serialize writers sharing one verified-download cache directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open('a+b')
+    locked = False
+    try:
+        if os.name == 'nt':
+            import msvcrt
+
+            if path.stat().st_size == 0:
+                handle.write(b'0')
+                handle.flush()
+            while not locked:
+                try:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    locked = True
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise DownloadFailure('RUNTIME_DOWNLOAD_TIMEOUT')
+                    time.sleep(0.1)
+        else:
+            import fcntl
+
+            while not locked:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise DownloadFailure('RUNTIME_DOWNLOAD_TIMEOUT')
+                    time.sleep(0.1)
+        yield
+    finally:
+        if locked:
+            if os.name == 'nt':
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 def failure_code(exc: Exception) -> str:
@@ -53,6 +122,7 @@ class RuntimeDownloader:
         self.total_seconds = total_seconds
         self.source_seconds = source_seconds
         self.events: List[dict] = []
+        self.tls_context = verified_tls_context()
 
     def _record(self, source: int, attempt: int, started: float, code: Optional[str], exc=None):
         self.events.append({'id': 'runtime.source_%d.attempt_%d' % (source, attempt),
@@ -60,13 +130,20 @@ class RuntimeDownloader:
                             'duration_ms': int((time.monotonic() - started) * 1000),
                             'http_status': exc.code if isinstance(exc, urllib.error.HTTPError) else None})
         target = self.root / 'download-diagnostics.json'
-        temp = target.with_suffix('.tmp')
-        temp.write_text(json.dumps(self.events[-30:]), encoding='utf-8')
-        temp.replace(target)
+        temp = target.with_name('%s.tmp-%s-%s' % (target.name, os.getpid(), uuid.uuid4().hex))
+        try:
+            temp.write_text(json.dumps(self.events[-30:]), encoding='utf-8')
+            temp.replace(target)
+        finally:
+            temp.unlink(missing_ok=True)
 
     def download(self, urls: List[str]) -> Path:
         self.root.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + self.total_seconds
+        with _exclusive_download_lock(self.root / '.download.lock', deadline):
+            return self._download_locked(urls, deadline)
+
+    def _download_locked(self, urls: List[str], deadline: float) -> Path:
         last_code = 'RUNTIME_DOWNLOAD_FAILED'
         for source, url in enumerate(dict.fromkeys(urls), 1):
             # Cache identity includes source and expected artifact; never append across mirrors.
@@ -121,7 +198,11 @@ class RuntimeDownloader:
         if remaining <= 0:
             raise DownloadFailure('RUNTIME_DOWNLOAD_TIMEOUT')
         try:
-            response = urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=min(15, remaining))
+            response = urllib.request.urlopen(
+                urllib.request.Request(url, headers=headers),
+                timeout=min(15, remaining),
+                context=self.tls_context,
+            )
         except urllib.error.HTTPError as exc:
             if exc.code == 416:
                 archive.unlink(missing_ok=True)

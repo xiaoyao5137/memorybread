@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from .engine          import OcrEngine
 from .backends.base   import OcrBackend, OcrBox, OcrOutput
 from .backends.paddle import PaddleBackend
-from .backends.vision import AppleVisionBackend
+from .backends.vision_pyobjc import AppleVisionBackend
 
 if TYPE_CHECKING:
     from .worker import OcrWorker

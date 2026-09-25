@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "记忆面包",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "identifier": "com.memory-bread.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -40,7 +40,7 @@
     "active": true,
     "targets": "all",
     "macOS": {
-      "bundleVersion": "9"
+      "bundleVersion": "10"
     },
     "icon": [
       "icons/32x32.png",

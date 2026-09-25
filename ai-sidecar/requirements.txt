@@ -22,6 +22,7 @@ pyobjc-framework-Quartz>=9.0   # CGImage 图片加载
 # ── 基础设施 ──────────────────────────────────────────────────────────────────
 pydantic>=2.0               # 数据验证（ipc-protocol 依赖）
 requests>=2.31              # HTTP 客户端（extractor_v2 流式调用 Ollama）
+certifi>=2024.8.30          # 打包版 HTTPS 下载的显式 CA 信任源（不依赖 Homebrew 路径）
 flask>=2.0                  # HTTP 服务框架
 flask-cors>=4.0             # CORS 跨域支持
 fastapi>=0.110              # 创作服务 HTTP/SSE API

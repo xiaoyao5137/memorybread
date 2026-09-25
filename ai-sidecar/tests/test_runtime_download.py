@@ -1,11 +1,12 @@
 import hashlib
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from runtime_download import DownloadFailure, RuntimeDownloader, failure_code
+from runtime_download import DownloadFailure, RuntimeDownloader, failure_code, verified_tls_context
 
 
 @pytest.fixture
@@ -148,3 +149,69 @@ def test_interrupted_body_resumes_on_same_source(server, tmp_path, monkeypatch):
     assert d.download([base]).read_bytes() == b'correct artifact'
     assert len(calls) == 2
     assert calls[1][1]['Range'] == 'bytes=8-'
+
+
+def test_https_downloads_use_explicit_verified_ca_context(tmp_path, monkeypatch):
+    captured = {}
+
+    class Response:
+        headers = {'Content-Length': '16'}
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read1(self, _size):
+            if captured.get('read'):
+                return b''
+            captured['read'] = True
+            return b'correct artifact'
+
+        read = read1
+
+    def fake_urlopen(_request, timeout, context):
+        captured['timeout'] = timeout
+        captured['context'] = context
+        return Response()
+
+    monkeypatch.setattr('runtime_download.urllib.request.urlopen', fake_urlopen)
+    d = downloader(tmp_path)
+    assert d.download(['https://download.example/artifact']).read_bytes() == b'correct artifact'
+    assert captured['context'] is d.tls_context
+    assert captured['context'].cert_store_stats()['x509_ca'] > 0
+
+
+def test_verified_tls_context_has_packaged_ca_roots():
+    assert verified_tls_context().cert_store_stats()['x509_ca'] > 0
+
+
+def test_shared_cache_download_is_serialized(server, tmp_path):
+    base, responder, calls = server
+
+    def slow_response(_path, _headers):
+        time.sleep(0.2)
+        return 200, {}, b'correct artifact'
+
+    responder['fn'] = slow_response
+    results = []
+    failures = []
+
+    def run_download():
+        try:
+            results.append(downloader(tmp_path).download([base + '/artifact']).read_bytes())
+        except Exception as exc:
+            failures.append(exc)
+
+    threads = [threading.Thread(target=run_download) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert failures == []
+    assert results == [b'correct artifact', b'correct artifact']
+    assert len(calls) == 1
+    assert not list(tmp_path.glob('download-diagnostics.json.tmp-*'))

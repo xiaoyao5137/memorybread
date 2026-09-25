@@ -7,11 +7,13 @@
   source_capture_ids 加 timeline 关联的全部 capture id（primary + capture_ids + captures.timeline_id）
 """
 import json
+import argparse
 import sqlite3
 import sys
 import time
+from pathlib import Path
 
-DB = "/Users/xianjiaqi/.memory-bread/memory-bread.db"
+DEFAULT_DB = Path.home() / ".memory-bread" / "memory-bread.db"
 
 MARKERS = [
     "/docs/", "docs.google", "/document/", "yuque.com", "feishu.cn/docx",
@@ -54,8 +56,23 @@ def parse_ids(raw):
         return []
 
 
-def main():
-    conn = sqlite3.connect(DB)
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=DEFAULT_DB,
+        help="MemoryBread SQLite 数据库路径（默认: %(default)s）",
+    )
+    return parser.parse_args()
+
+
+def main(db_path=None):
+    resolved_db = Path(db_path) if db_path is not None else parse_args().db
+    if not resolved_db.is_file():
+        print("数据库不存在: %s" % resolved_db, file=sys.stderr)
+        return 2
+    conn = sqlite3.connect(str(resolved_db))
     conn.row_factory = sqlite3.Row
 
     # 文档索引：identity -> (doc_id, source_memory_ids, source_capture_ids, source_episode_ids)
