@@ -358,6 +358,67 @@
   -webkit-user-select: none;
 }
 
+.creation-manual-edit__save {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid #a45d22;
+  border-radius: 6px;
+  background: #a45d22;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.creation-manual-edit__save:disabled { opacity: .55; cursor: default; }
+.creation-manual-edit__save:focus-visible,
+.creation-manual-edit button:focus-visible,
+.creation-manual-edit__textarea:focus-visible { outline: 2px solid #a45d22; outline-offset: 2px; }
+
+.creation-manual-edit__message {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--mb-border-strong);
+  color: var(--mb-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.creation-manual-edit__message.is-error { color: #b42318; background: #fff8f6; }
+
+.creation-document-content.is-manual-edit { display: flex; flex-direction: column; }
+.creation-manual-edit { display: flex; flex: 1; flex-direction: column; min-height: 100%; gap: 12px; }
+.creation-manual-edit__toolbar,
+.creation-manual-edit__footer { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; color: var(--mb-text-secondary); font-size: 12px; }
+.creation-manual-edit__toolbar > div { display: flex; gap: 4px; }
+.creation-manual-edit__toolbar button {
+  padding: 5px 10px;
+  border: 1px solid var(--mb-border-strong);
+  border-radius: 6px;
+  background: var(--mb-bg-card);
+  color: var(--mb-text-primary);
+  cursor: pointer;
+}
+.creation-manual-edit__toolbar button[aria-pressed="true"] { color: #a45d22; border-color: #a45d22; background: #fff8f0; }
+.creation-manual-edit__textarea {
+  box-sizing: border-box;
+  flex: 1;
+  width: 100%;
+  min-height: 360px;
+  padding: 14px 16px;
+  border: 1px solid var(--mb-border-strong);
+  border-radius: 8px;
+  resize: vertical;
+  background: var(--mb-bg-card);
+  color: var(--mb-text-primary);
+  font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  tab-size: 2;
+}
+.creation-manual-edit__preview { flex: 1; min-height: 360px; }
+.creation-manual-edit__footer { flex-wrap: wrap; }
+
 .creation-evidence-image {
   display: block;
   width: min(100%, 1040px);

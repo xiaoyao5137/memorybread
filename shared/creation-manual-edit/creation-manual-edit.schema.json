@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://memorybread.local/schemas/creation-manual-edit.schema.json",
+  "title": "Creation manual document edit v1",
+  "$defs": {
+    "request": {
+      "type": "object",
+      "required": ["session_id", "base_revision_no", "base_document_hash", "content"],
+      "additionalProperties": false,
+      "properties": {
+        "session_id": { "type": "string", "description": "Empty only for a legacy history row without a session ID." },
+        "base_revision_no": { "type": "integer", "minimum": 1 },
+        "base_document_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "content": { "type": "string", "description": "Complete Markdown body; at most 1 MiB in UTF-8 bytes." }
+      }
+    },
+    "response": {
+      "type": "object",
+      "required": ["history_id", "session_id", "revision_no", "document_hash", "content", "changed"],
+      "additionalProperties": false,
+      "properties": {
+        "history_id": { "type": "integer", "minimum": 1 },
+        "session_id": { "type": "string" },
+        "revision_no": { "type": "integer", "minimum": 1 },
+        "document_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "content": { "type": "string" },
+        "changed": { "type": "boolean" },
+        "document_patch": { "type": "object" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["error"],
+      "properties": {
+        "error": {
+          "type": "object",
+          "required": ["code", "message", "retryable", "request_id"],
+          "properties": {
+            "code": { "type": "string" },
+            "message": { "type": "string" },
+            "retryable": { "type": "boolean" },
+            "request_id": { "type": "null" }
+          }
+        }
+      }
+    }
+  }
+}

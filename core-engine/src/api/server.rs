@@ -89,7 +89,8 @@ use super::{
         creation::{
             cancel_creation_inline_edit, generate_document, get_history,
             get_inline_edit_capabilities, list_history, preview_references, run_creation_agent,
-            run_creation_brainstorm_turn, run_creation_inline_edit, save_history, start_history,
+            run_creation_brainstorm_turn, run_creation_inline_edit, save_history,
+            save_manual_document, start_history,
             undo_creation_inline_edit, undo_creation_operation, update_history_progress,
         },
         creation_skill::{
@@ -236,6 +237,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/creation/history", get(list_history))
         .route("/api/creation/history/start", post(start_history))
         .route("/api/creation/history/:id", get(get_history))
+        .route("/api/creation/history/:id/document", axum::routing::put(save_manual_document))
         .route(
             "/api/creation/history/:id/progress",
             axum::routing::patch(update_history_progress),

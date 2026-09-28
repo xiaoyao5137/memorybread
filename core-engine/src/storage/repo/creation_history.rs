@@ -1,13 +1,111 @@
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 /// Shared optimistic-concurrency guard for conversational and selection edits.
 /// Call again inside the transaction immediately before committing a result.
-pub fn matches_document_base(history: &CreationHistory, session: &str, revision: i64, document: &str) -> bool {
+pub fn matches_document_base(
+    history: &CreationHistory,
+    session: &str,
+    revision: i64,
+    document: &str,
+) -> bool {
     history.session_id.as_deref() == Some(session)
         && history.revision_no == revision
         && history.generated_content == document
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualDocumentSaveOutcome {
+    Saved(i64),
+    Unchanged(i64),
+    NotFound,
+    BaseChanged,
+    NotReady,
+}
+
+/// Commit a user-edited Markdown body against Core's current session revision.
+/// The row, revision and content hash are checked again in the same transaction
+/// that writes the new body. Other creation metadata and historical records stay intact.
+pub fn save_manual_document(
+    conn: &Connection,
+    history_id: i64,
+    session_id: &str,
+    base_revision_no: i64,
+    base_document_hash: &str,
+    content: &str,
+    document_patch_json: &str,
+) -> Result<ManualDocumentSaveOutcome> {
+    let tx = conn.unchecked_transaction()?;
+    let Some(current) = get_by_id(&tx, history_id)? else {
+        return Ok(ManualDocumentSaveOutcome::NotFound);
+    };
+    let legacy_without_session = current
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty();
+    if legacy_without_session {
+        // Older creation rows have no session. The explicit row ID, revision and
+        // body hash are their concurrency key; an empty session is required so
+        // a caller cannot attach the legacy document to another session.
+        if !session_id.is_empty() {
+            return Ok(ManualDocumentSaveOutcome::NotFound);
+        }
+    } else {
+        if current.session_id.as_deref() != Some(session_id) {
+            return Ok(ManualDocumentSaveOutcome::NotFound);
+        }
+        let Some(context) = get_session_context(&tx, session_id)? else {
+            return Ok(ManualDocumentSaveOutcome::NotFound);
+        };
+        if context.latest.id != history_id {
+            return Ok(ManualDocumentSaveOutcome::BaseChanged);
+        }
+    }
+    if !matches!(
+        current.lifecycle_status.as_str(),
+        "completed" | "failed" | "cancelled"
+    ) || current.generated_content.trim().is_empty()
+    {
+        return Ok(ManualDocumentSaveOutcome::NotReady);
+    }
+    let current_hash = format!("{:x}", Sha256::digest(current.generated_content.as_bytes()));
+    if current.revision_no != base_revision_no || current_hash != base_document_hash {
+        return Ok(ManualDocumentSaveOutcome::BaseChanged);
+    }
+    if current.generated_content == content {
+        return Ok(ManualDocumentSaveOutcome::Unchanged(current.revision_no));
+    }
+    let revision_no = current
+        .revision_no
+        .checked_add(1)
+        .ok_or(rusqlite::Error::InvalidQuery)?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let changed = tx.execute(
+        "UPDATE creation_history
+         SET generated_content=?1, revision_no=?2, edit_operation='manual_edit',
+             document_patch_json=?3, lifecycle_status='completed', updated_at=?4
+         WHERE id=?5 AND COALESCE(TRIM(session_id), '')=?6 AND revision_no=?7
+           AND generated_content=?8 AND lifecycle_status IN ('completed','failed','cancelled')",
+        params![
+            content,
+            revision_no,
+            document_patch_json,
+            now,
+            history_id,
+            session_id,
+            base_revision_no,
+            current.generated_content,
+        ],
+    )?;
+    if changed != 1 {
+        return Ok(ManualDocumentSaveOutcome::BaseChanged);
+    }
+    tx.commit()?;
+    Ok(ManualDocumentSaveOutcome::Saved(revision_no))
 }
 
 const HISTORY_SELECT: &str = "SELECT id, prompt, generated_content, doc_type, audience,

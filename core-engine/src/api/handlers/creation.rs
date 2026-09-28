@@ -117,6 +117,7 @@ const INLINE_EDIT_SCHEMA_VERSION: &str = "creation.inline-edit.v1";
 const INLINE_EDIT_CONSTRAINTS_VERSION: &str = "creation.inline-edit.constraints.v1";
 const INLINE_EDIT_MAX_SELECTION_BYTES: usize = 12_000;
 const INLINE_EDIT_MAX_CUSTOM_PROMPT_BYTES: usize = 2_000;
+const MANUAL_DOCUMENT_MAX_BYTES: usize = 1024 * 1024;
 const CREATION_LEASE_TTL_MS: i64 = 15 * 60 * 1000;
 
 fn creation_sidecar_client() -> reqwest::Client {
@@ -4516,6 +4517,7 @@ fn normalize_edit_operation(value: &str) -> &str {
         | "polish_selection"
         | "expand_selection"
         | "elaborate_selection"
+        | "manual_edit"
         | "undo_inline_edit" => value,
         _ => "rewrite_document",
     }
@@ -4580,6 +4582,193 @@ fn enrich_creation_model_from_preferences(state: &Arc<AppState>, req: &mut Gener
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SaveManualDocumentRequest {
+    /// Empty only for a legacy history row without a session_id.
+    pub session_id: String,
+    pub base_revision_no: i64,
+    pub base_document_hash: String,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SaveManualDocumentResponse {
+    pub history_id: i64,
+    pub session_id: String,
+    pub revision_no: i64,
+    pub document_hash: String,
+    pub content: String,
+    pub changed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_patch: Option<serde_json::Value>,
+}
+
+/// PUT /api/creation/history/:id/document - save the user's Markdown in place.
+/// This path never calls the model and never treats browser state as the base.
+pub async fn save_manual_document(
+    State(state): State<Arc<AppState>>,
+    Path(history_id): Path<i64>,
+    Json(req): Json<SaveManualDocumentRequest>,
+) -> Result<Json<SaveManualDocumentResponse>, InlineEditHttpError> {
+    let fail = |status, code, message, retryable| {
+        inline_edit_error(status, code, message, retryable, None)
+    };
+    if history_id <= 0
+        || req.session_id != req.session_id.trim()
+        || req.base_revision_no < 1
+        || req.base_document_hash.len() != 64
+        || !req
+            .base_document_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            "CREATION_DOCUMENT_EDIT_INVALID",
+            "文档编辑基线参数无效",
+            false,
+        ));
+    }
+    if req.content.trim().is_empty() {
+        return Err(fail(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "CREATION_DOCUMENT_EMPTY",
+            "文档正文不能为空",
+            false,
+        ));
+    }
+    if req.content.len() > MANUAL_DOCUMENT_MAX_BYTES {
+        return Err(fail(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "CREATION_DOCUMENT_TOO_LARGE",
+            "文档正文超过 1 MiB 上限",
+            false,
+        ));
+    }
+
+    let result_hash = sha256_hex(&req.content);
+    let patch = serde_json::json!({
+        "operation": "manual_edit",
+        "base_hash": req.base_document_hash.clone(),
+        "result_hash": result_hash.clone(),
+        "change_count": 1,
+        "changes": [{
+            "change_type": "modified",
+            "section_title": "正文",
+            "start_line": 1,
+            "end_line": req.content.lines().count().max(1),
+            "summary": "用户手动编辑正文"
+        }],
+        "summary": "用户手动编辑正文"
+    });
+    let patch_json = serde_json::to_string(&patch).map_err(|_| {
+        fail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "CREATION_DOCUMENT_EDIT_UNAVAILABLE",
+            "保存文档失败",
+            true,
+        )
+    })?;
+    let lease_session_id = if req.session_id.is_empty() {
+        format!("history-{history_id}")
+    } else {
+        req.session_id.clone()
+    };
+    let lease_owner = format!("manual-edit-{}", uuid::Uuid::new_v4());
+    if !acquire_creation_lease(&state, &lease_session_id, &lease_owner) {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "CREATION_DOCUMENT_EDIT_BUSY",
+            "当前创作会话已有操作正在运行",
+            true,
+        ));
+    }
+    let outcome = state.storage.with_conn(|conn| {
+        if !req.session_id.is_empty() {
+            crate::storage::repo::creation_inline_edit::cancel_stale_precommit_for_session(
+                conn,
+                &req.session_id,
+                chrono::Utc::now()
+                    .timestamp_millis()
+                    .saturating_sub(CREATION_LEASE_TTL_MS),
+            )?;
+            if crate::storage::repo::creation_inline_edit::get_active_for_session(
+                conn,
+                &req.session_id,
+            )?
+            .is_some()
+            {
+                return Ok(None);
+            }
+        }
+        Ok(Some(crate::storage::repo::creation_history::save_manual_document(
+            conn,
+            history_id,
+            &req.session_id,
+            req.base_revision_no,
+            &req.base_document_hash,
+            &req.content,
+            &patch_json,
+        )?))
+    });
+    release_creation_lease(&state, &lease_session_id, &lease_owner);
+    let outcome = outcome.map_err(|error| {
+        error!("保存手工编辑正文失败: {}", error);
+        fail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "CREATION_DOCUMENT_EDIT_UNAVAILABLE",
+            "保存文档失败",
+            true,
+        )
+    })?;
+    use crate::storage::repo::creation_history::ManualDocumentSaveOutcome;
+    let (revision_no, changed) = match outcome {
+        None => {
+            return Err(fail(
+                StatusCode::CONFLICT,
+                "CREATION_DOCUMENT_EDIT_BUSY",
+                "当前选区编辑仍在进行，请稍后重试",
+                true,
+            ));
+        }
+        Some(ManualDocumentSaveOutcome::NotFound) => {
+            return Err(fail(
+                StatusCode::NOT_FOUND,
+                "CREATION_DOCUMENT_EDIT_NOT_FOUND",
+                "创作文档不存在",
+                false,
+            ));
+        }
+        Some(ManualDocumentSaveOutcome::BaseChanged) => {
+            return Err(fail(
+                StatusCode::CONFLICT,
+                "CREATION_BASE_CHANGED",
+                "文档已变化，请重新加载后核对编辑内容",
+                false,
+            ));
+        }
+        Some(ManualDocumentSaveOutcome::NotReady) => {
+            return Err(fail(
+                StatusCode::CONFLICT,
+                "CREATION_DOCUMENT_EDIT_NOT_READY",
+                "文档仍在生成或尚无正文",
+                false,
+            ));
+        }
+        Some(ManualDocumentSaveOutcome::Saved(revision_no)) => (revision_no, true),
+        Some(ManualDocumentSaveOutcome::Unchanged(revision_no)) => (revision_no, false),
+    };
+    Ok(Json(SaveManualDocumentResponse {
+        history_id,
+        session_id: req.session_id,
+        revision_no,
+        document_hash: result_hash,
+        content: req.content,
+        changed,
+        document_patch: changed.then_some(patch),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SaveHistoryRequest {
     #[serde(default)]
     pub committed_operation_id: Option<String>,
@@ -4597,6 +4786,11 @@ pub struct SaveHistoryRequest {
     pub session_id: Option<String>,
     #[serde(default)]
     pub history_id: Option<i64>,
+    /// Optional CAS base for a legacy fallback generation after a manual edit.
+    #[serde(default)]
+    pub base_revision_no: Option<i64>,
+    #[serde(default)]
+    pub base_document_hash: Option<String>,
     #[serde(default)]
     pub conversation: Vec<serde_json::Value>,
     #[serde(default)]
@@ -4641,6 +4835,11 @@ pub async fn save_history(
     let id = state
         .storage
         .with_conn(|conn| {
+            // Keep the legacy fallback's base check, metadata merge and body
+            // write in one SQLite transaction. Another Core process cannot
+            // interleave a manual edit between the read and the final write.
+            let tx = conn.unchecked_transaction()?;
+            let conn = &tx;
             if let (Some(session),Some(operation_id)) = (req.session_id.as_deref(),req.committed_operation_id.as_deref()) {
                 let operation = crate::storage::repo::creation_operation::get(conn,session,operation_id)?
                     .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
@@ -4661,6 +4860,7 @@ pub async fn save_history(
                     let ids: Vec<String> = req.evidence.iter().filter_map(|e|e["id"].as_str().map(str::to_string)).collect();
                     crate::storage::repo::creation_evidence::attach_to_history(conn,history.id,&ids)?;
                 }
+                tx.commit()?;
                 return Ok(history.id);
             }
             let references_json = serde_json::to_string(&req.references)?;
@@ -4719,6 +4919,18 @@ pub async fn save_history(
                         }
                     })
             };
+            // A compatibility save following a manual edit must name the exact
+            // Core-owned base. Durable operations use their own CAS commit;
+            // their acknowledgement is handled above without replaying a body.
+            if let Some(context) = prior.as_ref().filter(|context| context.latest.edit_operation == "manual_edit") {
+                let current_hash = sha256_hex(&context.latest.generated_content);
+                if req.history_id != Some(context.latest.id)
+                    || req.base_revision_no != Some(context.latest.revision_no)
+                    || req.base_document_hash.as_deref() != Some(current_hash.as_str())
+                {
+                    return Err(rusqlite::Error::InvalidQuery.into());
+                }
+            }
             let mut merged_evidence = prior
                 .as_ref()
                 .and_then(|context| context.latest.evidence_json.as_deref())
@@ -4876,9 +5088,16 @@ pub async fn save_history(
                 creation_brief_json.as_deref(),
                 req.brainstorm_revision,
             )?;
+            tx.commit()?;
             Ok(history_id)
         })
         .map_err(|e| {
+            if matches!(
+                &e,
+                crate::storage::error::StorageError::Sqlite(rusqlite::Error::InvalidQuery)
+            ) {
+                return (StatusCode::CONFLICT, "CREATION_BASE_CHANGED".to_string());
+            }
             error!("保存创作记录失败: {}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
         })?;

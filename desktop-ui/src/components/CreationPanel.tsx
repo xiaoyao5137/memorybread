@@ -153,6 +153,53 @@ interface CreationHistoryItem {
   brainstormRevision: number | null
   progressEpoch: number
 }
+
+interface ManualDocumentEdit {
+  historyId: number
+  sessionId: string
+  baseRevisionNo: number
+  baseDocumentHash: string
+  baseContent: string
+  draft: string
+}
+
+interface CreationDocumentBase {
+  historyId: number
+  revisionNo: number
+  documentHash: string
+}
+
+const MANUAL_DOCUMENT_DRAFT_KEY = 'memory-bread_creation_manual_document_draft_v1'
+const MAX_MANUAL_DOCUMENT_BYTES = 1024 * 1024
+
+const readManualDocumentDraft = (): ManualDocumentEdit | null => {
+  try {
+    const saved = window.sessionStorage.getItem(MANUAL_DOCUMENT_DRAFT_KEY)
+    if (!saved) return null
+    const parsed = JSON.parse(saved) as ManualDocumentEdit
+    return Number.isInteger(parsed.historyId)
+      && Number.isInteger(parsed.baseRevisionNo)
+      && typeof parsed.sessionId === 'string'
+      && typeof parsed.baseDocumentHash === 'string'
+      && typeof parsed.baseContent === 'string'
+      && typeof parsed.draft === 'string'
+      ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+const writeManualDocumentDraft = (edit: ManualDocumentEdit | null) => {
+  try {
+    if (edit && edit.draft !== edit.baseContent) {
+      window.sessionStorage.setItem(MANUAL_DOCUMENT_DRAFT_KEY, JSON.stringify(edit))
+    } else {
+      window.sessionStorage.removeItem(MANUAL_DOCUMENT_DRAFT_KEY)
+    }
+  } catch {
+    // Storage quota must never prevent editing or saving the document.
+  }
+}
 interface CreationEvidenceItem {
   id: string
   source_url: string
@@ -1565,6 +1612,16 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     historyId: number
     resultHash: string
   } | null>(null)
+  const [manualEdit, setManualEdit] = useState<ManualDocumentEdit | null>(null)
+  const [manualEditLoading, setManualEditLoading] = useState(false)
+  const [manualEditSaving, setManualEditSaving] = useState(false)
+  const [manualEditPreview, setManualEditPreview] = useState(false)
+  const [manualEditError, setManualEditError] = useState('')
+  const [manualEditNotice, setManualEditNotice] = useState('')
+  const [manualEditEpoch, setManualEditEpoch] = useState(0)
+  const [manualEditSavedAt, setManualEditSavedAt] = useState(0)
+  const manualEditRequestRef = useRef(0)
+  const manualEditRef = useRef<HTMLTextAreaElement>(null)
   const turnMatchedSkillsRef = useRef<MatchedCreationSkill[] | null>(null)
   const [skillPickerOpen, setSkillPickerOpen] = useState(false)
   const [skillQuery, setSkillQuery] = useState('')
@@ -1665,7 +1722,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
   useEffect(() => {
     const controller = new AbortController()
     const loadInlineCapabilities = async () => {
-      if (!activeHistoryId || !generatedContent.trim() || isGenerating) {
+      if (!activeHistoryId || !generatedContent.trim() || isGenerating || manualEdit) {
         setInlineCapabilities(null)
         setInlineSelection(null)
         return
@@ -1715,7 +1772,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     }
     void loadInlineCapabilities()
     return () => controller.abort()
-  }, [activeHistoryId, apiBaseUrl, generatedContent, isGenerating])
+  }, [activeHistoryId, apiBaseUrl, generatedContent, isGenerating, Boolean(manualEdit), manualEditEpoch])
 
   useEffect(() => {
     const updateSelection = () => {
@@ -1731,6 +1788,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
         !capabilities
         || !container
         || isGenerating
+        || manualEdit
         || showBrief
         || inlineRunningAction
         || selectionStableContent !== generatedContent
@@ -1779,7 +1837,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
       contentRef.current?.removeEventListener('scroll', updateSelection)
       window.removeEventListener('resize', updateSelection)
     }
-  }, [generatedContent, inlineCapabilities, inlinePromptOpen, inlineRunningAction, isGenerating, selectionStableContent, showBrief])
+  }, [generatedContent, inlineCapabilities, inlinePromptOpen, inlineRunningAction, isGenerating, manualEdit, selectionStableContent, showBrief])
 
   useEffect(() => {
     let cancelled = false
@@ -2170,6 +2228,169 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     }
   }
 
+  useEffect(() => {
+    if (manualEdit) writeManualDocumentDraft(manualEdit)
+  }, [manualEdit])
+
+  const cancelManualDocumentEdit = () => {
+    if (manualEditSaving) return
+    manualEditRequestRef.current += 1
+    setManualEdit(null)
+    setManualEditPreview(false)
+    setManualEditError('')
+    writeManualDocumentDraft(null)
+  }
+
+  const beginManualDocumentEdit = async () => {
+    const historyId = activeHistoryIdRef.current
+    if (
+      !historyId || !generatedContent.trim() || manualEdit || manualEditLoading
+      || manualEditSaving || isGenerating || isBrainstormLoading
+      || inlineRunningAction || isInlineUndoing || showBrief
+    ) return
+    const requestEpoch = ++manualEditRequestRef.current
+    setManualEditLoading(true)
+    setManualEditError('')
+    setManualEditNotice('')
+    try {
+      const response = await fetchWithLocalhostFallback(`${apiBaseUrl}/api/creation/history/${historyId}`)
+      if (!response.ok) throw new Error(await readApiErrorMessage(response, '读取文档失败'))
+      const history = await response.json() as Record<string, unknown>
+      if (manualEditRequestRef.current !== requestEpoch || activeHistoryIdRef.current !== historyId) return
+      const content = history.generated_content
+      const revisionNo = Number(history.revision_no)
+      if (Number(history.id) !== historyId || typeof content !== 'string' || !content.trim() || !Number.isInteger(revisionNo) || revisionNo < 1) {
+        throw new Error('当前文档尚未完成保存，请稍后再试')
+      }
+      if (history.lifecycle_status === 'running') throw new Error('文档仍在生成中，请等待本轮完成')
+      const savedSessionId = typeof history.session_id === 'string' ? history.session_id : ''
+      if (savedSessionId && savedSessionId !== sessionId) throw new Error('会话已切换，请重新打开这份文档')
+      const cached = readManualDocumentDraft()
+      if (cached && cached.historyId !== historyId && cached.draft !== cached.baseContent) {
+        throw new Error(`文档 #${cached.historyId} 还有未保存草稿，请先返回该文档处理`)
+      }
+      const baseDocumentHash = await sha256Hex(content)
+      if (manualEditRequestRef.current !== requestEpoch || activeHistoryIdRef.current !== historyId) return
+      const recoverCached = Boolean(cached && cached.historyId === historyId && cached.draft !== cached.baseContent)
+      const nextEdit: ManualDocumentEdit = recoverCached && cached
+        ? cached
+        : { historyId, sessionId: savedSessionId, baseRevisionNo: revisionNo, baseDocumentHash, baseContent: content, draft: content }
+      if (recoverCached && cached) {
+        setManualEditNotice('已恢复这份文档的未保存草稿')
+        if (cached.baseRevisionNo !== revisionNo || cached.baseDocumentHash !== baseDocumentHash) {
+          setManualEditError('文档已有新版本；草稿已保留，保存时会检查冲突。请先对照最新内容。')
+        }
+      }
+      setManualEdit(nextEdit)
+      setManualEditPreview(false)
+      setInlineSelection(null)
+      setInlinePromptOpen(false)
+      window.getSelection()?.removeAllRanges()
+      if (sanitizeGeneratedContent(content) !== generatedContent) {
+        const latestContent = sanitizeGeneratedContent(content)
+        syncSelectionStableContent(latestContent)
+        setGeneratedContent(latestContent)
+        setCurrentDocumentSource(current => current?.kind === 'creation_history' && current.id === String(historyId)
+          ? { ...current, content: latestContent }
+          : current)
+      }
+      window.requestAnimationFrame(() => manualEditRef.current?.focus())
+    } catch (editError) {
+      if (manualEditRequestRef.current === requestEpoch) {
+        setManualEditError(toUserFacingError(editError, '无法打开文档编辑'))
+      }
+    } finally {
+      if (manualEditRequestRef.current === requestEpoch) setManualEditLoading(false)
+    }
+  }
+
+  const saveManualDocumentEdit = async () => {
+    const edit = manualEdit
+    if (!edit || manualEditSaving || manualEditLoading) return
+    if (edit.draft === edit.baseContent) {
+      cancelManualDocumentEdit()
+      return
+    }
+    if (!edit.draft.trim()) {
+      setManualEditError('文档内容不能为空；当前草稿已保留')
+      return
+    }
+    if (new TextEncoder().encode(edit.draft).length > MAX_MANUAL_DOCUMENT_BYTES) {
+      setManualEditError('文档超过 1 MiB，请精简后保存；当前草稿已保留')
+      return
+    }
+    const requestEpoch = manualEditRequestRef.current
+    setManualEditSaving(true)
+    setManualEditError('')
+    try {
+      const response = await fetchWithLocalhostFallback(
+        `${apiBaseUrl}/api/creation/history/${edit.historyId}/document`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: edit.sessionId,
+            base_revision_no: edit.baseRevisionNo,
+            base_document_hash: edit.baseDocumentHash,
+            content: edit.draft,
+          }),
+        },
+      )
+      if (!response.ok) {
+        const message = await readApiErrorMessage(response, '保存文档失败')
+        throw new Error(response.status === 409 ? `${message}；当前草稿已保留` : message)
+      }
+      const result = await response.json() as {
+        history_id?: number
+        revision_no?: number
+        content?: string
+        document_hash?: string
+        changed?: boolean
+      }
+      if (
+        result.history_id !== edit.historyId || typeof result.content !== 'string' || result.content !== edit.draft
+        || typeof result.revision_no !== 'number' || !Number.isInteger(result.revision_no)
+        || typeof result.document_hash !== 'string'
+        || result.document_hash !== await sha256Hex(result.content)
+      ) throw new Error('保存响应校验失败，草稿已保留；请重新打开文档确认结果')
+      if (manualEditRequestRef.current !== requestEpoch || activeHistoryIdRef.current !== edit.historyId) return
+      const nextContent = sanitizeGeneratedContent(result.content)
+      syncSelectionStableContent(nextContent)
+      setGeneratedContent(nextContent)
+      setCurrentDocumentSource(current => current?.kind === 'creation_history' && current.id === String(edit.historyId)
+        ? { ...current, content: nextContent }
+        : current)
+      setCreationHistory(items => items.map(item => item.id === edit.historyId
+        ? {
+          ...item,
+          fullContent: nextContent,
+          preview: stripInternalCreationMarkers(nextContent).slice(0, 100),
+          revisionNo: result.revision_no as number,
+          editOperation: 'manual_edit',
+          documentPatch: null,
+          timestamp: new Date().toLocaleString('zh-CN'),
+          lifecycleStatus: 'completed',
+        }
+        : item))
+      setManualEditSavedAt(Date.now())
+      setManualEdit(null)
+      setManualEditPreview(false)
+      setManualEditNotice(result.changed === false ? '文档内容未变化' : '文档已保存')
+      setInlineUndo(null)
+      setInlineSelection(null)
+      setInlineCapabilities(null)
+      setManualEditEpoch(value => value + 1)
+      writeManualDocumentDraft(null)
+      if (historyPage === 1) void loadCreationHistory()
+    } catch (editError) {
+      if (manualEditRequestRef.current === requestEpoch) {
+        setManualEditError(toUserFacingError(editError, '保存文档失败；当前草稿已保留'))
+      }
+    } finally {
+      if (manualEditRequestRef.current === requestEpoch) setManualEditSaving(false)
+    }
+  }
+
   const resetInlineOperation = (cancelServer = true) => {
     const requestId = inlineRequestIdRef.current
     const activeSessionId = useAppStore.getState().creationDraft.sessionId
@@ -2189,6 +2410,18 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
   }
 
   const handleRestoreHistory = (item: typeof creationHistory[0]) => {
+    if (manualEditSaving || manualEditLoading || (manualEdit && manualEdit.draft !== manualEdit.baseContent)) {
+      setManualEditError('请先保存或取消当前文档编辑；未保存草稿已保留')
+      setTopTab('creation')
+      return
+    }
+    manualEditRequestRef.current += 1
+    setManualEdit(null)
+    setManualEditLoading(false)
+    setManualEditPreview(false)
+    setManualEditError('')
+    setManualEditNotice('')
+    setManualEditSavedAt(item.editOperation === 'manual_edit' ? Date.now() : 0)
     // Stop and persist the outgoing run before restoring another document.
     // Abort alone cannot suppress already buffered or parsed responses.
     handleStopGenerate()
@@ -2267,6 +2500,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
       )
     if (
       item.documentPatch
+      && item.editOperation !== 'manual_edit'
       && !restoredEvents.some(event => event.type === 'document.patch.applied')
     ) {
       restoredEvents.push({
@@ -2936,6 +3170,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
       || inlineRunningAction
       || inlineUndoAbortRef.current
       || isGenerating
+      || manualEdit
     ) return
     const actionPrompt = action === 'brainstorm' ? customPromptOverride : action === 'polish' ? inlineCustomPrompt : ''
     if (new TextEncoder().encode(actionPrompt).length > capabilities.max_custom_prompt_bytes) {
@@ -3259,7 +3494,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
 
   const undoInlineEdit = async () => {
     const undo = inlineUndo
-    if (!undo || inlineRunningAction || inlineUndoAbortRef.current || isGenerating) return
+    if (!undo || inlineRunningAction || inlineUndoAbortRef.current || isGenerating || manualEdit) return
     const controller = new AbortController()
     inlineUndoAbortRef.current = controller
     const requestEpoch = conversationEpochRef.current
@@ -4428,7 +4663,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
 
   const beginInlineBrainstorm = async () => {
     const snapshot = inlineSelection
-    if (!snapshot || !inlineCapabilities?.enabled || inlineRunningAction || isGenerating) return
+    if (!snapshot || !inlineCapabilities?.enabled || inlineRunningAction || isGenerating || manualEdit) return
     const now = Date.now()
     const messageId = `inline-brainstorm-user-${now}`
     const brainstormSessionId = `inline-brainstorm-${sessionId || 'current'}-${globalThis.crypto.randomUUID?.() || Math.random().toString(16).slice(2)}`
@@ -4655,6 +4890,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     usedModelId: string,
     latencyMs: number | null,
     lifecycleStatus: 'completed' | 'failed' = 'completed',
+    documentBase: CreationDocumentBase | null = null,
   ) => {
     const state = useAppStore.getState().creationDraft
     const requestEpoch = conversationEpochRef.current
@@ -4708,7 +4944,9 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
           model: usedModelId,
           latency_ms: latencyMs,
           session_id: state.sessionId,
-          history_id: Number.isSafeInteger(sourceHistoryId) ? sourceHistoryId : null,
+          history_id: documentBase?.historyId ?? (Number.isSafeInteger(sourceHistoryId) ? sourceHistoryId : null),
+          base_revision_no: documentBase?.revisionNo,
+          base_document_hash: documentBase?.documentHash,
           root_request: state.rootRequest || userMessage,
           conversation: chat,
           agent_trace: state.agentEvents.map(toStoredAgentEvent),
@@ -4800,6 +5038,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     chat: CreationChatMessage[],
     controller: AbortController,
     assertActive: () => void,
+    documentBase: CreationDocumentBase | null,
   ) => {
     assertActive()
     let referencesForHistory: CreationReferenceItem[] = []
@@ -4834,7 +5073,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     const latencyMs = Date.now() - startedAt
     setLastInferenceMeta({ model: usedModelId, latencyMs })
     const finalChat = appendAssistantCompletion(chat, null)
-    await persistCreationResult(userMessage, content, finalChat, usedModelId, latencyMs)
+    await persistCreationResult(userMessage, content, finalChat, usedModelId, latencyMs, 'completed', documentBase)
   }
 
   const runAgentTurn = async ({
@@ -4846,7 +5085,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     confirmed?: boolean
     appendUser?: boolean
   }) => {
-    if (inlineRunningAction || inlineUndoAbortRef.current) return
+    if (inlineRunningAction || inlineUndoAbortRef.current || manualEdit) return
     const message = userMessage.trim()
     if (!message) return
     setInlineUndo(null)
@@ -4914,6 +5153,38 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     const isRunActive = () => !controller.signal.aborted && isRunOwned()
     const assertRunActive = () => {
       if (!isRunActive()) throw new DOMException('创作请求已取消', 'AbortError')
+    }
+    // Capture the persisted base before any model output. The legacy generator
+    // can save after a manual edit only when that exact version is still current.
+    let documentBase: CreationDocumentBase | null = null
+    const baseHistoryId = activeHistoryIdRef.current
+    if (baseHistoryId && useAppStore.getState().creationDraft.generatedContent.trim()) {
+      try {
+        const baseResponse = await fetchWithLocalhostFallback(
+          `${apiBaseUrl}/api/creation/history/${baseHistoryId}`,
+          { signal: controller.signal },
+        )
+        if (baseResponse.ok) {
+          const persisted = await baseResponse.json() as Record<string, unknown>
+          const rawContent = persisted.generated_content
+          const revisionNo = Number(persisted.revision_no)
+          if (
+            Number(persisted.id) === baseHistoryId
+            && typeof rawContent === 'string'
+            && sanitizeGeneratedContent(rawContent) === useAppStore.getState().creationDraft.generatedContent
+            && Number.isInteger(revisionNo) && revisionNo > 0
+          ) {
+            documentBase = {
+              historyId: baseHistoryId,
+              revisionNo,
+              documentHash: await sha256Hex(rawContent),
+            }
+          }
+        }
+      } catch {
+        // The durable operation may still succeed. A legacy save without a
+        // verified base will be rejected rather than overwrite a manual edit.
+      }
     }
     await startCreationHistory(message, chat, activeSessionId, controller.signal)
     if (!isRunActive()) {
@@ -4983,7 +5254,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
         setCreationDraft({ brainstormPaused: true })
         setBrainstormContinuationOpen(false)
       }
-      await persistCreationResult(message, finalContent, finalChat, usedModelId, latencyMs)
+      await persistCreationResult(message, finalContent, finalChat, usedModelId, latencyMs, 'completed', documentBase)
       assertRunActive()
       setAttachments([])
     } catch (err) {
@@ -4992,7 +5263,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
       // 旧生成器不传递脑暴简报，不能在降级时丢失用户已确认的回答。
       if (code === 'CREATION_AGENT_NOT_AVAILABLE' && !useAppStore.getState().creationDraft.brainstormState) {
         try {
-          await runLegacyGeneration(message, chat, controller, assertRunActive)
+          await runLegacyGeneration(message, chat, controller, assertRunActive, documentBase)
           return
         } catch (legacyError) {
           if (!isRunActive()) return
@@ -5100,6 +5371,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
 
   const handleGenerate = async () => {
     if (isGenerating || isBrainstormLoading) return
+    if (manualEdit) { setManualEditError('请先保存或取消当前文档编辑'); return }
     if (briefDirty || isBriefSaving) { setBrainstormError('请先保存创作简报修改'); setShowBrief(true); return }
     if (inlineRunningAction || inlineUndoAbortRef.current) return
     if (isCreationSessionTerminated(useAppStore.getState().creationDraft)) return
@@ -5133,6 +5405,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     const liveDraft = useAppStore.getState().creationDraft
     const state = liveDraft.brainstormState
     if (!state || state.phase !== 'exploring' || isGenerating || abortRef.current || isBrainstormLoading) return
+    if (manualEdit) { setManualEditError('请先保存或取消当前文档编辑'); return }
     if (inlineRunningAction || inlineUndoAbortRef.current || isCreationSessionTerminated(liveDraft)) return
     if (briefDirty || isBriefSaving) { setBrainstormError('请先保存创作简报修改'); setShowBrief(true); return }
     setBrainstormError(null)
@@ -5303,6 +5576,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
 
   const handleTerminateSession = () => {
     if (!hasActiveSession || sessionTerminated) return
+    if (manualEdit) { setManualEditError('请先保存或取消当前文档编辑'); return }
 
     conversationEpochRef.current += 1
     if (abortRef.current && !abortRef.current.signal.aborted) abortRef.current.abort()
@@ -5389,6 +5663,17 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
 
   const handleNewConversation = () => {
     if ((!sessionTerminated && (isGenerating || isBrainstormLoading || pendingConfirmation)) || !hasActiveSession) return
+    if (manualEditSaving || manualEditLoading || (manualEdit && manualEdit.draft !== manualEdit.baseContent)) {
+      setManualEditError('请先保存或取消当前文档编辑；未保存草稿已保留')
+      return
+    }
+    manualEditRequestRef.current += 1
+    setManualEdit(null)
+    setManualEditLoading(false)
+    setManualEditPreview(false)
+    setManualEditError('')
+    setManualEditNotice('')
+    setManualEditSavedAt(0)
 
     conversationEpochRef.current += 1
     brainstormAbortRef.current?.abort()
@@ -5560,6 +5845,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
       ))
     : undefined
   const latestDocumentPatch = latestDocumentMutation?.type === 'document.patch.applied'
+    && (!manualEditSavedAt || Number(latestDocumentMutation.timestamp) > manualEditSavedAt)
     ? latestDocumentMutation.data?.patch as Record<string, unknown> | undefined
     : undefined
   const latestPatchTargets = Array.isArray(latestDocumentPatch?.target_sections)
@@ -6383,7 +6669,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                   type="button"
                   className="creation-terminate-session-button"
                   onClick={handleTerminateSession}
-                  disabled={!hasActiveSession || sessionTerminated}
+                  disabled={!hasActiveSession || sessionTerminated || Boolean(manualEdit) || manualEditSaving}
                   aria-label="终止当前会话"
                   title={sessionTerminated ? '当前会话已终止' : '停止当前会话并保留已有内容'}
                 >
@@ -6394,7 +6680,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                   type="button"
                   className="creation-new-session-button"
                   onClick={handleNewConversation}
-                  disabled={(!sessionTerminated && (isGenerating || isBrainstormLoading || Boolean(pendingConfirmation))) || !hasActiveSession}
+                  disabled={(!sessionTerminated && (isGenerating || isBrainstormLoading || Boolean(pendingConfirmation))) || !hasActiveSession || Boolean(manualEdit) || manualEditSaving}
                   aria-label="开启新会话"
                   title={isGenerating || isBrainstormLoading || pendingConfirmation
                     ? '当前创作结束或中止后可开启新会话'
@@ -6728,7 +7014,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                             type="button"
                             className="is-secondary"
                             onClick={() => void generateBrainstormDraft()}
-                            disabled={isBrainstormLoading || isGenerating || Boolean(inlineRunningAction) || isInlineUndoing}
+                            disabled={isBrainstormLoading || isGenerating || Boolean(inlineRunningAction) || isInlineUndoing || Boolean(manualEdit)}
                             title="基于已提交的回答生成一版文档，未答问题保留待确认"
                           >
                             <FileText size={15} /> 先生成一版
@@ -6890,7 +7176,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                               type="button"
                               className="is-secondary"
                               onClick={() => void generateBrainstormDraft()}
-                              disabled={isBrainstormLoading || isGenerating || Boolean(inlineRunningAction) || isInlineUndoing}
+                              disabled={isBrainstormLoading || isGenerating || Boolean(inlineRunningAction) || isInlineUndoing || Boolean(manualEdit)}
                               title="基于已提交的回答生成一版文档，未答问题保留待确认"
                             >
                               <FileText size={15} /> 先生成一版
@@ -7298,7 +7584,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                       setBrainstormContinuationDirectionIds(recommended ? [recommended.id] : [])
                       setBrainstormContinuationOpen(true)
                     }}
-                    disabled={isBrainstormLoading || Boolean(inlineRunningAction)}
+                    disabled={isBrainstormLoading || Boolean(inlineRunningAction) || Boolean(manualEdit)}
                   >
                     <Lightbulb size={16} /> 继续脑暴
                   </button>
@@ -7306,7 +7592,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                 <button
                   onClick={isGenerating ? handleStopGenerate : handleGenerate}
                   disabled={!isGenerating && (
-                    Boolean(inlineRunningAction) || isInlineUndoing
+                    Boolean(inlineRunningAction) || isInlineUndoing || Boolean(manualEdit) || manualEditSaving
                     ||
                     sessionTerminated
                     ||
@@ -7375,12 +7661,33 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                   )}
                 </div>
                 <div className="creation-document-header__actions" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  {inlineUndo && !isGenerating && !inlineRunningAction && (
+                  {manualEdit ? (
+                    <>
+                      <button type="button" onClick={() => void saveManualDocumentEdit()}
+                        disabled={manualEditSaving || manualEdit.draft === manualEdit.baseContent}
+                        className="creation-manual-edit__save" aria-label="保存文档">
+                        {manualEditSaving ? <Loader2 size={15} className="spin" /> : <Check size={15} />}
+                        {manualEditSaving ? '正在保存…' : '保存文档'}
+                      </button>
+                      <button type="button" onClick={cancelManualDocumentEdit}
+                        disabled={manualEditSaving} style={compactButtonStyle} aria-label="取消文档编辑">
+                        取消
+                      </button>
+                    </>
+                  ) : generatedContent && !showBrief && activeHistoryId && (
+                    <button type="button" onClick={() => void beginManualDocumentEdit()}
+                      disabled={manualEditLoading || isGenerating || isBrainstormLoading || Boolean(inlineRunningAction) || isInlineUndoing}
+                      style={compactButtonStyle} aria-label="编辑文档">
+                      {manualEditLoading ? <Loader2 size={15} className="spin" /> : <Pencil size={15} />}
+                      {manualEditLoading ? '正在打开…' : '编辑文档'}
+                    </button>
+                  )}
+                  {inlineUndo && !manualEdit && !isGenerating && !inlineRunningAction && (
                     <button type="button" onClick={() => void undoInlineEdit()} disabled={isInlineUndoing} style={compactButtonStyle}>
                       {isInlineUndoing ? '正在撤销…' : '撤销选区修改'}
                     </button>
                   )}
-                  {inlineError && !inlineSelection && (
+                  {inlineError && !inlineSelection && !manualEdit && (
                     <span className="creation-inline-edit-status is-error" role="alert">{inlineError}</span>
                   )}
                   <button
@@ -7395,15 +7702,21 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                     {fullscreenPanel === 'document' ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
                     {fullscreenPanel === 'document' ? '退出全屏' : '全屏'}
                   </button>
-                  {brainstormState && generatedContent && <button type="button" style={compactButtonStyle} disabled={briefDirty || isBriefSaving} onClick={() => setShowBrief(current => !current)}>
+                  {brainstormState && generatedContent && !manualEdit && <button type="button" style={compactButtonStyle} disabled={briefDirty || isBriefSaving} onClick={() => setShowBrief(current => !current)}>
                     {showBrief ? '查看创作文档' : '编辑创作简报'}
                   </button>}
-                  {(!brainstormState || (generatedContent && !showBrief)) && <button onClick={handleCopy} disabled={!generatedContent} style={compactButtonStyle}>
+                  {!manualEdit && (!brainstormState || (generatedContent && !showBrief)) && <button onClick={handleCopy} disabled={!generatedContent} style={compactButtonStyle}>
                     <Copy size={15} />
                     {copySuccess ? '已复制' : '复制'}
                   </button>}
                 </div>
               </div>
+              {(manualEditError || manualEditNotice) && (
+                <div className={`creation-manual-edit__message${manualEditError ? ' is-error' : ''}`}
+                  role={manualEditError ? 'alert' : 'status'}>
+                  {manualEditError || manualEditNotice}
+                </div>
+              )}
               {currentDocumentSkills.length > 0 && (
                 <div className="creation-document-skills" aria-label="当前文档关联技能">
                   <span>关联技能</span>
@@ -7437,8 +7750,47 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                   </div>
                 </div>
               )}
-              <div ref={contentRef} className="creation-document-content" style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
-                {brainstormState && (!selectionStableContent || showBrief) ? (
+              <div ref={contentRef} className={`creation-document-content${manualEdit ? ' is-manual-edit' : ''}`} style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
+                {manualEdit ? (
+                  <div className="creation-manual-edit">
+                    <div className="creation-manual-edit__toolbar">
+                      <span>编辑 Markdown 原文，保存后更新当前文档</span>
+                      <div role="group" aria-label="文档编辑视图">
+                        <button type="button" aria-pressed={!manualEditPreview} onClick={() => setManualEditPreview(false)}>编辑</button>
+                        <button type="button" aria-pressed={manualEditPreview} onClick={() => setManualEditPreview(true)}>预览</button>
+                      </div>
+                    </div>
+                    {manualEditPreview ? (
+                      <div className="creation-manual-edit__preview">
+                        <MarkdownContent content={manualEdit.draft} components={markdownComponents} changes={[]} />
+                      </div>
+                    ) : (
+                      <textarea
+                        ref={manualEditRef}
+                        className="creation-manual-edit__textarea"
+                        aria-label="文档 Markdown 内容"
+                        spellCheck={false}
+                        value={manualEdit.draft}
+                        disabled={manualEditSaving}
+                        onChange={event => {
+                          const draft = event.target.value
+                          setManualEdit(current => current ? { ...current, draft } : current)
+                          setManualEditError('')
+                        }}
+                        onKeyDown={event => {
+                          if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+                            event.preventDefault()
+                            void saveManualDocumentEdit()
+                          }
+                        }}
+                      />
+                    )}
+                    <div className="creation-manual-edit__footer">
+                      <span>{manualEdit.draft === manualEdit.baseContent ? '尚无修改' : '有未保存的修改'}</span>
+                      <span>{new TextEncoder().encode(manualEdit.draft).length.toLocaleString()} / {MAX_MANUAL_DOCUMENT_BYTES.toLocaleString()} 字节</span>
+                    </div>
+                  </div>
+                ) : brainstormState && (!selectionStableContent || showBrief) ? (
                   <CreationBriefEditor key={brainstormState.session_id} state={brainstormState} rootRequest={rootRequest}
                     disabled={isBrainstormLoading || isGenerating || isBriefSaving} onSave={saveBriefEdits} initialDrafts={briefDrafts} onDraftChange={values => setCreationDraft({ briefEditDraft: { sessionId: brainstormState.session_id, values } })} />
                 ) : selectionStableContent ? (
@@ -7462,7 +7814,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                   </div>
                 )}
               </div>
-              <CreationSelectionToolbar
+              {!manualEdit && <CreationSelectionToolbar
                 snapshot={inlineSelection}
                 actions={inlineCapabilities?.actions || []}
                 customPrompt={inlineCustomPrompt}
@@ -7494,7 +7846,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                   setInlineError('')
                   window.getSelection()?.removeAllRanges()
                 }}
-              />
+              />}
             </div>
           </section>
 
