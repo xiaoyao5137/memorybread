@@ -1,18 +1,18 @@
 """
-Embedding 模型源解析 — 离线优先 + 境内镜像级联
+Embedding 模型源解析 — 离线优先 + 限量测速与镜像回退
 
 目标：
 1. 运行时零境外网络依赖：本地已有模型文件时以离线模式加载，
    绝不触发 huggingface.co 的在线校验（国内网络下会导致启动长时间卡顿）。
-2. 首次下载走受控源和境内镜像：MemoryBread -> ModelScope -> hf-mirror -> Hugging Face，
-   逐个尝试，任一成功即止。
+2. 首次下载先对缺失的大权重限量测速，再按预计速度尝试 MemoryBread、
+   ModelScope、hf-mirror、Hugging Face；探测失败的来源仍保留为回退。
 3. 下载产物存放在应用自有模型目录，并按 HuggingFace 权重文件组织，
    SentenceTransformer 可直接以本地目录加载。
 
 环境变量：
 - MEMORYBREAD_EMBEDDING_MODEL_DIR: 覆盖模型存放根目录
-- MEMORYBREAD_EMBEDDING_SOURCES: 逗号分隔的下载源顺序，
-  可选值 modelscope / hfmirror / huggingface（默认全部，按此顺序）
+- MEMORYBREAD_EMBEDDING_SOURCES: 逗号分隔的允许下载源，
+  可选值 managed / modelscope / hfmirror / huggingface（默认全部）
 """
 
 from __future__ import annotations
@@ -217,14 +217,23 @@ def _download_file(url: str, target: Path, deadline: float) -> None:
 
 
 def download_embedding_model(target_dir: Path) -> List[str]:
-    """按配置的镜像级联下载模型到 target_dir，返回每个源的失败原因。
+    """按可用性和限量测速结果下载模型，返回每个源的失败原因。
 
     单文件下载失败会回滚该文件，随后切换下一个镜像源重试全部文件；
     已成功落盘的文件不会重复下载。
     """
     errors: List[str] = []
     deadline = time.monotonic() + _TOTAL_BUDGET_SECONDS
-    for source in _configured_sources():
+    sources = _configured_sources()
+    weight = target_dir / "model.safetensors"
+    if len(sources) > 1 and (not weight.is_file() or _file_sha256(weight) != MODEL_FILE_SHA256[weight.name]):
+        digest = MODEL_FILE_SHA256[weight.name]
+        ranker = RuntimeDownloader(target_dir / ".downloads" / digest[:16], digest, lambda _progress: None)
+        urls = [_url_for(source, weight.name) for source in sources]
+        ordered_urls = ranker.rank_sources(urls, budget_seconds=min(25, max(0, deadline - time.monotonic())))
+        by_url = dict(zip(urls, sources))
+        sources = [by_url[url] for url in ordered_urls]
+    for source in sources:
         if time.monotonic() >= deadline:
             errors.append("total: 模型下载超过 30 分钟总预算")
             break

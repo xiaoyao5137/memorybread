@@ -52,3 +52,25 @@ def test_file_download_uses_verified_source_bound_downloader(monkeypatch, tmp_pa
     assert target.read_bytes() == payload
     assert observed["expected_sha"] == digest
     assert observed["urls"] == [url]
+
+
+def test_embedding_download_uses_measured_source_order(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv('MEMORYBREAD_EMBEDDING_SOURCES', 'managed,modelscope')
+    observed = []
+
+    class FakeRanker:
+        def __init__(self, *_args):
+            pass
+
+        def rank_sources(self, urls, budget_seconds):
+            assert budget_seconds > 0
+            return list(reversed(urls))
+
+    monkeypatch.setattr(model_sources, 'RuntimeDownloader', FakeRanker)
+    monkeypatch.setattr(model_sources, '_download_file',
+                        lambda url, _target, _deadline: observed.append(url))
+    monkeypatch.setattr(model_sources, 'embedding_model_complete', lambda _target: True)
+
+    assert model_sources.download_embedding_model(tmp_path) == []
+    assert observed
+    assert all(url.startswith('https://modelscope.cn/') for url in observed)

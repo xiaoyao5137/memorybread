@@ -96,6 +96,8 @@ SANDBOX_COLD_INSTALL_STAGES = frozenset(
 
 # 这些供应商模型名不得出现在 get_status() 或 get_report_bundle() 中。
 _CAPTURE_MODEL_NAME = "qwen3.5:4b"
+_CAPTURE_MODEL_REPOSITORY = "qwen3.5"
+_CAPTURE_MODEL_TAG = "4b"
 _LEGACY_VECTOR_MODEL_NAME = "qllama/bge-small-zh-v1.5:q4_k_m"
 _CAPTURE_MODEL_BLOBS = (
     ("de9fed2251b37295b763727a59ca35cf5cfe5c7379bc3e2104b2ce3c145aa887", 475, "config"),
@@ -799,7 +801,17 @@ class InitializationManager:
         blobs_root = models_root / "blobs"
         cache_root = self._workspace_root(mode) / "downloads" / "capture-model"
         blobs_root.mkdir(parents=True, exist_ok=True)
-        total_deadline = time.monotonic() + 30 * 60
+        # The model layer is several GiB. A fixed ten-minute source window
+        # aborts a healthy transfer on ordinary connections, then starts the
+        # next mirror from zero because validators are source-specific. Budget
+        # for the pinned artifact size at 1 MiB/s, with setup overhead.
+        download_budget = max(
+            30 * 60,
+            min(2 * 60 * 60, 10 * 60 + sum(
+                size for _digest, size, _kind in _CAPTURE_MODEL_BLOBS
+            ) / (1024 * 1024)),
+        )
+        total_deadline = time.monotonic() + download_budget
         for digest, expected_size, _kind in _CAPTURE_MODEL_BLOBS:
             destination = blobs_root / ("sha256-" + digest)
             if (
@@ -810,11 +822,11 @@ class InitializationManager:
                 continue
             remaining = total_deadline - time.monotonic()
             if remaining <= 0:
-                raise InitializationFailure("MODEL_DOWNLOAD_FAILED", "模型下载超过 30 分钟总预算")
-            artifact_path = "qwen3.5/4b/blobs/sha256:" + digest
+                raise InitializationFailure("MODEL_DOWNLOAD_FAILED", "模型下载超过本轮总预算，可重试续传")
+            artifact_path = _CAPTURE_MODEL_REPOSITORY + "/" + _CAPTURE_MODEL_TAG + "/blobs/sha256:" + digest
             urls = [
                 "https://memorybread.cn/downloads/models/ollama/" + artifact_path,
-                "https://registry.ollama.ai/v2/library/qwen3.5/blobs/sha256:" + digest,
+                "https://registry.ollama.ai/v2/library/" + _CAPTURE_MODEL_REPOSITORY + "/blobs/sha256:" + digest,
             ]
             downloader = RuntimeDownloader(
                 cache_root / digest[:16],
@@ -823,7 +835,11 @@ class InitializationManager:
                     "capture_model", progress, "正在下载采集提炼模型"
                 ),
                 total_seconds=remaining,
-                source_seconds=min(600, remaining),
+                # A source may use the remaining budget while it keeps making
+                # progress. Network failures still trigger the next source.
+                source_seconds=remaining,
+                expected_size=expected_size,
+                probe_sources=True,
             )
             try:
                 verified = downloader.download(urls)
@@ -856,7 +872,8 @@ class InitializationManager:
             ],
         }
         manifest_path = (
-            models_root / "manifests" / "registry.ollama.ai" / "library" / "qwen3.5" / "4b"
+            models_root / "manifests" / "registry.ollama.ai" / "library"
+            / _CAPTURE_MODEL_REPOSITORY / _CAPTURE_MODEL_TAG
         )
         self._write_json_atomic(manifest_path, manifest)
 
@@ -2413,6 +2430,27 @@ class InitializationManager:
                 if isinstance(value, int) or (isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_]{1,100}", value)):
                     parts.append(f"{key}={value}")
             return (summary[:200] + ("; " + "; ".join(parts) if parts else ""))[:500] or None
+        if state.get("current_stage") == "capture_model":
+            parts = []
+            root = self._workspace_root(state.get("mode", "normal")) / "downloads" / "capture-model"
+            for index, (digest, _size, _kind) in enumerate(_CAPTURE_MODEL_BLOBS, 1):
+                path = root / digest[:16] / "download-diagnostics.json"
+                try:
+                    events = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(events, list):
+                    continue
+                latest = {}
+                for event in events[-30:]:
+                    if not isinstance(event, dict):
+                        continue
+                    identifier = str(event.get("id", ""))
+                    code = event.get("error_code")
+                    if re.fullmatch(r"runtime\.source_\d+\.attempt_\d+", identifier) and code in ERROR_SUGGESTIONS:
+                        latest[identifier.rsplit(".", 1)[0]] = identifier + ":" + code
+                parts.extend("blob_%d.%s" % (index, item) for item in latest.values())
+            return (summary[:100] + ("; " + "; ".join(parts) if parts else ""))[:500] or None
         if state.get("current_stage") != "inference_engine":
             return summary or None
         path = (self._runtime_root(state.get("mode", "normal")) / f"v{MANAGED_OLLAMA_VERSION}"

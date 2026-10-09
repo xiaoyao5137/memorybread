@@ -1,0 +1,13 @@
+{
+  "qwen3.5:4b": {
+    "license": "Apache-2.0",
+    "license_source": "https://registry.ollama.ai/v2/library/qwen3.5/blobs/sha256:7339fa418c9ad3e8e12e74ad0fd26a9cc4be8703f9c110728a992b193be85cb2",
+    "redistribution_permitted_by_license": true
+  },
+  "BAAI/bge-small-zh-v1.5": {
+    "license": "MIT",
+    "license_source": "https://github.com/FlagOpen/FlagEmbedding/blob/master/LICENSE",
+    "notice_local_path": "shared/model-mirror/BAAI-bge-small-zh-v1.5-LICENSE.txt",
+    "redistribution_permitted_by_license": true
+  }
+}

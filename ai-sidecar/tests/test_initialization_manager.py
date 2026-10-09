@@ -545,11 +545,14 @@ def test_capture_model_installer_uses_managed_then_official_verified_sources(
 
     manager = InitializationManager(base_dir=tmp_path)
     attempts = []
+    budgets = []
 
     class FakeDownloader:
-        def __init__(self, root, expected_sha, _progress, **_kwargs):
+        def __init__(self, root, expected_sha, _progress, **kwargs):
             self.root = root
             self.expected_sha = expected_sha
+            budgets.append((expected_sha, kwargs['total_seconds'], kwargs['source_seconds'],
+                            kwargs['expected_size'], kwargs['probe_sources']))
 
         def download(self, urls):
             attempts.append((self.expected_sha, urls))
@@ -568,6 +571,13 @@ def test_capture_model_installer_uses_managed_then_official_verified_sources(
     manager._install_pinned_capture_model('normal')
 
     assert len(attempts) == len(module._CAPTURE_MODEL_BLOBS)
+    model_digest = module._CAPTURE_MODEL_BLOBS[1][0]
+    model_budget = next((total, source, size, probe) for digest, total, source, size, probe in budgets
+                        if digest == model_digest)
+    assert model_budget[0] > 50 * 60
+    assert model_budget[1] == model_budget[0]
+    assert model_budget[2] == module._CAPTURE_MODEL_BLOBS[1][1]
+    assert model_budget[3] is True
     assert all(urls[0].startswith('https://memorybread.cn/downloads/') for _, urls in attempts)
     assert all(urls[1].startswith('https://registry.ollama.ai/') for _, urls in attempts)
     manifest_path = (
@@ -628,3 +638,23 @@ def test_download_attempts_use_existing_report_summary_not_new_check_ids(tmp_pat
     assert 'runtime.source_1.attempt_1:RUNTIME_TLS_FAILED' in report['summary']
     assert 'private.example' not in json.dumps(report)
     assert all(not check['id'].startswith('runtime.') for check in report['checks'])
+
+
+def test_capture_download_attempts_are_included_without_source_urls(tmp_path):
+    import initialization_manager as module
+    manager = InitializationManager(base_dir=tmp_path)
+    state = manager._new_state('normal')
+    state.update({'state': 'failed', 'current_stage': 'capture_model',
+                  'error_code': 'MODEL_DOWNLOAD_FAILED', 'message': 'RUNTIME_DOWNLOAD_TIMEOUT'})
+    manager._save_state(state)
+    digest = module._CAPTURE_MODEL_BLOBS[1][0]
+    folder = manager._workspace_root('normal') / 'downloads' / 'capture-model' / digest[:16]
+    folder.mkdir(parents=True)
+    (folder / 'download-diagnostics.json').write_text(json.dumps([
+        {'id': 'runtime.source_1.attempt_1', 'error_code': 'RUNTIME_HTTP_FAILED'},
+        {'id': 'runtime.source_2.attempt_1', 'error_code': 'RUNTIME_DOWNLOAD_TIMEOUT'},
+        {'id': 'https://private.example/token', 'error_code': 'RUNTIME_HTTP_FAILED'},
+    ]))
+    report = manager.get_report_bundle()
+    assert 'blob_2.runtime.source_2.attempt_1:RUNTIME_DOWNLOAD_TIMEOUT' in report['summary']
+    assert 'private.example' not in json.dumps(report)

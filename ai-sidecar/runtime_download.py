@@ -115,12 +115,15 @@ def sha256(path: Path) -> str:
 
 class RuntimeDownloader:
     def __init__(self, root: Path, expected_sha: str, progress: Callable[[int], None],
-                 total_seconds: float = 1800, source_seconds: float = 600):
+                 total_seconds: float = 1800, source_seconds: float = 600,
+                 expected_size: Optional[int] = None, probe_sources: bool = False):
         self.root = root
         self.expected_sha = expected_sha
         self.progress = progress
         self.total_seconds = total_seconds
         self.source_seconds = source_seconds
+        self.expected_size = expected_size
+        self.probe_sources = probe_sources
         self.events: List[dict] = []
         self.tls_context = verified_tls_context()
 
@@ -143,9 +146,20 @@ class RuntimeDownloader:
         with _exclusive_download_lock(self.root / '.download.lock', deadline):
             return self._download_locked(urls, deadline)
 
+    def rank_sources(self, urls: List[str], budget_seconds: float = 25) -> List[str]:
+        """Order sources by a small transfer sample, retaining failed probes last."""
+        sources = list(enumerate(dict.fromkeys(urls), 1))
+        if len(sources) < 2:
+            return [url for _source, url in sources]
+        ranked = self._rank_sources(sources, time.monotonic() + budget_seconds)
+        return [url for _source, url in ranked]
+
     def _download_locked(self, urls: List[str], deadline: float) -> Path:
         last_code = 'RUNTIME_DOWNLOAD_FAILED'
-        for source, url in enumerate(dict.fromkeys(urls), 1):
+        sources = list(enumerate(dict.fromkeys(urls), 1))
+        if self.probe_sources and self.expected_size and self.expected_size >= 1024 * 1024:
+            sources = self._rank_sources(sources, deadline)
+        for source, url in sources:
             # Cache identity includes source and expected artifact; never append across mirrors.
             key = hashlib.sha256((url + self.expected_sha).encode()).hexdigest()[:24]
             archive = self.root / (key + '.part')
@@ -160,7 +174,9 @@ class RuntimeDownloader:
                     break
                 try:
                     # A completed download survives process exit before extraction.
-                    if not archive.exists() or sha256(archive) != self.expected_sha:
+                    if (not archive.exists()
+                            or (self.expected_size is not None and archive.stat().st_size != self.expected_size)
+                            or sha256(archive) != self.expected_sha):
                         self._transfer(url, archive, metadata, source_deadline)
                     if sha256(archive) != self.expected_sha:
                         archive.unlink(missing_ok=True)
@@ -183,6 +199,77 @@ class RuntimeDownloader:
         if time.monotonic() >= deadline:
             last_code = 'RUNTIME_DOWNLOAD_TIMEOUT'
         raise DownloadFailure(last_code)
+
+    def _rank_sources(self, sources, deadline):
+        """Estimate completion time using a bounded range sample and resumable bytes.
+
+        A verified completed cache wins immediately. Probe failures are placed
+        last, but remain available as fallbacks if the sampled source fails.
+        """
+        for source, url in sources:
+            key = hashlib.sha256((url + self.expected_sha).encode()).hexdigest()[:24]
+            archive = self.root / (key + '.part')
+            if (archive.exists() and archive.stat().st_size == self.expected_size
+                    and sha256(archive) == self.expected_sha):
+                return [(source, url)] + [item for item in sources if item[0] != source]
+        ranked = []
+        for source, url in sources:
+            key = hashlib.sha256((url + self.expected_sha).encode()).hexdigest()[:24]
+            archive = self.root / (key + '.part')
+            metadata = self.root / (key + '.json')
+            try:
+                validator = json.loads(metadata.read_text(encoding='utf-8')).get('validator')
+            except (OSError, ValueError, AttributeError):
+                validator = None
+            saved = archive.stat().st_size if archive.exists() and validator else 0
+            started = time.monotonic()
+            code = None
+            http_status = None
+            try:
+                if deadline - started <= 0:
+                    raise DownloadFailure('RUNTIME_DOWNLOAD_TIMEOUT')
+                sample_bytes = min(256 * 1024, self.expected_size or 256 * 1024)
+                request = urllib.request.Request(url, headers={
+                    'User-Agent': 'MemoryBread-Initializer/1',
+                    'Accept-Encoding': 'identity',
+                    'Range': 'bytes=0-%d' % (sample_bytes - 1),
+                })
+                with urllib.request.urlopen(
+                    request, timeout=min(5, deadline - started), context=self.tls_context,
+                ) as response:
+                    http_status = getattr(response, 'status', None)
+                    if http_status not in (200, 206):
+                        raise DownloadFailure('RUNTIME_HTTP_FAILED')
+                    if http_status == 206:
+                        match = re.fullmatch(r'bytes 0-(\d+)/(\d+)', response.headers.get('Content-Range', ''))
+                        if not match or (self.expected_size is not None and int(match[2]) != self.expected_size):
+                            raise DownloadFailure('RUNTIME_RESUME_INVALID')
+                    received = 0
+                    while received < sample_bytes and time.monotonic() - started < 8:
+                        chunk = getattr(response, 'read1', response.read)(min(16 * 1024, sample_bytes - received))
+                        if not chunk:
+                            break
+                        received += len(chunk)
+                    if received <= 0:
+                        raise DownloadFailure('RUNTIME_NETWORK_FAILED')
+                elapsed = max(0.001, time.monotonic() - started)
+                remaining_bytes = (max(0, self.expected_size - min(saved, self.expected_size))
+                                   if self.expected_size is not None else 1)
+                estimate = elapsed * remaining_bytes / received
+            except Exception as exc:
+                code = failure_code(exc)
+                http_status = exc.code if isinstance(exc, urllib.error.HTTPError) else http_status
+                estimate = float('inf')
+            self.events.append({
+                'id': 'runtime.source_%d.probe' % source,
+                'status': 'failed' if code else 'passed',
+                'error_code': code,
+                'duration_ms': int((time.monotonic() - started) * 1000),
+                'http_status': http_status,
+            })
+            ranked.append((estimate, source, url))
+        ranked.sort(key=lambda item: (item[0], item[1]))
+        return [(source, url) for _estimate, source, url in ranked]
 
     def _transfer(self, url: str, archive: Path, metadata: Path, deadline: float):
         try:

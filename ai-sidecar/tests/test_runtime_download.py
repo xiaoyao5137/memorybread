@@ -70,6 +70,23 @@ def test_resume_validates_content_range_and_validator(server, tmp_path):
     assert calls[0][1]['If-Range'] == '"v1"'
 
 
+def test_signed_mirror_redirect_preserves_resume_headers(server, tmp_path):
+    base, responder, calls = server
+
+    def respond(path, headers):
+        if path == '/mirror':
+            return 307, {'Location': base + '/object'}, b''
+        return 206, {'ETag': '"v1"', 'Content-Range': 'bytes 8-15/16'}, b'artifact'
+
+    responder['fn'] = respond
+    d = downloader(tmp_path)
+    seed_partial(d, base + '/mirror', b'correct ')
+    assert d.download([base + '/mirror']).read_bytes() == b'correct artifact'
+    assert calls[1][0] == '/object'
+    assert calls[1][1]['Range'] == 'bytes=8-'
+    assert calls[1][1]['If-Range'] == '"v1"'
+
+
 @pytest.mark.parametrize('headers', [
     {'ETag': '"v1"', 'Content-Range': 'bytes 0-7/16'},
     {'ETag': '"v2"', 'Content-Range': 'bytes 8-15/16'},
@@ -108,6 +125,69 @@ def test_completed_cache_reused_without_network(server, tmp_path):
     seed_partial(d, base, b'correct artifact')
     assert d.download([base]).read_bytes() == b'correct artifact'
     assert calls == []
+
+
+def test_probe_selects_faster_verified_source(server, tmp_path):
+    base, responder, calls = server
+    content = b'a' * (1024 * 1024)
+
+    def respond(path, headers):
+        if path == '/slow':
+            time.sleep(0.15)
+        if headers.get('Range'):
+            sample = content[:256 * 1024]
+            return 206, {'Content-Range': 'bytes 0-262143/1048576', 'ETag': '"v1"'}, sample
+        return 200, {'ETag': '"v1"'}, content
+
+    responder['fn'] = respond
+    d = downloader(tmp_path, content=content, expected_size=len(content), probe_sources=True)
+    assert d.download([base + '/slow', base + '/fast']).read_bytes() == content
+    full_requests = [path for path, headers in calls if not headers.get('Range')]
+    assert full_requests == ['/fast']
+    assert [event['id'] for event in d.events[:2]] == [
+        'runtime.source_1.probe', 'runtime.source_2.probe',
+    ]
+
+
+def test_probe_skips_missing_source_and_reuses_complete_cache(server, tmp_path):
+    base, responder, calls = server
+    content = b'b' * (1024 * 1024)
+
+    def respond(path, headers):
+        if path == '/missing':
+            return 404, {}, b''
+        if headers.get('Range'):
+            return 206, {'Content-Range': 'bytes 0-262143/1048576'}, content[:256 * 1024]
+        return 200, {}, content
+
+    responder['fn'] = respond
+    d = downloader(tmp_path, content=content, expected_size=len(content), probe_sources=True)
+    urls = [base + '/missing', base + '/present']
+    assert d.download(urls).read_bytes() == content
+    assert [path for path, headers in calls if not headers.get('Range')] == ['/present']
+    assert d.events[0]['http_status'] == 404
+    calls.clear()
+    assert downloader(tmp_path, content=content, expected_size=len(content), probe_sources=True).download(urls).read_bytes() == content
+    assert calls == []
+
+
+def test_probe_favorite_failure_falls_back_to_other_source(server, tmp_path):
+    base, responder, calls = server
+    content = b'c' * (1024 * 1024)
+
+    def respond(path, headers):
+        if headers.get('Range'):
+            if path == '/fallback':
+                time.sleep(0.1)
+            return 206, {'Content-Range': 'bytes 0-262143/1048576'}, content[:256 * 1024]
+        if path == '/preferred':
+            return 503, {}, b''
+        return 200, {}, content
+
+    responder['fn'] = respond
+    d = downloader(tmp_path, content=content, expected_size=len(content), probe_sources=True)
+    assert d.download([base + '/preferred', base + '/fallback']).read_bytes() == content
+    assert [path for path, headers in calls if not headers.get('Range')][-1] == '/fallback'
 
 
 def test_failed_download_keeps_partial_for_next_run(server, tmp_path, monkeypatch):
