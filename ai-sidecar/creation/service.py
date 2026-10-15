@@ -9455,10 +9455,12 @@ flowchart LR
             parsed_requirement.get("time_context") or {}
         )
         # A capture timestamp is a freshness bound, never the date of the
-        # captured document's facts. Pending captures remain source leads for
-        # period work until their own content is verified.
-        time_clause = "AND ts >= ?"
-        params.append(int(time.time() * 1000) - 14 * 86_400_000)
+        # captured document's facts. An explicit period may be historical, so
+        # pending captures remain source leads until their content is verified.
+        time_clause = ""
+        if requested_bounds is None:
+            time_clause = "AND ts >= ?"
+            params.append(int(time.time() * 1000) - 14 * 86_400_000)
         rows = conn.execute(
             f"""
             SELECT id, COALESCE(webpage_title, win_title, '近期文档采集') AS title,
