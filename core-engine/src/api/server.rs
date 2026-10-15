@@ -140,7 +140,8 @@ use super::{
         },
         runtime::{get_runtime_status, update_runtime_status},
         snapshot::{
-            backup_asset_snapshot_to_cloud, export_asset_snapshot, import_asset_snapshot,
+            backup_asset_snapshot_to_cloud, export_asset_snapshot, get_cloud_backup_job,
+            import_asset_snapshot, start_cloud_backup_job,
             restore_asset_snapshot_from_cloud,
         },
         tasks::{
@@ -173,6 +174,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/snapshots/cloud/backup",
             post(backup_asset_snapshot_to_cloud),
         )
+        .route("/api/snapshots/cloud/backup/jobs", post(start_cloud_backup_job))
+        .route("/api/snapshots/cloud/backup/jobs/:job_id", get(get_cloud_backup_job))
         .route(
             "/api/snapshots/cloud/restore",
             post(restore_asset_snapshot_from_cloud),

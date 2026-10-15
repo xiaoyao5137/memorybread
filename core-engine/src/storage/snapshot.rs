@@ -36,10 +36,14 @@ const DATABASE_FILE_NAME: &str = "memory-bread.db";
 const EXCLUDED_LOCAL_PATHS: &[&str] = &[
     "backups",
     "captures",
+    "experiments",
     "floating-screenshots",
     "initialization",
     "logs",
+    "models",
+    "repair-backups",
     "state",
+    "verification",
 ];
 
 const EXCLUDED_RAW_CAPTURE_COLUMNS: &[&str] = &[
@@ -1620,6 +1624,11 @@ fn is_excluded_local_path(path: &Path) -> bool {
         || portable == format!("{DATABASE_FILE_NAME}-wal")
         || portable == format!("{DATABASE_FILE_NAME}-shm")
         || file_name.starts_with(&format!("{DATABASE_FILE_NAME}.backup"))
+        || (portable == file_name
+            && file_name.starts_with(&format!("{DATABASE_FILE_NAME}."))
+            && (file_name.contains(".bak")
+                || file_name.ends_with("-wal")
+                || file_name.ends_with("-shm")))
         || EXCLUDED_LOCAL_PATHS
             .iter()
             .any(|excluded| portable == *excluded || portable.starts_with(&format!("{excluded}/")))
@@ -3278,6 +3287,9 @@ mod tests {
         fs::create_dir_all(source_root.join("creation-evidence")).unwrap();
         fs::create_dir_all(source_root.join("initialization/models")).unwrap();
         fs::create_dir_all(source_root.join("logs")).unwrap();
+        fs::create_dir_all(source_root.join("repair-backups")).unwrap();
+        fs::create_dir_all(source_root.join("models")).unwrap();
+        fs::create_dir_all(source_root.join("experiments")).unwrap();
         fs::write(
             source_root.join("captures/screenshots/raw.jpg"),
             b"raw-capture",
@@ -3290,6 +3302,10 @@ mod tests {
         .unwrap();
         fs::write(source_root.join("user-content.txt"), b"keep-user-content").unwrap();
         fs::write(source_root.join("logs/core.log"), b"runtime-log").unwrap();
+        fs::write(source_root.join("repair-backups/old.db"), b"old-copy").unwrap();
+        fs::write(source_root.join("models/embedding.bin"), b"downloaded-model").unwrap();
+        fs::write(source_root.join("experiments/benchmark.bin"), b"temporary-benchmark").unwrap();
+        fs::write(source_root.join("memory-bread.db.bak-before-repair"), b"old-copy").unwrap();
         fs::write(
             source_root.join("initialization/models/model.bin"),
             b"downloaded-model",
@@ -3308,6 +3324,10 @@ mod tests {
         assert!(paths.contains(&"user-content.txt"));
         assert!(!paths.contains(&"captures/screenshots/raw.jpg"));
         assert!(!paths.contains(&"logs/core.log"));
+        assert!(!paths.contains(&"repair-backups/old.db"));
+        assert!(!paths.contains(&"models/embedding.bin"));
+        assert!(!paths.contains(&"experiments/benchmark.bin"));
+        assert!(!paths.contains(&"memory-bread.db.bak-before-repair"));
         assert!(!paths.contains(&"initialization/models/model.bin"));
 
         let target_root = dir.path().join("target");

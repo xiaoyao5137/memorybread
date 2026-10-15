@@ -845,15 +845,29 @@ export function useBackupMemoryPackageToCloud() {
     device_id: string
     client_state?: Record<string, string>
   }): Promise<CloudMemoryPackageBackupResult> => {
-    const resp = await fetchWithLocalhostFallback(`${apiBaseUrl}/api/snapshots/cloud/backup`, {
+    const resp = await fetchWithLocalhostFallback(`${apiBaseUrl}/api/snapshots/cloud/backup/jobs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     })
     if (!resp.ok) {
-      throw new Error(await parseApiErrorMessage(resp, `cloud memory package backup failed: ${resp.status}`))
+      throw new Error(await parseApiErrorMessage(resp, `cloud memory package backup job failed: ${resp.status}`))
     }
-    return resp.json()
+    const created: { job_id: string } = await resp.json()
+    while (true) {
+      await sleep(2000)
+      const statusResp = await fetchWithLocalhostFallback(`${apiBaseUrl}/api/snapshots/cloud/backup/jobs/${encodeURIComponent(created.job_id)}`)
+      if (!statusResp.ok) {
+        throw new Error(await parseApiErrorMessage(statusResp, `cloud memory package backup status failed: ${statusResp.status}`))
+      }
+      const job: { status: string; result?: CloudMemoryPackageBackupResult; error?: string } = await statusResp.json()
+      if (job.status === 'succeeded') {
+        if (!job.result) throw new Error('云端备份任务缺少完成结果')
+        return job.result
+      }
+      if (job.status === 'failed') throw new Error(job.error || '云端备份失败')
+      if (job.status !== 'running') throw new Error('云端备份任务状态无效')
+    }
   }, [apiBaseUrl])
 }
 

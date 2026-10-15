@@ -24,7 +24,7 @@
     { "id": "FACT-001", "value": "0.1.2", "renderings": ["v0.1.2"], "status": "confirmed", "as_of": "2026-08-11", "source_ids": ["S2", "S5"], "applies_to": ["DOC-001", "DOC-013"] },
     { "id": "FACT-002", "value": "macOS Apple Silicon and Intel", "renderings": ["macOS Apple Silicon 与 Intel"], "status": "confirmed", "as_of": "2026-08-11", "source_ids": ["S3"], "applies_to": ["DOC-002"] },
     { "id": "FACT-003", "value": "采集、提炼、检索与创作默认在本机完成", "renderings": ["默认在本机完成"], "status": "confirmed", "as_of": "2026-08-11", "source_ids": ["S1", "S3", "S5"], "applies_to": ["DOC-001", "DOC-004", "DOC-006", "DOC-007"] },
-    { "id": "FACT-004", "value": "云端记忆包在客户端加密后上传，每个账号默认 50MB", "renderings": ["客户端加密", "默认 50MB"], "status": "confirmed", "as_of": "2026-08-11", "source_ids": ["S1", "S5"], "applies_to": ["DOC-012"] },
+    { "id": "FACT-004", "value": "云端记忆包在客户端加密后上传，每个账号默认 1GB，服务端可配置实际额度", "renderings": ["客户端加密", "默认 1GB"], "status": "confirmed", "as_of": "2026-10-15", "source_ids": ["S1", "S5"], "applies_to": ["DOC-012"] },
     { "id": "FACT-005", "value": "消息渠道和 Webhook 地址只保存在当前设备", "renderings": ["只保存在本机"], "status": "confirmed", "as_of": "2026-08-11", "source_ids": ["S5"], "applies_to": ["DOC-008"] },
     { "id": "FACT-006", "value": "敏感规则命中的内容直接丢弃，只保留拦截计数", "renderings": ["直接丢弃", "只统计条数"], "status": "confirmed", "as_of": "2026-08-11", "source_ids": ["S3", "S5"], "applies_to": ["DOC-001", "DOC-004"] }
   ],

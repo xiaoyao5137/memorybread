@@ -125,6 +125,16 @@ pub struct CreationSkillAnalysisJobRecord {
     pub updated_at_ms: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CloudBackupJobRecord {
+    pub id: String,
+    pub status: String,
+    pub result: Option<Value>,
+    pub error: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct CreationSessionLease {
     pub owner_request_id: String,
@@ -143,6 +153,7 @@ pub struct AppState {
     pub debug_log_specs: Vec<DebugLogSpec>,
     pub rag_jobs: Arc<Mutex<HashMap<String, RagJobRecord>>>,
     pub rag_job_seq: Arc<AtomicU64>,
+    pub cloud_backup_jobs: Arc<Mutex<HashMap<String, CloudBackupJobRecord>>>,
     pub creation_skill_analysis_jobs: Arc<Mutex<HashMap<String, CreationSkillAnalysisJobRecord>>>,
     pub creation_skill_analysis_job_seq: Arc<AtomicU64>,
     pub(crate) brainstorm_stage_jobs: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
@@ -242,6 +253,7 @@ impl AppState {
             debug_log_specs,
             rag_jobs: Arc::new(Mutex::new(HashMap::new())),
             rag_job_seq: Arc::new(AtomicU64::new(1)),
+            cloud_backup_jobs: Arc::new(Mutex::new(HashMap::new())),
             creation_skill_analysis_jobs: Arc::new(Mutex::new(HashMap::new())),
             creation_skill_analysis_job_seq: Arc::new(AtomicU64::new(1)),
             brainstorm_stage_jobs: Arc::new(Mutex::new(HashMap::new())),

@@ -6,14 +6,14 @@ use aes_gcm::{
     aead::{rand_core::RngCore, Aead, OsRng},
     Aes256Gcm, KeyInit, Nonce,
 };
-use axum::{extract::State, Json};
+use axum::{extract::{Path, State}, Json};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    api::{error::ApiError, state::AppState},
+    api::{error::ApiError, state::{AppState, CloudBackupJobRecord}},
     storage::{
         db::current_ts_ms,
         snapshot::{AssetSnapshotExportResult, AssetSnapshotImportReport},
@@ -53,6 +53,77 @@ pub struct CloudBackupResponse {
     pub checksum_sha256: String,
     pub encrypted_size: i64,
     pub snapshot: Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CloudBackupJobCreated {
+    pub job_id: String,
+}
+
+pub async fn start_cloud_backup_job(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CloudBackupRequest>,
+) -> Result<Json<CloudBackupJobCreated>, ApiError> {
+    // Validate before acknowledging the job so malformed requests retain the normal API error.
+    normalize_admin_base_url(&body.admin_base_url)?;
+    normalize_service_environment(&body.service_environment)?;
+    clean_required(&body.access_token, "access_token")?;
+    clean_required(&body.device_id, "device_id")?;
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let now = current_ts_ms();
+    state.cloud_backup_jobs.lock().unwrap().insert(job_id.clone(), CloudBackupJobRecord {
+        id: job_id.clone(),
+        status: "running".to_string(),
+        result: None,
+        error: None,
+        created_at_ms: now,
+        updated_at_ms: now,
+    });
+    let task_state = state.clone();
+    let task_id = job_id.clone();
+    tokio::spawn(async move {
+        let outcome = run_cloud_backup(task_state.clone(), body).await;
+        let mut jobs = task_state.cloud_backup_jobs.lock().unwrap();
+        if let Some(job) = jobs.get_mut(&task_id) {
+            job.updated_at_ms = current_ts_ms();
+            match outcome {
+                Ok(response) => {
+                    job.status = "succeeded".to_string();
+                    job.result = serde_json::to_value(response).ok();
+                }
+                Err(error) => {
+                    tracing::error!(job_id = %task_id, error_kind = %cloud_backup_error_message(&error), "cloud backup job failed");
+                    job.status = "failed".to_string();
+                    job.error = Some(cloud_backup_error_message(&error));
+                }
+            }
+        }
+    });
+    Ok(Json(CloudBackupJobCreated { job_id }))
+}
+
+pub async fn get_cloud_backup_job(
+    State(state): State<Arc<AppState>>,
+    Path(job_id): Path<String>,
+) -> Result<Json<CloudBackupJobRecord>, ApiError> {
+    state.cloud_backup_jobs.lock().unwrap().get(&job_id).cloned()
+        .map(Json)
+        .ok_or_else(|| ApiError::NotFound("云端备份任务不存在或本地服务已重启，请刷新云端列表".to_string()))
+}
+
+fn cloud_backup_error_message(error: &ApiError) -> String {
+    match error {
+        ApiError::Upstream { code, .. } => match *code {
+            "CLOUD_PREPARE_UPLOAD_FAILED" => "云端备份准备失败，请检查账户和存储空间".to_string(),
+            "OSS_UPLOAD_FAILED" => "加密包上传失败，请检查网络后重试".to_string(),
+            "CLOUD_COMPLETE_SNAPSHOT_FAILED" => "云端备份登记失败，请刷新列表后重试".to_string(),
+            _ => "云端服务暂时不可用，请稍后重试".to_string(),
+        },
+        ApiError::Storage(_) => "本地快照导出失败".to_string(),
+        ApiError::BadRequest(message) => message.clone(),
+        ApiError::NotFound(_) => "备份资源不存在".to_string(),
+        ApiError::Internal(_) => "云端备份请求失败，请检查网络后重试".to_string(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,6 +231,13 @@ pub async fn backup_asset_snapshot_to_cloud(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CloudBackupRequest>,
 ) -> Result<Json<CloudBackupResponse>, ApiError> {
+    run_cloud_backup(state, body).await.map(Json)
+}
+
+async fn run_cloud_backup(
+    state: Arc<AppState>,
+    body: CloudBackupRequest,
+) -> Result<CloudBackupResponse, ApiError> {
     let admin_base_url = normalize_admin_base_url(&body.admin_base_url)?;
     let service_environment = normalize_service_environment(&body.service_environment)?;
     let access_token = clean_required(&body.access_token, "access_token")?;
@@ -178,9 +256,7 @@ pub async fn backup_asset_snapshot_to_cloud(
     .await
     .map_err(|error| ApiError::Internal(error.to_string()))??;
     let client = reqwest::Client::new();
-    // AES-GCM changes bytes but not envelope length, so this gives an exact quota preflight
-    // without generating or persisting user-managed recovery material.
-    let encrypted_size = encrypt_snapshot_bytes(&plaintext, &[0u8; 32])?.len() as i64;
+    let encrypted_size = encrypted_snapshot_size(plaintext.len())?;
     let prepare: CloudEnvelope<PreparedUploadData> = send_json(
         client
             .post(format!("{admin_base_url}/v1/snapshots/upload-url"))
@@ -222,7 +298,7 @@ pub async fn backup_asset_snapshot_to_cloud(
         .map_err(|error| ApiError::Internal(error.to_string()))?;
     ensure_success(put_response, "OSS_UPLOAD_FAILED").await?;
 
-    let completed: CloudEnvelope<Value> = send_json(
+    let completed: CloudEnvelope<Value> = send_json_retry_transient(
         client
             .post(format!("{admin_base_url}/v1/snapshots"))
             .header("x-memorybread-environment", &service_environment)
@@ -240,13 +316,13 @@ pub async fn backup_asset_snapshot_to_cloud(
     )
     .await?;
 
-    Ok(Json(CloudBackupResponse {
+    Ok(CloudBackupResponse {
         local_encrypted_path: output_path.display().to_string(),
         oss_object_key: prepare.data.oss_object_key,
         checksum_sha256,
         encrypted_size,
         snapshot: completed.data,
-    }))
+    })
 }
 
 pub async fn restore_asset_snapshot_from_cloud(
@@ -453,6 +529,32 @@ fn encrypt_snapshot_bytes(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, A
         .map_err(|error| ApiError::Internal(format!("序列化加密快照失败: {error}")))
 }
 
+fn encrypted_snapshot_size(plaintext_size: usize) -> Result<i64, ApiError> {
+    let ciphertext_size = plaintext_size
+        .checked_add(16)
+        .ok_or_else(|| ApiError::BadRequest("备份包过大".to_string()))?;
+    let encoded_size = ciphertext_size
+        .checked_add(2)
+        .and_then(|size| size.checked_div(3))
+        .and_then(|size| size.checked_mul(4))
+        .ok_or_else(|| ApiError::BadRequest("备份包过大".to_string()))?;
+    let envelope = EncryptedAssetSnapshotEnvelope {
+        magic: "MemoryBreadAssetSnapshotEncrypted".to_string(),
+        format_version: 1,
+        encryption_version: 2,
+        algorithm: "AES-256-GCM".to_string(),
+        nonce_base64: BASE64.encode([0u8; 12]),
+        ciphertext_base64: String::new(),
+        plaintext_sha256: "0".repeat(64),
+        plaintext_size: plaintext_size as u64,
+    };
+    let overhead = serde_json::to_vec_pretty(&envelope)
+        .map_err(|error| ApiError::Internal(error.to_string()))?
+        .len();
+    i64::try_from(overhead.saturating_add(encoded_size))
+        .map_err(|_| ApiError::BadRequest("备份包过大".to_string()))
+}
+
 fn decrypt_snapshot_bytes(encrypted: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, ApiError> {
     let envelope: EncryptedAssetSnapshotEnvelope = serde_json::from_slice(encrypted)
         .map_err(|_| ApiError::BadRequest("加密快照格式不合法".to_string()))?;
@@ -501,6 +603,36 @@ where
         .map_err(|error| ApiError::Internal(error.to_string()))
 }
 
+async fn send_json_retry_transient<T>(
+    request: reqwest::RequestBuilder,
+    code: &'static str,
+) -> Result<T, ApiError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    for attempt in 0..5 {
+        let current = request.try_clone().ok_or_else(|| {
+            ApiError::Internal("无法重试云端登记请求".to_string())
+        })?;
+        match send_json(current, code).await {
+            Ok(value) => return Ok(value),
+            Err(error) if attempt < 4 && transient_snapshot_error(&error) => {
+                tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("five attempts always return")
+}
+
+fn transient_snapshot_error(error: &ApiError) -> bool {
+    match error {
+        ApiError::Upstream { status, .. } => status.is_server_error(),
+        ApiError::Internal(_) => true,
+        _ => false,
+    }
+}
+
 async fn ensure_success(
     response: reqwest::Response,
     code: &'static str,
@@ -539,7 +671,53 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{decrypt_snapshot_bytes, encrypt_snapshot_bytes, normalize_service_environment};
+    use super::{
+        decrypt_snapshot_bytes, encrypt_snapshot_bytes, encrypted_snapshot_size,
+        normalize_service_environment, send_json_retry_transient, transient_snapshot_error,
+    };
+    use crate::api::error::ApiError;
+    use axum::http::StatusCode;
+    use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+
+    #[tokio::test]
+    async fn completion_retry_uses_the_same_request_after_a_server_error() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let count = attempts.clone();
+        let app = axum::Router::new().route("/", axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+            let count = count.clone();
+            async move {
+                assert_eq!(body["oss_object_key"], "same-object");
+                if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({"error": {"message": "temporary"}})))
+                } else {
+                    (StatusCode::OK, axum::Json(serde_json::json!({"data": {"id": "committed"}})))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let request = reqwest::Client::new()
+            .post(format!("http://{address}/"))
+            .json(&serde_json::json!({"oss_object_key": "same-object"}));
+        let result: super::CloudEnvelope<serde_json::Value> =
+            send_json_retry_transient(request, "CLOUD_COMPLETE_SNAPSHOT_FAILED").await.unwrap();
+        server.abort();
+        assert_eq!(result.data["id"], "committed");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn retries_only_transient_snapshot_completion_errors() {
+        let error = |status| ApiError::Upstream {
+            status,
+            code: "CLOUD_COMPLETE_SNAPSHOT_FAILED",
+            message: "unavailable".to_string(),
+        };
+        assert!(transient_snapshot_error(&error(StatusCode::INTERNAL_SERVER_ERROR)));
+        assert!(transient_snapshot_error(&error(StatusCode::SERVICE_UNAVAILABLE)));
+        assert!(!transient_snapshot_error(&error(StatusCode::CONFLICT)));
+    }
 
     #[test]
     fn encrypts_and_decrypts_snapshot_bytes() {
@@ -551,6 +729,15 @@ mod tests {
 
         let decrypted = decrypt_snapshot_bytes(&encrypted, &key).unwrap();
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn encrypted_size_preflight_matches_real_envelope() {
+        for size in [0, 1, 2, 3, 1024, 100_001] {
+            let plaintext = vec![b'x'; size];
+            let encrypted = encrypt_snapshot_bytes(&plaintext, &[7u8; 32]).unwrap();
+            assert_eq!(encrypted_snapshot_size(size).unwrap(), encrypted.len() as i64);
+        }
     }
 
     #[test]

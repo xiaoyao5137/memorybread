@@ -4,6 +4,7 @@ import {
   runGatewayRagQuery,
   runGatewayRagQueryStream,
   runRagQueryStream,
+  useBackupMemoryPackageToCloud,
   useFetchBakeCaptures,
   useFetchBakeKnowledge,
   useFetchBakeKnowledgeDetail,
@@ -22,6 +23,40 @@ import { useAppStore } from '../store/useAppStore'
 const jsonResponse = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
   status,
   headers: { 'Content-Type': 'application/json' },
+})
+
+describe('useBackupMemoryPackageToCloud', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('备份超过一分钟时持续轮询同一任务，不重新提交上传', async () => {
+    useAppStore.getState().reset()
+    useAppStore.getState().setApiBaseUrl('http://localhost:7070')
+    vi.useFakeTimers()
+    const snapshot = { id: 'snapshot-1' }
+    const result = { snapshot, encrypted_size: 462602284, checksum_sha256: 'checksum', local_encrypted_path: '/tmp/backup' }
+    let polls = 0
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/backup/jobs')) return jsonResponse({ job_id: 'job-1' })
+      polls += 1
+      return jsonResponse(polls < 32 ? { status: 'running' } : { status: 'succeeded', result })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { result: hook } = renderHook(() => useBackupMemoryPackageToCloud())
+    const pending = hook.current({
+      admin_base_url: 'http://127.0.0.1:18080',
+      service_environment: 'staging',
+      access_token: 'test-token',
+      device_id: 'test-device',
+    })
+    for (let i = 0; i < 32; i += 1) await vi.advanceTimersByTimeAsync(2000)
+    await expect(pending).resolves.toEqual(result)
+    expect(fetchMock).toHaveBeenCalledTimes(33)
+    expect(fetchMock.mock.calls.filter(([url]) => url.endsWith('/backup/jobs'))).toHaveLength(1)
+  })
 })
 
 describe('runRagQueryStream', () => {
