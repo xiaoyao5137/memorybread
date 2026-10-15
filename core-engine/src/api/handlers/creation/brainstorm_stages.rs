@@ -5851,7 +5851,14 @@ mod tests {
                 source: "user".into(), ..Default::default()},
         });
         stored.stage_workflow.as_mut().unwrap().active_stage = "detail".into();
-        apply_content_questions(&mut stored, content_response()).unwrap();
+        let mut detail_response = content_response();
+        detail_response["questions"][0]["id"] = json!("source_evidence");
+        detail_response["questions"][0]["dimension_id"] = json!("source_evidence");
+        detail_response["questions"][0]["dimension"] = json!("来源证据");
+        detail_response["questions"][0]["prompt"] =
+            json!("GPU成本优化本期应先核验哪项来源证据？");
+        detail_response["content_proofs"][0]["question_id"] = json!("source_evidence");
+        apply_content_questions(&mut stored, detail_response).unwrap();
         let mut req = request("reopen", 1);
         req.question_id = Some(direction.id);
         assert_eq!(revise_saved_answer(&mut stored, &req, 2).unwrap(), "exploring");

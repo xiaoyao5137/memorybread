@@ -166,6 +166,10 @@ def test_cross_process_p0_releases_model_connection_and_machine_slot(tmp_path, m
         assert output.get(timeout=2) == "preempted"
         process.join(timeout=2)
         assert process.exitcode == 0
+        # Future completion can precede the worker's final lock release.
+        deadline = time.monotonic() + 1
+        while queue_module.interactive_demand_active() and time.monotonic() < deadline:
+            time.sleep(0.01)
         assert not queue_module.interactive_demand_active()
     finally:
         queue.shutdown()
