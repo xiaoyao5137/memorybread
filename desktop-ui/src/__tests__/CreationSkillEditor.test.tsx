@@ -150,8 +150,8 @@ describe('沉淀技能', () => {
     expect(screen.queryByLabelText('标题风格提炼结果')).not.toBeInTheDocument()
     const exampleDocument = (screen.getByLabelText('完整示例文档') as HTMLTextAreaElement).value
     expect(exampleDocument).toContain('共享评审空间预约流程优化方案')
-    expect(exampleDocument.length).toBeGreaterThanOrEqual(1000)
-    expect(exampleDocument.match(/^##\s+/gm)?.length).toBeGreaterThanOrEqual(6)
+    expect(exampleDocument.length).toBeLessThan(1000)
+    expect(exampleDocument.match(/^##\s+/gm)?.length).toBe(2)
     expect(screen.getByText(/草稿已自动保存在本机/)).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '保存技能' }))

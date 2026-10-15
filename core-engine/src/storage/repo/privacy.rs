@@ -4,10 +4,7 @@
 
 use crate::storage::{
     error::StorageError,
-    models::{
-        AppBlacklistRecord, NewAppBlacklist, NewPrivacyFilter, PrivacyBlockStat,
-        PrivacyFilterRecord,
-    },
+    models::{AppBlacklistRecord, NewAppBlacklist, PrivacyBlockStat, PrivacyFilterRecord},
 };
 use rusqlite::{params, Connection};
 use std::collections::HashSet;
@@ -15,7 +12,7 @@ use std::collections::HashSet;
 type Result<T> = std::result::Result<T, StorageError>;
 
 fn get_week_start() -> String {
-    use chrono::{Datelike, Duration, Local, Weekday};
+    use chrono::{Datelike, Duration, Local};
     let now = Local::now().date_naive();
     let days_since_monday = now.weekday().num_days_from_monday();
     let monday = now - Duration::days(days_since_monday as i64);
@@ -28,7 +25,9 @@ fn get_week_start() -> String {
 
 /// 获取所有启用的黑名单 Bundle ID（用于内存缓存）
 pub fn get_enabled_blacklist_bundle_ids(conn: &Connection) -> Result<HashSet<String>> {
-    let mut stmt = conn.prepare("SELECT bundle_id FROM app_blacklist WHERE enabled = 1")?;
+    let mut stmt = conn.prepare(
+        "SELECT bundle_id FROM app_blacklist WHERE enabled = 1 AND bundle_id IS NOT NULL",
+    )?;
 
     let bundle_ids = stmt
         .query_map([], |row| row.get::<_, String>(0))?
@@ -38,13 +37,13 @@ pub fn get_enabled_blacklist_bundle_ids(conn: &Connection) -> Result<HashSet<Str
 }
 
 /// 获取所有启用的黑名单 Bundle ID 与应用名（用于内存缓存）
-pub fn get_enabled_blacklist_entries(conn: &Connection) -> Result<Vec<(String, String)>> {
+pub fn get_enabled_blacklist_entries(conn: &Connection) -> Result<Vec<(Option<String>, String)>> {
     let mut stmt =
         conn.prepare("SELECT bundle_id, app_name FROM app_blacklist WHERE enabled = 1")?;
 
     let entries = stmt
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
@@ -235,6 +234,10 @@ mod tests {
         ))
         .unwrap();
         conn.execute_batch(include_str!(
+            "../../../../shared/db-schema/migrations/136_app_blacklist_optional_bundle_id.sql"
+        ))
+        .unwrap();
+        conn.execute_batch(include_str!(
             "../../../../shared/db-schema/migrations/059_seed_other_privacy_filter.sql"
         ))
         .unwrap();
@@ -260,7 +263,7 @@ mod tests {
 
         // 测试添加新记录
         let new = NewAppBlacklist {
-            bundle_id: "com.test.app".to_string(),
+            bundle_id: Some("com.test.app".to_string()),
             app_name: "测试应用".to_string(),
             enabled: true,
             reason: Some("测试".to_string()),
@@ -276,6 +279,80 @@ mod tests {
         delete_app_blacklist(&conn, id).unwrap();
         let blacklist = list_app_blacklist(&conn).unwrap();
         assert!(!blacklist.iter().any(|r| r.id == id));
+    }
+
+    #[test]
+    fn test_name_only_blacklist_rows_and_legacy_migration() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!(
+            "../../../../shared/db-schema/migrations/009_privacy_settings.sql"
+        ))
+        .unwrap();
+        conn.execute(
+            "INSERT INTO app_blacklist (bundle_id, app_name, enabled, reason, created_at, updated_at)
+             VALUES ('', '旧应用', 0, '旧备注', '2024-01-01', '2024-02-01')",
+            [],
+        )
+        .unwrap();
+        let legacy_id = conn.last_insert_rowid();
+        let mut whitespace_ids = Vec::new();
+        for bundle_id in [" ", "  "] {
+            conn.execute(
+                "INSERT INTO app_blacklist (bundle_id, app_name, enabled, reason)
+                 VALUES (?1, '同名旧应用', 1, '保留不同旧记录')",
+                params![bundle_id],
+            )
+            .unwrap();
+            whitespace_ids.push(conn.last_insert_rowid());
+        }
+        conn.execute_batch(include_str!(
+            "../../../../shared/db-schema/migrations/136_app_blacklist_optional_bundle_id.sql"
+        ))
+        .unwrap();
+
+        let legacy = list_app_blacklist(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == legacy_id)
+            .unwrap();
+        assert_eq!(legacy.bundle_id, None);
+        assert_eq!(legacy.app_name, "旧应用");
+        assert!(!legacy.enabled);
+        assert_eq!(legacy.reason.as_deref(), Some("旧备注"));
+        assert_eq!(legacy.created_at, "2024-01-01");
+        assert_eq!(legacy.updated_at, "2024-02-01");
+        let migrated = list_app_blacklist(&conn).unwrap();
+        for (id, bundle_id) in whitespace_ids.iter().zip([" ", "  "]) {
+            let row = migrated.iter().find(|row| row.id == *id).unwrap();
+            assert_eq!(row.bundle_id.as_deref(), Some(bundle_id));
+            assert_eq!(row.app_name, "同名旧应用");
+        }
+
+        for name in ["钉钉", "企业微信"] {
+            add_app_blacklist(
+                &conn,
+                &NewAppBlacklist {
+                    bundle_id: None,
+                    app_name: name.to_string(),
+                    enabled: true,
+                    reason: None,
+                },
+            )
+            .unwrap();
+        }
+        let entries = get_enabled_blacklist_entries(&conn).unwrap();
+        assert!(entries.contains(&(None, "钉钉".to_string())));
+        assert!(entries.contains(&(None, "企业微信".to_string())));
+        assert!(add_app_blacklist(
+            &conn,
+            &NewAppBlacklist {
+                bundle_id: None,
+                app_name: "钉钉".to_string(),
+                enabled: true,
+                reason: None,
+            }
+        )
+        .is_err());
     }
 
     #[test]

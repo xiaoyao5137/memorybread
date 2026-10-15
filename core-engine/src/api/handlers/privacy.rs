@@ -38,7 +38,8 @@ pub struct FilterWithStats {
 
 #[derive(Debug, Deserialize)]
 pub struct AddBlacklistRequest {
-    pub bundle_id: String,
+    #[serde(default)]
+    pub bundle_id: Option<String>,
     pub app_name: String,
     pub reason: Option<String>,
 }
@@ -104,8 +105,17 @@ pub async fn list_blacklist(
             let with_stats: Vec<BlacklistWithStats> = records
                 .into_iter()
                 .map(|r| BlacklistWithStats {
-                    week_blocked: *stats_map.get(&r.bundle_id).unwrap_or(&0)
-                        + *stats_map.get(&r.app_name).unwrap_or(&0),
+                    week_blocked: r
+                        .bundle_id
+                        .as_ref()
+                        .and_then(|id| stats_map.get(id))
+                        .copied()
+                        .unwrap_or(0)
+                        + if r.bundle_id.as_deref() == Some(r.app_name.as_str()) {
+                            0
+                        } else {
+                            *stats_map.get(&r.app_name).unwrap_or(&0)
+                        },
                     record: r,
                 })
                 .collect();
@@ -123,12 +133,20 @@ pub async fn add_blacklist(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AddBlacklistRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let app_name = req.app_name.trim().to_string();
+    if app_name.is_empty() {
+        return Err(ApiError::BadRequest("请填写应用名称".to_string()));
+    }
+    let bundle_id = req
+        .bundle_id
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty());
     let storage = state.storage.clone();
     let id = tokio::task::spawn_blocking(move || {
         storage.with_conn(|conn| {
             let new_blacklist = NewAppBlacklist {
-                bundle_id: req.bundle_id,
-                app_name: req.app_name,
+                bundle_id,
+                app_name,
                 enabled: true,
                 reason: req.reason,
             };
@@ -136,7 +154,21 @@ pub async fn add_blacklist(
         })
     })
     .await
-    .map_err(|e| ApiError::Internal(e.to_string()))??;
+    .map_err(|e| ApiError::Internal(e.to_string()))?
+    .map_err(|error| match error {
+        crate::storage::StorageError::Sqlite(rusqlite::Error::SqliteFailure(info, _))
+            if info.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            ApiError::Upstream {
+                status: StatusCode::CONFLICT,
+                code: "BLACKLIST_ENTRY_EXISTS",
+                message: "该 Bundle ID 或应用名称已在排除列表中".to_string(),
+            }
+        }
+        other => ApiError::Storage(other),
+    })?;
+
+    state.storage.notify_blacklist_changed();
 
     Ok(Json(ApiResponse::ok(id)))
 }
@@ -154,6 +186,8 @@ pub async fn update_blacklist_enabled(
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))??;
 
+    state.storage.notify_blacklist_changed();
+
     Ok(Json(ApiResponse::ok(())))
 }
 
@@ -168,6 +202,8 @@ pub async fn delete_blacklist(
     })
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))??;
+
+    state.storage.notify_blacklist_changed();
 
     Ok(Json(ApiResponse::ok(())))
 }

@@ -163,7 +163,7 @@ participant 系统
     expect(screen.getByText('滚轮缩放 · 100%')).toBeInTheDocument()
   })
 
-  it('默认只显示实际图片，悬浮操作只提供复制图片和编辑代码', async () => {
+  it('默认只显示实际图片，悬浮操作提供复制、下载和编辑', async () => {
     const { container } = render(<CreationDiagram language="mermaid" code={'flowchart LR\nA --> B'} />)
 
     expect(screen.getByText('正在渲染图示…')).toBeInTheDocument()
@@ -171,7 +171,7 @@ participant 系统
     expect(screen.queryByText('flowchart LR')).not.toBeInTheDocument()
     expect(screen.queryByText('Mermaid 图示')).not.toBeInTheDocument()
     expect(screen.queryByText('放大')).not.toBeInTheDocument()
-    expect(screen.queryByText('下载')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '下载 PNG 图片' })).toBeInTheDocument()
     expect(screen.queryByText('复制代码')).not.toBeInTheDocument()
     expect(container.querySelector('.creation-diagram__actions')).toBeInTheDocument()
     const image = screen.getByRole('img', { name: 'Mermaid 图示' })
@@ -203,6 +203,46 @@ participant 系统
       'flowchart TD\nA --> C',
     ))
     await waitFor(() => expect(editor).not.toBeInTheDocument())
+  })
+
+  it('下载当前渲染图示的 PNG 文件', async () => {
+    const clickedLinks: Array<{ href: string; download: string }> = []
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      clickedLinks.push({ href: this.href, download: this.download })
+    })
+    try {
+      render(<CreationDiagram language="mermaid" code={'flowchart LR\nA --> B'} />)
+      fireEvent.click(await screen.findByRole('button', { name: '下载 PNG 图片' }))
+
+      await waitFor(() => expect(clickedLinks).toEqual([
+        { href: 'blob:diagram', download: 'memorybread-mermaid-diagram.png' },
+      ]))
+      expect(HTMLCanvasElement.prototype.toBlob).toHaveBeenCalledWith(expect.any(Function), 'image/png')
+      const createdUrls = vi.mocked(URL.createObjectURL).mock.calls
+      expect(createdUrls).toHaveLength(2)
+      expect(createdUrls[0][0]).toHaveProperty('type', 'image/svg+xml;charset=utf-8')
+      expect(createdUrls[1][0]).toHaveProperty('type', 'image/png')
+      expect(document.querySelector('a[download="memorybread-mermaid-diagram.png"]')).not.toBeInTheDocument()
+      expect(await screen.findByText('已下载')).toBeInTheDocument()
+      expect(navigator.clipboard.write).not.toHaveBeenCalled()
+    } finally {
+      click.mockRestore()
+    }
+  })
+
+  it('PNG 转换失败时不触发下载并显示失败状态', async () => {
+    vi.mocked(HTMLCanvasElement.prototype.toBlob).mockImplementationOnce((callback: BlobCallback) => callback(null))
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    try {
+      render(<CreationDiagram language="mermaid" code={'flowchart LR\nA --> B'} />)
+      fireEvent.click(await screen.findByRole('button', { name: '下载 PNG 图片' }))
+
+      expect(await screen.findByText('下载失败')).toBeInTheDocument()
+      expect(click).not.toHaveBeenCalled()
+      expect(vi.mocked(URL.createObjectURL).mock.calls).toHaveLength(1)
+    } finally {
+      click.mockRestore()
+    }
   })
 
   it('父级用相同内容重复渲染时不会重新绘制 Mermaid', async () => {

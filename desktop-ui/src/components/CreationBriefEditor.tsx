@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react'
 import type { CreationBrainstormQuestion, CreationBrainstormState } from '../store/useAppStore'
 import { brainstormDecisionSummary, brainstormExplorationStageLabel } from '../utils/brainstormSummary'
 import { BrainstormContext, splitBrainstormCopy } from './CreationBrainstormCopy'
+import { brainstormStageTitle } from './CreationBrainstormStages'
 
 interface Props {
   state: CreationBrainstormState
@@ -31,7 +32,9 @@ export default function CreationBriefEditor({ state, rootRequest, disabled, onSa
   const history = state.history || []
   const archived = state.archived_questions || []
   const allTurns = [...history, ...archived]
-  const questions = [...history.map(turn => turn.question), ...(state.current_question ? [state.current_question] : []), ...archived.map(turn => turn.question)]
+  const workflow = state.stage_workflow
+  const preparedQuestions = workflow?.stages.flatMap(stage => stage.questions) || []
+  const questions = [...history.map(turn => turn.question), ...(state.current_question ? [state.current_question] : []), ...preparedQuestions, ...archived.map(turn => turn.question)]
     .filter((question, index, items) => items.findIndex(item => item.id === question.id) === index)
   const selected = questions.find(question => question.id === selectedId)
   const selectedParent = questions.find(question => question.id === selected?.parent_question_id)
@@ -64,6 +67,7 @@ export default function CreationBriefEditor({ state, rootRequest, disabled, onSa
     const hasManualEdit = state.brief_edits?.[question.id] !== undefined
     const directChildren = children.filter(child => !question.options.some(option => option.id === child.parent_option_id))
     const branchStatus = (branchChildren: CreationBrainstormQuestion[]) => {
+      if (workflow) return null
       if (isArchived || hasManualEdit || effectiveSource !== 'user' || state.phase === 'abandoned'
         || branchChildren.some(child => !archived.some(turn => turn.question.id === child.id))) return null
       return <small className="creation-brief-tree__branch-status">{question.exploration_stage === 'validation' ? '已讨论' : '待深入'}</small>
@@ -71,11 +75,11 @@ export default function CreationBriefEditor({ state, rootRequest, disabled, onSa
     const renderChildren = (branchChildren: CreationBrainstormQuestion[]) => branchChildren.length > 0
       ? <ul>{branchChildren.map(child => renderQuestion(child, [...ancestors, question.id]))}</ul>
       : null
-    const optionBranches = question.options.filter(option => answer?.selected_option_ids.includes(option.id)
+    const optionBranches = question.options.filter(option => Boolean(workflow) || answer?.selected_option_ids.includes(option.id)
       || children.some(child => child.parent_option_id === option.id))
     return <li key={question.id} style={treeDepthStyle(ancestors.length * 2 + 1)}>
       <button type="button" aria-pressed={selectedId === question.id} onClick={() => selectNode(question.id)}>
-        <span>{question.dimension}</span><small>{isArchived ? '已失效 · 可回看' : effectiveSource === 'user_excluded' ? '已排除' : answer ? '已回答' : '当前问题'} · {brainstormExplorationStageLabel(question.exploration_stage)}</small>
+        <span>{question.dimension}</span><small>{isArchived ? '已失效 · 可回看' : effectiveSource === 'user_excluded' ? '已排除' : effectiveSource === 'user_cleared' ? '已清空' : answer ? '已回答' : !workflow || state.current_question?.id === question.id ? '当前问题' : '候选问题 · 未确认'}{!workflow && ` · ${brainstormExplorationStageLabel(question.exploration_stage)}`}</small>
       </button>
       {(optionBranches.length > 0 || answer?.custom_text || directChildren.length > 0) && <ul>
         {optionBranches.map(option => {
@@ -83,7 +87,7 @@ export default function CreationBriefEditor({ state, rootRequest, disabled, onSa
           const isSelected = answer?.selected_option_ids.includes(option.id)
           return <li key={option.id} style={treeDepthStyle(ancestors.length * 2 + 2)}>
             <button type="button" className="creation-brief-tree__option" onClick={() => selectNode(question.id)}>{option.label}</button>
-            {(!isSelected || hasManualEdit) && <small className="creation-brief-tree__branch-status">原分支</small>}
+            {workflow ? <small className="creation-brief-tree__branch-status">{isSelected && effectiveSource === 'user' && !hasManualEdit ? '已选择' : '候选选项 · 未确认'}</small> : (!isSelected || hasManualEdit) && <small className="creation-brief-tree__branch-status">原分支</small>}
             {renderChildren(branchChildren)}
             {isSelected && branchStatus(branchChildren)}
           </li>
@@ -114,9 +118,19 @@ export default function CreationBriefEditor({ state, rootRequest, disabled, onSa
         <button type="button" className="creation-brief-tree__toggle" aria-expanded={treeExpanded} aria-controls={treeId}
           aria-label={treeExpanded ? '收起思路树' : '展开完整思路树'} onClick={() => setTreeExpanded(expanded => !expanded)}>{treeExpanded ? '收起' : '展开查看'}</button>
       </div>
-      <p>先逐一讨论同层方向，再沿已选思路探索解法、细化落地与验证效果。点击节点查看题目和回答。</p>
+      <p>{workflow ? '按创作方向、创作细节、创作行文查看各阶段完整思路。候选问题和选项均未计入已确认决定。点击节点查看详情。' : '先逐一讨论同层方向，再沿已选思路探索解法、细化落地与验证效果。点击节点查看题目和回答。'}</p>
       <div id={treeId} className={`creation-brief-tree__scroll${treeExpanded ? ' is-expanded' : ''}`} tabIndex={0}><button type="button" onClick={() => selectNode("__root_request__")}>创作需求</button>
-        <ul>{questions.filter(question => !question.parent_question_id || !questions.some(parent => parent.id === question.parent_question_id)).map(question => renderQuestion(question))}</ul>
+        {workflow ? <>
+          {workflow.stages.map(stage => <details key={stage.id} className="creation-brief-tree__stage" open={stage.id === workflow.active_stage}>
+            <summary>{brainstormStageTitle(stage.id)} · {stage.questions.length} 道问题</summary>
+            {stage.status === 'thinking' && <p>正在准备完整思路，已完成 {stage.progress.completed_batches} / {stage.progress.total_batches} 批。</p>}
+            {stage.status === 'pending' && <p>确认前一阶段后开始思考。</p>}
+            <ul>{stage.questions.filter(question => !question.parent_question_id || !stage.questions.some(parent => parent.id === question.parent_question_id)).map(question => renderQuestion(question))}</ul>
+          </details>)}
+          {archived.some(turn => !preparedQuestions.some(question => question.id === turn.question.id)) && <details className="creation-brief-tree__stage"><summary>已失效的历史思路</summary>
+            <ul>{archived.filter(turn => !preparedQuestions.some(question => question.id === turn.question.id) && !archived.some(parent => parent.question.id === turn.question.parent_question_id)).map(turn => renderQuestion(turn.question))}</ul>
+          </details>}
+        </> : <ul>{questions.filter(question => !question.parent_question_id || !questions.some(parent => parent.id === question.parent_question_id)).map(question => renderQuestion(question))}</ul>}
       </div>
       {treeExpanded && <div className="creation-brief-tree__footer"><button type="button" aria-label="收起思路树并返回顶部" aria-expanded={treeExpanded} aria-controls={treeId}
         onClick={() => setTreeExpanded(false)}>收起思路树</button></div>}
@@ -129,7 +143,7 @@ export default function CreationBriefEditor({ state, rootRequest, disabled, onSa
           <div><dt>所属分支</dt><dd>{selectedParentBranch}</dd></div>
         </dl>}
         <BrainstormContext text={selected.why_now} details={selected.context_details} />
-        <p>讨论阶段：{brainstormExplorationStageLabel(selected.exploration_stage)}</p>
+        <p>讨论阶段：{workflow ? brainstormStageTitle(workflow.stages.find(stage => stage.questions.some(question => question.id === selected.id))?.id || '') : brainstormExplorationStageLabel(selected.exploration_stage)}</p>
         <small>{selected.type === 'multi_choice' ? '可多选' : '单选'}{selected.single_choice_reason ? ` · ${selected.single_choice_reason}` : ''}</small>
         <ul>{selected.options.map(option => {
           const { copy, details } = splitBrainstormCopy(option.description, option.details)

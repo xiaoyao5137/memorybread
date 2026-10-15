@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { StrictMode } from 'react'
 import CreationPanel from '../components/CreationPanel'
 import { useAppStore } from '../store/useAppStore'
+import { stageFixture } from '../../test/brainstorm-stage-fixture'
 
 const historyResponse = (url: URL) => {
   const query = url.searchParams.get('q') || ''
@@ -52,6 +53,189 @@ afterEach(() => {
 })
 
 describe('创作记录搜索与分页', () => {
+  it('shows the latest failed chapter draft separately and lists every delivery gap', async () => {
+    const state = stageFixture('answering', 'writing')
+    state.phase = 'chapter_writing'
+    state.current_question = null
+    state.stage_workflow!.chapters[0].status = 'writing'
+    state.stage_workflow!.chapters[0].instruction_id = 'chapter-instruction-188'
+    const agent = { kind: 'agent', id: 'creation_main_agent', name: '创作 Agent' }
+    const traceEvent = (runId: string, sequence: number, type: string, data: Record<string, unknown> = {}) => ({
+      schema_version: 'creation.agent.v1', event_id: `${runId}-${sequence}`, session_id: state.session_id,
+      run_id: runId, sequence, timestamp: 1_720_000_000_000 + sequence,
+      type, status: type === 'run.failed' ? 'failed' : 'completed', actor: agent,
+      summary: type === 'phase.started' ? '阶段开始：核对交付结果' : type,
+      environment_patch: {}, data,
+    })
+    const finalDraft = '# GPU 成本优化周报\n\n## 最新未验收内容\n\n需补充当周会议纪要与 AIGC 进度。'
+    const history = {
+      id: 188, prompt: 'GPU 成本优化周报', root_request: 'GPU 成本优化周报',
+      session_id: state.session_id, generated_content: '', lifecycle_status: 'failed',
+      creation_mode: 'brainstorm', creation_brief_json: JSON.stringify(state),
+      brainstorm_stage_summary: { version: 2, phase: 'chapter_writing', active_stage: 'writing',
+        stage_status: 'answering', completed_chapters: 0, total_chapters: 2, active_chapter_title: '目标与评估范围' },
+      agent_trace_json: JSON.stringify([
+        traceEvent('old-run', 1, 'document.replaced', { content: '# 上一次失败的草稿' }),
+        traceEvent('old-run', 2, 'run.failed', { error_code: 'CREATION_DOCUMENT_INVALID' }),
+        traceEvent('final-run', 1, 'document.replaced', { content: '# 本轮较早修订' }),
+        traceEvent('final-run', 2, 'document.replaced', { content: finalDraft }),
+        traceEvent('final-run', 3, 'phase.started', {
+          phase_id: 'step:delivery_validation', phase_title: '核对交付结果', phase_kind: 'plan_step',
+        }),
+        traceEvent('final-run', 4, 'delivery.checked', { review: { status: 'blocked', checks: [
+          { id: 'meeting', passed: false, reason: '本周大模型性能成本优化周会会议纪要：目标周期内资料未确认' },
+          { id: 'aigc', passed: false, reason: 'AIGC进度总结：目标周期内资料未确认' },
+        ], failed_checks: [
+          { id: 'aigc', reason: 'AIGC进度总结：目标周期内资料未确认' },
+          { id: 'token', reason: 'LangBridge 六项 Token 指标：只有单日卡片，周汇总仍待核对' },
+        ] } }),
+        traceEvent('final-run', 5, 'run.failed', { error_code: 'CREATION_DELIVERY_INCOMPLETE' }),
+      ]),
+      conversation_json: '[]', references_json: '[]', created_at: 1_720_000_000_000, updated_at: 1_720_000_100_000,
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input)).pathname
+      if (path === '/api/creation/history') return Response.json({ items: [history], total: 1 })
+      if (path === '/api/creation/skills') return Response.json([])
+      if (path === '/api/creation/brainstorm/turn') return Response.json(state)
+      return Response.json({ connected: false })
+    }))
+
+    render(<CreationPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: '创作记录 (1)' }))
+    expect(screen.getByText('待核验草稿已保留，打开后可查看交付缺口')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('GPU 成本优化周报').closest('button')!)
+
+    const preview = await screen.findByLabelText('待核验草稿')
+    expect(preview).toHaveTextContent('最新未验收内容')
+    expect(preview).not.toHaveTextContent('上一次失败的草稿')
+    expect(preview).not.toHaveTextContent('本轮较早修订')
+    expect(preview).toHaveTextContent('不是正式正文')
+    expect(useAppStore.getState().creationDraft.generatedContent).toBe('')
+    expect(screen.queryByRole('button', { name: '复制' })).not.toBeInTheDocument()
+    const deliveryPhase = screen.getByText('1. 核对交付结果').closest('.creation-trace-phase')!
+    expect(deliveryPhase).toHaveTextContent('待核验缺口（3）')
+    expect(deliveryPhase).toHaveTextContent('本周大模型性能成本优化周会会议纪要：目标周期内资料未确认')
+    expect(deliveryPhase).toHaveTextContent('AIGC进度总结：目标周期内资料未确认')
+    expect(deliveryPhase).toHaveTextContent('LangBridge 六项 Token 指标：只有单日卡片，周汇总仍待核对')
+    expect(screen.getByRole('button', { name: '继续本章创作' })).toBeEnabled()
+    expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).includes('/api/creation/agent/run'))).toBe(false)
+
+    fireEvent.click(screen.getByRole('button', { name: '编辑创作简报' }))
+    expect(screen.queryByText('最新未验收内容')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '查看待核验草稿' }))
+    expect(screen.getByLabelText('待核验草稿')).toHaveTextContent('最新未验收内容')
+  })
+
+  it('restores a stale failed workflow through status synchronization without flashing its old failure', async () => {
+    const cached = stageFixture('failed', 'writing')
+    cached.stage_workflow!.stages[2].error = { code: 'BRAINSTORM_MODEL_OUTPUT_INVALID', message: '历史快照生成失败', retryable: true }
+    const current = stageFixture('thinking', 'writing')
+    current.revision = cached.revision + 1
+    current.stage_workflow!.stages[2].generation_id = 'current-restored-generation'
+    const requests: Record<string, unknown>[] = []
+    let finishStatus!: () => void
+    const pendingStatus = new Promise<void>(resolve => { finishStatus = resolve })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname
+      if (path === '/api/creation/history') return Response.json({ items: [{ id: 41, session_id: cached.session_id,
+        root_request: '恢复旧脑暴会话', lifecycle_status: 'completed', generated_content: '', creation_mode: 'brainstorm',
+        creation_brief_json: JSON.stringify(cached),
+        brainstorm_stage_summary: { version: 2, active_stage: 'writing', phase: cached.phase, stage_status: 'failed', completed_chapters: 0, total_chapters: 2 },
+      }], total: 1 })
+      if (path === '/api/creation/brainstorm/turn') {
+        requests.push(JSON.parse(String(init?.body || '{}')))
+        await pendingStatus
+        return Response.json(current)
+      }
+      if (path === '/api/creation/skills') return Response.json([])
+      return Response.json({ connected: false })
+    }))
+    render(<CreationPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: '创作记录 (1)' }))
+    fireEvent.click(screen.getByText('恢复旧脑暴会话').closest('button')!)
+    expect(screen.getByText('正在同步创作行文进度')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByText('历史快照生成失败')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '继续本阶段思考' })).not.toBeInTheDocument()
+    expect(useAppStore.getState().creationDraft.brainstormState?.stage_workflow?.stages[2].status).toBe('failed')
+    await act(async () => { finishStatus() })
+    expect(await screen.findByText('创作行文阶段模型思考中')).toBeInTheDocument()
+    expect(requests.every(item => item.action === 'status')).toBe(true)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(useAppStore.getState().creationDraft.brainstormState?.decisions).toEqual([])
+  })
+
+  it('shows current stage and chapter count independently of a completed chapter operation or stale brief', async () => {
+    const staleBrief = stageFixture('completed', 'writing')
+    staleBrief.phase = 'completed'
+    const records = [
+      { id: 21, root_request: '等待第二章设计', phase: 'ready', stage_status: 'ready', lifecycle_status: 'completed', completed_chapters: 1 },
+      { id: 22, root_request: '正在创作第二章', phase: 'chapter_writing', stage_status: 'answering', lifecycle_status: 'completed', completed_chapters: 1 },
+      { id: 23, root_request: '第二章待恢复', phase: 'chapter_writing', stage_status: 'answering', lifecycle_status: 'failed', completed_chapters: 1 },
+      { id: 24, root_request: '全篇完成后的普通修改', phase: 'completed', stage_status: 'completed', lifecycle_status: 'failed', completed_chapters: 2 },
+    ].map(item => ({ ...item, generated_content: '# 已保留的第一章正文', creation_mode: 'brainstorm',
+      creation_brief_json: JSON.stringify(staleBrief),
+      brainstorm_stage_summary: { version: 2, active_stage: 'writing', phase: item.phase, stage_status: item.stage_status,
+        completed_chapters: item.completed_chapters, total_chapters: 2, active_chapter_title: item.phase === 'completed' ? null : '指标设计' },
+    }))
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input)).pathname
+      if (path === '/api/creation/history') return Response.json({ items: records, total: records.length })
+      if (path === '/api/creation/skills') return Response.json([])
+      return new Response('{}', { status: 404 })
+    }))
+    render(<CreationPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: '创作记录 (4)' }))
+    const waiting = within(screen.getByText('等待第二章设计').closest('article')!)
+    expect(waiting.getByText('创作行文待确认')).toBeInTheDocument()
+    expect(waiting.getByText('1 / 2 章已完成 · 当前章节：指标设计')).toBeInTheDocument()
+    expect(waiting.queryByText('全部章节已完成')).not.toBeInTheDocument()
+    expect(waiting.queryByText('进行中')).not.toBeInTheDocument()
+    expect(within(screen.getByText('正在创作第二章').closest('article')!).getByText('章节创作中')).toBeInTheDocument()
+    expect(within(screen.getByText('第二章待恢复').closest('article')!).getByText('章节创作待继续')).toBeInTheDocument()
+    const completed = within(screen.getByText('全篇完成后的普通修改').closest('article')!)
+    expect(completed.getByText('全部章节已完成')).toBeInTheDocument()
+    expect(completed.getByText('失败')).toBeInTheDocument()
+    expect(completed.getByText('2 / 2 章已完成')).toBeInTheDocument()
+    expect(records[0].lifecycle_status).toBe('completed')
+    expect(vi.mocked(fetch).mock.calls.every(([, init]) => !init?.method || init.method === 'GET')).toBe(true)
+    expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).includes('/agent/run'))).toBe(false)
+  })
+
+  it('refreshes a thinking history row while open and on returning without turning user confirmation into a running operation', async () => {
+    let stage_status = 'thinking'
+    let active_stage = 'direction'
+    const historyReads: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input)).pathname
+      if (path === '/api/creation/history') {
+        historyReads.push(stage_status)
+        return Response.json({ items: [{ id: 31, root_request: '切出等待模型思考', lifecycle_status: 'completed',
+          generated_content: '', creation_mode: 'brainstorm',
+          brainstorm_stage_summary: { version: 2, phase: stage_status === 'thinking' ? 'preparing' : 'ready',
+            active_stage, stage_status, completed_chapters: 0, total_chapters: 0 },
+        }], total: 1 })
+      }
+      if (path === '/api/creation/skills') return Response.json([])
+      return new Response('{}', { status: 404 })
+    }))
+    const view = render(<CreationPanel />)
+    fireEvent.click(await screen.findByRole('button', { name: '创作记录 (1)' }))
+    expect(screen.getByText('创作方向思考中')).toBeInTheDocument()
+    await waitFor(() => expect(historyReads.length).toBeGreaterThanOrEqual(2))
+    stage_status = 'ready'
+    await waitFor(() => expect(screen.getByText('创作方向待确认')).toBeInTheDocument(), { timeout: 4500 })
+    expect(screen.getByText('本阶段完整思路已准备好，点击继续确认。')).toBeInTheDocument()
+    view.rerender(<CreationPanel active={false} />)
+    active_stage = 'detail'
+    stage_status = 'thinking'
+    view.rerender(<CreationPanel active />)
+    await waitFor(() => expect(screen.getByText('创作细节思考中')).toBeInTheDocument())
+    expect(vi.mocked(fetch).mock.calls.every(([, init]) => !init?.method || init.method === 'GET')).toBe(true)
+    expect(vi.mocked(fetch).mock.calls.some(([input]) => String(input).includes('/agent/run'))).toBe(false)
+  })
+
   it('展示真实总数，并把搜索和分页参数传给服务端', async () => {
     render(<CreationPanel />)
 

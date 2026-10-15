@@ -1,3 +1,4 @@
+import { readWorkContext, type CreationWorkContext } from '../utils/creationWorkContext'
 import { create } from 'zustand'
 import type { AccountType, ActionCommand, AuthSession, BakeTab, CloudBalance, CloudSubscription, CloudUser, RagContext, RepositoryTab, ServiceEnvironment, TimelineItem, WindowMode } from '../types'
 import { getLocalNickname, LOCAL_NICKNAME_KEY } from '../utils/localIdentity'
@@ -141,6 +142,7 @@ export interface CreationBrainstormOption {
   description: string
   details?: string
   recommended?: boolean
+  input_value?: Record<string, unknown>
 }
 
 export interface CreationBrainstormContinuationDirection {
@@ -152,6 +154,51 @@ export interface CreationBrainstormContinuationDirection {
 }
 
 export type CreationBrainstormExplorationStage = 'explore' | 'solutions' | 'implementation' | 'validation'
+
+export interface CreationBrainstormInputReceipt {
+  source_type: string
+  source_id: string | number
+  source_snapshot_id?: string | number | null
+  title: string
+  source_url?: string
+  url_redacted?: boolean
+  observed_at?: string | number | null
+  updated_at?: string | number | null
+  source_period?: { start: string; end: string } | null
+  period_status: 'matched' | 'mismatch' | 'unknown'
+  completeness: 'complete' | 'partial' | 'unknown'
+  can_use?: boolean
+}
+
+export interface CreationBrainstormInputNeed {
+  id: string
+  skill_id?: string
+  skill_step_id?: string
+  label: string
+  source_type?: 'memory' | 'data'
+  tool?: string
+  source_target_index?: number
+  period_mode?: string
+  status: 'matched' | 'candidate' | 'partial' | 'missing' | 'failed' | 'skipped'
+  lookup_status?: 'completed' | 'partial' | 'failed' | 'skipped'
+  receipts: CreationBrainstormInputReceipt[]
+}
+
+export interface CreationBrainstormInputPreflight {
+  schema_version: number
+  status: 'matched' | 'partial' | 'empty' | 'failed' | 'skipped'
+  as_of_local_date?: string
+  timezone?: string
+  period: {
+    status: 'unconfirmed' | 'confirmed' | 'not_required'
+    start?: string
+    end?: string
+    source?: string
+    cadence?: string
+    candidate_ranges?: Array<{ start: string; end: string; kind: string }>
+  }
+  needs: CreationBrainstormInputNeed[]
+}
 
 export interface CreationBrainstormQuestion {
   exploration_stage?: CreationBrainstormExplorationStage
@@ -165,6 +212,10 @@ export interface CreationBrainstormQuestion {
   prompt: string
   why_now: string
   context_details?: string
+  input_clarification?: {
+    kind: 'report_period' | 'source_confirmation' | string
+    need_ids: string[]
+  }
   required: boolean
   allow_custom: boolean
   options: CreationBrainstormOption[]
@@ -182,7 +233,51 @@ export interface CreationBrainstormHistoryItem {
   answer: CreationBrainstormAnswer
 }
 
+export type CreationBrainstormStageId = 'direction' | 'detail' | 'writing'
+
+export interface CreationBrainstormStage {
+  preparation_contract_version?: number
+  id: CreationBrainstormStageId
+  title: string
+  status: 'pending' | 'thinking' | 'answering' | 'ready' | 'completed' | 'failed'
+  generation_id: string
+  questions: CreationBrainstormQuestion[]
+  content_no_new_decision_reason?: string | null
+  input_preflight?: CreationBrainstormInputPreflight
+  progress: {
+    completed_batches: number
+    total_batches: number
+    percent: number
+    started_at_ms: number
+    updated_at_ms: number
+    estimated_remaining_seconds: number | null
+  }
+  error?: { code: string; message: string; retryable: boolean }
+  preparation_progress?: { topic_title: string; saved_nodes: number; pending_nodes: number }
+  recovery_progress?: { attempt: number; max_attempts: number; retry_at_ms: number }
+}
+
+export interface CreationBrainstormChapter {
+  id: string
+  title: string
+  goal: string
+  status: 'pending' | 'answering' | 'ready' | 'writing' | 'completed'
+  question_ids: string[]
+  instruction_id?: string
+  operation_id?: string
+}
+
+export interface CreationBrainstormStageWorkflow {
+  version: 2
+  active_stage: CreationBrainstormStageId
+  stages: CreationBrainstormStage[]
+  chapters: CreationBrainstormChapter[]
+  active_chapter_id?: string | null
+}
+
 export interface CreationBrainstormState {
+  work_context?: CreationWorkContext
+  stage_workflow?: CreationBrainstormStageWorkflow
   archived_questions?: Array<{ question: CreationBrainstormQuestion; answer: CreationBrainstormAnswer | null }>
   root_request?: string
   brief_edits?: Record<string, string>
@@ -209,6 +304,7 @@ export interface CreationBrainstormState {
 }
 
 export interface CreationDraft {
+  workContext?: CreationWorkContext | null
   prompt: string
   docType: string
   audience: string
@@ -525,7 +621,14 @@ export function loadCreationModels(): CreationModelConfig[] {
   return normalizeCreationModels(DEFAULT_CREATION_MODELS)
 }
 
+const CREATION_WORK_CONTEXT_DRAFT_KEY = 'memorybread.creation-work-context-draft.v1'
+const loadCreationWorkContextDraft = () => {
+  try { return readWorkContext(JSON.parse(safeLocalStorage?.getItem(CREATION_WORK_CONTEXT_DRAFT_KEY) || 'null')) || undefined }
+  catch { return undefined }
+}
+
 const initialCreationDraft: CreationDraft = {
+  workContext: loadCreationWorkContextDraft(),
   prompt: '',
   docType: '',
   audience: '',
@@ -762,11 +865,20 @@ export const useAppStore = create<AppState>((set, get) => ({
     repositoryCaptureSourceCaptureId: null,
   }),
 
-  setCreationDraft: (patch) => set((state) => ({
-    creationDraft: { ...state.creationDraft, ...patch },
-  })),
+  setCreationDraft: (patch) => {
+    if (Object.prototype.hasOwnProperty.call(patch, 'workContext')) {
+      try {
+        if (patch.workContext == null) safeLocalStorage?.removeItem(CREATION_WORK_CONTEXT_DRAFT_KEY)
+        else safeLocalStorage?.setItem(CREATION_WORK_CONTEXT_DRAFT_KEY, JSON.stringify(patch.workContext))
+      } catch { /* Current in-memory draft remains editable when disk storage is unavailable. */ }
+    }
+    set((state) => ({ creationDraft: { ...state.creationDraft, ...patch } }))
+  },
 
-  resetCreationDraft: () => set({ creationDraft: initialCreationDraft }),
+  resetCreationDraft: () => {
+    try { safeLocalStorage?.removeItem(CREATION_WORK_CONTEXT_DRAFT_KEY) } catch { /* In-memory reset still applies. */ }
+    set({ creationDraft: { ...initialCreationDraft, workContext: undefined } })
+  },
 
   setCreationBackTarget: (target) => set({ creationBackTarget: target }),
 

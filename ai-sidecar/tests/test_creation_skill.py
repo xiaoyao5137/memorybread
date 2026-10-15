@@ -55,7 +55,7 @@ def test_creation_skill_normalizer_fills_missing_model_fields():
     assert len(result["diagram_style"]) >= 400
     assert len("".join(result["writing_guidelines"])) >= 400
     assert "structure_pattern" not in result
-    assert len(result["example_document"]) >= 1000
+    assert CreationService._is_complete_skill_example_document(result["example_document"])
     assert result["skill_description"]["purpose"]
     assert result["skill_description"]["problems"]
     assert result["skill_description"]["deliverables"]
@@ -120,7 +120,8 @@ def test_creation_skill_prompt_requires_source_specific_style_fingerprint():
     assert '"diagram_style": "图片生成方式"' in prompt
     assert '"writing_guidelines": "话术表达风格"' in prompt
     assert "PlantUML" in prompt
-    assert "一千二百至两千二百个中文字符" in prompt
+    assert "篇幅、标题层级、章节数量和段落密度适配源文档" in prompt
+    assert "一千二百至两千二百个中文字符" not in prompt
     assert "目标对象 目标对象" in prompt
     assert "四百至七百个中文字符" in prompt
     assert "合计四百至七百个中文字符" in prompt
@@ -280,7 +281,7 @@ def test_creation_skill_normalizer_replaces_source_copies_and_private_examples()
     assert "星火项目组" not in serialized
     assert source_sentence not in serialized
     assert result["field_examples"]["text_style"]
-    assert len(result["example_document"]) >= 1000
+    assert CreationService._is_complete_skill_example_document(result["example_document"])
 
 
 def test_creation_skill_fallback_skips_main_title_and_compacts_private_placeholders():
@@ -314,7 +315,7 @@ def test_creation_skill_fallback_skips_main_title_and_compacts_private_placehold
     assert result["distinctive_sections"][0]["title"] == "定义先行的概念建立"
 
 
-def test_creation_skill_normalizer_replaces_short_model_sample_with_complete_fallback():
+def test_creation_skill_normalizer_replaces_placeholder_sample_with_source_sized_fallback():
     result = CreationService._normalize_creation_skill_analysis(
         {
             "title": "流程优化文档",
@@ -331,14 +332,14 @@ def test_creation_skill_normalizer_replaces_short_model_sample_with_complete_fal
         "实施方案",
     )
 
-    assert len(result["example_document"]) >= 1000
-    assert result["example_document"].count("\n## ") >= 6
+    assert CreationService._is_complete_skill_example_document(result["example_document"])
+    assert result["example_document"].count("\n## ") == 2
     assert "目标对象 目标对象" not in str(result["field_examples"]["common_titles"])
     assert len(result["common_titles"]) >= 4
     assert len(result["text_style"]) >= 260
 
 
-def test_creation_skill_fallback_example_is_long_and_adapts_heading_style():
+def test_creation_skill_fallback_example_adapts_source_length_and_heading_style():
     result = CreationService._fallback_creation_skill_analysis(
         "通用流程说明",
         """# 通用流程说明
@@ -355,8 +356,9 @@ def test_creation_skill_fallback_example_is_long_and_adapts_heading_style():
     )
 
     example = result["example_document"]
-    assert len(example) >= 1000
-    assert example.count("\n## ") >= 6
+    assert CreationService._is_complete_skill_example_document(example)
+    assert len(example) < 1000
+    assert example.count("\n## ") == 2
     assert "## 为什么现有预约方式需要调整" in example
     assert "## 方案如何落到执行" in example
     assert not any(ch.isascii() and ch.isdigit() for ch in example)
@@ -453,3 +455,18 @@ def test_creation_skill_normalizer_humanizes_object_arrays_and_keeps_dynamic_sec
     assert "{'level':" not in serialized
     assert "{'role':" not in serialized
     assert result["distinctive_sections"][0]["title"] == "定义先行"
+
+
+def test_creation_skill_normalizer_retains_complete_short_model_example():
+    example = "# 协作入口说明\n\n## 推荐做法\n\n建议将申请和接手状态放在同一份记录里，相关角色可以直接看到下一步动作。\n\n## 验证方式\n\n先走通正常交接，再验证无人接手时是否有明确的提醒方式。"
+    result = CreationService._normalize_creation_skill_analysis(
+        {"example_document": example}, "流程说明", "# 流程说明\n\n## 推荐做法\n\n合并相关状态。\n\n## 验证方式\n\n检查提醒。", "协作说明",
+    )
+    assert result["example_document"] == example
+    assert len(example) < 1000
+    assert example.count("\n## ") == 2
+
+
+@pytest.mark.parametrize("example", ["# 示例\n\n## 未完成", "# 示例\n\n## 已完成\n\n当前入口有明确的处理角色。\n\n## 未完成", "# 示例\n\nTODO"])
+def test_creation_skill_example_rejects_real_unfinished_sections(example):
+    assert not CreationService._is_complete_skill_example_document(example)

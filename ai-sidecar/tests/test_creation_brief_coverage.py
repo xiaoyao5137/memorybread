@@ -54,6 +54,7 @@ def test_generated_contract_is_complete_idempotent_and_ignores_non_user_entries(
     assert all(check["id"] not in {"excluded", "assumption"} for check in bound["acceptance"])
 
 
+
 def test_open_flags_are_preserved_as_questions_not_turned_into_implicit_answers():
     original = contract()
     flags = ["预售目标是多少？", "- 可用预算是多少？", "预售目标是多少？"]
@@ -116,7 +117,7 @@ def test_legacy_checkpoint_upgrades_brief_contract_and_invalidates_old_pass(cont
     assert context["root_request"] == "旧上下文根目标"
     assert "执行参数0，每批100份。" in context["creation_brief"]
     assert len(context["brainstorm_decisions"]) == 27
-    assert context["brainstorm_context_version"] == 4
+    assert context["brainstorm_context_version"] == 6
     assert "delivery_checked_hash" not in state.environment
     bound = copy.deepcopy(state.environment["input_contract"])
     loop._input_context(state)
@@ -139,7 +140,7 @@ def test_open_flag_contract_upgrade_discards_failures_from_obsolete_acceptance()
         delivery_review={"status": "revise"}, delivery_pending_review={"checks": []},
         delivery_last_revise={"corrections": ["旧规则要求代答"]}, delivery_checked_hash="stale")
     loop._input_context(state)
-    assert state.environment["brainstorm_acceptance_version"] == 7
+    assert state.environment["brainstorm_acceptance_version"] == 9
     assert state.environment["delivery_repair_count"] == 0
     assert "delivery_review" not in state.environment
     assert "delivery_pending_review" not in state.environment

@@ -399,6 +399,25 @@
   box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.12);
 }
 
+.privacy-form-field input[aria-invalid="true"] {
+  border-color: #C24B46;
+}
+
+.privacy-form-feedback {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.privacy-form-feedback--error {
+  color: #B42318;
+}
+
+.privacy-form-feedback--success {
+  color: #1D6F42;
+}
+
 .privacy-add-btn,
 .privacy-retry-btn {
   min-height: 36px;
@@ -413,6 +432,11 @@
 .privacy-add-btn:hover,
 .privacy-retry-btn:hover {
   background: #0051D5;
+}
+
+.privacy-add-btn:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .privacy-retry-btn {
@@ -596,6 +620,14 @@
 
   .privacy-form-field input:hover {
     border-color: rgba(255, 255, 255, 0.2);
+  }
+
+  .privacy-form-feedback--error {
+    color: #FF9A90;
+  }
+
+  .privacy-form-feedback--success {
+    color: #6EE7A0;
   }
 
   .privacy-slider {

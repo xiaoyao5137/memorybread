@@ -371,6 +371,25 @@ describe('技能云端发布边界', () => {
 })
 
 describe('技能本地生成与类目容错', () => {
+  it('完整短说明保留模型示例，不因为少于六章或一千字而扩成长方案', async () => {
+    vi.useFakeTimers()
+    const example = '# 协作入口说明\n\n## 推荐做法\n\n建议把申请和接手状态放在同一份记录中，相关角色可以直接看到下一步动作。\n\n## 验证方式\n\n先走通正常交接，再检查无人接手时是否有明确的提醒方式。'
+    const result = {
+      title: '协作说明文档', summary: '适合梳理交接入口。', common_titles: ['推荐做法'],
+      text_style: '短段落先写推荐动作。', diagram_style: '默认不生成图片。', writing_guidelines: ['用直接的动作表达。'],
+      section_headings: DEFAULT_CREATION_SKILL_SECTION_HEADINGS,
+      field_examples: DEFAULT_CREATION_SKILL_FIELD_EXAMPLES,
+      example_document: example, analysis_mode: 'local_model',
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => new URL(String(input)).pathname.endsWith('/jobs')
+      ? Response.json({ job_id: 'compact-example', status: 'pending' })
+      : Response.json({ id: 'compact-example', status: 'succeeded', result })))
+    const pending = analyzeCreationSkill('http://127.0.0.1:7070', { kind: 'bake_document', id: 'compact-source',
+      title: '协作入口说明', content: '# 协作入口说明\n\n## 推荐做法\n\n合并状态。\n\n## 验证方式\n\n检查提醒。', docType: '协作说明' })
+    await vi.runAllTimersAsync()
+    const analysis = await pending
+    expect(analysis.exampleDocument).toBe(example)
+  })
   it('离线类目覆盖主要行业且每个节点都保持完整四级关系', () => {
     const counts = [1, 2, 3, 4].map(level => OFFLINE_CREATION_SKILL_CATEGORIES.filter(item => item.level === level).length)
     const ids = new Set(OFFLINE_CREATION_SKILL_CATEGORIES.map(item => item.id))
@@ -410,8 +429,8 @@ describe('技能本地生成与类目容错', () => {
     expect(analysis.diagramStyle).not.toBe('')
     expect(analysis.commonTitles.join('')).not.toContain('订单中心')
     expect(analysis.exampleDocument).not.toContain('订单中心')
-    expect(analysis.exampleDocument.length).toBeGreaterThanOrEqual(1000)
-    expect(analysis.exampleDocument.match(/^##\s+/gm)?.length).toBeGreaterThanOrEqual(6)
+    expect(analysis.exampleDocument.length).toBeLessThan(1000)
+    expect(analysis.exampleDocument.match(/^##\s+/gm)?.length).toBeLessThanOrEqual(4)
     expect(analysis.textStyle.length).toBeGreaterThanOrEqual(400)
     expect(analysis.diagramStyle.length).toBeGreaterThanOrEqual(400)
     expect(analysis.writingGuidelines.join('').length).toBeGreaterThanOrEqual(400)
@@ -543,8 +562,8 @@ describe('技能本地生成与类目容错', () => {
     expect(analysis.textStyle.length).toBeGreaterThanOrEqual(400)
     expect(analysis.diagramStyle.length).toBeGreaterThanOrEqual(400)
     expect(analysis.writingGuidelines.join('').length).toBeGreaterThanOrEqual(400)
-    expect(analysis.exampleDocument.length).toBeGreaterThanOrEqual(1000)
-    expect(analysis.exampleDocument.match(/^##\s+/gm)?.length).toBeGreaterThanOrEqual(6)
+    expect(analysis.exampleDocument.length).toBeLessThan(1000)
+    expect(analysis.exampleDocument.match(/^##\s+/gm)?.length).toBeLessThanOrEqual(4)
   })
 
   it('合并同一来源的并发分析，避免开发模式重复占用本地模型', async () => {

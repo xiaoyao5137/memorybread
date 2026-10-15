@@ -17,7 +17,9 @@ use tracing::{error, info};
 
 use crate::api::state::AppState;
 
+mod brainstorm_catalog;
 mod brainstorm_prefetch;
+mod brainstorm_stages;
 pub(crate) use brainstorm_prefetch::BrainstormPrefetchCache;
 
 #[derive(Debug, Deserialize)]
@@ -33,6 +35,8 @@ pub struct GenerateRequest {
     pub doc_type: String,
     #[serde(default)]
     pub audience: String,
+    #[serde(default)]
+    pub work_context: Option<serde_json::Value>,
     #[serde(default = "default_output_format")]
     pub output_format: String,
     #[serde(default = "default_true")]
@@ -73,6 +77,8 @@ pub struct GenerateRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct AgentRunRequest {
+    #[serde(default)]
+    pub brainstorm_chapter_id: Option<String>,
     #[serde(flatten)]
     pub generation: GenerateRequest,
     #[serde(default)]
@@ -95,6 +101,9 @@ pub struct AgentRunRequest {
     pub available_skills: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     pub explicit_skill_ids: Vec<String>,
+    /// Canonical chapter commitment, supplied by Core after loading the Brainstorm session.
+    #[serde(skip)]
+    pub brainstorm_skill_binding: Option<serde_json::Value>,
     #[serde(default = "default_model_mode")]
     pub model_mode: String,
     #[serde(default)]
@@ -547,6 +556,7 @@ struct CreationPayload {
     capture_context: Option<String>,
     doc_type: String,
     audience: String,
+    work_context: Option<serde_json::Value>,
     output_format: String,
     inherit_format: bool,
     enable_rag: bool,
@@ -579,6 +589,8 @@ struct AgentRunPayload {
     selected_skills: Vec<serde_json::Value>,
     available_skills: Option<Vec<serde_json::Value>>,
     explicit_skill_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    brainstorm_skill_binding: Option<serde_json::Value>,
     model_mode: String,
     confirmed: bool,
     resume_state: Option<serde_json::Value>,
@@ -615,6 +627,8 @@ pub struct BrainstormOption {
     pub details: String,
     #[serde(default)]
     pub recommended: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_value: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -636,6 +650,7 @@ impl From<&BrainstormContinuationDirection> for BrainstormOption {
             description: direction.description.clone(),
             details: direction.details.clone(),
             recommended: direction.recommended,
+            input_value: None,
         }
     }
 }
@@ -666,6 +681,8 @@ pub struct BrainstormQuestion {
     pub options: Vec<BrainstormOption>,
     #[serde(default)]
     pub answer_template: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_clarification: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -702,6 +719,10 @@ pub struct BrainstormArchivedQuestion {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BrainstormStoredState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    work_context: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stage_workflow: Option<brainstorm_stages::StageWorkflow>,
     #[serde(default)]
     pending_extensions: Vec<BrainstormExtensionPlan>,
     #[serde(default)]
@@ -721,6 +742,8 @@ struct BrainstormStoredState {
     root_request: String,
     #[serde(default)]
     selected_skills: Vec<serde_json::Value>,
+    #[serde(default)]
+    skill_binding_version: u8,
     #[serde(default)]
     turns: Vec<BrainstormStoredTurn>,
     #[serde(default)]
@@ -754,7 +777,15 @@ struct BrainstormStoredTurn {
 #[derive(Debug, Clone, Deserialize)]
 pub struct BrainstormTurnRequest {
     #[serde(default)]
+    pub work_context: Option<serde_json::Value>,
+    #[serde(default)]
+    pub workflow_version: Option<u8>,
+    #[serde(default)]
+    pub chapter_id: Option<String>,
+    #[serde(default)]
     pub brief_edits: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub candidate_copy_patches: Vec<brainstorm_stages::CandidateCopyPatch>,
     pub session_id: String,
     pub root_request: String,
     pub action: String,
@@ -784,6 +815,10 @@ pub struct BrainstormTurnRequest {
 
 #[derive(Debug, Serialize)]
 pub struct BrainstormTurnResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_context: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage_workflow: Option<brainstorm_stages::StageWorkflow>,
     pub archived_questions: Vec<BrainstormArchivedQuestion>,
     pub root_request: String,
     pub brief_edits: std::collections::BTreeMap<String, String>,
@@ -998,8 +1033,12 @@ pub async fn run_creation_inline_edit(
                 false,
             )
         })?;
-    if !crate::storage::repo::creation_history::matches_document_base(&history, req.session_id.trim(), req.selection.base_revision_no, &req.current_document)
-        || sha256_hex(&history.generated_content) != req.selection.base_document_hash
+    if !crate::storage::repo::creation_history::matches_document_base(
+        &history,
+        req.session_id.trim(),
+        req.selection.base_revision_no,
+        &req.current_document,
+    ) || sha256_hex(&history.generated_content) != req.selection.base_document_hash
     {
         return Err(fail(
             StatusCode::CONFLICT,
@@ -1743,6 +1782,9 @@ pub async fn generate_document(
         "创作请求已接收: prompt_length={}",
         req.user_prompt.chars().count()
     );
+    if let Some(context) = req.work_context.as_ref() {
+        req.work_context = Some(normalize_creation_work_context(Some(context))?);
+    }
     enrich_creation_model_from_preferences(&state, &mut req);
     let enabled_tools = normalize_creation_tool_ids(req.enabled_tools.clone());
 
@@ -1788,6 +1830,7 @@ pub async fn generate_document(
         capture_context,
         doc_type: req.doc_type,
         audience: req.audience,
+        work_context: req.work_context,
         output_format: req.output_format,
         inherit_format: req.inherit_format,
         enable_rag: req.enable_rag,
@@ -1860,21 +1903,36 @@ pub async fn generate_document(
 }
 
 #[derive(Debug, Deserialize)]
-pub struct UndoOperationRequest { pub session_id: String, pub operation_id: String }
+pub struct UndoOperationRequest {
+    pub session_id: String,
+    pub operation_id: String,
+}
 
-pub async fn undo_creation_operation(State(state): State<Arc<AppState>>, Json(req): Json<UndoOperationRequest>)
-    -> Result<Json<serde_json::Value>, (StatusCode,String)> {
-    let content = state.storage.with_conn(|conn| {
-        crate::storage::repo::creation_operation::undo(conn,&req.session_id,&req.operation_id).map_err(Into::into)
-    }).map_err(|_| (StatusCode::CONFLICT,"CREATION_BASE_CHANGED".to_string()))?;
-    Ok(Json(serde_json::json!({"content":content,"status":"undone"})))
+pub async fn undo_creation_operation(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UndoOperationRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let content = state
+        .storage
+        .with_conn(|conn| {
+            crate::storage::repo::creation_operation::undo(conn, &req.session_id, &req.operation_id)
+                .map_err(Into::into)
+        })
+        .map_err(|_| (StatusCode::CONFLICT, "CREATION_BASE_CHANGED".to_string()))?;
+    Ok(Json(
+        serde_json::json!({"content":content,"status":"undone"}),
+    ))
 }
 
 pub async fn run_creation_agent(
     State(state): State<Arc<AppState>>,
     Json(mut req): Json<AgentRunRequest>,
-) -> Result<Sse<futures::stream::BoxStream<'static, Result<Event, Infallible>>>, (StatusCode, String)> {
-    if !matches!(req.execution_origin.as_str(), "interactive" | "scheduled_task") {
+) -> Result<Sse<futures::stream::BoxStream<'static, Result<Event, Infallible>>>, (StatusCode, String)>
+{
+    if !matches!(
+        req.execution_origin.as_str(),
+        "interactive" | "scheduled_task"
+    ) {
         return Err((
             StatusCode::BAD_REQUEST,
             "execution_origin 只支持 interactive 或 scheduled_task".to_string(),
@@ -1903,6 +1961,18 @@ pub async fn run_creation_agent(
     req.generation.creation_api_key = None;
     req.generation.creation_base_url = None;
 
+    if req.generation.work_context.is_none() {
+        req.generation.work_context = req
+            .creation_brief
+            .as_ref()
+            .and_then(|brief| brief.get("work_context"))
+            .cloned();
+    }
+    if let Some(context) = req.generation.work_context.as_ref() {
+        req.generation.work_context = Some(normalize_creation_work_context(Some(context))?);
+    }
+    brainstorm_stages::bind_chapter_request(&state, &mut req)?;
+
     let stored_context = if let Some(session_id) = req.session_id.as_deref() {
         state
             .storage
@@ -1917,7 +1987,26 @@ pub async fn run_creation_agent(
     } else {
         None
     };
+    if req.brainstorm_chapter_id.is_some() && stored_context.is_none() {
+        return Err((
+            StatusCode::CONFLICT,
+            "BRAINSTORM_CHAPTER_HISTORY_REQUIRED".to_string(),
+        ));
+    }
     if let Some(ref context) = stored_context {
+        if req.generation.work_context.is_none() {
+            let saved_brief = context
+                .latest
+                .creation_brief_json
+                .as_deref()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
+            if let Some(saved) = saved_brief
+                .as_ref()
+                .and_then(|brief| brief.get("work_context"))
+            {
+                req.generation.work_context = Some(normalize_creation_work_context(Some(saved))?);
+            }
+        }
         if req.current_document.trim().is_empty() {
             req.current_document = context.latest.generated_content.clone();
         }
@@ -1962,55 +2051,142 @@ pub async fn run_creation_agent(
         req.run_id = Some(format!("run-{}", uuid::Uuid::new_v4()));
     }
 
+    if let Some(context) = req.generation.work_context.as_ref() {
+        let brief = req
+            .creation_brief
+            .get_or_insert_with(|| serde_json::json!({}));
+        if let Some(object) = brief.as_object_mut() {
+            object.insert("work_context".to_string(), context.clone());
+        }
+    }
     let mut operation_context = None;
     let mut resume_checkpoint = None;
     let mut fresh_input_attempt = false;
     let mut durable_operation_id = None;
-    if let (Some(session), Some(instruction_id), Some(context)) =
-        (req.session_id.as_deref(), req.instruction_id.as_deref(), stored_context.as_ref()) {
+    if let (Some(session), Some(instruction_id), Some(context)) = (
+        req.session_id.as_deref(),
+        req.instruction_id.as_deref(),
+        stored_context.as_ref(),
+    ) {
         let operation_id = req.resume_operation_id.clone().unwrap_or_else(|| {
-            format!("operation-{}", sha256_hex(&format!("{}:{}", session, instruction_id)))
+            format!(
+                "operation-{}",
+                sha256_hex(&format!("{}:{}", session, instruction_id))
+            )
         });
-        let operation = state.storage.with_conn(|conn| {
-            if req.resume_operation_id.is_none() {
-                crate::storage::repo::creation_operation::seed_legacy_pending(conn, session, instruction_id, &context.latest)?;
-                crate::storage::repo::creation_operation::begin(conn, session, &operation_id,
-                    instruction_id, &req.generation.user_prompt, &context.latest)?;
-            }
-            crate::storage::repo::creation_operation::get_for_resume(conn,session,&operation_id).map_err(Into::into)
-        }).map_err(|err| {
-            if matches!(err, crate::storage::error::StorageError::Sqlite(rusqlite::Error::InvalidQuery)) {
-                return (StatusCode::CONFLICT,"创作指令状态冲突，请重新打开会话后重试".to_string());
-            }
-            // Storage failures are server errors, not invalid user instructions.
-            // Do not expose SQL or user content through the response.
-            error!("创作操作持久化失败: {}", err);
-            (StatusCode::INTERNAL_SERVER_ERROR,"创作记录写入失败，请重启应用完成数据升级后重试".to_string())
-        })?
-          .ok_or((StatusCode::NOT_FOUND,"CREATION_RESUME_MISSING".to_string()))?;
+        let operation = state
+            .storage
+            .with_conn(|conn| {
+                if req.resume_operation_id.is_none() {
+                    if req.brainstorm_chapter_id.is_none() {
+                        crate::storage::repo::creation_operation::seed_legacy_pending(
+                            conn,
+                            session,
+                            instruction_id,
+                            &context.latest,
+                        )?;
+                    }
+                    crate::storage::repo::creation_operation::begin(
+                        conn,
+                        session,
+                        &operation_id,
+                        instruction_id,
+                        &req.generation.user_prompt,
+                        &context.latest,
+                    )?;
+                }
+                crate::storage::repo::creation_operation::get_for_resume(
+                    conn,
+                    session,
+                    &operation_id,
+                )
+                .map_err(Into::into)
+            })
+            .map_err(|err| {
+                if matches!(
+                    err,
+                    crate::storage::error::StorageError::Sqlite(rusqlite::Error::InvalidQuery)
+                ) {
+                    return (
+                        StatusCode::CONFLICT,
+                        "创作指令状态冲突，请重新打开会话后重试".to_string(),
+                    );
+                }
+                // Storage failures are server errors, not invalid user instructions.
+                // Do not expose SQL or user content through the response.
+                error!("创作操作持久化失败: {}", err);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "创作记录写入失败，请重启应用完成数据升级后重试".to_string(),
+                )
+            })?
+            .ok_or((StatusCode::NOT_FOUND, "CREATION_RESUME_MISSING".to_string()))?;
         if let Some(result) = operation.result.filter(|_| operation.status == "completed") {
             let events = futures::stream::iter(vec![Ok(Event::default().data(result.to_string()))]);
-            return Ok(Sse::new(Box::pin(events) as futures::stream::BoxStream<'static, Result<Event, Infallible>>));
+            return Ok(Sse::new(
+                Box::pin(events) as futures::stream::BoxStream<'static, Result<Event, Infallible>>
+            ));
         }
-        if !crate::storage::repo::creation_history::matches_document_base(&context.latest, session, operation.base_revision, &operation.base_document) {
-            return Err((StatusCode::CONFLICT,"CREATION_BASE_CHANGED".to_string()));
+        if !crate::storage::repo::creation_history::matches_document_base(
+            &context.latest,
+            session,
+            operation.base_revision,
+            &operation.base_document,
+        ) {
+            return Err((StatusCode::CONFLICT, "CREATION_BASE_CHANGED".to_string()));
         }
-        let pending = state.storage.with_conn(|conn| {
-            crate::storage::repo::creation_operation::pending(conn,session,&operation_id).map_err(Into::into)
-        }).map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR,"读取未完成操作失败".to_string()))?;
-        let undo_candidates = state.storage.with_conn(|conn| {
-            crate::storage::repo::creation_operation::undo_candidates(conn,session,operation.base_revision).map_err(Into::into)
-        }).map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR,"读取撤销记录失败".to_string()))?;
-        operation_context = Some(serde_json::json!({"operation_id":operation_id, "instruction_id": instruction_id,
-            "pending_operations":pending,"undo_candidates":undo_candidates,"base_revision":operation.base_revision}));
-        let changed_inputs = operation.checkpoint.as_ref()
+        let pending = state
+            .storage
+            .with_conn(|conn| {
+                crate::storage::repo::creation_operation::pending(conn, session, &operation_id)
+                    .map_err(Into::into)
+            })
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "读取未完成操作失败".to_string(),
+                )
+            })?;
+        let pending = brainstorm_stages::scope_pending_operations(&state, &req, pending)?;
+        let undo_candidates = state
+            .storage
+            .with_conn(|conn| {
+                crate::storage::repo::creation_operation::undo_candidates(
+                    conn,
+                    session,
+                    operation.base_revision,
+                )
+                .map_err(Into::into)
+            })
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "读取撤销记录失败".to_string(),
+                )
+            })?;
+        operation_context = Some(
+            serde_json::json!({"operation_id":operation_id, "instruction_id": instruction_id,
+            "pending_operations":pending,"undo_candidates":undo_candidates,"base_revision":operation.base_revision,
+            "original_document":operation.original_document,
+            "adopted_failed_candidate":req.resume_operation_id.is_some()
+                && operation.status == "failed"
+                && operation.base_document != operation.original_document}),
+        );
+        let changed_inputs = operation
+            .checkpoint
+            .as_ref()
             .is_some_and(|checkpoint| !creation_checkpoint_inputs_match(&req, checkpoint));
         if let Some(checkpoint) = operation.checkpoint.filter(|_| !changed_inputs) {
             req.run_id = checkpoint["run_id"].as_str().map(str::to_string);
             if req.model_result.is_some() {
                 let expected_request_id = checkpoint["pending_model_step"]["request_id"].as_str();
-                if expected_request_id.is_none() || req.model_request_id.as_deref() != expected_request_id {
-                    return Err((StatusCode::CONFLICT,"CREATION_MODEL_RESULT_STALE".to_string()));
+                if expected_request_id.is_none()
+                    || req.model_request_id.as_deref() != expected_request_id
+                {
+                    return Err((
+                        StatusCode::CONFLICT,
+                        "CREATION_MODEL_RESULT_STALE".to_string(),
+                    ));
                 }
                 req.resume_state = Some(checkpoint);
             } else {
@@ -2031,7 +2207,10 @@ pub async fn run_creation_agent(
                 req.generation.user_prompt = operation.instruction;
             }
         } else if req.model_result.is_some() {
-            return Err((StatusCode::CONFLICT,"CREATION_MODEL_RESULT_STALE".to_string()));
+            return Err((
+                StatusCode::CONFLICT,
+                "CREATION_MODEL_RESULT_STALE".to_string(),
+            ));
         } else if req.resume_operation_id.is_some() {
             // An operation persisted before its first model call can still resume its original instruction.
             req.generation.user_prompt = operation.instruction;
@@ -2073,10 +2252,27 @@ pub async fn run_creation_agent(
         }
     }
 
-    if let (Some(session), Some(operation_id)) = (lease_session_id.as_deref(), durable_operation_id.as_deref()) {
-        if state.storage.with_conn(|conn| crate::storage::repo::creation_operation::restart_attempt(conn,session,operation_id,resume_checkpoint.is_some() || fresh_input_attempt).map_err(Into::into)).is_err() {
-            release_creation_lease(&state,session,&lease_owner);
-            return Err((StatusCode::INTERNAL_SERVER_ERROR,"恢复操作失败".to_string()));
+    if let (Some(session), Some(operation_id)) =
+        (lease_session_id.as_deref(), durable_operation_id.as_deref())
+    {
+        if state
+            .storage
+            .with_conn(|conn| {
+                crate::storage::repo::creation_operation::restart_attempt(
+                    conn,
+                    session,
+                    operation_id,
+                    resume_checkpoint.is_some() || fresh_input_attempt,
+                )
+                .map_err(Into::into)
+            })
+            .is_err()
+        {
+            release_creation_lease(&state, session, &lease_owner);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "恢复操作失败".to_string(),
+            ));
         }
     }
     let generation = req.generation;
@@ -2089,6 +2285,7 @@ pub async fn run_creation_agent(
             capture_context,
             doc_type: generation.doc_type,
             audience: generation.audience,
+            work_context: generation.work_context,
             output_format: generation.output_format,
             inherit_format: generation.inherit_format,
             enable_rag: generation.enable_rag,
@@ -2116,6 +2313,7 @@ pub async fn run_creation_agent(
         selected_skills: req.selected_skills,
         available_skills: req.available_skills,
         explicit_skill_ids: req.explicit_skill_ids,
+        brainstorm_skill_binding: req.brainstorm_skill_binding,
         model_mode: req.model_mode,
         confirmed: req.confirmed,
         resume_state: req.resume_state,
@@ -2127,6 +2325,18 @@ pub async fn run_creation_agent(
         resume_checkpoint,
     };
 
+    // Own the durable operation before the HTTP handshake. A connect error
+    // or non-success response must release both the in-memory lease and the
+    // persisted `running` marker; otherwise an attempt with no SSE events is
+    // left looking active and cannot be safely resumed.
+    let durable_session_id = lease_session_id.clone();
+    let durable_lease_owner = lease_owner.clone();
+    let lease_guard = CreationLeaseGuard {
+        state: state.clone(),
+        session_id: lease_session_id,
+        operation_id: durable_operation_id.clone(),
+        owner: lease_owner,
+    };
     let response = creation_sidecar_client()
         .post(format!(
             "{}/creation/agent/run",
@@ -2136,9 +2346,6 @@ pub async fn run_creation_agent(
         .send()
         .await
         .map_err(|e| {
-            if let Some(session_id) = lease_session_id.as_deref() {
-                release_creation_lease(&state, session_id, &lease_owner);
-            }
             error!("调用创作 Agent sidecar 失败: {}", e);
             (
                 StatusCode::BAD_GATEWAY,
@@ -2149,23 +2356,12 @@ pub async fn run_creation_agent(
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         error!("创作 Agent sidecar 返回错误: {} - {}", status, body);
-        if let Some(session_id) = lease_session_id.as_deref() {
-            release_creation_lease(&state, session_id, &lease_owner);
-        }
         return Err((
             StatusCode::BAD_GATEWAY,
             format!("创作 Agent 服务错误: {}", body),
         ));
     }
 
-    let durable_session_id = lease_session_id.clone();
-    let durable_lease_owner = lease_owner.clone();
-    let lease_guard = CreationLeaseGuard {
-        state: state.clone(),
-        session_id: lease_session_id,
-        operation_id: durable_operation_id.clone(),
-        owner: lease_owner,
-    };
     let stream = async_stream::stream! {
         let _lease_guard = lease_guard;
         let mut bytes_stream = response.bytes_stream();
@@ -2236,7 +2432,17 @@ fn answer_summary(question: &BrainstormQuestion, answer: &BrainstormAnswer) -> S
         .selected_option_ids
         .iter()
         .filter_map(|id| question.options.iter().find(|item| &item.id == id))
-        .map(|item| item.label.clone())
+        .map(|item| {
+            if question.input_clarification.as_ref()
+                .and_then(|marker| marker["kind"].as_str()) == Some("report_period") {
+                if let Some((start, end)) = item.input_value.as_ref().and_then(|value| {
+                    Some((value["start"].as_str()?, value["end"].as_str()?))
+                }) {
+                    return format!("{}；报告周期：{} 至 {}", item.label, start, end);
+                }
+            }
+            item.label.clone()
+        })
         .collect::<Vec<_>>();
     if !answer.custom_text.trim().is_empty() {
         values.push(answer.custom_text.trim().to_string());
@@ -2312,24 +2518,54 @@ fn brainstorm_effective_summary(
     if turn.answer.source == "user_excluded" {
         return format!("该方向不重要，禁止展开或写入文档：{}", turn.question.prompt);
     }
-    state
-        .brief_edits
-        .get(&turn.question.id)
-        .cloned()
-        .unwrap_or_else(|| answer_summary(&turn.question, &turn.answer))
+    if let Some(edited) = state.brief_edits.get(&turn.question.id) {
+        return edited.clone();
+    }
+    let summary = answer_summary(&turn.question, &turn.answer);
+    if turn.answer.source != "user"
+        || !brainstorm_question_is_current(state, &turn.question)
+        || !state.stage_workflow.as_ref().is_some_and(|workflow|
+            workflow.is_content_question(&turn.question))
+    {
+        return summary;
+    }
+    let chosen = turn.answer.selected_option_ids.iter()
+        .filter_map(|id| turn.question.options.iter().find(|option| &option.id == id))
+        .map(|option| format!("{}：{}", option.label, option.description.trim()))
+        .collect::<Vec<_>>();
+    if chosen.is_empty() {
+        summary
+    } else {
+        format!("{}；用户选择的条件做法（不代表相关事实已经核实）：{}",
+            summary, chosen.join("；"))
+    }
 }
 
-fn brainstorm_question_is_current(state: &BrainstormStoredState, question: &BrainstormQuestion) -> bool {
+fn brainstorm_question_is_current(
+    state: &BrainstormStoredState,
+    question: &BrainstormQuestion,
+) -> bool {
+    if state
+        .turns
+        .iter()
+        .any(|turn| turn.question.id == question.id && turn.answer.source == "user_cleared")
+    {
+        return false;
+    }
     let mut question = question;
     let mut visited = std::collections::HashSet::new();
     while visited.insert(question.id.as_str()) {
-        let Some(parent) = question.parent_question_id.as_deref().and_then(|id| {
-            state.turns.iter().find(|turn| turn.question.id == id)
-        }) else {
+        let Some(parent) = question
+            .parent_question_id
+            .as_deref()
+            .and_then(|id| state.turns.iter().find(|turn| turn.question.id == id))
+        else {
             return true;
         };
         if state.brief_edits.contains_key(&parent.question.id) {
-            if !state.branch_parent_revisions.get(&question.id)
+            if !state
+                .branch_parent_revisions
+                .get(&question.id)
                 .zip(state.user_input_revisions.get(&parent.question.id))
                 .is_some_and(|(basis, current)| basis >= current)
             {
@@ -2344,13 +2580,24 @@ fn brainstorm_question_is_current(state: &BrainstormStoredState, question: &Brai
 }
 
 fn archive_superseded_brainstorm_turns(state: &mut BrainstormStoredState) -> Vec<String> {
-    let invalidated = state.turns.iter()
+    let invalidated = state
+        .turns
+        .iter()
         .filter(|turn| !brainstorm_question_is_current(state, &turn.question))
-        .map(|turn| turn.question.id.clone()).collect::<Vec<_>>();
+        .map(|turn| turn.question.id.clone())
+        .collect::<Vec<_>>();
     state.pending_extensions.retain(|plan| {
         !invalidated.contains(&plan.parent_question_id)
-            && state.turns.iter().any(|turn| turn.question.id == plan.parent_question_id)
-            && state.user_input_revisions.get(&plan.parent_question_id).copied().unwrap_or(0) == plan.parent_revision
+            && state
+                .turns
+                .iter()
+                .any(|turn| turn.question.id == plan.parent_question_id)
+            && state
+                .user_input_revisions
+                .get(&plan.parent_question_id)
+                .copied()
+                .unwrap_or(0)
+                == plan.parent_revision
     });
     let turns = std::mem::take(&mut state.turns);
     for turn in turns {
@@ -2358,7 +2605,8 @@ fn archive_superseded_brainstorm_turns(state: &mut BrainstormStoredState) -> Vec
             state.brief_edits.remove(&turn.question.id);
             state.user_input_revisions.remove(&turn.question.id);
             state.archived_questions.push(BrainstormArchivedQuestion {
-                question: turn.question, answer: Some(turn.answer),
+                question: turn.question,
+                answer: Some(turn.answer),
             });
         } else {
             state.turns.push(turn);
@@ -2381,6 +2629,46 @@ fn brainstorm_effective_open_flags(state: &BrainstormStoredState) -> Vec<String>
         .unwrap_or_else(|| state.open_flags.clone())
 }
 
+/// Only facts and work goals enter planning. Writing samples and profile rules are separate.
+fn brainstorm_work_facts(state: &BrainstormStoredState) -> Option<serde_json::Value> {
+    let context = state.work_context.as_ref()?;
+    let mut facts = serde_json::Map::new();
+    for key in ["purpose", "decision_goal", "reader_context", "constraints"] {
+        if let Some(value) = context
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            facts.insert(
+                key.to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
+        }
+    }
+    if facts.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(facts))
+    }
+}
+
+fn brainstorm_initial_work_context(
+    req: &BrainstormTurnRequest,
+) -> Result<Option<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    req.work_context
+        .as_ref()
+        .map(|value| {
+            normalize_creation_work_context(Some(value)).map_err(|_| {
+                brainstorm_error(
+                    StatusCode::BAD_REQUEST,
+                    "CREATION_WORK_CONTEXT_INVALID",
+                    "工作场景设置不完整或超过输入上限，请检查后重试",
+                )
+            })
+        })
+        .transpose()
+}
+
 fn brainstorm_brief(state: &BrainstormStoredState) -> String {
     let mut lines = vec![
         "# 创作简报".to_string(),
@@ -2393,36 +2681,79 @@ fn brainstorm_brief(state: &BrainstormStoredState) -> String {
                 .unwrap_or(&state.root_request)
         ),
     ];
-    if !state.memory_brief.is_empty() {
-        lines.push(format!("\n## 历史记忆参考（当前用户修订优先）\n{}", state.memory_brief));
+    if let Some(context) = brainstorm_work_facts(state) {
+        lines.push("\n## 工作用途与已知边界（用户输入）".to_string());
+        for (key, label) in [
+            ("purpose", "用途"),
+            ("decision_goal", "希望读者决定"),
+            ("reader_context", "读者已知背景"),
+            ("constraints", "资源与范围约束"),
+        ] {
+            if let Some(value) = context.get(key).and_then(serde_json::Value::as_str) {
+                lines.push(format!("- **{}：** {}", label, value));
+            }
+        }
     }
-    for turn in state.turns.iter().filter(|turn| brainstorm_question_is_current(state, &turn.question)) {
+    if !state.memory_brief.is_empty() {
+        lines.push(format!(
+            "\n## 历史记忆参考（当前用户修订优先）\n{}",
+            state.memory_brief
+        ));
+    }
+    if let Some(detail) = state.stage_workflow.as_ref().and_then(|workflow|
+        workflow.stages.iter().find(|stage| stage.id == "detail")) {
+        if let Some(preflight) = &detail.input_preflight {
+            lines.push("\n## 创作细节输入核验（来源收据不是正文事实）".to_string());
+            let period = detail.confirmed_period.as_ref().unwrap_or(&preflight["period"]);
+            if let (Some(start), Some(end)) = (period["start"].as_str(), period["end"].as_str()) {
+                lines.push(format!("- 报告统计期：{} 至 {}。", start, end));
+            } else if preflight["period"]["status"] == "unconfirmed" {
+                lines.push("- 报告统计期尚待用户确认，不得自行指定起止日。".to_string());
+            }
+            if let Some(needs) = preflight["needs"].as_array() {
+                for need in needs.iter().take(6) {
+                    let label = need["label"].as_str().unwrap_or("资料");
+                    let status = need["status"].as_str().unwrap_or("candidate");
+                    lines.push(format!("- {}：{}。只有来源实际统计期和完整度均获核验时才能作为该期完整事实；采集日期不能代替统计期。", label, status));
+                }
+            }
+        }
+    }
+    for turn in state
+        .turns
+        .iter()
+        .filter(|turn| brainstorm_question_is_current(state, &turn.question))
+    {
         if turn.answer.source == "user_excluded" {
-            lines.push(format!("\n- **排除约束（不得写入正文，也不得列为待补充或未展开方向）：** {}", turn.question.prompt));
+            lines.push(format!(
+                "\n- **排除约束（不得写入正文，也不得列为待补充或未展开方向）：** {}",
+                turn.question.prompt
+            ));
             continue;
         }
         lines.push(String::new());
         lines.push(format!("## {}", turn.question.dimension));
-        let label = if turn.answer.source == "agent_assumption"
-            && !state.brief_edits.contains_key(&turn.question.id)
-        {
-            "合理假设"
-        } else {
-            "已确认"
-        };
+        let label =
+            if turn.answer.source == "user" || state.brief_edits.contains_key(&turn.question.id) {
+                "已确认"
+            } else if turn.answer.source == "agent_assumption" {
+                "合理假设"
+            } else {
+                "待确认"
+            };
         lines.push(format!("- **问题：** {}", turn.question.prompt));
         lines.push(format!(
             "- **{}：** {}",
             label,
-            state
-                .brief_edits
-                .get(&turn.question.id)
-                .cloned()
-                .unwrap_or_else(|| answer_summary(&turn.question, &turn.answer))
+            brainstorm_effective_summary(state, turn)
         ));
     }
     let mut open = state.open_flags.clone();
-    if let Some(question) = state.current_question.as_ref().filter(|question| brainstorm_question_is_current(state, question)) {
+    if let Some(question) = state
+        .current_question
+        .as_ref()
+        .filter(|question| brainstorm_question_is_current(state, question))
+    {
         if !open.iter().any(|item| item == &question.prompt) {
             open.insert(0, question.prompt.clone());
         }
@@ -2456,7 +2787,9 @@ fn brainstorm_response(
             dimension: turn.question.dimension.clone(),
             summary: brainstorm_effective_summary(state, turn),
             user_inputs: brainstorm_user_inputs(state, turn),
-            source: if turn.answer.source != "user_excluded" && state.brief_edits.contains_key(&turn.question.id) {
+            source: if turn.answer.source != "user_excluded"
+                && state.brief_edits.contains_key(&turn.question.id)
+            {
                 "user".to_string()
             } else {
                 turn.answer.source.clone()
@@ -2472,6 +2805,11 @@ fn brainstorm_response(
         })
         .collect::<Vec<_>>();
     BrainstormTurnResponse {
+        work_context: state.work_context.clone(),
+        stage_workflow: state
+            .stage_workflow
+            .as_ref()
+            .map(|workflow| workflow.for_response()),
         archived_questions: state.archived_questions.clone(),
         root_request: state.root_request.clone(),
         brief_edits: state.brief_edits.clone(),
@@ -2574,7 +2912,10 @@ fn brainstorm_decision_context(state: &BrainstormStoredState) -> Vec<serde_json:
         .collect()
 }
 
-fn brainstorm_user_inputs(state: &BrainstormStoredState, turn: &BrainstormStoredTurn) -> Vec<String> {
+fn brainstorm_user_inputs(
+    state: &BrainstormStoredState,
+    turn: &BrainstormStoredTurn,
+) -> Vec<String> {
     if turn.answer.source == "user_excluded" {
         return Vec::new();
     }
@@ -2584,9 +2925,23 @@ fn brainstorm_user_inputs(state: &BrainstormStoredState, turn: &BrainstormStored
     if turn.answer.source != "user" {
         return Vec::new();
     }
-    let mut inputs = turn.answer.selected_option_ids.iter()
+    let mut inputs = turn
+        .answer
+        .selected_option_ids
+        .iter()
         .filter_map(|id| turn.question.options.iter().find(|option| &option.id == id))
-        .map(|option| option.label.clone()).collect::<Vec<_>>();
+        .map(|option| {
+            if turn.question.input_clarification.as_ref()
+                .and_then(|marker| marker["kind"].as_str()) == Some("report_period") {
+                if let Some((start, end)) = option.input_value.as_ref().and_then(|value| {
+                    Some((value["start"].as_str()?, value["end"].as_str()?))
+                }) {
+                    return format!("报告周期：{} 至 {}", start, end);
+                }
+            }
+            option.label.clone()
+        })
+        .collect::<Vec<_>>();
     if !turn.answer.custom_text.trim().is_empty() {
         inputs.push(turn.answer.custom_text.trim().to_string());
     }
@@ -2596,19 +2951,30 @@ fn brainstorm_user_inputs(state: &BrainstormStoredState, turn: &BrainstormStored
 fn initialize_brainstorm_input_revisions(stored: &mut BrainstormStoredState, revision: i64) {
     // Migrate once inside the next ordinary state write. An edited field with
     // unknown chronology is conservatively current; never refresh it on restore.
-    stored.user_input_revisions.entry("root_request".to_string()).or_insert(
-        if stored.brief_edits.contains_key("root_request") { revision } else { 0 }
-    );
+    stored
+        .user_input_revisions
+        .entry("root_request".to_string())
+        .or_insert(if stored.brief_edits.contains_key("root_request") {
+            revision
+        } else {
+            0
+        });
     for (index, turn) in stored.turns.iter().enumerate() {
         let inferred = if stored.brief_edits.contains_key(&turn.question.id) {
             revision
         } else {
             ((index + 1) as i64).min(revision)
         };
-        stored.user_input_revisions.entry(turn.question.id.clone()).or_insert(inferred);
+        stored
+            .user_input_revisions
+            .entry(turn.question.id.clone())
+            .or_insert(inferred);
     }
     for key in stored.brief_edits.keys() {
-        stored.user_input_revisions.entry(key.clone()).or_insert(revision);
+        stored
+            .user_input_revisions
+            .entry(key.clone())
+            .or_insert(revision);
     }
 }
 
@@ -2636,23 +3002,34 @@ struct PendingBrainstormBranch<'a> {
     depth: usize,
 }
 
-fn brainstorm_branch_focus(stored: &BrainstormStoredState, branch: &PendingBrainstormBranch<'_>) -> String {
+fn brainstorm_branch_focus(
+    stored: &BrainstormStoredState,
+    branch: &PendingBrainstormBranch<'_>,
+) -> String {
     let mut path = vec![branch.focus.clone()];
     let mut question = branch.question;
     let mut visited = std::collections::HashSet::new();
     while visited.insert(question.id.as_str()) {
-        let Some(parent) = question.parent_question_id.as_deref().and_then(|id| {
-            stored.turns.iter().find(|turn| turn.question.id == id)
-        }) else {
+        let Some(parent) = question
+            .parent_question_id
+            .as_deref()
+            .and_then(|id| stored.turns.iter().find(|turn| turn.question.id == id))
+        else {
             break;
         };
         let input = if let Some(edited) = stored.brief_edits.get(&parent.question.id) {
             edited.clone()
         } else if parent.answer.source == "user" {
-            question.parent_option_id.as_deref().and_then(|id| {
-                parent.question.options.iter().find(|option| option.id == id
-                    && parent.answer.selected_option_ids.contains(&option.id))
-            }).map(|option| option.label.clone()).unwrap_or_else(|| parent.answer.custom_text.clone())
+            question
+                .parent_option_id
+                .as_deref()
+                .and_then(|id| {
+                    parent.question.options.iter().find(|option| {
+                        option.id == id && parent.answer.selected_option_ids.contains(&option.id)
+                    })
+                })
+                .map(|option| option.label.clone())
+                .unwrap_or_else(|| parent.answer.custom_text.clone())
         } else {
             String::new()
         };
@@ -2680,13 +3057,18 @@ fn pending_brainstorm_branches(stored: &BrainstormStoredState) -> Vec<PendingBra
         while let Some((turn, depth)) = queue.pop_front() {
             if !visited.insert(turn.question.id.as_str())
                 || !brainstorm_question_is_current(stored, &turn.question)
-                || turn.answer.source == "user_excluded" {
+                || turn.answer.source == "user_excluded"
+            {
                 continue;
             }
-            let Some(exploration_stage) = next_brainstorm_exploration_stage(&turn.question) else { continue; };
+            let Some(exploration_stage) = next_brainstorm_exploration_stage(&turn.question) else {
+                continue;
+            };
             let mut branches = Vec::new();
             if let Some(edited) = stored.brief_edits.get(&turn.question.id) {
-                if !edited.trim().is_empty() { branches.push((None, edited.trim().to_string())); }
+                if !edited.trim().is_empty() {
+                    branches.push((None, edited.trim().to_string()));
+                }
             } else if turn.answer.source == "user" {
                 for option in &turn.question.options {
                     if turn.answer.selected_option_ids.contains(&option.id) {
@@ -2704,20 +3086,40 @@ fn pending_brainstorm_branches(stored: &BrainstormStoredState) -> Vec<PendingBra
                         && question.parent_option_id.as_deref() == option_id
                         && brainstorm_question_is_current(stored, question)
                 };
-                let children: Vec<_> = stored.turns.iter().filter(|child| matches(&child.question)).collect();
+                let children: Vec<_> = stored
+                    .turns
+                    .iter()
+                    .filter(|child| matches(&child.question))
+                    .collect();
                 // The visible unanswered question occupies its branch, but its
                 // unknown answers must never create speculative descendants.
                 if children.is_empty() && !stored.current_question.as_ref().is_some_and(matches) {
-                    pending.push(PendingBrainstormBranch {question: &turn.question, option, focus: focus.clone(), exploration_stage, extension: None, depth});
+                    pending.push(PendingBrainstormBranch {
+                        question: &turn.question,
+                        option,
+                        focus: focus.clone(),
+                        exploration_stage,
+                        extension: None,
+                        depth,
+                    });
                 }
                 for extension in stored.pending_extensions.iter().filter(|plan| {
                     plan.parent_question_id == turn.question.id
                         && plan.parent_option_id.as_deref() == option_id
-                        && stored.user_input_revisions.get(&turn.question.id).copied().unwrap_or(0) == plan.parent_revision
+                        && stored
+                            .user_input_revisions
+                            .get(&turn.question.id)
+                            .copied()
+                            .unwrap_or(0)
+                            == plan.parent_revision
                 }) {
                     pending.push(PendingBrainstormBranch {
-                        question: &turn.question, option, focus: focus.clone(), exploration_stage,
-                        extension: Some(extension), depth,
+                        question: &turn.question,
+                        option,
+                        focus: focus.clone(),
+                        exploration_stage,
+                        extension: Some(extension),
+                        depth,
                     });
                 }
                 queue.extend(children.into_iter().map(|child| (child, depth + 1)));
@@ -2725,13 +3127,19 @@ fn pending_brainstorm_branches(stored: &BrainstormStoredState) -> Vec<PendingBra
         }
         // Rotate first questions across the entire layer before second/third
         // independent facets, including facets under different sibling parents.
-        pending[root_start..].sort_by_key(|branch| (branch.depth,
-            branch.extension.map(|plan| plan.ordinal).unwrap_or(0)));
+        pending[root_start..].sort_by_key(|branch| {
+            (
+                branch.depth,
+                branch.extension.map(|plan| plan.ordinal).unwrap_or(0),
+            )
+        });
     }
     pending
 }
 
-fn pending_brainstorm_branch(stored: &BrainstormStoredState) -> Option<PendingBrainstormBranch<'_>> {
+fn pending_brainstorm_branch(
+    stored: &BrainstormStoredState,
+) -> Option<PendingBrainstormBranch<'_>> {
     pending_brainstorm_branches(stored).into_iter().next()
 }
 
@@ -2740,9 +3148,15 @@ fn apply_brainstorm_question_stage(
     branch: Option<&PendingBrainstormBranch<'_>>,
 ) -> bool {
     let expected_stage = branch.map(|branch| branch.exploration_stage);
-    let stage = question.exploration_stage.as_deref().or(expected_stage).unwrap_or("explore");
-    if !matches!(stage, "explore" | "solutions" | "implementation" | "validation")
-        || expected_stage.is_some_and(|expected| expected != stage)
+    let stage = question
+        .exploration_stage
+        .as_deref()
+        .or(expected_stage)
+        .unwrap_or("explore");
+    if !matches!(
+        stage,
+        "explore" | "solutions" | "implementation" | "validation"
+    ) || expected_stage.is_some_and(|expected| expected != stage)
     {
         return false;
     }
@@ -2750,7 +3164,8 @@ fn apply_brainstorm_question_stage(
     // must fail, rather than relabelling a diagnostic question as a solution.
     question.exploration_stage = Some(stage.to_string());
     question.parent_question_id = branch.map(|branch| branch.question.id.clone());
-    question.parent_option_id = branch.and_then(|branch| branch.option.map(|option| option.id.clone()));
+    question.parent_option_id =
+        branch.and_then(|branch| branch.option.map(|option| option.id.clone()));
     true
 }
 
@@ -2758,9 +3173,9 @@ fn brainstorm_log_identifier(value: &str) -> &str {
     let value = value.trim();
     if !value.is_empty()
         && value.len() <= 160
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':')
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'))
     {
         value
     } else {
@@ -2780,9 +3195,25 @@ fn log_brainstorm_stage(req: &BrainstormTurnRequest, stage: &'static str, starte
 
 fn brainstorm_log_action(action: &str) -> &str {
     match action {
-        "start" | "edit_brief" | "answer" | "skip" | "exclude" | "reopen"
-        | "revise_answer" | "finish" | "change_direction" | "continue_brainstorm"
-        | "abandon" => action,
+        "start"
+        | "edit_brief"
+        | "answer"
+        | "skip"
+        | "exclude"
+        | "reopen"
+        | "revise_answer"
+        | "finish"
+        | "change_direction"
+        | "continue_brainstorm"
+        | "abandon"
+        | "repair_candidate_copy"
+        | "status"
+        | "retry_stage"
+        | "review_inputs"
+        | "refresh_inputs"
+        | "confirm_stage"
+        | "confirm_chapter"
+        | "chapter_completed" => action,
         _ => "invalid",
     }
 }
@@ -2831,38 +3262,68 @@ async fn generate_uncached_brainstorm_step(
         let mut branches = pending_brainstorm_branches(stored).into_iter();
         if let Some(key) = target_key {
             branches.find(|branch| brainstorm_prefetch::branch_key(stored, req, branch) == key)
-        } else { branches.next() }
+        } else {
+            branches.next()
+        }
     } else {
         None
     };
     if target_key.is_some() && branch.is_none() {
         return Err(brainstorm_model_error("BRAINSTORM_MODEL_OUTPUT_INVALID"));
     }
-    let branch_hint = branch.as_ref().map(|branch| brainstorm_branch_focus(stored, branch));
+    let branch_hint = branch
+        .as_ref()
+        .map(|branch| brainstorm_branch_focus(stored, branch));
     let force_continue = force_continue || branch.is_some();
-    let question_batch_limit = if branch.as_ref().is_some_and(|branch| branch.extension.is_none()) {
-        std::env::var("MEMORYBREAD_BRAINSTORM_QUESTION_BATCH_LIMIT").ok()
-            .and_then(|value| value.parse::<usize>().ok()).unwrap_or(3).clamp(1, 8)
-    } else { 1 };
+    let question_batch_limit = if branch
+        .as_ref()
+        .is_some_and(|branch| branch.extension.is_none())
+    {
+        std::env::var("MEMORYBREAD_BRAINSTORM_QUESTION_BATCH_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(3)
+            .clamp(1, 8)
+    } else {
+        1
+    };
     let payload = DynamicBrainstormRequest {
         question_batch_limit,
-        extension_goal: branch.as_ref().and_then(|branch| branch.extension)
-            .map(|plan| plan.goal.clone()).unwrap_or_default(),
-        sibling_question_context: branch.as_ref().map(|branch| {
-            let option_id = branch.option.map(|option| option.id.as_str());
-            let mut context: Vec<String> = stored.turns.iter().map(|turn| &turn.question)
-                .chain(stored.current_question.iter()).filter(|question| {
-                    question.parent_question_id.as_deref() == Some(branch.question.id.as_str())
-                        && question.parent_option_id.as_deref() == option_id
-                        && brainstorm_question_is_current(stored, question)
-                }).map(|question| question.prompt.clone()).collect();
-            context.extend(stored.pending_extensions.iter().filter(|plan| {
-                plan.parent_question_id == branch.question.id
-                    && plan.parent_option_id.as_deref() == option_id
-                    && branch.extension.map(|current| &current.id) != Some(&plan.id)
-            }).map(|plan| plan.goal.clone()));
-            context
-        }).unwrap_or_default(),
+        extension_goal: branch
+            .as_ref()
+            .and_then(|branch| branch.extension)
+            .map(|plan| plan.goal.clone())
+            .unwrap_or_default(),
+        sibling_question_context: branch
+            .as_ref()
+            .map(|branch| {
+                let option_id = branch.option.map(|option| option.id.as_str());
+                let mut context: Vec<String> = stored
+                    .turns
+                    .iter()
+                    .map(|turn| &turn.question)
+                    .chain(stored.current_question.iter())
+                    .filter(|question| {
+                        question.parent_question_id.as_deref() == Some(branch.question.id.as_str())
+                            && question.parent_option_id.as_deref() == option_id
+                            && brainstorm_question_is_current(stored, question)
+                    })
+                    .map(|question| question.prompt.clone())
+                    .collect();
+                context.extend(
+                    stored
+                        .pending_extensions
+                        .iter()
+                        .filter(|plan| {
+                            plan.parent_question_id == branch.question.id
+                                && plan.parent_option_id.as_deref() == option_id
+                                && branch.extension.map(|current| &current.id) != Some(&plan.id)
+                        })
+                        .map(|plan| plan.goal.clone()),
+                );
+                context
+            })
+            .unwrap_or_default(),
         prefetch,
         root_request: stored
             .brief_edits
@@ -2882,7 +3343,11 @@ async fn generate_uncached_brainstorm_step(
         } else {
             "user".to_string()
         },
-        exploration_stage: branch.as_ref().map(|branch| branch.exploration_stage).unwrap_or("").to_string(),
+        exploration_stage: branch
+            .as_ref()
+            .map(|branch| branch.exploration_stage)
+            .unwrap_or("")
+            .to_string(),
         creation_model: req.creation_model.clone(),
         creation_api_key: req.creation_api_key.clone(),
         creation_base_url: req.creation_base_url.clone(),
@@ -2907,13 +3372,19 @@ async fn generate_uncached_brainstorm_step(
         })?;
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.json::<serde_json::Value>().await.unwrap_or_default();
+        let body = response
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_or_default();
         let failure = brainstorm_sidecar_error(
             StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
             &body,
         );
         // Never log upstream messages: they may contain model output, URLs or credentials.
-        error!("动态脑暴返回错误: status={}, code={}", status, failure.1.0["code"]);
+        error!(
+            "动态脑暴返回错误: status={}, code={}",
+            status, failure.1 .0["code"]
+        );
         return Err(failure);
     }
     log_brainstorm_stage(req, "sidecar_succeeded", started);
@@ -2948,20 +3419,32 @@ async fn generate_uncached_brainstorm_step(
     if result.sibling_question_goals.len() >= question_batch_limit
         || result.sibling_question_goals.iter().any(|goal| {
             let fingerprint = brainstorm_question_fingerprint(goal);
-            goal.trim().is_empty() || goal.chars().count() > 80 || fingerprint.is_empty()
+            goal.trim().is_empty()
+                || goal.chars().count() > 80
+                || fingerprint.is_empty()
                 || !goal_fingerprints.insert(fingerprint.clone())
-                || stored.turns.iter().any(|turn| brainstorm_question_fingerprint(&turn.question.prompt) == fingerprint)
-                || result.question.as_ref().is_some_and(|question| brainstorm_question_fingerprint(&question.prompt) == fingerprint)
-                || branch.as_ref().is_some_and(|branch| stored.pending_extensions.iter().any(|plan| {
-                    plan.parent_question_id == branch.question.id
-                        && plan.parent_option_id.as_deref() == branch.option.map(|option| option.id.as_str())
-                        && brainstorm_question_fingerprint(&plan.goal) == fingerprint
-                }))
+                || stored.turns.iter().any(|turn| {
+                    brainstorm_question_fingerprint(&turn.question.prompt) == fingerprint
+                })
+                || result.question.as_ref().is_some_and(|question| {
+                    brainstorm_question_fingerprint(&question.prompt) == fingerprint
+                })
+                || branch.as_ref().is_some_and(|branch| {
+                    stored.pending_extensions.iter().any(|plan| {
+                        plan.parent_question_id == branch.question.id
+                            && plan.parent_option_id.as_deref()
+                                == branch.option.map(|option| option.id.as_str())
+                            && brainstorm_question_fingerprint(&plan.goal) == fingerprint
+                    })
+                })
         })
     {
         return Err(brainstorm_model_error("BRAINSTORM_MODEL_OUTPUT_INVALID"));
     }
-    result.consumed_extension_id = branch.as_ref().and_then(|branch| branch.extension).map(|plan| plan.id.clone());
+    result.consumed_extension_id = branch
+        .as_ref()
+        .and_then(|branch| branch.extension)
+        .map(|plan| plan.id.clone());
     if let Some(question) = result.question.as_mut() {
         if result.consumed_extension_id.is_some() || !result.sibling_question_goals.is_empty() {
             question.id = format!("extension_{}", uuid::Uuid::new_v4());
@@ -2976,8 +3459,12 @@ async fn generate_uncached_brainstorm_step(
 }
 
 async fn generate_dynamic_brainstorm_step(
-    state: &AppState, stored: &BrainstormStoredState, req: &BrainstormTurnRequest,
-    force_continue: bool, suggest_directions: bool, focus_hint: &str,
+    state: &AppState,
+    stored: &BrainstormStoredState,
+    req: &BrainstormTurnRequest,
+    force_continue: bool,
+    suggest_directions: bool,
+    focus_hint: &str,
 ) -> Result<DynamicBrainstormResult, (StatusCode, Json<serde_json::Value>)> {
     with_brainstorm_session_guard(state, req.session_id.trim(), false, |_| Ok(()))?;
     if !suggest_directions {
@@ -2987,7 +3474,17 @@ async fn generate_dynamic_brainstorm_step(
     }
     // An incomplete speculative request must yield to the demanded P0 turn.
     brainstorm_prefetch::stop_running(state, req.session_id.trim());
-    generate_uncached_brainstorm_step(state, stored, req, force_continue, suggest_directions, focus_hint, None, false).await
+    generate_uncached_brainstorm_step(
+        state,
+        stored,
+        req,
+        force_continue,
+        suggest_directions,
+        focus_hint,
+        None,
+        false,
+    )
+    .await
 }
 
 fn apply_dynamic_step(
@@ -2996,7 +3493,9 @@ fn apply_dynamic_step(
 ) -> String {
     stored.current_extension_id = result.consumed_extension_id.clone();
     if let Some(question) = result.question.as_ref() {
-        stored.prefetch_safe_options.insert(question.id.clone(), result.prefetch_safe_option_ids.clone());
+        stored
+            .prefetch_safe_options
+            .insert(question.id.clone(), result.prefetch_safe_option_ids.clone());
     }
     stored.open_flags = result.open_flags;
     stored.readiness_reason = result.readiness_reason;
@@ -3007,12 +3506,19 @@ fn apply_dynamic_step(
     }
     if let Some(question) = result.question.as_ref() {
         if let Some(parent_id) = question.parent_question_id.as_ref() {
-            let parent_revision = stored.user_input_revisions.get(parent_id).copied().unwrap_or(0);
+            let parent_revision = stored
+                .user_input_revisions
+                .get(parent_id)
+                .copied()
+                .unwrap_or(0);
             for (index, goal) in result.sibling_question_goals.into_iter().enumerate() {
                 stored.pending_extensions.push(BrainstormExtensionPlan {
-                    id: uuid::Uuid::new_v4().to_string(), parent_question_id: parent_id.clone(),
-                    parent_option_id: question.parent_option_id.clone(), parent_revision,
-                    goal, ordinal: index + 1,
+                    id: uuid::Uuid::new_v4().to_string(),
+                    parent_question_id: parent_id.clone(),
+                    parent_option_id: question.parent_option_id.clone(),
+                    parent_revision,
+                    goal,
+                    ordinal: index + 1,
                 });
             }
         }
@@ -3024,10 +3530,14 @@ fn apply_dynamic_step(
         "ready".to_string()
     } else {
         if let Some(question) = result.question.as_ref() {
-            if let Some(parent_revision) = question.parent_question_id.as_ref()
+            if let Some(parent_revision) = question
+                .parent_question_id
+                .as_ref()
                 .and_then(|parent_id| stored.user_input_revisions.get(parent_id))
             {
-                stored.branch_parent_revisions.insert(question.id.clone(), *parent_revision);
+                stored
+                    .branch_parent_revisions
+                    .insert(question.id.clone(), *parent_revision);
             }
         }
         stored.current_question = result.question;
@@ -3081,13 +3591,19 @@ fn brainstorm_question_fingerprint(prompt: &str) -> String {
 fn brainstorm_questions_overlap(left: &BrainstormQuestion, right: &BrainstormQuestion) -> bool {
     let left_exact = brainstorm_question_fingerprint(&left.prompt);
     let right_exact = brainstorm_question_fingerprint(&right.prompt);
-    if left_exact == right_exact { return true; }
+    if left_exact == right_exact {
+        return true;
+    }
     if left.parent_question_id.is_none()
         || left.parent_question_id != right.parent_question_id
         || left.parent_option_id != right.parent_option_id
-    { return false; }
+    {
+        return false;
+    }
     let normalize = |mut text: String| {
-        for scaffolding in ["如何", "怎样", "怎么", "请问", "设计", "愿意", "能够", "可以", "应该", "才能"] {
+        for scaffolding in [
+            "如何", "怎样", "怎么", "请问", "设计", "愿意", "能够", "可以", "应该", "才能",
+        ] {
             text = text.replace(scaffolding, "");
         }
         text
@@ -3098,16 +3614,24 @@ fn brainstorm_questions_overlap(left: &BrainstormQuestion, right: &BrainstormQue
     let b = right.chars().collect::<Vec<_>>();
     let shortest = a.len().min(b.len());
     let longest = a.len().max(b.len());
-    if shortest >= 6 && shortest * 100 >= longest * 55 && (left.contains(&right) || right.contains(&left)) {
+    if shortest >= 6
+        && shortest * 100 >= longest * 55
+        && (left.contains(&right) || right.contains(&left))
+    {
         return true;
     }
-    if shortest < 18 || longest > 120 { return false; }
+    if shortest < 18 || longest > 120 {
+        return false;
+    }
     let mut previous = vec![0usize; b.len() + 1];
     for character in &a {
         let mut row = vec![0usize; b.len() + 1];
         for (index, other) in b.iter().enumerate() {
-            row[index + 1] = if character == other { previous[index] + 1 }
-                else { row[index].max(previous[index + 1]) };
+            row[index + 1] = if character == other {
+                previous[index] + 1
+            } else {
+                row[index].max(previous[index + 1])
+            };
         }
         previous = row;
     }
@@ -3172,16 +3696,13 @@ fn discard_duplicate_brainstorm_questions(stored: &mut BrainstormStoredState) {
     let duplicate_current = stored.current_question.as_ref().is_some_and(|question| {
         let fingerprint = brainstorm_question_fingerprint(&question.prompt);
         (!fingerprint.is_empty() && seen.contains(&fingerprint))
-            || stored
-                .turns
-                .iter()
-                .any(|turn| {
-                    if stored.current_extension_id.is_some() {
-                        brainstorm_questions_overlap(&turn.question, question)
-                    } else {
-                        brainstorm_question_repeats_answered(turn, question)
-                    }
-                })
+            || stored.turns.iter().any(|turn| {
+                if stored.current_extension_id.is_some() {
+                    brainstorm_questions_overlap(&turn.question, question)
+                } else {
+                    brainstorm_question_repeats_answered(turn, question)
+                }
+            })
     });
     if duplicate_current {
         if let Some(question) = stored.current_question.take() {
@@ -3257,6 +3778,7 @@ fn parse_brainstorm_state(state_json: &str) -> Result<BrainstormStoredState, ser
                 allow_custom: true,
                 options: Vec::new(),
                 answer_template: String::new(),
+                input_clarification: None,
             },
             answer,
         });
@@ -3368,7 +3890,9 @@ fn brainstorm_model_error(code: &str) -> (StatusCode, Json<serde_json::Value>) {
             "模型未能接受脑暴请求，请检查模型配置后重试",
             false,
         ),
-        "MODEL_TRANSPORT_UNAVAILABLE" | "MODEL_SERVICE_UNAVAILABLE" | "CREATION_UNAVAILABLE"
+        "MODEL_TRANSPORT_UNAVAILABLE"
+        | "MODEL_SERVICE_UNAVAILABLE"
+        | "CREATION_UNAVAILABLE"
         | "BRAINSTORM_MODEL_UNAVAILABLE" => (
             StatusCode::SERVICE_UNAVAILABLE,
             "BRAINSTORM_MODEL_UNAVAILABLE",
@@ -3398,11 +3922,15 @@ fn brainstorm_sidecar_error(
     status: StatusCode,
     body: &serde_json::Value,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let code = body.get("detail").unwrap_or(body)
-        .get("code").and_then(serde_json::Value::as_str).unwrap_or("");
+    let code = body
+        .get("detail")
+        .unwrap_or(body)
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
     let failure = brainstorm_model_error(code);
     if code == "BRAINSTORM_MODEL_OUTPUT_INVALID"
-        || failure.1.0["code"] != "BRAINSTORM_MODEL_OUTPUT_INVALID"
+        || failure.1 .0["code"] != "BRAINSTORM_MODEL_OUTPUT_INVALID"
     {
         return failure;
     }
@@ -3425,20 +3953,63 @@ pub async fn run_creation_brainstorm_turn(
         value.to_str().is_ok_and(|value| {
             value.split(',').any(|media_type| {
                 let mut parts = media_type.split(';');
-                parts.next().unwrap_or("").trim()
+                parts
+                    .next()
+                    .unwrap_or("")
+                    .trim()
                     .eq_ignore_ascii_case("text/event-stream")
                     && parts.all(|parameter| {
                         let Some((name, value)) = parameter.trim().split_once('=') else {
                             return true;
                         };
                         !name.trim().eq_ignore_ascii_case("q")
-                            || value.trim().parse::<f32>().is_ok_and(|q| q > 0.0 && q <= 1.0)
+                            || value
+                                .trim()
+                                .parse::<f32>()
+                                .is_ok_and(|q| q > 0.0 && q <= 1.0)
                     })
             })
         })
     });
     if !wants_events {
-        return execute_creation_brainstorm_turn(state, req).await.into_response();
+        return execute_creation_brainstorm_turn(state, req)
+            .await
+            .into_response();
+    }
+
+    let detached_stage_turn = state
+        .storage
+        .with_conn(|conn| {
+            let existing =
+                crate::storage::repo::creation_brainstorm::get(conn, req.session_id.trim())?;
+            Ok(existing
+                .map(|session| {
+                    serde_json::from_str::<serde_json::Value>(&session.state_json)
+                        .ok()
+                        .is_some_and(|value| value["stage_workflow"]["version"] == 2)
+                })
+                .unwrap_or(req.workflow_version == Some(2)))
+        })
+        .unwrap_or(false);
+    if detached_stage_turn {
+        // A v2 turn only commits state and dispatches detached batch work. Do
+        // this before exposing the SSE body so leaving immediately after the
+        // response headers cannot cancel an already submitted preparation.
+        let (name, data) = match execute_creation_brainstorm_turn(state, req).await {
+            Ok(Json(result)) => (
+                "brainstorm.completed",
+                serde_json::json!({ "state": result }),
+            ),
+            Err((status, Json(mut failure))) => {
+                failure["status"] = serde_json::json!(status.as_u16());
+                ("brainstorm.failed", failure)
+            }
+        };
+        let events = futures::stream::iter(vec![
+            Ok::<Event, Infallible>(Event::default().event("brainstorm.started").data("{}")),
+            Ok(Event::default().event(name).data(data.to_string())),
+        ]);
+        return Sse::new(events).into_response();
     }
 
     // Send headers before entering the inference queue. A JSON-only response can
@@ -3457,11 +4028,13 @@ pub async fn run_creation_brainstorm_turn(
         // The existing state machine validates and persists before returning.
         yield Ok(Event::default().event(name).data(data.to_string()));
     };
-    Sse::new(stream).keep_alive(
-        axum::response::sse::KeepAlive::new()
-            .interval(Duration::from_secs(10))
-            .text("keep-alive"),
-    ).into_response()
+    Sse::new(stream)
+        .keep_alive(
+            axum::response::sse::KeepAlive::new()
+                .interval(Duration::from_secs(10))
+                .text("keep-alive"),
+        )
+        .into_response()
 }
 
 async fn execute_creation_brainstorm_turn(
@@ -3478,7 +4051,11 @@ async fn execute_creation_brainstorm_turn(
     let result = run_creation_brainstorm_turn_inner(state, &req, trace.started).await;
     log_brainstorm_stage(
         &req,
-        if result.is_ok() { "completed" } else { "failed" },
+        if result.is_ok() {
+            "completed"
+        } else {
+            "failed"
+        },
         trace.started,
     );
     trace.finished = true;
@@ -3520,6 +4097,15 @@ async fn run_creation_brainstorm_turn_inner(
 
     if history_terminated && req.action != "abandon" {
         return Err(brainstorm_session_terminated_error());
+    }
+
+    let staged = existing.as_ref().is_some_and(|session| {
+        serde_json::from_str::<serde_json::Value>(&session.state_json)
+            .ok()
+            .is_some_and(|value| value["stage_workflow"]["version"] == 2)
+    });
+    if staged || (existing.is_none() && req.workflow_version == Some(2)) {
+        return brainstorm_stages::turn(state, req, existing).await;
     }
 
     if req.action == "start" {
@@ -3572,6 +4158,8 @@ async fn run_creation_brainstorm_turn_inner(
             )));
         }
         let mut stored = BrainstormStoredState {
+            work_context: brainstorm_initial_work_context(req)?,
+            stage_workflow: None,
             pending_extensions: Vec::new(),
             current_extension_id: None,
             prefetch_safe_options: Default::default(),
@@ -3582,6 +4170,7 @@ async fn run_creation_brainstorm_turn_inner(
             user_input_revisions: [("root_request".to_string(), 0)].into_iter().collect(),
             root_request: root_request.to_string(),
             selected_skills: req.selected_skills.clone(),
+            skill_binding_version: 1,
             turns: Vec::new(),
             current_question: None,
             open_flags: Vec::new(),
@@ -3646,8 +4235,12 @@ async fn run_creation_brainstorm_turn_inner(
     }
     // 兼容在章节覆盖能力上线前创建的会话：客户端每轮都会携带当前执行
     // Skill，旧状态只补写一次，之后仍以服务端持久化上下文为准。
-    if stored.selected_skills.is_empty() && !req.selected_skills.is_empty() {
+    if stored.skill_binding_version == 0
+        && stored.selected_skills.is_empty()
+        && !req.selected_skills.is_empty()
+    {
         stored.selected_skills = req.selected_skills.clone();
+        stored.skill_binding_version = 1;
     }
     initialize_brainstorm_input_revisions(&mut stored, session.revision);
 
@@ -3655,7 +4248,8 @@ async fn run_creation_brainstorm_turn_inner(
         brainstorm_prefetch::invalidate_revision(&state, session_id, session.revision);
     }
     if !matches!(req.action.as_str(), "answer" | "skip" | "exclude")
-        || (req.action == "answer" && !brainstorm_prefetch::answer_preserves_candidates(&stored, req))
+        || (req.action == "answer"
+            && !brainstorm_prefetch::answer_preserves_candidates(&stored, req))
     {
         stored.pending_extensions.clear();
     }
@@ -3678,7 +4272,9 @@ async fn run_creation_brainstorm_turn_inner(
             stored.memory_brief.clear();
             stored.brief_edits.extend(req.brief_edits.clone());
             for key in req.brief_edits.keys() {
-                stored.user_input_revisions.insert(key.clone(), session.revision + 1);
+                stored
+                    .user_input_revisions
+                    .insert(key.clone(), session.revision + 1);
             }
             session.phase.clone()
         }
@@ -3723,7 +4319,9 @@ async fn run_creation_brainstorm_turn_inner(
                     ..answer
                 }
             };
-            stored.user_input_revisions.insert(question.id.clone(), session.revision + 1);
+            stored
+                .user_input_revisions
+                .insert(question.id.clone(), session.revision + 1);
             stored.turns.push(BrainstormStoredTurn { question, answer });
             stored.current_question = None;
             stored.current_extension_id = None;
@@ -3846,7 +4444,9 @@ async fn run_creation_brainstorm_turn_inner(
                 });
             }
             stored.turns.truncate(index);
-            stored.user_input_revisions.insert(question.id.clone(), session.revision + 1);
+            stored
+                .user_input_revisions
+                .insert(question.id.clone(), session.revision + 1);
             stored.turns.push(BrainstormStoredTurn {
                 question,
                 answer: BrainstormAnswer {
@@ -3863,13 +4463,18 @@ async fn run_creation_brainstorm_turn_inner(
             phase
         }
         "finish" => {
-            let current_superseded = stored.current_question.as_ref()
+            let current_superseded = stored
+                .current_question
+                .as_ref()
                 .is_some_and(|question| !brainstorm_question_is_current(&stored, question));
             stored.invalidated_question_ids = archive_superseded_brainstorm_turns(&mut stored);
             if current_superseded {
                 if let Some(question) = stored.current_question.take() {
                     stored.invalidated_question_ids.push(question.id.clone());
-                    stored.archived_questions.push(BrainstormArchivedQuestion {question, answer: None});
+                    stored.archived_questions.push(BrainstormArchivedQuestion {
+                        question,
+                        answer: None,
+                    });
                 }
                 stored.current_extension_id = None;
             }
@@ -3927,8 +4532,11 @@ async fn run_creation_brainstorm_turn_inner(
             let custom_focus = if req.continuation_direction_id == "__custom__" {
                 let custom = req.focus_hint.trim();
                 if custom.is_empty() || custom.chars().count() > 500 {
-                    return Err(brainstorm_error(StatusCode::BAD_REQUEST,
-                        "BRAINSTORM_INVALID_CONTINUATION_DIRECTION", "请输入 1 到 500 字的脑暴方向"));
+                    return Err(brainstorm_error(
+                        StatusCode::BAD_REQUEST,
+                        "BRAINSTORM_INVALID_CONTINUATION_DIRECTION",
+                        "请输入 1 到 500 字的脑暴方向",
+                    ));
                 }
                 custom.to_string()
             } else {
@@ -3966,6 +4574,7 @@ async fn run_creation_brainstorm_turn_inner(
                     required: false,
                     allow_custom: true,
                     answer_template: String::new(),
+                    input_clarification: None,
                     options: stored
                         .continuation_directions
                         .iter()
@@ -3978,12 +4587,19 @@ async fn run_creation_brainstorm_turn_inner(
                     while question.options.iter().any(|option| option.id == custom_id) {
                         custom_id.push('_');
                     }
-                    question.options.push(BrainstormOption {id: custom_id.clone(),
-                        label: custom_focus.clone(), description: "用户自定义方向".to_string(),
-                        details: String::new(), recommended: false});
+                    question.options.push(BrainstormOption {
+                        id: custom_id.clone(),
+                        label: custom_focus.clone(),
+                        description: "用户自定义方向".to_string(),
+                        details: String::new(),
+                        recommended: false,
+                        input_value: None,
+                    });
                     selected_option_ids.push(custom_id);
                 }
-                stored.user_input_revisions.insert(question.id.clone(), session.revision + 1);
+                stored
+                    .user_input_revisions
+                    .insert(question.id.clone(), session.revision + 1);
                 stored.turns.push(BrainstormStoredTurn {
                     question,
                     answer: BrainstormAnswer {
@@ -4031,14 +4647,26 @@ async fn run_creation_brainstorm_turn_inner(
                     required: false,
                     allow_custom: true,
                     answer_template: String::new(),
-                    options: stored.continuation_directions.iter().map(BrainstormOption::from).collect(),
+                    input_clarification: None,
+                    options: stored
+                        .continuation_directions
+                        .iter()
+                        .map(BrainstormOption::from)
+                        .collect(),
                 };
-                stored.user_input_revisions.insert(question.id.clone(), session.revision + 1);
+                stored
+                    .user_input_revisions
+                    .insert(question.id.clone(), session.revision + 1);
                 stored.turns.push(BrainstormStoredTurn {
                     question,
                     answer: BrainstormAnswer {
-                        selected_option_ids: if direction_id == "__custom__" { Vec::new() } else { vec![direction_id.to_string()] },
-                        custom_text: focus_hint.clone(), source: "user".to_string(),
+                        selected_option_ids: if direction_id == "__custom__" {
+                            Vec::new()
+                        } else {
+                            vec![direction_id.to_string()]
+                        },
+                        custom_text: focus_hint.clone(),
+                        source: "user".to_string(),
                     },
                 });
                 let step = generate_dynamic_brainstorm_step(
@@ -4063,11 +4691,8 @@ async fn run_creation_brainstorm_turn_inner(
         }
     };
 
-    let changed = with_brainstorm_session_guard(
-        &state,
-        session_id,
-        req.action == "abandon",
-        |conn| {
+    let changed =
+        with_brainstorm_session_guard(&state, session_id, req.action == "abandon", |conn| {
             Ok(creation_brainstorm::update(
                 conn,
                 session_id,
@@ -4075,8 +4700,7 @@ async fn run_creation_brainstorm_turn_inner(
                 &next_phase,
                 &serde_json::to_string(&stored)?,
             )?)
-        },
-    )?;
+        })?;
     if !changed {
         return Err(brainstorm_error(
             StatusCode::CONFLICT,
@@ -4115,7 +4739,10 @@ pub async fn preview_references(
 
     let client = creation_sidecar_client();
     let response = client
-        .post(format!("{}/creation/references", state.creation_sidecar_url))
+        .post(format!(
+            "{}/creation/references",
+            state.creation_sidecar_url
+        ))
         .json(&payload)
         .send()
         .await
@@ -4140,6 +4767,73 @@ pub async fn preview_references(
     })?;
 
     Ok(Json(body))
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WorkCreationPreviewRequest {
+    pub action: String,
+    #[serde(default)]
+    pub instruction: String,
+    #[serde(default)]
+    pub current_document: String,
+    #[serde(default)]
+    pub work_context: Option<serde_json::Value>,
+}
+
+fn validate_work_creation_preview(
+    req: &mut WorkCreationPreviewRequest,
+) -> Result<(), (StatusCode, String)> {
+    if !["trial", "review", "summary"].contains(&req.action.as_str())
+        || req.instruction.chars().count() > 4000
+        || req.current_document.chars().count() > 24000
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "CREATION_WORK_PREVIEW_INPUT_INVALID".to_string(),
+        ));
+    }
+    if let Some(context) = req.work_context.as_ref() {
+        req.work_context = Some(normalize_creation_work_context(Some(context))?);
+    }
+    Ok(())
+}
+
+pub async fn preview_work_document(
+    State(state): State<Arc<AppState>>,
+    Json(mut req): Json<WorkCreationPreviewRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    validate_work_creation_preview(&mut req)?;
+    let response = creation_sidecar_client()
+        .post(format!(
+            "{}/creation/work-quality/preview",
+            state.creation_sidecar_url
+        ))
+        .timeout(std::time::Duration::from_secs(300))
+        .json(&req)
+        .send()
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                "CREATION_WORK_PREVIEW_UNAVAILABLE".to_string(),
+            )
+        })?;
+    if !response.status().is_success() {
+        let status = if response.status().is_client_error() {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::BAD_GATEWAY
+        };
+        // Error bodies can contain model response text; expose only a stable code.
+        return Err((status, "CREATION_WORK_PREVIEW_FAILED".to_string()));
+    }
+    let result = response.json::<serde_json::Value>().await.map_err(|_| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "CREATION_WORK_PREVIEW_INVALID".to_string(),
+        )
+    })?;
+    Ok(Json(result))
 }
 
 fn default_true() -> bool {
@@ -4265,17 +4959,135 @@ fn normalize_conversation_item(value: &serde_json::Value) -> Option<serde_json::
     }))
 }
 
+fn normalize_creation_work_context(
+    value: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    let invalid = || {
+        (
+            StatusCode::BAD_REQUEST,
+            "CREATION_WORK_CONTEXT_INVALID".to_string(),
+        )
+    };
+    let mut result = serde_json::json!({"schema_version":"creation.work-context.v1", "purpose":"", "decision_goal":"", "reader_context":"", "constraints":"", "style_samples":[], "profile_id":"general", "review_enabled":false});
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(result);
+    };
+    let object = value.as_object().ok_or_else(invalid)?;
+    let allowed = [
+        "schema_version",
+        "purpose",
+        "decision_goal",
+        "reader_context",
+        "constraints",
+        "style_samples",
+        "profile_id",
+        "review_enabled",
+    ];
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(invalid());
+    }
+    for field in [
+        "purpose",
+        "decision_goal",
+        "reader_context",
+        "constraints",
+        "profile_id",
+        "schema_version",
+    ] {
+        if let Some(raw) = object.get(field) {
+            let text = raw.as_str().ok_or_else(invalid)?;
+            if text.chars().count() > 1500 {
+                return Err(invalid());
+            }
+            result[field] = serde_json::json!(text.trim());
+        }
+    }
+    if result["schema_version"] != "creation.work-context.v1" {
+        return Err(invalid());
+    }
+    let profiles: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../shared/creation-work-quality/profiles.json"
+    ))
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "CREATION_WORK_QUALITY_CONFIG_INVALID".to_string(),
+        )
+    })?;
+    if !profiles["profiles"]
+        .as_array()
+        .is_some_and(|rows| rows.iter().any(|row| row["id"] == result["profile_id"]))
+    {
+        return Err(invalid());
+    }
+    if let Some(raw) = object.get("style_samples") {
+        let samples = raw.as_array().ok_or_else(invalid)?;
+        if samples.len() > 3
+            || samples.iter().any(|sample| {
+                sample.as_str().map_or(true, |text| {
+                    text.chars().count() > 1500 || text.trim().is_empty()
+                })
+            })
+        {
+            return Err(invalid());
+        }
+        result["style_samples"] = serde_json::json!(samples
+            .iter()
+            .filter_map(|sample| sample.as_str())
+            .map(str::trim)
+            .filter(|sample| !sample.is_empty())
+            .collect::<Vec<_>>());
+    }
+    if let Some(raw) = object.get("review_enabled") {
+        result["review_enabled"] = serde_json::json!(raw.as_bool().ok_or_else(invalid)?);
+    }
+    Ok(result)
+}
+
 fn creation_checkpoint_inputs_match(req: &AgentRunRequest, checkpoint: &serde_json::Value) -> bool {
+    let current_binding = req
+        .brainstorm_skill_binding
+        .as_ref()
+        .and_then(|binding| binding.get("fingerprint"))
+        .and_then(serde_json::Value::as_str);
+    let saved_binding =
+        checkpoint["environment"]["brainstorm_skill_binding"]["fingerprint"].as_str();
+    if current_binding != saved_binding {
+        return false;
+    }
+    let current_context = req.generation.work_context.as_ref().or_else(|| {
+        req.creation_brief
+            .as_ref()
+            .and_then(|brief| brief.get("work_context"))
+    });
+    let saved_context = checkpoint["options"]
+        .get("work_context")
+        .or_else(|| checkpoint["environment"]["creation_brief"].get("work_context"));
+    if normalize_creation_work_context(current_context).ok()
+        != normalize_creation_work_context(saved_context).ok()
+    {
+        return false;
+    }
     if let Some(brief) = &req.creation_brief {
         let saved = &checkpoint["environment"]["creation_brief"];
         let both_empty = brief.as_object().is_some_and(|value| value.is_empty())
             && (saved.is_null() || saved.as_object().is_some_and(|value| value.is_empty()));
-        if !both_empty && brief != saved {
+        let additive_gap_contract = req.creation_mode == "brainstorm"
+            && req.brainstorm_chapter_id.is_some()
+            && saved.get("content_source_gap").is_none()
+            && brief["content_source_gap"]["schema_version"] == "brainstorm.content-source-gap.v1"
+            && brief.as_object().is_some_and(|object| {
+                let mut without_gap = object.clone();
+                without_gap.remove("content_source_gap");
+                serde_json::Value::Object(without_gap) == *saved
+            });
+        if !both_empty && brief != saved && !additive_gap_contract {
             return false;
         }
     }
     if let (Some(current_root), Some(saved_root)) = (
-        req.root_request.as_deref(), checkpoint["root_request"].as_str(),
+        req.root_request.as_deref(),
+        checkpoint["root_request"].as_str(),
     ) {
         if current_root.trim() != saved_root.trim() {
             return false;
@@ -4835,30 +5647,78 @@ pub async fn save_history(
     let id = state
         .storage
         .with_conn(|conn| {
-            // Keep the legacy fallback's base check, metadata merge and body
-            // write in one SQLite transaction. Another Core process cannot
-            // interleave a manual edit between the read and the final write.
+            // Keep the legacy fallback base check, metadata merge and body
+            // write in one SQLite transaction.
             let tx = conn.unchecked_transaction()?;
             let conn = &tx;
-            if let (Some(session),Some(operation_id)) = (req.session_id.as_deref(),req.committed_operation_id.as_deref()) {
-                let operation = crate::storage::repo::creation_operation::get(conn,session,operation_id)?
-                    .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-                if !matches!(operation.status.as_str(), "completed" | "partial") { return Err(rusqlite::Error::InvalidQuery.into()); }
-                let history = crate::storage::repo::creation_history::get_by_id(conn,operation.history_id)?
-                    .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-                let stored = history.conversation_json.as_deref()
-                    .and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
-                let conversation = merge_creation_history_conversation(stored,req.conversation.clone(),history.root_request.as_deref());
+            if let (Some(session), Some(operation_id)) = (
+                req.session_id.as_deref(),
+                req.committed_operation_id.as_deref(),
+            ) {
+                let operation =
+                    crate::storage::repo::creation_operation::get(conn, session, operation_id)?
+                        .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                if !matches!(operation.status.as_str(), "completed" | "partial") {
+                    return Err(rusqlite::Error::InvalidQuery.into());
+                }
+                let history =
+                    crate::storage::repo::creation_history::get_by_id(conn, operation.history_id)?
+                        .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                let stored = history
+                    .conversation_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                let conversation = merge_creation_history_conversation(
+                    stored,
+                    req.conversation.clone(),
+                    history.root_request.as_deref(),
+                );
                 // Acknowledgement may update metadata, never replay an already committed document.
-                conn.execute("UPDATE creation_history SET conversation_json=?2 WHERE id=?1",
-                    rusqlite::params![history.id,serde_json::to_string(&conversation)?])?;
-                if operation.result.as_ref().and_then(|r|r["data"]["revision_no"].as_i64()) == Some(history.revision_no) {
-                    conn.execute("UPDATE creation_history SET references_json=?2,reference_count=?3,
+                conn.execute(
+                    "UPDATE creation_history SET conversation_json=?2 WHERE id=?1",
+                    rusqlite::params![history.id, serde_json::to_string(&conversation)?],
+                )?;
+                if operation
+                    .result
+                    .as_ref()
+                    .and_then(|r| r["data"]["revision_no"].as_i64())
+                    == Some(history.revision_no)
+                {
+                    // A delayed UI acknowledgement may carry an empty or stale
+                    // preview. The committed terminal event owns citations for
+                    // this revision whenever it supplied a references array.
+                    let terminal_references = operation
+                        .result
+                        .as_ref()
+                        .and_then(|result| result["data"]["references"].as_array());
+                    let (references_json, reference_count) = match terminal_references {
+                        Some(references) => (
+                            serde_json::to_string(references)?,
+                            references.len() as i64,
+                        ),
+                        None => (serde_json::to_string(&req.references)?, req.reference_count),
+                    };
+                    conn.execute(
+                        "UPDATE creation_history SET references_json=?2,reference_count=?3,
                         model=?4,latency_ms=?5,evidence_json=?6 WHERE id=?1",
-                        rusqlite::params![history.id,serde_json::to_string(&req.references)?,req.reference_count,
-                            req.model,req.latency_ms,serde_json::to_string(&req.evidence)?])?;
-                    let ids: Vec<String> = req.evidence.iter().filter_map(|e|e["id"].as_str().map(str::to_string)).collect();
-                    crate::storage::repo::creation_evidence::attach_to_history(conn,history.id,&ids)?;
+                        rusqlite::params![
+                            history.id,
+                            references_json,
+                            reference_count,
+                            req.model,
+                            req.latency_ms,
+                            serde_json::to_string(&req.evidence)?
+                        ],
+                    )?;
+                    let ids: Vec<String> = req
+                        .evidence
+                        .iter()
+                        .filter_map(|e| e["id"].as_str().map(str::to_string))
+                        .collect();
+                    crate::storage::repo::creation_evidence::attach_to_history(
+                        conn, history.id, &ids,
+                    )?;
                 }
                 tx.commit()?;
                 return Ok(history.id);
@@ -4920,9 +5780,11 @@ pub async fn save_history(
                     })
             };
             // A compatibility save following a manual edit must name the exact
-            // Core-owned base. Durable operations use their own CAS commit;
-            // their acknowledgement is handled above without replaying a body.
-            if let Some(context) = prior.as_ref().filter(|context| context.latest.edit_operation == "manual_edit") {
+            // Core owned base. Durable operations use their own CAS commit.
+            if let Some(context) = prior
+                .as_ref()
+                .filter(|context| context.latest.edit_operation == "manual_edit")
+            {
                 let current_hash = sha256_hex(&context.latest.generated_content);
                 if req.history_id != Some(context.latest.id)
                     || req.base_revision_no != Some(context.latest.revision_no)
@@ -5167,10 +6029,14 @@ pub async fn start_history(
                     Some(&context.root_request),
                 );
                 let conversation_json = serde_json::to_string(&merged_conversation)?;
-                let durable: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM creation_operations WHERE history_id=?1)",
-                    rusqlite::params![context.latest.id], |row| row.get(0))?;
-                let generated_content = if durable || (req.generated_content.trim().is_empty()
-                    && !context.latest.generated_content.trim().is_empty())
+                let durable: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM creation_operations WHERE history_id=?1)",
+                    rusqlite::params![context.latest.id],
+                    |row| row.get(0),
+                )?;
+                let generated_content = if durable
+                    || (req.generated_content.trim().is_empty()
+                        && !context.latest.generated_content.trim().is_empty())
                 {
                     context.latest.generated_content.as_str()
                 } else {
@@ -5352,10 +6218,44 @@ pub struct ListHistoryParams {
 
 #[derive(Debug, Serialize)]
 pub struct HistoryPageResponse {
-    pub items: Vec<crate::storage::repo::creation_history::CreationHistory>,
+    pub items: Vec<HistoryItemResponse>,
     pub total: usize,
     pub limit: usize,
     pub offset: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HistoryItemResponse {
+    #[serde(flatten)]
+    pub history: crate::storage::repo::creation_history::CreationHistory,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brainstorm_stage_summary:
+        Option<crate::storage::repo::creation_brainstorm::BrainstormStageSummary>,
+}
+
+fn history_items_with_stage_summaries(
+    conn: &rusqlite::Connection,
+    histories: Vec<crate::storage::repo::creation_history::CreationHistory>,
+) -> rusqlite::Result<Vec<HistoryItemResponse>> {
+    let sessions = histories
+        .iter()
+        .filter_map(|history| history.session_id.clone())
+        .collect::<Vec<_>>();
+    let summaries = crate::storage::repo::creation_brainstorm::stage_summaries(conn, &sessions)?;
+    Ok(histories
+        .into_iter()
+        .map(|history| {
+            let brainstorm_stage_summary = history
+                .session_id
+                .as_ref()
+                .and_then(|id| summaries.get(id))
+                .cloned();
+            HistoryItemResponse {
+                history,
+                brainstorm_stage_summary,
+            }
+        })
+        .collect())
 }
 
 pub async fn list_history(
@@ -5398,8 +6298,13 @@ pub async fn list_history(
                     settled_operations, "已收口无法继续运行的历史创作状态"
                 );
             }
-            crate::storage::repo::creation_history::list_page(conn, query.as_deref(), limit, offset)
-                .map_err(Into::into)
+            let (histories, total) = crate::storage::repo::creation_history::list_page(
+                conn,
+                query.as_deref(),
+                limit,
+                offset,
+            )?;
+            Ok((history_items_with_stage_summaries(conn, histories)?, total))
         })
         .map_err(|e| {
             error!("查询创作记录失败: {}", e);
@@ -5446,7 +6351,12 @@ pub async fn get_history(
     let history = state
         .storage
         .with_conn(|conn| {
-            crate::storage::repo::creation_history::get_by_id(conn, id).map_err(Into::into)
+            let history = crate::storage::repo::creation_history::get_by_id(conn, id)?;
+            Ok(
+                history_items_with_stage_summaries(conn, history.into_iter().collect())?
+                    .into_iter()
+                    .next(),
+            )
         })
         .map_err(|e| {
             error!("查询创作记录失败: {}", e);
@@ -5463,14 +6373,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn report_period_answer_keeps_full_dates_in_brief_and_writing_context() {
+        let question: BrainstormQuestion = serde_json::from_value(serde_json::json!({
+            "id":"period", "dimension":"报告周期", "type":"single_choice",
+            "prompt":"这份周报应覆盖哪个周期？", "why_now":"先确认周期",
+            "required":true, "allow_custom":true,
+            "input_clarification":{"kind":"report_period","need_ids":[]},
+            "options":[{"id":"previous", "label":"最近完整一周（9月21日—9月27日）",
+                "description":"备选周期", "input_value":{
+                    "start":"2026-09-21", "end":"2026-09-27",
+                    "timezone":"Asia/Shanghai"}}]
+        })).unwrap();
+        let turn = BrainstormStoredTurn { question: question.clone(), answer: BrainstormAnswer {
+            selected_option_ids: vec!["previous".into()], source: "user".into(),
+            ..Default::default()
+        }};
+        let mut state: BrainstormStoredState = serde_json::from_value(serde_json::json!({
+            "root_request":"请生成GPU成本优化的周报"
+        })).unwrap();
+        state.turns.push(turn);
+        assert!(brainstorm_effective_summary(&state, &state.turns[0])
+            .contains("2026-09-21 至 2026-09-27"));
+        assert_eq!(brainstorm_user_inputs(&state, &state.turns[0]),
+            vec!["报告周期：2026-09-21 至 2026-09-27"]);
+        let context = brainstorm_decision_context(&state);
+        assert!(context[0]["answer"].as_str().unwrap()
+            .contains("2026-09-21 至 2026-09-27"));
+        assert!(brainstorm_brief(&state).contains("2026-09-21 至 2026-09-27"));
+    }
+
+    #[test]
     fn brainstorm_diagnostics_only_keep_bounded_identifiers_and_known_actions() {
         assert_eq!(
             brainstorm_log_identifier("creation-1788802278839-b615a62dd42728"),
             "creation-1788802278839-b615a62dd42728"
         );
         for unsafe_value in [
-            "", "raw user prompt", "https://internal.example.com",
-            "session\nsecret", &"a".repeat(161),
+            "",
+            "raw user prompt",
+            "https://internal.example.com",
+            "session\nsecret",
+            &"a".repeat(161),
         ] {
             assert_eq!(brainstorm_log_identifier(unsafe_value), "invalid");
         }
@@ -5481,17 +6424,72 @@ mod tests {
     #[test]
     fn brainstorm_sidecar_errors_use_stable_safe_contracts() {
         let cases = [
-            ("BRAINSTORM_MODEL_OUTPUT_TRUNCATED", "BRAINSTORM_MODEL_OUTPUT_TRUNCATED", StatusCode::BAD_GATEWAY, false),
-            ("CREATION_DOCUMENT_TRUNCATED", "BRAINSTORM_MODEL_OUTPUT_TRUNCATED", StatusCode::BAD_GATEWAY, false),
-            ("BRAINSTORM_MODEL_OUTPUT_INVALID", "BRAINSTORM_MODEL_OUTPUT_INVALID", StatusCode::BAD_GATEWAY, false),
-            ("MODEL_ACCESS_DENIED", "MODEL_ACCESS_DENIED", StatusCode::FORBIDDEN, false),
-            ("MODEL_RATE_LIMITED", "MODEL_RATE_LIMITED", StatusCode::TOO_MANY_REQUESTS, true),
-            ("MODEL_REQUEST_FAILED", "MODEL_REQUEST_FAILED", StatusCode::BAD_GATEWAY, false),
-            ("MODEL_TRANSPORT_UNAVAILABLE", "BRAINSTORM_MODEL_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE, true),
-            ("MODEL_SERVICE_UNAVAILABLE", "BRAINSTORM_MODEL_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE, true),
-            ("CREATION_UNAVAILABLE", "BRAINSTORM_MODEL_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE, true),
-            ("BRAINSTORM_MODEL_UNAVAILABLE", "BRAINSTORM_MODEL_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE, true),
-            ("BRAINSTORM_MODEL_TIMEOUT", "BRAINSTORM_MODEL_TIMEOUT", StatusCode::GATEWAY_TIMEOUT, true),
+            (
+                "BRAINSTORM_MODEL_OUTPUT_TRUNCATED",
+                "BRAINSTORM_MODEL_OUTPUT_TRUNCATED",
+                StatusCode::BAD_GATEWAY,
+                false,
+            ),
+            (
+                "CREATION_DOCUMENT_TRUNCATED",
+                "BRAINSTORM_MODEL_OUTPUT_TRUNCATED",
+                StatusCode::BAD_GATEWAY,
+                false,
+            ),
+            (
+                "BRAINSTORM_MODEL_OUTPUT_INVALID",
+                "BRAINSTORM_MODEL_OUTPUT_INVALID",
+                StatusCode::BAD_GATEWAY,
+                false,
+            ),
+            (
+                "MODEL_ACCESS_DENIED",
+                "MODEL_ACCESS_DENIED",
+                StatusCode::FORBIDDEN,
+                false,
+            ),
+            (
+                "MODEL_RATE_LIMITED",
+                "MODEL_RATE_LIMITED",
+                StatusCode::TOO_MANY_REQUESTS,
+                true,
+            ),
+            (
+                "MODEL_REQUEST_FAILED",
+                "MODEL_REQUEST_FAILED",
+                StatusCode::BAD_GATEWAY,
+                false,
+            ),
+            (
+                "MODEL_TRANSPORT_UNAVAILABLE",
+                "BRAINSTORM_MODEL_UNAVAILABLE",
+                StatusCode::SERVICE_UNAVAILABLE,
+                true,
+            ),
+            (
+                "MODEL_SERVICE_UNAVAILABLE",
+                "BRAINSTORM_MODEL_UNAVAILABLE",
+                StatusCode::SERVICE_UNAVAILABLE,
+                true,
+            ),
+            (
+                "CREATION_UNAVAILABLE",
+                "BRAINSTORM_MODEL_UNAVAILABLE",
+                StatusCode::SERVICE_UNAVAILABLE,
+                true,
+            ),
+            (
+                "BRAINSTORM_MODEL_UNAVAILABLE",
+                "BRAINSTORM_MODEL_UNAVAILABLE",
+                StatusCode::SERVICE_UNAVAILABLE,
+                true,
+            ),
+            (
+                "BRAINSTORM_MODEL_TIMEOUT",
+                "BRAINSTORM_MODEL_TIMEOUT",
+                StatusCode::GATEWAY_TIMEOUT,
+                true,
+            ),
         ];
         for (upstream_code, expected_code, expected_status, retryable) in cases {
             let detail = serde_json::json!({
@@ -5501,11 +6499,16 @@ mod tests {
             });
             for body in [detail.clone(), serde_json::json!({"detail": detail})] {
                 // The stable category wins even when the old sidecar used 503 for every failure.
-                let (status, Json(body)) = brainstorm_sidecar_error(StatusCode::SERVICE_UNAVAILABLE, &body);
+                let (status, Json(body)) =
+                    brainstorm_sidecar_error(StatusCode::SERVICE_UNAVAILABLE, &body);
                 assert_eq!(status, expected_status, "{upstream_code}");
                 assert_eq!(body["code"], expected_code);
                 assert_eq!(body["retryable"], retryable);
-                assert!(body["message"].as_str().unwrap().chars().all(|c| !c.is_ascii_alphabetic()));
+                assert!(body["message"]
+                    .as_str()
+                    .unwrap()
+                    .chars()
+                    .all(|c| !c.is_ascii_alphabetic()));
                 assert!(!body.to_string().contains("sk-private"));
                 assert!(!body.to_string().contains("internal.example.com"));
                 assert!(!body.to_string().contains("raw user prompt"));
@@ -5523,7 +6526,10 @@ mod tests {
             for (upstream_status, expected_code) in [
                 (StatusCode::BAD_GATEWAY, "BRAINSTORM_MODEL_OUTPUT_INVALID"),
                 (StatusCode::TOO_MANY_REQUESTS, "MODEL_RATE_LIMITED"),
-                (StatusCode::SERVICE_UNAVAILABLE, "BRAINSTORM_MODEL_UNAVAILABLE"),
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "BRAINSTORM_MODEL_UNAVAILABLE",
+                ),
                 (StatusCode::GATEWAY_TIMEOUT, "BRAINSTORM_MODEL_TIMEOUT"),
             ] {
                 let (_, Json(failure)) = brainstorm_sidecar_error(upstream_status, &body);
@@ -5572,6 +6578,7 @@ mod tests {
                     description: "推荐方向的依据与取舍".to_string(),
                     details: String::new(),
                     recommended: true,
+                    input_value: None,
                 },
                 BrainstormOption {
                     id: "alternative".to_string(),
@@ -5579,9 +6586,11 @@ mod tests {
                     description: "备选方向的依据与取舍".to_string(),
                     details: String::new(),
                     recommended: false,
+                    input_value: None,
                 },
             ],
             answer_template: String::new(),
+            input_clarification: None,
         }
     }
 
@@ -5598,7 +6607,8 @@ mod tests {
 
     #[test]
     fn brainstorm_legacy_display_fields_restore_without_truncating_original_content() {
-        let mut question = serde_json::to_value(test_brainstorm_question("multi_choice", true)).unwrap();
+        let mut question =
+            serde_json::to_value(test_brainstorm_question("multi_choice", true)).unwrap();
         question.as_object_mut().unwrap().remove("context_details");
         let original_description = "旧会话完整选项和引用资料".repeat(80);
         for option in question["options"].as_array_mut().unwrap() {
@@ -5611,7 +6621,10 @@ mod tests {
         }).to_string()).unwrap();
         let restored = stored.current_question.unwrap();
         assert!(restored.context_details.is_empty());
-        assert!(restored.options.iter().all(|option| option.details.is_empty()));
+        assert!(restored
+            .options
+            .iter()
+            .all(|option| option.details.is_empty()));
         assert_eq!(restored.options[0].description, original_description);
         assert!(stored.continuation_directions[0].details.is_empty());
     }
@@ -5641,8 +6654,14 @@ mod tests {
             &restored.archived_questions[0].question,
         ] {
             assert_eq!(restored_question.context_details, question.context_details);
-            assert_eq!(restored_question.options[0].details, question.options[0].details);
-            assert_eq!(restored_question.options[0].description, question.options[0].description);
+            assert_eq!(
+                restored_question.options[0].details,
+                question.options[0].details
+            );
+            assert_eq!(
+                restored_question.options[0].description,
+                question.options[0].description
+            );
         }
         let direction = &restored.continuation_directions[0];
         let option = BrainstormOption::from(direction);
@@ -5651,7 +6670,10 @@ mod tests {
         assert_eq!(option.id, direction.id);
         assert_eq!(option.label, direction.label);
         assert_eq!(option.recommended, direction.recommended);
-        assert_eq!(restored.turns[0].answer.selected_option_ids, vec!["recommended"]);
+        assert_eq!(
+            restored.turns[0].answer.selected_option_ids,
+            vec!["recommended"]
+        );
     }
 
     #[test]
@@ -6032,6 +7054,8 @@ mod tests {
         success.dimension_id = "success_criteria".to_string();
 
         let state = BrainstormStoredState {
+            work_context: None,
+            stage_workflow: None,
             pending_extensions: Vec::new(),
             current_extension_id: None,
             prefetch_safe_options: Default::default(),
@@ -6042,6 +7066,7 @@ mod tests {
             root_request: "设计原创剧本生成方案".to_string(),
             user_input_revisions: Default::default(),
             selected_skills: Vec::new(),
+            skill_binding_version: 0,
             turns: vec![
                 BrainstormStoredTurn {
                     question: ownership,
@@ -6085,10 +7110,13 @@ mod tests {
         assert_eq!(stored.user_input_revisions["root_request"], 5);
         assert_eq!(stored.user_input_revisions["open_flags"], 5);
         assert_eq!(stored.user_input_revisions[&question_id], 1);
-        let mut restored = parse_brainstorm_state(&serde_json::to_string(&stored).unwrap()).unwrap();
+        let mut restored =
+            parse_brainstorm_state(&serde_json::to_string(&stored).unwrap()).unwrap();
         initialize_brainstorm_input_revisions(&mut restored, 9);
         assert_eq!(restored.user_input_revisions, stored.user_input_revisions);
-        restored.user_input_revisions.insert(question_id.clone(), 10);
+        restored
+            .user_input_revisions
+            .insert(question_id.clone(), 10);
         initialize_brainstorm_input_revisions(&mut restored, 11);
         assert_eq!(restored.user_input_revisions[&question_id], 10);
         assert_eq!(restored.user_input_revisions["root_request"], 5);
@@ -6096,22 +7124,169 @@ mod tests {
 
     #[test]
     fn creation_checkpoint_requires_unchanged_explicit_source_inputs() {
-        let brief = serde_json::json!({"revision": 1, "brief_edits": {"root_request": "可以检索个人资料"}});
+        let brief =
+            serde_json::json!({"revision": 1, "brief_edits": {"root_request": "可以检索个人资料"}});
         let checkpoint = serde_json::json!({"root_request":"组织读书会", "environment":{"creation_brief":brief}});
         let mut req: AgentRunRequest = serde_json::from_value(serde_json::json!({
             "user_prompt":"开始写作", "root_request":"组织读书会", "creation_brief":brief
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(creation_checkpoint_inputs_match(&req, &checkpoint));
-        req.creation_brief = Some(serde_json::json!({"revision":2, "brief_edits":{"root_request":"不检索个人资料"}}));
+        req.creation_brief = Some(
+            serde_json::json!({"revision":2, "brief_edits":{"root_request":"不检索个人资料"}}),
+        );
         assert!(!creation_checkpoint_inputs_match(&req, &checkpoint));
         req.creation_brief = Some(serde_json::json!({}));
         assert!(!creation_checkpoint_inputs_match(&req, &checkpoint));
-        assert!(creation_checkpoint_inputs_match(&req, &serde_json::json!({"environment":{}})));
-        assert!(creation_checkpoint_inputs_match(&req, &serde_json::json!({"environment":{"creation_brief":{}}})));
+        assert!(creation_checkpoint_inputs_match(
+            &req,
+            &serde_json::json!({"environment":{}})
+        ));
+        assert!(creation_checkpoint_inputs_match(
+            &req,
+            &serde_json::json!({"environment":{"creation_brief":{}}})
+        ));
         req.creation_brief = None;
         assert!(creation_checkpoint_inputs_match(&req, &checkpoint));
         req.root_request = Some("用户更改创作目标".to_string());
         assert!(!creation_checkpoint_inputs_match(&req, &checkpoint));
+    }
+
+    #[test]
+    fn old_brainstorm_checkpoint_accepts_only_additive_source_gap_contract() {
+        let saved = serde_json::json!({"revision": 7, "root_request": "GPU 周报"});
+        let checkpoint = serde_json::json!({"root_request":"GPU 周报",
+            "environment":{"creation_brief":saved}});
+        let mut req: AgentRunRequest = serde_json::from_value(serde_json::json!({
+            "user_prompt":"继续章节", "root_request":"GPU 周报",
+            "creation_mode":"brainstorm", "brainstorm_chapter_id":"body",
+            "creation_brief":{"revision":7,"root_request":"GPU 周报",
+                "content_source_gap":{"schema_version":"brainstorm.content-source-gap.v1"}}
+        })).unwrap();
+        assert!(creation_checkpoint_inputs_match(&req, &checkpoint));
+        req.creation_brief.as_mut().unwrap()["root_request"] =
+            serde_json::json!("其他主题");
+        assert!(!creation_checkpoint_inputs_match(&req, &checkpoint));
+        req.creation_brief.as_mut().unwrap()["root_request"] =
+            serde_json::json!("GPU 周报");
+        req.creation_brief.as_mut().unwrap()["content_source_gap"]["schema_version"] =
+            serde_json::json!("unknown");
+        assert!(!creation_checkpoint_inputs_match(&req, &checkpoint));
+    }
+
+    #[test]
+    fn chapter_skill_binding_invalidates_legacy_or_changed_checkpoint() {
+        let mut req: AgentRunRequest = serde_json::from_value(serde_json::json!({
+            "user_prompt":"撰写第 1 章", "root_request":"请生成GPU成本优化的周报"
+        }))
+        .unwrap();
+        req.brainstorm_skill_binding = Some(serde_json::json!({
+            "version":1, "fingerprint":"frozen-gpu-profile", "skills":[{
+                "id":"gpu", "role":"primary", "selection_source":"automatic"
+            }]
+        }));
+        let old = serde_json::json!({
+            "root_request":"请生成GPU成本优化的周报", "environment":{}
+        });
+        assert!(!creation_checkpoint_inputs_match(&req, &old));
+        let changed = serde_json::json!({
+            "root_request":"请生成GPU成本优化的周报", "environment":{
+                "brainstorm_skill_binding":{"fingerprint":"changed-profile"}
+            }
+        });
+        assert!(!creation_checkpoint_inputs_match(&req, &changed));
+        let same = serde_json::json!({
+            "root_request":"请生成GPU成本优化的周报", "environment":{
+                "brainstorm_skill_binding":{"fingerprint":"frozen-gpu-profile"}
+            }
+        });
+        assert!(creation_checkpoint_inputs_match(&req, &same));
+    }
+
+    #[test]
+    fn work_context_validates_bounds_and_profile_from_shared_configuration() {
+        let defaults = normalize_creation_work_context(None).unwrap();
+        assert_eq!(defaults["review_enabled"], false);
+        let accepted = serde_json::json!({"profile_id":"proposal_review", "purpose":"方案评审", "style_samples":["直接给出判断，再说明理由。"], "review_enabled":true});
+        assert_eq!(
+            normalize_creation_work_context(Some(&accepted)).unwrap()["purpose"],
+            "方案评审"
+        );
+        for rejected in [
+            serde_json::json!({"style_samples":["", "样稿"]}),
+            serde_json::json!({"style_samples":["a", "b", "c", "d"]}),
+            serde_json::json!({"constraints":"字".repeat(1501)}),
+            serde_json::json!({"review_enabled":"true"}),
+            serde_json::json!({"profile_id":"unknown"}),
+            serde_json::json!({"schema_version":"v2"}),
+        ] {
+            assert!(normalize_creation_work_context(Some(&rejected)).is_err());
+        }
+    }
+
+    #[test]
+    fn brainstorm_context_plans_with_only_user_work_facts_and_restores_full_settings() {
+        let request: BrainstormTurnRequest = serde_json::from_value(serde_json::json!({
+            "session_id":"work-start", "root_request":"设计试点", "action":"start",
+            "work_context":{"purpose":"评审试点", "decision_goal":"是否批准", "reader_context":"已有入口共识", "constraints":"沿用现有人员", "profile_id":"proposal_review", "style_samples":["样稿中的虚构日期与成本"], "review_enabled":true}
+        })).unwrap();
+        let mut stored: BrainstormStoredState =
+            serde_json::from_value(serde_json::json!({"root_request":"设计试点"})).unwrap();
+        stored.work_context = brainstorm_initial_work_context(&request).unwrap();
+        let brief = brainstorm_brief(&stored);
+        for fact in ["评审试点", "是否批准", "已有入口共识", "沿用现有人员"] {
+            assert!(brief.contains(fact));
+        }
+        for style in ["虚构日期", "proposal_review", "review_enabled"] {
+            assert!(!brief.contains(style));
+        }
+        let restored = parse_brainstorm_state(&serde_json::to_string(&stored).unwrap()).unwrap();
+        assert_eq!(restored.work_context, stored.work_context);
+        let response =
+            serde_json::to_value(brainstorm_response("work-start", "ready", 0, &restored)).unwrap();
+        assert_eq!(
+            response["work_context"]["style_samples"][0],
+            "样稿中的虚构日期与成本"
+        );
+        let mut invalid = request;
+        invalid.work_context = Some(serde_json::json!({"constraints":"长".repeat(1501)}));
+        assert!(brainstorm_initial_work_context(&invalid).is_err());
+    }
+
+    #[test]
+    fn work_context_change_invalidates_checkpoint_without_mutating_brief_choices() {
+        let context =
+            normalize_creation_work_context(Some(&serde_json::json!({"purpose":"方案评审"})))
+                .unwrap();
+        let mut request: AgentRunRequest = serde_json::from_value(
+            serde_json::json!({"user_prompt":"继续", "work_context":context}),
+        )
+        .unwrap();
+        let checkpoint = serde_json::json!({"options":{"work_context":context}});
+        assert!(creation_checkpoint_inputs_match(&request, &checkpoint));
+        request.generation.work_context.as_mut().unwrap()["decision_goal"] =
+            serde_json::json!("批准试点");
+        assert!(!creation_checkpoint_inputs_match(&request, &checkpoint));
+        let legacy: AgentRunRequest =
+            serde_json::from_value(serde_json::json!({"user_prompt":"继续"})).unwrap();
+        assert!(creation_checkpoint_inputs_match(
+            &legacy,
+            &serde_json::json!({})
+        ));
+    }
+
+    #[test]
+    fn work_preview_is_explicit_and_rejects_over_budget_documents() {
+        let mut request: WorkCreationPreviewRequest = serde_json::from_value(
+            serde_json::json!({"action":"review", "current_document":"已完成正文"}),
+        )
+        .unwrap();
+        assert!(validate_work_creation_preview(&mut request).is_ok());
+        request.current_document = "文".repeat(24001);
+        assert!(validate_work_creation_preview(&mut request).is_err());
+        request.current_document.clear();
+        request.action = "apply".to_string();
+        assert!(validate_work_creation_preview(&mut request).is_err());
     }
 
     fn answer_pending_brainstorm_branch(
@@ -6123,9 +7298,14 @@ mod tests {
         let branch = pending_brainstorm_branch(stored).unwrap();
         let mut question = test_brainstorm_question("multi_choice", true);
         question.id = id.to_string();
-        assert!(apply_brainstorm_question_stage(&mut question, Some(&branch)));
+        assert!(apply_brainstorm_question_stage(
+            &mut question,
+            Some(&branch)
+        ));
         if let Some(revision) = stored.user_input_revisions.get(&branch.question.id) {
-            stored.branch_parent_revisions.insert(question.id.clone(), *revision);
+            stored
+                .branch_parent_revisions
+                .insert(question.id.clone(), *revision);
         }
         stored.turns.push(BrainstormStoredTurn {
             question,
@@ -6143,14 +7323,62 @@ mod tests {
             answer: test_brainstorm_answer(&["alternative", "recommended"], ""),
         });
         let steps = [
-            ("solution-a", root.id.as_str(), "recommended", "solutions", vec!["recommended", "alternative"]),
-            ("solution-b", root.id.as_str(), "alternative", "solutions", vec!["recommended"]),
-            ("delivery-a1", "solution-a", "recommended", "implementation", vec!["recommended"]),
-            ("delivery-a2", "solution-a", "alternative", "implementation", vec!["recommended"]),
-            ("delivery-b", "solution-b", "recommended", "implementation", vec!["recommended"]),
-            ("validation-a1", "delivery-a1", "recommended", "validation", vec!["recommended", "alternative"]),
-            ("validation-a2", "delivery-a2", "recommended", "validation", vec!["recommended"]),
-            ("validation-b", "delivery-b", "recommended", "validation", vec!["recommended"]),
+            (
+                "solution-a",
+                root.id.as_str(),
+                "recommended",
+                "solutions",
+                vec!["recommended", "alternative"],
+            ),
+            (
+                "solution-b",
+                root.id.as_str(),
+                "alternative",
+                "solutions",
+                vec!["recommended"],
+            ),
+            (
+                "delivery-a1",
+                "solution-a",
+                "recommended",
+                "implementation",
+                vec!["recommended"],
+            ),
+            (
+                "delivery-a2",
+                "solution-a",
+                "alternative",
+                "implementation",
+                vec!["recommended"],
+            ),
+            (
+                "delivery-b",
+                "solution-b",
+                "recommended",
+                "implementation",
+                vec!["recommended"],
+            ),
+            (
+                "validation-a1",
+                "delivery-a1",
+                "recommended",
+                "validation",
+                vec!["recommended", "alternative"],
+            ),
+            (
+                "validation-a2",
+                "delivery-a2",
+                "recommended",
+                "validation",
+                vec!["recommended"],
+            ),
+            (
+                "validation-b",
+                "delivery-b",
+                "recommended",
+                "validation",
+                vec!["recommended"],
+            ),
         ];
         for (id, parent, option, stage, selected) in steps {
             let branch = pending_brainstorm_branch(&stored).unwrap();
@@ -6200,6 +7428,7 @@ mod tests {
         ));
 
         let stored = BrainstormStoredState {
+            stage_workflow: None,
             turns: vec![answered_turn],
             current_question: Some(repeated.clone()),
             open_flags: vec!["自动化边界仍待确认".into(), "不同模式影响仍待确认".into()],
@@ -6229,19 +7458,29 @@ mod tests {
         let mut stored: BrainstormStoredState =
             serde_json::from_value(serde_json::json!({"root_request":"测试"})).unwrap();
         let root = test_brainstorm_question("multi_choice", true);
-        stored.turns.push(BrainstormStoredTurn { question: root,
-            answer: test_brainstorm_answer(&["recommended", "alternative"], "") });
+        stored.turns.push(BrainstormStoredTurn {
+            question: root,
+            answer: test_brainstorm_answer(&["recommended", "alternative"], ""),
+        });
         answer_pending_brainstorm_branch(&mut stored, "solution-a", &["recommended"], "");
         answer_pending_brainstorm_branch(&mut stored, "solution-b", &["recommended"], "");
         answer_pending_brainstorm_branch(&mut stored, "delivery-a", &["recommended"], "");
         stored.pending_extensions.push(BrainstormExtensionPlan {
-            id: "facet-a".into(), parent_question_id: "solution-a".into(),
-            parent_option_id: Some("recommended".into()), parent_revision: 0,
-            goal: "另一项独立执行决定".into(), ordinal: 1,
+            id: "facet-a".into(),
+            parent_question_id: "solution-a".into(),
+            parent_option_id: Some("recommended".into()),
+            parent_revision: 0,
+            goal: "另一项独立执行决定".into(),
+            ordinal: 1,
         });
         let pending = pending_brainstorm_branches(&stored);
-        assert_eq!(pending.iter().map(|branch| branch.question.id.as_str()).collect::<Vec<_>>(),
-            vec!["solution-b", "solution-a", "delivery-a"]);
+        assert_eq!(
+            pending
+                .iter()
+                .map(|branch| branch.question.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["solution-b", "solution-a", "delivery-a"]
+        );
         assert_eq!(pending[0].exploration_stage, "implementation");
         assert_eq!(pending[1].extension.unwrap().id, "facet-a");
         assert_eq!(pending[2].exploration_stage, "validation");
@@ -6249,18 +7488,27 @@ mod tests {
 
     #[test]
     fn brainstorm_branch_queue_covers_single_choices_and_custom_answers() {
-        for (selected, custom) in [(vec!["recommended"], ""), (vec![], "先办一次小型试演")] {
+        for (selected, custom) in [(vec!["recommended"], ""), (vec![], "先办一次小型试演")]
+        {
             let mut stored: BrainstormStoredState =
                 serde_json::from_value(serde_json::json!({"root_request":"测试"})).unwrap();
             let root = test_brainstorm_question("single_choice", true);
-            stored.turns.push(BrainstormStoredTurn {question: root.clone(),
-                answer: test_brainstorm_answer(&selected, custom)});
+            stored.turns.push(BrainstormStoredTurn {
+                question: root.clone(),
+                answer: test_brainstorm_answer(&selected, custom),
+            });
             let branch = pending_brainstorm_branch(&stored).unwrap();
             assert_eq!(branch.question.id, root.id);
             assert_eq!(branch.option.is_some(), !selected.is_empty());
             answer_pending_brainstorm_branch(&mut stored, "solution", &[], "先做原型");
-            assert_eq!(stored.turns[1].question.parent_question_id.as_deref(), Some(root.id.as_str()));
-            assert_eq!(stored.turns[1].question.parent_option_id.as_deref(), selected.first().copied());
+            assert_eq!(
+                stored.turns[1].question.parent_question_id.as_deref(),
+                Some(root.id.as_str())
+            );
+            assert_eq!(
+                stored.turns[1].question.parent_option_id.as_deref(),
+                selected.first().copied()
+            );
             answer_pending_brainstorm_branch(&mut stored, "delivery", &[], "下周试演");
             answer_pending_brainstorm_branch(&mut stored, "validation", &[], "收集参与者反馈");
             assert!(pending_brainstorm_branch(&stored).is_none());
@@ -6272,10 +7520,14 @@ mod tests {
         let mut stored: BrainstormStoredState =
             serde_json::from_value(serde_json::json!({"root_request":"测试"})).unwrap();
         let root = test_brainstorm_question("multi_choice", true);
-        stored.turns.push(BrainstormStoredTurn {question: root.clone(),
-            answer: test_brainstorm_answer(&["recommended"], "")});
+        stored.turns.push(BrainstormStoredTurn {
+            question: root.clone(),
+            answer: test_brainstorm_answer(&["recommended"], ""),
+        });
         answer_pending_brainstorm_branch(&mut stored, "old-solution", &["recommended"], "");
-        stored.brief_edits.insert(root.id.clone(), "新的方向".to_string());
+        stored
+            .brief_edits
+            .insert(root.id.clone(), "新的方向".to_string());
         let branch = pending_brainstorm_branch(&stored).unwrap();
         assert_eq!(branch.question.id, root.id);
         assert!(branch.option.is_none());
@@ -6298,8 +7550,10 @@ mod tests {
         root.options[0].label = "自由交流".to_string();
         root.options[0].description = "PRIVATE-CACHED-EVIDENCE".to_string();
         root.options[0].details = "PRIVATE-DETAIL-EVIDENCE".to_string();
-        stored.turns.push(BrainstormStoredTurn {question: root,
-            answer: test_brainstorm_answer(&["recommended"], "")});
+        stored.turns.push(BrainstormStoredTurn {
+            question: root,
+            answer: test_brainstorm_answer(&["recommended"], ""),
+        });
         answer_pending_brainstorm_branch(&mut stored, "solution", &[], "先办小型试演");
         let branch = pending_brainstorm_branch(&stored).unwrap();
         let focus = brainstorm_branch_focus(&stored, &branch);
@@ -6317,16 +7571,22 @@ mod tests {
         let mut stored: BrainstormStoredState =
             serde_json::from_value(serde_json::json!({"root_request":"测试"})).unwrap();
         let root = test_brainstorm_question("multi_choice", true);
-        stored.turns.push(BrainstormStoredTurn {question: root.clone(),
-            answer: test_brainstorm_answer(&[], "原来自定义方向")});
+        stored.turns.push(BrainstormStoredTurn {
+            question: root.clone(),
+            answer: test_brainstorm_answer(&[], "原来自定义方向"),
+        });
         stored.user_input_revisions.insert(root.id.clone(), 1);
         answer_pending_brainstorm_branch(&mut stored, "old-custom-solution", &["recommended"], "");
         assert_eq!(stored.branch_parent_revisions["old-custom-solution"], 1);
-        stored.brief_edits.insert(root.id.clone(), "新的自定义方向".to_string());
+        stored
+            .brief_edits
+            .insert(root.id.clone(), "新的自定义方向".to_string());
         stored.user_input_revisions.insert(root.id.clone(), 2);
         // The old question may be answered after its parent was edited. Its
         // answer revision cannot make its earlier generation context current.
-        stored.user_input_revisions.insert("old-custom-solution".to_string(), 3);
+        stored
+            .user_input_revisions
+            .insert("old-custom-solution".to_string(), 3);
         assert_eq!(brainstorm_decision_context(&stored).len(), 1);
         assert!(!brainstorm_brief(&stored).contains("推荐答案"));
         let branch = pending_brainstorm_branch(&stored).unwrap();
@@ -6336,9 +7596,12 @@ mod tests {
         answer_pending_brainstorm_branch(&mut stored, "new-delivery", &[], "新落地步骤");
         answer_pending_brainstorm_branch(&mut stored, "new-validation", &[], "新的验证计划");
         assert!(pending_brainstorm_branch(&stored).is_none());
-        stored.brief_edits.insert(root.id.clone(), "再次调整的方向".to_string());
+        stored
+            .brief_edits
+            .insert(root.id.clone(), "再次调整的方向".to_string());
         stored.user_input_revisions.insert(root.id.clone(), 7);
-        let restored: BrainstormStoredState = serde_json::from_str(&serde_json::to_string(&stored).unwrap()).unwrap();
+        let restored: BrainstormStoredState =
+            serde_json::from_str(&serde_json::to_string(&stored).unwrap()).unwrap();
         let branch = pending_brainstorm_branch(&restored).unwrap();
         assert_eq!(branch.question.id, root.id);
         assert_eq!(branch.focus, "再次调整的方向");
@@ -6353,14 +7616,22 @@ mod tests {
         assert!(encoded.get("exploration_stage").is_none());
         let legacy: BrainstormQuestion = serde_json::from_value(encoded).unwrap();
         assert_eq!(brainstorm_exploration_stage(&legacy), "explore");
-        stored.turns.push(BrainstormStoredTurn {question: legacy,
-            answer: test_brainstorm_answer(&["recommended"], "")});
+        stored.turns.push(BrainstormStoredTurn {
+            question: legacy,
+            answer: test_brainstorm_answer(&["recommended"], ""),
+        });
         let branch = pending_brainstorm_branch(&stored).unwrap();
         let mut generated = question.clone();
-        assert!(apply_brainstorm_question_stage(&mut generated, Some(&branch)));
+        assert!(apply_brainstorm_question_stage(
+            &mut generated,
+            Some(&branch)
+        ));
         assert_eq!(generated.exploration_stage.as_deref(), Some("solutions"));
         generated.exploration_stage = Some("explore".to_string());
-        assert!(!apply_brainstorm_question_stage(&mut generated, Some(&branch)));
+        assert!(!apply_brainstorm_question_stage(
+            &mut generated,
+            Some(&branch)
+        ));
         generated.exploration_stage = Some("invented".to_string());
         assert!(!apply_brainstorm_question_stage(&mut generated, None));
         generated.exploration_stage = Some("implementation".to_string());
@@ -6372,13 +7643,17 @@ mod tests {
         let mut stored: BrainstormStoredState =
             serde_json::from_value(serde_json::json!({"root_request":"测试"})).unwrap();
         let root = test_brainstorm_question("multi_choice", true);
-        stored.turns.push(BrainstormStoredTurn {question: root.clone(),
-            answer: test_brainstorm_answer(&["recommended", "alternative"], "")});
+        stored.turns.push(BrainstormStoredTurn {
+            question: root.clone(),
+            answer: test_brainstorm_answer(&["recommended", "alternative"], ""),
+        });
         let mut continuation = root;
         continuation.id = "continuation".to_string();
         continuation.dimension_id = "continuation_directions".to_string();
-        stored.turns.push(BrainstormStoredTurn {question: continuation,
-            answer: test_brainstorm_answer(&[], "新增方向")});
+        stored.turns.push(BrainstormStoredTurn {
+            question: continuation,
+            answer: test_brainstorm_answer(&[], "新增方向"),
+        });
         let branch = pending_brainstorm_branch(&stored).unwrap();
         assert_eq!(branch.question.id, "continuation");
         assert_eq!(branch.focus, "新增方向");

@@ -1,6 +1,6 @@
 import { Children, isValidElement, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, Copy, Pencil, X } from 'lucide-react'
+import { Check, Copy, Download, Pencil, X } from 'lucide-react'
 
 type DiagramLanguage = 'mermaid' | 'plantuml'
 
@@ -283,6 +283,7 @@ export const CreationDiagram = ({ language, code }: CreationDiagramProps) => {
   const modalCanvasRef = useRef<HTMLDivElement>(null)
   const [renderCode, setRenderCode] = useState(code)
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copying' | 'copied' | 'error'>('idle')
+  const [downloadStatus, setDownloadStatus] = useState<'idle' | 'downloading' | 'downloaded' | 'error'>('idle')
   const [editorOpen, setEditorOpen] = useState(false)
   const [editorDraft, setEditorDraft] = useState(code)
   const [editorError, setEditorError] = useState('')
@@ -383,6 +384,30 @@ export const CreationDiagram = ({ language, code }: CreationDiagramProps) => {
     window.setTimeout(() => setCopyStatus('idle'), 1800)
   }
 
+  const downloadImage = async () => {
+    if (!svg || downloadStatus === 'downloading') return
+    setDownloadStatus('downloading')
+    try {
+      const blob = await svgToPngBlob(svg)
+      const url = URL.createObjectURL(blob)
+      try {
+        const link = document.createElement('a')
+        link.href = url
+        link.download = `memorybread-${language}-diagram.png`
+        document.body.appendChild(link)
+        link.click()
+        link.remove()
+        setDownloadStatus('downloaded')
+      } finally {
+        // Give WebKit time to consume the object URL after the synthetic click.
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+      }
+    } catch {
+      setDownloadStatus('error')
+    }
+    window.setTimeout(() => setDownloadStatus('idle'), 1800)
+  }
+
   const openEditor = () => {
     setEditorDraft(renderCode)
     setEditorError('')
@@ -429,6 +454,10 @@ export const CreationDiagram = ({ language, code }: CreationDiagramProps) => {
             <button type="button" onClick={() => void copyImage()} disabled={copyStatus === 'copying'} aria-label="复制图片">
               {copyStatus === 'copied' ? <Check size={14} /> : <Copy size={14} />}
               {copyStatus === 'copying' ? '处理中' : copyStatus === 'copied' ? '已复制' : copyStatus === 'error' ? '复制失败' : '复制'}
+            </button>
+            <button type="button" onClick={() => void downloadImage()} disabled={downloadStatus === 'downloading'} aria-label="下载 PNG 图片">
+              {downloadStatus === 'downloaded' ? <Check size={14} /> : <Download size={14} />}
+              {downloadStatus === 'downloading' ? '处理中' : downloadStatus === 'downloaded' ? '已下载' : downloadStatus === 'error' ? '下载失败' : '下载 PNG'}
             </button>
             <button type="button" onClick={openEditor} aria-label={`编辑 ${label} 图片代码`}><Pencil size={14} />编辑</button>
           </div>

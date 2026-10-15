@@ -45,7 +45,13 @@ impl DebugLogSpec {
 
 fn default_debug_log_specs() -> Vec<DebugLogSpec> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let log_dir = PathBuf::from(home).join(".memory-bread").join("logs");
+    debug_log_specs_for_home(PathBuf::from(home))
+}
+
+fn debug_log_specs_for_home(home: PathBuf) -> Vec<DebugLogSpec> {
+    let app_dir = home.join(".memory-bread");
+    let log_dir = app_dir.join("logs");
+    let engine_log_dir = app_dir.join("initialization").join("logs");
 
     vec![
         DebugLogSpec::new(
@@ -78,7 +84,23 @@ fn default_debug_log_specs() -> Vec<DebugLogSpec> {
             log_dir.clone(),
             "bake_extract_errors.log",
         ),
-        DebugLogSpec::new("ui", "ui.log · Desktop UI", log_dir, "ui.log"),
+        DebugLogSpec::new("ui", "ui.log · Desktop UI", log_dir.clone(), "ui.log"),
+        DebugLogSpec::new(
+            "inference_engine", "本地推理引擎 · 当前日志",
+            engine_log_dir.clone(), "local-ai-engine.log",
+        ),
+        DebugLogSpec::new(
+            "inference_engine_previous_1", "本地推理引擎 · 轮转日志 1",
+            engine_log_dir.clone(), "local-ai-engine.log.1",
+        ),
+        DebugLogSpec::new(
+            "inference_engine_previous_2", "本地推理引擎 · 轮转日志 2",
+            engine_log_dir, "local-ai-engine.log.2",
+        ),
+        DebugLogSpec::new(
+            "inference_launcher", "本地推理引擎 · 开发启动日志",
+            log_dir, "ollama.log",
+        ),
     ]
 }
 
@@ -123,6 +145,7 @@ pub struct AppState {
     pub rag_job_seq: Arc<AtomicU64>,
     pub creation_skill_analysis_jobs: Arc<Mutex<HashMap<String, CreationSkillAnalysisJobRecord>>>,
     pub creation_skill_analysis_job_seq: Arc<AtomicU64>,
+    pub(crate) brainstorm_stage_jobs: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     pub(crate) brainstorm_prefetch: Arc<Mutex<crate::api::handlers::creation::BrainstormPrefetchCache>>,
     pub creation_session_leases: Arc<Mutex<HashMap<String, CreationSessionLease>>>,
     pub capture_enabled: Arc<AtomicBool>,
@@ -221,6 +244,7 @@ impl AppState {
             rag_job_seq: Arc::new(AtomicU64::new(1)),
             creation_skill_analysis_jobs: Arc::new(Mutex::new(HashMap::new())),
             creation_skill_analysis_job_seq: Arc::new(AtomicU64::new(1)),
+            brainstorm_stage_jobs: Arc::new(Mutex::new(HashMap::new())),
             brainstorm_prefetch: Arc::new(Mutex::new(Default::default())),
             creation_session_leases: Arc::new(Mutex::new(HashMap::new())),
             capture_enabled: Arc::new(AtomicBool::new(capture_enabled)),
@@ -242,5 +266,27 @@ impl AppState {
     pub fn update_keyboard_signal_enabled(&self, enabled: bool) {
         self.keyboard_signal_enabled
             .store(enabled, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_log_spec_tests {
+    use super::*;
+
+    #[test]
+    fn inference_logs_include_managed_rotations_and_launcher() {
+        let home = PathBuf::from("/test/home");
+        let specs = debug_log_specs_for_home(home.clone());
+        for (key, relative_path) in [
+            ("inference_engine", "initialization/logs/local-ai-engine.log"),
+            ("inference_engine_previous_1", "initialization/logs/local-ai-engine.log.1"),
+            ("inference_engine_previous_2", "initialization/logs/local-ai-engine.log.2"),
+            ("inference_launcher", "logs/ollama.log"),
+        ] {
+            let spec = specs.iter().find(|spec| spec.key == key).unwrap();
+            assert_eq!(spec.path(), home.join(".memory-bread").join(relative_path));
+        }
+        let keys: std::collections::HashSet<_> = specs.iter().map(|spec| &spec.key).collect();
+        assert_eq!(keys.len(), specs.len());
     }
 }

@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import type { CaptureHealth, ExtractionLive, MonitorOverview, SystemResources } from '../types'
+import type { CaptureHealth, ExtractionLive, InferenceRuntimeHealth, MonitorOverview, SystemResources } from '../types'
 import { useAppStore } from '../store/useAppStore'
 import { toUserFacingError } from '../utils/userFacingError'
 import PipelineDagPanel from './PipelineDagPanel'
@@ -701,9 +701,10 @@ function fontSize_20_weight_700(color: string): React.CSSProperties {
   return { fontSize: 20, fontWeight: 700, color, lineHeight: 1 }
 }
 
-type ExtractorStatus = 'running' | 'waiting' | 'idle' | 'stalled' | 'paused'
+type ExtractorStatus = 'running' | 'waiting' | 'idle' | 'stalled' | 'paused' | 'blocked'
 
 const EXTRACTOR_STATUS_META: Record<ExtractorStatus, { label: string; color: string; dot: string }> = {
+  blocked: { label: '提炼受阻', color: '#FF3B30', dot: '#FF3B30' },
   running: { label: '运行中', color: '#34C759', dot: '#34C759' },
   waiting: { label: '等待片段成熟', color: '#FF9500', dot: '#FF9500' },
   idle:    { label: '空闲', color: 'var(--mb-text-tertiary)', dot: '#8E8E93' },
@@ -742,14 +743,16 @@ function oldestQueueAge(oldestAtMs: number | null | undefined): number {
   return oldestAtMs ? Math.max(0, Date.now() - oldestAtMs) : 0
 }
 
-const ExtractionQueueCard: React.FC<{
+export const ExtractionQueueCard: React.FC<{
   pending: number
   status: ExtractorStatus
   extractingCount: number
   lastExtractionAtMs: number | null | undefined
   oldestPendingAtMs: number | null | undefined
   stalled: boolean
-}> = ({ pending, status, extractingCount, lastExtractionAtMs, oldestPendingAtMs, stalled }) => {
+  inference?: InferenceRuntimeHealth
+}> = ({ pending, status: reportedStatus, extractingCount, lastExtractionAtMs, oldestPendingAtMs, stalled, inference }) => {
+  const status = reportedStatus !== 'paused' && inference?.available === false ? 'blocked' : reportedStatus
   const meta = EXTRACTOR_STATUS_META[status] ?? EXTRACTOR_STATUS_META.idle
   const oldestAge = oldestQueueAge(oldestPendingAtMs)
   const baseColor = status === 'paused'
@@ -759,7 +762,9 @@ const ExtractionQueueCard: React.FC<{
     : stalled || pending > 0 ? '#FF9500' : '#8E8E93'
 
   let sub: string
-  if (status === 'running') {
+  if (status === 'blocked') {
+    sub = inferenceRecoveryLabel(inference?.recovery_status)
+  } else if (status === 'running') {
     sub = extractingCount > 0
       ? `正在提炼 ${extractingCount} 条 · 上次 ${fmtRelativeTs(lastExtractionAtMs)}`
       : `刚刚完成 · 上次 ${fmtRelativeTs(lastExtractionAtMs)}`
@@ -1412,6 +1417,7 @@ const OverviewContent: React.FC<{
           sub="占用既有烘焙配额，不追加模型调用" color="#5E5CE6" />
         <ExtractionQueueCard
           pending={knowledge_flow.pending_extraction_count}
+          inference={serviceHealth.inference}
           status={knowledge_flow.extractor_status}
           extractingCount={knowledge_flow.extracting.length}
           lastExtractionAtMs={knowledge_flow.last_extraction_at_ms}
@@ -1778,12 +1784,25 @@ const formatServiceMode = (mode?: string) => {
   return '状态待确认'
 }
 
-const ServiceHealthBanner: React.FC<{ health: MonitorOverview['service_health'] }> = ({ health }) => {
-  const meta = SERVICE_HEALTH_META[health.status] ?? SERVICE_HEALTH_META.down
-  if (health.status === 'ok') return null
+const INFERENCE_RECOVERY_LABELS: Record<string, string> = {
+  starting: '本地推理服务正在启动',
+  restarting: '正在自动重启本地推理服务',
+  retry_wait: '本地推理服务启动失败，等待自动重试',
+  cooldown: '自动重启暂未成功，正在冷却等待重试',
+  component_missing: '本地推理组件缺失，请在设置中继续初始化／修复',
+  port_conflict: '本地推理服务端口被占用，请检查本机服务',
+}
+const inferenceRecoveryLabel = (status?: string) => INFERENCE_RECOVERY_LABELS[status ?? '']
+  ?? '本地推理服务不可用，等待自动恢复'
+
+export const ServiceHealthBanner: React.FC<{ health: MonitorOverview['service_health'] }> = ({ health }) => {
+  const inference = health.inference
+  const unavailable = inference?.available === false
+  const meta = SERVICE_HEALTH_META[unavailable ? 'down' : health.status] ?? SERVICE_HEALTH_META.down
+  if (health.status === 'ok' && !unavailable) return null
   const issues = health.issues?.length ? health.issues : ['后台整理能力暂未就绪，部分内容可能稍后才能完成提炼']
   return (
-    <div style={{
+    <div role="alert" style={{
       ...cardStyle,
       borderColor: meta.border,
       background: meta.bg,
@@ -1799,17 +1818,27 @@ const ServiceHealthBanner: React.FC<{ health: MonitorOverview['service_health'] 
           <div key={idx}>{toUserFacingError(issue, '后台能力暂未就绪，请稍后重试')}</div>
         ))}
       </div>
+      {unavailable && inference && (
+        <div style={{ fontSize: 12, color: meta.color, marginTop: 8 }}>
+          <div>{inferenceRecoveryLabel(inference.recovery_status)}</div>
+          {inference.max_attempts > 0 && <div>本轮已尝试 {inference.attempts}/{inference.max_attempts} 次</div>}
+          {inference.next_retry_at_ms != null && (
+            <div>下次重试约 {fmtDurationMs(inference.next_retry_at_ms - Date.now())}后</div>
+          )}
+          {inference.recovery_stale && <div>自动恢复状态尚未更新，以实时服务探测为准</div>}
+        </div>
+      )}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
-        <HealthChip ok={health.critical_checks_passed} label="本地分析" />
+        <HealthChip ok={inference?.available ?? health.critical_checks_passed} label="本地推理" />
         <HealthChip ok={health.embedding_ok} label="语义索引" />
         <HealthChip ok={health.full_dispatch_ready} label="任务分发" />
-        <HealthChip ok={health.background_processor_running} label="后台整理" />
+        <HealthChip ok={health.background_processor_running && !unavailable} label="后台整理" state={unavailable ? '受阻' : undefined} />
       </div>
     </div>
   )
 }
 
-const HealthChip: React.FC<{ ok: boolean; label: string }> = ({ ok, label }) => (
+const HealthChip: React.FC<{ ok: boolean; label: string; state?: string }> = ({ ok, label, state }) => (
   <span style={{
     fontSize: 11,
     padding: '2px 7px',
@@ -1818,7 +1847,7 @@ const HealthChip: React.FC<{ ok: boolean; label: string }> = ({ ok, label }) => 
     color: ok ? '#248A3D' : '#C52828',
     fontWeight: 600,
   }}>
-    {label} {ok ? '正常' : '异常'}
+    {label} {state ?? (ok ? '正常' : '异常')}
   </span>
 )
 

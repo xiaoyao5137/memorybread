@@ -40,6 +40,7 @@ const STAGE_COLOR: Record<DagStageKey, { fill: string; stroke: string; accent: s
 
 const EXTRACTOR_LABEL: Record<string, { text: string; color: string }> = {
   running: { text: '提炼中', color: '#34C759' },
+  blocked: { text: '推理服务不可用', color: '#FF3B30' },
   waiting: { text: '等待中', color: '#FF9500' },
   idle:    { text: '空闲',   color: 'var(--mb-text-tertiary)' },
   stalled: { text: '已停止', color: '#FF3B30' },

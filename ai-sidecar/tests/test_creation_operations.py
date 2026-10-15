@@ -385,6 +385,26 @@ async def test_invalid_model_contract_retries_interpretation_without_tool_execut
 
 
 @pytest.mark.asyncio
+async def test_truncated_routing_decision_retries_once_with_larger_budget():
+    service = object.__new__(CreationService)
+    service.model = 'test'
+    calls = []
+    async def completion(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            yield '{"tools":'
+            raise OperationError("CREATION_DOCUMENT_TRUNCATED", "length")
+        yield json.dumps({'operation': {'kind': 'respond', 'response': '已收到'},
+                          'tools': [], 'agents': [], 'reasoning': '确认收到'})
+    service._stream_direct_completion = completion
+    service._log_creation_usage = lambda **kwargs: None
+    decision = await service.route_capabilities(query='请确认收到', requirement={})
+    assert decision['source'] == 'model'
+    assert decision['operation']['kind'] == 'respond'
+    assert [call['num_predict'] for call in calls] == [4096, 6144]
+
+
+@pytest.mark.asyncio
 async def test_route_rejects_operation_kind_not_offered_by_current_intent_and_repairs_it():
     service = object.__new__(CreationService)
     service.model = 'test'
@@ -410,6 +430,40 @@ async def test_route_rejects_operation_kind_not_offered_by_current_intent_and_re
     assert len(calls) == 2
     assert decision['operation'] == {'kind': 'transform', 'targets': [target]}
     assert '不属于本轮意图和当前状态允许的操作' in calls[1]['user_prompt']
+
+
+@pytest.mark.asyncio
+async def test_standalone_diagram_route_offers_only_diagram_generation():
+    service = object.__new__(CreationService)
+    service.model = 'test'
+    calls = []
+    request = '生成一张快手大模型性能成本优化的技术架构图'
+    skill = {'id': 'document-template', 'title': '技术架构方案评审文档模板',
+             'summary': '生成评审文档'}
+
+    async def completion(**kwargs):
+        calls.append(kwargs)
+        yield json.dumps({'operation': {'kind': 'generate', 'artifact_kind': 'diagram',
+            'document_identity': {'title': '快手大模型性能成本优化的技术架构图',
+                                  'source': 'generated', 'evidence': request}},
+            'tools': [], 'agents': [], 'reasoning': '绘制独立图示'})
+
+    service._stream_direct_completion = completion
+    service._log_creation_usage = lambda **kwargs: None
+    decision = await service.route_capabilities(query=request,
+        requirement={'task_intent': {'action': 'create', 'artifact_kind': 'diagram'},
+                     'operation_context': {'current_document': '',
+                                           'available_skills': [skill],
+                                           'explicit_skill_ids': []}},
+        selected_skills=[skill])
+    assert len(calls) == 1
+    variants = calls[0]['json_schema']['properties']['operation']['anyOf']
+    assert [item['properties']['kind']['const'] for item in variants] == ['generate']
+    assert variants[0]['properties']['artifact_kind'] == {'const': 'diagram'}
+    assert 'artifact_kind' in variants[0]['required']
+    assert skill['title'] not in calls[0]['system_prompt']
+    assert skill['title'] not in calls[0]['user_prompt']
+    assert decision['operation']['artifact_kind'] == 'diagram'
 
 
 @pytest.mark.asyncio
@@ -454,6 +508,40 @@ async def test_structured_contract_rejection_surfaces_its_own_error_code():
     assert '不能复制' in calls[1]['user_prompt']
     assert logged[-1]['status'] == 'failed'
     assert '不能复制' in logged[-1]['error_msg']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('generated_title', [
+    'GPU成本优化周报', 'GPU成本优化周报模板',
+    'GPU成本优化周报创作法 · 虚构主题示例',
+])
+async def test_chapter_route_grounds_and_repairs_title_with_effective_user_request(generated_title):
+    service = object.__new__(CreationService)
+    service.model = 'test'
+    request = '请生成GPU成本优化的周报'
+    chapter_instruction = '撰写第 1 章《创作正文》，按当前需求和所选技能创作完整正文。'
+    skill = {'id': 'creation-skill-gpu-cost-weekly-report', 'title': 'GPU成本优化周报模板',
+             'example_document': '# GPU成本优化周报创作法 · 虚构主题示例\n\n示例正文'}
+    calls = []
+
+    async def completion(**kwargs):
+        calls.append(kwargs)
+        yield json.dumps({'tools': [], 'agents': [], 'reasoning': '按确认需求生成周报',
+                          'operation': {'kind': 'generate', 'document_identity': {
+                              'title': generated_title, 'source': 'generated',
+                              'evidence': request}}})
+
+    service._stream_direct_completion = completion
+    service._log_creation_usage = lambda **kwargs: None
+    decision = await service.route_capabilities(
+        query=chapter_instruction, requirement={'title_request': request},
+        selected_skills=[skill])
+    assert len(calls) == 1
+    assert '本轮文档命名依据' in calls[0]['user_prompt']
+    assert '当前章节执行指令' in calls[0]['user_prompt']
+    assert decision['source'] == 'model'
+    assert decision['operation']['document_identity'] == {
+        'title': 'GPU成本优化周报', 'source': 'generated', 'evidence': request}
 
 
 @pytest.mark.parametrize('patch', [

@@ -20,6 +20,19 @@ MAX_SAMPLE_ROWS = 3
 MAX_OPERATIONS = 16
 MAX_RESULT_ROWS = 1000
 
+# A single writing step can ask for prose and one or more exact ranked tables.
+# The narrative planner result must not make those row operations optional.
+_RANKED_ROWS = re.compile(
+    r"(?:按|依据|根据)\s*(?P<field>[^，。；;\n]{1,80}?)\s*"
+    r"(?P<direction>降序|升序|从高到低|从低到高)"
+    r"[^，。；;\n]{0,48}?(?:前\s*(?P<count>\d{1,4})|top\s*(?P<top>\d{1,4}))",
+    re.IGNORECASE,
+)
+_DISPLAY_COLUMNS = re.compile(
+    r"(?:表格列|输出列|展示列|字段)\s*(?:沿用|使用|包含|包括|为|[:：])?"
+    r"\s*(?:页面已有的|原表)?\s*(?P<columns>[^。；;\n]{1,160})"
+)
+
 ALLOWED_MODES = {"relational", "narrative"}
 ALLOWED_PRESENTATIONS = {"auto", "table", "chart", "prose", "metric"}
 ALLOWED_OPERATORS = {
@@ -196,6 +209,94 @@ def relation_catalog(data_results: list[dict[str, Any]]) -> list[dict[str, Any]]
         {key: value for key, value in relation.items() if not key.startswith("_")}
         for relation in discover_relations(data_results)
     ]
+
+
+def _field_name_key(value: Any) -> str:
+    """Normalize a displayed column label without guessing its business meaning."""
+    label = _compact_text(value, 160).casefold()
+    label = re.sub(r"[（(][^）)]*[）)]\s*$", "", label)
+    return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", label)
+
+
+def explicit_ranked_row_plans(
+    objective: str, catalog: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Bind explicit sort-and-top-N requests to actual numeric table columns.
+
+    Only an unambiguous field/relation is accepted. The query executor retains
+    row IDs and validates whether pagination covers the full source table.
+    This deliberately handles an exact relational subtask even when the same
+    writing step also contains narrative or unavailable-date subtasks.
+    """
+    instruction = str(objective or "")
+    plans: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, int]] = set()
+    for match in _RANKED_ROWS.finditer(instruction):
+        count = int(match.group("count") or match.group("top") or 0)
+        if not 1 <= count <= MAX_RESULT_ROWS:
+            raise QueryPlanError("RANKING_LIMIT_INVALID", "显式排行的行数超出可执行范围")
+        field_phrase = _field_name_key(match.group("field"))
+        candidates: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+        for relation in catalog:
+            for field in relation.get("fields", []):
+                if not isinstance(field, dict) or field.get("type") != "decimal":
+                    continue
+                field_name = _field_name_key(field.get("display_name"))
+                if field_name and field_name in field_phrase:
+                    candidates.append((len(field_name), relation, field))
+        if not candidates:
+            raise QueryPlanError("RANKING_FIELD_UNRESOLVED", "显式排行字段没有对应的数值表列")
+        best_length = max(item[0] for item in candidates)
+        best = [item for item in candidates if item[0] == best_length]
+        if len(best) != 1:
+            raise QueryPlanError("RANKING_BINDING_AMBIGUOUS", "显式排行字段匹配到多个来源表")
+        _, relation, sort_field = best[0]
+        relation_id = str(relation.get("relation_id") or "")
+        sort_field_id = str(sort_field.get("field_id") or "")
+        direction = "desc" if match.group("direction") in {"降序", "从高到低"} else "asc"
+        signature = (relation_id, sort_field_id, direction, count)
+        if signature in seen:
+            continue
+        seen.add(signature)
+
+        # Explicit presentation columns are selected by their real display
+        # labels. No cross-row derivation or synthetic fields are introduced.
+        following = instruction[match.end():]
+        next_rank = _RANKED_ROWS.search(following)
+        if next_rank:
+            following = following[:next_rank.start()]
+        column_match = _DISPLAY_COLUMNS.search(following)
+        column_text = _field_name_key(column_match.group("columns")) if column_match else ""
+        projection: list[tuple[int, str]] = []
+        if column_text:
+            for field in relation.get("fields", []):
+                field_name = _field_name_key(field.get("display_name"))
+                if field_name and field_name in column_text:
+                    projection.append((column_text.index(field_name), str(field["field_id"])))
+            projection.sort(key=lambda item: item[0])
+        field_ids = [field_id for _, field_id in projection]
+        if not field_ids:
+            fields = [item for item in relation.get("fields", []) if isinstance(item, dict)]
+            if fields:
+                field_ids.append(str(fields[0].get("field_id") or ""))
+            if sort_field_id not in field_ids:
+                field_ids.append(sort_field_id)
+        operations: list[dict[str, Any]] = [
+            {"op": "order_by", "field_id": sort_field_id,
+             "direction": direction, "nulls": "last"},
+            {"op": "limit", "value": count},
+        ]
+        if field_ids:
+            operations.append({"op": "project", "field_ids": field_ids})
+        plans.append(validate_query_plan({
+            "schema_version": QUERY_PLAN_VERSION,
+            "mode": "relational",
+            "presentation": "table",
+            "relation_id": relation_id,
+            "operations": operations,
+            "reason": "explicit_ranked_rows",
+        }, catalog))
+    return plans
 
 
 def parse_query_plan(value: str) -> dict[str, Any]:

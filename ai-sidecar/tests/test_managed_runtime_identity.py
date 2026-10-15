@@ -91,3 +91,31 @@ def test_identity_recovery_does_not_adopt_sandbox_or_race_launcher(runtime, monk
     assert not manager._managed_ollama_process_owned('sandbox')
     monkeypatch.setattr(manager, '_external_backend_start_in_progress', lambda: True)
     assert not manager._managed_ollama_process_owned('normal')
+
+
+@pytest.mark.parametrize('mismatch', ['models', 'host', 'command', 'create_time'])
+def test_existing_marker_revalidates_live_identity_before_restart(runtime, mismatch):
+    manager, executable, environment, _, process = runtime
+    manager._write_process_marker('normal', 'ollama', process.pid, executable, {
+        'port': 11434, 'models_root': str(manager._models_root('normal')),
+    })
+    if mismatch == 'models':
+        environment['OLLAMA_MODELS'] = '/tmp/foreign-models'
+    elif mismatch == 'host':
+        environment['OLLAMA_HOST'] = '127.0.0.1:11500'
+    elif mismatch == 'command':
+        process.cmdline = lambda: [str(executable), 'run']
+    else:
+        process.create_time = lambda: 987.6
+    assert not manager._managed_ollama_marker_valid('normal')
+
+
+def test_stop_rechecks_pid_creation_time(runtime, monkeypatch):
+    manager, executable, _, _, process = runtime
+    manager._write_process_marker('normal', 'ollama', process.pid, executable, {
+        'port': 11434, 'models_root': str(manager._models_root('normal')),
+    })
+    monkeypatch.setattr(manager, '_managed_ollama_process_owned', lambda _: True)
+    process.create_time = lambda: 987.6
+    process.terminate = lambda: pytest.fail('reused PID terminated')
+    assert not manager._stop_owned_ollama_for_repair('normal')

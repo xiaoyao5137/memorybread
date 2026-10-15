@@ -305,78 +305,55 @@ async def _run_main(args: argparse.Namespace) -> None:
         dispatch_fn = runtime_state["dispatch"]
         return await dispatch_fn(req)
 
+    startup_tasks = set()
+
+    def start_startup_task(coro):
+        task = asyncio.create_task(coro)
+        startup_tasks.add(task)
+        task.add_done_callback(startup_tasks.discard)
+        return task
+
+    async def activate_full_dispatch(checks_result):
+        logger.info("🔄 检测到 Ollama 服务已可用，开始升级到完整模式")
+
+        # 初始化完整功能
+        if not checks_result.get('embedding_ok'):
+            logger.warning("向量模型不可用，以降级模式启动（RAG 向量检索不可用，提炼功能正常）")
+
+        from dispatcher_v2 import Dispatcher
+        dispatcher = Dispatcher(ocr_worker=ocr_worker)
+        await dispatcher.initialize()
+        logger.info("生产模式：已切换到完整任务分发器")
+
+        from background_processor import BackgroundProcessor
+        db_path = str(Path.home() / ".memory-bread" / "memory-bread.db")
+        bg_processor = BackgroundProcessor(db_path=db_path, interval=30, batch_size=20)
+
+        issues = [] if checks_result.get('embedding_ok') else ["向量模型不可用，RAG 向量检索降级"]
+        _write_runtime_status(
+            mode="full",
+            full_dispatch_ready=True,
+            background_processor_running=True,
+            critical_checks_passed=True,
+            embedding_ok=bool(checks_result.get('embedding_ok')),
+            issues=issues,
+            checks=checks_result,
+        )
+        logger.info("✅ 自动升级成功：后台处理器已启动（向量化 + 时间线提炼）")
+        runtime_state["bg_processor"] = bg_processor
+        asyncio.create_task(bg_processor.run())
+        asyncio.create_task(bg_processor.backfill_document_vectors())
+        runtime_state["dispatch"] = dispatcher.dispatch
+
     async def auto_upgrade_to_full_mode() -> None:
-        """
-        后台任务：定期检查 Ollama 服务是否从不可用变为可用。
-        如果检测到可用，自动升级到完整模式。
-        """
-        check_interval = 30  # 每 30 秒检查一次
-        max_checks = 60      # 最多检查 60 次（30 分钟），之后放弃
-        checks_done = 0
+        from runtime_upgrade import monitor_runtime_upgrade
+        from startup_checks import check_critical_requirements_silent
 
-        logger.info("自动升级监控已启动：将定期检查 Ollama 服务状态")
-
-        while checks_done < max_checks:
-            await asyncio.sleep(check_interval)
-            checks_done += 1
-
-            # 如果已经升级到完整模式，停止监控
-            if runtime_state.get("dispatch") != limited_dispatch:
-                logger.info("已升级到完整模式，停止自动升级监控")
-                return
-
-            # 检查 Ollama 是否可用
-            try:
-                from startup_checks import check_critical_requirements_silent
-                checks_result = await asyncio.to_thread(check_critical_requirements_silent)
-
-                if checks_result.get('critical_passed'):
-                    logger.info("🔄 检测到 Ollama 服务已可用，开始升级到完整模式")
-
-                    # 初始化完整功能
-                    if not checks_result.get('embedding_ok'):
-                        logger.warning("向量模型不可用，以降级模式启动（RAG 向量检索不可用，提炼功能正常）")
-
-                    from dispatcher_v2 import Dispatcher
-                    dispatcher = Dispatcher(ocr_worker=ocr_worker)
-                    await dispatcher.initialize()
-                    runtime_state["dispatch"] = dispatcher.dispatch
-                    logger.info("生产模式：已切换到完整任务分发器")
-
-                    from background_processor import BackgroundProcessor
-                    db_path = str(Path.home() / ".memory-bread" / "memory-bread.db")
-                    bg_processor = BackgroundProcessor(db_path=db_path, interval=30, batch_size=20)
-                    runtime_state["bg_processor"] = bg_processor
-                    asyncio.create_task(bg_processor.run())
-                    asyncio.create_task(bg_processor.backfill_document_vectors())
-
-                    issues = [] if checks_result.get('embedding_ok') else ["向量模型不可用，RAG 向量检索降级"]
-                    _write_runtime_status(
-                        mode="full",
-                        full_dispatch_ready=True,
-                        background_processor_running=True,
-                        critical_checks_passed=True,
-                        embedding_ok=bool(checks_result.get('embedding_ok')),
-                        issues=issues,
-                        checks=checks_result,
-                    )
-                    logger.info("✅ 自动升级成功：后台处理器已启动（向量化 + 时间线提炼）")
-                    return
-                else:
-                    # 检查未通过，记录详细信息以便诊断
-                    if checks_done % 10 == 0:  # 每 10 次（5 分钟）记录一次详细状态
-                        logger.info(
-                            "自动升级检查未通过（第 %d/%d 次）: critical_passed=%s, embedding_ok=%s, message=%s",
-                            checks_done, max_checks,
-                            checks_result.get('critical_passed'),
-                            checks_result.get('embedding_ok'),
-                            checks_result.get('message', 'unknown')
-                        )
-            except Exception as exc:
-                # 将 debug 改为 warning，确保异常能被看到
-                logger.warning("自动升级检查遇到异常（第 %d 次）: %s", checks_done, exc, exc_info=checks_done % 10 == 0)
-
-        logger.warning("自动升级监控超时（30 分钟），停止尝试。如需启用完整功能，请重启应用。")
+        await monitor_runtime_upgrade(
+            check_critical_requirements_silent,
+            activate_full_dispatch,
+            lambda: runtime_state.get("dispatch") == limited_dispatch,
+        )
 
     async def bootstrap_full_dispatch() -> None:
         if limited_mode:
@@ -414,34 +391,9 @@ async def _run_main(args: argparse.Namespace) -> None:
                     detail.get('message', 'unknown'),
                 )
                 # 启动自动升级任务：定期检查 Ollama 是否变为可用
-                asyncio.create_task(auto_upgrade_to_full_mode())
+                start_startup_task(auto_upgrade_to_full_mode())
                 return
-            if not checks_result.get('embedding_ok'):
-                logger.warning("向量模型不可用，以降级模式启动（RAG 向量检索不可用，提炼功能正常）")
-
-            from dispatcher_v2 import Dispatcher
-            dispatcher = Dispatcher(ocr_worker=ocr_worker)
-            await dispatcher.initialize()
-            runtime_state["dispatch"] = dispatcher.dispatch
-            logger.info("生产模式：已切换到完整任务分发器")
-
-            from background_processor import BackgroundProcessor
-            db_path = str(Path.home() / ".memory-bread" / "memory-bread.db")
-            bg_processor = BackgroundProcessor(db_path=db_path, interval=30, batch_size=20)
-            runtime_state["bg_processor"] = bg_processor
-            asyncio.create_task(bg_processor.run())
-            asyncio.create_task(bg_processor.backfill_document_vectors())
-            issues = [] if checks_result.get('embedding_ok') else ["向量模型不可用，RAG 向量检索降级"]
-            _write_runtime_status(
-                mode="full",
-                full_dispatch_ready=True,
-                background_processor_running=True,
-                critical_checks_passed=True,
-                embedding_ok=bool(checks_result.get('embedding_ok')),
-                issues=issues,
-                checks=checks_result,
-            )
-            logger.info("后台处理器已启动（向量化 + 时间线提炼）")
+            await activate_full_dispatch(checks_result)
         except Exception as exc:
             _write_runtime_status(
                 mode="basic_ipc",
@@ -452,6 +404,7 @@ async def _run_main(args: argparse.Namespace) -> None:
                 issues=[f"完整能力初始化失败：{exc}"],
             )
             logger.error("完整能力初始化失败，保持基础 IPC 模式: %s", exc, exc_info=True)
+            start_startup_task(auto_upgrade_to_full_mode())
 
     if args.dry_run:
         logger.info("dry-run 模式：使用基础 IPC 分发器（ping + OCR）")
@@ -464,7 +417,7 @@ async def _run_main(args: argparse.Namespace) -> None:
             issues=["dry-run 模式，仅启用 ping/OCR"],
         )
     else:
-        asyncio.create_task(bootstrap_full_dispatch())
+        start_startup_task(bootstrap_full_dispatch())
 
     server = IpcServer(dispatch_fn=dispatch_proxy)
 
@@ -484,6 +437,10 @@ async def _run_main(args: argparse.Namespace) -> None:
     try:
         await server.serve()
     finally:
+        for task in list(startup_tasks):
+            task.cancel()
+        if startup_tasks:
+            await asyncio.gather(*list(startup_tasks), return_exceptions=True)
         bg_processor = runtime_state.get("bg_processor")
         if bg_processor:
             bg_processor.stop()

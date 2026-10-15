@@ -284,7 +284,10 @@ def build_section_prompts(section: Dict[str, Any], decisions: List[Dict[str, Any
     final_instruction = ("\n\n本次仅输出 " + json.dumps(str(section.get("title") or "当前章节"), ensure_ascii=False)
         + " 章节正文，完整落实本章 owned_decisions。其余选择用于保持一致，不扩写其他章节；"
         "不得推翻其他已确认约束，不新增未经定义的业务含义或阈值。不要重复文档或章节标题。")
-    return SECTION_PROMPT, json.dumps(payload, ensure_ascii=False) + final_instruction
+    from .work_quality import work_context_guidance
+    expression = provided_materials.get("expression_context")
+    guidance = work_context_guidance(expression) if expression else ""
+    return SECTION_PROMPT + guidance, json.dumps(payload, ensure_ascii=False) + final_instruction
 
 
 def normalize_section_content(text: str) -> str:
@@ -467,7 +470,8 @@ async def _write_source_owned_section(service: Any, section: Dict[str, Any], dec
             if raw["body"].strip() or any(not raw[key].strip() for key in body_fields):
                 raise ValueError("建议模式须完整提供输入、步骤、产物与验证方法")
             payload = json.JSONDecoder().raw_decode(original)[0]
-            confirmed_source = str(payload.get("root_request") or "") + json.dumps(_confirmed_decisions(decisions), ensure_ascii=False)
+            confirmed_source = (str(payload.get("root_request") or "") + json.dumps(_confirmed_decisions(decisions), ensure_ascii=False)
+                + json.dumps(payload.get("provided_materials", {}).get("user_options", {}), ensure_ascii=False))
             quantities = _unprovided_proposal_quantities(raw, confirmed_source)
             if quantities:
                 if attempt < attempts - 1:

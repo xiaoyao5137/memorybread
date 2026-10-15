@@ -262,12 +262,9 @@ def with_brainstorm_coverage(contract: Dict[str, Any], decisions: List[Dict[str,
         if item.get("description"):
             content += "；已选项说明：" + item["description"]
         required.append({"id": item["id"], "criterion":
-            "独立核对已确认选择「" + content + "」。在本轮目标中实质落实，不能只提标题或关键词；"
-            "保留具体参数及其适用对象、验证变量和边界，不改成待确认，也不挪用于其他试验。"
-            "方向或策略选择须展开具体执行步骤、所需输入、产物与验证方法，不能只复述选项说明；"
-            "纯参数选择不要求重复展开整套流程。事实或痛点选择只需保持已确认范围并在方案中实际应用；"
-            "不得为了‘展开’要求补出资料没有的设备、团队、背景或因果细节。事实与建议保持区别，经验、预测和目标不得升级为已实测结果。"
-            "同义或重复选择可合并呈现。若后续用户明确更正，以更正为准并说明输入依据。"})
+            "在本轮成品中实质落实已确认选择「" + content + "」，按用户要求的文体、用途、范围和篇幅判断，不能只提标题或关键词。"
+            "保留该选择的参数、对象、条件和确定性，不换成其他选项或待确认。"
+            "仅核对该选择实际承诺的内容，不扩充原需求；同义或重复选择可合并呈现。用户后续明确更正优先。"})
     for check in required:
         if check["id"] in existing:
             checks[:] = [check if old["id"] == check["id"] else old for old in checks]
@@ -428,6 +425,12 @@ def supplied_material_lines(instruction: str, document: str, conversation: List[
     audience = (user_options or {}).get("audience", "")
     if audience:
         materials.append(("user-options-audience", audience))
+    work_context = (user_options or {}).get("work_context")
+    if work_context:
+        from .work_integration import work_fact_options
+        for key, value in work_fact_options(work_context).items():
+            if key in {"purpose", "decision_goal", "reader_context", "constraints"} and value:
+                materials.append(("user-options-work-" + key, value))
     return {"{}-{}".format(kind, i): line for kind, value in materials
             for i, line in enumerate(value.splitlines(), 1) if line.strip()}
 
@@ -1635,13 +1638,19 @@ def source_fact_text(evidence: Dict[str, Any]) -> str:
 def delivery_source_materials(instruction: str, environment: Dict[str, Any]) -> Dict[str, Any]:
     """Give acceptance and repair the same role-preserving source snapshot."""
     context = environment.get("input_context") or {}
+    from .work_integration import work_source_options
     provided = {"user_instruction_and_supplied_facts": instruction,
         "original_document": environment.get("input_base_document", ""),
         "root_request": context.get("root_request", ""),
         "conversation": context.get("conversation", []),
         "creation_brief": context.get("creation_brief", ""), "retrieved_evidence": review_evidence(environment),
-        "user_options": context.get("user_options", {})}
+        "user_options": work_source_options(context.get("user_options", {}))}
     brief = environment.get("creation_brief")
+    from .brainstorm_chapters import chapter_delivery_scope
+    scope = chapter_delivery_scope(brief, str(environment.get("chapter_base_document", provided["original_document"]) or ""))
+    if scope is not None:
+        provided["original_document"] = str(environment.get("chapter_base_document", provided["original_document"]) or "")
+        provided["chapter_delivery_scope"] = scope
     if isinstance(brief, dict) and isinstance(context.get("brainstorm_decisions"), list):
         edits = brief.get("brief_edits") or {}
         from .brief_context import effective_brief_open_flags
@@ -1983,6 +1992,7 @@ checks 是以 required_check_ids 为固定键的对象，每个键的值仅含 e
 source_catalog_scope 说明本批精确事实的压缩范围。未装入本批的事实只表示当前上下文未展示，不能据此断言事实或来源不存在；只能按已展示证据判断当前候选是否已获支持。
 provided_materials 是已经拥有的输入资料，candidate_document_lines 是待验收的输出，不能把二者混为一谈。用户指令中给出的事实也是可用资料。输出漏写或写错已有事实属于 revise，不是 blocked；只有所需事实在全部输入资料中也确实缺失才 blocked。
 局部修改或追加只验收本轮新增或修改的内容及保留约束，不因未改动的旧正文追加全文审查任务。
+chapter_delivery_scope 是系统按本轮真实原始正文生成的章节边界。original_document 为空时，没有需要补回的此前章节；目录、后续章节标题、当前候选或历史审查猜测均不能证明另有已完成正文。保留要求只对 original_document 中实际存在的内容验证；尚未创作的章节不要求覆盖，也不能提前成文。按用户要求的文体、用途和篇幅判断选择在正文中的落实程度，不增加原需求和该选择之外的验收义务。
 没有检索的来源不能被宣称不存在或无法公开获得。不得用通用常识冒充用户业务定义、现状或数据。数字、模型能力和结论必须有给定证据支持或明确属于建议/假设。
 evidence 填 candidate_document_lines 中的行 id，不能填解释、输入材料或自行改写的引用。passed=true 必须选一行实际支持该条件的正文；不存在支持行就 passed=false、evidence为空。
 特别逐项核查本轮新增的日期、时间区间、数字、产品能力及归因；逐项检查新增的过程、原因和效果陈述，不得把数量变化或已给原因扩展为未经证实的效率、能力或行为变化。它们即使看起来合理，也必须有资料依据或明确作为建议/推导。不能擅自将相对时间展开成未经提供的绝对日期。检查未增加事实的条件时，不要因大部分数据吻合就忽略多出的事实。
@@ -2028,6 +2038,18 @@ reasonable_inference与unsupported必须让对应checks失败。corrections固�
                           "provided_materials": prompt_materials, "candidate_document": document,
                           "candidate_metrics": candidate_text_metrics(document),
                           "candidate_document_lines": lines}
+    if provided.get("chapter_delivery_scope") is not None:
+        from .brainstorm_chapters import chapter_body_for_metrics, chapter_context
+        current_chapter = chapter_context(environment.get("creation_brief"))
+        chapter_body = chapter_body_for_metrics(document, provided["original_document"], current_chapter)
+        review_input["candidate_metrics_scope"] = "complete_document"
+        review_input["chapter_candidate_metrics"] = {
+            "scope": "current_chapter_addition_excluding_title",
+            "chapter_id": current_chapter["id"],
+            **candidate_text_metrics(chapter_body),
+        }
+        system += ("\n章节追加时，candidate_metrics 是包含此前章节的全篇长度；chapter_candidate_metrics 才是本轮新增章节正文长度，"
+                   "已经排除此前正文和本章标题。‘本章/每章’字数条件必须使用 chapter_candidate_metrics；只有明确的全篇字数条件才使用 candidate_metrics。")
     if decision_sections:
         review_input["decision_application_lines"] = {key: decision_sections[key] for key in required_check_ids if key in decision_sections}
         system += "\ndecision_application_lines 是从当前实际正文唯一定位的对应章节落实内容，不是规划或通过证明。逐项阅读全文及这些执行内容，判断是否实质落实选择；不能只读已确认依据那一行就判仅复述。evidence 选择体现实际应用或具体缺口的正文行。"

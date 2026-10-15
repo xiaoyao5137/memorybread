@@ -27,6 +27,9 @@ use crate::{
     },
 };
 
+mod inference_health;
+use inference_health::InferenceRuntimeHealth;
+
 const SELF_GENERATED_APP_KEYWORDS: [&str; 2] = ["memory-bread", "记忆面包"];
 const SELF_GENERATED_WINDOW_KEYWORDS: [&str; 6] = [
     "memory-bread",
@@ -410,6 +413,7 @@ pub struct ServiceHealth {
     pub full_dispatch_ready: bool,
     pub background_processor_running: bool,
     pub critical_checks_passed: bool,
+    pub inference: Option<InferenceRuntimeHealth>,
     pub embedding_ok: bool,
     pub issues: Vec<String>,
     pub updated_at_ms: Option<i64>,
@@ -423,6 +427,7 @@ impl ServiceHealth {
             full_dispatch_ready: false,
             background_processor_running: false,
             critical_checks_passed: false,
+            inference: None,
             embedding_ok: false,
             issues: vec![reason.into()],
             updated_at_ms: None,
@@ -1347,11 +1352,37 @@ pub async fn monitor_overview(
 
     enrich_extractor_status(&mut overview.knowledge_flow, now_ms).await;
     overview.service_health = read_sidecar_runtime_health(now_ms).await;
+    apply_inference_extractor_status(&mut overview.knowledge_flow.extractor_status, &overview.service_health);
 
     Ok(Json(overview))
 }
 
 async fn read_sidecar_runtime_health(now_ms: i64) -> ServiceHealth {
+    let mut health = read_sidecar_capability_health(now_ms).await;
+    let base_url = inference_health::configured_base_url();
+    let recovery_path = std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home)
+        .join(".memory-bread/initialization/runtime-recovery.json"));
+    let inference = inference_health::sample(base_url.as_deref(), recovery_path.as_deref(), now_ms).await;
+    apply_inference_health(&mut health, inference);
+    health
+}
+
+fn apply_inference_health(health: &mut ServiceHealth, inference: InferenceRuntimeHealth) {
+    if !inference.available {
+        health.status = "down".into();
+        health.critical_checks_passed = false;
+        health.issues.insert(0, "本地推理服务不可用，时间线与知识提炼暂时受阻".into());
+    }
+    health.inference = Some(inference);
+}
+
+fn apply_inference_extractor_status(status: &mut String, health: &ServiceHealth) {
+    if status != "paused" && health.inference.as_ref().is_some_and(|inference| !inference.available) {
+        *status = "blocked".into();
+    }
+}
+
+async fn read_sidecar_capability_health(now_ms: i64) -> ServiceHealth {
     const RUNTIME_STATUS_STALENESS_MS: i64 = 5 * 60 * 1000;
 
     let path = match std::env::var_os("HOME") {
@@ -1421,6 +1452,7 @@ async fn read_sidecar_runtime_health(now_ms: i64) -> ServiceHealth {
         full_dispatch_ready: body.full_dispatch_ready,
         background_processor_running: body.background_processor_running,
         critical_checks_passed: body.critical_checks_passed,
+        inference: None,
         embedding_ok: body.embedding_ok,
         issues,
         updated_at_ms: body.updated_at_ms,
@@ -1777,6 +1809,7 @@ pub async fn monitor_extraction_live(
     let mut service_health = read_sidecar_runtime_health(now_ms).await;
     let inference_queue = read_inference_queue_monitor(&state.sidecar_url).await;
     apply_bake_pipeline_health(&mut service_health, &backlog);
+    apply_inference_extractor_status(&mut tmp.extractor_status, &service_health);
 
     Ok(Json(ExtractionLiveResponse {
         extractor_status: tmp.extractor_status,
@@ -2839,6 +2872,8 @@ pub async fn monitor_pipeline_dag(
         extractor_status: "stalled".to_string(),
     };
     enrich_extractor_status(&mut tmp_flow, now_ms).await;
+    let health = read_sidecar_runtime_health(now_ms).await;
+    apply_inference_extractor_status(&mut tmp_flow.extractor_status, &health);
     let extracting_captures = tmp_flow.extracting;
     let extractor_status = tmp_flow.extractor_status;
 
@@ -3440,6 +3475,34 @@ fn load_candidate_stage(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn live_inference_failure_overrides_healthy_heartbeat_and_active_groups() {
+        let mut health = ServiceHealth::unknown("test");
+        health.status = "ok".into();
+        health.full_dispatch_ready = true;
+        health.critical_checks_passed = true;
+        health.background_processor_running = true;
+        health.issues.clear();
+        let inference = inference_health::classify(false, 100_000, None);
+        apply_inference_health(&mut health, inference);
+        assert_eq!(health.status, "down");
+        assert!(!health.critical_checks_passed);
+        let mut status = "running".to_string();
+        apply_inference_extractor_status(&mut status, &health);
+        assert_eq!(status, "blocked");
+        status = "paused".into();
+        apply_inference_extractor_status(&mut status, &health);
+        assert_eq!(status, "paused");
+    }
+
+    #[test]
+    fn live_inference_recovery_does_not_hide_unstarted_background_processing() {
+        let mut health = ServiceHealth::unknown("后台整理未启动");
+        apply_inference_health(&mut health, inference_health::classify(true, 100_000, None));
+        assert_eq!(health.status, "down");
+        assert!(health.inference.unwrap().available);
+    }
+
     use super::*;
 
     #[test]

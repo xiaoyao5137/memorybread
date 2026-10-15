@@ -1121,6 +1121,9 @@ describe('创作 Agent 多轮 Loop', () => {
       summary: '已按本轮指令完成 2 处调整',
     }
     const savedHistories: any[] = []
+    const provisionalReview = {
+      status: 'pass', provisional: true, source_validation: 'pending', document_hash: 'a'.repeat(64),
+    }
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input))
       if (url.pathname === '/api/creation/skills') return Response.json([])
@@ -1160,11 +1163,21 @@ describe('创作 Agent 多轮 Loop', () => {
           },
           {
             ...event(
-              'run.completed',
+              'delivery.checked',
               5,
+              '已核对待核实草稿的交付条件',
+              undefined,
+              { review: provisionalReview },
+            ),
+            status: 'completed',
+          },
+          {
+            ...event(
+              'run.completed',
+              6,
               '本轮创作完成',
               undefined,
-              { document: polishedDocument },
+              { document: polishedDocument, delivery_review: provisionalReview },
             ),
             status: 'completed',
           },
@@ -1195,6 +1208,12 @@ describe('创作 Agent 多轮 Loop', () => {
     expect(savedHistories[0].document_patch).toEqual(polishPatch)
     expect(savedHistories[0].agent_trace).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'document.patch.applied' }),
+      expect.objectContaining({ type: 'delivery.checked', data: expect.objectContaining({
+        delivery_review: expect.objectContaining(provisionalReview),
+      }) }),
+      expect.objectContaining({ type: 'run.completed', data: expect.objectContaining({
+        delivery_review: expect.objectContaining(provisionalReview),
+      }) }),
     ]))
   })
 

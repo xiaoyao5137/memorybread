@@ -10,6 +10,18 @@ const SELECT_COLUMNS: &str =
      example_document, skill_description, execution_steps, package_files,
      status, installed, published, created_at, updated_at";
 
+/// Read canonical skill packages while the caller holds the session CAS lock.
+pub(crate) fn list_for_brainstorm_catalog(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<CreationSkillRecord>, StorageError> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {SELECT_COLUMNS} FROM creation_skills WHERE deleted_at IS NULL"
+    ))?;
+    let rows = statement.query_map([], row_to_skill)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::Sqlite)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreationSkillSectionHeadings {
     #[serde(default = "default_common_titles_heading")]
@@ -157,7 +169,11 @@ fn default_retain_webpage_screenshot() -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreationSkillExecutionStep {
-    #[serde(default, skip_serializing_if = "String::is_empty", alias = "outputRole")]
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        alias = "outputRole"
+    )]
     pub output_role: String,
     pub id: String,
     pub title: String,
@@ -466,9 +482,22 @@ fn row_to_skill(row: &rusqlite::Row<'_>) -> rusqlite::Result<CreationSkillRecord
 
 fn valid_skill_description(description: &CreationSkillDescription) -> bool {
     if let Some(scope) = &description.applicability {
-        if scope.version != 1 || scope.use_when.is_empty()
-            || [&scope.use_when, &scope.not_for, &scope.required_inputs, &scope.output_structure]
-                .iter().any(|items| items.len() > 24 || items.iter().any(|item| item.trim().is_empty() || item.chars().count() > 1000)) {
+        if scope.version != 1
+            || scope.use_when.is_empty()
+            || [
+                &scope.use_when,
+                &scope.not_for,
+                &scope.required_inputs,
+                &scope.output_structure,
+            ]
+            .iter()
+            .any(|items| {
+                items.len() > 24
+                    || items
+                        .iter()
+                        .any(|item| item.trim().is_empty() || item.chars().count() > 1000)
+            })
+        {
             return false;
         }
     }
@@ -487,8 +516,10 @@ fn valid_skill_description(description: &CreationSkillDescription) -> bool {
 fn valid_execution_steps(steps: &[CreationSkillExecutionStep]) -> bool {
     steps.is_empty()
         || steps.iter().all(|step| {
-            matches!(step.output_role.as_str(), "" | "process" | "section" | "document")
-                && !step.id.trim().is_empty()
+            matches!(
+                step.output_role.as_str(),
+                "" | "process" | "section" | "document"
+            ) && !step.id.trim().is_empty()
                 && !step.title.trim().is_empty()
                 && !step.objective.trim().is_empty()
                 && step.agents.len() + step.tools.len() <= 4
@@ -590,20 +621,44 @@ mod tests {
         let storage = StorageManager::open_in_memory().unwrap();
         let mut skill = sample_skill();
         skill.skill_description.applicability = Some(CreationSkillApplicability {
-            version: 1, use_when: vec!["技术架构评审".into()], not_for: vec!["经营增长方案".into()],
-            required_inputs: vec![], output_structure: vec!["技术设计".into()],
+            version: 1,
+            use_when: vec!["技术架构评审".into()],
+            not_for: vec!["经营增长方案".into()],
+            required_inputs: vec![],
+            output_structure: vec!["技术设计".into()],
         });
         skill.execution_steps[0].output_role = "document".into();
         let saved = storage.upsert_creation_skill(&skill).unwrap();
         let loaded = storage.get_creation_skill(saved.id).unwrap().unwrap();
-        assert_eq!(loaded.skill_description.applicability, skill.skill_description.applicability);
+        assert_eq!(
+            loaded.skill_description.applicability,
+            skill.skill_description.applicability
+        );
         assert_eq!(loaded.execution_steps[0].output_role, "document");
-        skill.skill_description.applicability.as_mut().unwrap().version = 99;
+        skill
+            .skill_description
+            .applicability
+            .as_mut()
+            .unwrap()
+            .version = 99;
         assert!(storage.upsert_creation_skill(&skill).is_err());
-        skill.skill_description.applicability.as_mut().unwrap().version = 1;
+        skill
+            .skill_description
+            .applicability
+            .as_mut()
+            .unwrap()
+            .version = 1;
         skill.execution_steps[0].output_role = "unknown".into();
         assert!(storage.upsert_creation_skill(&skill).is_err());
-        assert_eq!(storage.get_creation_skill(saved.id).unwrap().unwrap().execution_steps[0].output_role, "document");
+        assert_eq!(
+            storage
+                .get_creation_skill(saved.id)
+                .unwrap()
+                .unwrap()
+                .execution_steps[0]
+                .output_role,
+            "document"
+        );
     }
 
     #[test]

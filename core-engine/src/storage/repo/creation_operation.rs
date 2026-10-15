@@ -280,11 +280,23 @@ pub fn record_event(conn: &Connection, session: &str, id: &str, event: &mut Valu
             .unwrap_or(&operation.base_document)
             .to_string();
         let revision = operation.base_revision + i64::from(content != operation.base_document);
-        tx.execute("UPDATE creation_history SET generated_content=?2,revision_no=?3,
-            document_patch_json=?4,goal_json=?5,lifecycle_status=?7,updated_at=?6,edit_operation=?8 WHERE id=?1",
+        // Only an explicit references array replaces the prior citation snapshot.
+        // Undo and older sidecars omit it; clearing those references would lose
+        // provenance even though the document change itself is valid.
+        let references = event["data"]["references"].as_array();
+        let references_json = references.map(|items| Value::Array(items.clone()).to_string());
+        let reference_count = references.map(|items| items.len() as i64);
+        let changed = tx.execute("UPDATE creation_history SET generated_content=?2,revision_no=?3,
+            document_patch_json=?4,goal_json=?5,lifecycle_status=?7,updated_at=?6,edit_operation=?8,
+            references_json=COALESCE(?9,references_json),reference_count=COALESCE(?10,reference_count)
+            WHERE id=?1 AND revision_no=?11 AND generated_content=?12 AND session_id=?13",
             params![operation.history_id,content,revision,event["data"]["document_patch"].to_string(),
                 event["data"]["goal"].to_string(),now,if partial {"failed"} else {"completed"},
-                event["data"]["edit_intent"]["operation"].as_str().unwrap_or("document_patch")])?;
+                event["data"]["edit_intent"]["operation"].as_str().unwrap_or("document_patch"),
+                references_json,reference_count,operation.base_revision,operation.base_document,session])?;
+        if changed != 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         event["data"]["committed_operation_id"] = json!(id);
         event["data"]["revision_no"] = json!(revision);
         event["data"]["history_id"] = json!(operation.history_id);
@@ -469,6 +481,95 @@ mod tests {
                 assert!(pending(conn, "session", "")?.is_empty());
                 assert_eq!(undo(conn, "session", "op")?, "## A\nbase\n");
                 assert!(undo(conn, "session", "op").is_err());
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn completion_commits_references_with_document_and_replays_the_same_result() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage
+            .with_conn(|conn| {
+                let id = fixture(conn);
+                let references = json!([
+                    {"id":"document:81","title":"架构设计"},
+                    {"id":"knowledge:236","title":"Agent 实现"}
+                ]);
+                let mut event = complete();
+                event["data"]["references"] = references.clone();
+                record_event(conn, "session", "op", &mut event)?;
+
+                let history = super::super::creation_history::get_by_id(conn, id)?.unwrap();
+                assert_eq!(history.generated_content, "## A\nchanged\n");
+                assert_eq!(history.revision_no, 2);
+                assert_eq!(history.reference_count, 2);
+                assert_eq!(
+                    serde_json::from_str::<Value>(history.references_json.as_deref().unwrap())
+                        .unwrap(),
+                    references
+                );
+
+                let mut duplicate = complete();
+                duplicate["data"]["references"] = json!([]);
+                record_event(conn, "session", "op", &mut duplicate)?;
+                assert_eq!(duplicate, event);
+                let history = super::super::creation_history::get_by_id(conn, id)?.unwrap();
+                assert_eq!(history.reference_count, 2);
+                assert_eq!(
+                    serde_json::from_str::<Value>(history.references_json.as_deref().unwrap())
+                        .unwrap(),
+                    references
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn completion_without_references_preserves_existing_citation_snapshot() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage
+            .with_conn(|conn| {
+                let id = fixture(conn);
+                let references = json!([{"id":"original-source"}]);
+                conn.execute(
+                    "UPDATE creation_history SET references_json=?2,reference_count=1 WHERE id=?1",
+                    params![id, references.to_string()],
+                )?;
+
+                let mut event = complete();
+                record_event(conn, "session", "op", &mut event)?;
+                let history = super::super::creation_history::get_by_id(conn, id)?.unwrap();
+                assert_eq!(history.generated_content, "## A\nchanged\n");
+                assert_eq!(history.reference_count, 1);
+                assert_eq!(
+                    serde_json::from_str::<Value>(history.references_json.as_deref().unwrap())
+                        .unwrap(),
+                    references
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn completion_with_empty_references_clears_previous_citation_snapshot() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        storage
+            .with_conn(|conn| {
+                let id = fixture(conn);
+                conn.execute(
+                    "UPDATE creation_history SET references_json=?2,reference_count=1 WHERE id=?1",
+                    params![id, json!([{"id":"old"}]).to_string()],
+                )?;
+
+                let mut event = complete();
+                event["data"]["references"] = json!([]);
+                record_event(conn, "session", "op", &mut event)?;
+                let history = super::super::creation_history::get_by_id(conn, id)?.unwrap();
+                assert_eq!(history.reference_count, 0);
+                assert_eq!(history.references_json.as_deref(), Some("[]"));
                 Ok(())
             })
             .unwrap();

@@ -19,7 +19,7 @@ resources, not mandatory stages. Every decision includes one `operation`:
 | --- | --- |
 | `patch` | Nonempty `patches`: deterministic delete, replace, insert or move. No resource calls. |
 | `transform` | Nonempty `targets`: generate bounded patches, optionally using selected resources. No full-document writer/reviewer. |
-| `generate` | Generate the requested document using only selected resources. |
+| `generate` | Generate the requested document or standalone structured diagram using only selected resources. Optional `artifact_kind` is `document` or `diagram`; omission means `document` for older clients/checkpoints. |
 | `respond` | Nonempty `response`: answer or clarify without changing the document or calling resources. |
 | `answer` | Generate an answer from selected resources without changing the document. |
 | `resume` | `operation_id` from Core-owned `pending_operations`; restore saved work. No new resource plan. |
@@ -30,6 +30,24 @@ resources, not mandatory stages. Every decision includes one `operation`:
 Capabilities declare their purpose. Dependencies order only capabilities already
 selected; they do not introduce research or other absent stages. Actual execution
 plans are emitted with decision source and reason.
+
+Intent extraction keeps the action (`create`) separate from the requested artifact.
+Its optional `artifact_kind` is `document`, `diagram`, or `image`; omitted legacy
+values mean `document`. A standalone architecture, flow, sequence, or relationship
+diagram is `diagram`; a photograph, illustration, or poster is `image`; a document
+that contains a figure remains `document`. Each extracted request quotes a span
+of the current instruction, and an explicit standalone visual request binds the
+kind even when the routing model omits or mislabels it. The `generate` operation
+supports only `document` and `diagram`. An independent `image` request must fail
+with `CREATION_CAPABILITY_UNAVAILABLE` before any document writer or commit, until
+an image asset runtime and delivery contract are available. A code diagram within
+a requested document continues through the existing document path.
+For a verified standalone `diagram` request, the routing decoder offers only
+`generate` with `artifact_kind=diagram`; candidate document Skills cannot replace
+that deliverable. Runtime alignment also converts a legacy or externally supplied
+automatic Skill decision into diagram generation before scheduling work, while
+keeping an explicitly requested or frozen Skill workflow from being silently
+discarded. The plan must include diagram generation and diagram delivery checks.
 
 An invalid decision fails closed. Local interpretation can retry once with the
 contract error; this performs no tools and never substitutes keyword-based routing.

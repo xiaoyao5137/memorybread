@@ -20,12 +20,15 @@ const PrivacyPanel: React.FC = () => {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [newApp, setNewApp] = useState({ bundle_id: '', app_name: '', reason: '' })
+  const [addError, setAddError] = useState<string | null>(null)
+  const [addSuccess, setAddSuccess] = useState<string | null>(null)
+  const [adding, setAdding] = useState(false)
 
   useEffect(() => {
     loadData()
   }, [])
 
-  const loadData = async () => {
+  const loadData = async (): Promise<boolean> => {
     try {
       const [blacklistRes, filtersRes] = await Promise.all([
         fetch(`${API_BASE}/api/privacy/blacklist`),
@@ -42,9 +45,11 @@ const PrivacyPanel: React.FC = () => {
       setBlacklist(blacklistData.data || [])
       setFilters(filtersData.data || [])
       setError(null)
+      return true
     } catch (err) {
       console.error('加载隐私设置失败:', err)
       setError(toUserFacingError(err, '隐私设置加载失败'))
+      return false
     } finally {
       setLoading(false)
     }
@@ -79,23 +84,42 @@ const PrivacyPanel: React.FC = () => {
     }
   }
 
-  const addBlacklist = async () => {
-    if (!newApp.bundle_id || !newApp.app_name) {
-      alert('请填写 Bundle ID 和应用名称')
+  const addBlacklist = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (adding) return
+
+    const appName = newApp.app_name.trim()
+    const bundleId = newApp.bundle_id.trim()
+    const reason = newApp.reason.trim()
+    setAddSuccess(null)
+    if (!appName) {
+      setAddError('请填写应用名称')
       return
     }
+
+    setAdding(true)
+    setAddError(null)
     try {
       const res = await fetch(`${API_BASE}/api/privacy/blacklist`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newApp)
+        body: JSON.stringify({
+          app_name: appName,
+          ...(bundleId ? { bundle_id: bundleId } : {}),
+          ...(reason ? { reason } : {})
+        })
       })
-      if (!res.ok) throw new Error('添加失败')
+      if (!res.ok) {
+        const result = await res.json().catch(() => null)
+        throw new Error(typeof result?.message === 'string' ? result.message : '添加失败')
+      }
       setNewApp({ bundle_id: '', app_name: '', reason: '' })
-      loadData()
+      if (await loadData()) setAddSuccess(`已添加“${appName}”`)
     } catch (err) {
       console.error('添加黑名单失败:', err)
-      alert('添加失败')
+      setAddError(toUserFacingError(err, '添加失败，请稍后重试'))
+    } finally {
+      setAdding(false)
     }
   }
 
@@ -214,7 +238,7 @@ const PrivacyPanel: React.FC = () => {
                     <div className="privacy-list-info">
                       <div className="privacy-item-name">{item.app_name}</div>
                       <div className="privacy-item-description">
-                        {item.bundle_id}
+                        {item.bundle_id?.trim() || '按应用名称匹配'}
                         <span className="privacy-stat"> · 本周已拦截 {item.week_blocked ?? 0} 次</span>
                       </div>
                       {item.reason && <div className="privacy-item-reason">{item.reason}</div>}
@@ -247,25 +271,33 @@ const PrivacyPanel: React.FC = () => {
               <div className="privacy-add-form">
                 <div className="privacy-form-heading">
                   <h3>添加新应用</h3>
-                  <p>填写应用标识后，该应用窗口会被立即排除在采集范围外。</p>
+                  <p>填写应用名称即可按名称排除采集；Bundle ID 选填，可辅助精确匹配。</p>
                 </div>
-                <div className="privacy-form-grid">
+                <form className="privacy-form-grid" onSubmit={addBlacklist} noValidate>
                   <label className="privacy-form-field">
-                    <span>Bundle ID</span>
+                    <span>Bundle ID <small>选填</small></span>
                     <input
                       type="text"
                       placeholder="如 com.tencent.xinWeChat"
                       value={newApp.bundle_id}
-                      onChange={(e) => setNewApp({ ...newApp, bundle_id: e.target.value })}
+                      onChange={(e) => {
+                        setNewApp({ ...newApp, bundle_id: e.target.value })
+                        setAddError(null)
+                      }}
                     />
                   </label>
                   <label className="privacy-form-field">
-                    <span>应用名称</span>
+                    <span>应用名称 <small>必填</small></span>
                     <input
                       type="text"
                       placeholder="如 微信"
                       value={newApp.app_name}
-                      onChange={(e) => setNewApp({ ...newApp, app_name: e.target.value })}
+                      required
+                      aria-invalid={Boolean(addError && !newApp.app_name.trim())}
+                      onChange={(e) => {
+                        setNewApp({ ...newApp, app_name: e.target.value })
+                        setAddError(null)
+                      }}
                     />
                   </label>
                   <label className="privacy-form-field">
@@ -274,13 +306,18 @@ const PrivacyPanel: React.FC = () => {
                       type="text"
                       placeholder="如 包含私密聊天内容"
                       value={newApp.reason}
-                      onChange={(e) => setNewApp({ ...newApp, reason: e.target.value })}
+                      onChange={(e) => {
+                        setNewApp({ ...newApp, reason: e.target.value })
+                        setAddError(null)
+                      }}
                     />
                   </label>
-                  <button type="button" className="privacy-add-btn" onClick={addBlacklist}>
-                    添加应用
+                  <button type="submit" className="privacy-add-btn" disabled={adding}>
+                    {adding ? '正在添加…' : '添加应用'}
                   </button>
-                </div>
+                  {addError && <p className="privacy-form-feedback privacy-form-feedback--error" role="alert">{addError}</p>}
+                  {addSuccess && <p className="privacy-form-feedback privacy-form-feedback--success" role="status">{addSuccess}</p>}
+                </form>
               </div>
             </div>
           </div>

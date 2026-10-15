@@ -311,10 +311,14 @@ const withResourceMentions = <T extends StepMentionSource>(step: T, selfTitle = 
 }
 
 // 基于已填写信息本地模拟一份示例文档，帮助用户预览结构与表达效果。
-const buildExampleDocumentPreview = (form: SkillForm): string => {
+const buildExampleDocumentPreview = (form: SkillForm, sourceContent = ''): string => {
   const titlePool = [...lines(form.commonTitleExamples), ...lines(form.commonTitles)]
-  const headingPool = form.executionSteps.map(step => step.title.trim()).filter(Boolean)
-  const headings = headingPool.length ? headingPool : ['背景与目标', '现状与约束', '方案设计', '实施计划', '风险与验证']
+  const configuredHeadings = lines(form.outputStructure)
+  const sectionSteps = form.executionSteps.filter(step => step.outputRole === 'section').map(step => step.title.trim()).filter(Boolean)
+  const sourceHeadingCount = Array.from(sourceContent.matchAll(/^#{2,6}\s+(.+)$/gm)).length
+  const sourceHeadings = lines(form.commonTitleExamples).slice(0, sourceHeadingCount)
+  const headingPool = configuredHeadings.length ? configuredHeadings : sectionSteps.length ? sectionSteps : sourceHeadings
+  const headings = headingPool.length ? headingPool : ['核心说明']
   const skillName = form.title.trim() || '本技能'
   const docTitle = titlePool[0] ? `${titlePool[0]}（模拟示例）` : `${skillName} · 虚构主题示例`
   const flowPool = [...lines(form.textStyle), ...lines(form.textStyleExamples)]
@@ -338,35 +342,14 @@ const buildExampleDocumentPreview = (form: SkillForm): string => {
     ].join('\n')
   })
 
-  const diagramRules = lines(form.diagramStyle)
-  const diagramExamples = lines(form.diagramStyleExamples)
-  const diagramSection = [
-    '## 图示表达',
-    '',
-    diagramRules.length ? diagramRules.map(item => `- ${item}`).join('\n') : '- 需要配图时优先使用代码生成图，保持信息密度与正文一致。',
-    ...(diagramExamples.length ? ['', '仿写示例：', ...diagramExamples.map(item => `- ${item}`)] : []),
-  ].join('\n')
-
-  const toneSection = [
-    '## 话术表达要点',
-    '',
-    tonePool.length ? tonePool.slice(0, 5).map(item => `- ${item}`).join('\n') : `- ${tone}`,
-  ].join('\n')
-
   return [
     `# ${docTitle}`,
     '',
     `> 本示例由已填写的技能信息在本机模拟生成，主题完全虚构，仅用于预览结构与表达效果。`,
     '',
-    '## 摘要',
-    '',
     `${purpose}示例按“${skillName}”的规则演示文档结构与表达。${intro}`,
     '',
     ...sections,
-    '',
-    diagramSection,
-    '',
-    toneSection,
     '',
   ].join('\n')
 }
@@ -919,7 +902,7 @@ export default function CreationSkillEditor({ source, initialSkill, onClose, onS
             `请为创作 Skill「${skillPayload.title}」生成一份完整的示例文档，用于该技能的 few-shot 示例。`,
             '主题必须完全虚构，不得出现任何真实的公司、项目、产品、人员、地域、日期和金额。',
             '严格按照该 Skill 的执行步骤、标题句式、惯用话术和图示方式撰写，不要把鲜明风格稀释成通用公文。',
-            '正文篇幅约一千二百至两千二百个中文字符，包含主标题、摘要、至少六个二级章节和结论。',
+            '篇幅、章节数量和结构按技能的适用场景、源文档特点与最终交付物选择；短评审稿、决策简报与完整方案分别采用合适的信息密度，不固定要求摘要、六个章节或结论。',
             '只输出 Markdown 文档本身，不要输出任何解释。',
           ].join('\n'),
           design_templates: [],
@@ -950,7 +933,7 @@ export default function CreationSkillEditor({ source, initialSkill, onClose, onS
     } catch (err) {
       if (abort.signal.aborted) return
       // Agent 不可用时退回本机模拟预览，保证用户始终能拿到可编辑的示例。
-      setForm(prev => ({ ...prev, exampleDocument: buildExampleDocumentPreview(prev) }))
+      setForm(prev => ({ ...prev, exampleDocument: buildExampleDocumentPreview(prev, source?.content) }))
       setError(toUserFacingError(err, '创作 Agent 生成示例失败，已改用本机模拟预览'))
     } finally {
       if (exampleAbortRef.current === abort) exampleAbortRef.current = null

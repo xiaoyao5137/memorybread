@@ -780,7 +780,7 @@ export interface MonitorOverview {
     recent: { id: number; ts: number; summary: string; category: string; importance: number; app_name: string; win_title: string }[]
     extracting: { id: number; ts: number; app_name: string; win_title: string; group_started_at_ms: number }[]
     last_extraction_at_ms: number | null
-    extractor_status: 'running' | 'waiting' | 'idle' | 'stalled' | 'paused'
+    extractor_status: 'running' | 'waiting' | 'idle' | 'stalled' | 'paused' | 'blocked'
   }
   operation_flow: {
     period_audited_count: number
@@ -841,19 +841,31 @@ export interface TokenMetricDistribution {
   buckets: { label: string; count: number }[]
 }
 
+export interface InferenceRuntimeHealth {
+  available: boolean
+  checked_at_ms: number
+  recovery_status: string
+  recovery_stale: boolean
+  attempts: number
+  max_attempts: number
+  next_retry_at_ms: number | null
+  error_code: string | null
+}
+
 export interface ServiceHealth {
   status: 'ok' | 'degraded' | 'down' | string
   mode: string
   full_dispatch_ready: boolean
   background_processor_running: boolean
   critical_checks_passed: boolean
+  inference?: InferenceRuntimeHealth
   embedding_ok: boolean
   issues: string[]
   updated_at_ms: number | null
 }
 
 export interface ExtractionLive {
-  extractor_status: 'running' | 'waiting' | 'idle' | 'stalled' | 'paused'
+  extractor_status: 'running' | 'waiting' | 'idle' | 'stalled' | 'paused' | 'blocked'
   capture_enabled: boolean
   service_health?: ServiceHealth
   extracting:       { id: number; ts: number; app_name: string; win_title: string; group_started_at_ms: number }[]
@@ -933,7 +945,7 @@ export interface DagStage {
 
 export interface PipelineDagResponse {
   server_now_ms:     number
-  extractor_status:  'running' | 'waiting' | 'idle' | 'stalled' | 'paused'
+  extractor_status:  'running' | 'waiting' | 'idle' | 'stalled' | 'paused' | 'blocked'
   capture_enabled:   boolean
   /// 兼容旧 UI：第一个 running bake run（如有）
   running_bake_run:  { id: number; trigger_reason: string; started_at: number; candidate_count: number } | null
@@ -1146,7 +1158,7 @@ export interface SystemResources {
 
 export interface AppBlacklistRecord {
   id: number
-  bundle_id: string
+  bundle_id: string | null
   app_name: string
   enabled: boolean
   reason: string | null

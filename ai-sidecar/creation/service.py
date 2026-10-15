@@ -276,6 +276,7 @@ class CreationOptions:
 
     doc_type: str = ""
     audience: str = ""
+    work_context: Optional[dict[str, Any]] = None
     output_format: str = "markdown"
     inherit_format: bool = True
     enable_rag: bool = True
@@ -293,6 +294,8 @@ class CreationOptions:
     enabled_tools: tuple[str, ...] = DEFAULT_CREATION_TOOL_IDS
 
     def __post_init__(self) -> None:
+        from .work_quality import normalize_work_context
+        self.work_context = None if self.work_context is None or self.work_context == {} else normalize_work_context(self.work_context)
         self.enabled_tools = normalize_creation_tool_ids(self.enabled_tools)
         self.max_references = max(1, min(int(self.max_references), 30))
         self.data_search_limit = max(1, min(int(self.data_search_limit), 50))
@@ -345,6 +348,7 @@ class ReferenceDocument:
     refresh_truncated: bool = False
     source_snapshot_id: Optional[int] = None
     source_body_hash: Optional[str] = None
+    bridge_evidence: Optional[dict] = None
 
 
 @dataclass
@@ -439,6 +443,7 @@ class CreationService:
         return self._apply_requested_period_policy(
             normalized,
             parsed_requirement.get("time_context") or {},
+            query=query,
         )
 
     async def scrape_data_context(
@@ -679,6 +684,7 @@ class CreationService:
             {int(item["source_id"]) for item in report_sources},
             db_path=self.db_path,
             time_context=parsed_requirement.get("time_context") or {},
+            query=query,
         )
         return {"scrapes": scrapes, "refreshed_data": refreshed}
 
@@ -717,6 +723,14 @@ class CreationService:
         candidates.sort(key=lambda ref: ref.final_weight, reverse=True)
         candidates = candidates[:MAX_DOCUMENT_REFRESH_SOURCES]
 
+        def mark_refresh_failed(ref: ReferenceDocument) -> None:
+            ref.refresh_status = "historical_only"
+            # Completeness describes the body still attached to this reference,
+            # not the failed foreground request. A verified historical capture
+            # remains complete historical evidence after a refresh failure.
+            if not ref.source_snapshot_id or not ref.full_content:
+                ref.refresh_completeness = "failed"
+
         async def refresh_one(client, ref):
             stats["attempted"] += 1
             document_id = int(ref.source_id)
@@ -732,8 +746,7 @@ class CreationService:
                     },
                 )
             except asyncio.CancelledError:
-                ref.refresh_status = "historical_only"
-                ref.refresh_completeness = "failed"
+                mark_refresh_failed(ref)
                 stats["failed"] += 1
                 raise
             except Exception:
@@ -774,6 +787,21 @@ class CreationService:
                     and type(snapshot_id) is int and snapshot_id > 0
                     and completeness in {"complete", "partial"}
                 ):
+                    if (
+                        completeness == "partial"
+                        and ref.source_snapshot_id
+                        and ref.refresh_completeness == "complete"
+                        and ref.full_content
+                    ):
+                        # A newer page fragment does not supersede a complete,
+                        # identity-verified original. Keep the older body as
+                        # historical evidence with its original hash/scope;
+                        # the fragment is recorded only in refresh stats.
+                        ref.refresh_status = "historical_only"
+                        ref.reason += "；本轮仅刷新到局部页面，保留完整历史原文"
+                        stats["partial"] += 1
+                        stats[status] += 1
+                        return
                     page_title = str(snapshot.get("page_title") or "")
                     if page_title:
                         ref.title = page_title
@@ -808,14 +836,12 @@ class CreationService:
                     stats[completeness] += 1
                     stats[status] += 1
                 else:
-                    ref.refresh_status = "historical_only"
-                    ref.refresh_completeness = "failed"
+                    mark_refresh_failed(ref)
                     stats["failed"] += 1
             elif status == "skipped":
                 stats["skipped"] += 1
             else:
-                ref.refresh_status = "historical_only"
-                ref.refresh_completeness = "failed"
+                mark_refresh_failed(ref)
                 stats["failed"] += 1
                 logger.info(
                     "召回文档刷新失败 document_id=%s code=DOCUMENT_REFRESH_FAILED",
@@ -882,15 +908,49 @@ class CreationService:
         return False
 
     @staticmethod
-    def _report_collection_period(time_context: dict) -> dict:
-        """返回报表实际可采集的相对时间窗口。
+    def _requested_period_bounds(time_context: dict) -> Optional[tuple[int, int]]:
+        """Return an explicit time constraint, never the default 'today' hint.
+
+        ``analyze_requirement`` includes today's millisecond bounds even when
+        no period was requested. An absolute user-confirmed period therefore
+        needs its own marker instead of relying on the presence of those keys.
+        """
+        if not isinstance(time_context, dict) or not (
+            time_context.get("has_relative_time") is True
+            or time_context.get("has_absolute_time") is True
+        ):
+            return None
+        try:
+            start_ms = int(time_context.get("period_start_ms") or 0)
+            end_ms = int(time_context.get("period_end_ms") or 0)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if start_ms <= 0 or end_ms < start_ms:
+            # Older relative-time callers can provide calendar dates without
+            # millisecond bounds. Retain their period contract; new confirmed
+            # absolute ranges always carry zone-aware bounds from Agent Loop.
+            try:
+                start_day = datetime.strptime(str(time_context.get("period_start")), "%Y-%m-%d")
+                end_day = datetime.strptime(str(time_context.get("period_end")), "%Y-%m-%d")
+                start_ms = int(start_day.timestamp() * 1000)
+                end_ms = int(end_day.replace(hour=23, minute=59, second=59,
+                                             microsecond=999999).timestamp() * 1000)
+            except (TypeError, ValueError, OverflowError, OSError):
+                return None
+        if start_ms <= 0 or end_ms < start_ms:
+            return None
+        return (start_ms, end_ms)
+
+    @classmethod
+    def _report_collection_period(cls, time_context: dict) -> dict:
+        """返回报表实际可采集的已指定时间窗口。
 
         周报/月报的文档语义仍使用完整自然周期，但周期尚未结束时，页面筛选
         不能提交未来日期。否则正常报表会因为无法显示未来结束日而被误判为
         INTERACTION_POSTCONDITION_FAILED。这里仅截断浏览器采集结束日，不修改
         requirement 中用于成稿和历史快照匹配的完整周期。
         """
-        if not time_context.get("has_relative_time"):
+        if cls._requested_period_bounds(time_context) is None:
             return {}
         start = str(time_context.get("period_start") or "").strip()
         end = str(time_context.get("period_end") or "").strip()
@@ -918,30 +978,29 @@ class CreationService:
             ),
         }
 
-    @staticmethod
-    def _period_bounds_from_mapping(value: object) -> tuple[int, int]:
+    @classmethod
+    def _period_bounds_from_mapping(cls, value: object) -> tuple[int, int]:
         if not isinstance(value, dict):
             return (0, 0)
         structured = value.get("structured_data")
-        provenance = value.get("provenance")
-        period = None
-        if isinstance(structured, dict) and isinstance(
-            structured.get("period"), dict
-        ):
-            period = structured.get("period")
-        elif isinstance(provenance, dict) and isinstance(
-            provenance.get("period"), dict
-        ):
-            period = provenance.get("period")
-        if isinstance(period, dict):
-            return (
-                int(period.get("start_at") or 0),
-                int(period.get("end_at") or 0),
-            )
-        observed_at = int(
-            value.get("observed_at") or value.get("collected_at") or 0
-        )
-        return (observed_at, observed_at)
+        if not isinstance(structured, dict):
+            return (0, 0)
+        # Core's snapshot/provenance `period` is the week of observation, even
+        # for a metric about an older week. It is a storage bucket, not proof
+        # of the metric's statistical period.
+        dates = []
+        for key in ("metric_rows", "metric_statements"):
+            rows = structured.get(key)
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if isinstance(row, dict):
+                    dates.extend(cls._metric_row_statistical_dates(row))
+        if not dates:
+            return (0, 0)
+        start = min(dates).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = max(dates).replace(hour=23, minute=59, second=59, microsecond=999999)
+        return (int(start.timestamp() * 1000), int(end.timestamp() * 1000))
 
     @staticmethod
     def _calendar_dates_in_text(value: object) -> list[datetime]:
@@ -962,20 +1021,88 @@ class CreationService:
         return dates
 
     @classmethod
+    def _metric_row_statistical_dates(cls, row: dict) -> list[datetime]:
+        """Read dates asserted with a metric, excluding collection metadata."""
+        if not isinstance(row, dict):
+            return []
+        evidence = "\n".join(
+            str(row.get(field) or "")
+            for field in ("statement", "evidence_quote")
+        )
+        if not evidence.strip():
+            return []
+        normalized = (evidence.replace("年", "-").replace("月", "-")
+                      .replace("日", "").replace("/", "-").replace(".", "-"))
+        date_pattern = r"20\d{2}-\d{1,2}-\d{1,2}"
+        capture_prefix = (
+            r"(?:采集|抓取|截图|访问|观察|保存|入库|收集|录入|更新|生成)"
+            r"(?:日期|时间|于|为|在)?\s*[：:]?\s*"
+        )
+        normalized = re.sub(capture_prefix + date_pattern, "", normalized)
+        matches = list(re.finditer(date_pattern, normalized))
+        unique = list(dict.fromkeys(
+            item.date() for item in cls._calendar_dates_in_text(normalized)
+        ))
+        if not unique or len(unique) > 2:
+            return []
+        if len(unique) == 2 and len(matches) >= 2:
+            between = normalized[matches[0].end():matches[1].start()]
+            if not re.search(r"至|到|~|～|—|–|－|-", between):
+                return []
+        return [datetime.combine(day, datetime.min.time()) for day in unique]
+
+    @classmethod
+    def _metric_row_matches_request(cls, row: dict, requested: list[str]) -> bool:
+        """Match the metric row itself, never a source title or old history."""
+        haystack = cls._normalize_evidence_text(" ".join(
+            str(row.get(key) or "")
+            for key in ("metric", "dimension", "statement", "evidence_quote")
+        ))
+        if not haystack:
+            return False
+        ignored = {
+            "数据", "指标", "信息", "分析", "情况", "本周", "本期", "周报",
+            "月报", "报告", "来源", "查询", "获取", "期间", "口径", "可比",
+            "比较", "对比", "明细", "汇总", "统计",
+        }
+        for phrase in requested:
+            tokens = cls._evidence_match_tokens(phrase)
+            ascii_tokens = [token for token in tokens if token.isascii()]
+            chinese_tokens = [
+                token for token in tokens
+                if not token.isascii() and token not in ignored
+                and not any(char in "及和与的" for char in token)
+            ]
+            if not ascii_tokens and not chinese_tokens:
+                continue
+            if any(token not in haystack for token in ascii_tokens):
+                continue
+            matched_chinese = sum(token in haystack for token in chinese_tokens)
+            if chinese_tokens and matched_chinese * 2 < len(chinese_tokens):
+                continue
+            return True
+        return False
+
+    @classmethod
     def _filter_metric_facts_for_period(
         cls,
         structured_data: object,
         period_start_ms: int,
         period_end_ms: int,
+        requested_metrics: Optional[list[str]] = None,
     ) -> tuple[dict, bool, bool]:
-        """移除统计日期明确落在目标周期外的指标事实。
+        """Only expose metric facts with an explicit date in the target period.
 
         返回过滤后的结构、是否见到显式指标日期、是否仍保留至少一条指标。
         快照周标签只能筛选快照，不能覆盖指标 statement 自带的实际日期。
         """
         if not isinstance(structured_data, dict):
             return ({}, False, False)
-        filtered = dict(structured_data)
+        filtered = {
+            key: structured_data[key]
+            for key in ("extraction_version", "semantic_subject", "semantic_identity")
+            if key in structured_data
+        }
         start = datetime.fromtimestamp(period_start_ms / 1000).date()
         end = datetime.fromtimestamp(period_end_ms / 1000).date()
         saw_explicit_period = False
@@ -992,21 +1119,18 @@ class CreationService:
             for raw in raw_items:
                 if not isinstance(raw, dict):
                     continue
-                evidence = "\n".join(
-                    str(raw.get(field) or "")
-                    for field in (
-                        "statement",
-                        "dimension",
-                        "target_context",
-                        "evidence_quote",
-                        "note",
-                    )
-                )
-                dates = [item.date() for item in cls._calendar_dates_in_text(evidence)]
-                if dates:
-                    saw_explicit_period = True
-                    if max(dates) < start or min(dates) > end:
-                        continue
+                dates = [item.date() for item in cls._metric_row_statistical_dates(raw)]
+                if not dates:
+                    continue
+                saw_explicit_period = True
+                # A monthly/quarterly aggregate that overlaps a requested
+                # week is not a value for that week. The row's complete
+                # statistical interval must be contained in the target.
+                if min(dates) < start or max(dates) > end:
+                    continue
+                if (requested_metrics is not None
+                        and not cls._metric_row_matches_request(raw, requested_metrics)):
+                    continue
                 kept.append(dict(raw))
             filtered[key] = kept
             retained_metric = retained_metric or bool(kept)
@@ -1018,50 +1142,111 @@ class CreationService:
             metric_rows_retained if metric_rows_present else retained_metric,
         )
 
+    @staticmethod
+    def _period_fact_statements(structured: dict) -> list[str]:
+        rows = structured.get("metric_rows") or structured.get("metric_statements") or []
+        return [
+            str(row.get("statement") or row.get("evidence_quote") or "").strip()
+            for row in rows
+            if isinstance(row, dict)
+            and str(row.get("statement") or row.get("evidence_quote") or "").strip()
+        ]
+
+    @staticmethod
+    def _period_source_identity(provenance: object) -> dict:
+        if not isinstance(provenance, dict):
+            return {}
+        return {
+            key: provenance[key]
+            for key in ("source", "semantic_subject", "semantic_identity", "semantic_scope")
+            if key in provenance
+        }
+
     @classmethod
     def _apply_requested_period_policy(
         cls,
         results: list[dict],
         time_context: dict,
+        query: str = "",
     ) -> list[dict]:
-        """为相对时间任务选择同周期快照，并在指标粒度二次校验。
+        """为指定周期任务选择同周期快照，并在指标粒度二次校验。
 
         report_url 仍保留给即时刷新；不可刷新的工作记忆只有在快照周期与
         指标事实周期都可接受时才进入 Writer 上下文。
         """
-        if not time_context.get("has_relative_time"):
+        bounds = cls._requested_period_bounds(time_context)
+        if bounds is None:
             return results
-        start_ms = int(time_context.get("period_start_ms") or 0)
-        end_ms = int(time_context.get("period_end_ms") or 0)
-        if start_ms <= 0 or end_ms <= 0:
-            return results
+        start_ms, end_ms = bounds
+        requested_metrics = (cls._extract_requested_metrics(query)
+                             if str(query).strip() else None)
         filtered_results: list[dict] = []
         for original in results:
             item = dict(original)
             if item.get("source_kind") == "report_url":
                 filtered_results.append(item)
                 continue
-            candidates = [item]
-            candidates.extend(
-                candidate
-                for candidate in item.get("history", [])
-                if isinstance(candidate, dict)
-            )
+            matched_history = []
+            for candidate in item.get("history", []):
+                if not isinstance(candidate, dict):
+                    continue
+                structured, _, retained = cls._filter_metric_facts_for_period(
+                    candidate.get("structured_data"), start_ms, end_ms,
+                    requested_metrics,
+                )
+                statements = cls._period_fact_statements(structured)
+                if retained and statements:
+                    matched_history.append({
+                        **candidate,
+                        "content_text": "\n".join(statements),
+                        "structured_data": structured,
+                        "provenance": cls._period_source_identity(
+                            candidate.get("provenance")
+                        ),
+                    })
+            candidates = [item, *matched_history]
+            # Historical comparisons are separate facts. Do not let an
+            # out-of-period raw snapshot back into the Writer prompt through
+            # the result's history after selecting an eligible snapshot.
+            item["history"] = matched_history
             selected = None
             for candidate in candidates:
-                period_start, period_end = cls._period_bounds_from_mapping(candidate)
-                if period_end >= start_ms and period_start <= end_ms:
+                candidate_structured, _, has_target_fact = (
+                    cls._filter_metric_facts_for_period(
+                        candidate.get("structured_data"), start_ms, end_ms,
+                        requested_metrics,
+                    )
+                )
+                if (has_target_fact
+                        and cls._period_fact_statements(candidate_structured)):
                     selected = candidate
                     break
             if selected is None:
+                has_period_fact = any(
+                    cls._filter_metric_facts_for_period(
+                        candidate.get("structured_data"), start_ms, end_ms
+                    )[2]
+                    for candidate in candidates
+                )
+                has_dated_facts = any(
+                    cls._period_bounds_from_mapping(candidate) != (0, 0)
+                    for candidate in candidates
+                )
                 item.update(
                     {
                         "can_use": False,
                         "period_match": False,
-                        "unavailable_reason": "requested_period_mismatch",
+                        "unavailable_reason": (
+                            "requested_metric_unmatched" if has_period_fact
+                            and requested_metrics is not None
+                            else "requested_period_mismatch" if has_dated_facts
+                            else "requested_period_unverified"
+                        ),
+                        "topic_match": False if requested_metrics is not None else None,
                         "content_excerpt": None,
                         "structured_data": None,
                         "provenance": None,
+                        "history": [],
                     }
                 )
                 filtered_results.append(item)
@@ -1079,36 +1264,37 @@ class CreationService:
                 )
             structured, saw_explicit_period, retained_metric = (
                 cls._filter_metric_facts_for_period(
-                    item.get("structured_data"), start_ms, end_ms
+                    item.get("structured_data"), start_ms, end_ms,
+                    requested_metrics,
                 )
             )
             original_structured = item.get("structured_data")
-            had_metrics = isinstance(original_structured, dict) and any(
-                isinstance(original_structured.get(key), list)
-                and bool(original_structured.get(key))
-                for key in ("metric_rows", "metric_statements")
-            )
-            if had_metrics and saw_explicit_period and not retained_metric:
+            if not retained_metric:
                 item.update(
                     {
                         "can_use": False,
                         "period_match": False,
-                        "unavailable_reason": "metric_period_mismatch",
+                        "unavailable_reason": (
+                            "metric_period_mismatch" if saw_explicit_period
+                            else "requested_period_unverified"
+                        ),
                         "content_excerpt": None,
                         "structured_data": None,
                         "provenance": None,
+                        "history": [],
                     }
                 )
             else:
                 item["period_match"] = True
+                if requested_metrics is not None:
+                    item["topic_match"] = True
+                    item["matched_metric_rows"] = len(structured.get("metric_rows") or [])
                 if isinstance(original_structured, dict):
                     item["structured_data"] = structured
-                    statements = [
-                        str(row.get("statement") or "").strip()
-                        for row in structured.get("metric_rows", [])
-                        if isinstance(row, dict)
-                        and str(row.get("statement") or "").strip()
-                    ]
+                    item["provenance"] = cls._period_source_identity(
+                        item.get("provenance")
+                    )
+                    statements = cls._period_fact_statements(structured)
                     if statements:
                         item["content_excerpt"] = "\n".join(statements)
             filtered_results.append(item)
@@ -1119,6 +1305,7 @@ class CreationService:
         db_path: str,
         source_id: Optional[int],
         time_context: dict,
+        query: str = "",
     ) -> Optional[dict]:
         """刷新失败时，若库内仍有可接受的快照则返回降级信息。
 
@@ -1133,10 +1320,7 @@ class CreationService:
             conn = sqlite3.connect(db_path)
             try:
                 rows = conn.execute(
-                    "SELECT collected_at,"
-                    " COALESCE(period_start_at, observed_at, collected_at),"
-                    " COALESCE(period_end_at, observed_at, collected_at),"
-                    " content_text, structured_data, collector"
+                    "SELECT collected_at, content_text, structured_data, collector"
                     " FROM data_snapshots WHERE source_id = ?"
                     " ORDER BY collected_at DESC, id DESC LIMIT 20",
                     (int(source_id),),
@@ -1145,13 +1329,14 @@ class CreationService:
                 conn.close()
         except sqlite3.Error:
             return None
+        requested_bounds = CreationService._requested_period_bounds(time_context)
+        requested_metrics = (CreationService._extract_requested_metrics(query)
+                             if str(query).strip() else None)
         for row in rows:
             collected_at = int(row[0] or 0)
-            period_start = int(row[1] or 0)
-            period_end = int(row[2] or 0)
-            content_text = str(row[3] or "").strip()
+            content_text = str(row[1] or "").strip()
             try:
-                structured_data = json.loads(str(row[4] or "{}"))
+                structured_data = json.loads(str(row[2] or "{}"))
             except (TypeError, ValueError, json.JSONDecodeError):
                 structured_data = {}
             if not isinstance(structured_data, dict):
@@ -1162,35 +1347,23 @@ class CreationService:
                 # 旧版本可能把业务错误壳误存为 success。降级时跳过这些
                 # 已污染快照，继续寻找同周期的上一份有效采集。
                 continue
-            collector = str(row[5] or "snapshot_fallback")
+            collector = str(row[3] or "snapshot_fallback")
             if collected_at <= 0:
                 continue
-            if time_context.get("has_relative_time"):
-                start_ms = int(time_context.get("period_start_ms") or 0)
-                end_ms = int(time_context.get("period_end_ms") or 0)
-                if not (period_end >= start_ms and period_start <= end_ms):
-                    continue
-                filtered_structured, saw_explicit_period, retained_metric = (
+            if requested_bounds is not None:
+                start_ms, end_ms = requested_bounds
+                filtered_structured, _, retained_metric = (
                     CreationService._filter_metric_facts_for_period(
-                        structured_data, start_ms, end_ms
+                        structured_data, start_ms, end_ms, requested_metrics
                     )
                 )
-                had_metrics = any(
-                    isinstance(structured_data.get(key), list)
-                    and bool(structured_data.get(key))
-                    for key in ("metric_rows", "metric_statements")
-                )
-                if had_metrics and saw_explicit_period and not retained_metric:
+                if not retained_metric:
                     continue
                 structured_data = filtered_structured
-                statements = [
-                    str(item.get("statement") or "").strip()
-                    for item in structured_data.get("metric_rows", [])
-                    if isinstance(item, dict)
-                    and str(item.get("statement") or "").strip()
-                ]
-                if statements:
-                    content_text = "\n".join(statements)
+                statements = CreationService._period_fact_statements(structured_data)
+                if not statements:
+                    continue
+                content_text = "\n".join(statements)
                 reason = "refresh_failed_period_matched_snapshot"
             else:
                 now_ms = int(time.time() * 1000)
@@ -1686,6 +1859,7 @@ class CreationService:
         attempted_source_ids: set[int],
         db_path: str = "",
         time_context: Optional[dict] = None,
+        query: str = "",
     ) -> list[dict]:
         attempted_report_urls = {
             str(item.get("source_url") or "").strip(): int(item["source_id"])
@@ -1782,7 +1956,7 @@ class CreationService:
                     merged.append(item)
                     continue
                 stale_fallback = CreationService._stale_snapshot_fallback_info(
-                    db_path, source_id, time_context or {}
+                    db_path, source_id, time_context or {}, query=query
                 )
                 if stale_fallback is not None:
                     # 瞬态刷新失败但库内有可接受快照：保留召回内容，连同
@@ -3876,13 +4050,14 @@ class CreationService:
                                      workflow_plan: Optional[list] = None, brief_context: str = "",
                                      root_request: str = "", user_options: Optional[dict] = None) -> dict:
         from .delivery_contract import assess_inputs
+        from .work_integration import work_source_options
         return await assess_inputs(self, instruction, document, operation, conversation,
                                    workflow_plan=workflow_plan, brief_context=brief_context,
-                                   root_request=root_request, user_options=user_options)
+                                   root_request=root_request, user_options=work_source_options(user_options))
 
     async def review_creation_delivery(self, instruction: str, document: str, contract: dict, environment: dict) -> dict:
-        from .delivery_contract import review_delivery
-        return await review_delivery(self, instruction, document, contract, environment)
+        from .work_integration import review_work_delivery
+        return await review_work_delivery(self, instruction, document, contract, environment)
 
     def build_routing_prompts(
         self,
@@ -3909,7 +4084,9 @@ class CreationService:
             "先确定覆盖本轮完整目标的 operation，再选其所需资源。已有文档的删除、移动、用户已给出追加原文以及用户给出替换内容的精确改动使用 patch（tools/agents 都为空）；需要总结、润色、生成新措辞或先检索资料再改动使用 transform，保持范围外原文，禁止在 patch 中编造新事实。复合指令必须覆盖全部动作，"
             "不能只处理其中一句；存在新事实缺口才选择相应工具。否定指令不得反向执行。"
             "transform 会生成一组完整的原子补丁，支持在一次操作中删除、移动、插入和改写多个位置；混合指令不能把删除留给另一个未安排的操作。targets 必须同时覆盖删除位置和追加位置。"
-            "明确需要全文创作才选择 generate。直接回答或目标有歧义用 respond；需要先调用资料工具再回答而不改文档时用 answer。撤销操作用 undo 并绑定 undo_candidates 的 operation_id。"
+            "明确需要全文创作或独立结构图示才选择 generate。直接回答或目标有歧义用 respond；需要先调用资料工具再回答而不改文档时用 answer。撤销操作用 undo 并绑定 undo_candidates 的 operation_id。"
+            "generate 的 artifact_kind 表示主交付物：普通正文为 document；用户明确单独要一张架构图、流程图等可渲染结构图时为 diagram。"
+            "文档里要求配图仍是 document。独立 diagram 不得由文档正文、Mermaid 写作建议或图片提示词替代；无需选择文档撰写 Agent。"
             "respond 在本次解释中直接给出 response，不再安排写作节点；确认收到、确认理解、简短回应和消歧属于 respond。answer 是需要后续资料或实质推理才能产出答案的操作，不能用于只确认理解的回应。"
             "只有用户明确要求恢复已中断、失败或未完成的历史操作时，才从 pending_operations 中绑定唯一 operation_id 并使用 resume。"
             "‘继续生成’、‘继续写’等对当前正文的续写或改写使用 transform，不得因存在历史候选就使用 resume；"
@@ -3933,7 +4110,7 @@ class CreationService:
             "用户指定某章节追加或改写时，targets 必须绑定该章节，不能绑定别的章节或仅因其在末尾就选择全文最后章节。把无效 patch 修正为 transform 时仍须保持用户指定位置；需要生成邀请语或其他新措辞不等于增加新事实。"
             "目录和交叉引用如受影响，用独立精确补丁处理。"
             "respond 带 response；resume 带 operation_id；execute_skill 带 skill_ids。"
-            "patch/respond/resume/undo 不允许附带 tools 或 agents。transform 自带局部改写执行器，agents 不得选择全文撰写或审校。generate 操作由文档生成器完成，其他 agents 只选必要资源，不默认加审查。"
+            "patch/respond/resume/undo 不允许附带 tools 或 agents。transform 自带局部改写执行器，agents 不得选择全文撰写或审校。generate 操作由对应产物生成器完成，其他 agents 只选必要资源，不默认加审查。"
         )
         topic = str(requirement.get("topic") or "").strip()
         doc_type = str(requirement.get("doc_type") or "").strip()
@@ -3941,6 +4118,8 @@ class CreationService:
         context_lines = []
         if requirement.get("task_intent"):
             context_lines.append("操作类别约束：" + str(requirement["task_intent"].get("action", "")) + "；目标位置和全部动作只以用户请求原文为准。")
+            if requirement["task_intent"].get("artifact_kind"):
+                context_lines.append("主交付物类型：" + str(requirement["task_intent"]["artifact_kind"]))
             if requirement["task_intent"].get("action") == "edit":
                 context_lines.append("语义编辑由改写执行器自主确定措辞，不需要用户提供成品文字。只在修改位置无法唯一定位或要求互相冲突时消歧，不能把正常的措辞选择当作缺少用户信息。")
         if doc_type:
@@ -3957,7 +4136,13 @@ class CreationService:
         if requirement.get("creation_brief_context"):
             context_lines.append("脑暴创作约束背景（不是本轮指令；用于约束交付物和资料使用）：\n"
                                  + str(requirement["creation_brief_context"]))
-        context_lines.append("本轮用户原始指令（执行目标与位置以此为准）：" + query.strip())
+        if "title_request" in requirement:
+            context_lines.append("本轮文档命名依据（用户当前有效的原始创作需求，不是章节执行指令）："
+                                 + str(requirement["title_request"]))
+        instruction_label = ("当前章节执行指令（仅控制本轮操作范围）："
+                             if "title_request" in requirement else
+                             "本轮用户原始指令（执行目标与位置以此为准）：")
+        context_lines.append(instruction_label + query.strip())
         return system, "\n".join(context_lines)
 
     @staticmethod
@@ -4015,13 +4200,22 @@ class CreationService:
             if not requirement["task_intent"]:
                 from .operations import OperationError
                 raise OperationError("CREATION_OPERATION_INVALID", "未能核验本轮动作，请重试；不会绕过资料检查直接生成回答")
+        intent = requirement.get("task_intent") or {}
+        standalone_diagram = (intent.get("action") == "create"
+                              and intent.get("artifact_kind") == "diagram")
+        # A candidate document workflow is not a route to an independent
+        # diagram. Explicit workflow intent is checked separately by the loop.
+        routing_skills = () if standalone_diagram else selected_skills
+        if standalone_diagram and isinstance(context, dict):
+            requirement["operation_context"] = {key: value for key, value in context.items()
+                if key not in {"available_skills", "explicit_skill_ids"}}
         system_prompt, user_prompt = self.build_routing_prompts(
-            query, requirement, selected_skills, enabled_tool_ids
+            query, requirement, routing_skills, enabled_tool_ids
         )
         from .operations import routing_response_schema, decoding_schema, OperationError
         from .tools import ROUTABLE_TOOL_IDS, ROUTABLE_AGENT_IDS
         allowed = set(enabled_tool_ids) if enabled_tool_ids is not None else set(ROUTABLE_TOOL_IDS)
-        schema = routing_response_schema([item for item in ROUTABLE_TOOL_IDS if item in allowed], list(ROUTABLE_AGENT_IDS), [str(item.get("id")) for item in selected_skills if item.get("id")])
+        schema = routing_response_schema([item for item in ROUTABLE_TOOL_IDS if item in allowed], list(ROUTABLE_AGENT_IDS), [str(item.get("id")) for item in routing_skills if item.get("id")])
         operation_context = requirement.get("operation_context") or {}
         unavailable = set()
         action = (requirement.get("task_intent") or {}).get("action")
@@ -4029,6 +4223,8 @@ class CreationService:
         permitted = INTENT_OPERATIONS.get(action)
         if permitted:
             unavailable.update({"patch", "transform", "generate", "execute_skill", "respond", "answer", "resume", "undo"} - permitted)
+        if standalone_diagram:
+            unavailable.update({"patch", "transform", "execute_skill", "respond", "answer", "resume", "undo"})
         if not operation_context.get("current_document"):
             unavailable.update({"patch", "transform"})
         if not operation_context.get("pending_operations"):
@@ -4044,8 +4240,10 @@ class CreationService:
         # Title provenance is a structural precondition already checked by the
         # validator. Do not offer impossible source values to the decoder.
         from .skill_governance import explicit_title, document_heading
-        title_sources = ["user"] if explicit_title(query) else ["generated"]
-        if not explicit_title(query) and document_heading(str(operation_context.get("current_document") or "")):
+        title_instruction = (str(requirement["title_request"])
+                             if "title_request" in requirement else query)
+        title_sources = ["user"] if explicit_title(title_instruction) else ["generated"]
+        if not explicit_title(title_instruction) and document_heading(str(operation_context.get("current_document") or "")):
             title_sources.append("existing")
         import copy
         schema = copy.deepcopy(schema)
@@ -4053,25 +4251,34 @@ class CreationService:
             identity_schema = variant["properties"].get("document_identity")
             if identity_schema:
                 identity_schema["properties"]["source"] = {"enum": title_sources}
+            if standalone_diagram and variant["properties"]["kind"]["const"] == "generate":
+                variant["properties"]["artifact_kind"] = {"const": "diagram"}
+                variant["required"].append("artifact_kind")
         started_ms = int(time.time() * 1000)
         model_name = creation_model or self.model
         parts: list[str] = []
         try:
             for attempt in range(2):
                 parts = []
-                async for chunk in self._stream_direct_completion(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    creation_model=creation_model,
-                    creation_api_key=creation_api_key,
-                    creation_base_url=creation_base_url,
-                    num_predict=4096,
-                    temperature=0.0,
-                    disable_thinking=True,
-                    json_mode=True,
-                    json_schema=decoding_schema(schema),
-                ):
-                    parts.append(chunk)
+                try:
+                    async for chunk in self._stream_direct_completion(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        creation_model=creation_model,
+                        creation_api_key=creation_api_key,
+                        creation_base_url=creation_base_url,
+                        num_predict=4096 if attempt == 0 else 6144,
+                        temperature=0.0,
+                        disable_thinking=True,
+                        json_mode=True,
+                        json_schema=decoding_schema(schema),
+                    ):
+                        parts.append(chunk)
+                except OperationError as error:
+                    if error.code != "CREATION_DOCUMENT_TRUNCATED" or attempt:
+                        raise
+                    logger.warning("操作解释输出达到长度上限，以较大预算重试一次")
+                    continue
                 response_text = "".join(parts)
                 try:
                     decision = self.parse_routing_decision(response_text)
@@ -4096,10 +4303,11 @@ class CreationService:
                         elif operation["kind"] == "transform":
                             for target in operation["targets"]:
                                 resolve_target(document, target)
-                    from .skill_governance import validate_identity
+                    from .skill_governance import repair_copied_generated_title
                     if operation["kind"] in {"generate", "execute_skill"}:
-                        validate_identity(operation.get("document_identity"), query,
-                                          str(document or ""), list(selected_skills))
+                        operation["document_identity"] = repair_copied_generated_title(
+                            operation.get("document_identity"), title_instruction,
+                            str(document or ""), list(selected_skills))
                     break
                 except ValueError as error:
                     if attempt:
@@ -4858,8 +5066,8 @@ Skill 命名与简介原则：
 - 脱敏后的标题必须仍是自然、可理解的中文标题。“目标对象 目标对象”“相关角色相关角色”或只剩占位词的结果属于错误，必须重写为保留原句式的完整标题。
 
 完整示例文档质量标准：
-- 正文目标篇幅为一千二百至两千二百个中文字符，不含 Markdown 标记；不能用摘要式短文冒充完整文档。
-- 至少包含一个主标题、摘要、六个承担不同内容角色的二级章节和结论。每个核心章节至少有两个完整段落，必要时加入同语法起点的无序列表。
+- 示例应足以复现源文档的主要组织方式和关键表达习惯，篇幅、章节数与内容角色依据源文档及真实适用场景确定。
+- 主标题、摘要、章节和结尾沿用源文档实际存在的结构；不为凑数补出六个章节，不给短说明强加长篇方案结构。段落需要给出具体判断、依据或动作，避免只有模板占位语句。
 - 开篇、章节过渡、段内展开、列表和收束都要实际使用本次提炼出的写法；不能只是章节名相似。
 - 若 diagram_style 明确默认不生成图片，示例中也不强行加图；若源文档有稳定图示习惯，则提供一段可执行的 PlantUML 或 Mermaid 代码，并在正文中先解释图的阅读方式。
 - 输出前检查：文档主题必须完全虚构，标题示例语义完整，JSON 字符串正确转义，所有字段均无阿拉伯数字。
@@ -4951,7 +5159,7 @@ JSON 类型硬约束：
     "diagram_style": ["一至三个可执行的代码生图说明，明确 PlantUML 或 Mermaid 的图类型、启用条件、信息范围、元素、布局、标注和图文衔接方式；必要时给出短代码骨架"],
     "writing_guidelines": ["一至三个把收集到的惯用短语、动词、标点或专业表达迁移到虚构主题中的完整仿写句，并让示例体现对应规则的出现位置和语气"]
   }},
-  "example_document": "一份一千二百至两千二百个中文字符的完整 Markdown 示例文档，使用全新虚构主题，至少包含主标题、摘要、六个二级章节和结论；核心章节至少两个完整段落，必须实际体现上述标题句式、行文逻辑、话术和图示方式，不得出现源文档中的名称、事实、阿拉伯数字或完整句子",
+  "example_document": "使用全新虚构主题的完整 Markdown 示例，篇幅、标题层级、章节数量和段落密度适配源文档实际写法与适用场景；短说明不扩成长方案，只有源结构需要时才包含摘要和结论，必须实际体现上述写法，不得出现源文档中的名称、事实、阿拉伯数字或完整句子",
   "suggested_category_keywords": ["从候选中选择的行业", "从候选中选择的细分行业", "从候选中选择的工种", "从候选中选择的具体文档类型"]
 }}
 """
@@ -5434,19 +5642,30 @@ JSON 类型硬约束：
 
     @staticmethod
     def _is_complete_skill_example_document(value: str) -> bool:
+        """Reject unfinished examples, without imposing a document genre or quota."""
+        from .document_integrity import integrity_problems
         text = str(value or "").strip()
-        if len(text) < 1000:
+        if not text or integrity_problems(text) or len(re.findall(r"(?m)^#\s+\S", text)) > 1:
             return False
-        if len(re.findall(r"(?m)^#\s+\S", text)) != 1:
+        if len(re.findall(r"(?m)^\s*(?:```|~~~)", text)) % 2:
             return False
-        if len(re.findall(r"(?m)^##\s+\S", text)) < 6:
+        prose = re.sub(r"```.*?```|~~~.*?~~~", "", text, flags=re.S)
+        headings = list(re.finditer(r"(?m)^(#{1,6})\s+[^\n]+\n?", prose))
+        sections = [prose[:headings[0].start()]] if headings else [prose]
+        for index, heading in enumerate(headings):
+            stop = headings[index + 1].start() if index + 1 < len(headings) else len(prose)
+            body = prose[heading.end():stop].strip()
+            # A parent heading can introduce child sections without its own paragraph.
+            if not body and (index + 1 == len(headings) or len(headings[index + 1].group(1)) <= len(heading.group(1))):
+                return False
+            sections.append(body)
+        bodies = [section.strip() for section in sections if section.strip()]
+        if not bodies:
             return False
-        body_blocks = [
-            block.strip()
-            for block in re.split(r"\n\s*\n", text)
-            if block.strip() and not block.lstrip().startswith("#")
-        ]
-        return len([block for block in body_blocks if len(block) >= 40]) >= 8
+        placeholder = r"(?:内容很短|内容不足|这是一份过短示例|继续说明|正文|示例正文|待补充|待完善|TODO|TBD)[。.!！]?"
+        if any(re.fullmatch(placeholder, body, flags=re.I) for body in bodies):
+            return False
+        return any(re.search(r"[。！？!?.]|^\s*[-*|]", body, flags=re.M) for body in bodies)
 
     @staticmethod
     def _generalize_skill_text(
@@ -6285,7 +6504,7 @@ JSON 类型硬约束：
         source_headings: list[str],
         source_content: str,
     ) -> str:
-        """构造足够长且随源标题句式变化的安全示例，供模型失败或结果过短时使用。"""
+        """Construct a safe example whose shape follows the actual source."""
         joined_headings = "\n".join(source_headings)
         question_style = bool(
             re.search(r"[？?]|为何|为什么|如何|怎么", joined_headings)
@@ -6398,7 +6617,7 @@ flowchart LR
     确认使用 --> 完成释放
 ```"""
 
-        return f"""# {main_title}
+        example = f"""# {main_title}
 
 ## 摘要
 
@@ -6455,6 +6674,35 @@ flowchart LR
 这套方案把一次临时协调转化为可以被读取、执行和复核的状态链路。它保留必要的人为判断，但让判断发生在边界明确的位置；它减少重复询问，但不以隐藏异常为代价。
 
 后续优化应继续围绕同一目标展开：让每位相关角色在进入流程时知道自己为什么接手、需要完成什么、完成后留下什么证据。只要这三个问题能够稳定回答，共享资源的协作就不再依赖某位熟悉情况的人持续兜底。"""
+        if not source_content.strip():
+            return example
+        entries = list(re.finditer(r"(?m)^##\s+(.+)$", example))
+        blocks = {name: example[entry.start():(entries[index + 1].start() if index + 1 < len(entries) else len(example))].strip()
+                  for index, entry in enumerate(entries) for name in [entry.group(1)]}
+        roles = [(r"摘要|summary", "摘要"), (r"背景|问题|为何|为什么", background_heading),
+                 (r"目标|范围|边界", scope_heading), (r"方案|策略|设计|方法|落地", design_heading),
+                 (r"流程|步骤|路径", flow_heading), (r"风险|异常|保障", risk_heading),
+                 (r"验证|验收|复盘|评测", validation_heading), (r"结论|后续|建议", conclusion_heading)]
+        source_titles = list(dict.fromkeys(source_headings))
+        selected = []
+        unused = [background_heading, scope_heading, design_heading, flow_heading, risk_heading, validation_heading, conclusion_heading]
+        for title in source_titles:
+            match = next((target for pattern, target in roles if re.search(pattern, title, re.I) and target not in selected), None)
+            choice = match or next((target for target in unused if target not in selected), None)
+            if choice:
+                selected.append(choice)
+        source_paragraphs = [part for part in re.split(r"\n\s*\n", source_content)
+                             if part.strip() and not part.lstrip().startswith("#")]
+        paragraph_budget = max(1, min(2, (len(source_paragraphs) + max(1, len(source_titles)) - 1) // max(1, len(source_titles))))
+        adapted = ["# " + main_title]
+        if not selected:
+            adapted.append("这是一个完全虚构的协作场景。建议把申请、接手与释放放在同一份记录中，让相关角色能直接看到当前状态和下一步动作。")
+            adapted.append("先验证一次正常流转和一次异常处理是否都有明确的接手角色，再根据实际记录调整边界。该示例只演示表达方式，不代表任何真实项目的安排或效果。")
+        for title in selected:
+            body = blocks[title].split("\n", 1)[1].strip()
+            paragraphs = [part for part in re.split(r"\n\s*\n", body) if part.strip()]
+            adapted.append("## " + title + "\n\n" + "\n\n".join(paragraphs[:paragraph_budget]))
+        return "\n\n".join(adapted)
 
     def _log_creation_usage(
         self,
@@ -6989,6 +7237,23 @@ flowchart LR
                     payload["role"] = "generic"
                     payload["weight"] = 0.15
                     payload["calibration"] = "creation_entity_corpus_df"
+                if (
+                    payload["role"] != "generic"
+                    and not any(
+                        keyword.casefold() == term.text.casefold()
+                        or keyword.casefold().startswith(term.text.casefold())
+                        for keyword in normalized_keywords
+                    )
+                    and any(
+                        term.text.casefold() in keyword.casefold()
+                        for keyword in normalized_keywords
+                    )
+                ):
+                    # Chinese sliding windows may start inside a named subject
+                    # (e.g. the second character of a company name). Keep them
+                    # as recall fallbacks, but never let their high IDF dominate.
+                    payload["weight"] = min(payload["weight"], 0.35)
+                    payload["calibration"] = "internal_subject_fragment"
                 term_payloads.append(payload)
             # 泛词保留为关系查询的辅助组件，但只能提供很弱的词面信号。
             # 这样 Agent 可帮助补齐另一端，却不能压过“原创剧本”等稀有目标。
@@ -7080,6 +7345,13 @@ flowchart LR
                 != "generic"
             )
         ]
+        mixed_subjects = [
+            keyword for keyword in normalized_keywords
+            if re.search(r"[A-Za-z]", keyword)
+            and re.search(r"[\u4e00-\u9fff]", keyword)
+            and keyword.casefold() in payload_by_text
+            and payload_by_text[keyword.casefold()].get("role") != "generic"
+        ]
         if len(multi_targets) >= 2:
             mode = "multi_target"
         elif relations and len(components) >= 2:
@@ -7097,6 +7369,8 @@ flowchart LR
             primary_target = primary_entities[0]
         elif mode == "relational" and relation_components:
             primary_target = relation_components[0]
+        elif mixed_subjects:
+            primary_target = mixed_subjects[0]
         elif ranked_targets:
             primary_target = ranked_targets[0]
         elif relations and components:
@@ -7713,6 +7987,18 @@ flowchart LR
             logger.warning("关键词召回失败 code=KEYWORD_RECALL_FAILED")
             keyword_rows = []
 
+        # A long Chinese subject may be reduced to a highly weighted prefix by
+        # the corpus planner. A document whose title names the remaining topic
+        # (or uses a different word order) must still enter the common ranking
+        # and source checks. This channel supplies candidates, not citations.
+        try:
+            title_rows = self._query_title_aligned_document_rows(
+                user_prompt, parsed_requirement, options
+            )
+        except Exception:
+            logger.warning("标题候选召回失败 code=TITLE_RECALL_FAILED")
+            title_rows = []
+
         # 路径2: 向量召回。语义查询只保留需求解析后的主题词，避免 Skill、
         # Tool 和输出格式等执行包装稀释相似度。
         semantic_query = self._semantic_recall_query(user_prompt, parsed_requirement)
@@ -7738,6 +8024,7 @@ flowchart LR
         merged_by_id: dict[str, dict] = {}
         routed_rows = (
             [(row, "keyword") for row in keyword_rows]
+            + [(row, "title_alignment") for row in title_rows]
             + [(row, "semantic_seed") for row in semantic_seed_rows]
             + [(row, "vector") for row in vector_rows]
         )
@@ -7798,7 +8085,14 @@ flowchart LR
 
         for row in merged_rows:
             diagnostics = self._relevance_diagnostics(row, parsed_requirement)
-            relevance = diagnostics["relevance_score"]
+            # A second-hop source is linked by terms co-occurring in a small
+            # window of a verified original, not by an unrelated match
+            # elsewhere in a long meeting document. Keep its ordinary lexical
+            # score visible while letting that independent link enter ranking.
+            relevance = max(
+                diagnostics["relevance_score"],
+                float(row.get("historical_bridge_score") or 0.0),
+            )
             quality = self._score_quality(row)
             completeness = self._score_completeness(row)
             usage = math.log1p(int(row.get("usage_count") or 0)) / math.log1p(max_usage)
@@ -7894,6 +8188,25 @@ flowchart LR
                 semantic_score=diagnostics["semantic_score"],
                 quality=quality,
             )
+            historical_source = bool(row.get("historical_source"))
+            if historical_source:
+                reason += "；已核验的历史原文快照，仅证明采集时内容，非当前权威版本"
+            if row.get("historical_bridge_score"):
+                bridge_terms = "、".join(row.get("historical_bridge_terms") or [])
+                bridge_kind = str(row.get("historical_bridge_kind") or "entity")
+                if bridge_kind == "source_citation":
+                    reason += (
+                        "；经原文引用信息发现的独立历史资料；局部关系词“"
+                        + bridge_terms + "”，不证明跨文档调用或连线"
+                    )
+                else:
+                    reason += (
+                        "；历史原文二跳：原始快照"
+                        + str(row.get("historical_bridge_snapshot_id"))
+                        + "中的“" + str(row.get("historical_bridge_entity"))
+                        + "”经" + bridge_kind + "证据关联；目标原文局部关系词“"
+                        + bridge_terms + "”"
+                    )
             refs.append(
                 ReferenceDocument(
                     id=int(row["id"]),
@@ -7920,6 +8233,11 @@ flowchart LR
                     source_id=int(row.get("source_id") or row["id"]),
                     source_snapshot_id=row.get("source_snapshot_id"),
                     refresh_completeness=str(row.get("source_completeness") or "unverified"),
+                    refresh_collected_at=(
+                        int(row.get("observed_at"))
+                        if historical_source and row.get("observed_at") is not None
+                        else None
+                    ),
                     source_body_hash=hashlib.sha256(
                         str(row.get("full_content") or "").encode("utf-8")
                     ).hexdigest(),
@@ -7940,6 +8258,31 @@ flowchart LR
                     matched_components=tuple(diagnostics["matched_components"]),
                     matched_relations=tuple(diagnostics["matched_relations"]),
                     relation_score=diagnostics["relation_score"],
+                    selection_reasons=(
+                        ("historical_complete_snapshot", "historical_bridge")
+                        if row.get("historical_bridge_score") else
+                        (("historical_complete_snapshot",) if historical_source else ())
+                    ),
+                    bridge_evidence=(
+                        {
+                            "anchor_snapshot_id": row.get("historical_bridge_snapshot_id"),
+                            "anchor_source_body_hash": row.get("historical_bridge_anchor_hash"),
+                            "anchor_excerpt": row.get("historical_bridge_anchor_excerpt"),
+                            "target_snapshot_id": row.get("source_snapshot_id"),
+                            "target_source_body_hash": hashlib.sha256(
+                                str(row.get("full_content") or "").encode("utf-8")
+                            ).hexdigest(),
+                            "target_excerpt": row.get("historical_bridge_excerpt"),
+                            "link_excerpt": row.get("historical_bridge_link_excerpt"),
+                            "entity": row.get("historical_bridge_entity"),
+                            "matched_terms": row.get("historical_bridge_terms") or [],
+                            "relation_terms": row.get("historical_bridge_relation_terms") or [],
+                            "link_kind": row.get("historical_bridge_kind"),
+                            "claim_scope": "target_source_only",
+                            "cross_source_edge_allowed": False,
+                        }
+                        if row.get("historical_bridge_score") else None
+                    ),
                 )
             )
 
@@ -7974,6 +8317,7 @@ flowchart LR
             )
         else:
             selected = self._select_diverse_references(refs, limit)
+        selected = self._select_verified_source_family(refs, selected, limit)
         for item in selected:
             if not item.selection_reasons:
                 item.selection_reasons = ("global_rank",)
@@ -7983,6 +8327,302 @@ flowchart LR
             "selected_count": len(selected),
             "filter_counts": filter_counts,
         }
+        return selected
+
+    @staticmethod
+    def select_structural_evidence_windows(
+        item: ReferenceDocument,
+        relevance_terms: list[str],
+        *,
+        max_windows: int = 4,
+        max_chars_per_window: int = 520,
+        max_total_chars: int = 1600,
+    ) -> list[dict]:
+        """Expose several independent, source-bound relation spans of an original.
+
+        A bridge proves that a second-hop document is worth reading; its one
+        short match is not the entire document's architecture. Each additional
+        span is selected from the *same* verified body, and carries its own
+        exact byte range. Consumers must audit a claim inside one span rather
+        than joining text across windows or source documents.
+        """
+        body = str(item.full_content or "")
+        snapshot_id = item.source_snapshot_id
+        if (not body or snapshot_id is None or item.source_type != "document"
+                or item.refresh_completeness != "complete"):
+            return []
+        body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        if item.source_body_hash and item.source_body_hash != body_hash:
+            raise ValueError("Source body hash does not match reference content")
+        max_windows = max(0, min(int(max_windows), 8))
+        width = max(0, min(int(max_chars_per_window), 1600))
+        budget = max(0, min(int(max_total_chars), 6400))
+        if not max_windows or not width or not budget:
+            return []
+
+        folded_terms = tuple(dict.fromkeys(
+            str(term).strip().casefold()
+            for term in relevance_terms
+            if (len(str(term).strip()) >= 3
+                or re.fullmatch(r"[\u4e00-\u9fff]{2}", str(term).strip()))
+        ))[:20]
+        broad_terms = {"agent", "skill", "workflow", "aigc", "架构图", "技术架构"}
+        subject_terms = tuple(term for term in folded_terms if term not in broad_terms)
+        folded_title = str(item.title or "").casefold()
+        # A compound topic can occur in a source title with its facets in a
+        # different order. Keep the full-topic overlap as a source-local cue;
+        # a short generic facet alone must not authorize another document.
+        title_topic_aligned = any(
+            CreationService._title_alignment_score(
+                CreationService._title_alignment_units(term), folded_title
+            ) > 0
+            for term in subject_terms
+        )
+        bridge = item.bridge_evidence if isinstance(item.bridge_evidence, dict) else {}
+        preferred = str(bridge.get("target_excerpt") or "")
+        entity = str(bridge.get("entity") or "").strip().casefold()
+        relation_words = (
+            "调用", "连接", "接入", "输入", "输出", "依赖", "编排",
+            "流转", "串联", "承接", "协同", "沉淀", "打通", "实现",
+            "复用", "组装", "生成", "提供给", "回流", "优化", "评测",
+            "标注", "上线", "方案", "闭环", "支撑", "承载", "调度",
+            "分配", "路由", "部署", "共享", "供给", "分流",
+        )
+        topology_words = (
+            "调用", "连接", "接入", "输入", "输出", "依赖", "编排",
+            "流转", "串联", "承接", "沉淀", "打通", "复用",
+            "组装", "提供给", "回流", "支撑", "承载", "调度",
+            "分配", "路由", "部署", "共享", "供给", "分流",
+        )
+        structure_words = (
+            "架构", "工作流", "workflow", "dag", "agent", "skill", "模块",
+            "组件", "服务", "引擎", "链路", "流程", "库", "模板",
+            "视频", "商品", "内容", "模型", "页面", "平台", "资源池",
+            "算力", "网关", "调度", "实例", "缓存", "集群", "队列", "节点",
+        )
+        arrows = ("➡", "→", "->", "⟶")
+        dash_sequence = re.compile(r"(?<!—)—(?!—)")
+        foreign_context = re.compile(
+            r"竞品|竞争对手|行业(?:产品)?调研|外部(?:参考|案例)|"
+            r"第三方方案|其他厂商|对标|抖音|小红书"
+        )
+        lines = []
+        cursor = 0
+        for text in body.splitlines(keepends=True):
+            lines.append((cursor, cursor + len(text), text))
+            cursor += len(text)
+        if not lines:
+            lines = [(0, len(body), body)]
+
+        candidates: list[tuple[float, int, int, str, str]] = []
+        if preferred and preferred in body:
+            at = body.find(preferred)
+            if len(preferred) <= width:
+                candidates.append((1_000_000.0, at, at + len(preferred), "bridge", preferred))
+            else:
+                # Keep a real relation clause within a long bridge excerpt.
+                matches = [
+                    (sum(word in line.casefold() for word in relation_words),
+                     sum(word in line.casefold() for word in structure_words),
+                     offset)
+                    for offset, _, line in lines
+                    if at <= offset < at + len(preferred)
+                ]
+                center = max(matches, default=(0, 0, at))[2]
+                start = min(max(at, center), at + len(preferred) - width)
+                candidates.append((1_000_000.0, start, start + width, "bridge", preferred))
+
+        for index, (line_start, line_end, line) in enumerate(lines):
+            folded_line = line.casefold()
+            if (not line.strip() or any(word in folded_line for word in (
+                "本文被引用", "本文引用的文档", "全文评论", "ai 摘要",
+            )) or foreign_context.search(line)
+                    or any(word in folded_line for word in (
+                        "任务状态不一致", "故障", "无法", "报错", "异常",
+                    ))):
+                continue
+            line_relations = sum(word in folded_line for word in relation_words)
+            arrow_count = (sum(folded_line.count(arrow) for arrow in arrows)
+                           + len(dash_sequence.findall(folded_line)))
+            line_structures = sum(word in folded_line for word in structure_words)
+            # A heading, a statistic, or a tool name alone is not a relation.
+            if not arrow_count and not line_relations:
+                continue
+            if arrow_count < 2 and line_structures < 2:
+                continue
+            if arrow_count >= 2:
+                # An explicit chain is one claim. Avoid swallowing adjacent
+                # numbered OKRs and treating their proximity as an edge.
+                first = index
+                last = index
+                following = lines[index + 1][2] if index + 1 < len(lines) else ""
+                continues_chain = (
+                    bool(following)
+                    and not re.match(r"\s*(?:[●○■]\s*)?(?:KR\d+|\d+[.、])", following)
+                    and (any(arrow in following for arrow in arrows)
+                         or bool(dash_sequence.search(following)))
+                )
+                if continues_chain:
+                    # Captured tables may wrap a single pipeline statement
+                    # inside Chinese words. Continue until its sentence ends,
+                    # bounded by the next list item or four source lines.
+                    last = index + 1
+                    for continuation in range(index + 2,
+                                              min(len(lines), index + 4)):
+                        previous = lines[last][2].rstrip()
+                        following_line = lines[continuation][2]
+                        if (re.search(r"[。；;]$", previous)
+                                or re.match(r"\s*(?:[●○■]\s*)?(?:KR\d+|\d+[.、])",
+                                            following_line)):
+                            break
+                        last = continuation
+            elif arrow_count:
+                # A pipeline may wrap across source lines. Keep its local
+                # heading and following steps as one contiguous source span.
+                first = max(0, index - 4)
+                last = min(len(lines) - 1, index + 2)
+            else:
+                first = max(0, index - 1)
+                last = min(len(lines) - 1, index + 1)
+            start = lines[first][0]
+            end = lines[last][1]
+            while end - start > width and first < index:
+                first += 1
+                start = lines[first][0]
+            while end - start > width and last > index:
+                last -= 1
+                end = lines[last][1]
+            if end - start > width:
+                start = line_start
+                end = min(line_end, line_start + width)
+            excerpt = body[start:end]
+            folded = excerpt.casefold()
+            # Do not let a neighboring navigation/footer block become evidence.
+            footer = re.search(r"(?:AI\s*摘要|本文被引用|全文评论)", excerpt, re.I)
+            if footer:
+                end = start + footer.start()
+                excerpt = body[start:end]
+                folded = excerpt.casefold()
+            if not excerpt.strip() or end <= line_start:
+                continue
+            if foreign_context.search(excerpt):
+                continue
+            term_hits = sum(term in folded for term in folded_terms)
+            subject_hits = sum(term in folded for term in subject_terms)
+            structure_hits = sum(word in folded for word in structure_words)
+            relation_hits = sum(word in folded for word in relation_words)
+            local_entity = bool(entity and entity in folded)
+            # An explicit sequence is useful even if the user's broad topic
+            # words occur only in the source title (for example, an OKR's
+            # evaluation loop). Other relations need stronger local context.
+            sequence = (sum(folded_line.count(arrow) for arrow in arrows)
+                        + len(dash_sequence.findall(folded_line)))
+            if not (sequence >= 2 or (
+                line_structures >= 2 and any(word in folded_line for word in (
+                    *topology_words, "实现", "生成",
+                ))
+            )):
+                continue
+            # Broad words such as Agent and Skill cannot by themselves pull
+            # another product's workflow out of a mixed weekly document.
+            long_subject_hits = sum(
+                len(term) > 2 and term in folded for term in subject_terms
+            )
+            short_subject_hits = subject_hits - long_subject_hits
+            local_topic = (long_subject_hits or short_subject_hits >= 2
+                           or (short_subject_hits and title_topic_aligned))
+            if (not local_entity and not local_topic and
+                    not (sequence >= 2 and entity and entity in folded_title) and
+                    not (not entity and title_topic_aligned)):
+                continue
+            # A measured outcome alone is not an architecture edge. Cost and
+            # performance words are allowed when the sentence actually links
+            # components; otherwise technical architecture source text loses
+            # the relations the diagram is meant to show.
+            measured_outcome = bool(re.search(
+                r"\b(?:gmv|dau|roi|qps|tps|ttft)\b|"
+                r"(?:\d+(?:\.\d+)?\s*%|同比|环比|转化率|曝光量)",
+                folded_line,
+            ))
+            if (measured_outcome and sequence < 2 and
+                    not any(word in folded_line for word in topology_words)):
+                continue
+            score = (
+                min(sequence, 5) * 20
+                + min(relation_hits, 6) * 5
+                + min(structure_hits, 8) * 3
+                + min(term_hits, 4) * 4
+                + min(subject_hits, 3) * 10
+                + (20 if local_entity else 0)
+                + (8 if line_structures >= 2 else 0)
+            )
+            fact_key = re.sub(r"\W+", "", folded_line)
+            candidates.append((float(score), start, end, "relevant_relation"
+                               if subject_hits or local_entity else "structural_relation",
+                               fact_key))
+
+        selected: list[dict] = []
+        selected_ranges: list[tuple[int, int]] = []
+        fingerprints: list[set[str]] = []
+        selected_shingles: list[set[str]] = []
+        selected_facts: set[str] = set()
+        # A long meeting often repeats the same table across copied weekly
+        # sections. Greedily retain distinct local facts instead of copies.
+        for _, start, end, reason, fact_key in sorted(candidates, reverse=True):
+            if len(selected) >= max_windows or budget <= 0:
+                break
+            if any(
+                max(0, min(end, prior_end) - max(start, prior_start))
+                >= min(end - start, prior_end - prior_start) * 0.5
+                for prior_start, prior_end in selected_ranges
+            ):
+                continue
+            if fact_key and fact_key in selected_facts:
+                continue
+            excerpt = body[start:end]
+            if len(excerpt) > budget:
+                continue
+            fingerprint = set(re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9]+", excerpt.casefold()))
+            if fingerprint and any(
+                len(fingerprint & earlier) / max(1, min(len(fingerprint), len(earlier)))
+                >= 0.85 for earlier in fingerprints
+            ):
+                continue
+            canonical = re.sub(r"\s+", "", excerpt.casefold())
+            shingles = set(canonical[pos:pos + 8]
+                           for pos in range(max(0, len(canonical) - 7)))
+            if shingles and any(
+                len(shingles & earlier) / max(1, min(len(shingles), len(earlier)))
+                >= 0.50 for earlier in selected_shingles
+            ):
+                continue
+            start_byte = len(body[:start].encode("utf-8"))
+            raw = excerpt.encode("utf-8")
+            selected.append({
+                "content": excerpt,
+                "source_scope": {
+                    "schema_version": "document-excerpt.v1",
+                    "snapshot_id": snapshot_id,
+                    "source_body_hash": body_hash,
+                    "offset_unit": "utf8_bytes",
+                    "start_byte": start_byte,
+                    "end_byte": start_byte + len(raw),
+                    "excerpt_hash": hashlib.sha256(raw).hexdigest(),
+                    "source_coverage": item.refresh_completeness,
+                    "excerpt_truncated": len(excerpt) < len(body),
+                    "allows_full_document_claims": (
+                        item.refresh_completeness == "complete"
+                        and len(excerpt) == len(body)
+                    ),
+                },
+                "selection_reason": reason,
+            })
+            selected_ranges.append((start, end))
+            fingerprints.append(fingerprint)
+            selected_shingles.append(shingles)
+            if fact_key:
+                selected_facts.add(fact_key)
+            budget -= len(excerpt)
         return selected
 
     @classmethod
@@ -8124,10 +8764,201 @@ flowchart LR
             selected.append(reference)
             domain_counts[domain] = domain_counts.get(domain, 0) + 1
             if len(selected) >= limit:
-                return selected
+                break
         if len(selected) < limit:
             selected.extend(deferred[: limit - len(selected)])
+        # Strong, provenance-bound original text deserves one place when a
+        # crowd of derivative knowledge nearly pushes it outside Top-K. This
+        # never admits a weak or unbound document; historical snapshots keep
+        # their historical_only status after selection.
+        if limit >= 4 and selected:
+            selected_keys = {
+                (item.source_type, item.source_id) for item in selected
+            }
+            if not any(
+                item.source_type == "document"
+                and getattr(item, "source_snapshot_id", None)
+                for item in selected
+            ):
+                cutoff = getattr(selected[-1], "final_weight", None)
+                anchors = [
+                    item for item in references
+                    if item.source_type == "document"
+                    and getattr(item, "source_snapshot_id", None)
+                    and getattr(item, "refresh_completeness", "") == "complete"
+                    and getattr(item, "source_url", None)
+                    and getattr(item, "lexical_score", 0) >= 0.65
+                    and getattr(item, "relevance_score", 0) >= 0.65
+                    and (item.source_type, item.source_id) not in selected_keys
+                    and cutoff is not None
+                    and getattr(item, "final_weight", 0) >= cutoff * 0.90
+                ]
+                if anchors:
+                    anchor = anchors[0]
+                    anchor.selection_reasons = tuple(dict.fromkeys([
+                        *anchor.selection_reasons, "original_source_anchor"
+                    ]))
+                    selected[-1] = anchor
         return selected
+
+    @staticmethod
+    def _select_verified_source_family(
+        references: list[ReferenceDocument],
+        selected: list[ReferenceDocument],
+        limit: int,
+    ) -> list[ReferenceDocument]:
+        """Keep a direct original with a few proven structural second hops.
+
+        Vector and derivative memories can fill Top-K ahead of a linked
+        original family. A bridge is promoted only when its anchor snapshot
+        and body hash resolve to another complete original in this same
+        candidate set; the quota is bounded so the rest of retrieval stays
+        diverse.
+        """
+        if limit < 3 or not selected:
+            return selected
+        selected_keys = {(item.source_type, item.source_id) for item in selected}
+        cutoff = selected[-1].final_weight
+
+        def direct_anchor_relevance(item: ReferenceDocument) -> bool:
+            """A linked family still needs an independently relevant root."""
+            relevance = float(getattr(item, "relevance_score", 0.0) or 0.0)
+            lexical = float(getattr(item, "lexical_score", 0.0) or 0.0)
+            semantic = float(getattr(item, "semantic_score", 0.0) or 0.0)
+            keywords = getattr(item, "matched_keywords", ())
+            if relevance < 0.40:
+                return False
+            if not (lexical >= 0.30 and bool(keywords) or semantic >= 0.65):
+                return False
+            return (
+                relevance >= 0.65
+                or item.final_weight >= cutoff * 0.90
+            )
+
+        originals = {
+            (item.source_snapshot_id, item.source_body_hash): item
+            for item in references
+            if item.source_type == "document"
+            and item.source_snapshot_id
+            and item.source_body_hash
+            and item.refresh_completeness == "complete"
+            and item.source_url
+            and direct_anchor_relevance(item)
+        }
+        families: dict[tuple[int, str], list[ReferenceDocument]] = {}
+        for item in references:
+            evidence = item.bridge_evidence
+            if not isinstance(evidence, dict):
+                continue
+            anchor_key = (
+                evidence.get("anchor_snapshot_id"),
+                evidence.get("anchor_source_body_hash"),
+            )
+            if (
+                anchor_key not in originals
+                or item.source_snapshot_id != evidence.get("target_snapshot_id")
+                or item.source_body_hash != evidence.get("target_source_body_hash")
+                or not isinstance(evidence.get("target_excerpt"), str)
+                or evidence["target_excerpt"] not in item.full_content
+            ):
+                continue
+            families.setdefault(anchor_key, []).append(item)
+        if not families:
+            return selected
+        family_key = max(
+            families,
+            key=lambda key: (
+                float(getattr(originals[key], "relevance_score", 0.0) or 0.0)
+                + (0.04 if (
+                    originals[key].source_type,
+                    originals[key].source_id,
+                ) in selected_keys else 0.0),
+                originals[key].final_weight,
+                len(families[key]),
+            ),
+        )
+        anchor = originals[family_key]
+        bridge_limit = min(4, max(1, limit // 2))
+        bridges = sorted(
+            families[family_key],
+            key=lambda item: item.final_weight,
+            reverse=True,
+        )[:bridge_limit]
+        family = [anchor, *bridges]
+        for index, item in enumerate(family):
+            item.selection_reasons = tuple(dict.fromkeys([
+                *item.selection_reasons,
+                "verified_source_anchor" if index == 0 else "verified_source_bridge",
+            ]))
+        family_keys = {(item.source_type, item.source_id) for item in family}
+        remainder = [
+            item for item in selected
+            if (item.source_type, item.source_id) not in family_keys
+        ]
+        return [*family, *remainder][:limit]
+
+    @staticmethod
+    def _title_alignment_units(value: str) -> set[str]:
+        """Small title-search units, independent of the planner's prefix weight."""
+        units: set[str] = set()
+        for part in re.findall(
+            r"[\u4e00-\u9fff]{2,}|[a-z0-9][a-z0-9_.-]{2,}",
+            str(value or "").casefold(),
+        ):
+            if re.fullmatch(r"[\u4e00-\u9fff]+", part):
+                units.update(part[index:index + 2] for index in range(len(part) - 1))
+            else:
+                units.add(part)
+        return units
+
+    @classmethod
+    def _title_alignment_score(cls, query_units: set[str], title: str,
+                               structure_hint: str = "") -> float:
+        """Only substantial title overlap earns an independent relevance cue."""
+        if len(query_units) < 5:
+            return 0.0
+        common = query_units.intersection(cls._title_alignment_units(title))
+        coverage = len(common) / len(query_units)
+        if len(common) < 4 or coverage < 0.45:
+            return 0.0
+        hint = str(structure_hint or "").strip().casefold()
+        hint_bonus = 0.08 if hint and hint in str(title).casefold() else 0.0
+        return min(0.55 + 0.4 * coverage + hint_bonus, 0.95)
+
+    def _query_title_aligned_document_rows(
+        self, user_prompt: str, parsed_requirement: dict, options: CreationOptions
+    ) -> list[dict]:
+        """Admit title-matched documents to normal scoring with original provenance."""
+        query_units = self._title_alignment_units(user_prompt)
+        if len(query_units) < 5:
+            return []
+        hint = str(parsed_requirement.get("title_structure_hint") or "")[:40]
+        conn = sqlite3.connect(self.db_path)
+        try:
+            candidates = []
+            for document_id, title in conn.execute(
+                "SELECT id,title FROM bake_documents WHERE deleted_at IS NULL"
+            ):
+                score = self._title_alignment_score(query_units, title, hint)
+                if score:
+                    candidates.append((score, int(document_id)))
+        finally:
+            conn.close()
+        if not candidates:
+            return []
+        candidates.sort(reverse=True)
+        limit = max(30, min(options.max_references * 3, 90))
+        selected = dict((document_id, score) for score, document_id in candidates[:limit])
+        document_ids = list(selected)
+        rows = self._query_document_rows(
+            user_prompt, parsed_requirement, options, document_ids=document_ids
+        )
+        rows.extend(self._query_historical_document_rows(
+            user_prompt, parsed_requirement, options, document_ids=document_ids
+        ))
+        for row in rows:
+            row["_title_alignment_score"] = selected[int(row["id"])]
+        return rows
 
     def _query_memory_rows(
         self,
@@ -8143,6 +8974,14 @@ flowchart LR
         except Exception as exc:
             # 单个记忆域迁移未完成时，不能让它拖垮其余三个域的召回。
             logger.warning("文档记忆召回失败，继续检索其他记忆域 code=DOCUMENT_RECALL_FAILED")
+        try:
+            rows.extend(
+                self._query_historical_document_rows(
+                    user_prompt, parsed_requirement, options
+                )
+            )
+        except Exception:
+            logger.warning("历史原文召回失败，继续使用其他记忆域 code=HISTORICAL_SOURCE_RECALL_FAILED")
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
@@ -8520,25 +9359,22 @@ flowchart LR
             expression,
             term_specs,
         )
-        time_context = parsed_requirement.get("time_context") or {}
-        period_clause = ""
-        if time_context.get("has_relative_time"):
-            period_clause = (
-                " AND COALESCE(snapshot.period_end_at, snapshot.observed_at, "
-                "snapshot.collected_at) >= ? AND COALESCE(snapshot.period_start_at, "
-                "snapshot.observed_at, snapshot.collected_at) <= ?"
-            )
-            params.extend(
-                [
-                    int(time_context.get("period_start_ms") or 0),
-                    int(time_context.get("period_end_ms") or 0),
-                ]
+        requested_bounds = self._requested_period_bounds(
+            parsed_requirement.get("time_context") or {}
+        )
+        latest_selector = ""
+        if requested_bounds is None:
+            latest_selector = (
+                " AND snapshot.id = (SELECT latest.id FROM data_snapshots latest"
+                " WHERE latest.source_id = source.id"
+                " ORDER BY latest.collected_at DESC, latest.id DESC LIMIT 1)"
             )
         rows = conn.execute(
             f"""
             SELECT source.id AS id, source.title AS title, 'data' AS doc_type,
                    SUBSTR(snapshot.content_text, 1, 600) AS summary,
                    snapshot.content_text || '\n' || snapshot.structured_data AS full_content,
+                   snapshot.structured_data AS _snapshot_structured,
                    '[]' AS sections_json, '[]' AS style_phrases,
                    '' AS prompt_hint, 0 AS usage_count,
                    snapshot.status AS review_status,
@@ -8548,22 +9384,51 @@ flowchart LR
             FROM data_sources source
             JOIN data_snapshots snapshot ON snapshot.source_id = source.id
             WHERE source.deleted_at IS NULL AND source.status = 'active'
-              AND snapshot.id = (
-                  SELECT latest.id FROM data_snapshots latest
-                  WHERE latest.source_id = source.id
-                  ORDER BY latest.collected_at DESC, latest.id DESC LIMIT 1
-              )
-              AND {where}{period_clause}
+              {latest_selector}
+              AND {where}
             ORDER BY {candidate_score} DESC, snapshot.collected_at DESC, source.id DESC
             LIMIT ?
             """,
             [
                 *params,
                 *score_params,
-                max(options.max_references * 12, 120),
+                (max(options.max_references * 60, 600)
+                 if requested_bounds is not None
+                 else max(options.max_references * 12, 120)),
             ],
         ).fetchall()
-        return [dict(row) for row in rows]
+        if requested_bounds is None:
+            return [{key: value for key, value in dict(row).items()
+                     if key != "_snapshot_structured"} for row in rows]
+        start_ms, end_ms = requested_bounds
+        requested_metrics = self._extract_requested_metrics(user_prompt)
+        eligible = []
+        seen_sources = set()
+        for raw in rows:
+            item = dict(raw)
+            source_id = item["source_id"]
+            if source_id in seen_sources:
+                continue
+            try:
+                structured = json.loads(str(item.pop("_snapshot_structured") or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            filtered, _, has_target_fact = self._filter_metric_facts_for_period(
+                structured, start_ms, end_ms,
+                requested_metrics or None,
+            )
+            if not has_target_fact:
+                continue
+            statements = self._period_fact_statements(filtered)
+            if not statements:
+                continue
+            item["summary"] = "\n".join(statements)[:600]
+            item["full_content"] = "\n".join(statements) + "\n" + json.dumps(
+                filtered, ensure_ascii=False
+            )
+            eligible.append(item)
+            seen_sources.add(source_id)
+        return eligible[:max(options.max_references * 12, 120)]
 
     def _query_pending_capture_rows(
         self,
@@ -8586,18 +9451,14 @@ flowchart LR
             expression,
             term_specs,
         )
-        time_context = parsed_requirement.get("time_context") or {}
-        if time_context.get("has_relative_time"):
-            params.extend(
-                [
-                    int(time_context.get("period_start_ms") or 0),
-                    int(time_context.get("period_end_ms") or 0),
-                ]
-            )
-            time_clause = "AND ts BETWEEN ? AND ?"
-        else:
-            time_clause = "AND ts >= ?"
-            params.append(int(time.time() * 1000) - 14 * 86_400_000)
+        requested_bounds = self._requested_period_bounds(
+            parsed_requirement.get("time_context") or {}
+        )
+        # A capture timestamp is a freshness bound, never the date of the
+        # captured document's facts. Pending captures remain source leads for
+        # period work until their own content is verified.
+        time_clause = "AND ts >= ?"
+        params.append(int(time.time() * 1000) - 14 * 86_400_000)
         rows = conn.execute(
             f"""
             SELECT id, COALESCE(webpage_title, win_title, '近期文档采集') AS title,
@@ -8631,6 +9492,10 @@ flowchart LR
         by_url: dict[str, dict] = {}
         for raw in rows:
             item = dict(raw)
+            if requested_bounds is not None:
+                item["summary"] = "原始采集的事实周期尚未核验；仅可作为来源线索。"
+                item["full_content"] = item["summary"]
+                item["review_status"] = "period_unverified"
             identity = self._canonical_memory_url(str(item.get("source_url") or ""))
             current = by_url.get(identity)
             if current is None or (
@@ -8678,6 +9543,10 @@ flowchart LR
         keeper["_vector_similarity"] = max(
             float(keeper.get("_vector_similarity") or 0),
             float(other.get("_vector_similarity") or 0),
+        )
+        keeper["_title_alignment_score"] = max(
+            float(keeper.get("_title_alignment_score") or 0),
+            float(other.get("_title_alignment_score") or 0),
         )
         return keeper
 
@@ -8824,7 +9693,10 @@ flowchart LR
         user_prompt: str,
         parsed_requirement: dict,
         options: CreationOptions,
+        document_ids: Optional[list[int]] = None,
     ) -> list[dict]:
+        if document_ids is not None and not document_ids:
+            return []
         term_specs = self._memory_term_specs(user_prompt, parsed_requirement)
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -8842,6 +9714,11 @@ flowchart LR
                 expression,
                 term_specs,
             )
+            if document_ids is not None:
+                where = "id IN ({})".format(",".join("?" for _ in document_ids))
+                params = list(document_ids)
+                candidate_score = "id"
+                score_params = []
             # 正文与摘要都为空的占位文档没有可引用内容，不能作为创作
             # 参考；同源原始采集会在后续仲裁中充当替身。
             clauses: list[str] = [
@@ -8873,6 +9750,8 @@ flowchart LR
             if rows:
                 record_unverified_heads(conn, rows)
                 return rows
+            if document_ids is not None:
+                return []
             rows = [
                 dict(row)
                 for row in conn.execute(
@@ -8897,6 +9776,485 @@ flowchart LR
             return rows
         finally:
             conn.close()
+
+    def _query_historical_document_rows(
+        self,
+        user_prompt: str,
+        parsed_requirement: dict,
+        options: CreationOptions,
+        document_ids: Optional[list[int]] = None,
+    ) -> list[dict]:
+        """Recall complete original captures without granting current-source authority.
+
+        Only documents with no source head qualify. A rejected or mismatched
+        head must continue to fail the normal source projection rather than
+        being bypassed by an older capture. The selected snapshot remains a
+        dated historical reference until a foreground refresh verifies today.
+        """
+        if document_ids is not None and not document_ids:
+            return []
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            document_columns = self._table_columns(conn, "bake_documents")
+            snapshot_columns = self._table_columns(
+                conn, "bake_document_source_snapshots"
+            )
+            head_columns = self._table_columns(conn, "bake_document_source_heads")
+            required_documents = {
+                "id", "title", "doc_type", "source_url", "deleted_at",
+                "usage_count", "status",
+            }
+            required_snapshots = {
+                "id", "document_id", "source_url", "page_title",
+                "content_text", "identity_match", "completeness_status",
+                "collected_at",
+            }
+            if (
+                not required_documents.issubset(document_columns)
+                or not required_snapshots.issubset(snapshot_columns)
+                or not {"document_id", "snapshot_id"}.issubset(head_columns)
+            ):
+                return []
+
+            term_specs = self._memory_term_specs(user_prompt, parsed_requirement)
+            expression = (
+                "LOWER(COALESCE(d.title, '') || ' ' || "
+                "COALESCE(s.page_title, '') || ' ' || s.content_text)"
+            )
+            where, params, candidate_score, score_params = self._weighted_like_query(
+                expression, term_specs
+            )
+            if document_ids is not None:
+                where = "d.id IN ({})".format(",".join("?" for _ in document_ids))
+                params = list(document_ids)
+                candidate_score = "s.collected_at"
+                score_params = []
+            # The latest *complete* capture may be older than a later partial
+            # capture. It is still useful as history but must not be called the
+            # current head. Require the exact saved URL and identity check.
+            sql = """
+                SELECT d.id, COALESCE(NULLIF(s.page_title, ''), d.title) AS title,
+                       d.doc_type, '' AS summary, s.content_text AS full_content,
+                       '[]' AS sections_json, '[]' AS style_phrases,
+                       '' AS prompt_hint, d.usage_count,
+                       'source_verified_historical' AS review_status,
+                       s.collected_at AS updated_at, s.source_url,
+                       d.status AS bake_status, s.id AS source_snapshot_id,
+                       'complete' AS source_completeness,
+                       'document' AS source_type, d.id AS source_id,
+                       s.collected_at AS observed_at, 1 AS historical_source
+                FROM bake_documents d
+                JOIN bake_document_source_snapshots s ON s.id = (
+                    SELECT previous.id
+                    FROM bake_document_source_snapshots previous
+                    WHERE previous.document_id=d.id
+                      AND previous.source_url=d.source_url
+                      AND previous.identity_match=1
+                      AND previous.completeness_status='complete'
+                      AND COALESCE(previous.content_text, '') <> ''
+                    ORDER BY previous.collected_at DESC, previous.id DESC
+                    LIMIT 1
+                )
+                LEFT JOIN bake_document_source_heads h ON h.document_id=d.id
+                WHERE d.deleted_at IS NULL AND h.document_id IS NULL
+                  AND COALESCE(d.source_url, '') <> ''
+                  AND {where}
+                ORDER BY {candidate_score} DESC, s.collected_at DESC, d.id DESC
+                LIMIT ?
+            """.format(where=where, candidate_score=candidate_score)
+            first_hop = [
+                dict(row)
+                for row in conn.execute(
+                    sql,
+                    [*params, *score_params, max(options.max_references * 8, 80)],
+                ).fetchall()
+            ]
+            if document_ids is not None:
+                return first_hop
+            bridge_plans = self._historical_bridge_plans(
+                user_prompt, parsed_requirement, first_hop
+            )
+            if not bridge_plans:
+                return first_hop
+
+            seen_ids = {int(row["id"]) for row in first_hop}
+            first_hop_by_id = {int(row["id"]): row for row in first_hop}
+            expanded: list[dict] = []
+            for bridge in bridge_plans[:3]:
+                # A short phrase adjacent to an acronym can be ordinary prose
+                # (for example, "日均AIGC"). Require independent source-title
+                # evidence before using it as a project/entity bridge. The
+                # title source must be a different verified original capture.
+                entity_pattern = "%" + self._escape_like(
+                    bridge["entity"].casefold()
+                ) + "%"
+                named_source = conn.execute(
+                    """
+                    SELECT 1 FROM bake_documents named
+                    JOIN bake_document_source_snapshots named_snapshot
+                      ON named_snapshot.id = (
+                          SELECT previous.id
+                          FROM bake_document_source_snapshots previous
+                          WHERE previous.document_id = named.id
+                            AND previous.source_url = named.source_url
+                            AND previous.identity_match = 1
+                            AND previous.completeness_status = 'complete'
+                            AND COALESCE(previous.content_text, '') <> ''
+                          ORDER BY previous.collected_at DESC, previous.id DESC
+                          LIMIT 1
+                      )
+                    LEFT JOIN bake_document_source_heads named_head
+                      ON named_head.document_id = named.id
+                    WHERE named.deleted_at IS NULL
+                      AND named_head.document_id IS NULL
+                      AND named_snapshot.id <> ?
+                      AND (
+                          LOWER(named.title) LIKE ? ESCAPE '\\'
+                          OR LOWER(named_snapshot.page_title) LIKE ? ESCAPE '\\'
+                      )
+                    LIMIT 1
+                    """,
+                    (bridge["snapshot_id"], entity_pattern, entity_pattern),
+                ).fetchone()
+                if named_source is None:
+                    continue
+                # Reuse the same identity, URL and no-head gates as the first
+                # hop. The source title is an additional *explicit citation*
+                # route: an original that names the anchor document may have
+                # useful local architecture facts even without the entity's
+                # name. LIKE only narrows the scan; the substantive window
+                # check below decides whether the source is linked.
+                bridge_sql = sql.replace(
+                    "AND {where}".format(where=where),
+                    "AND (LOWER(s.content_text) LIKE ? ESCAPE '\\' "
+                    "OR LOWER(d.title) LIKE ? ESCAPE '\\' "
+                    "OR LOWER(s.page_title) LIKE ? ESCAPE '\\' "
+                    "OR LOWER(s.content_text) LIKE ? ESCAPE '\\')",
+                ).replace(
+                    "ORDER BY {candidate_score} DESC, s.collected_at DESC, d.id DESC".format(
+                        candidate_score=candidate_score
+                    ),
+                    "ORDER BY s.collected_at DESC, d.id DESC",
+                )
+                for raw in conn.execute(
+                    bridge_sql,
+                    ("%" + self._escape_like(bridge["entity"].casefold()) + "%",
+                     "%" + self._escape_like(bridge["entity"].casefold()) + "%",
+                     "%" + self._escape_like(bridge["entity"].casefold()) + "%",
+                     "%" + self._escape_like(bridge["anchor_title"].casefold()) + "%",
+                     max(options.max_references * 8, 80)),
+                ).fetchall():
+                    row = dict(raw)
+                    match = self._historical_bridge_match(
+                        str(row.get("full_content") or ""), bridge,
+                        str(row.get("title") or ""),
+                    )
+                    if match is None:
+                        continue
+                    row_id = int(row["id"])
+                    if row.get("source_snapshot_id") == bridge["snapshot_id"]:
+                        continue
+                    if row_id in first_hop_by_id:
+                        first_hop_by_id[row_id].update(match)
+                    elif row_id not in seen_ids:
+                        row.update(match)
+                        expanded.append(row)
+                        seen_ids.add(row_id)
+            expanded.sort(
+                key=lambda row: float(row["historical_bridge_score"]),
+                reverse=True,
+            )
+            return [*first_hop, *expanded[:max(options.max_references, 10)]]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _escape_like(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    @staticmethod
+    def _historical_bridge_plans(
+        user_prompt: str, parsed_requirement: dict, first_hop: list[dict]
+    ) -> list[dict]:
+        """Find source-local names and architecture terms without aliases.
+
+        A name must occur beside a query acronym in a directly matched,
+        verified original. For example, a name paired with an acronym in the
+        source can lead to neighboring source documents, but a name appearing
+        elsewhere in a long collection cannot start an expansion.
+        """
+        acronyms = list(dict.fromkeys(
+            match.group(0) for match in re.finditer(
+                r"(?<![A-Za-z])[A-Za-z][A-Za-z0-9]{2,}(?![A-Za-z])",
+                user_prompt,
+            )
+        ))[:3]
+        query_subjects = [
+            str(term) for term in parsed_requirement.get("keywords") or []
+            if re.search(r"[A-Za-z]", str(term))
+            and re.search(r"[\u4e00-\u9fff]", str(term))
+        ]
+        if not acronyms or not query_subjects:
+            return []
+        markers = ("工作流", "链路", "流程", "模块", "组件", "模型",
+                   "平台", "服务", "引擎", "库", "Agent")
+        plans: list[dict] = []
+        seen_entities: set[str] = set()
+        # A few high-frequency title mentions can precede the actual source
+        # in the SQL candidate order. Inspect a bounded wider set; each plan
+        # still needs the subject/acronym/name relation in its own original.
+        for row in first_hop[:12]:
+            body = str(row.get("full_content") or "")
+            folded = body.casefold()
+            subject_positions = [
+                match.start()
+                for subject in query_subjects[:4]
+                for match in list(re.finditer(re.escape(subject.casefold()), folded))[:30]
+            ]
+            if not subject_positions:
+                continue
+            for acronym in acronyms:
+                expression = re.compile(
+                    r"(?<![\u4e00-\u9fff])([\u4e00-\u9fff]{2,6})"
+                    + re.escape(acronym) + r"(?![A-Za-z])", re.I,
+                )
+                for match in list(expression.finditer(body))[:30]:
+                    entity = match.group(1)
+                    if (
+                        entity in user_prompt
+                        or entity in seen_entities
+                        or min(abs(match.start() - pos) for pos in subject_positions) > 800
+                    ):
+                        continue
+                    term_counts: dict[str, int] = {}
+                    for occurrence in list(re.finditer(re.escape(entity), body))[:500]:
+                        if min(abs(occurrence.start() - pos)
+                               for pos in subject_positions) > 800:
+                            continue
+                        local = body[
+                            max(0, occurrence.start() - 260):
+                            min(len(body), occurrence.end() + 260)
+                        ]
+                        for marker in markers:
+                            pattern = re.compile(
+                                r"[\u4e00-\u9fff]{0,5}\s*" + re.escape(marker),
+                                re.I,
+                            )
+                            for found in pattern.finditer(local):
+                                prefix = found.group(0)[:-len(marker)].strip()
+                                terms = [marker] if len(marker) >= 2 else []
+                                if prefix:
+                                    terms.append(prefix[-2:] + marker)
+                                for term in terms:
+                                    if len(term) >= 2 and term not in user_prompt:
+                                        term_counts[term] = term_counts.get(term, 0) + 1
+                    specific = [
+                        term for term in term_counts
+                        if len(term) >= 3
+                        and term.casefold() not in {
+                            marker.casefold() for marker in markers
+                        }
+                        and not any(
+                            term != other and term in other for other in term_counts
+                        )
+                    ]
+                    if not specific:
+                        continue
+                    ordered = sorted(
+                        term_counts,
+                        key=lambda term: (
+                            term in specific, term_counts[term], len(term)
+                        ),
+                        reverse=True,
+                    )
+                    plans.append({
+                        "entity": entity,
+                        "terms": ordered[:24],
+                        "specific": specific,
+                        "snapshot_id": int(row["source_snapshot_id"]),
+                        "anchor_title": str(row.get("title") or "").split(" - ", 1)[0].strip(),
+                        "anchor_hash": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                        "anchor_excerpt": body[
+                            max(0, match.start() - 100):
+                            min(len(body), match.end() + 140)
+                        ],
+                    })
+                    seen_entities.add(entity)
+                    if len(plans) >= 3:
+                        return plans
+        return plans
+
+    @staticmethod
+    def _historical_bridge_match(
+        body: str, bridge: dict, title: str = ""
+    ) -> Optional[dict]:
+        """Keep a bounded, substantive original-text relation for a second hop.
+
+        Source-title citations and an independently verified entity title can
+        connect documents whose useful clause does not repeat the entity. A
+        table of contents or a passing competitor mention is insufficient.
+        """
+        entity = str(bridge["entity"])
+        terms = list(bridge["terms"])
+        specific = set(bridge["specific"])
+        relation_words = (
+            "核心架构", "架构", "实现", "打通", "沉淀", "复用", "提供给",
+            "接入", "支持", "完成", "建设", "组成", "通过", "生成",
+            "串联", "协同", "优化", "编排", "调用", "上线", "上传", "方案",
+        )
+        foreign_context = re.compile(
+            r"竞品|竞争对手|行业(?:产品)?调研|外部(?:参考|案例)|"
+            r"第三方方案|其他厂商|对标|参考资料"
+        )
+        if foreign_context.search(title):
+            return None
+        title_has_entity = entity.casefold() in title.casefold()
+        anchor_title = str(bridge.get("anchor_title") or "")
+        citation_at = -1
+        citation_start = -1
+        if len(anchor_title) >= 8:
+            for citation in re.finditer(re.escape(anchor_title), body, re.I):
+                before = body[max(0, citation.start() - 180):citation.start()]
+                markers = [
+                    before.rfind(marker) for marker in (
+                        "本文被以下文档引用", "被以下文档引用",
+                        "本文引用的文档", "引用文档", "Referenced by",
+                    )
+                ]
+                marker_at = max(markers)
+                if marker_at >= 0 and "全文评论" not in before[marker_at:]:
+                    citation_at = citation.start()
+                    citation_start = max(0, citation.start() - 180) + marker_at
+                    break
+        cited_anchor = citation_at >= 0
+        link_excerpt = (
+            body[citation_start:min(len(body), citation_at + len(anchor_title) + 50)]
+            if citation_at >= 0 else None
+        )
+        entity_positions = list(re.finditer(re.escape(entity), body, re.I))[:500]
+        # A name present only once, in a directory or competitor overview,
+        # cannot transfer project identity to the rest of that document.
+        local_entity_allowed = title_has_entity or len(entity_positions) >= 2
+        candidates: list[tuple[tuple[int, int, int, int], dict]] = []
+
+        def consider(start: int, end: int, kind: str) -> None:
+            excerpt = body[max(0, start):min(len(body), end)]
+            lines = excerpt.splitlines(keepends=True) or [excerpt]
+            offsets = [0]
+            for line in lines:
+                offsets.append(offsets[-1] + len(line))
+            local_windows: list[tuple[tuple[int, int, int], str, list[str], list[str]]] = []
+            for line_start in range(len(lines)):
+                for line_end in range(line_start + 1, min(len(lines), line_start + 4) + 1):
+                    clause = excerpt[offsets[line_start]:offsets[line_end]]
+                    folded = clause.casefold()
+                    absolute_start = max(0, start) + offsets[line_start]
+                    previous_lines = body[
+                        max(0, absolute_start - 320):absolute_start
+                    ].splitlines()[-3:]
+                    nearby_heading = any(
+                        len(line.strip()) <= 80
+                        and (foreign_context.search(line)
+                             or re.match(r"\s*(?:目录|目\s*录|内容索引)\b", line))
+                        for line in previous_lines
+                    )
+                    if (
+                        foreign_context.search(clause)
+                        or re.match(r"\s*(?:目录|目\s*录|内容索引)\b", clause)
+                        or nearby_heading
+                    ):
+                        continue
+                    matches: list[str] = []
+                    for term in sorted(terms, key=len, reverse=True):
+                        if term.casefold() in folded and not any(
+                            term.casefold() in longer.casefold() for longer in matches
+                        ):
+                            matches.append(term)
+                    relations = [word for word in relation_words if word in clause]
+                    if not matches or not relations:
+                        continue
+                    substantive_relation = any(
+                        word in clause for word in (
+                            "实现", "打通", "沉淀", "复用", "提供给", "接入",
+                            "支持", "完成", "建设", "组成", "通过", "生成",
+                            "串联", "协同", "优化", "编排", "调用", "上线",
+                            "上传", "覆盖", "构成", "连接",
+                        )
+                    ) or (
+                        "方案" in clause
+                        and any(symbol in clause for symbol in ("+", "＋", "→", "->"))
+                    )
+                    if not substantive_relation:
+                        continue
+                    if kind == "entity_local":
+                        if (entity.casefold() not in folded
+                                or not any(term in specific for term in matches)):
+                            continue
+                    elif kind == "entity_title":
+                        if not any(
+                            word in clause for word in ("架构", "链路", "流程", "工作流")
+                        ):
+                            continue
+                    elif kind == "source_citation":
+                        if not any(
+                            word in clause for word in ("链路", "流程", "工作流", "架构")
+                        ):
+                            continue
+                    else:
+                        return
+                    local_windows.append((
+                        (len(clause), -sum(term in specific for term in matches),
+                         -len(matches)),
+                        clause, matches, relations,
+                    ))
+            if not local_windows:
+                return
+            _, excerpt, matches, relations = min(
+                local_windows, key=lambda item: item[0]
+            )
+            # Prefer an actual architecture clause over an index hit and keep
+            # its exact text for downstream writer and claim verification.
+            strength = (
+                int("核心架构" in excerpt or "为核心架构" in excerpt),
+                sum(term in specific for term in matches),
+                len(matches),
+                len(relations),
+            )
+            candidates.append((strength, {
+                "historical_bridge_score": min(
+                    0.61, 0.53 + 0.015 * len(matches)
+                    + (0.02 if "架构" in excerpt else 0.0)
+                ),
+                "historical_bridge_entity": entity,
+                "historical_bridge_terms": matches[:4],
+                "historical_bridge_relation_terms": relations[:4],
+                "historical_bridge_snapshot_id": bridge["snapshot_id"],
+                "historical_bridge_anchor_hash": bridge.get("anchor_hash"),
+                "historical_bridge_anchor_excerpt": bridge.get("anchor_excerpt"),
+                "historical_bridge_excerpt": excerpt,
+                "historical_bridge_link_excerpt": link_excerpt if kind == "source_citation" else None,
+                "historical_bridge_kind": kind,
+            }))
+
+        if local_entity_allowed:
+            for occurrence in entity_positions:
+                consider(occurrence.start() - 160,
+                         occurrence.end() + 190, "entity_local")
+        if title_has_entity or cited_anchor:
+            # The title/citation establishes document identity; the bounded
+            # *body* clause must still state a structural relation. Limit the
+            # scan to source-local components learned from the first hop.
+            for term in terms[:16]:
+                for occurrence in list(re.finditer(re.escape(term), body, re.I))[:80]:
+                    consider(
+                        occurrence.start() - 100,
+                        occurrence.end() + 180,
+                        "entity_title" if title_has_entity else "source_citation",
+                    )
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item[0])[1]
 
     @staticmethod
     def _source_snapshot_select(conn: sqlite3.Connection, field: str = "id") -> str:
@@ -9425,6 +10783,13 @@ flowchart LR
         r"(?<!\d)(20\d{2})\s*(?:[-/.]|年)\s*(\d{1,2})\s*"
         r"(?:[-/.]|月)\s*(\d{1,2})\s*日?(?!\d)"
     )
+    _COMPACT_CONTENT_DATE_PATTERN = re.compile(
+        r"(?<![A-Za-z0-9])(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])"
+        r"(?![A-Za-z0-9])"
+    )
+    _COMPACT_DATE_CONTEXT_PATTERN = re.compile(
+        r"(?:日期|时间|截至|截止|更新于|统计至|会议于)\s*[:：]?\s*$"
+    )
 
     @classmethod
     def reference_period_evidence(
@@ -9453,12 +10818,33 @@ flowchart LR
             )
             if value
         )
-        for match in cls._EXPLICIT_CONTENT_DATE_PATTERN.finditer(source_text):
+        date_matches = [
+            (match.start(), match.group(1), match.group(2), match.group(3))
+            for match in cls._EXPLICIT_CONTENT_DATE_PATTERN.finditer(source_text)
+        ]
+        for match in cls._COMPACT_CONTENT_DATE_PATTERN.finditer(source_text):
+            line_start = source_text.rfind("\n", 0, match.start()) + 1
+            line_end = source_text.find("\n", match.end())
+            if line_end < 0:
+                line_end = len(source_text)
+            prefix = source_text[line_start:match.start()].strip()
+            suffix = source_text[match.end():line_end]
+            # Compact dates often label a weekly section, but an eight-digit
+            # document ID or a number inside a URL is not an event date.
+            if not (
+                re.fullmatch(r"(?:#{1,6}\s*)?(?:[-*]\s*)?", prefix)
+                or cls._COMPACT_DATE_CONTEXT_PATTERN.search(prefix)
+            ) or re.match(r"(?:[-_/]\d|\.[A-Za-z0-9])", suffix):
+                continue
+            date_matches.append(
+                (match.start(), match.group(1), match.group(2), match.group(3))
+            )
+        for _, year, month, day in sorted(date_matches):
             try:
                 normalized = datetime(
-                    int(match.group(1)),
-                    int(match.group(2)),
-                    int(match.group(3)),
+                    int(year),
+                    int(month),
+                    int(day),
                 ).date().isoformat()
             except ValueError:
                 continue
@@ -9492,7 +10878,7 @@ flowchart LR
         return compact[:50] or "未命名主题"
 
     def _infer_style(self, text: str) -> str:
-        if any(word in text for word in ["正式", "严谨", "政务", "汇报"]):
+        if any(word in text for word in ["正式", "严谨", "政务"]):
             return "正式严谨"
         if any(word in text for word in ["简洁", "短", "提纲"]):
             return "简洁提纲"
@@ -9505,14 +10891,37 @@ flowchart LR
         # 步骤 objective 中真正的数据对象；否则长 Skill 名会占满前 12 个词。
         text_clean = strip_capability_mentions(text)
         text_clean = re.sub(
-            r"(?i:\btool\b)|(?:请|帮我|帮忙|给我|写一份|生成(?:一份|一下|下)?|撰写|"
-            r"输出|制作|创作(?:一份|一下|下)?|使用|用|工具获取|获取|工具)",
+            r"(?i:\btool\b)|(?:请|帮我|帮忙|给我|写一份|生成(?:一份|一张|一幅|一个|一下|下)?|撰写|"
+            r"输出(?:一张|一幅|一份)?|绘制(?:一张|一幅)?|画(?:一张|一幅)?|"
+            r"制作(?:一张|一幅)?|创作(?:一份|一下|下)?|使用|用|工具获取|获取|工具)",
             " ",
             text_clean,
         )
         text_clean = re.sub(r"(?:本周|这周|这一周|当前周|上周|上一周)", " ", text_clean)
 
         tokens: list[str] = []
+        # Preserve a compact phrase straddling a Chinese/ASCII boundary. The
+        # independent ASCII token and Chinese run cannot express this exact
+        # subject (e.g. a product name ending in an acronym), while a sliding
+        # Chinese window can accidentally start inside a quantity or name.
+        for match in re.finditer(
+            r"([\u4e00-\u9fff]{3,})([A-Za-z][A-Za-z0-9._+\-/]{1,})",
+            text_clean,
+        ):
+            chinese_tail = re.split(
+                r"[的了在与和及或中里]+", match.group(1)
+            )[-1]
+            if len(chinese_tail) >= 3:
+                tokens.append(chinese_tail[-3:] + match.group(2))
+        for match in re.finditer(
+            r"([A-Za-z][A-Za-z0-9._+\-/]{1,})([\u4e00-\u9fff]{2,})",
+            text_clean,
+        ):
+            chinese_head = re.split(
+                r"[的了在与和及或中里]+", match.group(2)
+            )[0]
+            if len(chinese_head) >= 2:
+                tokens.append(match.group(1) + chinese_head[:2])
         tokens.extend(re.findall(r"[A-Za-z][A-Za-z0-9._+\-/]{1,}", text_clean))
         chinese_runs = re.findall(r"[\u4e00-\u9fff]{2,}", text_clean)
         phrases: list[str] = []
@@ -9530,6 +10939,13 @@ flowchart LR
         # 后备。不再对长短语生成滑窗 n-gram：“大模型性能成”“模型性能
         # 成本”这类近重复噪声词会撑大分母，稀释真实命中的相关性。
         tokens.extend(phrases)
+        # A requested diagram names both a format and a subject facet.
+        # Retain the facet so sources discussing the architecture or process
+        # need not literally contain the output word "diagram".
+        tokens.extend(
+            phrase[:-1] for phrase in phrases
+            if len(phrase) >= 3 and phrase.endswith("图")
+        )
         fallback_prefixes: set[str] = set()
         for phrase in phrases:
             if len(phrase) <= 12:
@@ -9936,6 +11352,9 @@ flowchart LR
             relevance = min(higher + 0.20 * lower * (1.0 - higher), 1.0)
         else:
             relevance = max(lexical_score, semantic_score)
+        # Title alignment is independent evidence of topical relevance. It
+        # does not grant source authority or skip the normal quality threshold.
+        relevance = max(relevance, min(float(row.get("_title_alignment_score") or 0), 0.95))
         return {
             "relevance_score": relevance,
             "lexical_score": lexical_score,
@@ -9990,6 +11409,7 @@ flowchart LR
         if retrieval_paths:
             path_labels = {
                 "keyword": "关键词召回",
+                "title_alignment": "标题主题匹配",
                 "semantic_seed": "跨域语义候选",
                 "vector": "文档向量召回",
             }

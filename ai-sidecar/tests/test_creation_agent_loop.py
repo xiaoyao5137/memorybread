@@ -3201,6 +3201,8 @@ def _failed_refresh_report_item(source_id):
 
 def test_failed_refresh_falls_back_to_period_matched_snapshot(tmp_path):
     snapshot_tables = {
+        "metric_rows": [{"metric": "在用项目数", "value": "102",
+                         "statement": "统计日期 2026-08-20，在用项目数为 102。"}],
         "tables": [[
             ["项目", "年内成本", "收益"],
             ["项目甲", "806.4万元", "0万元"],
@@ -3233,8 +3235,9 @@ def test_failed_refresh_falls_back_to_period_matched_snapshot(tmp_path):
         merged[0]["stale_fallback"]["reason"]
         == "refresh_failed_period_matched_snapshot"
     )
-    assert merged[0]["content_excerpt"] == "历史快照正文：在用项目数 102"
-    assert merged[0]["structured_data"] == snapshot_tables
+    assert merged[0]["content_excerpt"] == "统计日期 2026-08-20，在用项目数为 102。"
+    assert merged[0]["structured_data"]["metric_rows"] == snapshot_tables["metric_rows"]
+    assert "tables" not in merged[0]["structured_data"]
     assert merged[0]["provenance"]["fallback"] is True
 
 
@@ -3246,6 +3249,10 @@ def test_failed_refresh_skips_poisoned_error_snapshot(tmp_path):
         1787100000000,
         1787700000000,
         content_text="在用项目数 102\n总卡数 1803.59",
+        structured_data={"metric_rows": [
+            {"metric": "在用项目数", "value": "102",
+             "statement": "统计日期 2026-08-20，在用项目数为 102。"}
+        ]},
     )
     conn = sqlite3.connect(db_path)
     conn.execute(
@@ -3280,7 +3287,7 @@ def test_failed_refresh_skips_poisoned_error_snapshot(tmp_path):
     )
 
     assert merged[0]["can_use"] is True
-    assert merged[0]["content_excerpt"] == "在用项目数 102\n总卡数 1803.59"
+    assert merged[0]["content_excerpt"] == "统计日期 2026-08-20，在用项目数为 102。"
     assert merged[0]["stale_fallback"]["snapshot_collected_at"] == 1787155000000
 
 
@@ -3372,7 +3379,7 @@ def test_requested_period_policy_removes_out_of_period_work_memory_values():
 
     assert filtered[0]["can_use"] is False
     assert filtered[0]["period_match"] is False
-    assert filtered[0]["unavailable_reason"] == "metric_period_mismatch"
+    assert filtered[0]["unavailable_reason"] == "requested_period_mismatch"
     assert filtered[0]["content_excerpt"] is None
     assert filtered[0]["structured_data"] is None
 
@@ -6635,8 +6642,14 @@ async def test_optional_tools_are_called_only_when_enabled_and_matched():
 
 @pytest.mark.asyncio
 async def test_mermaid_diagram_tool_is_called_when_enabled_and_matched():
+    class StandaloneDiagramService(FakeCreationService):
+        async def run_specialist_agent(self, **kwargs):
+            if kwargs["agent_id"] == "diagram_writer_agent":
+                return "```mermaid\nstateDiagram-v2\n    [*] --> 已创建\n    已创建 --> 已归档\n```"
+            return await super().run_specialist_agent(**kwargs)
+
     events = await collect_events(
-        CreationAgentLoop(FakeCreationService()).run(
+        CreationAgentLoop(StandaloneDiagramService()).run(
             user_message="用 Mermaid 画一张状态图，说明任务从创建到归档的状态流转",
             current_document="",
             conversation=[],
@@ -6658,6 +6671,8 @@ async def test_mermaid_diagram_tool_is_called_when_enabled_and_matched():
     )
     assert mermaid_event["data"]["diagram_type"] == "state"
     assert events[-1]["type"] == "run.completed"
+    assert events[-1]["data"]["artifact_kind"] == "diagram"
+    assert events[-1]["data"]["document"].startswith("```mermaid\nstateDiagram-v2")
 
 
 @pytest.mark.asyncio

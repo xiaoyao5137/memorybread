@@ -1,0 +1,835 @@
+{
+  "schema_version": 1,
+  "kind": "memorybread.brainstorm-catalog",
+  "catalog_id": "gpu-cost-weekly-report-detail",
+  "catalog_version": 1,
+  "skill_key": "creation-skill-gpu-cost-weekly-report",
+  "skill_profile_sha256": "e786d6d344712e016b861b1447a414d7030a10a9d7254de4e31bdffcc586e508",
+  "stages": {
+    "detail": {
+      "topics": [
+        {
+          "id": "detail-field-mapping",
+          "title": "核心数据指标提取与清洗",
+          "goal": "组织原始指标表的字段对照记录，便于核对来源字段与表内位置",
+          "root_slot_ids": [
+            "field-map-organize"
+          ]
+        },
+        {
+          "id": "detail-cost-evidence",
+          "title": "成本收益量化分析",
+          "goal": "组织既定成本项目表的原值来源与解释证据，便于核验既定排序与指标",
+          "root_slot_ids": [
+            "cost-evidence-organize"
+          ]
+        },
+        {
+          "id": "detail-chart-notes",
+          "title": "可视化图表生成",
+          "goal": "安排既定图表的图例、图注及来源说明位置，保持图表口径与数据值",
+          "root_slot_ids": [
+            "chart-notes-position"
+          ]
+        },
+        {
+          "id": "detail-risk-evidence",
+          "title": "风险预警与瓶颈分析",
+          "goal": "在既定独立风险板块组织证据记录与条目索引，便于核验风险描述",
+          "root_slot_ids": [
+            "risk-evidence-archive"
+          ]
+        },
+        {
+          "id": "detail-summary-index",
+          "title": "报告结论与决策建议",
+          "goal": "组织结论与建议的证据索引，使管理层可逐项核对依据与限制",
+          "root_slot_ids": [
+            "summary-index-organize"
+          ]
+        }
+      ],
+      "slots": [
+        {
+          "id": "field-map-organize",
+          "topic_id": "detail-field-mapping",
+          "object_id": "field-correspondence-records",
+          "choice_axis": "字段对照记录的组织位置",
+          "required_fields": [
+            "source_name",
+            "source_field_label",
+            "source_locator",
+            "target_table",
+            "target_column",
+            "source_period",
+            "captured_at"
+          ],
+          "prompt_body": "字段对照记录怎样组织，便于核对来源原列与表内位置？",
+          "why_now": "确定对照记录的组织方式，便于核验原始字段与来源。",
+          "methods": [
+            {
+              "id": "field-map-organize-list",
+              "label": "集中字段对照清单",
+              "description": "用独立清单列出完整字段对照及来源时间信息，原指标表保留原列与原值。",
+              "tradeoff": "便于整体核对，阅读原表时需对照清单。",
+              "child_slot_ids": [
+                "field-map-list-entry"
+              ],
+              "object_id": "field-correspondence-records",
+              "required_fields": [
+                "source_name",
+                "source_field_label",
+                "source_locator",
+                "target_table",
+                "target_column",
+                "source_period",
+                "captured_at"
+              ]
+            },
+            {
+              "id": "field-map-organize-notes",
+              "label": "随表字段对照注",
+              "description": "在各原指标表下列出同样完整的字段对照及来源时间信息，原表保持原样。",
+              "tradeoff": "便于就近核对，多张表需分别维护对照注。",
+              "child_slot_ids": [
+                "field-map-note-entry"
+              ],
+              "object_id": "field-correspondence-records",
+              "required_fields": [
+                "source_name",
+                "source_field_label",
+                "source_locator",
+                "target_table",
+                "target_column",
+                "source_period",
+                "captured_at"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "field-map-list-entry",
+          "topic_id": "detail-field-mapping",
+          "object_id": "field-correspondence-list-entry",
+          "choice_axis": "集中清单内定位信息的呈现位置",
+          "required_fields": [
+            "source_name",
+            "source_field_label",
+            "source_locator",
+            "target_table",
+            "target_column",
+            "source_period",
+            "captured_at"
+          ],
+          "prompt_body": "集中字段对照清单的定位信息放在哪里？",
+          "why_now": "为清单条目确定可核对的定位信息位置。",
+          "methods": [
+            {
+              "id": "field-map-list-entry-inline",
+              "label": "定位信息列内展开",
+              "description": "在清单条目内展开来源字段、来源定位、目标表列及来源时间信息。",
+              "tradeoff": "每条信息完整可见，清单较宽。",
+              "child_slot_ids": [],
+              "object_id": "field-correspondence-list-entry",
+              "required_fields": [
+                "source_name",
+                "source_field_label",
+                "source_locator",
+                "target_table",
+                "target_column",
+                "source_period",
+                "captured_at"
+              ]
+            },
+            {
+              "id": "field-map-list-entry-attached",
+              "label": "定位信息随项附注",
+              "description": "清单条目附注列出同样完整的字段、来源定位、目标表列及来源时间信息。",
+              "tradeoff": "清单较紧凑，核对时需阅读条目附注。",
+              "child_slot_ids": [],
+              "object_id": "field-correspondence-list-entry",
+              "required_fields": [
+                "source_name",
+                "source_field_label",
+                "source_locator",
+                "target_table",
+                "target_column",
+                "source_period",
+                "captured_at"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "field-map-note-entry",
+          "topic_id": "detail-field-mapping",
+          "object_id": "field-correspondence-table-note",
+          "choice_axis": "随表对照注的对应信息顺序",
+          "required_fields": [
+            "source_name",
+            "source_field_label",
+            "source_locator",
+            "target_table",
+            "target_column",
+            "source_period",
+            "captured_at"
+          ],
+          "prompt_body": "随表字段对照注的来源与目标怎样排列？",
+          "why_now": "为表下注释中的字段对应关系确定阅读顺序。",
+          "methods": [
+            {
+              "id": "field-map-note-entry-source-first",
+              "label": "来源字段先行",
+              "description": "每项先列来源字段与定位，再列目标表列和来源时间信息，保留完整对照。",
+              "tradeoff": "便于从原字段核对目标位置。",
+              "child_slot_ids": [],
+              "object_id": "field-correspondence-table-note",
+              "required_fields": [
+                "source_name",
+                "source_field_label",
+                "source_locator",
+                "target_table",
+                "target_column",
+                "source_period",
+                "captured_at"
+              ]
+            },
+            {
+              "id": "field-map-note-entry-target-first",
+              "label": "目标位置先行",
+              "description": "每项先列目标表列，再列来源字段、定位和来源时间信息，保留完整对照。",
+              "tradeoff": "便于从表内位置追溯原字段。",
+              "child_slot_ids": [],
+              "object_id": "field-correspondence-table-note",
+              "required_fields": [
+                "source_name",
+                "source_field_label",
+                "source_locator",
+                "target_table",
+                "target_column",
+                "source_period",
+                "captured_at"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "cost-evidence-organize",
+          "topic_id": "detail-cost-evidence",
+          "object_id": "cost-value-evidence-records",
+          "choice_axis": "原值来源与解释证据的放置方式",
+          "required_fields": [
+            "project_name",
+            "original_metric_name",
+            "original_metric_value",
+            "original_row_locator",
+            "source_period",
+            "captured_at",
+            "explanation_reference"
+          ],
+          "prompt_body": "原成本表的取值来源与解释证据，放在哪里便于核对？",
+          "why_now": "确定证据组织位置，保持原表取值与行列关系可核验。",
+          "methods": [
+            {
+              "id": "cost-evidence-organize-row-notes",
+              "label": "表后逐行证据解读",
+              "description": "原成本表保留原列与原序，表后逐行列出项目、原指标值、原行定位、来源时间及解释依据。",
+              "tradeoff": "便于逐行阅读，表后说明较长。",
+              "child_slot_ids": [
+                "cost-evidence-row-note"
+              ],
+              "object_id": "cost-value-evidence-records",
+              "required_fields": [
+                "project_name",
+                "original_metric_name",
+                "original_metric_value",
+                "original_row_locator",
+                "source_period",
+                "captured_at",
+                "explanation_reference"
+              ]
+            },
+            {
+              "id": "cost-evidence-organize-register",
+              "label": "附表集中证据清单",
+              "description": "原成本表保留原列与原序，附表清单列出同样完整的项目、原值、定位、来源时间及解释依据。",
+              "tradeoff": "原表阅读较简洁，核对时需查看证据清单。",
+              "child_slot_ids": [
+                "cost-evidence-register"
+              ],
+              "object_id": "cost-value-evidence-records",
+              "required_fields": [
+                "project_name",
+                "original_metric_name",
+                "original_metric_value",
+                "original_row_locator",
+                "source_period",
+                "captured_at",
+                "explanation_reference"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "cost-evidence-row-note",
+          "topic_id": "detail-cost-evidence",
+          "object_id": "cost-evidence-row-explanation",
+          "choice_axis": "逐行解读中原行定位的放置位置",
+          "required_fields": [
+            "project_name",
+            "original_metric_name",
+            "original_metric_value",
+            "original_row_locator",
+            "source_period",
+            "captured_at",
+            "explanation_reference"
+          ],
+          "prompt_body": "表后逐行证据解读的原行定位放在哪里？",
+          "why_now": "使每项说明与对应原表行保持明确连接。",
+          "methods": [
+            {
+              "id": "cost-evidence-row-note-lead",
+              "label": "原行定位放开头",
+              "description": "每项说明先列项目与原行定位，再列原指标值、来源时间和解释依据。",
+              "tradeoff": "阅读前即可定位原表，说明开头信息较多。",
+              "child_slot_ids": [],
+              "object_id": "cost-evidence-row-explanation",
+              "required_fields": [
+                "project_name",
+                "original_metric_name",
+                "original_metric_value",
+                "original_row_locator",
+                "source_period",
+                "captured_at",
+                "explanation_reference"
+              ]
+            },
+            {
+              "id": "cost-evidence-row-note-tail",
+              "label": "原行定位放末尾",
+              "description": "每项说明先列项目、原指标值与解释依据，末尾列完整原行定位及来源时间。",
+              "tradeoff": "说明阅读较连贯，核验时需查看末尾定位。",
+              "child_slot_ids": [],
+              "object_id": "cost-evidence-row-explanation",
+              "required_fields": [
+                "project_name",
+                "original_metric_name",
+                "original_metric_value",
+                "original_row_locator",
+                "source_period",
+                "captured_at",
+                "explanation_reference"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "cost-evidence-register",
+          "topic_id": "detail-cost-evidence",
+          "object_id": "cost-evidence-register-entry",
+          "choice_axis": "集中证据清单条目内的信息顺序",
+          "required_fields": [
+            "project_name",
+            "original_metric_name",
+            "original_metric_value",
+            "original_row_locator",
+            "source_period",
+            "captured_at",
+            "explanation_reference"
+          ],
+          "prompt_body": "附表集中证据清单的原值与定位怎样排列？",
+          "why_now": "确定清单条目结构，便于查验取值与原始出处。",
+          "methods": [
+            {
+              "id": "cost-evidence-register-value-first",
+              "label": "原值先行定位随后",
+              "description": "先列项目与原指标值，再列原行定位、来源时间及对应解释依据。",
+              "tradeoff": "便于先查看取值，再追溯来源。",
+              "child_slot_ids": [],
+              "object_id": "cost-evidence-register-entry",
+              "required_fields": [
+                "project_name",
+                "original_metric_name",
+                "original_metric_value",
+                "original_row_locator",
+                "source_period",
+                "captured_at",
+                "explanation_reference"
+              ]
+            },
+            {
+              "id": "cost-evidence-register-locator-first",
+              "label": "定位先行原值随后",
+              "description": "先列项目、原行定位和来源时间，再列原指标值及对应解释依据。",
+              "tradeoff": "便于先确认出处，再核对取值。",
+              "child_slot_ids": [],
+              "object_id": "cost-evidence-register-entry",
+              "required_fields": [
+                "project_name",
+                "original_metric_name",
+                "original_metric_value",
+                "original_row_locator",
+                "source_period",
+                "captured_at",
+                "explanation_reference"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "chart-notes-position",
+          "topic_id": "detail-chart-notes",
+          "object_id": "existing-chart-explanation",
+          "choice_axis": "既定图表说明区的位置",
+          "required_fields": [
+            "legend_labels",
+            "chart_annotation",
+            "source_name",
+            "source_locator",
+            "source_period",
+            "captured_at",
+            "missing_annotation"
+          ],
+          "prompt_body": "既定图表的完整图例、图注与来源说明放在哪里？",
+          "why_now": "安排图表说明位置，便于读者核对图中信息。",
+          "methods": [
+            {
+              "id": "chart-notes-position-below",
+              "label": "图下注释区",
+              "description": "在图下集中放置完整图例、图注、来源定位、来源时间及既定缺失说明。",
+              "tradeoff": "图与说明便于纵向阅读，页面纵向空间较多。",
+              "child_slot_ids": [
+                "chart-below-note-layout"
+              ],
+              "object_id": "existing-chart-explanation",
+              "required_fields": [
+                "legend_labels",
+                "chart_annotation",
+                "source_name",
+                "source_locator",
+                "source_period",
+                "captured_at",
+                "missing_annotation"
+              ]
+            },
+            {
+              "id": "chart-notes-position-side",
+              "label": "图旁说明区",
+              "description": "在图旁放置同样完整的图例、图注、来源定位、来源时间及既定缺失说明。",
+              "tradeoff": "图与说明便于并列核对，横向空间需求较大。",
+              "child_slot_ids": [
+                "chart-side-note-grouping"
+              ],
+              "object_id": "existing-chart-explanation",
+              "required_fields": [
+                "legend_labels",
+                "chart_annotation",
+                "source_name",
+                "source_locator",
+                "source_period",
+                "captured_at",
+                "missing_annotation"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "chart-below-note-layout",
+          "topic_id": "detail-chart-notes",
+          "object_id": "below-chart-explanation-block",
+          "choice_axis": "图下注释区的信息布局",
+          "required_fields": [
+            "legend_labels",
+            "chart_annotation",
+            "source_name",
+            "source_locator",
+            "source_period",
+            "captured_at",
+            "missing_annotation"
+          ],
+          "prompt_body": "图下注释区的完整信息怎样组织？",
+          "why_now": "为已选图下注释区安排完整信息的阅读结构。",
+          "methods": [
+            {
+              "id": "chart-below-note-layout-blocks",
+              "label": "分块排列说明",
+              "description": "在图下注释区分块列出完整图例、图注、来源定位与时间及既定缺失说明。",
+              "tradeoff": "信息分类清晰，区块间需保留间距。",
+              "child_slot_ids": [],
+              "object_id": "below-chart-explanation-block",
+              "required_fields": [
+                "legend_labels",
+                "chart_annotation",
+                "source_name",
+                "source_locator",
+                "source_period",
+                "captured_at",
+                "missing_annotation"
+              ]
+            },
+            {
+              "id": "chart-below-note-layout-entries",
+              "label": "连续条目排列说明",
+              "description": "在图下注释区用连续条目列出同样完整的图例、图注、来源定位与时间及既定缺失说明。",
+              "tradeoff": "结构紧凑，核对时需按条目阅读。",
+              "child_slot_ids": [],
+              "object_id": "below-chart-explanation-block",
+              "required_fields": [
+                "legend_labels",
+                "chart_annotation",
+                "source_name",
+                "source_locator",
+                "source_period",
+                "captured_at",
+                "missing_annotation"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "chart-side-note-grouping",
+          "topic_id": "detail-chart-notes",
+          "object_id": "side-chart-explanation-panel",
+          "choice_axis": "图旁说明区的分组标识",
+          "required_fields": [
+            "legend_labels",
+            "chart_annotation",
+            "source_name",
+            "source_locator",
+            "source_period",
+            "captured_at",
+            "missing_annotation"
+          ],
+          "prompt_body": "图旁说明区的完整信息怎样标识分组？",
+          "why_now": "为已选图旁说明区确定便于查找的分组标识。",
+          "methods": [
+            {
+              "id": "chart-side-note-grouping-headings",
+              "label": "标题分组说明",
+              "description": "图旁说明区用小标题分组列出完整图例、图注、来源定位与时间及缺失说明。",
+              "tradeoff": "分组含义直观，标题占用部分空间。",
+              "child_slot_ids": [],
+              "object_id": "side-chart-explanation-panel",
+              "required_fields": [
+                "legend_labels",
+                "chart_annotation",
+                "source_name",
+                "source_locator",
+                "source_period",
+                "captured_at",
+                "missing_annotation"
+              ]
+            },
+            {
+              "id": "chart-side-note-grouping-numbers",
+              "label": "编号分组说明",
+              "description": "图旁说明区用编号分组列出同样完整的图例、图注、来源定位与时间及缺失说明。",
+              "tradeoff": "便于编号引用，阅读时需对应组内内容。",
+              "child_slot_ids": [],
+              "object_id": "side-chart-explanation-panel",
+              "required_fields": [
+                "legend_labels",
+                "chart_annotation",
+                "source_name",
+                "source_locator",
+                "source_period",
+                "captured_at",
+                "missing_annotation"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "risk-evidence-archive",
+          "topic_id": "detail-risk-evidence",
+          "object_id": "risk-entry-evidence-records",
+          "choice_axis": "风险板块内证据的归档方式",
+          "required_fields": [
+            "risk_entry_id",
+            "risk_statement",
+            "evidence_summary",
+            "source_locator",
+            "limitation_note"
+          ],
+          "prompt_body": "既定风险板块的证据记录怎样组织，便于定位原文依据？",
+          "why_now": "保持风险条目与依据可追溯，便于核对风险描述。",
+          "methods": [
+            {
+              "id": "risk-evidence-archive-attached",
+              "label": "风险条目尾随证据",
+              "description": "各风险条目后附完整条目编号、风险描述、证据摘要、来源定位与限制说明。",
+              "tradeoff": "依据紧邻风险描述，各条目篇幅较长。",
+              "child_slot_ids": [
+                "risk-entry-evidence-order"
+              ],
+              "object_id": "risk-entry-evidence-records",
+              "required_fields": [
+                "risk_entry_id",
+                "risk_statement",
+                "evidence_summary",
+                "source_locator",
+                "limitation_note"
+              ]
+            },
+            {
+              "id": "risk-evidence-archive-table",
+              "label": "板块内集中证据表",
+              "description": "在风险板块内用集中表列出同样完整的编号、风险描述、证据、定位与限制说明。",
+              "tradeoff": "便于集中核验，阅读条目时需对应证据表。",
+              "child_slot_ids": [
+                "risk-evidence-table-layout"
+              ],
+              "object_id": "risk-entry-evidence-records",
+              "required_fields": [
+                "risk_entry_id",
+                "risk_statement",
+                "evidence_summary",
+                "source_locator",
+                "limitation_note"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "risk-entry-evidence-order",
+          "topic_id": "detail-risk-evidence",
+          "object_id": "risk-entry-attached-evidence",
+          "choice_axis": "尾随证据中的摘要与定位顺序",
+          "required_fields": [
+            "risk_entry_id",
+            "risk_statement",
+            "evidence_summary",
+            "source_locator",
+            "limitation_note"
+          ],
+          "prompt_body": "风险条目尾随证据的摘要与定位怎样排列？",
+          "why_now": "安排尾随证据的核对顺序，保留完整对应关系。",
+          "methods": [
+            {
+              "id": "risk-entry-evidence-order-summary-first",
+              "label": "证据摘要先行",
+              "description": "保留条目编号、风险描述与限制说明，先列证据摘要，再列原文定位。",
+              "tradeoff": "便于先理解依据，再核对原文。",
+              "child_slot_ids": [],
+              "object_id": "risk-entry-attached-evidence",
+              "required_fields": [
+                "risk_entry_id",
+                "risk_statement",
+                "evidence_summary",
+                "source_locator",
+                "limitation_note"
+              ]
+            },
+            {
+              "id": "risk-entry-evidence-order-locator-first",
+              "label": "原文定位先行",
+              "description": "保留条目编号、风险描述与限制说明，先列原文定位，再列证据摘要。",
+              "tradeoff": "便于先查原文，再阅读摘要。",
+              "child_slot_ids": [],
+              "object_id": "risk-entry-attached-evidence",
+              "required_fields": [
+                "risk_entry_id",
+                "risk_statement",
+                "evidence_summary",
+                "source_locator",
+                "limitation_note"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "risk-evidence-table-layout",
+          "topic_id": "detail-risk-evidence",
+          "object_id": "risk-evidence-table-entry",
+          "choice_axis": "集中证据表内记录的行内布局",
+          "required_fields": [
+            "risk_entry_id",
+            "risk_statement",
+            "evidence_summary",
+            "source_locator",
+            "limitation_note"
+          ],
+          "prompt_body": "板块内集中证据表的记录怎样排版？",
+          "why_now": "确定证据表条目的阅读布局，保持全部字段可见。",
+          "methods": [
+            {
+              "id": "risk-evidence-table-layout-single-line",
+              "label": "同行单元排列字段",
+              "description": "每条记录同行排列完整编号、风险描述、证据摘要、来源定位与限制说明。",
+              "tradeoff": "便于横向核对，表格宽度需求较大。",
+              "child_slot_ids": [],
+              "object_id": "risk-evidence-table-entry",
+              "required_fields": [
+                "risk_entry_id",
+                "risk_statement",
+                "evidence_summary",
+                "source_locator",
+                "limitation_note"
+              ]
+            },
+            {
+              "id": "risk-evidence-table-layout-wrapped",
+              "label": "换行单元排列字段",
+              "description": "每条记录在单元内分段换行，保留同样完整的编号、风险、证据、定位与限制说明。",
+              "tradeoff": "适合较长文本，单条记录占用更多高度。",
+              "child_slot_ids": [],
+              "object_id": "risk-evidence-table-entry",
+              "required_fields": [
+                "risk_entry_id",
+                "risk_statement",
+                "evidence_summary",
+                "source_locator",
+                "limitation_note"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "summary-index-organize",
+          "topic_id": "detail-summary-index",
+          "object_id": "conclusion-evidence-index",
+          "choice_axis": "结论与证据索引的组织方式",
+          "required_fields": [
+            "conclusion_id",
+            "conclusion_text",
+            "evidence_id",
+            "source_locator",
+            "limitation_note"
+          ],
+          "prompt_body": "总结中各项结论与证据的对应索引怎样组织？",
+          "why_now": "使结论与建议的依据及限制可逐项核对。",
+          "methods": [
+            {
+              "id": "summary-index-organize-pairs",
+              "label": "结论证据成对清单",
+              "description": "用成对清单列出结论编号、原结论、证据编号、来源定位与限制说明。",
+              "tradeoff": "对应关系便于逐项阅读，清单内容较长。",
+              "child_slot_ids": [
+                "summary-pair-list-order"
+              ],
+              "object_id": "conclusion-evidence-index",
+              "required_fields": [
+                "conclusion_id",
+                "conclusion_text",
+                "evidence_id",
+                "source_locator",
+                "limitation_note"
+              ]
+            },
+            {
+              "id": "summary-index-organize-table",
+              "label": "结论证据交叉索引表",
+              "description": "用交叉索引表列出同样完整的结论编号、原结论、证据编号、来源定位与限制说明。",
+              "tradeoff": "便于集中查找，阅读正文时需对应索引。",
+              "child_slot_ids": [
+                "summary-cross-index-layout"
+              ],
+              "object_id": "conclusion-evidence-index",
+              "required_fields": [
+                "conclusion_id",
+                "conclusion_text",
+                "evidence_id",
+                "source_locator",
+                "limitation_note"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "summary-pair-list-order",
+          "topic_id": "detail-summary-index",
+          "object_id": "conclusion-evidence-pair-entry",
+          "choice_axis": "成对清单内编号与依据的阅读顺序",
+          "required_fields": [
+            "conclusion_id",
+            "conclusion_text",
+            "evidence_id",
+            "source_locator",
+            "limitation_note"
+          ],
+          "prompt_body": "结论证据成对清单的信息怎样排列？",
+          "why_now": "为已选成对清单安排便于查验的编号与依据顺序。",
+          "methods": [
+            {
+              "id": "summary-pair-list-order-conclusion-first",
+              "label": "结论编号先行",
+              "description": "先列结论编号与原结论，再列证据编号、来源定位及限制说明。",
+              "tradeoff": "便于从结论追溯依据。",
+              "child_slot_ids": [],
+              "object_id": "conclusion-evidence-pair-entry",
+              "required_fields": [
+                "conclusion_id",
+                "conclusion_text",
+                "evidence_id",
+                "source_locator",
+                "limitation_note"
+              ]
+            },
+            {
+              "id": "summary-pair-list-order-evidence-first",
+              "label": "证据编号先行",
+              "description": "先列证据编号与来源定位，再列结论编号、原结论及限制说明。",
+              "tradeoff": "便于从依据核对对应结论。",
+              "child_slot_ids": [],
+              "object_id": "conclusion-evidence-pair-entry",
+              "required_fields": [
+                "conclusion_id",
+                "conclusion_text",
+                "evidence_id",
+                "source_locator",
+                "limitation_note"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "summary-cross-index-layout",
+          "topic_id": "detail-summary-index",
+          "object_id": "conclusion-evidence-index-cell",
+          "choice_axis": "交叉索引表内对应记录的单元布局",
+          "required_fields": [
+            "conclusion_id",
+            "conclusion_text",
+            "evidence_id",
+            "source_locator",
+            "limitation_note"
+          ],
+          "prompt_body": "结论证据交叉索引表的记录怎样排版？",
+          "why_now": "为索引表的完整对应记录安排可读的单元布局。",
+          "methods": [
+            {
+              "id": "summary-cross-index-layout-single-line",
+              "label": "对应记录单行展开",
+              "description": "每条对应记录单行列出完整结论编号、原结论、证据编号、来源定位与限制说明。",
+              "tradeoff": "便于横向查找，表格宽度需求较大。",
+              "child_slot_ids": [],
+              "object_id": "conclusion-evidence-index-cell",
+              "required_fields": [
+                "conclusion_id",
+                "conclusion_text",
+                "evidence_id",
+                "source_locator",
+                "limitation_note"
+              ]
+            },
+            {
+              "id": "summary-cross-index-layout-wrapped",
+              "label": "对应记录分行展开",
+              "description": "每条对应记录在单元内分行列出同样完整的结论编号、原结论、证据编号、定位与限制说明。",
+              "tradeoff": "较长结论便于阅读，单条记录高度较大。",
+              "child_slot_ids": [],
+              "object_id": "conclusion-evidence-index-cell",
+              "required_fields": [
+                "conclusion_id",
+                "conclusion_text",
+                "evidence_id",
+                "source_locator",
+                "limitation_note"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

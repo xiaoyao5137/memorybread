@@ -108,6 +108,13 @@ _TYPE_TERM_SOURCES: dict[str, frozenset[str]] = {
 _BOUNDARY_PARTICLES = frozenset("的了着过是在于和与及或把被给向从对中里上下一些这那")
 _ASCII_TERM_RE = re.compile(r"[a-z][a-z0-9._:/+-]*|\d+[a-z0-9._:/+-]+", re.IGNORECASE)
 _CJK_RUN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+")
+_MIXED_TERM_RE = re.compile(
+    r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,}"
+    r"[a-z][a-z0-9._:/+-]*|"
+    r"[a-z][a-z0-9._:/+-]*"
+    r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,}",
+    re.IGNORECASE,
+)
 
 _ARTIFACT_TABLES: dict[str, tuple[tuple[str, ...], str]] = {
     "bake_documents": (
@@ -225,6 +232,9 @@ def _surface_terms(
         for term in (entity_terms or [])
         if str(term).strip() and _valid_cjk_candidate(str(term).strip().lower())
     )
+    # A contiguous Chinese/ASCII product phrase is a stronger topic signal
+    # than character windows cut through the Chinese half of that phrase.
+    candidates.extend(match.group(0).lower() for match in _MIXED_TERM_RE.finditer(working))
     candidates.extend(match.group(0).lower() for match in _ASCII_TERM_RE.finditer(working))
 
     for run in _CJK_RUN_RE.findall(working):

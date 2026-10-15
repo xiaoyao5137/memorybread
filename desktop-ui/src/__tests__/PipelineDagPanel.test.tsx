@@ -22,6 +22,20 @@ describe('PipelineDagPanel', () => {
     vi.restoreAllMocks()
   })
 
+  it('推理服务不可用时流程页显示受阻原因', async () => {
+    const response: PipelineDagResponse = {
+      server_now_ms: Date.now(), extractor_status: 'blocked', capture_enabled: true,
+      running_bake_run: null, running_bake_runs: [], bake_watermark_lag_ms: 0,
+      stages: [stage('capture', '采集', 0)],
+    }
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(response), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    }))
+    render(<PipelineDagPanel base="http://127.0.0.1:7070" isVisible />)
+    expect(await screen.findByText('推理服务不可用')).toBeInTheDocument()
+    expect(screen.queryByText('未知')).not.toBeInTheDocument()
+  })
+
   it('把数据作为提炼流程的同级产物并展示今日统计', async () => {
     const response: PipelineDagResponse = {
       server_now_ms: 1_800_000_000_000,

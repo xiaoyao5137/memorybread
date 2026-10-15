@@ -17,11 +17,22 @@ LOG_SPECS: Tuple[Tuple[str, str, str], ...] = (
     ("creation", "creation.log · Creation Service", "creation.log"),
     ("bake_extract_errors", "bake_extract_errors.log · Bake 提炼错误", "bake_extract_errors.log"),
     ("ui", "ui.log · Desktop UI", "ui.log"),
+    ("inference_engine", "本地推理引擎 · 当前日志", "local-ai-engine.log"),
+    ("inference_engine_previous_1", "本地推理引擎 · 轮转日志 1", "local-ai-engine.log.1"),
+    ("inference_engine_previous_2", "本地推理引擎 · 轮转日志 2", "local-ai-engine.log.2"),
+    ("inference_launcher", "本地推理引擎 · 开发启动日志", "ollama.log"),
 )
 
 
 def diagnostic_log_dir() -> Path:
     return Path.home() / ".memory-bread" / "logs"
+
+
+def _log_directory(key: str, log_dir: Optional[Path]) -> Path:
+    directory = log_dir or diagnostic_log_dir()
+    if key.startswith("inference_engine"):
+        return directory.parent / "initialization" / "logs"
+    return directory
 
 
 def _spec_for_key(key: str) -> Optional[Tuple[str, str, str]]:
@@ -36,13 +47,13 @@ def _modified_at_ms(path: Path) -> Optional[int]:
 
 
 def list_diagnostic_logs(log_dir: Optional[Path] = None) -> List[Dict[str, object]]:
-    allowed_dir = log_dir or diagnostic_log_dir()
     items: List[Dict[str, object]] = []
     for key, label, file_name in LOG_SPECS:
+        allowed_dir = _log_directory(key, log_dir).resolve()
         path = allowed_dir / file_name
         try:
             stat = path.stat()
-            exists = path.is_file()
+            exists = path.is_file() and path.resolve().parent == allowed_dir
             size_bytes = stat.st_size if exists else 0
         except OSError:
             exists = False
@@ -67,7 +78,7 @@ def read_diagnostic_log(
     spec = _spec_for_key(key)
     if spec is None:
         return None
-    allowed_dir = (log_dir or diagnostic_log_dir()).resolve()
+    allowed_dir = _log_directory(key, log_dir).resolve()
     path = allowed_dir / spec[2]
     try:
         canonical_path = path.resolve(strict=True)

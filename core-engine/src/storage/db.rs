@@ -8,7 +8,10 @@
 //! - 迁移 SQL 内嵌于二进制，应用启动时自动执行，无需外部文件
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::Connection;
@@ -570,6 +573,12 @@ static MIGRATIONS: &[(&str, &str)] = &[
         "135_normalize_capture_retention_data_links",
         include_str!("migrations/135_normalize_capture_retention_data_links.sql"),
     ),
+    (
+        "136_app_blacklist_optional_bundle_id",
+        include_str!(
+            "../../../shared/db-schema/migrations/136_app_blacklist_optional_bundle_id.sql"
+        ),
+    ),
 ];
 
 fn migrate_document_identity_v2(conn: &Connection, sql: &str) -> Result<(), StorageError> {
@@ -608,6 +617,7 @@ fn migrate_document_identity_v2(conn: &Connection, sql: &str) -> Result<(), Stor
 #[derive(Clone)]
 pub struct StorageManager {
     pub(crate) conn: Arc<Mutex<Connection>>,
+    pub(crate) blacklist_revision: Arc<AtomicU64>,
 }
 
 impl StorageManager {
@@ -642,6 +652,7 @@ impl StorageManager {
 
         let mgr = Self {
             conn: Arc::new(Mutex::new(conn)),
+            blacklist_revision: Arc::new(AtomicU64::new(0)),
         };
         mgr.run_migrations_observed(startup)?;
         mgr.with_conn(|conn| {
@@ -660,6 +671,7 @@ impl StorageManager {
         Self::configure_connection(&conn)?;
         let mgr = Self {
             conn: Arc::new(Mutex::new(conn)),
+            blacklist_revision: Arc::new(AtomicU64::new(0)),
         };
         mgr.run_migrations()?;
         Ok(mgr)
@@ -1399,6 +1411,15 @@ impl StorageManager {
             poisoned.into_inner()
         });
         f(&conn)
+    }
+
+    /// Invalidate capture-side blacklist caches after a successful local edit.
+    pub fn notify_blacklist_changed(&self) {
+        self.blacklist_revision.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn blacklist_revision(&self) -> u64 {
+        self.blacklist_revision.load(Ordering::Acquire)
     }
 
     /// 将同步 `with_conn` 包装为 async，内部使用 `spawn_blocking`。

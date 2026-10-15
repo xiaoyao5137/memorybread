@@ -1,5 +1,7 @@
 # 脑暴与可编辑简报契约
 
+主创作的新三阶段流程见 [三阶段脑暴 v2](stages-v2.md)。以下单轮动态出题与兄弟预生成规则继续用于旧会话及局部选区脑暴；v2 的阶段完整预生成和逐章创作规则以新契约为准。
+
 ## 基于已回答内容先生成一版
 
 探索中的脑暴卡片提供“先生成一版”动作，复用 `POST /api/creation/agent/run`，传入 `creation_mode=brainstorm`、当前已保存的 `creation_brief` 快照及原始 `root_request`。快照的 `phase` 可以为 `exploring`，无需先完成所有问题或调用脑暴 `finish`。已有正文时，将当前正文作为 `current_document`，基于本轮指令更新一版。

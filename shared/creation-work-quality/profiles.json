@@ -1,0 +1,17 @@
+{
+  "schema_version": "creation.work-quality-profiles.v1",
+  "criteria": [
+    {"id": "natural_expression", "label": "表达自然", "severity": "warning", "issue_code": "work_natural_expression", "criterion": "根据用户指定读者、用途和表达样稿，检查语言是否直接清楚，有明确对象和动作；避免空泛开场、名词化口号、机械衔接、无必要的重复总结。专业术语、严谨论述、自然长句本身不是问题，不为口语化而改变事实强度。"},
+    {"id": "information_increment", "label": "信息有增量", "severity": "warning", "issue_code": "work_information_increment", "criterion": "检查段落是否提供了与本轮任务相关的事实、解释、机制、取舍或可采用安排。若删去或换成任意项目名称仍不影响内容，需要指出具体缺失的对象、机制、边界或依据；有用的简短背景与必要过渡可以保留，不要求每段同一格式。"},
+    {"id": "decision_help", "label": "支持判断", "severity": "warning", "issue_code": "work_decision_help", "criterion": "仅依据本轮用户用途与决策目标，检查读者能否看出作者的关键判断、支持理由、必要取舍和需要决定或协调的事项。用户未要求决策时不凭空增加审批或资源诉求；局部章节只核对本章承担的判断，不要求摘要、完整比较或全篇结论。"},
+    {"id": "actionable_specificity", "label": "执行具体", "severity": "warning", "issue_code": "work_actionable_specificity", "criterion": "按purpose与decision_goal所需粒度判断本轮方案或行动是否具体。方向或试点路径评审需要对象、主要机制、必要输入或依赖的确认方法、结果观察与调整方式，足以决定下一步即可；只有原请求明确要求实施规范时才检查完整字段字典、指标公式、人员指派或确定排期。阅读全文核对分散在不同段落的输入、动作和验证，不因当前引文没包含全部内容就判缺失。已经列出输入/产物要素并说明启动前确认未知条件时，这些属于实际安排，不能改判为完全缺少。没有精确数字、固定周期、收益、成本或人员姓名不自动失败，不以新增X天等占位参数作为必改要求。纯事实整理或不承担行动的当前章不增加执行义务；泛写按计划执行、形成方案、比较结果等，需指出真正阻碍本轮目标的具体不足。"},
+    {"id": "assumption_distinction", "label": "区分事实与建议", "severity": "warning", "issue_code": "work_assumption_distinction", "criterion": "本维度只核对正文对过去或当前已成立情况的明确实质断言：例如现有资源、已完成工作或已实现效果，是否把未确认内容写成既有事实。在本轮实际输入明确可比对的给定事实边界内逐句核对来源支持：当前因果、痛点程度、已有职责或缺陷同样是事实断言，不能把仅支持现象的输入扩大为确定原因、普遍性、严重程度、已发生职责变化或缺陷。合理推断应保留为待验证判断，不写成既有现状；段落包含建议或标题写为方案，不能整体豁免其中的过去/当前断言。未来计划、追求的结果、建议与预测不在本维度当作已实现断言；后续推进、持续优化、形成机制等行动描述没有声称已经完成，不因没有逐句标签判失败。没有提供事实本身不是混淆；若没有错误的过去/当前已实现断言则本项通过。来源没有在审阅输入中展开本身不构成事实错误，不能据此断言业务事实不成立。空泛未来动作分别在信息增量或具体性维度处理。此项不能替代独立来源验收，也不能凭表达样稿证明业务事实。"}
+  ],
+  "profiles": [
+    {"id": "general", "label": "通用工作文档", "description": "先核对事实强度，再关注表达与信息增量，沿用本轮实际目标。", "criteria": ["assumption_distinction", "natural_expression", "information_increment"]},
+    {"id": "proposal_review", "label": "方案评审", "description": "先核对事实强度，再评估方案是否足以支持本轮决定；不自动按完整实施规范要求方向或试点评审。", "criteria": ["assumption_distinction", "natural_expression", "information_increment", "decision_help", "actionable_specificity"]},
+    {"id": "project_report", "label": "项目汇报", "description": "先核对事实强度，再关注当前判断、证据、变化和协调事项，行动只检查本轮要求的范围。", "criteria": ["assumption_distinction", "natural_expression", "information_increment", "decision_help", "actionable_specificity"]},
+    {"id": "project_initiation", "label": "项目立项", "description": "先核对事实强度，再关注开展理由、安排、投入边界与价值验证，按本轮立项目的要求粒度。", "criteria": ["assumption_distinction", "natural_expression", "information_increment", "decision_help", "actionable_specificity"]},
+    {"id": "retrospective", "label": "项目复盘", "description": "先核对事实强度，再关注结果与预期的差异、原因依据和与发现对应的改进。", "criteria": ["assumption_distinction", "natural_expression", "information_increment", "decision_help", "actionable_specificity"]}
+  ]
+}

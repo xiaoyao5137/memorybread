@@ -826,7 +826,7 @@ impl CaptureEngine {
                 );
                 return Ok(None);
             }
-            let blacklisted = self.blacklist.is_blacklisted_by_bundle_or_name(
+            let blacklisted_target = self.blacklist.matched_target(
                 context.app_bundle_id.as_deref(),
                 context.app_name.as_deref(),
             );
@@ -836,9 +836,9 @@ impl CaptureEngine {
                 context.focused_role.as_deref(),
                 context.win_title.as_deref(),
             );
-            if blacklisted || sensitive {
-                if blacklisted {
-                    self.record_blacklist_block(&context);
+            if blacklisted_target.is_some() || sensitive {
+                if let Some(target) = blacklisted_target.as_deref() {
+                    self.record_blacklist_block(target);
                 }
                 info!(
                     event = ?event.to_event_type(),
@@ -849,7 +849,7 @@ impl CaptureEngine {
                 self.record_attempt(
                     &event,
                     "privacy_skipped",
-                    if blacklisted {
+                    if blacklisted_target.is_some() {
                         "app_blacklist"
                     } else {
                         "sensitive_context"
@@ -1032,7 +1032,7 @@ impl CaptureEngine {
         }
 
         // 3. 应用黑名单检测（优先级最高，快速跳过）
-        if self.blacklist.is_blacklisted_by_bundle_or_name(
+        if let Some(blacklisted_target) = self.blacklist.matched_target(
             merged.app_bundle_id.as_deref(),
             merged.app_name.as_deref(),
         ) {
@@ -1041,7 +1041,7 @@ impl CaptureEngine {
                 bundle_id = ?merged.app_bundle_id,
                 "应用在黑名单中，跳过采集"
             );
-            self.record_blacklist_block(&merged);
+            self.record_blacklist_block(&blacklisted_target);
             self.record_attempt(
                 &event,
                 "privacy_skipped",
@@ -1513,20 +1513,18 @@ impl CaptureEngine {
         }
     }
 
-    fn record_blacklist_block(&self, info: &AXInfo) {
+    fn record_blacklist_block(&self, target_id: &str) {
         let storage = self.storage.clone();
-        let stat_target = info.app_bundle_id.clone().or_else(|| info.app_name.clone());
-        if let Some(target_id) = stat_target {
-            tokio::spawn(async move {
-                let _ = storage.with_conn(|conn| {
-                    crate::storage::repo::privacy::increment_block_stat(
-                        conn,
-                        "blacklist",
-                        &target_id,
-                    )
-                });
+        let target_id = target_id.to_string();
+        tokio::spawn(async move {
+            let _ = storage.with_conn(|conn| {
+                crate::storage::repo::privacy::increment_block_stat(
+                    conn,
+                    "blacklist",
+                    &target_id,
+                )
             });
-        }
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2266,6 +2264,7 @@ mod tests {
 
         let storage = StorageManager {
             conn: Arc::new(Mutex::new(conn)),
+            blacklist_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let config = CaptureConfig {
             captures_dir: make_test_captures_dir(),
@@ -3108,6 +3107,73 @@ mod tests {
             .list_captures(&CaptureFilter::new())
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_name_only_blacklist_drops_bundled_app_before_capture() {
+        let storage = StorageManager::open_in_memory().unwrap();
+        let engine = CaptureEngine::new(
+            storage.clone(),
+            CaptureConfig {
+                enable_screenshot: false,
+                enable_ax: false,
+                ..Default::default()
+            },
+        );
+        storage
+            .with_conn(|conn| {
+                crate::storage::repo::privacy::add_app_blacklist(
+                    conn,
+                    &crate::storage::models::NewAppBlacklist {
+                        bundle_id: None,
+                        app_name: "钉钉".into(),
+                        enabled: true,
+                        reason: None,
+                    },
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        storage.notify_blacklist_changed();
+
+        let result = engine
+            .process_event(CaptureEvent::AppSwitch {
+                app_name: "钉钉".into(),
+                bundle_id: Some("com.alibaba.DingTalkMac".into()),
+                win_title: "工作群".into(),
+            })
+            .await
+            .unwrap();
+
+        assert!(result.is_none());
+        assert!(storage.list_captures(&CaptureFilter::new()).unwrap().is_empty());
+        let reason: String = storage
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT reason FROM capture_attempts ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(reason, "app_blacklist");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let stats = storage
+                    .with_conn(crate::storage::repo::privacy::get_week_block_stats)
+                    .unwrap();
+                if stats.iter().any(|stat| {
+                    stat.stat_type == "blacklist"
+                        && stat.target_id == "钉钉"
+                        && stat.block_count == 1
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("name-only blacklist block count was not recorded");
     }
 
     #[tokio::test]

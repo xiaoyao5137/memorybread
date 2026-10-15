@@ -1,0 +1,204 @@
+{
+  "schema_version": 1,
+  "kind": "memorybread.brainstorm-root-axes",
+  "registry_id": "generic-creation-attributes",
+  "registry_version": 4,
+  "axes": [
+    {
+      "id": "audience",
+      "property": "audience",
+      "definition": "作品面向哪些阅读对象；汇报对象、阅读对象和受众范围均属于这一属性，不预设单一对象，不包含信息粒度或概念解释深度。",
+      "goal": "在全部既定要求内，选择当前主题尚未确定的阅读对象范围",
+      "stages": [
+        "direction",
+        "detail"
+      ],
+      "title": "阅读对象范围",
+      "decision_mode": "atomic",
+      "value_ids": [
+        "audience.participants",
+        "audience.decision_makers",
+        "audience.collaborators",
+        "audience.specialists",
+        "audience.general_readers"
+      ]
+    },
+    {
+      "id": "purpose",
+      "property": "purpose",
+      "definition": "作品希望读者理解、判断或采取什么行动；这是表达目的，不是内容侧重、语气或行动的具体实施方法。",
+      "goal": "在全部既定要求内，确定当前主题尚未确定的表达目的",
+      "stages": [
+        "direction",
+        "detail"
+      ],
+      "title": "表达目的",
+      "decision_mode": "atomic",
+      "value_ids": [
+        "purpose.understand_state",
+        "purpose.understand_causes",
+        "purpose.form_judgement",
+        "purpose.reach_consensus",
+        "purpose.encourage_action"
+      ]
+    },
+    {
+      "id": "content_focus",
+      "property": "content_focus",
+      "definition": "保留全部必需内容时，哪些内容在表达中获得更突出的位置与说明；不选择删去必需内容，也不改变表达目的。",
+      "goal": "保留全部必需内容，确定当前主题尚未确定的表达侧重",
+      "stages": [
+        "direction",
+        "detail"
+      ],
+      "title": "表达侧重",
+      "decision_mode": "atomic",
+      "value_ids": [
+        "content_focus.central_ideas",
+        "content_focus.key_results",
+        "content_focus.development_process",
+        "content_focus.impact",
+        "content_focus.limitations"
+      ]
+    },
+    {
+      "id": "information_granularity",
+      "property": "information_granularity",
+      "definition": "完整必需信息在表达中的呈现粒度；不改变必需字段、数据关系、计算规则或概念解释的深度。",
+      "goal": "保留全部必需信息及其关系，确定当前主题尚未确定的信息呈现粒度",
+      "stages": [
+        "detail"
+      ],
+      "title": "信息呈现粒度",
+      "decision_mode": "atomic",
+      "value_ids": [
+        "information_granularity.whole",
+        "information_granularity.object",
+        "information_granularity.local"
+      ]
+    },
+    {
+      "id": "concept_explanation_depth",
+      "property": "concept_explanation_depth",
+      "definition": "对概念、术语与原理补充多少解释；不重新选择读者对象，不改变数据呈现粒度或删去必需信息。",
+      "goal": "保留全部必需内容，确定当前主题尚未确定的概念解释深度",
+      "stages": [
+        "detail"
+      ],
+      "title": "概念解释深度",
+      "decision_mode": "atomic",
+      "value_ids": [
+        "concept_explanation_depth.definition",
+        "concept_explanation_depth.basic",
+        "concept_explanation_depth.detailed",
+        "concept_explanation_depth.derivation"
+      ]
+    },
+    {
+      "id": "evidence_presentation",
+      "property": "evidence_presentation",
+      "definition": "已有完整论据怎样支持表达中的判断；不选择资料权限、替换来源、删去必需论据或制造事实。",
+      "goal": "保留全部必需论据与来源，确定当前主题尚未确定的论据呈现方式",
+      "stages": [
+        "detail"
+      ],
+      "title": "论据呈现",
+      "decision_mode": "atomic",
+      "value_ids": [
+        "evidence_presentation.direct",
+        "evidence_presentation.corroboration",
+        "evidence_presentation.itemized",
+        "evidence_presentation.consolidated"
+      ]
+    },
+    {
+      "id": "narrative_perspective",
+      "property": "narrative_perspective",
+      "definition": "叙述从哪个观察位置展开；不重新选择读者、表达目的或事件推进节奏。",
+      "goal": "在全部既定要求内，确定当前主题尚未确定的叙事视角",
+      "stages": [
+        "direction",
+        "detail"
+      ],
+      "title": "叙事视角",
+      "decision_mode": "atomic",
+      "value_ids": [
+        "narrative_perspective.observer",
+        "narrative_perspective.participant",
+        "narrative_perspective.subject"
+      ]
+    },
+    {
+      "id": "structural_order",
+      "property": "structural_order",
+      "definition": "尚未安排的表达单元采用什么组织次序；保留既定顺序与完整内容，不改变事件推进节奏或重排固定数据关系。",
+      "goal": "保留全部既定内容与安排，确定当前主题新增表达单元的组织次序",
+      "stages": [
+        "detail"
+      ],
+      "title": "新增表达单元的组织次序",
+      "decision_mode": "atomic",
+      "value_ids": [
+        "structural_order.chronological",
+        "structural_order.causal",
+        "structural_order.importance",
+        "structural_order.goal_to_action",
+        "structural_order.whole_to_part"
+      ]
+    },
+    {
+      "id": "rhythm",
+      "property": "rhythm",
+      "definition": "当前表达怎样分配展开与收束的节奏；不改变既定内容、表达单元的组织次序或叙事视角。",
+      "goal": "保留全部既定内容，确定当前主题尚未确定的展开节奏",
+      "stages": [
+        "detail"
+      ],
+      "title": "展开节奏",
+      "decision_mode": "atomic",
+      "value_ids": [
+        "rhythm.steady",
+        "rhythm.accelerating",
+        "rhythm.decelerating",
+        "rhythm.alternating"
+      ]
+    },
+    {
+      "id": "tone",
+      "property": "tone",
+      "definition": "表达采用怎样的语气；不重新选择受众、目的、事实结论或必需内容。",
+      "goal": "在全部既定要求内，确定当前主题尚未确定的表达语气",
+      "stages": [
+        "direction",
+        "detail"
+      ],
+      "title": "表达语气",
+      "decision_mode": "atomic",
+      "value_ids": [
+        "tone.objective",
+        "tone.direct",
+        "tone.careful",
+        "tone.formal",
+        "tone.approachable"
+      ]
+    },
+    {
+      "id": "action_plan",
+      "property": "action_plan",
+      "definition": "在全部既定目标与要求内，行动采用什么具体实施方式；不更改目标、取消固定动作、补造资源或制造成果。",
+      "goal": "保留全部既定目标与要求，确定当前主题尚未确定的行动实施方式",
+      "stages": [
+        "detail"
+      ],
+      "title": "行动实施方式",
+      "decision_mode": "atomic",
+      "value_ids": [
+        "action_plan.stepwise",
+        "action_plan.pilot_then_expand",
+        "action_plan.parallel",
+        "action_plan.concentrated"
+      ]
+    }
+  ],
+  "value_capabilities_sha256": "0e89c1dbd4f160d4a645523d412dfa723a97d2e48fd8525800740ba1c0d786be"
+}

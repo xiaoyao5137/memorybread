@@ -452,6 +452,11 @@
             "kind": {
               "const": "generate"
             },
+            "artifact_kind": {
+              "type": "string",
+              "enum": ["document", "diagram"],
+              "description": "本轮独立产物类型。省略时按既有 Markdown 文档处理；diagram 表示独立可渲染的结构图示。"
+            },
             "document_identity": {
               "type": "object",
               "properties": {

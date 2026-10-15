@@ -5,7 +5,7 @@ import { useAppStore, type CreationBrainstormState, type CreationChatMessage } f
 
 const ROOT_REQUEST = '设计面向商家的短视频创作方案'
 const SESSION_ID = 'session-termination-regression'
-const PREPARATION_LABEL = '正在准备第一条脑暴问题'
+const PREPARATION_LABEL = /正在准备(?:第一条脑暴问题|创作方向脑暴)/
 const originalMessage: CreationChatMessage = {
   id: 'original-request', role: 'user', content: ROOT_REQUEST, createdAt: 1,
 }
@@ -126,7 +126,7 @@ describe('创作输入清空与终止会话恢复边界', () => {
     expectPreservedRequest()
 
     await act(async () => { history.resolve(Response.json({ id: 41 })) })
-    expect(status).toHaveTextContent('正在生成第一条脑暴问题')
+    expect(status).toHaveTextContent('正在启动创作方向阶段思考')
     expect(composer()).toHaveValue('')
     expectPreservedRequest()
 

@@ -31,6 +31,7 @@ from .operations import OperationError
 from .brainstorm import (
     BrainstormCoordinator, BrainstormGenerationError, BrainstormGenerationTimeout,
 )
+from .brainstorm_stages import BrainstormStageCoordinator
 from .inline_edit import (
     InlineEditValidationError,
     build_inline_edit_prompts,
@@ -60,6 +61,7 @@ creation_service = CreationService()
 creation_agent_loop = CreationAgentLoop(creation_service)
 CREATION_AGENT_STREAM_HEARTBEAT_SECONDS = 10.0
 brainstorm_coordinator = BrainstormCoordinator(creation_service)
+brainstorm_stage_coordinator = BrainstormStageCoordinator(creation_service)
 
 
 class _InteractiveCreationCancellation:
@@ -240,6 +242,7 @@ class GenerateRequest(BaseModel):
     capture_context: Optional[str] = None
     doc_type: str = ""
     audience: str = ""
+    work_context: Optional[dict[str, Any]] = None
     output_format: str = "markdown"
     inherit_format: bool = True
     enable_rag: bool = True
@@ -260,6 +263,13 @@ class GenerateRequest(BaseModel):
     creation_model: Optional[str] = None
     creation_api_key: Optional[str] = None
     creation_base_url: Optional[str] = None
+
+
+class WorkCreationPreviewRequest(BaseModel):
+    action: Literal["trial", "review", "summary"]
+    instruction: str = Field(default="", max_length=4000)
+    current_document: str = Field(default="", max_length=24000)
+    work_context: Optional[dict[str, Any]] = None
 
 
 class ReferenceRequest(BaseModel):
@@ -300,6 +310,7 @@ class AgentRunRequest(GenerateRequest):
     selected_skills: list[dict[str, Any]] = Field(default_factory=list)
     available_skills: Optional[list[dict[str, Any]]] = None
     explicit_skill_ids: list[str] = Field(default_factory=list)
+    brainstorm_skill_binding: Optional[dict[str, Any]] = None
     model_mode: str = "local"
     confirmed: bool = False
     resume_state: Optional[dict[str, Any]] = None
@@ -353,14 +364,49 @@ class BrainstormNextRequest(BaseModel):
     creation_base_url: Optional[str] = None
 
 
+class BrainstormStageBatchRequest(BrainstormNextRequest):
+    stage: Literal["direction", "detail", "writing"]
+    kind: Literal["plan", "questions", "topic_plan", "node", "review", "input_preflight", "content_questions"]
+    topic: Optional[dict[str, Any]] = None
+    plan: Optional[dict[str, Any]] = None
+    limits: Optional[dict[str, int]] = None
+    context_id: str = ""
+    root_limit: Optional[int] = None
+    node: Optional[dict[str, Any]] = None
+    review_questions: Optional[list[dict[str, Any]]] = None
+    trusted_catalog: Optional[dict[str, Any]] = None
+    root_axes_binding: Optional[dict[str, Any]] = None
+    node_mode: Optional[dict[str, Any]] = None
+    confirmed_period: Optional[dict[str, Any]] = None
+    input_decisions: list[dict[str, Any]] = Field(default_factory=list)
+    input_as_of_local_date: Optional[str] = None
+    input_timezone: Optional[str] = None
+    input_attempt: int = 0
+    content_mode: bool = False
+
+
+@app.post("/creation/brainstorm/stage/batch")
+async def brainstorm_stage_batch(request: BrainstormStageBatchRequest, http_request: Request = None):
+    """Generate one complete batch; Core persists it before scheduling the next."""
+    return await _queued_brainstorm_request(request, http_request)
+
+
 @app.post("/creation/brainstorm/next")
 async def next_brainstorm_step(request: BrainstormNextRequest, http_request: Request = None):
     """生成当前题及按需规划的同层待问主题，或判断当前已收敛。"""
+    return await _queued_brainstorm_request(request, http_request)
+
+
+async def _queued_brainstorm_request(request: BrainstormNextRequest, http_request: Optional[Request]):
     if not request.root_request.strip():
         raise HTTPException(status_code=400, detail="root_request 不能为空")
 
-    # 排队和模型执行共享同一预算；晚获准的任务不能重新获得完整 150 秒。
-    deadline = time.monotonic() + brainstorm_coordinator.MAX_TURN_SECONDS
+    # 排队和执行共享截止；阶段规划/主题规划/单节点（兼容整树）与旧单题
+    # 分别使用自己的有界预算。
+    budget = (brainstorm_stage_coordinator.batch_timeout_seconds()
+              if isinstance(request, BrainstormStageBatchRequest)
+              else brainstorm_coordinator.MAX_TURN_SECONDS)
+    deadline = time.monotonic() + budget
     timeout_message = "本轮脑暴生成等待超时，已保留当前输入和已确认进度，请稍后重试"
     cancellation = _InteractiveCreationCancellation()
 
@@ -369,6 +415,26 @@ async def next_brainstorm_step(request: BrainstormNextRequest, http_request: Req
         if remaining <= 0:
             raise BrainstormGenerationTimeout(timeout_message)
         try:
+            if isinstance(request, BrainstormStageBatchRequest):
+                return await asyncio.wait_for(brainstorm_stage_coordinator.stage_batch(
+                    stage=request.stage, kind=request.kind, topic=request.topic, plan=request.plan,
+                    context_id=request.context_id, root_limit=request.root_limit, node=request.node,
+                    review_questions=request.review_questions,
+                    trusted_catalog=request.trusted_catalog,
+                    root_axes_binding=request.root_axes_binding,
+                    node_mode=request.node_mode,
+                    confirmed_period=request.confirmed_period,
+                    input_decisions=request.input_decisions,
+                    input_as_of_local_date=request.input_as_of_local_date,
+                    input_timezone=request.input_timezone,
+                    input_attempt=request.input_attempt,
+                    content_mode=request.content_mode,
+                    limits=request.limits, root_request=request.root_request,
+                    decisions=request.decisions, brief_markdown=request.brief_markdown,
+                    selected_skills=request.selected_skills, brief_edits=request.brief_edits,
+                    user_input_revisions=request.user_input_revisions,
+                    creation_model=request.creation_model, creation_api_key=request.creation_api_key,
+                    creation_base_url=request.creation_base_url), timeout=remaining)
             # Future.cancel() 无法终止已运行的线程；由任务自己的事件循环
             # 取消模型请求，退出流上下文并释放推理槽。
             return await asyncio.wait_for(
@@ -407,11 +473,22 @@ async def next_brainstorm_step(request: BrainstormNextRequest, http_request: Req
                 raise BrainstormGenerationTimeout(timeout_message) from exc
             raise
 
-    future = get_global_queue().submit(
-        Priority.P2 if request.prefetch else Priority.P0,
-        run_brainstorm,
-        lane=LANE_P2_CREATION if request.prefetch else LANE_P0_CREATION,
-    )
+    catalog_value = request.trusted_catalog if isinstance(request, BrainstormStageBatchRequest) else None
+    configured_catalog = (isinstance(catalog_value, dict)
+        and isinstance(catalog_value.get("catalog"), dict)
+        and isinstance(catalog_value["catalog"].get("stages"), dict)
+        and request.stage in catalog_value["catalog"]["stages"])
+    if configured_catalog:
+        # The coordinator authenticates the local package before this branch
+        # can return or retrieve anything. Pure compilation needs no model slot;
+        # disconnect and the original shared deadline still cancel this task.
+        future = asyncio.create_task(run_with_deadline())
+    else:
+        future = get_global_queue().submit(
+            Priority.P2 if request.prefetch else Priority.P0,
+            run_brainstorm,
+            lane=LANE_P2_CREATION if request.prefetch else LANE_P0_CREATION,
+        )
 
     async def await_result():
         wrapped = asyncio.wrap_future(future)
@@ -449,6 +526,8 @@ async def next_brainstorm_step(request: BrainstormNextRequest, http_request: Req
             )
             # This gate is computed from validated option labels, never from a
             # model-authored promise that a future answer cannot alter sources.
+            if isinstance(request, BrainstormStageBatchRequest):
+                return result
             result["prefetch_safe_option_ids"] = [
                 option["id"] for option in (result.get("question") or {}).get("options", [])
                 if isinstance(option.get("id"), str) and option["id"]
@@ -472,7 +551,8 @@ async def next_brainstorm_step(request: BrainstormNextRequest, http_request: Req
             detail={
                 "code": exc.code,
                 "message": str(exc),
-                "retryable": exc.code == "BRAINSTORM_MODEL_TIMEOUT",
+                "retryable": (isinstance(request, BrainstormStageBatchRequest)
+                              or exc.code == "BRAINSTORM_MODEL_TIMEOUT"),
             },
         ) from exc
     except Exception as exc:
@@ -610,6 +690,62 @@ async def generate_document(request: GenerateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/creation/work-quality/preview")
+async def preview_work_document(request: WorkCreationPreviewRequest, http_request: Request = None):
+    """Read-only work with the same queue, deadline and cancellation as creation."""
+    from .work_integration import preview_work_creation
+    from .work_quality import normalize_work_context
+    try:
+        context = normalize_work_context(request.work_context)
+    except OperationError as exc:
+        raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
+    deadline = time.monotonic() + 240.0
+    cancellation = _InteractiveCreationCancellation()
+
+    async def run_with_deadline():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise asyncio.TimeoutError()
+        return await asyncio.wait_for(preview_work_creation(creation_service, request.action,
+            request.instruction, request.current_document, context), timeout=remaining)
+
+    future = get_global_queue().submit(Priority.P0,
+        lambda: cancellation.run(run_with_deadline, preemptible=False), lane=LANE_P0_CREATION)
+    wrapped = asyncio.wrap_future(future)
+    disconnected = None
+    if http_request is not None:
+        async def watch_disconnect():
+            while True:
+                if await http_request.is_disconnected():
+                    raise asyncio.CancelledError()
+                await asyncio.sleep(0.05)
+        disconnected = asyncio.create_task(watch_disconnect())
+    try:
+        waiters = [wrapped] + ([disconnected] if disconnected is not None else [])
+        done, _ = await asyncio.wait(waiters, timeout=max(0.0, deadline - time.monotonic()),
+                                     return_when=asyncio.FIRST_COMPLETED)
+        if disconnected is not None and disconnected in done:
+            await disconnected
+        if wrapped not in done:
+            raise asyncio.TimeoutError()
+        return await wrapped
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=504, detail={"code": "CREATION_WORK_PREVIEW_TIMEOUT",
+            "message": "预览等待超时，当前正文和表达样稿已保留"}) from exc
+    except OperationError as exc:
+        raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail={"code": "CREATION_WORK_PREVIEW_UNAVAILABLE",
+            "message": "预览服务暂时不可用，当前正文已保留"}) from exc
+    finally:
+        cancellation.cancel()
+        future.cancel()
+        wrapped.cancel()
+        if disconnected is not None:
+            disconnected.cancel()
+            await asyncio.gather(disconnected, return_exceptions=True)
+
+
 @app.post("/creation/agent/run")
 async def run_creation_agent(request: AgentRunRequest):
     """执行可观察、可暂停和可恢复的目标驱动创作循环。"""
@@ -620,7 +756,10 @@ async def run_creation_agent(request: AgentRunRequest):
             status_code=400,
             detail="creation_mode 只支持 direct 或 brainstorm",
         )
-    options = _options_from_request(request)
+    try:
+        options = _options_from_request(request)
+    except OperationError as exc:
+        raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
     background = request.execution_origin == "scheduled_task"
     inference_priority = Priority.P2 if background else Priority.P0
     inference_lane = LANE_P2_CREATION if background else LANE_P0_CREATION
@@ -655,6 +794,7 @@ async def run_creation_agent(request: AgentRunRequest):
                     governance_required=True,
                     available_skills=request.available_skills,
                     explicit_skill_ids=request.explicit_skill_ids,
+                    brainstorm_skill_binding=request.brainstorm_skill_binding,
                     options=options,
                     model_mode=request.model_mode,
                     session_id=resolved_session_id,
@@ -1048,9 +1188,15 @@ async def chat_with_model(request: ChatRequest):
 
 
 def _options_from_request(request) -> CreationOptions:
+    work_context = getattr(request, "work_context", None)
+    if work_context is None:
+        brief = getattr(request, "creation_brief", None)
+        if isinstance(brief, dict):
+            work_context = brief.get("work_context")
     return CreationOptions(
         doc_type=getattr(request, "doc_type", "") or "",
         audience=getattr(request, "audience", "") or "",
+        work_context=work_context,
         output_format=getattr(request, "output_format", "markdown") or "markdown",
         inherit_format=bool(getattr(request, "inherit_format", True)),
         enable_rag=bool(getattr(request, "enable_rag", True)),

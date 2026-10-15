@@ -184,6 +184,7 @@ class InitializationManager:
         self._thread: Optional[threading.Thread] = None
         self._processes: dict[str, subprocess.Popen] = {}
         self._invalid_since: dict[str, Optional[float]] = {}
+        self._runtime_supervisor = None
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self._mark_interrupted_runs()
 
@@ -1570,26 +1571,29 @@ class InitializationManager:
         )
         return invalid
 
+    def _get_runtime_supervisor(self):
+        with self._lock:
+            if self._runtime_supervisor is None:
+                from inference_runtime_supervisor import InferenceRuntimeSupervisor
+                self._runtime_supervisor = InferenceRuntimeSupervisor(self)
+            return self._runtime_supervisor
+
+    def start_runtime_supervisor(self) -> None:
+        """Start once at service entry; recovery must not depend on UI requests."""
+        self._get_runtime_supervisor().start()
+
+    def stop_runtime_supervisor(self) -> None:
+        if self._runtime_supervisor is not None:
+            self._runtime_supervisor.stop()
+
     def _try_restart_managed_ollama(self, mode: str) -> None:
-        """Best-effort restart of an already installed, MemoryBread-owned runtime."""
-        if mode != "normal":
-            return
-        # start.sh 正在切换开发/正式运行时或刷新进程登记时，状态轮询不能并发
-        # 拉起第二个 Ollama。否则两边会争抢 11434，并把有效 PID 再次写旧。
-        if self._external_backend_start_in_progress():
-            return
-        base_url = self._ollama_base_url(mode)
-        if self._ollama_healthy(base_url) or self._managed_ollama_process_owned(mode):
-            return
-        executable = self._managed_ollama_executable(mode)
-        if executable is None or self._port_in_use(self._ollama_port(mode)):
-            return
-        try:
-            self._start_ollama(mode, executable)
-            logger.info("managed local AI engine restart requested during status refresh")
-        except Exception as exc:
-            # 状态刷新必须保持可用；失败会沿用既有 interrupted/failed 恢复入口。
-            logger.warning("managed local AI engine restart failed: %s", exc)
+        if mode == "normal":
+            # Status reads may start a missing engine, but never block on killing
+            # a hung process. The autonomous supervisor handles that operation.
+            try:
+                self._get_runtime_supervisor().check(restart_unhealthy=False)
+            except Exception as exc:
+                logger.warning("local inference recovery status refresh failed: %s", exc)
 
     def _external_backend_start_in_progress(self) -> bool:
         pid_path = self.base_dir / "state" / "start-lock" / "pid"
@@ -1978,7 +1982,18 @@ class InitializationManager:
             create_time = marker.get("create_time")
             if create_time is None or abs(process.create_time() - float(create_time)) > 0.01:
                 return False
-            return process.is_running() and self._process_matches_marker(process, executable)
+            environment = process.environ()
+            models_root = environment.get("OLLAMA_MODELS")
+            if not models_root or Path(models_root).resolve() != self._models_root(mode).resolve():
+                return False
+            if environment.get("OLLAMA_HOST") != f"127.0.0.1:{self._ollama_port(mode)}":
+                return False
+            command = process.cmdline()
+            return (
+                process.is_running()
+                and bool(command) and command[-1] == "serve"
+                and self._process_matches_marker(process, executable)
+            )
         except Exception:
             return False
 
@@ -2041,6 +2056,13 @@ class InitializationManager:
         try:
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
             process = psutil.Process(int(marker["pid"]))
+            # Revalidate the live PID immediately before signalling it.
+            if marker.get("create_time") is None or abs(
+                process.create_time() - float(marker["create_time"])
+            ) > 0.01:
+                return False
+            if not self._managed_ollama_marker_valid(mode):
+                return False
             process.terminate()
             try:
                 process.wait(timeout=8)

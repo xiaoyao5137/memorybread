@@ -1,26 +1,33 @@
+import CreationWorkContextEditor from './CreationWorkContextEditor'
+import { creationBriefWithWorkContext, emptyWorkContext, readWorkContext, workContextForRequest,
+  type CreationWorkContext, type WorkPreviewAction, type WorkPreviewResult } from '../utils/creationWorkContext'
 import { useInteractiveOcrActivity } from '../hooks/useInteractiveOcrActivity'
 import CreationBriefEditor from './CreationBriefEditor'
 import CreationBrainstormSummary from './CreationBrainstormSummary'
 import CreationBrainstormBranch from './CreationBrainstormBranch'
+import CreationBrainstormInputEvidence from './CreationBrainstormInputEvidence'
+import CreationBrainstormStages, { brainstormStageTitle } from './CreationBrainstormStages'
 import { BrainstormChoice, BrainstormContext, BrainstormPrompt } from './CreationBrainstormCopy'
 import { creationActionText } from '../utils/creationActionText'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { prepareCreationMarkdown } from '../utils/creationMarkdown'
 import { getLocalServiceBaseUrl } from '../utils/localServices'
-import { AtSign, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, CloudOff, CloudUpload, Copy, ExternalLink, Eye, FileCode2, FileText, FolderOpen, Globe2, Image, Library, Lightbulb, Loader2, Maximize2, MessageSquarePlus, Minimize2, PackageCheck, PackagePlus, Paperclip, Pencil, Plus, Search, Send, Sparkles, Square, Store, Trash2, Upload, Wrench, X, Zap } from 'lucide-react'
+import { AtSign, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, CloudOff, CloudUpload, Copy, ExternalLink, Eye, FileCode2, FileText, FolderOpen, Globe2, Image, Library, Lightbulb, Loader2, Maximize2, MessageSquarePlus, Minimize2, PackageCheck, PackagePlus, Paperclip, Pencil, Plus, Search, Send, Sparkles, Square, Store, Trash2, Upload, X, Zap } from 'lucide-react'
 import { serviceEnvironmentHeaders, useAppStore } from '../store/useAppStore'
 import type {
   CreationAgentEvent,
   CreationBrainstormState,
   CreationChatMessage,
   CreationDataReferenceItem,
+  CreationDraft,
   CreationMode,
   CreationReferenceItem,
   CreationReferencePreview,
 } from '../store/useAppStore'
 import { fetchWithLocalhostFallback } from '../hooks/useApi'
 import { requestBrainstormTurn } from '../utils/brainstormTransport'
+import { brainstormHistoryStatus, brainstormStageSnapshotKey, brainstormStatusSyncRetryDelay, normalizeBrainstormStageSummary, type BrainstormStageSummary } from '../utils/brainstormStageStatus'
 import { useImeCompositionGuard } from '../hooks/useImeCompositionGuard'
 import { MentionHighlightTextarea } from './MentionHighlightField'
 import { getUserDisplayName } from '../utils/accountDisplay'
@@ -53,6 +60,7 @@ import {
   skillFileText,
   type CreationSkillMarketItem,
   type CreationSkillSource,
+  type CreationSkillSelectionSource,
   type LocalCreationSkill,
   type MatchedCreationSkill,
 } from '../utils/creationSkills'
@@ -66,6 +74,7 @@ import CreationSkillDetail, {
   type CreationSkillDetailData,
 } from './CreationSkillDetail'
 import CreationToolsPanel from './CreationToolsPanel'
+import { CreationThinkingIcon, CreationTraceIcon } from './CreationTraceIcon'
 import CreationSelectionToolbar from './creation-selection/CreationSelectionToolbar'
 import CreationInlineBrainstormCard from './creation-selection/CreationInlineBrainstormCard'
 import {
@@ -113,7 +122,7 @@ const CREATION_MODE_OPTIONS = [
   {
     id: 'brainstorm',
     name: '脑暴模式',
-    description: '逐步确认方向与细节，形成创作简报后再生成',
+    description: '依次确认创作方向、细节与行文设计，逐章看到创作结果',
   },
 ] as const
 
@@ -150,6 +159,8 @@ interface CreationHistoryItem {
   lifecycleStatus: 'running' | 'completed' | 'failed' | 'cancelled'
   creationMode: CreationMode
   creationBrief: CreationBrainstormState | null
+  workContext: CreationWorkContext | null
+  brainstormStageSummary: BrainstormStageSummary | null
   brainstormRevision: number | null
   progressEpoch: number
 }
@@ -361,6 +372,46 @@ const retainConversationContext = (messages: CreationChatMessage[]) => {
 const isRunTerminalEvent = (event: CreationAgentEvent) => (
   ['run.completed', 'run.failed', 'run.cancelled'].includes(event.type)
 )
+
+const PROVISIONAL_CONTENT_GAP_GUIDANCE = '本期资料来源仍待核实。可手动编辑；如需 Agent 使用新增资料重写，请新建创作并重新确认周期/来源。'
+
+const safeDeliveryReviewForTrace = (value: unknown) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const review = value as Record<string, unknown>
+  return {
+    status: review.status,
+    provisional: typeof review.provisional === 'boolean' ? review.provisional : undefined,
+    source_validation: typeof review.source_validation === 'string'
+      && /^[a-z][a-z_]{0,31}$/.test(review.source_validation) ? review.source_validation : undefined,
+    document_hash: typeof review.document_hash === 'string' && /^[0-9a-f]{64}$/.test(review.document_hash)
+      ? review.document_hash : undefined,
+  }
+}
+
+const hasProvisionalDeliveryFromTrace = (
+  document: string, events: CreationAgentEvent[], sessionId: string | null,
+) => {
+  if (!document.trim()) return false
+  // Manual edits have no delivery review; keep the last verified Agent delivery
+  // until a later Agent delivery explicitly changes its validation result.
+  const latestReviewedRun = [...events].reverse().find(event => (
+    event.type === 'run.completed' && event.status === 'completed'
+    && (!sessionId || event.session_id === sessionId)
+    && event.data?.delivery_review && typeof event.data.delivery_review === 'object'
+  ))
+  const review = latestReviewedRun?.data?.delivery_review as Record<string, unknown> | undefined
+  return review?.status === 'pass' && review.provisional === true
+    && review.source_validation === 'pending'
+}
+
+const isCompletedProvisionalContentGapDraft = (draft: Pick<CreationDraft,
+  'creationMode' | 'brainstormState' | 'generatedContent' | 'agentEvents' | 'sessionId'>) => {
+  const workflow = draft.brainstormState?.stage_workflow
+  return draft.creationMode === 'brainstorm' && draft.brainstormState?.phase === 'completed'
+    && Boolean(workflow?.stages.length)
+    && Boolean(workflow?.stages.every(stage => stage.preparation_contract_version === 17))
+    && hasProvisionalDeliveryFromTrace(draft.generatedContent, draft.agentEvents, draft.sessionId)
+}
 
 const isCreationQualityReviewFailure = (code: unknown) => (
   ['CREATION_DELIVERY_INCOMPLETE', 'CREATION_DELIVERY_UNVERIFIED', 'CREATION_DOCUMENT_INVALID']
@@ -1141,6 +1192,9 @@ const mapCreationHistory = (histories: any[]): CreationHistoryItem[] => historie
     references = []
   }
   const agentEvents = parseHistoryJson<CreationAgentEvent[]>(h.agent_trace_json, [])
+  const savedBrief = parseHistoryJson<CreationBrainstormState | null>(h.creation_brief_json, null)
+  const creationBrief = savedBrief?.phase ? normalizeBrainstormState(savedBrief) : null
+  const workContext = readWorkContext(savedBrief?.work_context)
   return {
 
     id: Number(h.id),
@@ -1168,15 +1222,38 @@ const mapCreationHistory = (histories: any[]): CreationHistoryItem[] => historie
       ? h.lifecycle_status
       : 'completed',
     creationMode: h.creation_mode === 'brainstorm' ? 'brainstorm' : 'direct',
-    creationBrief: normalizeBrainstormState(
-      parseHistoryJson<CreationBrainstormState | null>(h.creation_brief_json, null),
-    ),
+    creationBrief,
+    workContext,
+    brainstormStageSummary: normalizeBrainstormStageSummary(h.brainstorm_stage_summary, creationBrief),
     brainstormRevision: Number.isFinite(Number(h.brainstorm_revision))
       ? Number(h.brainstorm_revision)
       : null,
     progressEpoch: Math.max(0, Number(h.progress_epoch) || 0),
   }
 })
+
+// A failed durable chapter can have a complete, uncommitted document in its
+// event trace while history.generated_content still holds the last accepted
+// version. Keep this preview separate from the editable/committed document.
+const unverifiedChapterDraft = (item: CreationHistoryItem): string | null => {
+  const chapterWriting = item.brainstormStageSummary?.phase === 'chapter_writing'
+    || item.creationBrief?.phase === 'chapter_writing'
+  if (item.creationMode !== 'brainstorm' || item.lifecycleStatus !== 'failed' || !chapterWriting) return null
+  const events = item.agentEvents
+  const terminal = terminalEventForLatestRun(events)
+  if (terminal?.type !== 'run.failed') return null
+  const terminalIndex = events.lastIndexOf(terminal)
+  for (let index = terminalIndex - 1; index >= 0; index -= 1) {
+    const candidate = events[index]
+    if (candidate.run_id !== terminal.run_id || candidate.type !== 'document.replaced') continue
+    // A stored trace may omit the document payload. Never fall back to an
+    // earlier revision or turn a compact event object into a visible draft.
+    if (typeof candidate.data?.content !== 'string') return null
+    const content = sanitizeGeneratedContent(candidate.data.content)
+    return content.trim() ? content : null
+  }
+  return null
+}
 
 const parseHistoryJson = <T,>(value: unknown, fallback: T): T => {
   try {
@@ -1477,8 +1554,11 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
   } = draft
 
   const sessionTerminated = isCreationSessionTerminated(draft)
+  const stageWorkflow = brainstormState?.stage_workflow
+  const provisionalContentGapDraft = isCompletedProvisionalContentGapDraft(draft)
+  const activeBrainstormStage = stageWorkflow?.stages.find(stage => stage.id === stageWorkflow.active_stage)
   const brainstormPaused = creationMode === 'brainstorm'
-    && (draft.brainstormPaused ?? Boolean(generatedContent.trim()))
+    && !stageWorkflow && (draft.brainstormPaused ?? Boolean(generatedContent.trim()))
   const setPrompt = (v: string) => setCreationDraft({ prompt: v })
   const setDocType = (v: string) => setCreationDraft({ docType: v })
   const setAudience = (v: string) => setCreationDraft({ audience: v })
@@ -1514,6 +1594,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
   const briefDrafts = draft.briefEditDraft?.sessionId === brainstormState?.session_id ? draft.briefEditDraft?.values || {} : {}
   const briefDirty = Object.keys(briefDrafts).length > 0
   const [showBrief, setShowBrief] = useState(false)
+  const [unverifiedDraft, setUnverifiedDraft] = useState<string | null>(null)
+  const [showUnverifiedDraft, setShowUnverifiedDraft] = useState(false)
   const [isBriefSaving, setIsBriefSaving] = useState(false)
   useEffect(() => { setShowBrief(false) }, [brainstormState?.session_id])
   const [isBrainstormLoading, setIsBrainstormLoading] = useState(false)
@@ -1532,6 +1614,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     return () => window.clearInterval(timer)
   }, [brainstormStartedAt])
   const [brainstormError, setBrainstormError] = useState<string | null>(null)
+  const [brainstormStageSyncError, setBrainstormStageSyncError] = useState<{ sessionId: string; message: string } | null>(null)
+  const [brainstormStageSyncedSnapshot, setBrainstormStageSyncedSnapshot] = useState<string | null>(null)
   const [brainstormSelectedOptions, setBrainstormSelectedOptions] = useState<string[]>([])
   const [brainstormCustomAnswerSelected, setBrainstormCustomAnswerSelected] = useState(false)
   const [brainstormCustomAnswer, setBrainstormCustomAnswer] = useState('')
@@ -1647,6 +1731,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
   } | null>(null)
   const chatTimelineRef = useRef<HTMLDivElement>(null)
   const brainstormCardRef = useRef<HTMLElement>(null)
+  const brainstormStagesRef = useRef<HTMLDivElement>(null)
+  const brainstormScrollAnchorRef = useRef<string | null>(null)
   const brainstormContinuationRef = useRef<HTMLDivElement>(null)
   const workspaceRef = useRef<HTMLElement>(null)
   const workspaceResizeCleanupRef = useRef<(() => void) | null>(null)
@@ -2054,10 +2140,24 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
   }, [historySearch])
 
   useEffect(() => {
+    if (!active) return
     const controller = new AbortController()
     void loadCreationHistory(controller.signal)
     return () => controller.abort()
-  }, [loadCreationHistory])
+  }, [loadCreationHistory, active, topTab])
+
+  const historyHasStageWork = creationHistory.some(item => brainstormHistoryStatus(item.brainstormStageSummary, item.lifecycleStatus)?.poll)
+  useEffect(() => {
+    if (!active || topTab !== 'history' || !historyHasStageWork) return
+    const controller = new AbortController()
+    let timer: number
+    const refresh = async () => {
+      await loadCreationHistory(controller.signal)
+      if (!controller.signal.aborted) timer = window.setTimeout(refresh, 3000)
+    }
+    timer = window.setTimeout(refresh, 3000)
+    return () => { controller.abort(); window.clearTimeout(timer) }
+  }, [active, topTab, historyHasStageWork, loadCreationHistory])
 
   const openFullscreenPanel = (
     panel: Exclude<FullscreenPanel, null>,
@@ -2430,6 +2530,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     setIsGenerating(false)
     stopTimer()
     brainstormAbortRef.current?.abort()
+    setBrainstormStageSyncedSnapshot(null)
     setBrainstormPreparation(null)
     setIsBrainstormLoading(false)
     resetInlineOperation()
@@ -2447,7 +2548,11 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     setAttachments([])
     setComposerAddMenuOpen(false)
     setCreationMode(item.creationMode)
-    setCreationDraft({ brainstormPaused: Boolean(item.fullContent.trim()) })
+    const recoveredDraft = unverifiedChapterDraft(item)
+    setUnverifiedDraft(recoveredDraft)
+    setShowUnverifiedDraft(Boolean(recoveredDraft))
+    setShowBrief(false)
+    setCreationDraft({ workContext: item.workContext, brainstormPaused: Boolean(item.fullContent.trim()) })
     setBrainstormContinuationOpen(false)
     setBrainstormContinuationDirectionIds([])
     setBrainstormCustomDirection('')
@@ -3015,6 +3120,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
       capture_ids: [],
       doc_type: docType,
       audience,
+      ...(useAppStore.getState().creationDraft.workContext != null
+        ? { work_context: workContextForRequest(useAppStore.getState().creationDraft.workContext) } : {}),
       output_format: 'markdown',
       inherit_format: inheritFormat,
       enable_rag: memorySearchEnabled,
@@ -3157,6 +3264,10 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     snapshotOverride?: CreationSelectionSnapshot,
     customPromptOverride = '',
   ) => {
+    if (isCompletedProvisionalContentGapDraft(useAppStore.getState().creationDraft)) {
+      setInlineError(PROVISIONAL_CONTENT_GAP_GUIDANCE)
+      return
+    }
     const snapshot = snapshotOverride || inlineSelection
     const capabilities = inlineCapabilities
     const historyId = activeHistoryIdRef.current
@@ -3619,6 +3730,27 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     return finalContent
   }
 
+  const previewWorkCreation = async (action: WorkPreviewAction, signal: AbortSignal): Promise<WorkPreviewResult> => {
+    const live = useAppStore.getState().creationDraft
+    const instruction = live.prompt.trim() || live.rootRequest.trim() || live.conversation.find(item => item.role === 'user')?.content || ''
+    if (instruction.length > 4000) throw new Error('创作目标超过预览上限，请在输入框简要说明本次预览目标')
+    if (live.generatedContent.length > 24000) throw new Error('正文超过整篇预览上限，请先精简文档或按章节审阅')
+    if (action !== 'trial' && !live.generatedContent.trim()) throw new Error('请先生成正文，再审阅或生成决策摘要')
+    const response = await fetchWithLocalhostFallback(`${apiBaseUrl}/api/creation/work-quality/preview`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
+      body: JSON.stringify({ action, instruction, current_document: live.generatedContent,
+        work_context: workContextForRequest(live.workContext) || emptyWorkContext() }),
+    })
+    if (!response.ok) throw new Error('工作文档预览未完成，请稍后重试；正文已保留')
+    const result = await response.json() as WorkPreviewResult
+    if (!['candidate', 'pass', 'revise', 'unverified'].includes(result.status)) throw new Error('预览未返回有效结果，正文已保留')
+    if (useAppStore.getState().creationDraft.generatedContent !== live.generatedContent
+      || JSON.stringify(useAppStore.getState().creationDraft.workContext) !== JSON.stringify(live.workContext)) {
+      throw new Error('正文或工作设置已变化，请用当前内容重新预览')
+    }
+    return result
+  }
+
   const selectedSkillPayload = (discloseAvailable = false) => {
     const turnSkills = discloseAvailable ? installedSkills.map(skill => ({ skill })) : effectiveMatchedSkills()
     const primarySkillIds = new Set(turnSkills.map(({ skill }) => skill.id))
@@ -3654,16 +3786,19 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     })
   }
 
-  const selectedBrainstormSkillPayload = () => selectedSkillPayload().map(skill => ({
-    id: skill.id,
-    title: skill.title,
-    summary: skill.summary,
-    workflowRole: skill.workflowRole,
-    skillDescription: skill.skillDescription,
-    executionSteps: skill.executionSteps,
-    writingDesign: skill.writingDesign,
-    voiceStyle: skill.voiceStyle,
-  }))
+  const selectedBrainstormSkillPayload = () => {
+    const sourcesById = new Map<string, CreationSkillSelectionSource>()
+    for (const { skill, reason } of effectiveMatchedSkills()) {
+      sourcesById.set(skill.clientSkillKey || String(skill.id), reason === 'mentioned' ? 'user' : 'automatic')
+    }
+    // Freeze the same complete runtime policy the Agent sees. The Brainstorm
+    // session retains this snapshot; later chapter runs use Core's saved copy.
+    return selectedSkillPayload().map(skill => {
+      const selectionSource = skill.workflowRole === 'support' ? 'dependency' : sourcesById.get(skill.id)
+      if (!selectionSource) throw new Error('当前 Skill 缺少选择来源，请重新提交创作指令')
+      return { ...skill, selectionSource }
+    })
+  }
 
   const buildAgentPayload = (
     message: string,
@@ -3693,7 +3828,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
       instruction_id: activeUserEntryRef.current?.id,
       model_mode: useGatewayCreation && currentUser?.id ? 'external' : 'local',
       creation_mode: liveDraft.creationMode,
-      creation_brief: liveDraft.brainstormState,
+      creation_brief: creationBriefWithWorkContext(liveDraft.brainstormState, liveDraft.workContext),
       ...extras,
     }
   }
@@ -3806,17 +3941,19 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     }
     if (event.type === 'delivery.checked' || event.type === 'delivery.rechecked') {
       // 验收原文可能复述整段正文，只保留结论与修改意见，不持久化逐行证据。
-      const review = event.data?.review as Record<string, unknown> | undefined
+      const review = (event.data?.review || event.data?.delivery_review) as Record<string, unknown> | undefined
       const checks = Array.isArray(review?.checks) ? review?.checks as Array<Record<string, unknown>> : []
+      const failedReasons = failedDeliveryCheckReasons(event)
       return {
         ...base,
         data: {
           delivery_review: {
-            status: review?.status,
+            ...(safeDeliveryReviewForTrace(review) || {}),
             corrections: Array.isArray(review?.corrections) ? review?.corrections.slice(0, 12) : [],
-            failed_checks: checks
-              .filter(item => item?.passed === false)
-              .map(item => ({ id: item?.id, reason: String(item?.reason || '').slice(0, 200) })),
+            failed_checks: failedReasons.map((reason, index) => ({
+              id: checks.find(item => String(item?.reason || '').trim() === reason)?.id || `check-${index + 1}`,
+              reason,
+            })),
           },
         },
       }
@@ -3847,7 +3984,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
       return {
         ...base,
         data: { evidence: event.data?.evidence, response: event.data?.response,
-          committed_operation_id: event.data?.committed_operation_id, revision_no: event.data?.revision_no },
+          committed_operation_id: event.data?.committed_operation_id, revision_no: event.data?.revision_no,
+          delivery_review: safeDeliveryReviewForTrace(event.data?.delivery_review) || undefined },
       }
     }
     if (event.type === 'browser.preview.started' || event.type === 'browser.preview.completed') {
@@ -4238,7 +4376,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
             ? REMOTE_CREATION_MODEL_ID
             : LOCAL_CREATION_MODEL_ID,
           creation_mode: state.creationMode,
-          creation_brief: state.brainstormState,
+          creation_brief: creationBriefWithWorkContext(state.brainstormState, state.workContext),
           brainstorm_revision: state.brainstormState?.revision ?? null,
         }),
       })
@@ -4291,11 +4429,20 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
         // 每一轮都携带当前执行 Skill。Core 只在旧会话缺少 Skill 上下文时
         // 补写，因此恢复或继续历史脑暴也能获得章节覆盖图。
         selected_skills: selectedBrainstormSkillPayload(),
+        ...(payload.action === 'start' && useAppStore.getState().creationDraft.workContext != null
+          ? { work_context: workContextForRequest(useAppStore.getState().creationDraft.workContext) } : {}),
+        root_request: useAppStore.getState().creationDraft.rootRequest || useAppStore.getState().creationDraft.brainstormState?.root_request,
         ...payload,
       }, controller.signal)
       assertRequestActive()
       const normalized = normalizeBrainstormState(body)
       if (!normalized) throw new Error('脑暴状态为空')
+      // Explicit session restoration uses saved settings; progress polling never overwrites edits.
+      if (payload.action === 'start' && useAppStore.getState().creationDraft.brainstormState?.session_id !== normalized.session_id) {
+        const savedContext = readWorkContext(normalized.work_context)
+        if (savedContext) setCreationDraft({ workContext: savedContext })
+      }
+      if (normalized.stage_workflow) setBrainstormStageSyncedSnapshot(brainstormStageSnapshotKey(normalized))
       // 脑暴请求成功说明用户的重试已经恢复。正式生成与脑暴使用两个独立
       // 错误状态，若只清理卡片错误，之前的通用“生成失败”仍会残留在输入框
       // 下方，与新问题同时出现。
@@ -4347,7 +4494,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
       const next = await postBrainstormTurn({
         session_id: targetSessionId,
         root_request: request,
-        action: 'start',
+        action: useAppStore.getState().creationDraft.brainstormState?.stage_workflow ? 'status' : 'start',
         selected_skills: selectedBrainstormSkillPayload(),
       }, controller)
       if (!isRestoreActive()) return null
@@ -4422,6 +4569,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
         session_id: activeSessionId,
         root_request: submittedRequest,
         action: 'start',
+        workflow_version: 2,
         selected_skills: selectedBrainstormSkillPayload(),
       }, controller)
       if (!isPreparationActive()) return
@@ -4637,6 +4785,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
       if (!isRequestActive()) return null
       const body = await requestBrainstormTurn<CreationBrainstormState>(`${apiBaseUrl}/api/creation/brainstorm/turn`, {
         selected_skills: selectedBrainstormSkillPayload(),
+        ...(payload.action === 'start' && useAppStore.getState().creationDraft.workContext != null
+          ? { work_context: workContextForRequest(useAppStore.getState().creationDraft.workContext) } : {}),
         session_id: active.sessionId,
         root_request: active.rootRequest,
         ...payload,
@@ -4662,6 +4812,10 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
   }
 
   const beginInlineBrainstorm = async () => {
+    if (isCompletedProvisionalContentGapDraft(useAppStore.getState().creationDraft)) {
+      setInlineError(PROVISIONAL_CONTENT_GAP_GUIDANCE)
+      return
+    }
     const snapshot = inlineSelection
     if (!snapshot || !inlineCapabilities?.enabled || inlineRunningAction || isGenerating || manualEdit) return
     const now = Date.now()
@@ -4742,6 +4896,10 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
   }
 
   const applyInlineBrainstorm = async () => {
+    if (isCompletedProvisionalContentGapDraft(useAppStore.getState().creationDraft)) {
+      setInlineBrainstorm(current => current ? { ...current, error: PROVISIONAL_CONTENT_GAP_GUIDANCE } : current)
+      return
+    }
     const active = inlineBrainstorm
     if (!active?.state || active.state.phase !== 'ready' || active.applied) return
     const conclusions = active.state.decisions
@@ -4818,7 +4976,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
         evidence: [],
         lifecycle_status: lifecycleStatus,
         creation_mode: state.creationMode,
-        creation_brief: state.brainstormState,
+        creation_brief: creationBriefWithWorkContext(state.brainstormState, state.workContext),
         brainstorm_revision: state.brainstormState?.revision ?? null,
       }),
     })
@@ -4956,7 +5114,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
           evidence: Array.isArray(evidence) ? evidence : [],
           lifecycle_status: lifecycleStatus,
           creation_mode: state.creationMode,
-          creation_brief: state.brainstormState,
+          creation_brief: creationBriefWithWorkContext(state.brainstormState, state.workContext),
           brainstorm_revision: state.brainstormState?.revision ?? null,
         }),
       })
@@ -4989,6 +5147,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
   const appendAssistantCompletion = (
     chat: CreationChatMessage[],
     runId: string | null,
+    chapterCompletion = false,
   ) => {
     const activeUserEntry = activeUserEntryRef.current
     const ensuredChat = activeUserEntry && !chat.some(item => item.id === activeUserEntry.id)
@@ -5020,7 +5179,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     const assistant: CreationChatMessage = {
       id: `assistant-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       role: 'assistant',
-      content: typeof directResponse === 'string' && directResponse ? directResponse : isInitialCreation
+      content: chapterCompletion ? '本章内容已生成，正在确认交付结果。' : typeof directResponse === 'string' && directResponse ? directResponse : isInitialCreation
         ? '首版文档已生成。你可以继续提出修改要求，我会基于当前版本继续优化。'
         : patch
           ? `${patchSummary}。你可以继续修改。`
@@ -5080,12 +5239,28 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     userMessage,
     confirmed = false,
     appendUser = true,
+    brainstormChapterId,
+    chapterInstructionId,
   }: {
     userMessage: string
     confirmed?: boolean
     appendUser?: boolean
+    brainstormChapterId?: string
+    chapterInstructionId?: string
   }) => {
     if (inlineRunningAction || inlineUndoAbortRef.current || manualEdit) return
+    if (isCompletedProvisionalContentGapDraft(useAppStore.getState().creationDraft)) {
+      setError(PROVISIONAL_CONTENT_GAP_GUIDANCE)
+      return
+    }
+    setUnverifiedDraft(null)
+    setShowUnverifiedDraft(false)
+    const chapterWorkflow = useAppStore.getState().creationDraft.brainstormState?.stage_workflow
+    const recoveringChapter = chapterWorkflow?.chapters.find(item => item.id === chapterWorkflow.active_chapter_id && item.status === 'writing')
+    if (recoveringChapter) {
+      brainstormChapterId = brainstormChapterId || recoveringChapter.id
+      chapterInstructionId = chapterInstructionId || recoveringChapter.instruction_id
+    }
     const message = userMessage.trim()
     if (!message) return
     setInlineUndo(null)
@@ -5097,13 +5272,13 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     activeUserMessageRef.current = message
     const liveConversation = useAppStore.getState().creationDraft.conversation
     const existingUserEntry = !appendUser
-      ? liveConversation.find(item => item.id === activeUserEntryRef.current?.id)
+      ? liveConversation.find(item => item.id === (chapterInstructionId || activeUserEntryRef.current?.id))
         || [...liveConversation].reverse().find(item => (
           item.role === 'user' && item.content.trim() === message
         ))
       : undefined
     let userEntry: CreationChatMessage = existingUserEntry || {
-      id: `user-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      id: chapterInstructionId || `user-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       role: 'user',
       content: message,
       createdAt: Date.now(),
@@ -5203,6 +5378,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
       let payload = buildAgentPayload(message, chat, {
         session_id: activeSessionId,
         confirmed,
+        ...(brainstormChapterId ? { brainstorm_chapter_id: brainstormChapterId, instruction_id: chapterInstructionId } : {}),
       })
       let finalRunId: string | null = null
       while (true) {
@@ -5228,12 +5404,14 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
             model_result: modelResult,
             model_request_id: phase.modelRequestId,
             confirmed: true,
+            ...(brainstormChapterId ? { brainstorm_chapter_id: brainstormChapterId, instruction_id: chapterInstructionId } : {}),
           })
           continue
         }
         if (phase.resumeOperationId) {
           payload = buildAgentPayload(message, chat, { session_id: activeSessionId,
-            resume_operation_id: phase.resumeOperationId })
+            resume_operation_id: phase.resumeOperationId,
+            ...(brainstormChapterId ? { brainstorm_chapter_id: brainstormChapterId, instruction_id: chapterInstructionId } : {}) })
           continue
         }
         if (!phase.completed) throw new Error('创作 Agent 未完成，也没有返回可恢复动作')
@@ -5248,17 +5426,41 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
       const latencyMs = Date.now() - startedAt
       setLastInferenceMeta({ model: usedModelId, latencyMs })
       const currentConversation = useAppStore.getState().creationDraft.conversation
-      const finalChat = appendAssistantCompletion(currentConversation, finalRunId)
-      if (useAppStore.getState().creationDraft.creationMode === 'brainstorm') {
+      const finalChat = appendAssistantCompletion(currentConversation, finalRunId, Boolean(brainstormChapterId))
+      if (useAppStore.getState().creationDraft.creationMode === 'brainstorm' && !brainstormChapterId) {
         // 生成文档不会提交或结束脑暴，但问题交互应等待用户显式恢复。
         setCreationDraft({ brainstormPaused: true })
         setBrainstormContinuationOpen(false)
       }
       await persistCreationResult(message, finalContent, finalChat, usedModelId, latencyMs, 'completed', documentBase)
       assertRunActive()
+      if (brainstormChapterId) {
+        const current = useAppStore.getState().creationDraft.brainstormState
+        const next = await postBrainstormTurn({ session_id: activeSessionId, action: 'chapter_completed',
+          chapter_id: brainstormChapterId, revision: current?.revision })
+        // This is a server-accepted completion, even if the user stopped the
+        // already-completed stream while the acknowledgement was in flight.
+        // postBrainstormTurn still guards the session and termination boundary.
+        setBrainstormState(next)
+        setCreationDraft({ brainstormPaused: false })
+        const completionId = finalChat[finalChat.length - 1]?.id
+        setConversation(useAppStore.getState().creationDraft.conversation.map(item => item.id === completionId ? {
+          ...item, content: next.phase === 'completed'
+            ? '全部章节已通过交付检查，创作已完成。你可以继续提出修改要求。'
+            : '本章已通过交付检查。请继续确认下一章设计，已完成的正文会保留。',
+        } : item))
+        await persistCreationProgress('completed', latencyMs)
+        assertRunActive()
+      }
       setAttachments([])
     } catch (err) {
       if (!isRunActive()) return
+      if (brainstormChapterId) {
+        setConversation(useAppStore.getState().creationDraft.conversation.map(item => item.role === 'assistant'
+          && item.content === '本章内容已生成，正在确认交付结果。' ? {
+            ...item, content: '本章内容已保留，交付检查尚未完成。请继续本章创作，完成后再进入下一章。',
+          } : item))
+      }
       const code = (err as Error & { code?: string })?.code
       // 旧生成器不传递脑暴简报，不能在降级时丢失用户已确认的回答。
       if (code === 'CREATION_AGENT_NOT_AVAILABLE' && !useAppStore.getState().creationDraft.brainstormState) {
@@ -5376,6 +5578,11 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     if (inlineRunningAction || inlineUndoAbortRef.current) return
     if (isCreationSessionTerminated(useAppStore.getState().creationDraft)) return
     if (creationMode === 'brainstorm') {
+      if (stageWorkflow && brainstormState?.phase !== 'completed') return
+      if (stageWorkflow && brainstormState?.phase === 'completed') {
+        await runAgentTurn({ userMessage: prompt })
+        return
+      }
       if (brainstormPaused && generatedContent.trim() && brainstormState?.phase !== 'ready') {
         await runAgentTurn({ userMessage: prompt })
         return
@@ -5420,6 +5627,96 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
       ].join(''),
     })
   }
+
+  const advanceBrainstormStage = async (action: 'confirm_stage' | 'retry_stage' | 'review_inputs') => {
+    if (briefDirty || isBriefSaving) { setBrainstormError('请先保存创作简报修改'); setShowBrief(true); return }
+    const state = useAppStore.getState().creationDraft.brainstormState
+    if (!state?.stage_workflow || isBrainstormLoading || isGenerating) return
+    setIsBrainstormLoading(true)
+    try {
+      const next = await postBrainstormTurn({ session_id: state.session_id, action, revision: state.revision })
+      setBrainstormState(next)
+      setBrainstormHistoryIndex(null)
+      setShowBrief(true)
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') setBrainstormError(toUserFacingError(err, '阶段进度更新失败，请重试'))
+    } finally { setIsBrainstormLoading(false) }
+  }
+
+  const createBrainstormChapter = async () => {
+    if (briefDirty || isBriefSaving) { setBrainstormError('请先保存创作简报修改'); setShowBrief(true); return }
+    const state = useAppStore.getState().creationDraft.brainstormState
+    const workflow = state?.stage_workflow
+    const chapter = workflow?.chapters.find(item => item.id === workflow.active_chapter_id)
+    if (!state || !chapter || isGenerating || isBrainstormLoading) return
+    setIsBrainstormLoading(true)
+    let next: CreationBrainstormState
+    try {
+      next = await postBrainstormTurn({ session_id: state.session_id, action: 'confirm_chapter',
+        chapter_id: chapter.id, revision: state.revision })
+      setBrainstormState(next)
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') setBrainstormError(toUserFacingError(err, '本章设计确认失败，请重试'))
+      return
+    } finally { setIsBrainstormLoading(false) }
+    const confirmed = next.stage_workflow?.chapters.find(item => item.id === chapter.id)
+    if (!confirmed?.instruction_id) { setBrainstormError('本章创作指令尚未准备好，请刷新进度后重试'); return }
+    setShowBrief(false)
+    setCreationDraft({ brainstormPaused: false })
+    await runAgentTurn({ userMessage: `按照已确认的章节设计创作“${confirmed.title}”，保留已有章节内容。`,
+      brainstormChapterId: chapter.id, chapterInstructionId: confirmed.instruction_id,
+      appendUser: !useAppStore.getState().creationDraft.conversation.some(item => item.id === confirmed.instruction_id) })
+  }
+
+  // Stage generation belongs to Core. Unmounting or switching away cancels only
+  // this read; persisted generation continues and is restored when returning.
+  useEffect(() => {
+    if (!active || !stageWorkflow || !sessionId || sessionTerminated || isGenerating || isBrainstormLoading) return
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let synchronizationFailures = 0
+    const poll = async () => {
+      try {
+        const next = await requestBrainstormTurn<CreationBrainstormState>(`${apiBaseUrl}/api/creation/brainstorm/turn`, {
+          session_id: sessionId, action: 'status', root_request: useAppStore.getState().creationDraft.rootRequest || useAppStore.getState().creationDraft.brainstormState?.root_request,
+        }, controller.signal)
+        const current = useAppStore.getState().creationDraft
+        if (controller.signal.aborted || current.sessionId !== sessionId || isCreationSessionTerminated(current)) return
+        synchronizationFailures = 0
+        // Status reads own their message. A successful poll must not erase an
+        // unrelated answer, confirmation or edit error awaiting user action.
+        setBrainstormStageSyncError(null)
+        if (next.revision >= (current.brainstormState?.revision || 0)) {
+          const normalized = normalizeBrainstormState(next)
+          if (normalized) {
+            setBrainstormStageSyncedSnapshot(brainstormStageSnapshotKey(normalized))
+            setBrainstormState(normalized)
+          }
+        }
+        if (next.stage_workflow?.stages.some(stage => stage.status === 'thinking')) timer = setTimeout(poll, 1500)
+      } catch (err) {
+        if (controller.signal.aborted || (err as { name?: string })?.name === 'AbortError') return
+        synchronizationFailures += 1
+        const retryDelay = brainstormStatusSyncRetryDelay(err, synchronizationFailures)
+        if (retryDelay === null) {
+          setBrainstormStageSyncError({ sessionId, message: toUserFacingError(err, '进度无法同步，请检查本地服务连接后返回页面重试') })
+          return
+        }
+        // Brief service restarts and network interruptions recover in the
+        // background. Persistent outages become visible after bounded silence.
+        if (synchronizationFailures > 3) {
+          const savedWorkflow = useAppStore.getState().creationDraft.brainstormState?.stage_workflow
+          const knownThinking = savedWorkflow?.stages.some(stage => stage.id === savedWorkflow.active_stage && stage.status === 'thinking')
+          setBrainstormStageSyncError({ sessionId, message: knownThinking
+            ? '进度暂时无法同步，后台思考仍会继续；请检查本地服务连接。'
+            : '进度暂时无法同步，已保存的内容会保留；请检查本地服务连接。' })
+        }
+        timer = setTimeout(poll, retryDelay)
+      }
+    }
+    void poll()
+    return () => { controller.abort(); if (timer) clearTimeout(timer) }
+  }, [active, apiBaseUrl, sessionId, stageWorkflow?.version, activeBrainstormStage?.generation_id, activeBrainstormStage?.status, sessionTerminated, isGenerating, isBrainstormLoading])
 
   // 创作 Loop 运行在桌面页面进程内。应用重启后，数据库里的 running 记录仍在，
   // 但旧 SSE / 模型请求已经不存在；启动时自动认领最近一条手动创作记录，沿用
@@ -5661,7 +5958,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     void persistCreationProgress('cancelled', elapsedSeconds * 1000)
   }
 
-  const handleNewConversation = () => {
+  const handleNewConversation = (nextMode: CreationMode = 'direct') => {
     if ((!sessionTerminated && (isGenerating || isBrainstormLoading || pendingConfirmation)) || !hasActiveSession) return
     if (manualEditSaving || manualEditLoading || (manualEdit && manualEdit.draft !== manualEdit.baseContent)) {
       setManualEditError('请先保存或取消当前文档编辑；未保存草稿已保留')
@@ -5687,6 +5984,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     setInlinePromptOpen(false)
     setInlineCustomPrompt('')
     setInlineError('')
+    setUnverifiedDraft(null)
+    setShowUnverifiedDraft(false)
     activeUserMessageRef.current = ''
     activeUserEntryRef.current = null
     legacyDataRecoveryRef.current += 1
@@ -5703,9 +6002,10 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
       rootRequest: '',
       conversation: [],
       agentEvents: [],
-      creationMode: 'direct',
+      creationMode: nextMode,
       brainstormState: null,
       brainstormPaused: undefined,
+      workContext: undefined,
     })
     setBrainstormSelectedOptions([])
     setBrainstormCustomAnswerSelected(false)
@@ -5776,6 +6076,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
   useEffect(() => {
     const timeline = chatTimelineRef.current
     if (!timeline) return
+    if (stageWorkflow && !active) { brainstormScrollAnchorRef.current = null; return }
     const inlineViewport = inlineTimelineViewportRef.current
     if (inlineViewport) {
       timeline.scrollTop = inlineViewport.scrollTop
@@ -5785,12 +6086,23 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     // Brainstorm turns begin with a question. Keep its heading in view when
     // opening, answering or revisiting a turn, even if the options are tall.
     const card = brainstormCardRef.current
+    if (stageWorkflow && !isGenerating) {
+      const anchor = activeBrainstormStage?.status === 'answering' && card ? card : brainstormStagesRef.current
+      const anchorKey = [sessionId, activeBrainstormStage?.generation_id, activeBrainstormStage?.status,
+        stageWorkflow.active_chapter_id, brainstormState?.current_question?.id, brainstormHistoryIndex].join(':')
+      if (anchor && brainstormScrollAnchorRef.current !== anchorKey) {
+        timeline.scrollTop += anchor.getBoundingClientRect().top - timeline.getBoundingClientRect().top
+        brainstormScrollAnchorRef.current = anchorKey
+      }
+      return
+    }
+    brainstormScrollAnchorRef.current = null
     if (creationMode === 'brainstorm' && brainstormState && !agentEvents.length && card) {
       timeline.scrollTop += card.getBoundingClientRect().top - timeline.getBoundingClientRect().top
       return
     }
     timeline.scrollTop = timeline.scrollHeight
-  }, [agentEvents, brainstormError, brainstormState, brainstormHistoryIndex, conversation, pendingConfirmation, creationMode])
+  }, [active, isGenerating, agentEvents, brainstormError, brainstormState, brainstormHistoryIndex, conversation, pendingConfirmation, creationMode])
 
   useEffect(() => {
     if (!brainstormContinuationOpen) return undefined
@@ -5898,6 +6210,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
     ? null
     : brainstormHistory[brainstormHistoryIndex] || null
   const brainstormQuestion = brainstormHistoryTurn?.question || brainstormState?.current_question || null
+  const brainstormInputPreflight = stageWorkflow?.stages.find(stage =>
+    stage.questions.some(question => question.id === brainstormQuestion?.id))?.input_preflight
   const brainstormWhyNow = brainstormQuestion?.why_now || ''
   const shouldShowBrainstormWhyNow = Boolean(brainstormWhyNow)
     && !/\b(?:next_question_goal|dimension_id|required_coverage|force_continue|focus_hint)\b/i.test(brainstormWhyNow)
@@ -6057,12 +6371,33 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
 
   const hasBrainstormTimelineTurn = creationMode === 'brainstorm'
     && Boolean(brainstormState || brainstormError || isBrainstormLoading)
+  const showingUnverifiedDraft = Boolean(unverifiedDraft && showUnverifiedDraft && !showBrief && !isGenerating)
+  const showingBrief = Boolean(brainstormState && (showBrief || (!selectionStableContent && !showingUnverifiedDraft)))
   const brainstormGenerationStarted = creationMode === 'brainstorm'
-    && (agentEvents.length > 0 || Boolean(generatedContent.trim()))
+    && !stageWorkflow && (agentEvents.length > 0 || Boolean(generatedContent.trim()))
+  // A restored brief can predate Core's automatic recovery. Until the first
+  // current response, show synchronization rather than its stale failed card.
+  const awaitingBrainstormStageSync = activeBrainstormStage?.status === 'failed'
+    && brainstormStageSyncedSnapshot !== brainstormStageSnapshotKey(brainstormState)
+  const stageNextStep = stageWorkflow && brainstormState?.phase !== 'completed'
+    ? awaitingBrainstormStageSync
+      ? `${brainstormStageTitle(stageWorkflow.active_stage)}阶段进度同步中，可稍后返回`
+      : activeBrainstormStage?.status === 'thinking'
+      ? `${brainstormStageTitle(stageWorkflow.active_stage)}阶段模型思考中，可稍后返回`
+      : activeBrainstormStage?.status === 'failed'
+        ? '思考进度已保存，请继续本阶段思考'
+        : brainstormState?.phase === 'chapter_writing'
+          ? isGenerating ? '本章创作中，正文会实时更新' : '请继续本章创作，已有正文会保留'
+          : stageWorkflow.active_stage === 'writing'
+            ? '请在上方确认本章设计，再创作本章内容'
+            : activeBrainstormStage?.status === 'ready'
+              ? '请确认本阶段结果，开始下一阶段思考'
+              : '请在上方逐项确认本阶段的创作思路'
+    : null
   const brainstormCardState = brainstormGenerationStarted && anchoredBrainstormState
     ? anchoredBrainstormState
     : brainstormState
-  const brainstormIsDraftSnapshot = (anchoredBrainstormState || brainstormState)?.phase === 'exploring'
+  const brainstormIsDraftSnapshot = !stageWorkflow && (anchoredBrainstormState || brainstormState)?.phase === 'exploring'
     && (isGenerating || brainstormGenerationStarted || brainstormPaused)
   // 正式生成后的继续脑暴属于新的对话回合，不能塞回已经锚定的旧脑暴卡片。
   // 服务端在答案提交后会把 current_question 移入 history；若这里只渲染当前
@@ -6264,7 +6599,13 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
               </div>
             ) : creationHistory.length > 0 ? (
               <div className="creation-history__list">
-                {creationHistory.map((item) => (
+                {creationHistory.map((item) => {
+                  const stageStatus = brainstormHistoryStatus(item.brainstormStageSummary, item.lifecycleStatus)
+                  const showOperationStatus = !stageStatus || item.brainstormStageSummary?.phase === 'completed'
+                  const hasUnverifiedDraft = Boolean(unverifiedChapterDraft(item))
+                  const hasProvisionalContentGap = item.lifecycleStatus === 'completed'
+                    && hasProvisionalDeliveryFromTrace(item.fullContent, item.agentEvents, item.sessionId || null)
+                  return (
                   <article className="creation-history__entry" key={item.id}>
                     <button
                       type="button"
@@ -6277,16 +6618,25 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                       }}
                     >
                       <span className="creation-history__title">
-                        {item.prompt}
-                        {item.lifecycleStatus === 'running' && (
+                        <span className="creation-history__prompt">{item.prompt}</span>
+                        {stageStatus && (
+                          <span className={`creation-history__lifecycle is-${stageStatus.tone}`}>
+                            {stageStatus.tone === 'running' && <Loader2 className="spin" size={12} />}
+                            {stageStatus.label}
+                          </span>
+                        )}
+                        {hasProvisionalContentGap && (
+                          <span className="creation-history__lifecycle is-provisional">资料待核实草稿</span>
+                        )}
+                        {showOperationStatus && item.lifecycleStatus === 'running' && (
                           <span className="creation-history__lifecycle is-running">
                             <Loader2 className="spin" size={12} /> 进行中
                           </span>
                         )}
-                        {item.lifecycleStatus === 'failed' && (
+                        {showOperationStatus && item.lifecycleStatus === 'failed' && (
                           <span className="creation-history__lifecycle is-failed">失败</span>
                         )}
-                        {item.lifecycleStatus === 'cancelled' && (
+                        {showOperationStatus && item.lifecycleStatus === 'cancelled' && (
                           <span className="creation-history__lifecycle is-cancelled">已中止</span>
                         )}
                       </span>
@@ -6299,14 +6649,22 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                         )}
                         完整会话 · {item.timestamp} · 模型：{getModelDisplayName(item.model)} · 推理耗时：{formatInferenceLatency(item.latencyMs)}
                       </span>
+                      {stageStatus?.detail && <span className="creation-history__meta">{stageStatus.detail}</span>}
+                      {hasUnverifiedDraft && (
+                        <span className="creation-history__meta">待核验草稿已保留，打开后可查看交付缺口</span>
+                      )}
+                      {hasProvisionalContentGap && (
+                        <span className="creation-history__meta">资料来源仍待核实，打开后可查看交付说明</span>
+                      )}
                       <span className="creation-history__preview">
-                        {item.preview || (item.lifecycleStatus === 'running'
+                        {item.preview || stageStatus?.description || (item.lifecycleStatus === 'running'
                           ? '创作正在后台持续进行，点击查看实时进度。'
                           : '本次创作暂无正文内容。')}
                       </span>
                     </button>
                   </article>
-                ))}
+                  )
+                })}
               </div>
             ) : (
               <div className="history-browser__state">
@@ -6654,13 +7012,15 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
             '--creation-left-pane': `${workspaceSplit}%`,
           } as React.CSSProperties}
         >
-          <section className="creation-chat-shell" aria-label="创作对话">
+          <section className="creation-chat-shell" aria-label="创作对话" data-stage-workflow={stageWorkflow ? 'true' : undefined}>
             <header className="creation-chat-header">
               <div>
                 <Bot size={18} />
                 <strong>创作 Agent</strong>
                 {sessionTerminated
                   ? <span>会话已终止，已有内容仍可查看</span>
+                  : provisionalContentGapDraft ? <span>本期资料来源待核实，可手动编辑</span>
+                  : stageNextStep ? <span>{stageNextStep}</span>
                   : generatedContent && <span>继续对话优化当前文档</span>}
               </div>
               <div className="creation-chat-header__actions">
@@ -6679,7 +7039,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                 <button
                   type="button"
                   className="creation-new-session-button"
-                  onClick={handleNewConversation}
+                  onClick={() => handleNewConversation()}
                   disabled={(!sessionTerminated && (isGenerating || isBrainstormLoading || Boolean(pendingConfirmation))) || !hasActiveSession || Boolean(manualEdit) || manualEditSaving}
                   aria-label="开启新会话"
                   title={isGenerating || isBrainstormLoading || pendingConfirmation
@@ -6703,6 +7063,13 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                 aria-live="polite"
               >
                 {timelineBeforeBrainstorm.map(renderCreationTimelineItem)}
+                {creationMode === 'brainstorm' && stageWorkflow && !sessionTerminated && <div ref={brainstormStagesRef} className="creation-brainstorm-stage-anchor"><CreationBrainstormStages
+                  workflow={stageWorkflow} busy={isGenerating || isBrainstormLoading || isBriefSaving} synchronizing={awaitingBrainstormStageSync}
+                  reviewInputsAvailable={brainstormState?.phase !== 'completed'}
+                  onConfirmStage={() => void advanceBrainstormStage('confirm_stage')}
+                  onRetry={() => void advanceBrainstormStage('retry_stage')}
+                  onReviewInputs={() => void advanceBrainstormStage('review_inputs')}
+                  onConfirmChapter={() => void createBrainstormChapter()} /></div>}
             {creationMode === 'brainstorm' && isBrainstormLoading && !brainstormState && (
               <article className="creation-brainstorm-turn" aria-label="Agent 正在思考">
                 <div className="creation-chat-message__meta">
@@ -6712,26 +7079,26 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                 <section
                   className="creation-brainstorm-card creation-brainstorm-card--loading"
                   role="status"
-                  aria-label="正在准备第一条脑暴问题"
+                  aria-label={brainstormPreparation?.phase === 'restoring_session' ? '正在准备第一条脑暴问题' : '正在准备创作方向脑暴'}
                 >
                   <span className="creation-brainstorm-card__loading-icon" aria-hidden="true">
                     <Loader2 size={19} className="spin" />
                   </span>
                   <div className="creation-brainstorm-card__loading-copy">
-                    <span className="creation-brainstorm-card__eyebrow">正在准备第一条脑暴问题</span>
+                    <span className="creation-brainstorm-card__eyebrow">{brainstormPreparation?.phase === 'restoring_session' ? '正在恢复脑暴进度' : '正在准备创作方向脑暴'}</span>
                     <strong>{brainstormPreparation?.phase === 'matching_skills'
                       ? '正在匹配创作技能'
                       : brainstormPreparation?.phase === 'saving_session'
                         ? '正在保存创作会话'
                         : brainstormPreparation?.phase === 'generating_question'
-                          ? '正在生成第一条脑暴问题'
+                          ? '正在启动创作方向阶段思考'
                           : '正在恢复脑暴进度'}</strong>
                     <p>{brainstormPreparation?.phase === 'matching_skills'
-                      ? '正在确认适合本次创作的技能，完成后开始生成脑暴问题。'
+                      ? '正在确认适合本次创作的技能，完成后准备方向阶段的完整思路。'
                       : brainstormPreparation?.phase === 'saving_session'
                         ? '正在保存本次创作要求，方便之后恢复进度。'
                         : brainstormPreparation?.phase === 'generating_question'
-                          ? '已发送脑暴请求，正在等待模型返回第一条问题。'
+                          ? '已提交阶段思考任务，正在获取后台生成进度。'
                           : '已请求恢复进度；尚未保存首题时会继续生成。'}</p>
                     {brainstormPreparation && <p aria-live="off">已等待 {brainstormWaitSeconds} 秒</p>}
                     {brainstormPreparation && brainstormWaitSeconds >= 30 && (
@@ -6744,7 +7111,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
             {creationMode === 'brainstorm' && brainstormError && !brainstormState && (
               <div className="creation-brainstorm-card__error" role="alert">{brainstormError}</div>
             )}
-            {creationMode === 'brainstorm' && brainstormState && (
+            {creationMode === 'brainstorm' && brainstormState && (!stageWorkflow || Boolean(brainstormQuestion) || sessionTerminated) && (
               <article className="creation-brainstorm-turn" aria-label="Agent 消息">
                 <div className="creation-chat-message__meta">
                   <span>创作 Agent</span>
@@ -6762,6 +7129,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                         ? '切换脑暴方向'
                         : brainstormCardState?.phase === 'ready' && !brainstormIsReviewingHistory
                         ? '创作简报已就绪'
+                        : stageWorkflow ? `${brainstormStageTitle(stageWorkflow.active_stage)} · ${brainstormIsReviewingHistory ? '回看已答问题' : '确认你的思路'}`
                         : `${brainstormQuestion?.dimension || '需求梳理'} · ${brainstormIsReviewingHistory ? '回看已答问题' : `第 ${(brainstormCardState?.depth || 0) + 1} 轮模型追问`}`}
                     </span>
                     <BrainstormPrompt text={brainstormCardState?.phase === 'abandoned'
@@ -6786,7 +7154,9 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                         <ChevronLeft size={14} aria-hidden />
                       </button>
                       <span aria-live="polite">
-                        {brainstormIsReviewingHistory || brainstormCardState?.current_question
+                        {stageWorkflow
+                          ? `${brainstormIsReviewingHistory ? '回看' : '当前'}第 ${brainstormPageIndex + 1} 题 · 已回答 ${brainstormHistory.length} 题`
+                          : brainstormIsReviewingHistory || brainstormCardState?.current_question
                           ? `第 ${brainstormPageIndex + 1} / ${Math.max(1, brainstormPageCount)} 题`
                           : `${brainstormHistory.length} 题已完成`}
                       </span>
@@ -6913,6 +7283,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                 ) : brainstormQuestion ? (
                   <>
                     <CreationBrainstormBranch state={brainstormState} question={brainstormQuestion} />
+                    <CreationBrainstormInputEvidence question={brainstormQuestion} preflight={brainstormInputPreflight} />
                     <BrainstormContext text={shouldShowBrainstormWhyNow ? brainstormWhyNow : ''}
                       details={brainstormQuestion.context_details} />
                     <p className="creation-brainstorm-card__why">{brainstormQuestion.type === 'multi_choice' ? '可多选 · 先逐一讨论同层方向，再展开下一层' : `单选${brainstormQuestion.single_choice_reason ? ` · ${brainstormQuestion.single_choice_reason}` : ''}`}</p>
@@ -6981,6 +7352,9 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                         />
                       </label>
                     )}
+                    {brainstormQuestion.input_clarification && brainstormQuestion.required && !brainstormIsReviewingHistory && (
+                      <p className="creation-brainstorm-card__why">这项资料口径需要你确认；请选择一项或填写自定义答案后继续。</p>
+                    )}
                     <footer>
                       {brainstormIsReviewingHistory ? (
                         <button
@@ -6993,24 +7367,26 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                         </button>
                       ) : (
                         <>
-                          <button type="button" className="is-secondary" onClick={() => void skipBrainstormQuestion('exclude')} disabled={isBrainstormLoading} title="不再展开此方向，生成的文档也不会包含相关内容">该方向不重要</button>
-                          <button
-                            type="button"
-                            className="is-secondary"
-                            onClick={() => void skipBrainstormQuestion()}
-                            disabled={isBrainstormLoading}
-                          >
-                            跳过此题
-                          </button>
-                          <button
+                          {!(brainstormQuestion.input_clarification && brainstormQuestion.required) && <>
+                            <button type="button" className="is-secondary" onClick={() => void skipBrainstormQuestion('exclude')} disabled={isBrainstormLoading} title="不再展开此方向，生成的文档也不会包含相关内容">该方向不重要</button>
+                            <button
+                              type="button"
+                              className="is-secondary"
+                              onClick={() => void skipBrainstormQuestion()}
+                              disabled={isBrainstormLoading}
+                            >
+                              跳过此题
+                            </button>
+                          </>}
+                          {!stageWorkflow && <button
                             type="button"
                             className="is-secondary"
                             onClick={() => void changeBrainstormDirection()}
                             disabled={isBrainstormLoading}
                           >
                             <Lightbulb size={15} /> 换一个脑暴方向
-                          </button>
-                          <button
+                          </button>}
+                          {!stageWorkflow && <button
                             type="button"
                             className="is-secondary"
                             onClick={() => void generateBrainstormDraft()}
@@ -7018,7 +7394,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                             title="基于已提交的回答生成一版文档，未答问题保留待确认"
                           >
                             <FileText size={15} /> 先生成一版
-                          </button>
+                          </button>}
                         </>
                       )}
                       <button
@@ -7042,6 +7418,8 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                 </section>
               </article>
             )}
+                {stageWorkflow && brainstormError && !brainstormQuestion && <div className="creation-brainstorm-card__error" role="alert">{brainstormError}</div>}
+                {stageWorkflow && brainstormStageSyncError?.sessionId === sessionId && <div className="creation-brainstorm-card__error" role="alert">{brainstormStageSyncError.message}</div>}
                 {timelineAfterBrainstorm.map(renderCreationTimelineItem)}
                 {creationMode === 'brainstorm'
                   && brainstormGenerationStarted
@@ -7314,6 +7692,15 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                 )}
               </div>
             )}
+            {provisionalContentGapDraft && (
+              <div className="creation-provisional-gap-guidance" role="status">
+                <span>{PROVISIONAL_CONTENT_GAP_GUIDANCE}</span>
+                <button type="button" onClick={() => handleNewConversation('brainstorm')}
+                  disabled={Boolean(manualEdit) || manualEditSaving || isGenerating || isBrainstormLoading}>
+                  新建创作
+                </button>
+              </div>
+            )}
             <div className="creation-prompt-skill-shell" ref={promptSkillShellRef}>
               <MentionHighlightTextarea
                 ref={promptInputRef}
@@ -7370,12 +7757,12 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                     void addFiles(files, true)
                   }
                 }}
-                placeholder={generatedContent
+                placeholder={provisionalContentGapDraft ? '本期资料待核实；新建创作后可使用新增资料。' : stageNextStep || (generatedContent
                   ? '继续告诉 Agent 如何修改当前文档。Enter 发送，Shift+Enter 换行；输入 @ 可选择技能。'
-                  : `${defaultPrompt}\n输入 @ 可选择已安装的技能。`}
+                  : `${defaultPrompt}\n输入 @ 可选择已安装的技能。`)}
                 style={{ ...inputStyle, minHeight: conversation.length ? 82 : 112, resize: 'vertical', lineHeight: 1.6 }}
-                disabled={isGenerating || isBrainstormLoading || sessionTerminated || Boolean(
-                  brainstormState && (!generatedContent.trim() || (!brainstormPaused && brainstormState.phase !== 'ready')),
+                disabled={isGenerating || isBrainstormLoading || sessionTerminated || provisionalContentGapDraft || Boolean(stageWorkflow && brainstormState?.phase !== 'completed') || Boolean(
+                  brainstormState && (!generatedContent.trim() || (!brainstormPaused && !['ready', 'completed'].includes(brainstormState.phase))),
                 )}
                 aria-expanded={skillPickerOpen}
                 aria-controls="creation-skill-picker"
@@ -7481,7 +7868,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                     aria-haspopup="menu"
                     aria-expanded={composerAddMenuOpen}
                     onClick={() => setComposerAddMenuOpen(open => !open)}
-                    disabled={isGenerating || isBrainstormLoading || sessionTerminated}
+                    disabled={isGenerating || isBrainstormLoading || sessionTerminated || provisionalContentGapDraft}
                   >
                     <Plus size={20} strokeWidth={1.5} />
                   </button>
@@ -7561,6 +7948,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
               </div>
               <div className="creation-action-buttons" role="group" aria-label="创作操作">
                 {creationMode === 'brainstorm'
+                  && !stageWorkflow
                   && brainstormState
                   && (brainstormState.can_continue_brainstorm || (
                     brainstormPaused && brainstormState.phase === 'exploring' && brainstormState.current_question
@@ -7589,16 +7977,17 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                     <Lightbulb size={16} /> 继续脑暴
                   </button>
                 )}
-                <button
+                {(!stageWorkflow || isGenerating || brainstormState?.phase === 'completed') && <button
                   onClick={isGenerating ? handleStopGenerate : handleGenerate}
                   disabled={!isGenerating && (
                     Boolean(inlineRunningAction) || isInlineUndoing || Boolean(manualEdit) || manualEditSaving
                     ||
                     sessionTerminated
+                    || provisionalContentGapDraft
                     ||
                     isBrainstormLoading
                     || (creationMode === 'brainstorm'
-                      ? brainstormPaused && generatedContent.trim() && brainstormState?.phase !== 'ready'
+                      ? (brainstormPaused || brainstormState?.phase === 'completed') && generatedContent.trim() && brainstormState?.phase !== 'ready'
                         ? !prompt.trim()
                         : brainstormState ? brainstormState.phase !== 'ready' : !prompt.trim()
                       : !prompt.trim())
@@ -7613,7 +8002,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                     : creationMode === 'brainstorm'
                       ? isBrainstormLoading
                         ? '正在梳理'
-                        : brainstormPaused && generatedContent.trim()
+                        : (brainstormPaused || brainstormState?.phase === 'completed') && generatedContent.trim()
                           ? '提交'
                         : brainstormState?.phase === 'ready'
                           ? generatedContent
@@ -7623,7 +8012,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                             ? '请回答上方问题'
                             : '开始梳理'
                       : generatedContent ? '提交' : '开始创作'}
-                </button>
+                </button>}
               </div>
             </div>
             {isGenerating && (
@@ -7653,7 +8042,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
             <div className="creation-document-card" style={{ height: '100%', border: '1px solid var(--mb-border-strong)', borderRadius: 8, background: 'var(--mb-bg-card)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
               <div className="creation-document-header" style={{ height: 48, padding: '0 16px', borderBottom: '1px solid var(--mb-border-strong)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
                 <div className="creation-document-header__title" style={{ fontSize: 14, fontWeight: 650 }}>
-                  <span>{brainstormState && (!generatedContent || showBrief) ? '创作简报' : '创作文档'}</span>
+                  <span>{showingBrief ? '创作简报' : showingUnverifiedDraft ? '待核验草稿' : provisionalContentGapDraft ? '资料待核实草稿' : '创作文档'}</span>
                   {latestDocumentPatch && (
                     <small className="creation-document-patch-badge">
                       本轮改动 {latestPatchChangeCount || latestPatchTargets.length} 处
@@ -7674,7 +8063,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                         取消
                       </button>
                     </>
-                  ) : generatedContent && !showBrief && activeHistoryId && (
+                  ) : generatedContent && !showBrief && !showingUnverifiedDraft && activeHistoryId && (
                     <button type="button" onClick={() => void beginManualDocumentEdit()}
                       disabled={manualEditLoading || isGenerating || isBrainstormLoading || Boolean(inlineRunningAction) || isInlineUndoing}
                       style={compactButtonStyle} aria-label="编辑文档">
@@ -7696,16 +8085,19 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                       ? closeFullscreenPanel()
                       : openFullscreenPanel('document', event.currentTarget)}
                     style={compactButtonStyle}
-                    aria-label={brainstormState && (!generatedContent || showBrief) ? fullscreenPanel === 'document' ? '退出简报全屏' : '全屏查看简报' : fullscreenPanel === 'document' ? '退出文档全屏' : '全屏查看文档'}
+                    aria-label={showingBrief ? fullscreenPanel === 'document' ? '退出简报全屏' : '全屏查看简报' : fullscreenPanel === 'document' ? '退出文档全屏' : '全屏查看文档'}
                     title={fullscreenPanel === 'document' ? '退出全屏（Esc）' : '全屏查看文档'}
                   >
                     {fullscreenPanel === 'document' ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
                     {fullscreenPanel === 'document' ? '退出全屏' : '全屏'}
                   </button>
-                  {brainstormState && generatedContent && !manualEdit && <button type="button" style={compactButtonStyle} disabled={briefDirty || isBriefSaving} onClick={() => setShowBrief(current => !current)}>
-                    {showBrief ? '查看创作文档' : '编辑创作简报'}
+                  {!manualEdit && brainstormState && (generatedContent || unverifiedDraft) && <button type="button" style={compactButtonStyle} disabled={briefDirty || isBriefSaving} onClick={() => setShowBrief(current => !current)}>
+                    {showBrief ? showUnverifiedDraft ? '查看待核验草稿' : '查看创作文档' : '编辑创作简报'}
                   </button>}
-                  {!manualEdit && (!brainstormState || (generatedContent && !showBrief)) && <button onClick={handleCopy} disabled={!generatedContent} style={compactButtonStyle}>
+                  {!manualEdit && unverifiedDraft && !showBrief && (generatedContent || !showUnverifiedDraft) && <button type="button" style={compactButtonStyle} onClick={() => setShowUnverifiedDraft(current => !current)}>
+                    {showUnverifiedDraft ? '查看已交付正文' : '查看待核验草稿'}
+                  </button>}
+                  {!manualEdit && (!brainstormState || (generatedContent && !showBrief && !showingUnverifiedDraft)) && <button onClick={handleCopy} disabled={!generatedContent} style={compactButtonStyle}>
                     <Copy size={15} />
                     {copySuccess ? '已复制' : '复制'}
                   </button>}
@@ -7790,9 +8182,16 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                       <span>{new TextEncoder().encode(manualEdit.draft).length.toLocaleString()} / {MAX_MANUAL_DOCUMENT_BYTES.toLocaleString()} 字节</span>
                     </div>
                   </div>
-                ) : brainstormState && (!selectionStableContent || showBrief) ? (
+                ) : showingBrief && brainstormState ? (
                   <CreationBriefEditor key={brainstormState.session_id} state={brainstormState} rootRequest={rootRequest}
                     disabled={isBrainstormLoading || isGenerating || isBriefSaving} onSave={saveBriefEdits} initialDrafts={briefDrafts} onDraftChange={values => setCreationDraft({ briefEditDraft: { sessionId: brainstormState.session_id, values } })} />
+                ) : showingUnverifiedDraft && unverifiedDraft ? (
+                  <div className="creation-unverified-draft" aria-label="待核验草稿">
+                    <div className="creation-unverified-draft__notice" role="status">
+                      本章已有草稿，但交付检查尚未通过。以下内容不是正式正文；请核对执行过程中的缺口后继续本章创作。
+                    </div>
+                    <MarkdownContent content={unverifiedDraft} components={markdownComponents} />
+                  </div>
                 ) : selectionStableContent ? (
                   <MarkdownContent content={selectionStableContent} components={markdownComponents} changes={latestPatchChanges} />
                 ) : isGenerating ? (
@@ -7814,7 +8213,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                   </div>
                 )}
               </div>
-              {!manualEdit && <CreationSelectionToolbar
+              {!manualEdit && !provisionalContentGapDraft && <CreationSelectionToolbar
                 snapshot={inlineSelection}
                 actions={inlineCapabilities?.actions || []}
                 customPrompt={inlineCustomPrompt}
@@ -8012,6 +8411,9 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                   目标读者
                   <input value={audience} onChange={(e) => setAudience(e.target.value)} placeholder="客户" style={inputStyle} />
                 </label>
+                <CreationWorkContextEditor key={sessionId || 'new-draft'} value={draft.workContext} onChange={value => setCreationDraft({ workContext: value })}
+                  disabled={isGenerating || isBrainstormLoading} canPreview={Boolean(prompt.trim() || rootRequest.trim() || generatedContent.trim())}
+                  onPreview={previewWorkCreation} />
                 <Toggle label="继承历史格式" checked={inheritFormat} onChange={setInheritFormat} />
                 <Toggle label="图片生成建议" checked={enableImageGeneration} onChange={setEnableImageGeneration} icon={<Image size={16} />} />
                 <div style={{ height: 1, background: 'var(--mb-border-strong)', margin: '4px 0' }} />
@@ -8147,6 +8549,22 @@ const agentEventStatusLabels: Record<string, string> = {
   failed: '未完成',
   cancelled: '已结束',
   paused: '已暂停',
+}
+
+const failedDeliveryCheckReasons = (event: CreationAgentEvent): string[] => {
+  if (event.type !== 'delivery.checked' && event.type !== 'delivery.rechecked') return []
+  const rawReview = event.data?.review || event.data?.delivery_review
+  if (!rawReview || typeof rawReview !== 'object' || Array.isArray(rawReview)) return []
+  const review = rawReview as Record<string, unknown>
+  const checks = Array.isArray(review.checks)
+    ? review.checks.filter(item => item && typeof item === 'object' && item.passed === false)
+    : []
+  const compactChecks = Array.isArray(review.failed_checks) ? review.failed_checks : []
+  return [...new Set([...checks, ...compactChecks]
+    .map(item => (item && typeof item === 'object'
+      ? String(item.reason || item.message || '').trim()
+      : String(item || '').trim()))
+    .filter(Boolean))]
 }
 
 const harnessDecisionReasonLabels: Record<string, string> = {
@@ -8340,28 +8758,9 @@ export const AgentExecutionTrace = ({
             toggleBlock(group.key)
           }}
           aria-expanded={showDetails}
+          aria-label={`${displayAgentName(actorEvent)} · ${agentEventStatusLabels[displayStatus] || displayStatus} · ${headline.main}${headline.sub ? `，${headline.sub}` : ''}`}
         >
-          <span
-            className={`creation-agent-event__icon is-${actorEvent.actor?.kind || 'agent'}${['completed', 'warning', 'failed', 'cancelled'].includes(displayStatus) ? ' is-dot' : ''}`}
-            aria-hidden="true"
-          >
-            {displayStatus === 'completed'
-                ? <span className="creation-agent-event__dot is-done" />
-                : displayStatus === 'warning'
-                  ? <span className="creation-agent-event__dot is-warning" />
-                : displayStatus === 'failed'
-                  ? <span className="creation-agent-event__dot is-failed" />
-                  : displayStatus === 'cancelled'
-                    ? <span className="creation-agent-event__dot is-cancelled" />
-                  : actorEvent.actor?.kind === 'tool'
-                    ? <Wrench size={13} />
-                    : actorEvent.actor?.kind === 'skill'
-                      ? <Sparkles size={13} />
-                      : <Bot size={13} />}
-            {displayStatus === 'running' && (
-              <span className="creation-agent-event__activity" />
-            )}
-          </span>
+          <CreationTraceIcon event={actorEvent} status={displayStatus} />
           <span className="creation-agent-event__headline">
             {/* 行标题直接表达动作目的；次级结果置灰，具体调用的能力退到展开细节 */}
             <strong>{headline.main}</strong>
@@ -8434,7 +8833,7 @@ export const AgentExecutionTrace = ({
           onClick={() => toggleBlock(segment.key)}
           aria-expanded={showBody}
         >
-          <span className="creation-trace-thinking__dot" aria-hidden="true" />
+          <CreationThinkingIcon />
           <span className="creation-trace-thinking__title">
             {isRunning ? `深度思考中${stageLabel ? `：${stageLabel}` : ''}` : '深度思考'}
           </span>
@@ -8474,14 +8873,26 @@ export const AgentExecutionTrace = ({
 
   // 顶层阶段行：序号 + 阶段标题 + 灰色耗时，展开后是思考/动作块，竖线标识层级
   const renderPhaseSegment = (segment: RenderPhaseSegment) => {
-    const terminal = segment.status === 'running' ? terminalByRun.get(segment.runId) : undefined
+    const isDeliveryPhase = segment.phaseId === 'step:delivery_validation' || segment.title === '核对交付结果'
+    const terminal = segment.status === 'running' || isDeliveryPhase
+      ? terminalByRun.get(segment.runId)
+      : undefined
     const runWasCancelled = terminal?.type === 'run.cancelled'
     const runFailed = terminal?.type === 'run.failed'
-    const qualityReviewFailed = runFailed && isCreationQualityReviewFailure(
+    const qualityReviewFailed = isDeliveryPhase && runFailed && isCreationQualityReviewFailure(
       terminal?.data?.error_code,
     )
+    const latestDeliveryReview = isDeliveryPhase
+      ? [...events].reverse().find(event => (
+        event.run_id === segment.runId
+        && (event.type === 'delivery.checked' || event.type === 'delivery.rechecked')
+      ))
+      : undefined
+    const failedChecks = runFailed && latestDeliveryReview
+      ? failedDeliveryCheckReasons(latestDeliveryReview)
+      : []
     const isRunning = segment.status === 'running' && !terminalByRun.get(segment.runId)
-    const hasFailure = !isRunning && qualityReviewFailed
+    const hasFailure = !isRunning && (qualityReviewFailed || failedChecks.length > 0)
     const hasWarning = !isRunning && !hasFailure && (runFailed || runWasCancelled || segment.innerSegments.some((inner) => (
       inner.kind === 'step'
         ? ['warning', 'failed'].includes(groupStatusByKey.get(inner.group.key) || '')
@@ -8525,6 +8936,12 @@ export const AgentExecutionTrace = ({
         </button>
         {showBody && (
           <div className="creation-trace-phase__body">
+            {failedChecks.length > 0 && (
+              <div className="creation-delivery-gaps" role="status">
+                <strong>待核验缺口（{failedChecks.length}）</strong>
+                <ol>{failedChecks.map((reason, index) => <li key={`${index}-${reason}`}>{reason}</li>)}</ol>
+              </div>
+            )}
             {renderInnerSegments(segment.innerSegments)}
           </div>
         )}
@@ -8861,6 +9278,12 @@ const agentEventDetails = (event: CreationAgentEvent) => {
   }
   if (event.type === 'agent.failed' && data.error_reason) {
     details.push({ label: '失败原因', value: String(data.error_reason) })
+  }
+  if (event.type === 'delivery.checked' || event.type === 'delivery.rechecked') {
+    const failed = failedDeliveryCheckReasons(event)
+    if (failed.length) {
+      details.push({ label: '待核验缺口', value: failed.map((reason, index) => `${index + 1}. ${reason}`).join('\n') })
+    }
   }
   if (event.type === 'harness.decision') {
     const triggerStatus = agentEventStatusLabels[String(data.trigger_status || '')] || '状态未知'

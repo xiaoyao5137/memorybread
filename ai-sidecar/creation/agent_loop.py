@@ -13,6 +13,7 @@ import re
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
 from typing import Any, AsyncIterator, Optional
 from uuid import uuid4
@@ -31,6 +32,7 @@ from .query_engine import (
     QueryPlanError,
     build_query_planner_prompts,
     execute_query_plan,
+    explicit_ranked_row_plans,
     parse_query_plan,
     relation_catalog,
     validate_query_plan,
@@ -318,9 +320,12 @@ class CreationAgentLoop(CreationEvidencePrompts):
         governance_required: bool = False,
         available_skills: Optional[list[dict[str, Any]]] = None,
         explicit_skill_ids: Optional[list[str]] = None,
+        brainstorm_skill_binding: Optional[dict[str, Any]] = None,
     ) -> AsyncIterator[dict[str, Any]]:
         if available_skills is not None:
             selected_skills = available_skills
+        self._guard_provisional_content_gap_followup(
+            creation_mode, creation_brief)
 
         def bind_live_operation_context(state: LoopState) -> None:
             """Replace checkpoint-era candidates with Core's current durable view."""
@@ -329,62 +334,102 @@ class CreationAgentLoop(CreationEvidencePrompts):
             state.environment["operation_context"] = dict(operation_context)
             requirement = state.environment.setdefault("requirement", {})
             requirement["operation_context"] = {
-                **operation_context,
+                **{key: value for key, value in operation_context.items()
+                   if key != "original_document"},
                 "session_goal": state.root_request,
                 "current_document": current_document[:64000],
                 "document_truncated": len(current_document) > 64000,
                 "nodes": document_nodes(current_document)[:300],
-                "explicit_skill_ids": list(explicit_skill_ids or []),
+                "explicit_skill_ids": list(state.environment.get("explicit_skill_ids") or []),
                 "available_skills": [{"id": item.get("id") or item.get("clientSkillKey"),
                     "title": item.get("title"), "summary": item.get("summary")}
-                    for item in selected_skills],
+                    for item in state.selected_skills],
                 "conversation": state.conversation[-12:],
             }
 
         if resume_checkpoint and not resume_state:
             state = LoopState.restore(resume_checkpoint)
-            self._validate_resume_context(state, session_id, current_document, creation_brief)
+            self._validate_resume_context(state, session_id, current_document, creation_brief, options.work_context)
+            self._bind_chapter_skill_binding(state, brainstorm_skill_binding, selected_skills,
+                                             explicit_skill_ids, restoring=True)
             bind_live_operation_context(state)
             self._input_context(state)
+            resume_reassembly = self._reassemble_frozen_skill_resume_preview(
+                state, current_document
+            )
+            self._recover_invalid_chapter_candidate(state)
+            self._skip_obsolete_gap_repair_on_resume(state)
             await self._refresh_brainstorm_acceptance(state)
             self._seed_restored_delivery_failures(state)
             await self._recover_document_identity(state)
+            gap_retraction = self._retract_restored_content_gap_candidate(state)
+            diagram_replanned = self._repair_standalone_diagram_resume(state)
             state.model_mode = model_mode
             state.run_id = run_id or f"run-{uuid4()}"
             state.sequence = 0
             # A saved in-flight node is retried, completed nodes remain behind cursor.
-            if state.pending_model_step:
+            if state.pending_model_step and not diagram_replanned:
                 state.cursor = max(0, state.cursor - 1)
                 state.pending_model_step = None
             yield self._event(state, "run.resumed", "从未完成操作恢复，复用已完成结果")
+            if gap_retraction:
+                yield self._event(state, "document.replaced", "已撤回旧断点中未核实的来源事实",
+                    status="completed", data={"content": state.current_document,
+                        "operation": "confirmed_source_gap_resume_retraction",
+                        "superseded_hash": gap_retraction})
+                yield self._checkpoint_event(state)
+            if diagram_replanned:
+                yield self._event(state, "diagram.replanned", "原请求要求独立图示，已从失败的文字草稿改走图示交付",
+                    status="completed", data={"artifact_kind": "diagram",
+                        "superseded_hash": diagram_replanned})
+            if resume_reassembly and state.current_document == resume_reassembly["content"]:
+                yield self._event(
+                    state, "document.replaced", "已按冻结技能步骤重建待核验草稿",
+                    status="completed",
+                    data={"content": state.current_document,
+                          "operation": "strict_skill_resume_reassembly",
+                          "superseded_hash": resume_reassembly["superseded_hash"]},
+                )
+                yield self._checkpoint_event(state)
         elif resume_state:
             state = LoopState.restore(resume_state)
-            self._validate_resume_context(state, session_id, current_document, creation_brief)
+            self._validate_resume_context(state, session_id, current_document, creation_brief, options.work_context)
+            self._bind_chapter_skill_binding(state, brainstorm_skill_binding, selected_skills,
+                                             explicit_skill_ids, restoring=True)
             bind_live_operation_context(state)
             self._input_context(state)
+            chapter_recovered = self._recover_invalid_chapter_candidate(state)
             await self._refresh_brainstorm_acceptance(state)
             self._seed_restored_delivery_failures(state)
             await self._recover_document_identity(state)
+            gap_retraction = self._retract_restored_content_gap_candidate(state)
             yield self._event(state, "run.resumed", "创作 Agent 已恢复创作循环")
-            if not state.pending_model_step or model_result is None:
-                yield self._event(
-                    state,
-                    "run.failed",
-                    "恢复创作循环时缺少待处理的模型结果",
-                    status="failed",
-                )
-                return
-            completed_model_step = dict(state.pending_model_step.get("step") or {})
-            async for event in self._apply_model_result(state, model_result):
-                yield event
-            decision = self._replan_after_feedback(
-                state,
-                completed_model_step,
-                status="completed",
-            )
-            if decision:
-                async for event in self._yield_harness_decision(state, decision):
+            if gap_retraction:
+                yield self._event(state, "document.replaced", "已撤回旧断点中未核实的来源事实",
+                    status="completed", data={"content": state.current_document,
+                        "operation": "confirmed_source_gap_resume_retraction",
+                        "superseded_hash": gap_retraction})
+                yield self._checkpoint_event(state)
+            if not chapter_recovered:
+                if not state.pending_model_step or model_result is None:
+                    yield self._event(
+                        state,
+                        "run.failed",
+                        "恢复创作循环时缺少待处理的模型结果",
+                        status="failed",
+                    )
+                    return
+                completed_model_step = dict(state.pending_model_step.get("step") or {})
+                async for event in self._apply_model_result(state, model_result):
                     yield event
+                decision = self._replan_after_feedback(
+                    state,
+                    completed_model_step,
+                    status="completed",
+                )
+                if decision:
+                    async for event in self._yield_harness_decision(state, decision):
+                        yield event
         else:
             state = self._new_state(
                 user_message=user_message,
@@ -401,16 +446,19 @@ class CreationAgentLoop(CreationEvidencePrompts):
             )
             state.environment["governance_required"] = governance_required or available_skills is not None
             state.environment["explicit_skill_ids"] = list(explicit_skill_ids or [])
+            self._bind_chapter_skill_binding(state, brainstorm_skill_binding, selected_skills,
+                                             explicit_skill_ids, restoring=False)
             state.environment["operation_context"] = operation_context or {}
             state.environment["requirement"]["operation_context"] = {
-                **(operation_context or {}), "session_goal": state.root_request,
+                **{key: value for key, value in (operation_context or {}).items()
+                   if key != "original_document"}, "session_goal": state.root_request,
                 "current_document": current_document[:64000],
                 "document_truncated": len(current_document) > 64000,
                 "nodes": document_nodes(current_document)[:300],
                 "explicit_skill_ids": state.environment["explicit_skill_ids"],
                 "available_skills": [{"id": item.get("id") or item.get("clientSkillKey"),
                     "title": item.get("title"), "summary": item.get("summary")}
-                    for item in selected_skills],
+                    for item in state.selected_skills],
                 "conversation": state.conversation[-12:],
             }
             yield self._event(state, "run.started", "创作 Agent 已接管目标")
@@ -564,6 +612,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
                             "tool_id": tool_id,
                             "status": "failed",
                             "error_code": error_code,
+                            "skill_id": step.get("skill_id"),
                             "skill_step_id": step.get("skill_step_id"),
                         }
                     )
@@ -584,7 +633,19 @@ class CreationAgentLoop(CreationEvidencePrompts):
             if step.get("input_requirement_ids") and not state.pending_model_step:
                 state.environment.setdefault("input_receipts", {})[step["id"]] = step_status
                 if step_status == "failed":
-                    raise OperationError("CREATION_EVIDENCE_UNAVAILABLE", "本轮需要的资料检索失败，已保留断点，可恢复后继续")
+                    if state.environment.get("brainstorm_skill_binding") and step.get("skill_step_id"):
+                        # Keep the chapter draft and execute the remaining frozen
+                        # steps. The final guard reports this exact missing input;
+                        # a prose repair cannot make a failed retrieval succeed.
+                        state.environment.setdefault("frozen_skill_missing_input_events", []).append({
+                            "skill_id": step.get("skill_id"),
+                            "step_id": step.get("skill_step_id"),
+                            "title": step.get("skill_step_title"),
+                            "tool_id": step.get("id"),
+                            "error_code": error_code,
+                        })
+                    else:
+                        raise OperationError("CREATION_EVIDENCE_UNAVAILABLE", "本轮需要的资料检索失败，已保留断点，可恢复后继续")
             if step_status == "completed":
                 consecutive_failures = 0
             if not state.pending_model_step:
@@ -639,6 +700,43 @@ class CreationAgentLoop(CreationEvidencePrompts):
                       "references": state.environment.get("reference_summaries", [])})
             return
 
+        if operation.get("kind") == "generate" and operation.get("artifact_kind") == "diagram":
+            from .diagram_delivery import diagram_delivery_report
+            diagram = str(state.environment.get("document") or state.current_document)
+            report = diagram_delivery_report(diagram)
+            if report["status"] != "pass":
+                raise OperationError("CREATION_DIAGRAM_INVALID", "独立图示没有形成可交付结果，已保留原操作")
+            if state.environment.get("delivery_checked_hash") != self._document_hash(diagram):
+                raise OperationError("CREATION_DIAGRAM_INVALID", "独立图示尚未完成交付核验")
+            if state.environment.get("diagram_source_required") and not self._audit_diagram_sources(state)["ready"]:
+                raise OperationError("CREATION_EVIDENCE_UNAVAILABLE", "该主体的架构资料核验未完成，已保留原操作")
+            # Retrieval events retain every candidate for diagnosis. The final
+            # document cites only originals that passed the diagram source
+            # gate, so an unrelated recall hit is never presented as evidence.
+            references = list(state.environment.get("reference_summaries") or [])
+            if state.environment.get("diagram_source_required"):
+                claim_audit = self._diagram_claim_audit(
+                    state, diagram, state.environment.get("diagram_source_audit") or {})
+                if not claim_audit["passed"]:
+                    raise OperationError("CREATION_EVIDENCE_UNAVAILABLE", "图示的来源核验未通过")
+                state.environment["diagram_claim_audit"] = claim_audit
+                eligible_ids = set(claim_audit.get("used_reference_ids") or [])
+                references = [item for item in references if isinstance(item, dict)
+                              and "{}:{}".format(item.get("source_type"), item.get("source_id")) in eligible_ids]
+            state.goal.status = "complete"
+            state.goal.remaining_steps = []
+            state.goal.outcome = "已生成可渲染、可导出的独立图示"
+            yield self._event(state, "goal.updated", state.goal.outcome,
+                environment_patch={"diagram_ready": True, "artifact_kind": "diagram"})
+            yield self._event(state, "run.completed", state.goal.outcome,
+                status="completed", data={"document": diagram, "artifact_kind": "diagram",
+                    "diagram_language": "mermaid", "delivery_review": state.environment.get("delivery_review", report),
+                    "references": references,
+                    "tools": state.environment.get("tool_results", []),
+                    "edit_intent": state.environment.get("edit_intent", {}),
+                    "goal": asdict(state.goal)})
+            return
+
         hard_failures = [
             str(item)
             for item in state.environment.get("quality_hard_failures", [])
@@ -649,9 +747,10 @@ class CreationAgentLoop(CreationEvidencePrompts):
         ]
         quality_warnings = [*hard_failures, *soft_warnings]
         document = str(state.environment.get("document") or state.current_document)
-        if state.environment.get("strict_skill_workflow") and not state.environment.get(
-            "strict_skill_document_polished"
-        ):
+        gap_audits = state.environment.get("acknowledged_gap_revision_audits") or []
+        if (state.environment.get("strict_skill_workflow")
+                and not state.environment.get("strict_skill_document_polished")
+                and not gap_audits):
             strict_document = self._assemble_strict_skill_document(state)
             if strict_document and self._document_hash(strict_document) != self._document_hash(document):
                 document = strict_document
@@ -664,7 +763,8 @@ class CreationAgentLoop(CreationEvidencePrompts):
                     status="completed",
                     data={"content": document},
                 )
-        if state.environment.get("document_identity"):
+        if (state.environment.get("document_identity")
+                and not str(state.environment.get("chapter_base_document") or "")):
             from .skill_governance import apply_title
             document = apply_title(document, state.environment["document_identity"]["title"])
             state.environment["document"] = document
@@ -746,15 +846,69 @@ class CreationAgentLoop(CreationEvidencePrompts):
                 "已在数据下方保留参考值、实际周期、来源与风险说明",
                 status="completed", data={"content": document, "audit": data_risk_audit},
             )
+        if (gap_audits and state.environment.get("strict_skill_workflow")
+                and isinstance(gap_audits[-1], dict)
+                and gap_audits[-1].get("output_hash") != self._document_hash(document)):
+            # Final formatting and a resumed repair can change the already
+            # redacted draft. Never rebuild it from unverified step outputs.
+            from .brainstorm_gap_delivery import revise_acknowledged_gap_preview
+            gap_receipts = self._frozen_skill_delivery_receipts(state)
+            base = str(state.environment.get("chapter_base_document") or "")
+            revised, edits = revise_acknowledged_gap_preview(
+                document, state.environment.get("creation_brief"), gap_receipts,
+                protected_base=base, force=True)
+            if edits:
+                from .brainstorm_chapters import chapter_context, validate_chapter_document
+                chapter = chapter_context(state.environment.get("creation_brief"))
+                if chapter is not None:
+                    validate_chapter_document(revised, base, chapter)
+                old_hash = self._document_hash(document)
+                if revised != document:
+                    state.environment.setdefault("superseded_skill_previews", []).append({
+                        "document": document, "document_hash": old_hash,
+                        "replacement_hash": self._document_hash(revised),
+                        "reason": "acknowledged_source_gap_final_recheck", "run_id": state.run_id,
+                    })
+                state.environment.setdefault("acknowledged_gap_revision_audits", []).append({
+                    "input_hash": old_hash, "output_hash": self._document_hash(revised),
+                    "edits": edits,
+                })
+                if revised != document:
+                    document = revised
+                    state.environment["document"] = document
+                    state.current_document = document
+                    state.environment.pop("delivery_checked_hash", None)
+                    yield self._event(
+                        state, "document.replaced",
+                        "最终落盘前已撤回未核实的目标周期事实",
+                        status="completed",
+                        data={"content": document, "operation": "acknowledged_source_gap_final_recheck",
+                              "superseded_hash": old_hash, "edit_count": len(edits)},
+                    )
+        final_gap_document, _ = self._apply_content_gap_candidate(state, document)
+        if final_gap_document != document:
+            old_hash = self._document_hash(document)
+            document = final_gap_document
+            state.environment["document"] = document
+            state.current_document = document
+            yield self._event(
+                state, "document.replaced",
+                "最终落盘前已撤回未核实的来源事实",
+                status="completed",
+                data={"content": document, "operation": "confirmed_source_gap_final_recheck",
+                      "superseded_hash": old_hash},
+            )
         if not document.strip():
             raise RuntimeError("模型未生成文档正文，请重试或切换可用模型")
         final_problems = integrity_problems(document)
         if final_problems:
             raise OperationError("CREATION_DOCUMENT_INVALID", "正文验收失败：" + ", ".join(final_problems))
         if state.environment.get("input_contract") and state.environment.get("delivery_checked_hash") != self._document_hash(document):
-            report = await self.service.review_creation_delivery(state.user_message, document,
-                state.environment["input_contract"], state.environment)
+            report = await self._review_creation_delivery(state, document)
             state.environment["delivery_review"] = report
+            state.environment["delivery_checked_hash"] = (
+                self._document_hash(document) if report.get("status") == "pass" else None
+            )
             yield self._event(state, "delivery.checked", "已核对最终落盘正文", data={"review": report})
             if report["status"] == "revise" and state.environment.get("delivery_repair_count", 0) < MAX_DELIVERY_REPAIR_CYCLES:
                 # 后处理（占位符/引用/证据卡片）可能引入新的交付偏差，
@@ -790,12 +944,14 @@ class CreationAgentLoop(CreationEvidencePrompts):
                     delivery_incomplete_message(
                         report or {},
                         int(state.environment.get("delivery_repair_count", 0) or 0),
-                        state.environment.get("input_contract"),
+                        None if report.get("frozen_skill_gap") else state.environment.get("input_contract"),
                     ),
                 )
         state.goal.status = "complete"
         state.goal.remaining_steps = []
         state.goal.outcome = (
+            "已生成带资料缺口的可编辑文档，目标周期来源仍待核实"
+            if (state.environment.get("delivery_review") or {}).get("provisional") else
             "已生成可用文档，并在执行记录中保留质量风险"
             if quality_warnings
             else "已生成满足当前验收条件的文档"
@@ -815,6 +971,8 @@ class CreationAgentLoop(CreationEvidencePrompts):
             if isinstance(item, dict)
         ]
         completed_summary = (
+            "带资料缺口的文档已生成，可补充目标周期来源后继续完善"
+            if (state.environment.get("delivery_review") or {}).get("provisional") else
             f"本轮创作完成，其中 {len(failed_steps)} 个节点失败已跳过，可继续对话补充"
             if failed_steps
             else "本轮创作完成，可以继续对话优化文档"
@@ -880,13 +1038,19 @@ class CreationAgentLoop(CreationEvidencePrompts):
             if mode == "revision"
             else f"生成一份可直接使用的文档：{resolved_root_request}"
         )
+        from .skill_governance import explicit_standalone_artifact_kind
+        initial_artifact_kind = explicit_standalone_artifact_kind(message)
+        if initial_artifact_kind == "diagram" and mode == "initial":
+            objective = f"生成一张可渲染、可导出的图示：{resolved_root_request}"
         goal = GoalState(
             objective=objective,
             acceptance_criteria=[
                 f"保留原始需求中未被本轮替换的约束：{resolved_root_request}",
                 "完整回应用户本轮要求",
                 "事实与参考资料可追溯，不编造具体数据",
-                "结构清晰，输出为可继续编辑的 Markdown 文档",
+                ("只交付一张可渲染的结构图，支持导出图片"
+                 if initial_artifact_kind == "diagram" else
+                 "结构清晰，输出为可继续编辑的 Markdown 文档"),
                 "保留现有文档中未被要求删除的有效内容",
             ],
         )
@@ -905,11 +1069,30 @@ class CreationAgentLoop(CreationEvidencePrompts):
             goal=goal,
         )
         context_query = message
+        from .work_quality import normalize_work_context
+        raw_work = options.work_context or ((creation_brief or {}).get("work_context"))
+        if raw_work:
+            work = normalize_work_context(raw_work)
+            state.options["work_context"] = work
+            state.environment["work_context"] = work
+        if creation_brief and creation_mode != "brainstorm":
+            state.environment["creation_brief"] = creation_brief
         retrieval_query = context_query
         retrieval_context_terms: list[str] = []
         if creation_mode == "brainstorm" and creation_brief:
             state.environment["creation_brief"] = creation_brief
             state.environment["creation_mode"] = "brainstorm"
+            from .brainstorm_chapters import chapter_context, chapter_goal
+            chapter = chapter_context(creation_brief)
+            if chapter is not None:
+                state.environment["chapter_base_document"] = current_document
+                state.goal.objective = chapter_goal(chapter)
+                state.goal.acceptance_criteria = [chapter_goal(chapter),
+                    "本章事实与参考资料可追溯，不编造具体数据",
+                    "按本章已确认设计实际展开并完成通用交付核验"]
+                # This turn's writing instruction is generated by the workflow.
+                # Retrieval still needs the user's effective subject and period.
+                retrieval_query = self._title_instruction(state)
             retrieval_context_terms = self._brainstorm_retrieval_context_terms(
                 creation_brief
             )
@@ -943,6 +1126,10 @@ class CreationAgentLoop(CreationEvidencePrompts):
         """
         if not isinstance(creation_brief, dict):
             return ""
+
+        from .brainstorm_chapters import chapter_context, chapter_prompt_context
+        if chapter_context(creation_brief) is not None:
+            return chapter_prompt_context(creation_brief)
 
         from .brief_context import effective_brief_decisions, effective_brief_open_flags
         effective_decisions = effective_brief_decisions(creation_brief)
@@ -995,7 +1182,8 @@ class CreationAgentLoop(CreationEvidencePrompts):
             "脑暴创作上下文：已确认决策必须遵守；合理假设不得改写为用户已确认事实；"
             "开放事项不得擅自定论，必要时在文档中明确标注待补充。"
             "已选项说明属于该选择的具体约束，应与标签一起落实；完整覆盖早期方向与后续细节，"
-            "不能只围绕最后几题成文。方向和策略须按整体目标写明执行步骤、输入、产物和验证方法，"
+            "不能只围绕最后几题成文。操作方案中的方法和策略须按整体目标写明适用的执行步骤、输入、产物和验证方法；"
+            "叙事、语气、氛围、节奏和表达选择须在正文写法中体现，不为非方案文体强加流程或验证栏目。"
             "仅重复选项标签和说明不算展开。重复选择可合并，但不得遗漏参数或把已给参数改成待确认；"
             "参数保留其适用对象和验证变量，不能因为数值已出现就挪到另一项试验。"
             "旧简报与开放事项不能覆盖有效已确认选择。选中设计安排不等于效果已获实测证明；"
@@ -1198,7 +1386,8 @@ class CreationAgentLoop(CreationEvidencePrompts):
                  state.environment.get("operation", {}).get("kind") in {"generate", "execute_skill"})
             and hasattr(self.service, "_stream_direct_completion")):
             from .skill_governance import recover_identity
-            identity = await recover_identity(self.service, state.user_message, state.current_document, state.selected_skills)
+            identity = await recover_identity(self.service, self._title_instruction(state),
+                                              state.current_document, state.selected_skills)
             state.environment["document_identity"] = {"title": identity["title"], "source": identity["source"],
                                                        "evidence_hash": self._document_hash(identity["evidence"])}
 
@@ -1235,6 +1424,15 @@ class CreationAgentLoop(CreationEvidencePrompts):
         operation = validated.get("operation") or {"kind": "respond", "response": "本轮未选择可执行操作，请补充具体要求。"}
         state.environment["operation"] = operation
         kind = operation["kind"]
+        is_diagram = kind == "generate" and operation.get("artifact_kind") == "diagram"
+        if is_diagram:
+            routed_agents = [item for item in routed_agents if item not in {
+                "document_writer_agent", "chapter_design_agent", "quality_review_agent"}]
+            if state.environment.get("diagram_design_proposal"):
+                # Saved Brainstorm choices are the concept brief. External
+                # lookups can introduce an unrelated existing topology.
+                routed_tools = []
+                routed_agents = []
         if kind == "patch":
             from .operations import validate_literal_patch
             apply_patches(state.current_document, operation["patches"])
@@ -1252,9 +1450,16 @@ class CreationAgentLoop(CreationEvidencePrompts):
         catalog = self._match_skills(state)
         requested_ids = (skill_ids if kind == "execute_skill" else set()) | constraint_skill_ids
         matched_skills = [item for item in catalog if str(item["id"]) in requested_ids]
+        binding = state.environment.get("brainstorm_skill_binding")
+        frozen_roles = {item["id"]: item for item in binding.get("skills", [])
+                        } if isinstance(binding, dict) else {}
         for item in matched_skills:
-            item["selection_source"] = "user" if str(item["id"]) in state.environment.get("explicit_skill_ids", []) else "automatic"
-            item["workflow_role"] = "primary" if str(item["id"]) in skill_ids else "support"
+            frozen = frozen_roles.get(str(item["id"]))
+            item["selection_source"] = (frozen["selection_source"] if frozen else
+                                        "user" if str(item["id"]) in state.environment.get("explicit_skill_ids", [])
+                                        else "automatic")
+            item["workflow_role"] = (frozen["role"] if frozen else
+                                     "primary" if str(item["id"]) in skill_ids else "support")
         # Expand only dependencies declared by the explicitly chosen workflows.
         for item in matched_skills:
             references = {str(reference) for raw in item.get("execution_steps", [])
@@ -1399,7 +1604,10 @@ class CreationAgentLoop(CreationEvidencePrompts):
                 item["reason"] = str(decision.get("reasoning") or "本轮选择的 Skill 声明步骤")
             return plan
 
-        if kind == "generate" and "document_writer_agent" not in routed_agents:
+        if is_diagram:
+            plan.append({"kind": "agent", "id": "diagram_writer_agent", "name": "绘制独立图示",
+                         "action": "diagram_writer"})
+        elif kind == "generate" and "document_writer_agent" not in routed_agents:
             plan.append(self._agent_plan_step("document_writer_agent"))
         elif kind == "patch":
             plan.append({"kind": "tool", "id": "document_patch", "name": "修改指定内容", "action": "document_patch"})
@@ -1451,8 +1659,14 @@ class CreationAgentLoop(CreationEvidencePrompts):
         operation = record.get("operation") or {}
         if operation.get("kind") != "execute_skill":
             return []
-        explicit = {str(item) for item in state.environment.get("explicit_skill_ids") or []}
-        selected = {str(item) for item in operation.get("skill_ids") or []}.intersection(explicit)
+        binding = state.environment.get("brainstorm_skill_binding")
+        if isinstance(binding, dict):
+            selected = {str(item.get("id")) for item in binding.get("skills", [])
+                        if isinstance(item, dict) and item.get("role") == "primary"}
+            selected.intersection_update(str(item) for item in operation.get("skill_ids") or [])
+        else:
+            explicit = {str(item) for item in state.environment.get("explicit_skill_ids") or []}
+            selected = {str(item) for item in operation.get("skill_ids") or []}.intersection(explicit)
         if not selected:
             return []
         requirements: list[dict[str, Any]] = []
@@ -1479,6 +1693,108 @@ class CreationAgentLoop(CreationEvidencePrompts):
                 })
         return requirements
 
+    async def _apply_frozen_chapter_skills(self, state: LoopState, operation: dict[str, Any],
+                                            binding: dict[str, Any], instruction: str
+                                            ) -> AsyncIterator[dict[str, Any]]:
+        """Execute the saved chapter choice after an independent fit review."""
+        from .skill_governance import document_heading, review_skill, skill_id
+        from .delivery_contract import _missing_inputs_gap
+
+        frozen = binding["skills"]
+        primary_ids = [item["id"] for item in frozen if item["role"] == "primary"]
+        support_ids = [item["id"] for item in frozen if item["role"] == "support"]
+        if primary_ids:
+            identity = operation.get("document_identity") or state.environment.get("document_identity")
+            if state.current_document:
+                title = document_heading(state.current_document)
+                if title:
+                    identity = {"title": title, "source": "existing",
+                                "evidence_hash": self._document_hash(title)}
+            if identity is None:
+                raise OperationError("CREATION_TITLE_INVALID", "本章技能执行缺少有效文档标题")
+            state.environment["document_identity"] = identity
+            operation.clear()
+            operation.update({"kind": "execute_skill", "skill_ids": primary_ids,
+                              "document_identity": identity})
+            if support_ids:
+                operation["constraint_skill_ids"] = support_ids
+        else:
+            operation.pop("skill_ids", None)
+            operation["constraint_skill_ids"] = support_ids
+            if operation.get("kind") == "execute_skill":
+                raise OperationError("CREATION_SKILL_BINDING_INVALID", "章节技能绑定缺少主工作流")
+
+        if not frozen:
+            return
+        if not instruction:
+            raise OperationError("CREATION_SKILL_NOT_APPLICABLE", "当前有效创作需求为空，无法核验章节技能")
+        catalog = {skill_id(item): item for item in state.selected_skills}
+        reviews = []
+        receipts = []
+        for item in frozen:
+            candidate = catalog[item["id"]]
+            yield self._event(state, "skill.review.started", "正在独立核验已确认的章节技能与创作需求")
+            if not hasattr(self.service, "_stream_direct_completion"):
+                raise OperationError("CREATION_SKILL_REVIEW_UNAVAILABLE", "无法独立核验章节技能，已保留原操作")
+            review = await review_skill(self.service, candidate, instruction, role=item["role"],
+                                        primary_skills=[catalog[skill_id] for skill_id in primary_ids],
+                                        confirmed_brief=self._skill_relevance_brief_context(state),
+                                        frozen=True)
+            declared_retrieval = [raw_step for raw_step in
+                                  (candidate.get("executionSteps") or candidate.get("execution_steps") or [])
+                                  if isinstance(raw_step, dict) and any(
+                                      str(tool) in {MEMORY_SEARCH_TOOL_ID, DATA_SEARCH_TOOL_ID,
+                                                    INTERNET_SEARCH_TOOL_ID, GITHUB_SEARCH_TOOL_ID,
+                                                    WEBPAGE_SCRAPE_TOOL_ID}
+                                      for tool in (raw_step.get("tools") or []))]
+            def retrieval_covers(need: str) -> bool:
+                normalized_need = re.sub(r"\s+", "", str(need))
+                return any(
+                    SequenceMatcher(None, normalized_need,
+                                    re.sub(r"\s+", "", str(raw_step.get(field) or ""))).ratio() >= 0.45
+                    for raw_step in declared_retrieval for field in ("title", "objective")
+                )
+            deferred = [value for value in review.get("missing_inputs", [])
+                        if isinstance(value, str) and retrieval_covers(value)]
+            missing = [value for value in review.get("missing_inputs", []) if value not in deferred]
+            receipts.append({"skill_id": item["id"], "role": item["role"],
+                             "selection_source": item["selection_source"],
+                             "status": review.get("status"),
+                             "metadata_consistent": review.get("metadata_consistent"),
+                             "applicable": review.get("applicable"),
+                             "conflicts": review.get("conflicts"),
+                             "missing_inputs": missing,
+                             "pending_retrieval_inputs": deferred})
+            state.environment["brainstorm_skill_reviews"] = receipts
+            if review.get("status") != "reviewed":
+                raise OperationError("CREATION_SKILL_REVIEW_UNAVAILABLE", "章节技能独立核验未完成，已保留原操作")
+            if missing:
+                gap = _missing_inputs_gap([{"need": value} for value in missing])
+                raise OperationError("CREATION_SKILL_INPUTS_MISSING",
+                                     gap or "章节技能缺少必需资料，已保留原操作")
+            evidence = review.get("request_evidence")
+            if (not isinstance(evidence, str) or not evidence.strip()
+                    or evidence not in instruction) and (
+                    review.get("metadata_consistent") is True
+                    and review.get("applicable") is True
+                    and review.get("conflicts") == []):
+                # An otherwise positive semantic review can omit or paraphrase
+                # the quote. The validated root instruction itself is a literal
+                # span; never use a Skill title as substitute evidence.
+                evidence = instruction
+                review = {**review, "request_evidence": evidence}
+            if (review.get("metadata_consistent") is not True or review.get("applicable") is not True
+                    or review.get("conflicts") != [] or not isinstance(evidence, str)
+                    or not evidence.strip() or evidence not in instruction):
+                conflicts = review.get("conflicts") or []
+                reason = next((str(value) for value in conflicts
+                               if isinstance(value, str) and 0 < len(value) <= 60
+                               and not re.search(r"https?://|/Users/|[{}]", value)), "")
+                raise OperationError("CREATION_SKILL_NOT_APPLICABLE",
+                                     "章节所选技能与当前交付物不适用" + ("：" + reason if reason else "，已保留原操作"))
+            reviews.append({**review, "missing_inputs": []})
+        operation["skill_assessments"] = reviews
+
     async def _apply_routing_decision(
         self,
         state: LoopState,
@@ -1489,36 +1805,111 @@ class CreationAgentLoop(CreationEvidencePrompts):
         if decision.get("source") == "fallback":
             raise OperationError("CREATION_OPERATION_INVALID", "本轮操作解析失败，请重试当前指令")
         record = validate_routing_decision(decision)
-        from .skill_governance import admit_skills, validate_identity
+        from .skill_governance import admit_skills, repair_copied_generated_title
         from .operations import bind_append_transform_scope, normalize_operation_selectors
         operation = normalize_operation_selectors(state.current_document, record.get("operation", {}))
         operation = bind_append_transform_scope(
             getattr(state, "user_message", ""), state.current_document, operation
         )
+        from .skill_governance import explicit_standalone_artifact_kind
+        explicit_artifact = explicit_standalone_artifact_kind(getattr(state, "user_message", ""))
+        requested_artifact = (
+            explicit_artifact
+            or str(state.environment.get("requirement", {}).get("task_intent", {}).get("artifact_kind") or "")
+        )
+        if requested_artifact == "image":
+            raise OperationError(
+                "CREATION_CAPABILITY_UNAVAILABLE",
+                "当前创作尚未配置可交付的独立图像生成能力；已保留本轮指令，不会改写成文字文档",
+            )
+        if requested_artifact == "diagram":
+            routed_skill_ids = set(operation.get("skill_ids") or []) | set(
+                operation.get("constraint_skill_ids") or [])
+            explicit_skill_ids = set(state.environment.get("explicit_skill_ids") or [])
+            if (state.environment.get("brainstorm_skill_binding")
+                    or routed_skill_ids.intersection(explicit_skill_ids)):
+                raise OperationError(
+                    "CREATION_CAPABILITY_UNAVAILABLE",
+                    "已确认的 Skill 工作流不能被独立图示生成替代，当前尚不支持组合交付",
+                )
+            if operation.get("kind") != "generate":
+                if operation.get("kind") in {"transform", "patch", "respond", "answer", "execute_skill"}:
+                    # A source-backed standalone diagram request owns its
+                    # deliverable. Candidate document workflows and edit-biased
+                    # routes cannot replace it, including on legacy checkpoints.
+                    identity = operation.get("document_identity")
+                    operation = {"kind": "generate"}
+                    if identity is not None:
+                        operation["document_identity"] = identity
+                else:
+                    raise OperationError("CREATION_DELIVERABLE_MISMATCH", "本轮要求独立图示，执行计划却未选择图示生成")
+            # Automatically selected document Skill constraints may contain a
+            # diagram step, but their full document contract does not apply to
+            # an independent diagram. Keep only the diagram deliverable here.
+            operation.pop("constraint_skill_ids", None)
+            operation.pop("skill_assessments", None)
+            operation["artifact_kind"] = "diagram"
+            state.environment["diagram_design_proposal"] = self._diagram_is_design_proposal(state)
+            enabled = set(normalize_creation_tool_ids(state.options.get("enabled_tools")))
+            if MERMAID_DIAGRAM_TOOL_ID not in enabled:
+                raise OperationError("CREATION_CAPABILITY_UNAVAILABLE", "Mermaid 画图工具已关闭，无法交付独立图示")
+            # An independent diagram can assert relationships that the user's
+            # brief did not supply. Give its writer the local source context
+            # even when the routing model omitted memory_search.
+            if (MEMORY_SEARCH_TOOL_ID in enabled
+                    and MEMORY_SEARCH_TOOL_ID not in record["tools"]):
+                record["tools"].insert(0, MEMORY_SEARCH_TOOL_ID)
+            if MERMAID_DIAGRAM_TOOL_ID not in record["tools"]:
+                record["tools"].append(MERMAID_DIAGRAM_TOOL_ID)
+            state.goal.objective = f"生成一张可渲染、可导出的图示：{state.root_request}"
+            state.goal.acceptance_criteria = [
+                "只交付一张独立图示，不以文字说明或图片建议代替",
+                "图中节点与关系可渲染，且不把未证实的现网能力或指标写成事实",
+            ]
         record["operation"] = operation
+        from .brainstorm_chapters import chapter_context
+        chapter = chapter_context(state.environment.get("creation_brief"))
+        if (chapter is not None
+                and operation.get("kind") not in {"generate", "transform", "execute_skill"}):
+            raise OperationError("CREATION_OPERATION_INVALID", "当前章节必须经过成文与交付核验，请重试本章创作")
         intended = state.environment.get("requirement", {}).get("task_intent", {}).get("action")
         from .skill_governance import INTENT_OPERATIONS
         allowed = INTENT_OPERATIONS.get(intended)
         if allowed and operation.get("kind") not in allowed:
             raise OperationError("CREATION_OPERATION_INVALID", "操作与本轮主目标不一致")
         identity = operation.get("document_identity")
+        skill_instruction = self._title_instruction(state)
         if operation.get("kind") in {"generate", "execute_skill"} and state.environment.get("governance_required") and identity is None:
             raise OperationError("CREATION_TITLE_INVALID", "生成操作缺少文档标题与来源，请重试本轮指令")
         if identity is not None:
-            identity = validate_identity(identity, state.user_message, state.current_document, state.selected_skills)
+            identity = repair_copied_generated_title(
+                identity, skill_instruction, state.current_document, state.selected_skills)
             identity = {"title": identity["title"], "source": identity["source"],
                         "evidence_hash": self._document_hash(identity["evidence"])}
             state.environment["document_identity"] = identity
             operation["document_identity"] = identity
+        binding = state.environment.get("brainstorm_skill_binding") if chapter is not None else None
+        if isinstance(binding, dict):
+            async for review_event in self._apply_frozen_chapter_skills(state, operation, binding,
+                                                                        skill_instruction):
+                yield review_event
+            identity = operation.get("document_identity")
         explicit_ids = state.environment.get("explicit_skill_ids", [])
-        if explicit_ids and operation.get("kind") in {"generate", "execute_skill"} and hasattr(self.service, "_stream_direct_completion"):
+        if (not isinstance(binding, dict) and explicit_ids
+                and operation.get("kind") in {"generate", "execute_skill"}
+                and hasattr(self.service, "_stream_direct_completion")):
             from .skill_governance import explicit_workflows
-            requested = await explicit_workflows(self.service, state.user_message, state.selected_skills, explicit_ids)
+            requested = await explicit_workflows(self.service, skill_instruction, state.selected_skills, explicit_ids)
             state.environment["explicit_skill_ids"] = requested
             if requested:
+                if operation.get("artifact_kind") == "diagram":
+                    raise OperationError("CREATION_CAPABILITY_UNAVAILABLE",
+                                         "当前独立图示不能执行已明确选择的 Skill 工作流")
                 operation["kind"] = "execute_skill"
                 operation["skill_ids"] = list(dict.fromkeys(requested + operation.get("skill_ids", [])))
-        if (operation.get("kind") == "execute_skill" or operation.get("constraint_skill_ids")) and hasattr(self.service, "_stream_direct_completion"):
+        if (not isinstance(binding, dict)
+                and (operation.get("kind") == "execute_skill" or operation.get("constraint_skill_ids"))
+                and hasattr(self.service, "_stream_direct_completion")):
             from .skill_governance import review_skill, skill_id
             assessments = list(operation.get("skill_assessments") or [])
             explicit = set(state.environment.get("explicit_skill_ids", []))
@@ -1526,12 +1917,27 @@ class CreationAgentLoop(CreationEvidencePrompts):
                 selected = skill_id(candidate)
                 if selected in operation.get("skill_ids", []) + operation.get("constraint_skill_ids", []) and selected not in explicit:
                     yield self._event(state, "skill.review.started", "正在独立核验技能与主交付物是否一致")
-                    review = await review_skill(self.service, candidate, state.user_message)
+                    review = await review_skill(self.service, candidate, skill_instruction)
                     assessments = [item for item in assessments if item.get("skill_id") != selected]
                     assessments.append(review)
             operation["skill_assessments"] = assessments
+        admission_explicit_ids = list(state.environment.get("explicit_skill_ids", []))
+        if isinstance(binding, dict):
+            admission_explicit_ids.extend(item["id"] for item in binding["skills"]
+                                          if item["selection_source"] == "user"
+                                          and item["id"] not in admission_explicit_ids)
         operation, admission = admit_skills(operation, state.selected_skills,
-            state.environment.get("explicit_skill_ids", []), state.user_message)
+            admission_explicit_ids, skill_instruction)
+        if requested_artifact == "diagram" and (
+                operation.get("kind") != "generate"
+                or operation.get("artifact_kind") != "diagram"):
+            raise OperationError("CREATION_DELIVERABLE_MISMATCH", "本轮要求独立图示，执行计划却未选择图示生成")
+        if isinstance(binding, dict):
+            frozen = {item["id"]: item for item in binding["skills"]}
+            if len(admission) != len(frozen) or any(not item.get("admitted") for item in admission):
+                raise OperationError("CREATION_SKILL_NOT_APPLICABLE", "已确认的章节技能未能通过独立准入核验，已保留原操作")
+            admission = [{**item, "source": frozen[item["skill_id"]]["selection_source"],
+                          "role": frozen[item["skill_id"]]["role"]} for item in admission]
         record["operation"] = operation
         state.environment["skill_admission"] = admission
         if admission:
@@ -1564,11 +1970,13 @@ class CreationAgentLoop(CreationEvidencePrompts):
         if record.get("operation", {}).get("kind") in {"generate", "transform", "answer", "execute_skill"}:
             routing_context = state.environment.get("requirement", {}).get("operation_context")
             state.environment["requirement"] = self.service.analyze_requirement(
-                state.user_message, CreationOptions(**state.options),
+                skill_instruction, CreationOptions(**state.options),
                 retrieval_context_terms=state.environment.get("retrieval_context_terms", []))
             if routing_context:
                 state.environment["requirement"]["operation_context"] = routing_context
-        if record.get("operation", {}).get("kind") in {"generate", "transform", "answer", "execute_skill"} and hasattr(self.service, "assess_creation_inputs"):
+        if (record.get("operation", {}).get("kind") in {"generate", "transform", "answer", "execute_skill"}
+                and operation.get("artifact_kind") != "diagram"
+                and hasattr(self.service, "assess_creation_inputs")):
             from .delivery_contract import bind_declared_workflow_inputs, bind_resources
             input_context = self._input_context(state)
             operation_kind = record["operation"]["kind"]
@@ -1581,7 +1989,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
             assessment_conversation = input_context["conversation"]
             assessment_brief = self._acceptance_brief_context(state)
             assessment_root = input_context["root_request"]
-            if operation_kind == "transform":
+            if operation_kind == "transform" and chapter is None:
                 assessment_conversation = []
                 assessment_brief = ""
                 assessment_root = ""
@@ -1610,7 +2018,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
                 contract, state.user_message, record["operation"]["kind"]
             )
             contract = with_brainstorm_coverage(contract, input_context.get("brainstorm_decisions", []),
-                record["operation"]["kind"], input_context["root_request"])
+                "generate" if chapter is not None else record["operation"]["kind"], input_context["root_request"])
             if record["operation"]["kind"] == "transform":
                 contract = with_brainstorm_transform_delta_coverage(
                     contract,
@@ -1621,8 +2029,11 @@ class CreationAgentLoop(CreationEvidencePrompts):
             contract = with_brainstorm_open_flag_safety(contract,
                 self._brainstorm_open_flags(state), record["operation"]["kind"], state.user_message)
             contract = with_bare_working_definition_safety(contract, state.user_message)
+            if operation_kind in {"generate", "execute_skill"} or chapter is not None:
+                from .work_integration import bind_work_acceptance
+                contract = bind_work_acceptance(contract, state.environment.get("work_context")) if state.environment.get("work_context") else contract
             state.environment["input_contract"] = contract
-            state.environment["brainstorm_acceptance_version"] = 7
+            state.environment["brainstorm_acceptance_version"] = 9
             state.environment["input_base_document"] = state.current_document
             state.environment["candidate_routing_decision"] = dict(record)
             record = bind_resources(record, contract)
@@ -1631,6 +2042,10 @@ class CreationAgentLoop(CreationEvidencePrompts):
             yield self._event(state, "inputs.assessed", "已核对本轮交付物需要的资料与已有证据",
                 status="completed", data={"input_contract": contract, "required_tools": record["tools"]})
         state.plan = self._compose_plan_from_decision(state, record)
+        if operation.get("artifact_kind") == "diagram":
+            state.plan.append({"kind": "agent", "id": "delivery_validation", "name": "核对图示交付",
+                "action": "delivery_check", "decision_source": "artifact_contract",
+                "reason": "确认独立图示可渲染且没有被文字文档替代"})
         if state.environment.get("input_contract"):
             from .delivery_contract import resource_requirements
             # Explicit workflows retain their declared steps. Add only missing
@@ -1707,6 +2122,8 @@ class CreationAgentLoop(CreationEvidencePrompts):
         error_code: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         """Harness 只依据可观察 Tool 反馈追加下一步，不预演固定链路。"""
+        if (state.environment.get("operation") or {}).get("artifact_kind") == "diagram":
+            return None
         step_id = str(step.get("id") or "")
         step_key = self._step_schedule_key(step)
         completed_ids = state.environment.setdefault("harness_completed_step_ids", [])
@@ -2905,12 +3322,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
             state.environment["delivery_repair_stalled"] = True
             state.environment["delivery_review"] = report
             return
-        new_report = await self.service.review_creation_delivery(
-            state.user_message,
-            repaired_document,
-            state.environment["input_contract"],
-            state.environment,
-        )
+        new_report = await self._review_creation_delivery(state, repaired_document)
         state.environment["delivery_review"] = new_report
         yield self._event(
             state,
@@ -2942,6 +3354,12 @@ class CreationAgentLoop(CreationEvidencePrompts):
     async def _routing_requirement(self, state: LoopState) -> dict[str, Any]:
         """Bind operation classification to the current turn, including resumes."""
         requirement = state.environment.setdefault("requirement", {})
+        from .brainstorm_chapters import chapter_context
+        if chapter_context(state.environment.get("creation_brief")) is not None:
+            requirement["title_request"] = self._title_instruction(state)
+            requirement["topic"] = strip_capability_mentions(requirement["title_request"])
+        else:
+            requirement.pop("title_request", None)
         brief = ""
         if state.creation_mode == "brainstorm":
             saved_brief = state.environment.get("creation_brief")
@@ -2959,23 +3377,120 @@ class CreationAgentLoop(CreationEvidencePrompts):
         # Previous checkpoints may have classified context_query, which also
         # includes historical brief text. Only reuse a result bound to the real
         # current instruction and the document-presence input of this classifier.
-        binding = {"schema_version": "creation.current-turn-intent.v3",
+        binding = {"schema_version": "creation.current-turn-intent.v4",
                    "instruction_hash": self._document_hash(state.user_message),
                    "has_document": bool(state.current_document)}
+        from .brainstorm_chapters import chapter_routing_context
+        workflow_context = chapter_routing_context(state.environment.get("creation_brief"), bool(state.current_document))
+        if workflow_context:
+            binding["workflow_context"] = workflow_context
         if (requirement.get("task_intent_context") == binding
                 and requirement.get("task_intent")):
             return requirement
         requirement.pop("task_intent", None)
         requirement.pop("task_intent_context", None)
         from .skill_governance import task_intent
-        intent = await task_intent(self.service, state.user_message, bool(state.current_document))
+        intent = await task_intent(self.service, state.user_message, bool(state.current_document),
+            **({"workflow_context": workflow_context} if workflow_context else {}))
         if not intent:
             raise OperationError("CREATION_OPERATION_INVALID", "未能核验本轮动作，请重试；不会绕过资料检查直接生成回答")
         requirement["task_intent"] = intent
         requirement["task_intent_context"] = binding
         return requirement
 
+    @staticmethod
+    def _title_instruction(state: LoopState) -> str:
+        """Use the effective user request to name a confirmed chapter's document.
+
+        The chapter instruction is generated by the application to control the
+        operation. It is not the user's topic. A manual edit of the brief's root
+        request wins, including an explicit clear of that field.
+        """
+        from .brainstorm_chapters import chapter_context
+        brief = state.environment.get("creation_brief")
+        if chapter_context(brief) is None:
+            return state.user_message
+        edits = brief.get("brief_edits") if isinstance(brief.get("brief_edits"), dict) else {}
+        if "root_request" in edits:
+            return str(edits["root_request"] or "").strip()
+        if "root_request" in brief:
+            return str(brief["root_request"] or "").strip()
+        return state.root_request
+
+    @staticmethod
+    def _bind_chapter_skill_binding(state: LoopState, binding: Optional[dict[str, Any]],
+                                    profiles: list[dict[str, Any]], explicit_ids: Optional[list[str]],
+                                    *, restoring: bool) -> None:
+        """Keep Core's frozen chapter selection separate from the candidate catalog."""
+        from .brainstorm_chapters import chapter_context
+        saved = state.environment.get("brainstorm_skill_binding")
+        if binding is None:
+            if restoring and saved is not None:
+                raise OperationError("CREATION_SKILL_BINDING_CHANGED", "章节技能绑定已变化，请重新核对本轮技能")
+            private_gap = (state.environment.get("creation_brief") or {}).get("content_source_gap")
+            if (not profiles and not explicit_ids and saved is None
+                    and chapter_context(state.environment.get("creation_brief")) is not None
+                    and isinstance(private_gap, dict)
+                    and private_gap.get("schema_version") == "brainstorm.content-source-gap.v1"
+                    and private_gap.get("preparation_contract_version") == 17):
+                if state.selected_skills:
+                    # Older desktop checkpoints saved the installed catalog as
+                    # selected Skills. Core now sends an empty catalog for this
+                    # frozen no-Skill chapter; retain the old snapshot for audit.
+                    state.environment.setdefault("unbound_skill_catalog_snapshot",
+                                                 list(state.selected_skills))
+                state.selected_skills = []
+                state.environment["explicit_skill_ids"] = []
+            return
+        if chapter_context(state.environment.get("creation_brief")) is None:
+            raise OperationError("CREATION_SKILL_BINDING_INVALID", "章节技能绑定缺少对应的章节上下文")
+        if (not isinstance(binding, dict) or type(binding.get("version")) is not int
+                or binding.get("version") != 1
+                or not isinstance(binding.get("fingerprint"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", binding["fingerprint"])
+                or not isinstance(binding.get("skills"), list)):
+            raise OperationError("CREATION_SKILL_BINDING_INVALID", "章节技能绑定格式无效")
+        frozen = []
+        seen: set[str] = set()
+        for item in binding["skills"]:
+            if not isinstance(item, dict):
+                raise OperationError("CREATION_SKILL_BINDING_INVALID", "章节技能绑定条目格式无效")
+            skill_key = item.get("id")
+            role = item.get("role")
+            source = item.get("selection_source")
+            if (not isinstance(skill_key, str) or not skill_key or skill_key in seen
+                    or role not in {"primary", "support"}
+                    or source not in {"user", "automatic", "dependency"}):
+                raise OperationError("CREATION_SKILL_BINDING_INVALID", "章节技能角色或来源无效")
+            seen.add(skill_key)
+            frozen.append({"id": skill_key, "role": role, "selection_source": source})
+        profiles_by_id: dict[str, dict[str, Any]] = {}
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+            skill_key = str(profile.get("id") or profile.get("clientSkillKey") or "")
+            if skill_key in profiles_by_id:
+                raise OperationError("CREATION_SKILL_BINDING_INVALID", "章节技能目录包含重复标识")
+            profiles_by_id[skill_key] = profile
+        if any(item["id"] not in profiles_by_id for item in frozen):
+            raise OperationError("CREATION_SKILL_BINDING_INVALID", "章节所选技能资料不可用，已保留原操作")
+        user_primary = [item["id"] for item in frozen
+                        if item["role"] == "primary" and item["selection_source"] == "user"]
+        if set(explicit_ids or []) != set(user_primary):
+            raise OperationError("CREATION_SKILL_BINDING_INVALID", "章节技能的显式选择来源不一致")
+        normalized = {"version": 1, "fingerprint": binding["fingerprint"], "skills": frozen}
+        if restoring and saved != normalized:
+            raise OperationError("CREATION_SKILL_BINDING_CHANGED", "章节技能绑定与保存的执行计划不一致，已保留原操作")
+        state.environment["brainstorm_skill_binding"] = normalized
+        state.environment["explicit_skill_ids"] = user_primary
+        state.selected_skills = [profiles_by_id[item["id"]] for item in frozen]
+
     def _uses_brief_sections(self, state: LoopState, step: dict[str, Any]) -> bool:
+        from .brainstorm_chapters import chapter_context
+        if chapter_context(state.environment.get("creation_brief")) is not None:
+            # The user-confirmed chapter is already the bounded writing unit.
+            # Whole-brief section assembly would replace earlier chapters.
+            return False
         if (step.get("action") != "writer" or step.get("brief_assembled")
             or step.get("skill_step_id") or state.creation_mode != "brainstorm"
             or (state.environment.get("operation") or {}).get("kind") != "generate"
@@ -3033,6 +3548,10 @@ class CreationAgentLoop(CreationEvidencePrompts):
         allowed = BrainstormCoordinator._memory_allowed(str(brief.get("root_request") or ""),
             brief.get("decisions") or [], edits, brief.get("user_input_revisions"))
         root = str(edits["root_request"] or "") if "root_request" in edits else self._input_context(state)["root_request"]
+        from .brainstorm_chapters import chapter_context, chapter_goal
+        chapter = chapter_context(brief)
+        if chapter is not None:
+            root = chapter_goal(chapter)
         from .brief_context import effective_brief_open_flags
         flags = effective_brief_open_flags(brief) if allowed else []
         return {"current_root_request": root, "root_request_was_edited": "root_request" in edits,
@@ -3226,6 +3745,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
         scope = self._brief_writing_scope(state)
         materials = delivery_source_materials(state.user_message, state.environment)
         materials["brief_scope"] = scope
+        materials["expression_context"] = state.environment.get("work_context")
         return {"section": section, "decisions": context["brainstorm_decisions"],
             "root_request": scope["current_root_request"], "global_decision_ids": record["plan"]["global_decision_ids"],
             "provided_materials": materials,
@@ -3307,8 +3827,98 @@ class CreationAgentLoop(CreationEvidencePrompts):
         if action == "delivery_check":
             state.environment.pop("delivery_repair_result", None)
             operation = state.environment.get("operation", {})
+            is_diagram = operation.get("artifact_kind") == "diagram"
             document = str(operation.get("response") or "") if operation.get("kind") == "answer" else str(state.environment.get("document") or state.current_document)
-            if operation.get("kind") != "answer":
+            if operation.get("kind") != "answer" and not is_diagram:
+                superseded = self._supersede_adopted_failed_chapter(state, document)
+                if superseded is not None:
+                    document = superseded["content"]
+                    yield self._event(
+                        state, "document.replaced",
+                        "已用本轮完整章节替换失败草稿，原稿已存档",
+                        status="completed", actor=actor,
+                        data={"content": document,
+                              "operation": "failed_chapter_candidate_superseded",
+                              "superseded_hash": superseded["superseded_hash"]},
+                    )
+                    yield self._checkpoint_event(state)
+            if (operation.get("kind") != "answer"
+                    and state.environment.get("strict_skill_workflow")
+                    and state.environment.get("brainstorm_skill_binding")):
+                from .source_grounded_revision import revise_source_grounded_preview
+                from .source_time_consistency import audit_source_time_consistency
+                source_audit = audit_source_time_consistency(
+                    document, state.environment.get("data_results", []))
+                rank_conflicts = self._ranked_query_claim_conflicts(
+                    document, state.environment.get("data_query_results", []))
+                base = str(state.environment.get("chapter_base_document") or "")
+                revised, revision_edits = revise_source_grounded_preview(
+                    document, source_audit.get("issues", []), rank_conflicts,
+                    protected_base=base)
+                if revision_edits and revised != document:
+                    from .brainstorm_chapters import chapter_context, validate_chapter_document
+                    chapter = chapter_context(state.environment.get("creation_brief"))
+                    if chapter is not None:
+                        validate_chapter_document(revised, base, chapter)
+                    old_hash = self._document_hash(document)
+                    state.environment.setdefault("superseded_skill_previews", []).append({
+                        "document": document, "document_hash": old_hash,
+                        "replacement_hash": self._document_hash(revised),
+                        "reason": "source_grounded_revision", "run_id": state.run_id,
+                    })
+                    state.environment.setdefault("source_grounded_revision_audits", []).append({
+                        "input_hash": old_hash, "output_hash": self._document_hash(revised),
+                        "edits": revision_edits,
+                    })
+                    state.environment["document"] = revised
+                    state.current_document = revised
+                    state.environment.pop("delivery_checked_hash", None)
+                    document = revised
+                    yield self._event(
+                        state, "document.replaced",
+                        "已按来源统计期和已验证排行修订待核验草稿",
+                        status="completed", actor=actor,
+                        data={"content": document,
+                              "operation": "source_grounded_revision",
+                              "superseded_hash": old_hash,
+                              "edit_count": len(revision_edits)},
+                    )
+                    yield self._checkpoint_event(state)
+                from .brainstorm_gap_delivery import revise_acknowledged_gap_preview
+                gap_receipts = self._frozen_skill_delivery_receipts(state)
+                gap_revised, gap_edits = revise_acknowledged_gap_preview(
+                    document, state.environment.get("creation_brief"), gap_receipts,
+                    protected_base=base)
+                if gap_edits:
+                    from .brainstorm_chapters import chapter_context, validate_chapter_document
+                    chapter = chapter_context(state.environment.get("creation_brief"))
+                    if chapter is not None:
+                        validate_chapter_document(gap_revised, base, chapter)
+                    old_hash = self._document_hash(document)
+                    if gap_revised != document:
+                        state.environment.setdefault("superseded_skill_previews", []).append({
+                            "document": document, "document_hash": old_hash,
+                            "replacement_hash": self._document_hash(gap_revised),
+                            "reason": "acknowledged_source_gap", "run_id": state.run_id,
+                        })
+                    state.environment.setdefault("acknowledged_gap_revision_audits", []).append({
+                        "input_hash": old_hash, "output_hash": self._document_hash(gap_revised),
+                        "edits": gap_edits,
+                    })
+                    if gap_revised != document:
+                        state.environment["document"] = gap_revised
+                        state.current_document = gap_revised
+                        state.environment.pop("delivery_checked_hash", None)
+                        document = gap_revised
+                        yield self._event(
+                            state, "document.replaced",
+                            "已按用户确认的资料缺口生成待核实章节",
+                            status="completed", actor=actor,
+                            data={"content": document, "operation": "acknowledged_source_gap",
+                                  "superseded_hash": old_hash, "edit_count": len(gap_edits)},
+                        )
+                    yield self._checkpoint_event(state)
+            if operation.get("kind") != "answer" and not is_diagram:
                 document, inserted_definition = self._ensure_bare_working_definition(
                     document, state.user_message
                 )
@@ -3343,8 +3953,22 @@ class CreationAgentLoop(CreationEvidencePrompts):
                             },
                         },
                     )
-            report = await self.service.review_creation_delivery(state.user_message, document,
-                state.environment["input_contract"], state.environment)
+            revised_gap_document, _ = self._apply_content_gap_candidate(
+                state, document)
+            if revised_gap_document != document:
+                old_hash = self._document_hash(document)
+                document = revised_gap_document
+                state.environment["document"] = document
+                state.current_document = document
+                yield self._event(
+                    state, "document.replaced",
+                    "已撤回未核实的来源事实并标明目标周期资料缺口",
+                    status="completed", actor=actor,
+                    data={"content": document, "operation": "confirmed_source_gap",
+                          "superseded_hash": old_hash},
+                )
+                yield self._checkpoint_event(state)
+            report = await self._review_creation_delivery(state, document)
             state.environment["delivery_review"] = report
             state.environment["delivery_checked_hash"] = self._document_hash(document) if report["status"] == "pass" else None
             yield self._event(state, "delivery.checked", "已逐项核对本轮交付条件", status="completed",
@@ -3353,9 +3977,17 @@ class CreationAgentLoop(CreationEvidencePrompts):
                 "本轮交付存在资料缺口" if report["status"] == "blocked" else "已完成本轮交付核验",
                 status="failed" if report["status"] == "blocked" else "completed", actor=actor)
             if report["status"] == "blocked":
+                if is_diagram:
+                    if any(item.get("id") in {"source_grounding", "source_claims"}
+                           and not item.get("passed")
+                           for item in report.get("checks") or []):
+                        raise OperationError("CREATION_EVIDENCE_UNAVAILABLE",
+                                             "该主体的架构关系缺少可用原始资料，已保留原操作")
+                    raise OperationError("CREATION_DIAGRAM_INVALID", "独立图示未通过交付核验，已保留原操作")
                 raise OperationError(
                     "CREATION_DELIVERY_INCOMPLETE",
-                    delivery_incomplete_message(report, 0, state.environment.get("input_contract")),
+                    delivery_incomplete_message(report, 0,
+                        None if report.get("frozen_skill_gap") else state.environment.get("input_contract")),
                 )
             if report["status"] == "revise":
                 document_fingerprint = self._document_hash(document)
@@ -3472,11 +4104,70 @@ class CreationAgentLoop(CreationEvidencePrompts):
                     state.environment.get("retrieval_context_terms") or []
                 ),
             )
+            is_diagram_recall = (
+                (state.environment.get("operation") or {}).get("artifact_kind") == "diagram"
+            )
+            if is_diagram_recall:
+                if "架构" in state.root_request:
+                    requirement["title_structure_hint"] = "架构"
+                    state.environment["diagram_structure_hint"] = "架构"
+                entity_context = requirement.get("entity_context") or {}
+                anchor = self._diagram_subject_anchor(entity_context)
+                normalized_query = re.sub(r"\W+", "", query.casefold())
+                normalized_anchor = re.sub(r"\W+", "", anchor.casefold())
+                generic_artifact = bool(re.fullmatch(
+                    r"(?:技术|系统|业务|总体|整体)?(?:架构|流程|结构|组件|部署)(?:大)?图?",
+                    anchor,
+                ))
+                if (not normalized_anchor or normalized_anchor not in normalized_query
+                        or generic_artifact):
+                    # Corpus entity calibration may promote a common output
+                    # noun or an unrelated nearby project to the primary
+                    # target. Replan from the actual requested subject.
+                    anchor = ""
+                    entity_context = {}
+                    requirement["entity_context"] = entity_context
+                    requirement.pop("retrieval_plan", None)
+                    requirement["keywords"] = [query]
+                named_subject = bool(
+                    entity_context.get("has_high_confidence_entity") and anchor
+                )
+                if not named_subject:
+                    # A precise topic can have no corpus-calibrated named entity.
+                    # Keep the full requested topic for original-title matching;
+                    # this does not by itself claim that any source is authoritative.
+                    anchor = query.strip()
+                # A saved Brainstorm direction authorizes a proposed design,
+                # not a claim about the named subject's deployed topology.
+                # Keep fact reconstruction source-bound, while a proposal uses
+                # the user's confirmed choices as its design brief.
+                proposal = self._diagram_is_design_proposal(state)
+                state.environment["diagram_design_proposal"] = proposal
+                state.environment["diagram_source_required"] = named_subject and not proposal
+                state.environment["diagram_subject_anchor"] = anchor
+                state.environment["diagram_anchor_kind"] = (
+                    "entity" if named_subject and not proposal else "topic"
+                )
+                # A ten-result pool can drop the directly matched original
+                # before provenance/structure checks run. The bounded pool is
+                # still subject to relevance, provenance and claim checks.
+                options.max_references = 30
             references = self.service.retrieve_references(
                 query,
                 requirement,
                 options,
             )
+            diagram_terms = (
+                [str(item) for item in (requirement.get("keywords") or [])
+                 if str(item).strip()]
+                + self._diagram_requested_facets(state.user_message)
+                + [run[index:index + 2]
+                   for run in re.findall(r"[\u4e00-\u9fff]{4,}", query)
+                   for index in range(len(run) - 2, -1, -1)]
+                or [query]
+            ) if is_diagram_recall else None
+            if diagram_terms is not None:
+                diagram_terms = list(dict.fromkeys(diagram_terms))[:20]
             requested_time_context = requirement.get("time_context", {})
             # 创作消费召回结果前先对命中文档做浏览器即时刷新，把最新正文
             # 回写进召回对象；任何失败都静默降级，不中断创作主链路。
@@ -3496,6 +4187,13 @@ class CreationAgentLoop(CreationEvidencePrompts):
                             item,
                             requested_time_context,
                         ),
+                        relevance_terms=(
+                            diagram_terms
+                            + [str(term) for term in (
+                                (getattr(item, "bridge_evidence", None) or {}).get("matched_terms") or []
+                            )]
+                            + [str((getattr(item, "bridge_evidence", None) or {}).get("entity") or "")]
+                        ) if diagram_terms is not None else None,
                     ),
                     "retrieval_query": query,
                     "skill_step_id": step.get("skill_step_id"),
@@ -3503,11 +4201,31 @@ class CreationAgentLoop(CreationEvidencePrompts):
                 }
                 for item in references
             ]
+            if is_diagram_recall and state.environment.get("diagram_subject_anchor"):
+                anchor = state.environment["diagram_subject_anchor"]
+                for converted, original in zip(batch_references, references):
+                    converted["diagram_full_subject_coverage"] = round(
+                        self._diagram_subject_coverage(
+                            anchor, str(original.title or "") + "\n" + str(original.full_content or "")),
+                        3,
+                    )
+                    converted["diagram_subject_body_hash"] = converted.get("source_body_hash")
             state.environment["references"] = self._merge_reference_states(
                 list(state.environment.get("references") or []),
                 batch_references,
                 limit=30,
             )
+            if (is_diagram_recall and not state.environment.get("diagram_source_required")
+                    and not state.environment.get("diagram_design_proposal")):
+                topic = str(state.environment.get("diagram_subject_anchor") or "")
+                if any(
+                    self._diagram_source_assessment(
+                        item, topic, topic_mode=True
+                    )["eligible"]
+                    for item in state.environment["references"]
+                    if isinstance(item, dict)
+                ):
+                    state.environment["diagram_source_required"] = True
             batch_summaries = [
                 {
                     "id": item.id,
@@ -3550,6 +4268,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
                     "refresh_truncated": item.refresh_truncated,
                     "source_snapshot_id": item.source_snapshot_id,
                     "source_body_hash": item.source_body_hash,
+                    "bridge_evidence": getattr(item, "bridge_evidence", None),
                     "skill_step_id": step.get("skill_step_id"),
                     "skill_step_title": step.get("skill_step_title"),
                 }
@@ -3568,6 +4287,10 @@ class CreationAgentLoop(CreationEvidencePrompts):
             reference_ids = [
                 f"{item.source_type}:{item.source_id}" for item in references
             ]
+            period_counts: dict[str, int] = {}
+            for item in batch_summaries:
+                status = str((item.get("period_evidence") or {}).get("match_status") or "unknown")
+                period_counts[status] = period_counts.get(status, 0) + 1
             state.environment.setdefault("tool_results", []).append(
                 {
                     "tool_id": MEMORY_SEARCH_TOOL_ID,
@@ -3584,9 +4307,17 @@ class CreationAgentLoop(CreationEvidencePrompts):
                         "retrieval_diagnostics", {}
                     ),
                     "time_context": requirement.get("time_context", {}),
+                    "period_match_counts": period_counts,
                     "document_refresh": document_refresh_stats,
+                    "skill_id": step.get("skill_id"),
+                    "skill_step_id": step.get("skill_step_id"),
                 }
             )
+            if is_diagram_recall:
+                # The audit receipt must include the completed memory-search
+                # result; running it before this append records a false
+                # "memory_search_completed" value in recovery checkpoints.
+                self._audit_diagram_sources(state)
             self._update_goal(state)
             purpose = self._step_purpose(step)
             memory_summary = (
@@ -3631,6 +4362,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
                     "tool_id": INTERNET_SEARCH_TOOL_ID,
                     "status": "completed",
                     "result_count": len(results),
+                    "skill_id": step.get("skill_id"),
                     "skill_step_id": step.get("skill_step_id"),
                 }
             )
@@ -3658,10 +4390,9 @@ class CreationAgentLoop(CreationEvidencePrompts):
 
         if action == DATA_SEARCH_TOOL_ID:
             query = self._step_context_query(state, step)
-            step_requirement = self.service.analyze_requirement(
-                query,
-                CreationOptions(**state.options),
-            )
+            step_requirement = self._requirement_with_skill_period(
+                state, step, self.service.analyze_requirement(
+                    query, CreationOptions(**state.options)))
             results = await self.service.retrieve_data_context(
                 query,
                 step_requirement,
@@ -3686,8 +4417,13 @@ class CreationAgentLoop(CreationEvidencePrompts):
                         state.options.get("data_search_limit") or 30
                     ),
                     "refresh_required_count": refresh_count,
+                    "usable_result_count": sum(1 for item in results if isinstance(item, dict)
+                                               and item.get("can_use") is True),
+                    "source_ids": [item.get("source_id") for item in results
+                                   if isinstance(item, dict) and item.get("source_id") is not None],
                     "query": query,
                     "time_context": step_requirement.get("time_context", {}),
+                    "skill_id": step.get("skill_id"),
                     "skill_step_id": step.get("skill_step_id"),
                 }
             )
@@ -3747,6 +4483,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
             return
 
         if action == WEBPAGE_SCRAPE_TOOL_ID:
+            scrape_query, scrape_requirement = self._scrape_step_context(state, step)
             retain_screenshot = bool(
                 step.get("skill_step_retain_webpage_screenshot", False)
             )
@@ -3786,11 +4523,8 @@ class CreationAgentLoop(CreationEvidencePrompts):
                     or state.environment.get("data_results")
                     or []
                 ),
-                self._step_context_query(state, step),
-                self.service.analyze_requirement(
-                    self._step_context_query(state, step),
-                    CreationOptions(**state.options),
-                ),
+                scrape_query,
+                scrape_requirement,
                 run_id=state.run_id,
                 session_id=state.session_id,
                 preview_ids={
@@ -3946,6 +4680,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
                     "result_count": completed_count,
                     "failed_count": failed_count,
                     "attempted_count": len(scrapes),
+                    "skill_id": step.get("skill_id"),
                     "skill_step_id": step.get("skill_step_id"),
                 }
             )
@@ -4150,6 +4885,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
                     "tool_id": GITHUB_SEARCH_TOOL_ID,
                     "status": "completed",
                     "result_count": len(results),
+                    "skill_id": step.get("skill_id"),
                     "skill_step_id": step.get("skill_step_id"),
                 }
             )
@@ -4184,6 +4920,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
                     "tool_id": PLANTUML_DIAGRAM_TOOL_ID,
                     "status": "completed",
                     "diagram_type": diagram_context["diagram_type"],
+                    "skill_id": step.get("skill_id"),
                     "skill_step_id": step.get("skill_step_id"),
                 }
             )
@@ -4231,6 +4968,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
                     "diagram_type": diagram_context["diagram_type"],
                     "diagram_id": diagram_context.get("diagram_id"),
                     "section_title": diagram_context.get("section_title"),
+                    "skill_id": step.get("skill_id"),
                     "skill_step_id": step.get("skill_step_id"),
                 }
             )
@@ -4372,10 +5110,18 @@ class CreationAgentLoop(CreationEvidencePrompts):
             "answer_writer",
             "specialist",
             "writer",
+            "diagram_writer",
             "polisher",
             "skill_step",
             "data_query_plan",
         }:
+            if action == "diagram_writer" and state.environment.get("diagram_source_required"):
+                audit = self._audit_diagram_sources(state)
+                if not audit["ready"]:
+                    raise OperationError(
+                        "CREATION_EVIDENCE_UNAVAILABLE",
+                        "本地记忆未找到同时证明请求主体与架构关系的原始资料，已保留图示操作与草稿",
+                    )
             intent = state.environment.get("edit_intent", {})
             is_revision = action == "writer" and state.mode == "revision"
             is_document_mutation = action in {"writer", "polisher"}
@@ -4424,6 +5170,9 @@ class CreationAgentLoop(CreationEvidencePrompts):
                     relation_catalog(current_results),
                 )
             else:
+                if (step.get("skill_step_id")
+                        and state.environment.get("strict_skill_workflow")):
+                    self._ensure_explicit_ranked_queries(state, step)
                 if action == "patch_writer":
                     from .delivery_contract import minimal_working_definition_fragment
                     working_definition = minimal_working_definition_fragment(state.user_message)
@@ -4451,7 +5200,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
                             yield event
                         return
                 system_prompt, user_prompt = self._model_prompts(state, step)
-                if state.environment.get("document_identity"):
+                if state.environment.get("document_identity") and action != "diagram_writer":
                     user_prompt += "\n文档身份（不是技能名称）：" + json.dumps(
                         {"document_title": state.environment["document_identity"]["title"]}, ensure_ascii=False)
                     if self._step_outputs_full_document(state, step):
@@ -4542,6 +5291,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
                         )
             elif is_document_mutation:
                 is_local_polish = action == "polisher"
+                suppress_content_gap_preview = self._content_gap_active(state)
                 # 本地润色只推进度事件不推正文，断流可安全整步重试；
                 # document.delta 路径 UI 侧增量追加，重试会重复内容，不重试。
                 max_stream_attempts = 2 if is_local_polish else 1
@@ -4564,6 +5314,11 @@ class CreationAgentLoop(CreationEvidencePrompts):
                             if any(problem != "empty_document" for problem in
                                    integrity_problems("".join(document_parts))):
                                 break
+                            if suppress_content_gap_preview:
+                                # The model has not yet passed the saved source
+                                # gap gate. Progress may continue, but raw
+                                # chapter text must not reach the desktop.
+                                continue
                             if is_local_polish:
                                 # 润色只是局部重写相关细节：不把全文流式推给页面，
                                 # 避免用户误以为整篇文档在重新生成；只同步节流进度。
@@ -4621,6 +5376,162 @@ class CreationAgentLoop(CreationEvidencePrompts):
                 from .brief_writing import write_brief_section
                 result = await write_brief_section(self.service, **self._brief_section_prompt_args(state, step),
                     creation_model=creation_model, creation_api_key=creation_api_key, creation_base_url=creation_base_url)
+            elif action == "diagram_writer":
+                from .diagram_delivery import canonicalize_standalone_diagram
+                diagram_title = self._standalone_diagram_title(state)
+                for attempt in range(3):
+                    result = await self.service.run_specialist_agent(
+                        agent_id=step["id"],
+                        json_mode=False,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        creation_model=creation_model,
+                        creation_api_key=creation_api_key,
+                        creation_base_url=creation_base_url,
+                    )
+                    try:
+                        candidate = canonicalize_standalone_diagram(result, title=diagram_title)
+                        missing_decisions = self._diagram_missing_confirmed_labels(state, candidate)
+                        if missing_decisions:
+                            raise ValueError("图示遗漏已确认的设计对象：" + "、".join(missing_decisions))
+                        if state.environment.get("diagram_design_proposal"):
+                            unverified = self._diagram_proposal_claims(candidate)
+                            if unverified:
+                                raise ValueError("概念方案含未经核验的现网或定量断言：" + "、".join(unverified))
+                            structure_problem = self._diagram_proposal_structure(candidate)
+                            if structure_problem:
+                                raise ValueError(structure_problem)
+                        if state.environment.get("diagram_source_required"):
+                            source_audit = self._audit_diagram_sources(state)
+                            claims = self._diagram_claim_audit(state, candidate, source_audit)
+                            if not claims["passed"]:
+                                raise ValueError(
+                                    "以下节点、关系或状态没有同一原始来源支持："
+                                    + "、".join(claims["unsupported_claims"])
+                                )
+                        break
+                    except ValueError as exc:
+                        # Keep the rejected candidate in the durable operation
+                        # checkpoint. A format error without the offending
+                        # lines leaves the model unable to repair its own
+                        # Mermaid syntax and makes live failures opaque.
+                        state.environment.setdefault("diagram_rejected_candidates", []).append({
+                            "attempt": attempt + 1,
+                            "reason": str(exc),
+                            "candidate": str(result or "")[:12000],
+                        })
+                        # The outer loop advances cursor before executing a node.
+                        # A rejected candidate is still an unfinished writer step;
+                        # persist that position so recovery retries the writer,
+                        # rather than jumping to delivery review with an empty body.
+                        state.cursor -= 1
+                        yield self._checkpoint_event(state)
+                        state.cursor += 1
+                        if attempt == 2:
+                            if state.environment.get("diagram_design_proposal"):
+                                fallback = self._diagram_confirmed_design_fallback(state)
+                                if fallback:
+                                    try:
+                                        fallback = canonicalize_standalone_diagram(fallback)
+                                        missing = self._diagram_missing_confirmed_labels(state, fallback)
+                                        claims = self._diagram_proposal_claims(fallback)
+                                        structure = self._diagram_proposal_structure(fallback)
+                                        if not missing and not claims and not structure:
+                                            result = fallback
+                                            state.environment["diagram_fallback_used"] = True
+                                            state.environment["diagram_fallback_provenance"] = (
+                                                "brainstorm_confirmed_choices")
+                                            yield self._event(state, "agent.started",
+                                                "正在从已确认设计选项组装最小方案图",
+                                                actor=actor)
+                                            break
+                                    except ValueError:
+                                        pass
+                            if state.environment.get("diagram_source_required"):
+                                from .diagram_delivery import build_evidence_diagram
+                                try:
+                                    prompt_view = json.loads(user_prompt)
+                                    originals = {
+                                        "{}:{}".format(item.get("source_type"), item.get("source_id")): item
+                                        for item in (state.environment.get("references") or [])
+                                        if isinstance(item, dict)
+                                    }
+                                    fallback_references = []
+                                    for view in (prompt_view.get("references") or []):
+                                        source = originals.get("{}:{}".format(
+                                            view.get("source_type"), view.get("source_id")))
+                                        if source:
+                                            fallback_references.append({
+                                                **view,
+                                                "content": source.get("content"),
+                                                "source_scope": source.get("source_scope"),
+                                                "evidence_windows": source.get("evidence_windows"),
+                                            })
+                                    fallback = build_evidence_diagram(
+                                        fallback_references)
+                                    source_audit = self._audit_diagram_sources(state)
+                                    fallback_claims = self._diagram_claim_audit(
+                                        state, fallback, source_audit)
+                                    missing_fallback_decisions = self._diagram_missing_confirmed_labels(
+                                        state, fallback)
+                                    if fallback_claims["passed"] and not missing_fallback_decisions:
+                                        result = fallback
+                                        state.environment["diagram_fallback_used"] = True
+                                        state.environment["diagram_fallback_provenance"] = (
+                                            fallback_claims["claim_provenance"])
+                                        yield self._event(
+                                            state, "agent.started",
+                                            "正在按已核验原文关系组装图示",
+                                            actor=actor,
+                                        )
+                                        break
+                                    state.environment["diagram_fallback_rejection"] = (
+                                        fallback_claims["unsupported_claims"]
+                                        + ["遗漏已确认的设计对象：" + "、".join(missing_fallback_decisions)]
+                                        if missing_fallback_decisions else fallback_claims["unsupported_claims"])
+                                except (TypeError, ValueError) as fallback_error:
+                                    state.environment["diagram_fallback_rejection"] = [
+                                        str(fallback_error)]
+                            code = ("CREATION_EVIDENCE_UNAVAILABLE" if "原始来源支持" in str(exc)
+                                    else "CREATION_DIAGRAM_INVALID")
+                            raise OperationError(code, str(exc)) from exc
+                        retry_note = ("上一版图示未通过可交付或证据核验：" + str(exc)
+                                      + "。请只使用已提供的原始正文修正对应节点或边，"
+                                      "重新输出一张完整的独立 Mermaid 图。每个节点单独写"
+                                      " A[\"标签\"]；每条边单独写 A --> B；不要在连线两端"
+                                      "内联声明节点，不要合并多个节点或使用 Mermaid 简写。"
+                                      "同一 NodeId 全图只声明一次，跨分组连线写在所有 end 之后，"
+                                      "分组 ID 不是节点，不能作为边的起点或终点；请连接组内具体节点。"
+                                      "不要在两个 subgraph 中重复声明同一节点；分组不可嵌套，"
+                                      "每个分组至少声明一个只属于该组的节点；做不到时不要使用分组。"
+                                      "不要写 direction。"
+                                      "待核实、拟议等状态写在双引号标签内，如 A[\"网关（拟议）\"]；"
+                                      "删除 ::: 样式后缀、<br/> 换行、圆柱或圆角节点形状及注释。")
+                        try:
+                            retry_payload = json.loads(user_prompt)
+                            retry_payload["diagram_retry"] = retry_note
+                            if state.environment.get("diagram_design_proposal"):
+                                # Repeating a speculative baseline in the next
+                                # prompt makes small models copy it even after a
+                                # specific rejection. Keep the reason and the
+                                # user's choices, then require a fresh graph.
+                                retry_payload.pop("rejected_candidate", None)
+                                retry_payload["diagram_retry"] += (
+                                    "从已确认设计选项重新绘制；不要保留上一稿任何"
+                                    "现有系统、版本号或未经核实的量化收益。"
+                                    "最多六个节点，先逐行声明全部节点，再写连线；"
+                                    "不要使用 subgraph、内联节点或额外 Mermaid 语法。")
+                            else:
+                                rejected_text = str(result or "")
+                                retry_payload["rejected_candidate"] = (
+                                    rejected_text if len(rejected_text) <= 1600 else
+                                    "上一稿过长且不符合交付约束，请依据原文摘录重新绘制。"
+                                )
+                            user_prompt = json.dumps(retry_payload, ensure_ascii=False)
+                        except (TypeError, ValueError):
+                            user_prompt += "\n" + retry_note
+                        yield self._event(state, "agent.started", "正在修正图示依据与语法",
+                            actor=actor, data={"attempt": attempt + 2})
             else:
                 from .operations import patch_response_schema
                 patch_schema = patch_response_schema() if action == "patch_writer" else None
@@ -5293,6 +6204,191 @@ class CreationAgentLoop(CreationEvidencePrompts):
                 )
         return gaps
 
+    @classmethod
+    def _ranked_query_claim_conflicts(
+        cls, document: str, query_results: Any
+    ) -> list[dict[str, Any]]:
+        """Catch explicit non-membership claims about verified ranked rows."""
+        issues: list[dict[str, Any]] = []
+        lines = document.splitlines()
+        h2_lines = [index for index, line in enumerate(lines)
+                    if re.match(r"^\s{0,3}##\s+", line)]
+        for result in list(query_results or []):
+            if not isinstance(result, dict) or result.get("shape") != "table":
+                continue
+            if (result.get("validation") or {}).get("status") != "verified":
+                continue
+            plan = result.get("plan") or {}
+            limit = next((int(item.get("value")) for item in plan.get("operations", [])
+                          if isinstance(item, dict) and item.get("op") == "limit"
+                          and str(item.get("value") or "").isdigit()), 0)
+            if limit <= 0 or not any(item.get("op") == "order_by"
+                                      for item in plan.get("operations", [])
+                                      if isinstance(item, dict)):
+                continue
+            identity_field = next((item.get("field_id") for item in result.get("schema", [])
+                                   if isinstance(item, dict) and item.get("type") == "string"), None)
+            if not identity_field:
+                continue
+            rank_label = r"(?:Top\s*{}|前\s*{}(?:名|个|项|行)?|前\s*{}强)".format(
+                limit, limit, limit)
+            nonmembership = re.compile(
+                r"(?:未|不|没有|并未)(?:被)?(?:进入|在|列入|属于|跻身|出现在|纳入)"
+                r"[^。！？!?；;\n]{0,16}" + rank_label,
+                re.IGNORECASE,
+            )
+            rows_by_name = {}
+            for row in result.get("rows", []):
+                if isinstance(row, dict):
+                    cell = (row.get("cells") or {}).get(identity_field) or {}
+                    name = str(cell.get("raw") or "").strip() if isinstance(cell, dict) else ""
+                    if len(name) >= 2:
+                        rows_by_name[name] = row
+            # The same project may appear in another period's or source's Top
+            # N. A bare name cannot bind a prose claim to one relation.
+            for name in list(rows_by_name):
+                if any(
+                    other is not result and isinstance(other, dict)
+                    and other.get("shape") == "table"
+                    and (other.get("validation") or {}).get("status") == "verified"
+                    and (other.get("provenance") or {}).get("relation_id")
+                        != (result.get("provenance") or {}).get("relation_id")
+                    and any(
+                        isinstance(cell, dict) and str(cell.get("raw") or "").strip() == name
+                        for other_row in other.get("rows", []) if isinstance(other_row, dict)
+                        for cell in (other_row.get("cells") or {}).values()
+                    )
+                    for other in list(query_results or [])
+                ):
+                    rows_by_name.pop(name, None)
+            if not rows_by_name:
+                continue
+            ordered_field = next((item.get("field_id") for item in plan.get("operations", [])
+                                  if isinstance(item, dict) and item.get("op") == "order_by"), None)
+
+            def verified_row_anchor(line: str) -> bool:
+                if not line.lstrip().startswith("|") or not ordered_field:
+                    return False
+                line_values = set()
+                for token in re.findall(r"(?<!\d)[+-]?\d[\d,]*(?:\.\d+)?(?!\d)", line):
+                    try:
+                        line_values.add(Decimal(token.replace(",", "")))
+                    except InvalidOperation:
+                        pass
+                for name, row in rows_by_name.items():
+                    if name not in line:
+                        continue
+                    ordered_cell = (row.get("cells") or {}).get(ordered_field) or {}
+                    if not isinstance(ordered_cell, dict):
+                        continue
+                    for token in re.findall(
+                        r"(?<!\d)[+-]?\d[\d,]*(?:\.\d+)?(?!\d)",
+                        str(ordered_cell.get("raw") or ""),
+                    ):
+                        try:
+                            if Decimal(token.replace(",", "")) in line_values:
+                                return True
+                        except InvalidOperation:
+                            pass
+                return False
+
+            table_rows = [index for index, line in enumerate(lines)
+                          if verified_row_anchor(line)]
+            if h2_lines:
+                if len(table_rows) < min(2, len(rows_by_name)):
+                    continue
+                owners = {max((heading for heading in h2_lines if heading <= index), default=-1)
+                          for index in table_rows}
+                if len(owners) != 1 or -1 in owners:
+                    continue
+                scope_start = owners.pop()
+                scope_end = next((heading for heading in h2_lines if heading > scope_start), len(lines))
+                heading = lines[scope_start]
+                if re.search(r"(?:19|20)\d{2}\s*(?:年|[-/.])|历史|参考|上期|去年", heading):
+                    continue
+                provenance = result.get("provenance") or {}
+                source_url = str(provenance.get("source_url") or "").strip()
+                source_title = str(provenance.get("title") or "").strip()
+                section = "\n".join(lines[scope_start:scope_end])
+                if not ((source_url and source_url in section)
+                        or (source_title and source_title in section)):
+                    continue
+            else:
+                scope_start, scope_end = 0, len(lines)
+            anchor_end = max(table_rows) if table_rows else -1
+            reported: set[str] = set()
+            for line_index in range(scope_start, scope_end):
+                if line_index <= anchor_end:
+                    continue
+                if any(line.lstrip().startswith("|")
+                       for line in lines[anchor_end + 1:line_index]):
+                    continue
+                for sentence in re.split(r"[。！？!?]", lines[line_index]):
+                    # A dated historical comparison is not automatically a
+                    # claim about this QueryResult's source or period.
+                    if re.search(r"(?:19|20)\d{2}\s*(?:年|[-/.])", sentence):
+                        continue
+                    previous_subjects: list[str] = []
+                    for raw_clause in re.split(r"[，,；;]", sentence):
+                        clause = raw_clause.strip()
+                        if not clause:
+                            continue
+                        named_subjects = [name for name in rows_by_name if name in clause]
+                        match = nonmembership.search(clause)
+                        if match:
+                            # The negative predicate belongs to its own clause.
+                            # A subject may carry across a comma only for an
+                            # explicit continuation such as "甲，虽未进入前10".
+                            prefix = clause[:match.start()]
+                            mentions = []
+                            for name in named_subjects:
+                                for occurrence in re.finditer(re.escape(name), prefix):
+                                    mentions.append((occurrence.end(), occurrence.start(), name))
+                            mentions.sort(reverse=True)
+                            ambiguous = False
+                            subjects = []
+                            if mentions:
+                                nearest = mentions[0]
+                                subject_gap = prefix[nearest[0]:]
+                                # Do not attach a predicate to the last known
+                                # ranked row when an unknown subject may follow:
+                                # "甲已进入Top2且乙未进入Top2" is about 乙 even if
+                                # only 甲 is present in the verified rows.
+                                safe_subject_gap = bool(re.fullmatch(
+                                    r"[\s）)\]】”'\"]*(?:(?:虽(?:然)?|仍|也|并|却|尚|还|始终|一直|目前|本期|本周|当期)[\s）)\]】”'\"]*)*",
+                                    subject_gap,
+                                ))
+                                if len(mentions) > 1:
+                                    between = prefix[mentions[1][0]:nearest[1]]
+                                    ambiguous = bool(re.fullmatch(r"\s*(?:[、/]|和|与|及)\s*", between))
+                                if not ambiguous and safe_subject_gap:
+                                    subjects = [nearest[2]]
+                            elif (len(previous_subjects) == 1
+                                  and re.match(r"^(?:虽|虽然|仍|却|但|而|并|也)", clause)):
+                                subjects = previous_subjects
+                            elif (len(previous_subjects) > 1
+                                  and re.match(r"^(?:虽|虽然|仍|却|但|而|并|也)", clause)):
+                                ambiguous = True
+                            if ambiguous:
+                                issues.append({"row_id": None,
+                                           "relation_id": (result.get("provenance") or {}).get("relation_id"),
+                                           "name": "", "limit": limit,
+                                           "line_number": line_index + 1,
+                                           "excerpt": clause[:200],
+                                           "ambiguous_subject": True})
+                            for name in subjects:
+                                if name in reported:
+                                    continue
+                                row = rows_by_name[name]
+                                issues.append({"row_id": row.get("row_id"),
+                                           "relation_id": (result.get("provenance") or {}).get("relation_id"),
+                                           "name": name, "limit": limit,
+                                           "line_number": line_index + 1,
+                                           "excerpt": clause[:200]})
+                                reported.add(name)
+                        previous_subjects = named_subjects
+        return issues
+
     @staticmethod
     def _normalize_query_quality_text(value: Any) -> str:
         return re.sub(
@@ -5581,6 +6677,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
         cls,
         item: dict[str, Any],
         workflow_titles: list[str],
+        packaging_headings: Optional[list[str]] = None,
     ) -> tuple[str, dict[str, Any]]:
         """把单个 Skill 步骤结果收敛到当前章节，不误删章节内部结构。"""
         content = str(item.get("content") or "").strip()
@@ -5600,6 +6697,8 @@ class CreationAgentLoop(CreationEvidencePrompts):
             if cls._normalize_section_name(value)
             != cls._normalize_section_name(title)
         }
+        wrapper_titles = {cls._normalize_section_name(value)
+                          for value in (packaging_headings or []) if str(value).strip()}
         forbidden_top_level_markers = (
             "结论",
             "重点进展",
@@ -5614,6 +6713,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
         fallback_lines: list[str] = []
         skip_undeclared_block = False
         skip_reason = ""
+        skipped_heading_level = 0
         for line in content.splitlines():
             heading = re.match(r"^\s*(#{1,6})\s+(.+?)\s*$", line)
             if not heading:
@@ -5625,6 +6725,21 @@ class CreationAgentLoop(CreationEvidencePrompts):
             level = len(heading.group(1))
             heading_title = heading.group(2).strip()
             normalized_heading = cls._normalize_section_name(heading_title)
+            if skip_undeclared_block and level > skipped_heading_level:
+                # A skipped H2 owns its H3/H4 children. Otherwise the next
+                # child heading reopens a foreign section inside this step.
+                skipped_headings.append(heading_title)
+                continue
+            skip_undeclared_block = False
+            skip_reason = ""
+            skipped_heading_level = 0
+            if normalized_heading in wrapper_titles:
+                # The document/chapter title belongs to the outer container.
+                # Remove only its heading; keep every following body line.
+                skip_undeclared_block = False
+                skip_reason = ""
+                skipped_headings.append(heading_title)
+                continue
             if (
                 not any(value.strip() for value in normalized_lines)
                 and normalized_heading == cls._normalize_section_name(title)
@@ -5634,6 +6749,16 @@ class CreationAgentLoop(CreationEvidencePrompts):
                 continue
 
             is_other_workflow_step = normalized_heading in other_titles
+            if not is_other_workflow_step and level <= 3 and normalized_heading:
+                for other_title in other_titles:
+                    anchors = re.findall(r"[a-z]{3,}", other_title)
+                    unique_anchor = any(anchor in normalized_heading
+                                        and anchor not in declared_heading_scope
+                                        for anchor in anchors)
+                    if (unique_anchor or SequenceMatcher(
+                            None, normalized_heading, other_title).ratio() >= 0.62):
+                        is_other_workflow_step = True
+                        break
             is_forbidden_expansion = (
                 level <= 2
                 and normalized_heading not in declared_heading_scope
@@ -5644,11 +6769,30 @@ class CreationAgentLoop(CreationEvidencePrompts):
             )
             if is_other_workflow_step or is_forbidden_expansion:
                 skip_undeclared_block = True
+                skipped_heading_level = level
                 skip_reason = (
                     "other_workflow_step"
                     if is_other_workflow_step
                     else "forbidden_expansion"
                 )
+                skipped_headings.append(heading_title)
+                continue
+
+            own_title = cls._normalize_section_name(title)
+            own_anchors = re.findall(r"[a-z]{3,}", own_title)
+            is_own_wrapper = (
+                level <= 2
+                and normalized_heading != own_title
+                and (
+                    (own_anchors and any(anchor in normalized_heading
+                                         for anchor in own_anchors))
+                    or (own_title and SequenceMatcher(
+                        None, normalized_heading, own_title).ratio() >= 0.68)
+                )
+            )
+            if is_own_wrapper:
+                # The outer assembly already emits the declared H2. Keep the
+                # following facts and real subheadings, but not this duplicate.
                 skipped_headings.append(heading_title)
                 continue
 
@@ -5677,6 +6821,142 @@ class CreationAgentLoop(CreationEvidencePrompts):
         }
         return normalized, audit
 
+    def _reassemble_frozen_skill_resume_preview(
+        self, state: LoopState, live_document: str
+    ) -> Optional[dict[str, str]]:
+        """Replace an obsolete generated preview with the current strict assembly.
+
+        A failed chapter can resume directly at delivery_check, before the
+        post-plan assembly runs. The checkpoint's completed step outputs are
+        authoritative only when the live body still equals that generated
+        preview and the protected chapter base is unchanged.
+        """
+        environment = state.environment
+        if (not environment.get("strict_skill_workflow")
+                or not environment.get("brainstorm_skill_binding")
+                or not environment.get("completed_skill_steps")
+                or environment.get("strict_skill_document_polished")
+                or environment.get("strict_skill_document_owned_by_agent")):
+            return None
+        gap_audits = environment.get("acknowledged_gap_revision_audits") or []
+        if gap_audits:
+            # This candidate entered the provisional redaction path. Even when
+            # a failed repair changed its hash, step outputs remain unverified.
+            # The final recheck restores safe sections before delivery.
+            return None
+        saved_document = state.current_document
+        assembled, audits = self._assemble_strict_skill_document(
+            state, include_audit=True
+        )
+        if assembled == saved_document and environment.get("document") == saved_document:
+            return None
+        chapter_base = str(environment.get("chapter_base_document") or "")
+        input_base = str(environment.get("input_base_document") or "")
+        if chapter_base and input_base and chapter_base != input_base:
+            raise OperationError("CREATION_BASE_CHANGED", "已完成正文的保存基底不一致，不能重组技能草稿")
+        protected_base = chapter_base or input_base
+        published = environment.get("chapter_published_document")
+        if (environment.get("document") != saved_document
+                or live_document not in {saved_document, protected_base}
+                or (published is not None
+                    and published not in {saved_document, protected_base})
+                or (protected_base and not saved_document.startswith(protected_base))):
+            raise OperationError("CREATION_BASE_CHANGED", "待核验草稿与已完成正文不一致，不能自动重组")
+        if not assembled:
+            assembled = protected_base or "# {}".format(
+                self._strict_skill_document_title(state)
+            )
+        if protected_base and not assembled.startswith(protected_base):
+            raise OperationError("CREATION_BASE_CHANGED", "技能草稿重组未保留已完成正文")
+        from .brainstorm_chapters import chapter_context, validate_chapter_document
+        chapter = chapter_context(environment.get("creation_brief"))
+        if chapter is not None:
+            validate_chapter_document(assembled, protected_base, chapter)
+        if assembled == saved_document:
+            return None
+        old_hash = self._document_hash(saved_document)
+        environment.setdefault("superseded_skill_previews", []).append({
+            "document": saved_document,
+            "document_hash": old_hash,
+            "replacement_hash": self._document_hash(assembled),
+            "reason": "strict_skill_resume_reassembly",
+            "run_id": state.run_id,
+        })
+        environment["strict_skill_resume_assembly_audits"] = audits
+        environment["document"] = assembled
+        state.current_document = assembled
+        for key in ("delivery_review", "delivery_pending_review", "delivery_last_revise",
+                    "delivery_repair_result", "delivery_repair_stalled", "delivery_checked_hash"):
+            environment.pop(key, None)
+        return {"content": assembled, "superseded_hash": old_hash}
+
+    def _supersede_adopted_failed_chapter(
+        self, state: LoopState, document: str
+    ) -> Optional[dict[str, str]]:
+        """Replace a failed chapter candidate adopted as the retry's DB base.
+
+        Core keeps the failed draft as the concurrency base and undo evidence.
+        The chapter writer may append a complete new chapter to it; only the
+        original pre-operation document is a protected completed prefix.
+        """
+        context = state.environment.get("operation_context") or {}
+        if (state.creation_mode != "brainstorm" or not state.environment.get("strict_skill_workflow")
+                or context.get("adopted_failed_candidate") is not True
+                or not isinstance(context.get("original_document"), str)):
+            return None
+        original = context["original_document"]
+        provisional = str(state.environment.get("chapter_base_document") or "")
+        if (not provisional or provisional == original or not provisional.startswith(original)
+                or not document.startswith(provisional)):
+            return None
+        from .brainstorm_chapters import chapter_context, validate_chapter_document
+        chapter = chapter_context(state.environment.get("creation_brief"))
+        title = str(chapter.get("title") or "").strip() if chapter is not None else ""
+        addition = document[len(provisional):].strip()
+        if not title or not addition.startswith("## " + title):
+            return None
+        if original:
+            revised = original.rstrip() + "\n\n" + addition
+        else:
+            from .skill_governance import apply_title
+            revised = apply_title(addition, self._strict_skill_document_title(state))
+        validate_chapter_document(revised, original, chapter)
+        if revised == document:
+            return None
+        old_hash = self._document_hash(document)
+        state.environment.setdefault("superseded_skill_previews", []).append({
+            "document": document, "document_hash": old_hash,
+            "replacement_hash": self._document_hash(revised),
+            "reason": "failed_chapter_candidate_superseded", "run_id": state.run_id,
+        })
+        state.environment["chapter_base_document"] = original
+        state.environment["input_base_document"] = original
+        state.environment["chapter_published_document"] = revised
+        state.environment["document"] = revised
+        state.current_document = revised
+        state.environment.pop("delivery_checked_hash", None)
+        return {"content": revised, "superseded_hash": old_hash}
+
+    def _skip_obsolete_gap_repair_on_resume(self, state: LoopState) -> None:
+        """Recheck a saved gap draft before replaying a failed full-document repair."""
+        if state.cursor + 1 >= len(state.plan):
+            return
+        next_step = state.plan[state.cursor]
+        after = state.plan[state.cursor + 1]
+        if (next_step.get("delivery_repair") is not True
+                or next_step.get("action") != "polisher"
+                or after.get("action") != "delivery_check"
+                or (state.environment.get("delivery_review") or {}).get("status") != "revise"):
+            return
+        if not any(item.get("status") == "completed_with_gap"
+                   for item in self._frozen_skill_delivery_receipts(state)):
+            return
+        state.cursor += 1
+        state.environment["delivery_repair_count"] = 0
+        state.environment.pop("delivery_last_revise", None)
+        state.environment.setdefault("skipped_obsolete_gap_repairs", []).append({
+            "step_id": next_step.get("id"), "reason": "deterministic_gap_review_on_resume"})
+
     def _assemble_strict_skill_document(
         self,
         state: LoopState,
@@ -5696,6 +6976,11 @@ class CreationAgentLoop(CreationEvidencePrompts):
             for raw_step in skill.get("execution_steps", []) or []
             if isinstance(raw_step, dict)
         ]
+        from .brainstorm_chapters import chapter_context
+        chapter = chapter_context(state.environment.get("creation_brief"))
+        packaging_headings = [self._strict_skill_document_title(state)]
+        if chapter is not None:
+            packaging_headings.append(str(chapter.get("title") or ""))
         completed_items = list(state.environment.get("completed_skill_steps", []))
         if pending_step is not None and pending_content.strip():
             completed_items = [
@@ -5724,6 +7009,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
         documents = [item for item in eligible if item.get("output_role") == "document" and item.get("content")]
         if documents:
             document = apply_title(str(documents[-1]["content"]), self._strict_skill_document_title(state))
+            document = self._retain_chapter_base_for_strict_skill(state, document)
             return (document, []) if include_audit else document
         completed_items = [item for item in eligible if item.get("output_role") != "process"]
         sections: list[str] = []
@@ -5745,6 +7031,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
             normalized, audit = self._strict_skill_step_content(
                 item,
                 workflow_titles,
+                packaging_headings,
             )
             audits.append(audit)
             sections.append(f"## {title}\n\n{normalized}")
@@ -5754,7 +7041,22 @@ class CreationAgentLoop(CreationEvidencePrompts):
             f"# {self._strict_skill_document_title(state)}\n\n"
             + "\n\n".join(sections)
         ).strip()
+        document = self._retain_chapter_base_for_strict_skill(state, document)
         return (document, audits) if include_audit else document
+
+    @staticmethod
+    def _retain_chapter_base_for_strict_skill(state: LoopState, document: str) -> str:
+        """Append a frozen workflow's chapter without replacing earlier prose."""
+        from .brainstorm_chapters import chapter_context, normalize_chapter_document
+        chapter = chapter_context(state.environment.get("creation_brief"))
+        base = str(state.environment.get("chapter_base_document") or "").rstrip()
+        if chapter is None or not base:
+            return document
+        if document.startswith(base):
+            return normalize_chapter_document(document, base, chapter)
+        addition = re.sub(r"^ {0,3}#\s+[^\n]+\n*", "", document.strip(), count=1).strip()
+        candidate = "{}\n\n## {}\n\n{}".format(base, chapter["title"], addition).rstrip()
+        return normalize_chapter_document(candidate, base, chapter)
 
     @staticmethod
     def _record_completed_skill_step(
@@ -5783,6 +7085,12 @@ class CreationAgentLoop(CreationEvidencePrompts):
             )
         ]
         completed_steps.append(step_result)
+        failed_steps = state.environment.get("failed_skill_steps")
+        if isinstance(failed_steps, list):
+            failed_steps[:] = [item for item in failed_steps if not (
+                isinstance(item, dict)
+                and item.get("skill_id") == step_result["skill_id"]
+                and item.get("step_id") == step_result["step_id"])]
         return step_result
 
     @staticmethod
@@ -5968,9 +7276,40 @@ class CreationAgentLoop(CreationEvidencePrompts):
             state.environment["brief_writing"]["sections"][step["brief_section_id"]] = {
                 "content": cleaned, "cycle": step["brief_section_cycle"]}
             preview = self._assembled_brief_sections(state, step["brief_section_cycle"], complete=False)
-            yield self._event(state, "document.preview", "当前章节已完成", actor=actor, data={"content": preview})
+            if not self._content_gap_active(state):
+                yield self._event(state, "document.preview", "当前章节已完成", actor=actor, data={"content": preview})
             yield self._event(state, "agent.completed", step["name"] + "已完成", status="completed", actor=actor)
             yield self._thinking_completed(state, "generation", "已保存章节内容与选择归属")
+            return
+        if step.get("action") == "diagram_writer":
+            from .diagram_delivery import canonicalize_standalone_diagram, normalize_standalone_diagram
+            try:
+                diagram_document = canonicalize_standalone_diagram(
+                    cleaned, title=self._standalone_diagram_title(state))
+                _, code = normalize_standalone_diagram(diagram_document)
+            except ValueError as exc:
+                raise OperationError("CREATION_DIAGRAM_INVALID", str(exc)) from exc
+            if state.environment.get("diagram_source_required"):
+                source_audit = self._audit_diagram_sources(state)
+                claim_audit = self._diagram_claim_audit(state, diagram_document, source_audit)
+                if not claim_audit["passed"]:
+                    raise OperationError(
+                        "CREATION_EVIDENCE_UNAVAILABLE",
+                        "图示包含原始资料未支持的专有节点或数量：{}；已保留原操作".format(
+                            "、".join(claim_audit["unsupported_claims"])),
+                    )
+                state.environment["diagram_claim_audit"] = claim_audit
+            state.environment["document"] = diagram_document
+            state.current_document = diagram_document
+            state.environment["artifact_kind"] = "diagram"
+            yield self._event(state, "document.replaced", "已绘制可编辑的独立图示",
+                status="completed", actor=actor,
+                data={"content": diagram_document, "operation": "generate_diagram",
+                      "artifact_kind": "diagram", "diagram_language": "mermaid"})
+            yield self._event(state, "agent.completed", "独立图示已生成",
+                status="completed", actor=actor,
+                data={"diagram_language": "mermaid", "diagram_chars": len(code)})
+            yield self._thinking_completed(state, "generation", "已生成独立图示，等待交付核验")
             return
         if step.get("action") in {"writer", "polisher"}:
             cleaned = normalize_creation_markdown(cleaned)
@@ -6061,6 +7400,10 @@ class CreationAgentLoop(CreationEvidencePrompts):
             patch_base = step.get("patch_base_document", state.current_document)
             patch_allowed_targets = state.environment["operation"].get("targets", [])
             delivery_repair_rebased = False
+            chapter_repair_scope = self._chapter_repair_patch_scope(state, step)
+            if chapter_repair_scope is not None:
+                patch_base, patch_allowed_targets = chapter_repair_scope
+                delivery_repair_rebased = True
             if step.get("delivery_repair") and patch_base != state.current_document:
                 rebound_targets = rebind_targets_to_document(
                     patch_base, state.current_document, patch_allowed_targets
@@ -6131,6 +7474,10 @@ class CreationAgentLoop(CreationEvidencePrompts):
                 if problems == ["repeated_content"]:
                     raise OperationError("CREATION_DOCUMENT_INVALID", "局部改写产生重复正文，未提交修改")
                 raise OperationError("CREATION_DOCUMENT_INVALID", "局部改写未通过正文完整性检查：" + ", ".join(problems))
+            if chapter_repair_scope is not None:
+                from .brainstorm_chapters import chapter_context, validate_chapter_document
+                validate_chapter_document(updated, str(state.environment.get("chapter_base_document") or ""),
+                    chapter_context(state.environment.get("creation_brief")), completed=True)
             state.current_document = updated
             state.environment["document"] = updated
             state.environment["last_document_patch"] = patch
@@ -6206,6 +7553,8 @@ class CreationAgentLoop(CreationEvidencePrompts):
                 yield event
             return
         if step.get("action") == "data_query_plan":
+            skill_id = self._resolved_step_skill_id(
+                step, self._skill_step_owners(state))
             current_results = [
                 item
                 for item in (
@@ -6235,11 +7584,13 @@ class CreationAgentLoop(CreationEvidencePrompts):
                 planner_error = exc.code
             scoped_plan = {
                 **plan,
+                "skill_id": skill_id,
                 "skill_step_id": step.get("skill_step_id"),
                 "skill_step_title": step.get("skill_step_title"),
             }
             scoped_result = {
                 **query_result,
+                "skill_id": skill_id,
                 "skill_step_id": step.get("skill_step_id"),
                 "skill_step_title": step.get("skill_step_title"),
             }
@@ -6256,6 +7607,7 @@ class CreationAgentLoop(CreationEvidencePrompts):
                         query_result.get("validation") or {}
                     ).get("status"),
                     "error_code": planner_error,
+                    "skill_id": skill_id,
                     "skill_step_id": step.get("skill_step_id"),
                 }
             )
@@ -6347,9 +7699,19 @@ class CreationAgentLoop(CreationEvidencePrompts):
                 state, "generation", self._generation_reasoning(state, step)
             )
             return
-        if step["action"] in {"writer", "polisher"} and state.environment.get("document_identity"):
+        if (step["action"] in {"writer", "polisher"}
+                and state.environment.get("document_identity")
+                and not str(state.environment.get("chapter_base_document") or "")):
             from .skill_governance import apply_title
             cleaned = apply_title(cleaned, state.environment["document_identity"]["title"])
+        if step["action"] in {"writer", "polisher"}:
+            from .brainstorm_chapters import chapter_context, normalize_chapter_document
+            chapter = chapter_context(state.environment.get("creation_brief"))
+            if chapter is not None:
+                cleaned = normalize_chapter_document(cleaned,
+                    str(state.environment.get("chapter_base_document") or ""), chapter)
+            if cleaned:
+                cleaned, _ = self._apply_content_gap_candidate(state, cleaned)
         if step["action"] == "polisher":
             if not cleaned:
                 raise RuntimeError(f"{step['name']} 未返回润色后的完整文档")
@@ -7109,6 +8471,92 @@ class CreationAgentLoop(CreationEvidencePrompts):
             return
         remember_delivery_failures(state.user_message, environment, contract, report["checks"], report)
 
+    def _repair_standalone_diagram_resume(self, state: LoopState) -> str:
+        """Upgrade a saved document-only attempt without discarding its audit body."""
+        from .skill_governance import explicit_standalone_artifact_kind
+        from .diagram_delivery import diagram_delivery_report
+        operation = state.environment.get("operation")
+        if not isinstance(operation, dict) or operation.get("kind") != "generate":
+            return ""
+        # Chapter instructions may only say "write this chapter", and the
+        # original request may omit the word 图. A frozen diagram routing
+        # decision still proves this operation's required artifact type.
+        if (operation.get("artifact_kind") != "diagram"
+                and explicit_standalone_artifact_kind(state.root_request or state.user_message) != "diagram"):
+            return ""
+        if self._diagram_is_design_proposal(state):
+            state.environment["diagram_design_proposal"] = True
+            state.environment["diagram_source_required"] = False
+            state.environment["diagram_anchor_kind"] = "topic"
+        if (operation.get("artifact_kind") == "diagram"
+                and diagram_delivery_report(str(state.current_document))["status"] == "pass"):
+            return ""
+        previous = str(state.current_document or "")
+        previous_hash = self._document_hash(previous)
+        if previous.strip():
+            state.environment.setdefault("superseded_artifact_candidates", []).append({
+                "artifact_kind": "document", "content": previous,
+                "document_hash": previous_hash, "reason": "standalone_diagram_mismatch",
+                "run_id": state.run_id,
+            })
+        operation["artifact_kind"] = "diagram"
+        routing = state.environment.get("routing_decision")
+        if isinstance(routing, dict):
+            routing["operation"] = operation
+        for key in ("input_contract", "delivery_review", "delivery_checked_hash",
+                    "delivery_last_revise", "delivery_pending_review", "quality_review",
+                    "quality_issues", "quality_hard_failures", "quality_soft_warnings"):
+            state.environment.pop(key, None)
+        state.pending_model_step = None
+        upcoming = []
+        retry_source_lookup = (bool(state.environment.get("diagram_rejected_candidates"))
+                               and not state.environment.get("diagram_design_proposal"))
+        if retry_source_lookup:
+            # A failed writer can expose an inadequate recall set. Preserve the
+            # earlier attempt in the checkpoint trace, then run the read-only
+            # source lookup again under the current retrieval contract.
+            prior = [item for item in (state.environment.get("references") or [])
+                     if isinstance(item, dict)]
+            state.environment.setdefault("diagram_recall_history", []).append({
+                "reference_ids": ["{}:{}".format(
+                    item.get("source_type"), item.get("source_id")) for item in prior],
+                "references": prior,
+                "reference_summaries": list(
+                    state.environment.get("reference_summaries") or []),
+                "rejected_candidate_count": len(
+                    state.environment.get("diagram_rejected_candidates") or []),
+            })
+            state.environment["references"] = []
+            state.environment["reference_summaries"] = []
+            state.environment.pop("diagram_source_audit", None)
+        if (not state.environment.get("diagram_design_proposal")
+                and MEMORY_SEARCH_TOOL_ID in normalize_creation_tool_ids(state.options.get("enabled_tools"))
+                and (retry_source_lookup or not state.environment.get("references"))):
+            memory_tool = self._tool_plan_step(MEMORY_SEARCH_TOOL_ID)
+            if memory_tool:
+                upcoming.append(memory_tool)
+        if (not state.environment.get("diagram_design_proposal")
+                and not state.environment.get("mermaid_diagram")):
+            diagram_tool = self._tool_plan_step(MERMAID_DIAGRAM_TOOL_ID)
+            if diagram_tool:
+                upcoming.append(diagram_tool)
+        upcoming.extend([
+            {"kind": "agent", "id": "diagram_writer_agent", "name": "绘制独立图示",
+             "action": "diagram_writer", "decision_source": "artifact_recovery",
+             "reason": "原始指令要求一张图，旧候选只有文字"},
+            {"kind": "agent", "id": "delivery_validation", "name": "核对图示交付",
+             "action": "delivery_check", "decision_source": "artifact_contract",
+             "reason": "确认独立图示可渲染且没有被文字文档替代"},
+        ])
+        state.plan[state.cursor:] = upcoming
+        state.goal.objective = f"生成一张可渲染、可导出的图示：{state.root_request}"
+        state.goal.acceptance_criteria = ["只交付一张独立图示，不以文字说明代替",
+            "图中节点与关系可渲染，且不把未证实的现网能力或指标写成事实"]
+        state.goal.remaining_steps = [item["name"] for item in upcoming]
+        state.environment["edit_intent"] = {**(state.environment.get("edit_intent") or {}),
+            "operation": "create_diagram", "summary": "生成独立图示"}
+        return previous_hash
+
     @staticmethod
     def _delivery_repair_brief(report: Any) -> dict[str, Any]:
         """只把可执行的修正要求交给修复节点。
@@ -7151,7 +8599,593 @@ class CreationAgentLoop(CreationEvidencePrompts):
             payload["skill_constraints"] = skills
         return payload
 
-    def _repair_skill_constraints(self, state: LoopState) -> list[dict[str, Any]]:
+    @staticmethod
+    def _frozen_skill_delivery_receipts(state: LoopState) -> list[dict[str, Any]]:
+        """Require every frozen primary step to finish with its own evidence.
+
+        A repeated tool ID is not a repeated step receipt: two data_search
+        calls must each return usable sources for their declared purpose.
+        """
+        binding = state.environment.get("brainstorm_skill_binding") or {}
+        primary_ids = {str(item.get("id") or "") for item in binding.get("skills", [])
+                       if isinstance(item, dict) and item.get("role") == "primary"}
+        if not primary_ids:
+            return []
+        profiles = {str(item.get("id") or item.get("clientSkillKey") or ""): item
+                    for item in state.selected_skills if isinstance(item, dict)}
+        step_owners = CreationAgentLoop._skill_step_owners(state)
+        completed: dict[tuple[str, str], dict[str, Any]] = {}
+        for item in state.environment.get("completed_skill_steps", []):
+            if not isinstance(item, dict):
+                continue
+            key = (str(item.get("skill_id") or ""), str(item.get("step_id") or ""))
+            if str(item.get("content") or "").strip() or key not in completed:
+                completed[key] = item
+        failed = {(str(item.get("skill_id") or ""), str(item.get("step_id") or "")): item
+                  for item in state.environment.get("failed_skill_steps", [])
+                  if isinstance(item, dict)}
+        tool_results = [item for item in state.environment.get("tool_results", [])
+                        if isinstance(item, dict)]
+        source_tools = {MEMORY_SEARCH_TOOL_ID, INTERNET_SEARCH_TOOL_ID,
+                        DATA_SEARCH_TOOL_ID, WEBPAGE_SCRAPE_TOOL_ID,
+                        GITHUB_SEARCH_TOOL_ID}
+        tool_names = {MEMORY_SEARCH_TOOL_ID: "记忆资料", INTERNET_SEARCH_TOOL_ID: "公开资料",
+                      DATA_SEARCH_TOOL_ID: "业务数据", WEBPAGE_SCRAPE_TOOL_ID: "报表数据",
+                      GITHUB_SEARCH_TOOL_ID: "代码资料"}
+        from .brainstorm_gap_delivery import authorized_gap_steps
+        from .brainstorm_input_preflight import build_input_needs
+        gap_steps = authorized_gap_steps(
+            state.environment.get("creation_brief"), state.selected_skills)
+        full_range_steps = {
+            (need["skill_id"], need["skill_step_id"])
+            for need in build_input_needs(state.selected_skills)
+            if need.get("period_mode") == "full_range"
+        }
+        from .brainstorm_chapters import chapter_context
+        chapter = chapter_context(state.environment.get("creation_brief"))
+        packaging_headings = [str((state.environment.get("document_identity") or {}).get("title") or "")]
+        if chapter is not None:
+            packaging_headings.append(str(chapter.get("title") or ""))
+        receipts = []
+        for skill_id in primary_ids:
+            profile = profiles.get(skill_id) or {}
+            steps = profile.get("executionSteps") or profile.get("execution_steps") or []
+            if not steps:
+                steps = [{"id": item.get("skill_step_id"),
+                          "title": item.get("skill_step_title"), "tools": []}
+                         for item in state.plan if str(item.get("skill_id") or "") == skill_id
+                         and item.get("skill_step_id")]
+                steps = list({str(item.get("id") or ""): item for item in steps}.values())
+            if not steps:
+                receipts.append({"skill_id": skill_id, "step_id": "execute-skill",
+                                 "title": str(profile.get("title") or profile.get("name") or "技能工作流"),
+                                 "status": "missing_input", "missing_inputs": ["技能执行计划未建立"],
+                                 "content_completed": False})
+                continue
+            workflow_titles = [str(item.get("title") or "") for item in steps
+                               if isinstance(item, dict)]
+            for raw_step in steps:
+                if not isinstance(raw_step, dict):
+                    continue
+                step_id = str(raw_step.get("id") or "")
+                title = str(raw_step.get("title") or step_id or "技能步骤")
+                key = (skill_id, step_id)
+                scheduled = any(str(item.get("skill_id") or "") == skill_id
+                                and str(item.get("skill_step_id") or "") == step_id
+                                for item in state.plan)
+                output = completed.get(key) or {}
+                normalized = ""
+                if output and str(output.get("content") or "").strip():
+                    normalized = (str(output.get("content") or "").strip()
+                                  if output.get("output_role") == "document"
+                                  else CreationAgentLoop._strict_skill_step_content(
+                                      output, workflow_titles, packaging_headings)[0])
+                activated = any(item.get("action") == "activate_skill_step"
+                                and str(item.get("skill_id") or "") == skill_id
+                                and str(item.get("skill_step_id") or "") == step_id
+                                for item in state.plan)
+                retained_body = re.sub(r"(?m)^\s{0,3}#{1,6}\s+.*$", "", normalized).strip()
+                content_done = bool(retained_body or (output.get("output_role") == "process" and activated))
+                missing = []
+                source_missing = []
+                if not scheduled:
+                    missing.append("步骤未进入执行计划")
+                if key in failed:
+                    missing.append("步骤执行失败")
+                for tool_id in dict.fromkeys(str(value) for value in (raw_step.get("tools") or [])):
+                    matched = [item for item in tool_results
+                               if item.get("tool_id") == tool_id
+                               and str(item.get("skill_id") or "") == skill_id
+                               and str(item.get("skill_step_id") or "") == step_id]
+                    result = matched[-1] if matched else {}
+                    tool_label = tool_names.get(tool_id, "步骤工具")
+                    if not result or result.get("status") != "completed":
+                        source_missing.append(tool_label + "未完成检索")
+                    elif tool_id in source_tools:
+                        if int(result.get("result_count") or 0) <= 0:
+                            source_missing.append(tool_label + "未取得资料")
+                        elif tool_id == MEMORY_SEARCH_TOOL_ID:
+                            period = result.get("time_context") or {}
+                            if (isinstance(period, dict) and period.get("has_relative_time") is True
+                                    and period.get("period_start") and period.get("period_end")
+                                    and int((result.get("period_match_counts") or {}).get("matched") or 0) <= 0):
+                                source_missing.append("目标周期内资料未确认")
+                        elif tool_id == DATA_SEARCH_TOOL_ID:
+                            if int(result.get("usable_result_count") or 0) <= 0:
+                                source_missing.append("业务数据均不可用于本轮指标")
+                            period_requirement = CreationAgentLoop._requirement_with_skill_period(
+                                state,
+                                {"skill_id": skill_id, "skill_step_id": step_id,
+                                 "skill_step_title": title,
+                                 "skill_step_objective": raw_step.get("objective"),
+                                 "skill_step_output": raw_step.get("output")},
+                                {"time_context": result.get("time_context") or {}})
+                            period = period_requirement.get("time_context") or {}
+                            if (isinstance(period, dict)
+                                    and period.get("has_relative_time") is True
+                                    and period.get("period_start") and period.get("period_end")):
+                                from .source_time_consistency import source_period_coverage
+                                coverage = source_period_coverage(
+                                    state.environment.get("data_results", []),
+                                    result.get("source_ids") or [], period)
+                                state.environment.setdefault("frozen_skill_period_coverage", {})[
+                                    "{}:{}".format(skill_id, step_id)] = {
+                                        "target_period": coverage.get("target_period"),
+                                        "source_counts": coverage.get("source_counts"),
+                                        "claim_counts": coverage.get("claim_counts"),
+                                    }
+                                matched_count = int((coverage.get("claim_counts") or {}).get("matched") or 0)
+                                require_full_range = key in full_range_steps
+                                required_metrics: dict[str, bool] = {}
+                                for source in coverage.get("sources", []):
+                                    for claim in source.get("claims", []):
+                                        metric = str(claim.get("requested_metric") or "").strip()
+                                        if metric:
+                                            required_metrics[metric] = (
+                                                required_metrics.get(metric, False)
+                                                or (claim.get("status") == "matched"
+                                                    and (not require_full_range
+                                                         or claim.get("exact_target_range") is True)))
+                                missing_metrics = [name for name, available in required_metrics.items()
+                                                   if not available]
+                                if missing_metrics:
+                                    source_missing.append("目标周期指标未取得：" + "、".join(missing_metrics[:6]))
+                                elif matched_count <= 0:
+                                    source_missing.append("目标周期指标未取得")
+                                elif require_full_range and not any(
+                                        claim.get("exact_target_range") is True
+                                        for source in coverage.get("sources", [])
+                                        for claim in source.get("claims", [])):
+                                    source_missing.append("目标周期完整范围指标未取得")
+                if not content_done:
+                    missing.append("步骤正文未完成")
+                ranked_receipts = state.environment.get("explicit_ranked_query_receipts") or {}
+                ranked_key = CreationAgentLoop._ranked_receipt_key(
+                    skill_id, step_id, step_owners)
+                ranked_receipt = ranked_receipts.get(ranked_key)
+                if (ranked_receipt is None and ranked_key != step_id
+                        and step_id in ranked_receipts):
+                    missing.append("显式排行回执缺少技能归属")
+                if isinstance(ranked_receipt, dict) and ranked_receipt.get("status") != "completed":
+                    missing.append("显式排行的确定性查询未完成")
+                authorized = gap_steps.get(key) if source_missing else None
+                acknowledged_gaps = list(dict.fromkeys(source_missing)) if authorized else []
+                if not authorized:
+                    missing.extend(source_missing)
+                receipts.append({"skill_id": skill_id, "step_id": step_id, "title": title,
+                                 "status": "missing_input" if missing else
+                                           "completed_with_gap" if acknowledged_gaps else "completed",
+                                 "missing_inputs": list(dict.fromkeys(missing)),
+                                 "acknowledged_gaps": acknowledged_gaps,
+                                 "gap_need_ids": [item["id"] for item in authorized or []],
+                                 "gap_need_labels": [item["label"] for item in authorized or []],
+                                 "content_completed": content_done,
+                                 "retained_chars": len(normalized)})
+        return receipts
+
+    @staticmethod
+    def _saved_all_gap_intent(brief: Any) -> bool:
+        """Identify current saved source choices without trusting the contract."""
+        if not isinstance(brief, dict):
+            return False
+        latest = {}
+        for item in brief.get("history") or []:
+            if not isinstance(item, dict):
+                continue
+            question, answer = item.get("question"), item.get("answer")
+            if not isinstance(question, dict) or not isinstance(answer, dict):
+                continue
+            marker = question.get("input_clarification") or {}
+            if not isinstance(marker, dict):
+                continue
+            need_ids = marker.get("need_ids")
+            if (marker.get("kind") != "source_confirmation"
+                    or not isinstance(need_ids, list) or len(need_ids) != 1
+                    or not isinstance(need_ids[0], str)):
+                continue
+            selected = answer.get("selected_option_ids")
+            option = next((value for value in question.get("options") or []
+                if isinstance(value, dict) and isinstance(selected, list)
+                and len(selected) == 1 and value.get("id") == selected[0]), None)
+            input_value = option.get("input_value") if isinstance(option, dict) else None
+            latest[need_ids[0]] = (input_value.get("action")
+                if isinstance(input_value, dict) else None)
+        contract = brief.get("content_source_gap")
+        preflight = contract.get("input_preflight") if isinstance(contract, dict) else None
+        needs = preflight.get("needs") if isinstance(preflight, dict) else None
+        current_ids = [item.get("id") for item in needs if isinstance(item, dict)] \
+            if isinstance(needs, list) else []
+        if current_ids:
+            return all(latest.get(need_id) == "draft_with_gap" for need_id in current_ids)
+        return bool(latest) and all(action == "draft_with_gap" for action in latest.values())
+
+    @staticmethod
+    def _content_gap_active(state: LoopState) -> bool:
+        if state.creation_mode != "brainstorm" or state.mode != "initial":
+            return False
+        from .brainstorm_gap_delivery import retract_content_gap_preview
+        base = str(state.environment.get("chapter_base_document") or "")
+        brief = state.environment.get("creation_brief")
+        contracted = isinstance(brief, dict) and "content_source_gap" in brief
+        all_gap_intent = CreationAgentLoop._saved_all_gap_intent(brief) if contracted else False
+        # The routing step binds environment.operation *after* the first
+        # thinking and input-assessment events. A saved Core chapter contract
+        # must protect those earlier events too.
+        operation = (state.environment.get("operation") or {}).get("kind")
+        if contracted and all_gap_intent and operation not in (None, "generate"):
+            raise OperationError("CREATION_DOCUMENT_INVALID",
+                "资料缺口章节的操作类型不一致；现有正文已保留")
+        if not contracted and operation != "generate":
+            return False
+        _, _, audit = retract_content_gap_preview(
+            base, brief, state.selected_skills,
+            protected_base=base)
+        if contracted and all_gap_intent and audit.get("status") != "converted":
+            raise OperationError("CREATION_DOCUMENT_INVALID",
+                "已确认的资料缺口与当前周期或来源答案不一致；请检查会话状态后重试，现有正文已保留")
+        return audit.get("status") == "converted"
+
+    @staticmethod
+    def _guard_provisional_content_gap_followup(
+        creation_mode: str, creation_brief: Optional[dict[str, Any]],
+    ) -> None:
+        """Keep an acknowledged source gap from turning into unsourced facts on edit."""
+        if creation_mode != "brainstorm" or not isinstance(creation_brief, dict):
+            return
+        from .brainstorm_chapters import chapter_context
+        if chapter_context(creation_brief) is not None:
+            return
+        contract = creation_brief.get("content_source_gap")
+        if (isinstance(contract, dict)
+                and contract.get("schema_version") == "brainstorm.content-source-gap.v1"
+                and contract.get("preparation_contract_version") == 17):
+            raise OperationError(
+                "CREATION_EVIDENCE_UNAVAILABLE",
+                "本期来源仍待核实，现有草稿已保留。可手动编辑；如需 Agent 根据新增资料重写，"
+                "请开启新创作并重新确认目标周期及资料。",
+            )
+
+    @staticmethod
+    def _content_gap_candidate(
+        state: LoopState, document: str
+    ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+        """Keep a confirmed all-gap chapter provisional before it reaches the UI."""
+        if (getattr(state, "creation_mode", None) != "brainstorm"
+                or getattr(state, "mode", None) != "initial"
+                or (state.environment.get("operation") or {}).get("kind") != "generate"):
+            return document, [], {"status": "not_applicable"}
+        from .brainstorm_gap_delivery import retract_content_gap_preview
+        from .brainstorm_chapters import chapter_context, validate_chapter_document
+        brief = state.environment.get("creation_brief")
+        if chapter_context(brief) is None:
+            return document, [], {"status": "not_applicable"}
+        base = str(state.environment.get("chapter_base_document") or "")
+        revised, edits, audit = retract_content_gap_preview(
+            document, brief, state.selected_skills, protected_base=base)
+        if audit.get("status") != "converted":
+            return document, [], audit
+        if revised == document:
+            return document, [], audit
+        validate_chapter_document(revised, base, chapter_context(brief))
+        return revised, edits, audit
+
+    def _apply_content_gap_candidate(
+        self, state: LoopState, document: str
+    ) -> tuple[str, dict[str, Any]]:
+        revised, edits, audit = self._content_gap_candidate(state, document)
+        if revised == document:
+            return document, audit
+        old_hash = self._document_hash(document)
+        new_hash = self._document_hash(revised)
+        state.environment.setdefault("superseded_content_gap_previews", []).append({
+            "document": document, "document_hash": old_hash,
+            "replacement_hash": new_hash, "reason": "confirmed_source_gap",
+            "run_id": state.run_id,
+        })
+        state.environment.setdefault("content_gap_revision_audits", []).append({
+            "input_hash": old_hash, "output_hash": new_hash,
+            "edits": edits, "authorization": audit,
+        })
+        state.environment.pop("delivery_checked_hash", None)
+        return revised, audit
+
+    def _retract_restored_content_gap_candidate(self, state: LoopState) -> Optional[str]:
+        """Replace an old saved preview before publishing any resumed document."""
+        if not self._content_gap_active(state):
+            return None
+        candidate = str(state.environment.get("document") or state.current_document)
+        base = str(state.environment.get("chapter_base_document") or "")
+        if not candidate.strip() or candidate == base:
+            return None
+        revised, audit = self._apply_content_gap_candidate(state, candidate)
+        if audit.get("status") != "converted":
+            raise OperationError("CREATION_DOCUMENT_INVALID", "旧断点的来源缺口草稿无法安全恢复")
+        if revised == candidate:
+            return None
+        state.current_document = revised
+        state.environment["document"] = revised
+        state.environment.pop("last_document_patch", None)
+        return self._document_hash(candidate)
+
+    async def _review_creation_delivery(self, state: LoopState, document: str) -> dict[str, Any]:
+        safe_document, _, gap_audit = self._content_gap_candidate(state, document)
+        if gap_audit.get("status") == "converted" and safe_document != document:
+            return {"status": "blocked", "checks": [{
+                "id": "confirmed_source_gap_preview", "passed": False,
+                "evidence": "", "reason": "当前章节包含未核实来源的事实，须先撤回并标明资料缺口",
+            }], "corrections": []}
+        if (state.environment.get("operation") or {}).get("artifact_kind") == "diagram":
+            from .diagram_delivery import diagram_delivery_report
+            report = diagram_delivery_report(document)
+            missing_decisions = self._diagram_missing_confirmed_labels(state, document)
+            if missing_decisions:
+                reason = "图示遗漏已确认的设计对象：" + "、".join(missing_decisions)
+                report["checks"].append({"id": "confirmed_design_coverage", "passed": False,
+                    "evidence": "", "reason": reason})
+                report["status"] = "blocked"
+                report["corrections"].append(reason)
+            if state.environment.get("diagram_design_proposal"):
+                unverified = self._diagram_proposal_claims(document)
+                if unverified:
+                    reason = "概念方案含未经核验的现网或定量断言：" + "、".join(unverified)
+                    report["checks"].append({"id": "proposal_claims", "passed": False,
+                        "evidence": "", "reason": reason})
+                    report["status"] = "blocked"
+                    report["corrections"].append(reason)
+                structure_problem = self._diagram_proposal_structure(document)
+                if structure_problem:
+                    report["checks"].append({"id": "proposal_structure", "passed": False,
+                        "evidence": "", "reason": structure_problem})
+                    report["status"] = "blocked"
+                    report["corrections"].append(structure_problem)
+                if state.environment.get("diagram_fallback_provenance") == "brainstorm_confirmed_choices":
+                    report["checks"].append({"id": "confirmed_choice_fallback", "passed": True,
+                        "evidence": "brainstorm_confirmed_choices",
+                        "reason": "模型候选未过闸，已按已确认选项组成保守的最小方案示意"})
+            if state.environment.get("diagram_source_required"):
+                audit = self._audit_diagram_sources(state)
+                report["checks"].append({"id": "source_grounding", "passed": audit["ready"],
+                    "evidence": ", ".join(audit["eligible_reference_ids"]),
+                    "reason": "" if audit["ready"] else "缺少同时证明主体与架构关系的原始资料"})
+                if not audit["ready"]:
+                    report["status"] = "blocked"
+                    report["corrections"].append("缺少同时证明主体与架构关系的原始资料")
+                elif report["status"] == "pass":
+                    claims = self._diagram_claim_audit(state, document, audit)
+                    state.environment["diagram_claim_audit"] = claims
+                    reason = ("原始资料未支持的专有节点或数量：" + "、".join(claims["unsupported_claims"])
+                              if not claims["passed"] else "")
+                    report["checks"].append({"id": "source_claims", "passed": claims["passed"],
+                        "evidence": ", ".join(claims.get("used_reference_ids") or []), "reason": reason})
+                    if not claims["passed"]:
+                        report["status"] = "blocked"
+                        report["corrections"].append(reason)
+            return report
+        from .source_time_consistency import audit_confirmed_report_period
+        creation_brief = state.environment.get("creation_brief")
+        confirmed_period = (creation_brief.get("confirmed_report_period")
+                            if isinstance(creation_brief, dict) else None)
+        confirmed_period_audit = audit_confirmed_report_period(document, confirmed_period)
+        state.environment["confirmed_period_audit"] = confirmed_period_audit
+        period_checks = []
+        period_corrections = []
+        for issue in confirmed_period_audit.get("issues", []):
+            reason = "第 {} 行的报告周期与用户确认的周期冲突：{}".format(
+                issue.get("line_number"), issue.get("suggestion"))
+            period_checks.append({
+                "id": "confirmed_period_{}_{}".format(
+                    issue.get("line_number"), issue.get("code")),
+                "passed": False,
+                "evidence": str(issue.get("excerpt") or "")[:260],
+                "reason": reason,
+            })
+            period_corrections.append(reason)
+        if gap_audit.get("status") == "converted":
+            # Every current source need has an exact saved user choice to draft
+            # with a gap. The document is a deterministic, provisional chapter,
+            # not a factual report. A normal fact-report reviewer will demand
+            # unavailable metrics and reject the user's explicit gap choice.
+            from .brainstorm_chapters import chapter_context, validate_chapter_document
+            chapter = chapter_context(creation_brief)
+            base = str(state.environment.get("chapter_base_document") or "")
+            if chapter is None:
+                raise OperationError("CREATION_DOCUMENT_INVALID", "来源缺口草稿缺少章节边界")
+            validate_chapter_document(document, base, chapter, completed=True)
+            problems = integrity_problems(document)
+            if period_checks or problems:
+                reasons = period_corrections + ["正文完整性：{}".format(item) for item in problems]
+                return {"status": "blocked", "checks": period_checks + [{
+                    "id": "provisional_document_integrity", "passed": False,
+                    "reason": reason, "evidence": ""} for reason in reasons[len(period_corrections):]],
+                    "corrections": reasons, "confirmed_period_audit": confirmed_period_audit}
+            return {
+                "status": "pass", "provisional": True, "source_validation": "pending",
+                "document_hash": self._document_hash(document),
+                "acknowledged_gap_need_ids": gap_audit.get("need_ids") or [],
+                "checks": [{
+                    "id": "provisional_content_source_gap", "passed": True,
+                    "reason": "用户逐项选择标明资料缺口；当前正文与安全待核稿逐字一致，"
+                              "已列出逐项待核资料与核对条件，未形成本期事实结论",
+                    "evidence": "、".join(gap_audit.get("need_ids") or []),
+                }],
+                "corrections": [], "confirmed_period_audit": confirmed_period_audit,
+            }
+        frozen_receipts = self._frozen_skill_delivery_receipts(state)
+        provisional_receipts: list[dict[str, Any]] = []
+        if frozen_receipts:
+            from .source_time_consistency import audit_source_time_consistency
+            source_time_audit = audit_source_time_consistency(
+                document, state.environment.get("data_results", []))
+            provisional_step_keys = {
+                (item["skill_id"], item["step_id"]) for item in frozen_receipts
+                if item.get("status") == "completed_with_gap"
+            }
+            step_owners = self._skill_step_owners(state)
+            applicable_queries = []
+            provisional_query_rows = []
+            for item in state.environment.get("data_query_results", []):
+                if not isinstance(item, dict):
+                    continue
+                owner = self._query_artifact_owner(item, step_owners)
+                if owner in provisional_step_keys:
+                    if item.get("shape") == "table":
+                        provisional_query_rows.append(self._ranked_receipt_key(
+                            owner[0], owner[1], step_owners))
+                    continue
+                # Ambiguous legacy results remain delivery obligations; a
+                # same-named step in another Skill cannot waive their rows.
+                applicable_queries.append(item)
+            state.environment["provisional_query_rows_not_required"] = provisional_query_rows
+            rank_claim_conflicts = self._ranked_query_claim_conflicts(
+                document, applicable_queries)
+            state.environment["source_time_audit"] = source_time_audit
+            state.environment["ranked_query_claim_conflicts"] = rank_claim_conflicts
+            state.environment["frozen_skill_step_receipts"] = frozen_receipts
+            gaps = [item for item in frozen_receipts if item["status"] == "missing_input"]
+            checks = [{"id": "frozen_skill_step_{}_{}".format(item["skill_id"], item["step_id"]),
+                       "passed": False, "evidence": "",
+                       "reason": "{}：{}".format(item["title"], "、".join(item["missing_inputs"]))}
+                      for item in gaps]
+            query_row_gaps = self._data_query_result_gaps(
+                document, applicable_queries)
+            checks.extend({"id": "frozen_skill_query_rows_{}".format(index + 1),
+                           "passed": False, "evidence": "",
+                           "reason": "确定性查询结果未逐行进入成稿：{}".format(
+                               str(item.get("relation_id") or "来源表"))}
+                          for index, item in enumerate(query_row_gaps))
+            corrections: list[str] = []
+            checks.extend(period_checks)
+            corrections.extend(period_corrections)
+            from .brainstorm_gap_delivery import gap_disclosure_corrections
+            gap_corrections = gap_disclosure_corrections(
+                document, creation_brief, frozen_receipts)
+            for index, reason in enumerate(gap_corrections):
+                checks.append({"id": "acknowledged_source_gap_{}".format(index + 1),
+                               "passed": False, "evidence": "", "reason": reason})
+                corrections.append(reason)
+            for issue in source_time_audit.get("issues", []):
+                reason = "来源 {} 的统计期与正文第 {} 行冲突：{}".format(
+                    issue.get("source_id"), issue.get("line_number"),
+                    issue.get("suggestion"))
+                checks.append({"id": "source_time_{}_{}_{}".format(
+                    issue.get("source_id"), issue.get("line_number"), issue.get("code")),
+                    "passed": False, "evidence": str(issue.get("excerpt") or "")[:260],
+                    "reason": reason})
+                corrections.append(reason)
+            for issue in rank_claim_conflicts:
+                reason = (
+                    "排行否定断言涉及多个主语，需依据已验证的前 {} 行逐项核对。".format(
+                        issue.get("limit"))
+                    if issue.get("ambiguous_subject")
+                    else "已验证排行包含「{}」，不得称其未进入前 {} 行。".format(
+                        issue.get("name"), issue.get("limit"))
+                )
+                checks.append({"id": "ranked_row_claim_{}".format(
+                    issue.get("row_id") or len(checks) + 1),
+                    "passed": False, "evidence": str(issue.get("excerpt") or "")[:200],
+                    "reason": reason})
+                corrections.append(reason)
+            if gaps:
+                return {"status": "blocked", "checks": checks, "corrections": [],
+                        "frozen_skill_gap": True}
+            if query_row_gaps:
+                return {"status": "blocked", "checks": checks, "corrections": [],
+                        "frozen_skill_gap": True}
+            if checks:
+                return {"status": "revise", "checks": checks,
+                        "corrections": list(dict.fromkeys(corrections)),
+                        "confirmed_period_audit": confirmed_period_audit,
+                        "source_time_audit": source_time_audit,
+                        "ranked_query_claim_conflicts": rank_claim_conflicts}
+            provisional_receipts = [item for item in frozen_receipts
+                                    if item.get("status") == "completed_with_gap"]
+            if provisional_receipts:
+                audits = state.environment.get("acknowledged_gap_revision_audits") or []
+                latest = audits[-1] if audits and isinstance(audits[-1], dict) else {}
+                redacted_steps = {
+                    (str(edit.get("skill_id") or ""), str(edit.get("step_id") or ""))
+                    for edit in latest.get("edits") or [] if isinstance(edit, dict)
+                    and edit.get("kind") == "acknowledged_source_gap"
+                }
+                required_steps = {(item["skill_id"], item["step_id"])
+                                  for item in provisional_receipts}
+                if (latest.get("output_hash") != self._document_hash(document)
+                        or not required_steps.issubset(redacted_steps)):
+                    reason = "已确认资料缺口的章节尚未完成与当前正文绑定的逐节事实撤回"
+                    return {"status": "revise", "checks": [{
+                        "id": "provisional_redaction_audit", "passed": False,
+                        "reason": reason, "evidence": "",
+                    }], "corrections": [reason],
+                        "confirmed_period_audit": confirmed_period_audit,
+                        "source_time_audit": source_time_audit}
+                if len(provisional_receipts) == len(frozen_receipts):
+                    return {
+                        "status": "pass", "checks": [{
+                            "id": "provisional_source_gap", "passed": True,
+                            "reason": "已按用户确认的资料缺口完成章节并撤回未核实的目标周期事实",
+                            "evidence": "、".join(item["title"] for item in provisional_receipts),
+                        }], "corrections": [], "provisional": True,
+                        "source_validation": "pending",
+                        "acknowledged_gap_receipts": provisional_receipts,
+                        "confirmed_period_audit": confirmed_period_audit,
+                        "source_time_audit": source_time_audit,
+                    }
+        # Use the same adopted-rule authority as repairs. The candidate catalog
+        # is not permission to impose its rules on this deliverable.
+        state.environment["work_quality_skill_constraints"] = [
+            {**{key: value for key, value in skill.items() if key in {
+                "id", "name", "workflow_role", "strict_structure", "skill_instructions"}},
+             "execution_steps": [
+                 {key: value for key, value in step.items() if key in {
+                     "id", "title", "objective", "output", "output_role"}}
+                 for step in skill.get("execution_steps", []) if isinstance(step, dict)
+             ] if skill.get("workflow_role") != "support" else []}
+            for skill in self._adopted_skill_constraints(state)
+        ]
+        report = await self.service.review_creation_delivery(
+            state.user_message, document, state.environment["input_contract"], state.environment)
+        if gap_audit.get("status") == "converted" and report.get("status") == "pass":
+            report = {**report, "provisional": True, "source_validation": "pending",
+                      "acknowledged_gap_need_ids": gap_audit.get("need_ids") or [],
+                      "checks": list(report.get("checks") or []) + [{
+                          "id": "provisional_content_source_gap", "passed": True,
+                          "reason": "已撤回未核实来源事实，目标周期来源仍待核验",
+                          "evidence": "、".join(gap_audit.get("need_ids") or []),
+                      }]}
+        if provisional_receipts and report.get("status") == "pass":
+            report = {**report, "provisional": True, "source_validation": "pending",
+                      "acknowledged_gap_receipts": provisional_receipts}
+        if period_checks:
+            report = dict(report)
+            report["checks"] = list(report.get("checks") or []) + period_checks
+            report["corrections"] = list(dict.fromkeys(
+                list(report.get("corrections") or []) + period_corrections))
+            report["confirmed_period_audit"] = confirmed_period_audit
+            if report.get("status") == "pass":
+                report["status"] = "revise"
+        return report
+
+    def _adopted_skill_constraints(self, state: LoopState) -> list[dict[str, Any]]:
         from dataclasses import replace
 
         environment = state.environment
@@ -7188,15 +9222,976 @@ class CreationAgentLoop(CreationEvidencePrompts):
             # selections. Preserve that contract only without selection records.
             if selected_ids is not None:
                 skills = [item for item in skills if str(item["id"]) in selected_ids]
-        return self._prompt_bounded_items([
+        return [
             {key: value for key, value in skill.items() if key in {
                 "id", "name", "skill_instructions", "execution_steps", "strict_structure", "workflow_role",
                 "title_design_style", "writing_design", "image_generation", "voice_style"}}
-            for skill in skills if isinstance(skill, dict)], char_budget=MAX_PROMPT_SKILL_CHARS, item_limit=8)
+            for skill in skills if isinstance(skill, dict)]
+
+    def _repair_skill_constraints(self, state: LoopState) -> list[dict[str, Any]]:
+        return self._prompt_bounded_items(self._adopted_skill_constraints(state),
+                                         char_budget=MAX_PROMPT_SKILL_CHARS, item_limit=8)
+
+    @staticmethod
+    def _chapter_repair_patch_scope(state: LoopState, step: dict[str, Any]) -> Optional[tuple[str, list[dict[str, Any]]]]:
+        """Bind repairs to the generated addition, outside the protected base."""
+        from .brainstorm_chapters import chapter_context, validate_chapter_document
+        if not step.get("delivery_repair") or step.get("action") != "patch_writer":
+            return None
+        chapter = chapter_context(state.environment.get("creation_brief"))
+        if chapter is None:
+            return None
+        document = state.current_document
+        base = str(state.environment.get("chapter_base_document", state.environment.get("input_base_document", "")) or "")
+        validate_chapter_document(document, base, chapter, completed=True)
+        start = len(base.rstrip())
+        addition = document[start:]
+        positions = [match.start() for match in re.finditer(re.escape(addition), document)]
+        target = {"text": addition, "occurrence": positions.index(start) + 1}
+        from .operations import resolve_target
+        if resolve_target(document, target) != (start, len(document)):
+            raise OperationError("CREATION_PATCH_OUT_OF_SCOPE", "无法定位本章独立修正范围，已保留正文")
+        return document, [target]
 
     def _model_prompts(
         self, state: LoopState, step: dict[str, Any]
     ) -> tuple[str, str]:
+        system, user = self._base_model_prompts(state, step)
+        context = state.environment.get("work_context")
+        if context and not step.get("brief_section_id"):
+            from .work_quality import work_context_guidance
+            system += work_context_guidance(context)
+        return system, user
+
+    @staticmethod
+    def _standalone_diagram_title(state: LoopState) -> str:
+        identity = state.environment.get("document_identity") or {}
+        title = str(identity.get("title") or "").strip()
+        # A recall hit alone does not verify that a diagram describes the
+        # deployed system. Keep its provisional label until source claims are
+        # independently checked.
+        if title and "示意" not in title:
+            title += "（方案示意）"
+        return title
+
+    @staticmethod
+    def _diagram_missing_confirmed_labels(state: LoopState, document: str) -> list[str]:
+        """Keep explicit selected design objects visible in a standalone graph.
+
+        Only saved user decisions count. Candidate options, retrieved prose and
+        generated chapter instructions cannot introduce required objects.
+        Quoted labels have unambiguous boundaries. A chosen direction option
+        that names a technical object also belongs in the graph, even when the
+        saved summary has no quotes. Procedural choices remain subject to the
+        ordinary delivery review.
+        """
+        brief = state.environment.get("creation_brief")
+        if not isinstance(brief, dict):
+            return []
+        anchors = []
+        for decision in brief.get("decisions") or []:
+            if not isinstance(decision, dict) or decision.get("source") != "user":
+                continue
+            summary = str(decision.get("summary") or "")
+            anchors.extend(re.findall(r"[‘“]([^‘’“”\r\n]{2,40})[’”]", summary))
+            if str(decision.get("dimension_id") or "").startswith("content_direction"):
+                for raw in decision.get("user_inputs") or []:
+                    label = str(raw or "").strip()
+                    if (2 <= len(label) <= 40
+                            and re.search(r"策略|引擎|系统|组件|模块|平台|调度|缓存|量化|"
+                                          r"模型|资源|推理|部署|架构|批处理", label)):
+                        label = re.sub(r"^(?:引入|采用|使用|增加|纳入|建设|部署)", "", label)
+                        parts = [part.strip() for part in re.split(r"与|和|及", label)
+                                 if len(part.strip()) >= 2]
+                        anchors.extend(parts or [label])
+        compact_document = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", document.casefold())
+        missing = []
+        for anchor in dict.fromkeys(anchors):
+            compact_anchor = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", anchor.casefold())
+            if compact_anchor and compact_anchor not in compact_document:
+                missing.append(anchor)
+        return missing[:8]
+
+    @staticmethod
+    def _diagram_confirmed_design_choices(state: LoopState) -> list[str]:
+        brief = state.environment.get("creation_brief")
+        if not isinstance(brief, dict):
+            return []
+        result = []
+        for decision in brief.get("decisions") or []:
+            if (isinstance(decision, dict) and decision.get("source") == "user"
+                    and str(decision.get("dimension_id") or "").startswith("content_direction")):
+                result.extend(str(value).strip() for value in decision.get("user_inputs") or []
+                              if str(value).strip())
+        return list(dict.fromkeys(result))[:8]
+
+    @classmethod
+    def _diagram_is_design_proposal(cls, state: LoopState) -> bool:
+        return bool(
+            cls._diagram_confirmed_design_choices(state)
+            and not re.search(
+                r"现网|当前|现有|真实|实际部署|已上线|按.{0,20}原文|"
+                r"根据.{0,20}资料", state.root_request or "")
+        )
+
+    @classmethod
+    def _diagram_confirmed_design_fallback(cls, state: LoopState) -> str:
+        """Build a minimal concept graph solely from saved technical choices."""
+        brief = state.environment.get("creation_brief")
+        if not isinstance(brief, dict):
+            return ""
+        directions = []
+        details = []
+        for decision in brief.get("decisions") or []:
+            if not isinstance(decision, dict) or decision.get("source") != "user":
+                continue
+            dimension = str(decision.get("dimension_id") or "")
+            target = (directions if dimension.startswith("content_direction") else
+                      details if dimension.startswith("content_detail") else None)
+            if target is None:
+                continue
+            for raw in decision.get("user_inputs") or []:
+                label = re.sub(r"^(?:引入|采用|使用|增加|纳入|建设)", "", str(raw).strip())
+                if (2 <= len(label) <= 32 and not re.search(r"\d|[\[\]<>\"|]", label)
+                        and re.search(r"策略|引擎|系统|组件|模块|平台|调度|缓存|量化|"
+                                      r"模型|资源|推理|部署|架构|批处理|压缩", label)
+                        and not re.match(r"先|直接|仅|提供|核对", label)):
+                    target.append(label)
+        directions = list(dict.fromkeys(directions))[:4]
+        details = [item for item in dict.fromkeys(details) if item not in directions][:3]
+        if not directions:
+            return ""
+        root_label = cls._diagram_subject_for_retrieval(state.root_request)[:36]
+        root_label = re.sub(r'[\[\]<>\"|]', "", root_label).strip() or "目标架构"
+        lines = ["flowchart LR", '    Goal["{}（方案示意）"]'.format(root_label)]
+        for index, label in enumerate(directions, 1):
+            lines.append('    Direction{}["{}（拟议）"]'.format(index, label))
+        for index, label in enumerate(details, 1):
+            lines.append('    Detail{}["{}（拟议）"]'.format(index, label))
+        for index in range(1, len(directions) + 1):
+            lines.append("    Goal -->|方案包含| Direction{}".format(index))
+        for index in range(1, len(details) + 1):
+            lines.append("    Direction1 -->|配套考虑| Detail{}".format(index))
+        return "```mermaid\n" + "\n".join(lines) + "\n```"
+
+    @staticmethod
+    def _diagram_proposal_claims(document: str) -> list[str]:
+        """A conceptual graph cannot turn invented quantities into current facts."""
+        labels = re.findall(r'\["([^"\r\n]+)"\]', document)
+        claims = [label for label in labels if re.search(
+            r"\d|现网|当前|目前|现有|已上线|已部署|已实现|运行中|生产环境", label
+        )]
+        claims.extend(label for label in labels if re.search(r"实测数据|已验证|已确认", label)
+                      and not re.search(r"待核|待采集|待验证|拟议|计划", label))
+        relations = re.findall(r"(?:-->|-\.->|---|==>|<-->)\|([^|\r\n]+)\|", document)
+        claims.extend(label for label in relations if re.search(
+            r"降低|提升|节省|减少|增效|改善", label
+        ) and not re.search(r"目标|拟议|待验证|待测|待核", label))
+        return list(dict.fromkeys(claims))[:8]
+
+    @staticmethod
+    def _diagram_proposal_structure(document: str) -> str:
+        """A proposed architecture should have one inspectable component chain."""
+        nodes = set(re.findall(r'^\s*([A-Za-z][A-Za-z0-9_]*)\["', document, re.M))
+        edges = re.findall(r'^\s*([A-Za-z][A-Za-z0-9_]*)\s+(?:-->|-\.->|---|==>|<-->)(?:\|[^|]+\|)?\s+([A-Za-z][A-Za-z0-9_]*)\s*$', document, re.M)
+        if len(nodes) < 2 or not edges:
+            return "概念方案缺少节点关系"
+        adjacency = {node: set() for node in nodes}
+        for left, right in edges:
+            if left in adjacency and right in adjacency:
+                adjacency[left].add(right)
+                adjacency[right].add(left)
+        reached = set()
+        pending = [next(iter(nodes))]
+        while pending:
+            node = pending.pop()
+            if node not in reached:
+                reached.add(node)
+                pending.extend(adjacency[node] - reached)
+        return "" if reached == nodes else "概念方案存在未连接的孤立节点或链路"
+
+    @staticmethod
+    def _diagram_subject_anchor(entity_context: dict[str, Any]) -> str:
+        entities = []
+        for raw in entity_context.get("primary_entities") or []:
+            item = raw if isinstance(raw, dict) else {"name": raw}
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            ratio = item.get("document_frequency_ratio")
+            rarity = float(ratio) if isinstance(ratio, (float, int)) else 1.0
+            entities.append((rarity, -len(name), name))
+        return min(entities)[2] if entities else ""
+
+    @staticmethod
+    def _diagram_subject_coverage(anchor: str, source_text: str) -> float:
+        normalized_anchor = re.sub(r"[^\w\u4e00-\u9fff]+", "", anchor.casefold())
+        normalized_source = re.sub(r"[^\w\u4e00-\u9fff]+", "", source_text.casefold())
+        if not normalized_anchor:
+            return 0.0
+        if normalized_anchor in normalized_source:
+            return 1.0
+        if not re.fullmatch(r"[\u4e00-\u9fff]{4,}", normalized_anchor):
+            return 0.0
+        pairs = set(normalized_anchor[index:index + 2]
+                    for index in range(len(normalized_anchor) - 1))
+        return sum(pair in normalized_source for pair in pairs) / len(pairs)
+
+    @staticmethod
+    def _diagram_topic_title_aligned(anchor: str, title: str) -> bool:
+        """Match a distributed requested topic, not merely an org prefix."""
+        topic = re.sub(r"[^\w\u4e00-\u9fff]+", "", anchor.casefold())
+        heading = re.sub(r"[^\w\u4e00-\u9fff]+", "", title.casefold())
+        if not topic or not heading:
+            return False
+        if len(topic) >= 4 and topic in heading:
+            return True
+        if re.fullmatch(r"[\u4e00-\u9fff]{6,}", topic):
+            pairs = [topic[index:index + 2] for index in range(len(topic) - 1)]
+            hits = [index for index, pair in enumerate(pairs) if pair in heading]
+            return bool(
+                len(hits) >= 4
+                and len(hits) / len(pairs) >= 0.4
+                and sum(index >= len(pairs) // 2 for index in hits) >= 2
+            )
+        terms = [term for term in re.findall(
+            r"[A-Za-z0-9]{3,}|[\u4e00-\u9fff]{2,}", anchor.casefold()
+        ) if term not in {"diagram", "architecture", "technical", "技术", "架构", "图示"}]
+        return bool(len(terms) >= 2 and
+                    sum(term in heading for term in terms) >= max(2, len(terms) - 1))
+
+    @classmethod
+    def _diagram_source_assessment(
+        cls, reference: dict[str, Any], anchor: str, *, topic_mode: bool = False
+    ) -> dict[str, Any]:
+        """Require provenance, the requested subject, and actual structure text.
+
+        Retriever scores and matched_entities are clues only: a paper digest can
+        inherit the same words without describing the named system itself.
+        """
+        body = str(reference.get("content") or "")
+        text = str(reference.get("title") or "") + "\n" + body
+        snapshot_id = reference.get("source_snapshot_id")
+        scope = reference.get("source_scope") or {}
+        original = bool(
+            reference.get("source_type") == "document"
+            and type(snapshot_id) is int and snapshot_id > 0
+            and isinstance(scope, dict)
+            and scope.get("snapshot_id") == snapshot_id
+            and scope.get("source_body_hash") == reference.get("source_body_hash")
+            and scope.get("source_coverage") == "complete"
+            and isinstance(reference.get("source_body_hash"), str)
+            and len(reference["source_body_hash"]) == 64
+            and scope.get("excerpt_hash") == hashlib.sha256(body.encode("utf-8")).hexdigest()
+            and type(scope.get("start_byte")) is int
+            and type(scope.get("end_byte")) is int
+            and scope["end_byte"] - scope["start_byte"] == len(body.encode("utf-8"))
+        )
+        coverage = cls._diagram_subject_coverage(anchor, text)
+        if (original and reference.get("diagram_subject_body_hash") == reference.get("source_body_hash")
+                and isinstance(reference.get("diagram_full_subject_coverage"), (float, int))):
+            coverage = max(coverage, float(reference["diagram_full_subject_coverage"]))
+        structure_words = (
+            "架构", "模块", "组件", "工作流", "workflow", "dag", "agent",
+            "服务", "引擎", "链路", "流程", "管线", "pipeline",
+            "剧本库", "脚本库", "素材库", "资产库", "模板", "话术",
+            "图生视频", "商详",
+        )
+        relation_words = (
+            "调用", "连接", "接入", "输入", "输出", "依赖", "编排", "流转",
+            "集成", "串联", "组成", "构成", "协同", "承接", "贯通", "通过",
+            "支撑", "驱动", "生成", "合成", "沉淀", "打通", "实现", "复用",
+            "组装", "衔接", "完成", "上线", "上传", "提供给", "方案", "架构", "走", "->", "→",
+        )
+        body_folded = body.casefold()
+        title_aligned = cls._diagram_topic_title_aligned(
+            anchor, str(reference.get("title") or "")
+        ) if topic_mode else False
+        body_subject_coverage = cls._diagram_subject_coverage(anchor, body)
+        structure_hits = [word for word in structure_words if word in body_folded]
+        relation_hits = [word for word in relation_words if word in body_folded]
+        relation_window = any(
+            any(relation in body_folded[max(0, match.start() - 120):match.end() + 120]
+                for relation in relation_words)
+            and sum(word in body_folded[max(0, match.start() - 120):match.end() + 120]
+                    for word in structure_words) >= 2
+            for word in structure_words
+            for match in re.finditer(re.escape(word), body_folded)
+        )
+        eligible = bool(
+            reference.get("can_use") is not False and body.strip()
+            and original
+            and ((title_aligned and coverage >= 0.45
+                  and body_subject_coverage >= 0.3) if topic_mode
+                 else coverage >= 0.7)
+            and len(structure_hits) >= 2 and relation_hits and relation_window
+        )
+        return {
+            "reference_id": "{}:{}".format(reference.get("source_type"), reference.get("source_id")),
+            "eligible": eligible,
+            "eligibility": "direct" if eligible else "none",
+            "original_source": bool(original),
+            "subject_coverage": round(coverage, 3),
+            "topic_title_aligned": title_aligned,
+            "body_subject_coverage": round(body_subject_coverage, 3),
+            "structure_hits": structure_hits[:6],
+            "relation_hits": relation_hits[:6],
+            "relation_window": relation_window,
+            "refresh_status": reference.get("refresh_status") or "historical_only",
+        }
+
+    @classmethod
+    def _diagram_bridge_eligible(
+        cls, reference: dict[str, Any], assessment: dict[str, Any],
+        direct_sources: list[dict[str, Any]],
+    ) -> bool:
+        """Admit an adjacent original only through a checkable local bridge.
+
+        A retrieval score, title, or a directory of related documents is not
+        evidence of the requested architecture. The target sentence must
+        itself connect the bridged entity to a component with a relation verb,
+        and the anchor must be one of the directly matched original snapshots.
+        """
+        bridge = reference.get("bridge_evidence")
+        if (reference.get("source_type") != "document"
+                or not assessment.get("original_source")
+                or not isinstance(bridge, dict)
+                or "historical_bridge" not in (reference.get("selection_reasons") or [])):
+            return False
+        snapshot_id = reference.get("source_snapshot_id")
+        source_hash = reference.get("source_body_hash")
+        if (bridge.get("target_snapshot_id") != snapshot_id
+                or bridge.get("target_source_body_hash", source_hash) != source_hash):
+            return False
+        anchor_id = bridge.get("anchor_snapshot_id")
+        anchor_hash = bridge.get("anchor_source_body_hash")
+        if not any(
+            item.get("source_snapshot_id") == anchor_id
+            and (not anchor_hash or item.get("source_body_hash") == anchor_hash)
+            for item in direct_sources
+        ):
+            return False
+        target = str(bridge.get("target_excerpt") or "").strip()
+        body = str(reference.get("content") or "")
+        entity = str(bridge.get("entity") or "").strip()
+        terms = [str(term).strip() for term in bridge.get("matched_terms") or []
+                 if len(str(term).strip()) >= 2]
+        relation_terms = [str(term).strip() for term in bridge.get("relation_terms") or []
+                          if str(term).strip()]
+        kind = str(bridge.get("link_kind") or "")
+        if (not target or not body.strip() or body.strip() not in target or not entity
+                or len(set(terms)) < 1 or not relation_terms
+                or kind not in {"entity_local", "entity_title", "source_citation"}):
+            return False
+        # The retrieval bridge already selected a bounded original-text
+        # window. Keep its entity/component/relation trio together: meeting
+        # notes often split a heading, plan line, and status onto three lines.
+        body_folded = body.casefold()
+        if (not any(term.casefold() in body_folded for term in terms)
+                or not any(verb.casefold() in body_folded for verb in relation_terms)
+                or not assessment.get("structure_hits")
+                or target.lstrip().startswith(("目录", "本文被引用", "行业产品调研"))):
+            return False
+        if kind == "entity_local":
+            # Names and component relations need to be source-local; a name in
+            # a directory heading cannot license a remote technical paragraph.
+            return entity in target and len(set(terms)) >= 1
+        if kind == "entity_title":
+            return entity.casefold() in str(reference.get("title") or "").casefold()
+        link = str(bridge.get("link_excerpt") or "")
+        link_scope = reference.get("bridge_link_scope") or {}
+        return bool(
+            len(set(terms)) >= 1 and link and isinstance(link_scope, dict)
+            and link_scope.get("snapshot_id") == snapshot_id
+            and link_scope.get("source_body_hash") == source_hash
+            and link_scope.get("excerpt_hash") == hashlib.sha256(link.encode("utf-8")).hexdigest()
+            and (link_scope.get("end_byte") or 0) - (link_scope.get("start_byte") or 0)
+            == len(link.encode("utf-8"))
+        )
+
+    @classmethod
+    def _audit_diagram_sources(cls, state: LoopState) -> dict[str, Any]:
+        anchor = str(state.environment.get("diagram_subject_anchor") or "")
+        receipts = [item for item in (state.environment.get("tool_results") or [])
+                    if isinstance(item, dict)
+                    and item.get("tool_id") == MEMORY_SEARCH_TOOL_ID
+                    and item.get("status") == "completed"]
+        assessments = [cls._diagram_source_assessment(item, anchor)
+                       if state.environment.get("diagram_anchor_kind") != "topic"
+                       else cls._diagram_source_assessment(item, anchor, topic_mode=True)
+                       for item in (state.environment.get("references") or [])
+                       if isinstance(item, dict)] if anchor else []
+        references = [item for item in (state.environment.get("references") or [])
+                      if isinstance(item, dict)]
+        direct_sources = [item for item, assessment in zip(references, assessments)
+                          if assessment["eligible"]]
+        if direct_sources:
+            for reference, assessment in zip(references, assessments):
+                if assessment["eligible"]:
+                    continue
+                if cls._diagram_bridge_eligible(reference, assessment, direct_sources):
+                    assessment["eligible"] = True
+                    assessment["eligibility"] = "bridged"
+        eligible = [item["reference_id"] for item in assessments if item["eligible"]]
+        report = {"ready": bool(receipts and eligible), "subject_anchor": anchor,
+                  "memory_search_completed": bool(receipts),
+                  "eligible_reference_ids": eligible, "assessments": assessments}
+        state.environment["diagram_source_audit"] = report
+        return report
+
+    @staticmethod
+    def _diagram_specific_claims(label: str) -> list[str]:
+        """Extract names and quantities whose presence can be checked exactly."""
+        patterns = (
+            r"[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+",
+            r"\b[A-Z]{2,}[A-Za-z0-9]*\b",
+            r"\b(?:[A-Z][a-z]+\s+){1,}[A-Z][a-z]+\b",
+            r"\d+(?:\.\d+)?(?:个|人|路|层|类|模型|秒|分钟|%|ms)",
+        )
+        return list(dict.fromkeys(match.group(0) for pattern in patterns
+                                  for match in re.finditer(pattern, label)))
+
+    @staticmethod
+    def _diagram_label_anchor(label: str, source: str) -> str:
+        label = re.sub(r"[（(](?:方案示意|历史方案|拟议|待核实)[）)]", "", label)
+        label = re.sub(
+            r"[（(](?:历史(?:资料)?(?:记载)?[:：]?)?"
+            r"(?:已上线|已实现|规划|计划|目标|PRT回测|回测|小流量|白名单|开发中|方案中)"
+            r"[）)]", "", label,
+        )
+        normalized = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", label.casefold())
+        if not normalized:
+            return ""
+        if normalized in source:
+            return normalized
+        if any(char.isdigit() for char in normalized):
+            return ""
+        match = SequenceMatcher(None, normalized, source, autojunk=False).find_longest_match(
+            0, len(normalized), 0, len(source))
+        if match.size >= 3 and match.size / len(normalized) >= 0.75:
+            return normalized[match.a:match.a + match.size]
+        return ""
+
+    @classmethod
+    def _diagram_claim_audit(cls, state: LoopState, document: str,
+                             source_audit: dict[str, Any]) -> dict[str, Any]:
+        """Check each specific node and edge against the same eligible source."""
+        eligible_ids = set(source_audit.get("eligible_reference_ids") or [])
+        sources = []
+        for item in (state.environment.get("references") or []):
+            if not isinstance(item, dict):
+                continue
+            reference_id = "{}:{}".format(item.get("source_type"), item.get("source_id"))
+            if reference_id not in eligible_ids:
+                continue
+            seen_scopes = set()
+            for window in [item, *(item.get("evidence_windows") or [])]:
+                if not isinstance(window, dict):
+                    continue
+                scope = window.get("source_scope") or {}
+                content = str(window.get("content") or "")
+                if (not isinstance(scope, dict)
+                        or scope.get("snapshot_id") != item.get("source_snapshot_id")
+                        or scope.get("source_body_hash") != item.get("source_body_hash")
+                        or scope.get("excerpt_hash") != hashlib.sha256(
+                            content.encode("utf-8")).hexdigest()
+                        or type(scope.get("start_byte")) is not int
+                        or type(scope.get("end_byte")) is not int
+                        or scope["end_byte"] - scope["start_byte"] != len(
+                            content.encode("utf-8"))):
+                    continue
+                key = (scope["start_byte"], scope["end_byte"], scope["excerpt_hash"])
+                if key in seen_scopes:
+                    continue
+                seen_scopes.add(key)
+                sources.append({
+                    "reference_id": reference_id,
+                    "body": re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", content.casefold()),
+                    "raw": content,
+                    "refresh_status": str(item.get("refresh_status") or "historical_only"),
+                })
+        bodies = [item["body"] for item in sources]
+        user_text = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(state.user_message or "").casefold())
+        nodes = {}
+        edges = []
+        groups = []
+        current_group = None
+        code_lines = [line.strip() for line in document.splitlines()
+                      if line.strip() and line.strip() != "```" and line.strip() != "```mermaid"]
+        auditable_flowchart = bool(code_lines and re.fullmatch(
+            r"(?:flowchart|graph)\s+(?:LR|RL|TB|TD|BT)", code_lines[0], re.IGNORECASE))
+        for line in document.splitlines():
+            group = re.fullmatch(r'\s*subgraph\s+([A-Za-z][A-Za-z0-9_]*)\["([^"\r\n]+)"\]\s*', line)
+            if group:
+                current_group = {"label": group.group(2), "node_ids": []}
+                groups.append(current_group)
+                continue
+            if line.strip() == "end":
+                current_group = None
+                continue
+            node = re.fullmatch(r'\s*([A-Za-z][A-Za-z0-9_]*)\["([^"\r\n]+)"\]\s*', line)
+            if node:
+                nodes[node.group(1)] = node.group(2)
+                if current_group is not None:
+                    current_group["node_ids"].append(node.group(1))
+                continue
+            edge = re.fullmatch(r'\s*([A-Za-z][A-Za-z0-9_]*)\s+-->(?:\|([^|]+)\|)?\s+([A-Za-z][A-Za-z0-9_]*)\s*', line)
+            if edge:
+                edges.append((edge.group(1), edge.group(3), edge.group(2) or ""))
+        unsupported = []
+        if not auditable_flowchart or len(nodes) < 2 or not edges:
+            unsupported.append("图示缺少可逐边审计的 flowchart 节点和关系")
+        provenance = []
+        node_sources = {}
+        group_by_node = {node_id: group["label"] for group in groups
+                         for node_id in group["node_ids"]}
+        present_status = ("现网", "当前", "目前", "现行", "现状", "如今", "正在运行",
+                          "运行中", "生产环境", "线上运行", "已部署", "已落地", "在用")
+        bounded_status = ("已上线", "已实现", "规划", "计划", "目标",
+                          "PRT", "回测", "小流量", "白名单", "开发中", "方案中")
+
+        def status_supported(label: str, node_id: str,
+                             allowed_ids: Optional[set[str]] = None) -> bool:
+            """A time/status annotation needs the same local source as its node."""
+            current_markers = [marker for marker in present_status if marker in label]
+            markers = [marker for marker in bounded_status if marker in label]
+            if not current_markers and not markers:
+                return True
+            for source in sources:
+                if source["reference_id"] not in node_sources.get(node_id, []):
+                    continue
+                if allowed_ids is not None and source["reference_id"] not in allowed_ids:
+                    continue
+                if current_markers and source["refresh_status"] not in {
+                        "fresh_complete", "fresh_recent"}:
+                    continue
+                if source["refresh_status"] == "historical_only" and any(
+                        marker in label for marker in ("已上线", "已实现")) and "历史" not in label:
+                    continue
+                body = source["body"]
+                anchor = cls._diagram_label_anchor(nodes.get(node_id, ""), body)
+                if not anchor:
+                    continue
+                for match in list(re.finditer(re.escape(anchor), body))[:24]:
+                    local = body[max(0, match.start() - 160):match.end() + 160]
+                    def marker_supported(marker: str) -> bool:
+                        normalized = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", marker.casefold())
+                        if normalized == "已上线":
+                            return ("已上线" in local or "上线完成" in local
+                                    or ("完成" in local and "上线" in local))
+                        if normalized in {"规划", "计划"} and (
+                                re.search(r"kr\d+", local)
+                                or any(word in local for word in ("规划", "计划", "拟议"))):
+                            return True
+                        if normalized == "目标" and re.search(r"kr\d+", local):
+                            return True
+                        if normalized == "方案中" and "方案" in local:
+                            return True
+                        return normalized in local
+                    if all(marker_supported(marker) for marker in current_markers + markers):
+                        return True
+            return False
+
+        for node_id, label in nodes.items():
+            matching = list(dict.fromkeys(
+                source["reference_id"] for source in sources
+                if cls._diagram_label_anchor(label, source["body"])))
+            node_sources[node_id] = matching
+            if not matching:
+                unsupported.append(label)
+            elif not status_supported(label, node_id):
+                unsupported.append(label)
+            for claim in cls._diagram_specific_claims(label):
+                normalized = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", claim.casefold())
+                if normalized not in user_text and not any(normalized in body for body in bodies):
+                    unsupported.append(claim)
+            if matching:
+                provenance.append({"kind": "node", "node_id": node_id, "claim": label,
+                                   "reference_ids": matching})
+        incident_sources = {node_id: set() for node_id in nodes}
+        for start, end, relation in edges:
+            claims = cls._diagram_specific_claims(
+                " ".join((nodes.get(start, ""), nodes.get(end, ""), relation)))
+            normalized_claims = [re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", claim.casefold())
+                                 for claim in claims]
+            relation_text = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", relation.casefold())
+            relation_words = ("调用", "连接", "接入", "输入", "输出", "依赖", "编排",
+                              "流转", "集成", "串联", "组成", "构成", "协同", "承接",
+                              "贯通", "通过", "支撑", "驱动", "生成", "合成",
+                              "沉淀", "打通", "实现", "复用", "组装", "衔接",
+                              "方案", "架构", "完成", "上线", "上传", "提供给", "走",
+                              "引入", "迁入", "使用", "构建", "承载", "整合", "分配",
+                              "共享", "统一", "对齐")
+            supporting_ids = []
+            for source in sources:
+                body = source["body"]
+                left = cls._diagram_label_anchor(nodes.get(start, ""), body)
+                right = cls._diagram_label_anchor(nodes.get(end, ""), body)
+                if not left or not right or not all(claim in body for claim in normalized_claims):
+                    continue
+                raw_compact = re.sub(r"\s+", "", source["raw"].casefold())
+                raw_left = re.sub(r"\s+", "", nodes.get(start, "").casefold())
+                raw_right = re.sub(r"\s+", "", nodes.get(end, "").casefold())
+                left_raw_at = raw_compact.find(raw_left)
+                right_raw_at = raw_compact.find(raw_right,
+                                                 left_raw_at + len(raw_left))
+                plan_context = (raw_compact[max(0, left_raw_at - 40):right_raw_at]
+                                if left_raw_at >= 0 and right_raw_at >= 0 else "")
+                is_plan_edge = bool(re.search(
+                    r"(?:kr\d+|规划|计划|方案|拟议|目标)", plan_context))
+                if is_plan_edge and not (
+                    group_by_node.get(start) == group_by_node.get(end)
+                    and any(marker in group_by_node.get(start, "") for marker in
+                            ("规划", "计划", "方案", "拟议", "目标"))
+                ):
+                    continue
+                if raw_left and raw_right and re.search(
+                        re.escape(raw_left) + r"(?:➡\ufe0f?|→|->|—)" +
+                        re.escape(raw_right), raw_compact):
+                    supporting_ids.append(source["reference_id"])
+                    continue
+                for left_match in list(re.finditer(re.escape(left), body))[:24]:
+                    for right_match in list(re.finditer(re.escape(right), body))[:24]:
+                        distance = right_match.start() - left_match.end()
+                        if distance < 0 or distance > 400:
+                            continue
+                        between = body[left_match.end():right_match.start()]
+                        # A -> C cannot borrow A -> B -> C prose as a direct
+                        # edge. A single verb can govern parallel objects,
+                        # e.g. "Agent 实现图生视频、智能商详", so keep that case.
+                        intermediate = [cls._diagram_label_anchor(label, body)
+                                        for node_id, label in nodes.items()
+                                        if node_id not in {start, end}]
+                        relation_positions = {match.start() for word in relation_words
+                                              for match in re.finditer(re.escape(word), between)}
+                        action_words = ("调用", "连接", "接入", "输入", "输出", "编排",
+                                        "流转", "集成", "串联", "通过", "驱动", "生成",
+                                        "合成", "沉淀", "打通", "实现", "复用", "组装",
+                                        "上传", "提供给", "走", "引入", "迁入", "使用",
+                                        "构建", "承载", "整合", "分配", "共享", "统一", "对齐")
+                        action_matches = sorted((match.start(), match.end())
+                            for word in action_words
+                            for match in re.finditer(re.escape(word), between))
+                        if len(action_matches) > 1:
+                            continue
+                        if any(re.search(r"(?:不|未|尚未|无法|不会|不能|禁止|并未)" +
+                                         re.escape(word), between)
+                               for word in relation_words):
+                            continue
+                        # A second relation verb *after* an intermediate node
+                        # indicates A -> B -> C. In "A 上线 B、C", every verb
+                        # precedes B and one verb governs parallel objects.
+                        chained = any(
+                            label and any(
+                                relation_at >= hit.end()
+                                for hit in re.finditer(re.escape(label), between)
+                                for relation_at in relation_positions
+                            )
+                            for label in intermediate
+                        )
+                        if chained:
+                            continue
+                        if (relation_positions
+                                and (not relation_text or relation_text in between)):
+                            supporting_ids.append(source["reference_id"])
+                            break
+                    if source["reference_id"] in supporting_ids:
+                        break
+            if not supporting_ids:
+                unsupported.append("{} → {}".format(nodes.get(start, start), nodes.get(end, end)))
+            else:
+                chosen_id = supporting_ids[0]
+                incident_sources[start].add(chosen_id)
+                incident_sources[end].add(chosen_id)
+                provenance.append({"kind": "edge",
+                                   "claim": "{} → {}".format(nodes.get(start, start), nodes.get(end, end)),
+                                   "reference_ids": [chosen_id]})
+        for claim in provenance:
+            if claim["kind"] != "node":
+                continue
+            incident = incident_sources.get(claim.pop("node_id"), set())
+            candidates = [reference_id for reference_id in claim["reference_ids"]
+                          if reference_id in incident]
+            claim["reference_ids"] = candidates or claim["reference_ids"][:1]
+        for group in groups:
+            label = group["label"]
+            markers = [marker for marker in present_status + bounded_status if marker in label]
+            if markers and (not group["node_ids"] or not all(
+                status_supported(label, node_id,
+                                 incident_sources.get(node_id) or set(node_sources.get(node_id, [])[:1]))
+                for node_id in group["node_ids"]
+            )):
+                unsupported.append(label)
+        used_ids = list(dict.fromkeys(reference_id
+            for claim in provenance for reference_id in claim["reference_ids"]))
+        if not used_ids:
+            unsupported.append("图示缺少经原始资料验证的关系")
+        return {"passed": not unsupported,
+                "unsupported_claims": list(dict.fromkeys(unsupported))[:8],
+                "claim_provenance": provenance, "used_reference_ids": used_ids}
+
+    @staticmethod
+    def _diagram_prompt_window_spans(reference: dict[str, Any]) -> list[dict[str, Any]]:
+        """Select relation lines inside one byte-bounded original window."""
+        content = str(reference.get("content") or "")
+        scope = reference.get("source_scope") or {}
+        if not content or not isinstance(scope, dict):
+            return []
+        relation_words = (
+            "调用", "连接", "接入", "输入", "输出", "编排", "串联",
+            "通过", "提供给", "实现", "生成", "沉淀", "打通", "上传",
+            "走", "上线", "复用", "引入", "迁入", "构建", "依赖",
+            "承载", "支撑", "导致", "对齐", "整合", "分配", "共享",
+            "统一", "流转", "用于", "➡", "→", "->",
+        )
+        structure_words = (
+            "工作流", "workflow", "agent", "tool", "skill", "架构", "链路",
+            "流程", "模板", "剧本库", "脚本库", "剧本", "脚本", "资产库",
+            "图生视频", "商详", "管理", "推荐",
+            "badcase", "标注", "评估", "评测", "复投",
+            "服务", "引擎", "资源", "调度", "推理", "模型", "算力", "缓存",
+        )
+        lines = list(re.finditer(r"[^\n]+", content))
+        chosen: set[int] = set()
+        for index, match in enumerate(lines):
+            line = match.group(0).strip()
+            folded = line.casefold()
+            structural_hits = sum(word in folded for word in structure_words)
+            related = any(word in folded for word in relation_words)
+            combined = any(symbol in line for symbol in ("+", "＋", "→", "->"))
+            arrow_chain = any(symbol in line for symbol in ("➡", "→", "->"))
+            if (structural_hits < (1 if arrow_chain else 2)
+                    or not (related or combined)):
+                continue
+            if any(marker in folded for marker in (
+                    "日均", "dau", "gmv", "曝光", "roi", "价格",
+                    "竞品", "竞争对手", "行业调研", "外部参考")):
+                continue
+            chosen.add(index)
+            if index and len(lines[index - 1].group(0).strip()) <= 24:
+                heading = lines[index - 1].group(0).strip()
+                if any(word in heading.casefold() for word in
+                       ("agent", "tool", "skill", "工作流", "剧本", "脚本")):
+                    chosen.add(index - 1)
+        spans = []
+        covered_until = -1
+        for index in sorted(chosen)[:12]:
+            if index <= covered_until:
+                continue
+            match = lines[index]
+            char_start = match.start() + len(match.group(0)) - len(match.group(0).lstrip())
+            char_end = match.end() - len(match.group(0)) + len(match.group(0).rstrip())
+            excerpt = content[char_start:char_end]
+            if excerpt.endswith(("+", "＋")) and index + 1 < len(lines):
+                char_end = lines[index + 1].end()
+                excerpt = content[char_start:char_end].rstrip()
+            elif (not re.search(r"[。；;：:]\s*$", excerpt)
+                  and index + 1 < len(lines)):
+                following = lines[index + 1].group(0).strip()
+                if (len(following) >= 20
+                        and not re.match(r"^(?:[●○■]|KR\d+|\d+[.、]|#{1,6}\s)", following, re.I)
+                        and not any(marker in following for marker in
+                                    ("AI 摘要", "本文被引用", "全文评论"))
+                        and lines[index + 1].end() - char_start <= 650):
+                    # Browser captures can wrap one source sentence across
+                    # lines. Keep its exact contiguous bytes so an edge is
+                    # checked against the whole clause, not a cut-off half.
+                    char_end = lines[index + 1].end()
+                    excerpt = content[char_start:char_end].rstrip()
+            if re.search(r"➡\ufe0f?|→|->|—", excerpt):
+                end_index = index
+                while end_index + 1 < len(lines) and end_index - index < 3:
+                    previous = lines[end_index].group(0).rstrip()
+                    following = lines[end_index + 1].group(0).strip()
+                    if (previous.endswith(("。", "；", ";", "，", ","))
+                            or re.match(r"^(?:[●○■]|KR\d+|\d+[.、])", following, re.I)
+                            or not (re.search(r"➡\ufe0f?|→|->|—", following)
+                                    or (previous.endswith("闭") and following.startswith("环")))):
+                        break
+                    end_index += 1
+                if end_index > index:
+                    char_end = lines[end_index].end()
+                    excerpt = content[char_start:char_end].rstrip()
+                    covered_until = end_index
+            effect_at = excerpt.find("，提升")
+            if effect_at >= 0:
+                excerpt = excerpt[:effect_at]
+                char_end = char_start + len(excerpt)
+            start_byte = int(scope.get("start_byte") or 0) + len(
+                content[:char_start].encode("utf-8"))
+            data = excerpt.encode("utf-8")
+            spans.append({
+                "text": excerpt,
+                "snapshot_id": scope.get("snapshot_id"),
+                "source_body_hash": scope.get("source_body_hash"),
+                "start_byte": start_byte,
+                "end_byte": start_byte + len(data),
+                "excerpt_hash": hashlib.sha256(data).hexdigest(),
+            })
+        return spans
+
+    @classmethod
+    def _diagram_prompt_evidence_spans(cls, reference: dict[str, Any]) -> list[dict[str, Any]]:
+        """Expose disjoint source windows without merging their relations."""
+        result = []
+        seen = set()
+        for window in [*(reference.get("evidence_windows") or []), reference]:
+            if not isinstance(window, dict):
+                continue
+            for span in cls._diagram_prompt_window_spans(window):
+                key = (span["start_byte"], span["end_byte"], span["excerpt_hash"])
+                if key not in seen:
+                    seen.add(key)
+                    result.append(span)
+                if len(result) >= 36:
+                    return result
+        return result
+
+    @classmethod
+    def _diagram_prompt_references(cls, references: list[dict[str, Any]],
+                                   compacted: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        by_id = {"{}:{}".format(item.get("source_type"), item.get("source_id")): item
+                 for item in references}
+        result = []
+        for item in compacted:
+            key = "{}:{}".format(item.get("source_type"), item.get("source_id"))
+            source = by_id.get(key)
+            if not source:
+                continue
+            spans = cls._diagram_prompt_evidence_spans(source)
+            if not spans:
+                continue
+            # The writer needs claims and their source ID, not document titles,
+            # retrieval scores or navigation text that the model may mistake
+            # for architecture nodes.
+            view = {
+                "source_type": source.get("source_type"),
+                "source_id": source.get("source_id"),
+                "source_snapshot_id": source.get("source_snapshot_id"),
+                "source_body_hash": source.get("source_body_hash"),
+                "refresh_status": source.get("refresh_status") or "historical_only",
+                "evidence_spans": spans,
+            }
+            result.append(view)
+        return result
+
+    def _base_model_prompts(
+        self, state: LoopState, step: dict[str, Any]
+    ) -> tuple[str, str]:
+        if step.get("action") == "diagram_writer":
+            if state.environment.get("diagram_design_proposal"):
+                brief = state.environment.get("creation_brief") or {}
+                decisions = [str(item.get("summary") or "") for item in
+                             (brief.get("decisions") or []) if isinstance(item, dict)
+                             and item.get("source") == "user"]
+                system = (
+                    "你是架构图绘制 Agent。交付一张独立 Mermaid 概念方案图，不写文章。"
+                    "根请求和已确认选择是设计授权；必须把已选技术对象画入图中，"
+                    "节点标签应保留已选对象的中文名称，可去掉引入等动作词，"
+                    "不要只用英文缩写替代；"
+                    "并用简短、合理的拟议链路连接，不能只重画检索资料中的旧系统。"
+                    "整图为拟议方案，不声称任何节点已在现网部署；没有实测数据时"
+                    "不得写显卡数量、成本、节省比例、延迟数值或其他量化收益。"
+                    "只展示拟议目标链路；不要绘制现有系统、原始引擎、V1/V2 对照"
+                    "或用待核实字样包装这些未经核验的现状。"
+                    "只输出一个 ```mermaid 代码块，第一行 flowchart LR 或 flowchart TB。"
+                    "只画 3 到 6 个节点、2 到 5 条关系；不要使用 subgraph。"
+                    "先把每个节点单独声明为 A[\"标签\"]，全部声明完后再逐行"
+                    "写 A --> B 或 A -->|关系| B；同一节点只声明一次。"
+                    "节点 ID 为英文字母、数字和下划线，不要在连线两端内联声明节点。"
+                    "不写样式、HTML、注释、来源标题、模型供应商名或示例占位节点。"
+                )
+                payload = {"original_goal": state.root_request,
+                           "chapter_instruction": state.user_message,
+                           "confirmed_design_choices": self._diagram_confirmed_design_choices(state),
+                           "confirmed_decisions": decisions}
+                return system, json.dumps(payload, ensure_ascii=False)
+            audit = self._audit_diagram_sources(state) if state.environment.get(
+                "diagram_source_required") else None
+            eligible_ids = set(audit["eligible_reference_ids"]) if audit else set()
+            diagram_references = [
+                item for item in (state.environment.get("references") or [])
+                if isinstance(item, dict) and item.get("can_use") is not False
+                and (not audit or "{}:{}".format(item.get("source_type"), item.get("source_id")) in eligible_ids)
+            ]
+            if not audit and state.environment.get("diagram_anchor_kind") == "topic":
+                # A topical but unverified memory hit is not a factual basis
+                # for a named architecture. Draw a conceptual diagram from
+                # the instruction instead of blending unrelated recalls.
+                diagram_references = []
+            if audit:
+                assessment_by_id = {item["reference_id"]: item
+                                    for item in audit.get("assessments", [])}
+                diagram_references.sort(key=lambda item: (
+                    int(bool(item.get("bridge_evidence"))),
+                    -float(assessment_by_id.get("{}:{}".format(
+                        item.get("source_type"), item.get("source_id")), {}).get(
+                            "subject_coverage") or 0),
+                ))
+                structure_hint = str(state.environment.get("diagram_structure_hint") or "")
+                if structure_hint:
+                    direct_architecture = [item for item in diagram_references
+                                           if structure_hint in str(item.get("title") or "")]
+                    if direct_architecture:
+                        diagram_references = direct_architecture
+            prompt_source_ids = {"{}:{}".format(
+                item.get("source_type"), item.get("source_id"))
+                for item in diagram_references}
+            diagram_source_roles = [
+                {"reference_id": item["reference_id"],
+                 "eligibility": item["eligibility"],
+                 "refresh_status": item["refresh_status"]}
+                for item in (audit or {}).get("assessments", [])
+                if item.get("eligible") and item.get("reference_id") in prompt_source_ids
+            ]
+            system = (
+                "你是结构图绘制 Agent。用户要求交付一张图，不要撰写文章、章节、解释、图片建议或生图提示词。"
+                "只输出一个可渲染的 Mermaid 图，格式为单独的 ```mermaid 代码块。"
+                "使用 flowchart LR 或 flowchart TB。第一行必须是该声明，其余行仅使用以下语法："
+                "节点单独声明为 NodeId[\"简短标签\"]；关系单独声明为 NodeId --> OtherId 或 NodeId -->|简短关系| OtherId。"
+                "NodeId 只能由英文字母、数字和下划线组成，且必须先声明节点再引用。"
+                "节点标签必须用双引号包裹；不能把节点声明写在关系行上。"
+                "待核实、拟议等状态直接写在双引号标签内，如 NodeA[\"网关（拟议）\"]；"
+                "不要使用 ::: 样式后缀、圆柱或圆角节点形状、<br/> 换行和注释。"
+                "只画原文中的系统、资源或能力节点；不要把来源文档、版本号、证据链或检索结果画成节点。"
+                "优先提炼直接关系，最多 12 个节点、16 条连线；原文关系少时只画少量节点。"
+                "可使用不嵌套的 subgraph GroupId[\"简短分组\"] ... end 按证据来源中的阶段或能力域分组；"
+                "分组标题仅表达分类，不得暗示分组内各节点之间存在未证实的关系。"
+                "不要写 direction、style、title、classDef、HTML 或其他 Mermaid 指令。"
+                "图中必须有实际节点和连接关系，节点标签简短，关系方向清楚。"
+                "已有检索或方案笔记只能作材料，不能证明未核实的现网架构、性能指标、供应商和内部系统。"
+                "若 references 带 evidence_spans，只从这些原文局部关系提取节点与连线；否则从 references.content 提取；标题不能单独证明架构事实。"
+                "逐项区分来源记载的已实现现状、讨论中的设计方案和无法核实的推测；只有正文明确证实现网状态时才可表述为已实现。"
+                "不同来源冲突或时间状态不明时，在图中使用待核实或拟议标注，不得把计划画成已上线架构。"
+                "refresh_status=historical_only 的资料只证明历史文本中有该设计或目标，不能证明现网部署。"
+                "只能从本次给出的原文摘录抽取节点与边；论文综述、检索分数和匹配实体不能补充该主体的架构。"
+                "若多个经核验原始来源分别记载不同的组件或链路，应覆盖这些互补关系，"
+                "不要仅把首个来源压缩成一条六节点链；节点数量由可核验关系决定，"
+                "但每一个节点、边和状态须能在同一条来源的摘录里定位。"
+                "可以分别绘制多条原文支持的独立证据链；不得为了让全图连通而虚构跨组边。"
+                "来源状态为 historical_only 时，图示只表示历史资料记载；"
+                "规划、回测、小流量和历史已上线须按原文分别标注，不能统一标作现网。"
+                "不要把某来源的两个孤立事实拼成没有原文关系的跨来源连线。"
+                "客户侧图中不得出现供应商模型名、供应商密钥或购买成本。"
+                "没有权威架构材料时只给出概念性模块与关系；图示标题由文档身份承载，不能新增标题节点；"
+                "不得添加原文未证实的具体时延、成功率、规模、成本或已上线状态。"
+                "Mermaid 代码不得包含 click、HTML、初始化指令和示例占位节点。"
+            )
+            payload = {
+                "instruction": state.user_message,
+                "original_goal": state.root_request,
+                "diagram_title": self._standalone_diagram_title(state),
+                "diagram_preparation": {"diagram_type": "flowchart_lr"},
+                "references": (self._diagram_prompt_references(
+                    diagram_references, self._prompt_references(diagram_references))
+                    if audit else self._prompt_references(diagram_references)),
+                "source_roles": diagram_source_roles,
+                "web_results": [] if audit or state.environment.get("diagram_anchor_kind") == "topic"
+                               else state.environment.get("web_results", [])[:6],
+                "design_notes": "" if audit or state.environment.get("diagram_anchor_kind") == "topic"
+                                else state.environment.get("solution_design", ""),
+            }
+            return system, json.dumps(payload, ensure_ascii=False, default=str)
         if step.get("brief_section_id"):
             from .brief_writing import build_section_prompts
             return build_section_prompts(**self._brief_section_prompt_args(state, step))
@@ -7238,16 +10233,23 @@ class CreationAgentLoop(CreationEvidencePrompts):
                 original["contract_attached"] = True
                 patch_system, _ = self._model_prompts(state, original)
                 system += "\n本轮输出使用下列补丁协议：\n" + patch_system
-                patch_base = step.get("patch_base_document", state.current_document)
-                payload.update(document=patch_base, nodes=document_nodes(patch_base),
-                    allowed_targets=state.environment["operation"].get("targets", []))
-                system += (
-                    "\n这是从原始基线重新生成一份局部补丁，不是在失败候选上继续修补。"
-                    "document 是补丁唯一绑定的不可变基线，target 只能选择 document/nodes 中真实存在的原文或节点；"
-                    "candidate_document 仅用于理解失败内容，绝不能作为 selector 来源。"
-                    "删除失败候选中的无依据内容时，做法是在新补丁 content 中不再生成它，"
-                    "不能对 document 中不存在的失败候选文字输出 delete 或 replace。"
-                )
+                chapter_scope = self._chapter_repair_patch_scope(state, step)
+                if chapter_scope is not None:
+                    patch_base, allowed_targets = chapter_scope
+                    payload.update(document=patch_base, nodes=document_nodes(patch_base), allowed_targets=allowed_targets)
+                    system += ("\n本轮修正当前候选中的新增章节。document 是补丁基线，allowed_targets 精确限定本章新增区；"
+                               "target 必须选择该范围内真实存在的文字或节点。此前已完成正文不可修改、移动或删除。")
+                else:
+                    patch_base = step.get("patch_base_document", state.current_document)
+                    payload.update(document=patch_base, nodes=document_nodes(patch_base),
+                        allowed_targets=state.environment["operation"].get("targets", []))
+                    system += (
+                        "\n这是从原始基线重新生成一份局部补丁，不是在失败候选上继续修补。"
+                        "document 是补丁唯一绑定的不可变基线，target 只能选择 document/nodes 中真实存在的原文或节点；"
+                        "candidate_document 仅用于理解失败内容，绝不能作为 selector 来源。"
+                        "删除失败候选中的无依据内容时，做法是在新补丁 content 中不再生成它，"
+                        "不能对 document 中不存在的失败候选文字输出 delete 或 replace。"
+                    )
             elif step["action"] == "answer_writer":
                 system += "\n本轮只输出修正后的问题回答，不改写用户文档。"
             else:
@@ -7474,6 +10476,37 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
                     cleaned = cleaned.replace(f"@{name}", " ")
         return strip_capability_mentions(cleaned)
 
+    @staticmethod
+    def _diagram_subject_for_retrieval(instruction: str) -> str:
+        """Remove drawing instructions so entity recall targets the pictured subject."""
+        original = strip_capability_mentions(str(instruction or "")).strip()
+        # A follow-up often gives drawing rules after the requested title.
+        # Search the first actual drawing request, so tool names and node
+        # lists in later sentences cannot become the subject entity.
+        sentences = [part.strip() for part in re.split(r"[。！？\n]", original)
+                     if part.strip()]
+        drawing = next((part for part in sentences
+                        if re.search(r"(?:生成|绘|画|制作|设计|创建|输出|提供).{0,100}图", part)), None)
+        if drawing:
+            original = drawing
+        original = re.sub(r"^(?:请)?(?:依据|根据|基于)[^，,]{0,60}[，,]\s*", "", original)
+        subject = re.sub(r"^(?:(?:请|麻烦|帮我|帮忙|给我|为我|请你)\s*)+", "", original)
+        subject = re.sub(r"^(?:(?:用|使用)\s*(?:Mermaid|PlantUML|UML)\s*)", "", subject, flags=re.I)
+        subject = re.sub(r"^(?:(?:重新|再)\s*)?(?:生成|绘制|重绘|画出?|制作|设计|创建|输出|做出?|提供|出)\s*", "", subject)
+        subject = re.sub(r"^(?:一|1)\s*(?:张|幅|个)\s*", "", subject)
+        subject = re.sub(
+            r"(?:的)?(?:技术|系统|业务|总体|整体|产品)?"
+            r"(?:架构|流程|时序|关系|结构|状态|拓扑|组件|部署|组织|数据流|实体关系|"
+            r"泳道|交互|依赖|类|思维导|甘特|旅程|网络)图|示意图|框图|导图",
+            " ", subject,
+        )
+        # "一张……技术架构" is an artifact request even when 图 is omitted.
+        # Its trailing output noun must not outrank the system being pictured.
+        subject = re.sub(r"(?:的)?(?:技术|系统|业务|总体|整体|产品)?架构\s*$", "", subject)
+        subject = re.sub(r"[，,]\s*(?:体现|展示|说明|包括|涵盖)\s*", " ", subject)
+        subject = re.sub(r"\s+", " ", subject).strip(" \t，,。；;：:‘’“”\"'")
+        return subject or original
+
     @classmethod
     def _step_context_query(cls, state: LoopState, step: dict[str, Any]) -> str:
         step_specific_query = cls._step_focus_query(step)
@@ -7489,6 +10522,20 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             state,
             str(state.environment.get(query_key) or state.user_message),
         )
+        if (step_id == MEMORY_SEARCH_TOOL_ID
+                and (state.environment.get("operation") or {}).get("artifact_kind") == "diagram"
+                and not input_query and not step_specific_query):
+            subject = cls._diagram_subject_for_retrieval(context_query)
+            root_subject = cls._diagram_subject_for_retrieval(state.root_request)
+            compact_subject = re.sub(r"\W+", "", subject.casefold())
+            compact_root = re.sub(r"\W+", "", root_subject.casefold())
+            if (compact_subject and compact_root
+                    and SequenceMatcher(None, compact_subject, compact_root).ratio() >= 0.82):
+                # A detailed follow-up may weaken the original named subject
+                # with generic words such as "能力". Keep the more specific
+                # root when both clearly refer to the same requested system.
+                return root_subject
+            return subject
         if step_id == "data_query_planner" and step_specific_query:
             return step_specific_query
         if (
@@ -7544,6 +10591,8 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
                 context_query = "\n".join([*report_titles, context_query])
             if step.get("skill_step_id"):
                 return context_query
+        if step_id == WEBPAGE_SCRAPE_TOOL_ID and step.get("skill_step_id") and step_specific_query:
+            return step_specific_query
         if step_id == MEMORY_SEARCH_TOOL_ID and step.get("skill_step_id"):
             return context_query
         if not step_specific_query:
@@ -7553,6 +10602,132 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             for item in (context_query, step_specific_query)
             if item
         )
+
+    @classmethod
+    def _requirement_with_skill_period(
+        cls, state: LoopState, step: dict[str, Any], requirement: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Carry an authoritative chapter or Skill period into a retrieval step.
+
+        The step's own explicit period always wins. A generic reference to the
+        requested period can inherit a single, consistent period already used
+        by another step of the same frozen Skill; unrelated historical steps
+        do not acquire today's date merely because they follow a weekly step.
+        """
+        time_context = requirement.get("time_context") or {}
+        if not isinstance(time_context, dict):
+            return requirement
+        brief = state.environment.get("creation_brief")
+        confirmed = (brief.get("confirmed_report_period")
+                     if isinstance(brief, dict) else None)
+        if (state.creation_mode == "brainstorm" and not step.get("skill_id")
+                and isinstance(confirmed, dict)
+                and confirmed.get("source") in {"user", "user_edit", "confirmed_selection"}):
+            from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+            start = str(confirmed.get("start") or "")
+            end = str(confirmed.get("end") or "")
+            timezone = str(confirmed.get("timezone") or "")
+            canonical_date = r"20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"
+            if (re.fullmatch(canonical_date, start)
+                    and re.fullmatch(canonical_date, end) and timezone):
+                try:
+                    start_date = datetime.strptime(start, "%Y-%m-%d").date()
+                    end_date = datetime.strptime(end, "%Y-%m-%d").date()
+                    zone = ZoneInfo(timezone)
+                except (ValueError, ZoneInfoNotFoundError):
+                    return requirement
+                if start_date > end_date:
+                    return requirement
+                # A step may deliberately query another complete period. Inspect
+                # only its own text: the root request and chapter brief must not
+                # turn a comparison step into a query for the report period.
+                step_text = "\n".join(str(step.get(key) or "") for key in (
+                    "input_query", "skill_step_objective", "skill_step_title", "objective"))
+                explicit_ranges = list(dict.fromkeys(re.findall(
+                    r"({0})\s*(?:至|到|~|～|—|–|－|-)\s*({0})".format(canonical_date),
+                    step_text)))
+                if len(explicit_ranges) > 1:
+                    return requirement
+                if explicit_ranges and explicit_ranges[0] != (start, end):
+                    start, end = explicit_ranges[0]
+                    try:
+                        start_date = datetime.strptime(start, "%Y-%m-%d").date()
+                        end_date = datetime.strptime(end, "%Y-%m-%d").date()
+                    except ValueError:
+                        return requirement
+                    if start_date > end_date:
+                        return requirement
+                    period_source = "step_explicit_range"
+                else:
+                    period_source = "confirmed_report_period"
+                if (time_context.get("has_relative_time")
+                        and re.search(r"上周|上一周|本周|这周|这一周|当前周|本月|这个月|当前月|今天|今日|当天", step_text)):
+                    # Only a relative period in this step can override the
+                    # user's confirmed report range. The analyzed query may
+                    # also contain generic wording from the root brief.
+                    return requirement
+                iso_year, iso_week, _ = start_date.isocalendar()
+                return {**requirement, "time_context": {
+                    **time_context,
+                    "has_relative_time": False,
+                    "has_absolute_time": True,
+                    "period_kind": "absolute_range",
+                    "period_source": period_source,
+                    "timezone": timezone,
+                    "iso_year": int(iso_year),
+                    "iso_week": int(iso_week),
+                    "period_start": start,
+                    "period_end": end,
+                    "period_start_ms": int(datetime.combine(
+                        start_date, datetime.min.time(), tzinfo=zone).timestamp() * 1000),
+                    "period_end_ms": int(datetime.combine(
+                        end_date, datetime.max.time(), tzinfo=zone).timestamp() * 1000),
+                    "display": "{} 至 {}".format(start, end),
+                }}
+        if time_context.get("has_relative_time"):
+            return requirement
+        objective = cls._step_focus_query(step)
+        if not re.search(r"目标周期|用户要求周期|指定周期|周报周期|本期|本周|当周", objective):
+            return requirement
+        skill_id = str(step.get("skill_id") or "")
+        if not skill_id:
+            return requirement
+        candidates: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for item in state.environment.get("tool_results") or []:
+            if not isinstance(item, dict) or str(item.get("skill_id") or "") != skill_id:
+                continue
+            period = item.get("time_context") or {}
+            if not isinstance(period, dict) or period.get("has_relative_time") is not True:
+                continue
+            key = (str(period.get("period_kind") or ""),
+                   str(period.get("period_start") or ""),
+                   str(period.get("period_end") or ""))
+            if all(key):
+                candidates[key] = period
+        if len(candidates) != 1:
+            return requirement
+        return {**requirement, "time_context": dict(next(iter(candidates.values())))}
+
+    def _scrape_step_context(
+        self, state: LoopState, step: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        """Refresh a report under the exact query and period used to find it."""
+        source_search = next((item for item in reversed(
+            state.environment.get("tool_results") or [])
+            if isinstance(item, dict)
+            and item.get("tool_id") == DATA_SEARCH_TOOL_ID
+            and str(item.get("skill_id") or "") == str(step.get("skill_id") or "")
+            and str(item.get("skill_step_id") or "") == str(step.get("skill_step_id") or "")), {})
+        query = str(source_search.get("query") or self._step_context_query(state, step))
+        requirement = self.service.analyze_requirement(
+            query, CreationOptions(**state.options))
+        if isinstance(source_search.get("time_context"), dict):
+            requirement = {**requirement,
+                           "time_context": dict(source_search["time_context"])}
+        else:
+            requirement = self._requirement_with_skill_period(state, step, requirement)
+        return query, requirement
 
     @staticmethod
     def _apply_data_freshness_to_references(
@@ -8162,20 +11337,88 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             used_chars += candidate_size
         return compacted
 
+    @staticmethod
+    def _skill_step_owners(state: LoopState) -> dict[str, set[str]]:
+        """Resolve legacy step-only receipts only when one Skill owns the ID."""
+        owners: dict[str, set[str]] = {}
+        for skill in state.selected_skills:
+            if not isinstance(skill, dict):
+                continue
+            skill_id = str(skill.get("id") or skill.get("clientSkillKey") or "")
+            if not skill_id:
+                continue
+            for raw_step in (skill.get("executionSteps") or skill.get("execution_steps") or []):
+                if isinstance(raw_step, dict) and raw_step.get("id"):
+                    owners.setdefault(str(raw_step["id"]), set()).add(skill_id)
+        for planned in state.plan:
+            if not isinstance(planned, dict):
+                continue
+            skill_id = str(planned.get("skill_id") or "")
+            step_id = str(planned.get("skill_step_id") or "")
+            if skill_id and step_id:
+                owners.setdefault(step_id, set()).add(skill_id)
+        return owners
+
+    @staticmethod
+    def _resolved_step_skill_id(
+        step: dict[str, Any], owners: dict[str, set[str]]
+    ) -> str:
+        skill_id = str(step.get("skill_id") or "")
+        if skill_id:
+            return skill_id
+        step_id = str(step.get("skill_step_id") or "")
+        candidates = owners.get(step_id, set())
+        return next(iter(candidates)) if len(candidates) == 1 else ""
+
+    @staticmethod
+    def _query_artifact_owner(
+        artifact: dict[str, Any], owners: dict[str, set[str]]
+    ) -> Optional[tuple[str, str]]:
+        step_id = str(artifact.get("skill_step_id") or "")
+        if not step_id:
+            return None
+        skill_id = str(artifact.get("skill_id") or "")
+        if skill_id:
+            return skill_id, step_id
+        candidates = owners.get(step_id, set())
+        if len(candidates) == 1:
+            return next(iter(candidates)), step_id
+        return None
+
+    @classmethod
+    def _query_artifact_matches_step(
+        cls, artifact: dict[str, Any], step: dict[str, Any],
+        owners: dict[str, set[str]],
+    ) -> bool:
+        step_id = str(step.get("skill_step_id") or "")
+        skill_id = cls._resolved_step_skill_id(step, owners)
+        return bool(step_id and skill_id and
+                    cls._query_artifact_owner(artifact, owners) == (skill_id, step_id))
+
+    @staticmethod
+    def _ranked_receipt_key(
+        skill_id: str, step_id: str, owners: dict[str, set[str]]
+    ) -> str:
+        # Checkpoints written before Skill scoping used the bare step ID.
+        return step_id if owners.get(step_id, set()) == {skill_id} else (
+            "{}:{}".format(skill_id, step_id))
+
     @classmethod
     def _prompt_query_results(
         cls,
         values: Any,
         step: Optional[dict[str, Any]] = None,
+        state: Optional[LoopState] = None,
     ) -> list[dict[str, Any]]:
         """QueryResult 是一个原子执行产物，按结果而不是零散 claim 裁剪。"""
         step_id = str((step or {}).get("skill_step_id") or "")
+        owners = cls._skill_step_owners(state) if state is not None else {}
         compacted: list[dict[str, Any]] = []
         used_chars = 2
         for raw in list(values or []):
             if not isinstance(raw, dict):
                 continue
-            if step_id and str(raw.get("skill_step_id") or "") != step_id:
+            if step_id and not cls._query_artifact_matches_step(raw, step or {}, owners):
                 continue
             item = {
                 key: raw.get(key)
@@ -8188,6 +11431,7 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
                     "coverage",
                     "provenance",
                     "validation",
+                    "skill_id",
                     "skill_step_id",
                     "skill_step_title",
                 )
@@ -8212,6 +11456,77 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             compacted.append(item)
             used_chars += len(str(item))
         return compacted
+
+    @classmethod
+    def _ensure_explicit_ranked_queries(
+        cls, state: LoopState, step: dict[str, Any]
+    ) -> None:
+        """Execute exact row-ranking subtasks even when a mixed planner chose prose.
+
+        This runs against the already captured source snapshot. Resuming a
+        failed writer never repeats a data search or browser collection.
+        """
+        step_id = str(step.get("skill_step_id") or "")
+        if not step_id:
+            return
+        owners = cls._skill_step_owners(state)
+        skill_id = cls._resolved_step_skill_id(step, owners)
+        receipt_key = cls._ranked_receipt_key(skill_id, step_id, owners)
+        results = [item for item in (state.environment.get("current_data_results") or [])
+                   if isinstance(item, dict)]
+        catalog = relation_catalog(results)
+        if not catalog:
+            return
+        try:
+            plans = explicit_ranked_row_plans(cls._step_focus_query(step), catalog)
+        except QueryPlanError as exc:
+            state.environment.setdefault("explicit_ranked_query_receipts", {})[receipt_key] = {
+                "status": "missing_input", "error_code": exc.code,
+            }
+            return
+        if not plans:
+            return
+        query_results = state.environment.setdefault("data_query_results", [])
+        query_plans = state.environment.setdefault("data_query_plans", [])
+        completed = 0
+        for plan in plans:
+            signature = (
+                plan.get("relation_id"),
+                tuple((item.get("op"), item.get("field_id"), item.get("direction"),
+                       item.get("value")) for item in plan.get("operations", [])
+                      if item.get("op") in {"order_by", "limit"}),
+            )
+            existing = next((item for item in query_results
+                             if isinstance(item, dict)
+                             and cls._query_artifact_matches_step(item, step, owners)
+                             and isinstance(item.get("plan"), dict)
+                             and (item["plan"].get("relation_id"),
+                                  tuple((operation.get("op"), operation.get("field_id"),
+                                         operation.get("direction"), operation.get("value"))
+                                        for operation in item["plan"].get("operations", [])
+                                        if operation.get("op") in {"order_by", "limit"}))
+                             == signature), None)
+            if existing is None:
+                try:
+                    execution = execute_query_plan(plan, results)
+                except QueryPlanError as exc:
+                    state.environment.setdefault("explicit_ranked_query_receipts", {})[receipt_key] = {
+                        "status": "missing_input", "error_code": exc.code,
+                    }
+                    return
+                existing = {**execution, "skill_id": skill_id, "skill_step_id": step_id,
+                            "skill_step_title": step.get("skill_step_title"),
+                            "origin": "explicit_ranked_rows"}
+                query_plans.append({**plan, "skill_id": skill_id, "skill_step_id": step_id,
+                                    "skill_step_title": step.get("skill_step_title"),
+                                    "origin": "explicit_ranked_rows"})
+                query_results.append(existing)
+            if (existing.get("validation") or {}).get("status") == "verified":
+                completed += 1
+        state.environment.setdefault("explicit_ranked_query_receipts", {})[receipt_key] = {
+            "status": "completed" if completed == len(plans) else "missing_input",
+            "required_count": len(plans), "completed_count": completed,
+        }
 
     @classmethod
     def _prompt_webpage_scrapes(
@@ -8284,6 +11599,7 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
         state: LoopState,
         step: Optional[dict[str, Any]] = None,
     ) -> str:
+        content_gap = self._content_gap_active(state)
         requirement = state.environment.get("requirement", {})
         time_context = (
             requirement.get("time_context", {})
@@ -8296,9 +11612,12 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             # window computed from today's clock is not evidence about them.
             time_context = {"policy": "保留输入材料的相对时间，不以执行当天日期推定材料的绝对周次或日期。"}
             requirement = {**requirement, "time_context": time_context}
-        all_data_results = list(state.environment.get("data_results") or [])
+        # An exact saved choice to draft with every source gap authorizes a
+        # provisional chapter, not reuse of unrelated candidate facts.
+        all_data_results = ([] if content_gap else
+                            list(state.environment.get("data_results") or []))
         current_data_results = list(
-            state.environment.get("current_data_results") or []
+            [] if content_gap else state.environment.get("current_data_results") or []
         )
         # Skill 内显式声明的 Writer/专项 Agent 也只能看到当前步骤的数据视图。
         # 否则第二个指标步骤可能同时拿到第一个步骤的数据并合并成一张表。
@@ -8323,15 +11642,49 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
         compact_query_results = self._prompt_query_results(
             state.environment.get("data_query_results", []),
             step,
-        )
+            state,
+        ) if not content_gap else []
+        # A verified QueryResult is the sole row-level writer view for that
+        # relation. Keep source identity and collection metadata, but omit the
+        # 100+ raw table rows that can exhaust the model output budget or let
+        # it recompute a different ranking from a partial prompt sample.
+        queried_sources = {
+            str((item.get("provenance") or {}).get("source_id"))
+            for item in compact_query_results
+            if item.get("shape") == "table"
+            and (item.get("validation") or {}).get("status") == "verified"
+            and (item.get("provenance") or {}).get("source_id") is not None
+        }
+        if queried_sources:
+            compact_query_results = [item for item in compact_query_results
+                                     if item.get("shape") == "table"
+                                     or str(item.get("skill_step_id") or "")
+                                     != str((step or {}).get("skill_step_id") or "")]
+            for item in compact_data_results:
+                if str(item.get("source_id")) not in queried_sources:
+                    continue
+                item.pop("content_excerpt", None)
+                structured = item.get("structured_data")
+                if isinstance(structured, dict):
+                    item["structured_data"] = {
+                        key: structured[key] for key in ("completeness", "pagination",
+                                                         "data_usage_status")
+                        if key in structured
+                    }
+                item["row_facts"] = "见同源确定性数据查询结果"
         compact_scrapes = self._prompt_webpage_scrapes(
             state.environment.get("webpage_scrapes", []),
             current_source_ids if is_scoped_skill_step else set(),
-        )
-        compact_references = self._prompt_references(
-            state.environment.get("references", []),
-            step,
-        )
+        ) if not content_gap else []
+        reference_source = [] if content_gap else state.environment.get("references", [])
+        if strict_isolated:
+            current_step_id = str(step.get("skill_step_id") or "")
+            reference_source = [item for item in reference_source
+                                if isinstance(item, dict)
+                                and current_step_id in {
+                                    str(value) for value in (item.get("matched_skill_steps") or [])
+                                }]
+        compact_references = self._prompt_references(reference_source, step)
         compact_skills = self._prompt_bounded_items(
             state.environment.get("applied_skills", []),
             char_budget=MAX_PROMPT_SKILL_CHARS,
@@ -8381,6 +11734,11 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             brainstorm_context = self._brainstorm_prompt_context(
                 state.environment.get("creation_brief")
             )
+        from .brainstorm_chapters import chapter_delivery_scope
+        chapter_scope = chapter_delivery_scope(state.environment.get("creation_brief"),
+            str(state.environment.get("chapter_base_document", state.environment.get("input_base_document", "")) or ""))
+        if chapter_scope is not None:
+            brainstorm_context += "\n\nchapter_delivery_scope：" + json.dumps(chapter_scope, ensure_ascii=False)
         blocks = [
             f"检索时间边界（仅用于取数，不代表材料事实的绝对时间）：{time_context}",
             f"原始需求：{state.root_request}",
@@ -8404,9 +11762,9 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             f"Mermaid 画图约束：{self._compact_prompt_value(state.environment.get('mermaid_diagram', {}))}",
             f"章节 Visual Plan：{self._compact_prompt_value(state.environment.get('visual_plan', {}))}",
             f"已准备的章节 Mermaid 图示：{self._compact_prompt_value(state.environment.get('mermaid_diagrams', []))}",
-            f"数据分析：{state.environment.get('data_analysis', '')}",
-            f"行业调研：{state.environment.get('industry_research', '')}",
-            f"方案设计：{state.environment.get('solution_design', '')}",
+            f"数据分析：{'' if content_gap else state.environment.get('data_analysis', '')}",
+            f"行业调研：{'' if content_gap else state.environment.get('industry_research', '')}",
+            f"方案设计：{'' if content_gap else state.environment.get('solution_design', '')}",
             f"章节设计：{state.environment.get('chapter_design', '')}",
             f"上一轮质量审校：{state.environment.get('quality_review', {})}",
             f"当前质检问题：{state.environment.get('quality_issues', [])}",
@@ -8455,12 +11813,171 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             )
         return f"文档目录：\n{outline}\n\n目标章节上下文：\n{section_context}"
 
+    @staticmethod
+    def _diagram_requested_facets(request: str) -> list[str]:
+        """Keep explicit requested topics for source-window selection only.
+
+        The retrieval subject stays narrow. A later clause such as "cover A,
+        B, and C" tells the excerpt selector which distant source passages
+        to expose, without claiming any architecture relation itself.
+        """
+        facets = []
+        for match in re.finditer(r"(?:覆盖|包含|包括|涉及)([^。；;\n]{1,180})", request):
+            clause = re.split(r"(?:并将|同时|不再|不要|如果)", match.group(1), 1)[0]
+            for raw in re.split(r"[、，,]|(?:以及|和|及|与)", clause):
+                value = raw.strip()
+                if "的" in value:
+                    value = value.rsplit("的", 1)[-1].strip()
+                value = re.sub(r"(?:关系|组件|模块)(?:图)?$", "", value).strip()
+                if 2 <= len(value) <= 20 and value not in {"多条能力", "原文", "来源"}:
+                    facets.append(value)
+        return list(dict.fromkeys(facets))[:16]
+
+    @staticmethod
+    def _diagram_reference_excerpt(
+        content: str,
+        limit: int,
+        terms: list[str],
+        snapshot_id: Optional[int],
+        coverage: str,
+        source_hash: Optional[str],
+        preferred_excerpt: str = "",
+    ) -> dict[str, Any]:
+        """Select an exact query-related window from a recalled source body.
+
+        The byte range stays bound to the entire recalled body, even when a
+        relevant paragraph is beyond its first page. This never widens a
+        source's coverage or fetches an unbound upstream snapshot.
+        """
+        actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if source_hash is not None and source_hash != actual_hash:
+            raise ValueError("Source body hash does not match reference content")
+        width = max(0, limit)
+        last_start = max(0, len(content) - width)
+        stride = max(1, width // 2)
+        starts = sorted(set([0, last_start] + list(range(0, last_start + 1, stride))))
+        normalized_terms = list(dict.fromkeys(
+            term.casefold() for raw in terms
+            for term in [str(raw or "").strip()]
+            if len(term) >= 2
+        ))[:16]
+        relation_words = ("调用", "连接", "接入", "输入", "输出", "依赖", "编排",
+                          "流转", "串联", "贯通", "合轨", "承接", "协同",
+                          "沉淀", "打通", "实现", "复用", "组装", "衔接")
+        structure_words = ("架构", "工作流", "workflow", "dag", "agent", "模块",
+                           "组件", "服务", "引擎", "链路", "首帧", "话术", "tts",
+                           "bgm", "剧本", "脚本", "模板", "图生视频", "商详")
+        scored = []
+        for start in starts:
+            window = content[start:start + width].casefold()
+            matched = [(term, min(3, window.count(term))) for term in normalized_terms
+                       if term in window]
+            relevance = sum((min(len(term), 12) * 2 + count) for term, count in matched)
+            relations = sum(1 for word in relation_words if word in window)
+            structures = sum(1 for word in structure_words if word in window)
+            # A title/OKR paragraph may repeat the topic yet say nothing about
+            # edges. Favor a later workflow paragraph with multiple components
+            # and relation verbs over a high-frequency business introduction.
+            structural_pair = int(relations > 0 and structures >= 2)
+            scored.append((int(bool(matched)), structural_pair,
+                           structures * 9 + relations * 6 + relevance, start))
+        # Without a query hit, retain the source beginning instead of choosing
+        # an unrelated technical-looking passage elsewhere in the document.
+        best = max(scored) if scored else (0, 0, 0, 0)
+        start = best[3] if best[0] > 0 or best[1] else 0
+        # A second-hop original carries a literal source-local relation span.
+        # Center that span rather than letting generic root-query words select
+        # an unrelated meeting section from a long document.
+        preferred_found = bool(preferred_excerpt and preferred_excerpt in content)
+        preferred_end = None
+        if preferred_found:
+            # The bridge span can contain a whole meeting page around one
+            # useful relation. Keep a smaller exact line cluster around that
+            # relation, so unrelated metrics, vendors, and directory entries
+            # never become writer context just because they are adjacent.
+            preferred_at = content.find(preferred_excerpt)
+            if len(preferred_excerpt) <= min(width, 600):
+                start = preferred_at
+                preferred_end = preferred_at + len(preferred_excerpt.rstrip("\n"))
+            else:
+                lines = list(re.finditer(r"[^\n]+", preferred_excerpt))
+                ranked = []
+                for index, line in enumerate(lines):
+                    folded = line.group(0).casefold()
+                    term_hits = sum(term in folded for term in normalized_terms)
+                    relation_hits = sum(word in folded for word in relation_words)
+                    structure_hits = sum(word in folded for word in structure_words)
+                    ranked.append((int(term_hits > 0 and relation_hits > 0),
+                                   term_hits * 12 + relation_hits * 5 + structure_hits * 3,
+                                   index))
+                best_line = max(ranked)[2] if ranked else 0
+                first_line = max(0, best_line - 1)
+                last_line = min(len(lines) - 1, best_line + 2)
+                status_words = ("回测", "小流量", "白名单", "规划", "计划", "目标", "已上线")
+                for index in range(last_line + 1, min(len(lines), best_line + 9)):
+                    if (lines[index].start() - lines[best_line].start() > 480):
+                        break
+                    if any(word in lines[index].group(0) for word in status_words):
+                        last_line = index
+                        break
+                start = preferred_at + (lines[first_line].start() if lines else 0)
+                preferred_end = preferred_at + (lines[last_line].end() if lines else len(preferred_excerpt))
+                preferred_end = min(preferred_end, start + width)
+        selected = content[start:start + width]
+        # Stride-based windows can include an unrelated business section just
+        # before the relationship that made the window useful. Start at the
+        # first line that actually states a structural relationship, preserving
+        # the exact original bytes and making room for the following context.
+        if not preferred_found:
+            for line in re.finditer(r"[^\n]+", selected):
+                line_text = line.group(0).casefold()
+                if (any(word in line_text for word in relation_words)
+                        and sum(word in line_text for word in structure_words) >= 2):
+                    start += line.start()
+                    break
+        excerpt = content[start:preferred_end if preferred_end is not None else start + width]
+        if not preferred_found:
+            strong_relations = 0
+            for line in re.finditer(r"[^\n]+", excerpt):
+                folded = line.group(0).casefold()
+                if (any(word in folded for word in relation_words)
+                        and sum(word in folded for word in structure_words) >= 2):
+                    strong_relations += 1
+                line_label = line.group(0).strip()
+                if (strong_relations < 3 or not 5 <= len(line_label) <= 24
+                        or re.match(r"^(?:[a-z]|\d+)[.、]", line_label, re.I)
+                        or any(word in folded for word in relation_words)):
+                    continue
+                following = excerpt[line.start():line.start() + 220].casefold()
+                metric_signals = ("日均", "gmv", "dau", "成本", "%", "曝光", "roi")
+                if (not any(word in folded for word in structure_words)
+                        and sum(word in following for word in metric_signals) >= 2):
+                    excerpt = excerpt[:line.start()].rstrip("\n")
+                    break
+        start_byte = len(content[:start].encode("utf-8"))
+        excerpt_bytes = excerpt.encode("utf-8")
+        return {"content": excerpt, "source_scope": {
+            "schema_version": "document-excerpt.v1",
+            "snapshot_id": snapshot_id,
+            "source_body_hash": actual_hash,
+            "offset_unit": "utf8_bytes",
+            "start_byte": start_byte,
+            "end_byte": start_byte + len(excerpt_bytes),
+            "excerpt_hash": hashlib.sha256(excerpt_bytes).hexdigest(),
+            "source_coverage": coverage,
+            "excerpt_truncated": len(excerpt) < len(content),
+            "allows_full_document_claims": coverage == "complete" and len(excerpt) == len(content),
+        }}
+
     def _reference_to_state(
         self,
         item: ReferenceDocument,
         period_evidence: Optional[dict[str, Any]] = None,
+        relevance_terms: Optional[list[str]] = None,
     ) -> dict[str, Any]:
-        content_limit = 8000 if item.refresh_status.startswith("fresh_") else 1600
+        content_limit = 8000 if item.refresh_status.startswith("fresh_") else (
+            1200 if relevance_terms is not None else 1600
+        )
         state = {
             "id": item.id,
             "source_id": item.source_id,
@@ -8495,8 +12012,33 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             "refresh_truncated": item.refresh_truncated,
             "source_snapshot_id": item.source_snapshot_id,
             "source_body_hash": item.source_body_hash,
+            "bridge_evidence": getattr(item, "bridge_evidence", None),
         }
-        if item.source_snapshot_id is not None:
+        bridge = getattr(item, "bridge_evidence", None) or {}
+        link_excerpt = str(bridge.get("link_excerpt") or "")
+        if link_excerpt and item.full_content and link_excerpt in item.full_content:
+            link_start = item.full_content.find(link_excerpt)
+            link_bytes = link_excerpt.encode("utf-8")
+            start_byte = len(item.full_content[:link_start].encode("utf-8"))
+            state["bridge_link_scope"] = {
+                "snapshot_id": item.source_snapshot_id,
+                "source_body_hash": item.source_body_hash,
+                "start_byte": start_byte,
+                "end_byte": start_byte + len(link_bytes),
+                "excerpt_hash": hashlib.sha256(link_bytes).hexdigest(),
+            }
+        if relevance_terms is not None and item.full_content:
+            state.update(self._diagram_reference_excerpt(
+                item.full_content, content_limit, relevance_terms,
+                item.source_snapshot_id, item.refresh_completeness,
+                item.source_body_hash,
+                preferred_excerpt=str(bridge.get("target_excerpt") or ""),
+            ))
+            state["source_body_hash"] = state["source_scope"]["source_body_hash"]
+            select_windows = getattr(self.service, "select_structural_evidence_windows", None)
+            if callable(select_windows):
+                state["evidence_windows"] = select_windows(item, relevance_terms)
+        elif item.source_snapshot_id is not None:
             from .source_scope import source_excerpt
             state.update(source_excerpt(item.full_content, content_limit,
                          item.source_snapshot_id, item.refresh_completeness,
@@ -8619,12 +12161,219 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
         data: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         identity = state.environment.get("document_identity")
-        if identity and data and event_type in {"document.preview", "document.replaced", "document.skill_structure.enforced", "run.completed"}:
+        protected_chapter_base = str(state.environment.get("chapter_base_document") or "")
+        content_gap = self._content_gap_active(state)
+        if content_gap and event_type == "inputs.assessed" and data:
+            data = {"required_tools": [str(item) for item in
+                    data.get("required_tools") or [] if isinstance(item, str)],
+                    "source_validation": "pending"}
+        if content_gap and event_type == "agent.completed":
+            payload = data or {}
+            data = {key: payload[key] for key in ("section_count", "issue_count",
+                    "quality_cycle") if isinstance(payload.get(key), int)}
+            plan = payload.get("execution_plan")
+            if isinstance(plan, list):
+                data["execution_plan"] = [
+                    {key: item[key] for key in ("id", "kind", "action")
+                     if isinstance(item.get(key), str)}
+                    for item in plan if isinstance(item, dict)
+                ]
+            environment_patch = {}
+            summary = "当前步骤已完成；待核资料不会作为本期事实写入正文"
+        if content_gap and event_type == "tool.completed":
+            # Tool results can carry candidate titles, snippets, queries, and
+            # provider names in more fields than data_sources. The preflight
+            # already owns the user-facing source list; expose counts only.
+            allowed_counts = ("attempted_source_count", "scraped_source_count",
+                              "failed_source_count", "result_count",
+                              "refresh_required_count")
+            environment_patch = {key: environment_patch[key] for key in allowed_counts
+                                 if isinstance((environment_patch or {}).get(key), int)
+                                 and not isinstance(environment_patch[key], bool)}
+            data = {key: data[key] for key in allowed_counts
+                    if isinstance((data or {}).get(key), int)
+                    and not isinstance(data[key], bool)}
+            summary = "资料检查已完成；目标周期来源仍待核实"
+        if content_gap and event_type == "goal.updated" and environment_patch:
+            environment_patch = dict(environment_patch)
+            if "quality_warnings" in environment_patch:
+                environment_patch["quality_warnings"] = ["目标周期来源待核实"]
+        if content_gap and data and (event_type.startswith("document.")
+                                     or event_type == "run.completed"):
+            data = dict(data)
+            if event_type in {"document.delta", "document.patch.delta"}:
+                # A stream fragment is not a full chapter. Keep it out of the
+                # published event until the saved source-gap contract can be
+                # applied to the complete candidate.
+                data.pop("content", None)
+                data.pop("document", None)
+            elif any(isinstance(data.get(key), str) for key in ("content", "document")):
+                if event_type == "document.preview":
+                    # Previews are often incomplete; publish the deterministic
+                    # gap chapter without changing the in-progress candidate.
+                    safe, _, audit = self._content_gap_candidate(state, protected_chapter_base)
+                else:
+                    candidate = data.get("content", data.get("document"))
+                    safe, audit = self._apply_content_gap_candidate(state, candidate)
+                    if audit.get("status") == "converted" and safe != candidate:
+                        state.current_document = safe
+                        state.environment["document"] = safe
+                if audit.get("status") != "converted":
+                    raise OperationError("CREATION_DOCUMENT_INVALID", "来源缺口草稿未通过安全交付契约")
+                for key in ("content", "document"):
+                    if isinstance(data.get(key), str):
+                        data[key] = safe
+            if event_type.startswith("document."):
+                # Mutation metadata and the caller's summary may themselves
+                # quote unverified model claims, including generated headings.
+                data = {key: value for key, value in data.items()
+                        if key in {"content", "document", "operation",
+                                   "superseded_hash", "progress_chars"}}
+                environment_patch = {key: value for key, value in
+                    (environment_patch or {}).items() if key != "document_patch"}
+                state.environment.pop("last_document_patch", None)
+                summary = "正在生成标明资料缺口的待核实草稿" if event_type in {
+                    "document.preview", "document.delta", "document.patch.delta"} else \
+                    "已更新标明资料缺口的待核实草稿"
+            if event_type == "run.completed":
+                # The report explicitly has no validated current-period source.
+                # A new chapter cannot erase proven citations from an earlier
+                # protected chapter; omission keeps Core's prior snapshot.
+                if protected_chapter_base:
+                    data.pop("references", None)
+                    data.pop("evidence", None)
+                else:
+                    data["references"] = []
+                    data["evidence"] = []
+                data["tools"] = [
+                    {key: item[key] for key in ("tool_id", "status",
+                        "result_count", "refresh_required_count")
+                     if key in item}
+                    for item in data.get("tools") or [] if isinstance(item, dict)
+                ]
+                intent = data.get("edit_intent")
+                data["edit_intent"] = ({"operation": intent.get("operation")}
+                    if isinstance(intent, dict) and isinstance(intent.get("operation"), str)
+                    else {})
+                data["failed_steps"] = [
+                    {key: item[key] for key in ("step_id", "action", "error_code")
+                     if isinstance(item.get(key), str)}
+                    for item in data.get("failed_steps") or [] if isinstance(item, dict)
+                ]
+                data.pop("input_receipts", None)
+                data.pop("document_patch", None)
+        if (identity and data and not content_gap and not protected_chapter_base
+                and (state.environment.get("operation") or {}).get("artifact_kind") != "diagram"
+                and event_type in {"document.preview", "document.replaced", "document.skill_structure.enforced", "run.completed"}):
             from .skill_governance import apply_title
             data = dict(data)
             for key in ("content", "document"):
                 if isinstance(data.get(key), str):
                     data[key] = apply_title(data[key], identity["title"])
+        from .brainstorm_chapters import chapter_context, validate_chapter_document, normalize_chapter_document
+        chapter = chapter_context(state.environment.get("creation_brief"))
+        if chapter is not None:
+            candidate = None
+            if data and (event_type.startswith("document.") or event_type == "run.completed"):
+                if event_type == "document.preview":
+                    data = dict(data)
+                    for key in ("content", "document"):
+                        if isinstance(data.get(key), str):
+                            data[key] = normalize_chapter_document(data[key],
+                                str(state.environment.get("chapter_base_document") or ""), chapter)
+                candidate = data.get("content", data.get("document"))
+            elif event_type == "delivery.checked" and data and (data.get("review") or {}).get("status") == "pass":
+                candidate = state.environment.get("document", state.current_document)
+            if isinstance(candidate, str):
+                try:
+                    validate_chapter_document(candidate, str(state.environment.get("chapter_base_document") or ""),
+                        chapter, completed=event_type in {"delivery.checked", "run.completed"})
+                except OperationError:
+                    preserved = str(state.environment.get("chapter_published_document",
+                                    state.environment.get("chapter_base_document", "")))
+                    state.current_document = preserved
+                    state.environment["document"] = preserved
+                    raise
+                state.environment["chapter_published_document"] = candidate
+                if event_type == "run.completed" and (
+                    (state.environment.get("delivery_review") or {}).get("status") != "pass"
+                    or state.environment.get("delivery_checked_hash") != self._document_hash(candidate)
+                ):
+                    raise OperationError("CREATION_DELIVERY_INCOMPLETE", "当前章节尚未通过最终正文交付核验，不能推进下一章")
+        if content_gap:
+            # The deterministic draft is the only published content in this
+            # mode. Other event families must not reintroduce unverified
+            # claims through reasoning, source lists, plan prose, or the goal
+            # envelope that the desktop persists in its trace.
+            if event_type in {"intent.pending", "intent.interpreted"}:
+                operation = (state.environment.get("operation") or {}).get("kind")
+                data = {"operation": operation} if operation in {
+                    "generate", "execute_skill", "patch", "transform"} else {}
+                environment_patch = {}
+                summary = "正在核对目标周期资料与交付方式"
+            elif event_type == "thinking.completed":
+                stage = (data or {}).get("stage")
+                data = {"stage": stage} if stage in THINKING_STAGE_LABELS else {}
+                environment_patch = {}
+                summary = "已完成当前步骤思考；目标周期资料仍待核实"
+            elif event_type in {"phase.started", "phase.completed"}:
+                phase_id = (data or {}).get("phase_id")
+                data = {"phase_id": phase_id, "phase_title": "章节步骤"} \
+                    if isinstance(phase_id, str) else {}
+                environment_patch = {}
+                summary = "正在核对章节资料" if event_type == "phase.started" else "章节步骤已完成"
+            elif event_type == "goal.updated":
+                ready = (environment_patch or {}).get("document_ready")
+                environment_patch = ({"document_ready": ready} if isinstance(ready, bool) else {})
+                data = {}
+                summary = "目标周期来源待核实"
+            elif event_type == "inputs.assessed":
+                environment_patch = {}
+                summary = "已核对本轮所需资料；目标周期来源待核实"
+            elif event_type == "tool.completed":
+                pass  # Counts and summary were sanitized above.
+            elif event_type == "agent.completed":
+                pass  # Sanitized above, including execution_plan and summary.
+            elif event_type == "delivery.checked":
+                review = (data or {}).get("review")
+                data = {"review": {key: review[key] for key in (
+                    "status", "provisional", "source_validation", "document_hash")
+                    if key in review}} if isinstance(review, dict) else {}
+                environment_patch = {}
+                summary = "已核对待核实草稿的交付条件"
+            elif event_type == "run.completed":
+                data = {key: value for key, value in (data or {}).items()
+                        if key in {"document", "revision_no", "history_id",
+                                   "committed_operation_id", "delivery_review", "references",
+                                   "evidence", "tools", "edit_intent", "failed_steps"}}
+                review = data.get("delivery_review")
+                if isinstance(review, dict):
+                    data["delivery_review"] = {key: review[key] for key in (
+                        "status", "provisional", "source_validation", "document_hash")
+                        if key in review}
+                environment_patch = {}
+                summary = "待核实草稿已生成；可手动编辑，新增资料需在新创作中重新确认"
+            elif event_type.startswith("document."):
+                environment_patch = {}
+            else:
+                error_code = (data or {}).get("error_code")
+                data = {"error_code": error_code} if (event_type == "run.failed"
+                    and isinstance(error_code, str)) else {}
+                environment_patch = {}
+                summary = "正在核对目标周期资料" if status == "running" else \
+                    "目标周期来源待核实"
+            actor_kind = (actor or {}).get("kind")
+            actor = self._actor("tool", "source_review_tool", "资料检查") if actor_kind == "tool" \
+                else self._actor("agent", "creation_main_agent", "创作 Agent")
+            goal = {"objective": "形成标明来源缺口的待核实草稿",
+                    "status": state.goal.status, "revision": state.goal.revision,
+                    "remaining_steps": [],
+                    "outcome": "待核实草稿已生成" if event_type == "run.completed" else ""}
+        else:
+            goal = {"objective": state.goal.objective, "status": state.goal.status,
+                    "revision": state.goal.revision,
+                    "remaining_steps": state.goal.remaining_steps,
+                    "outcome": state.goal.outcome}
         state.sequence += 1
         return {
             "schema_version": SCHEMA_VERSION,
@@ -8638,13 +12387,7 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
             "actor": actor
             or self._actor("agent", "creation_main_agent", "创作 Agent"),
             "summary": summary,
-            "goal": {
-                "objective": state.goal.objective,
-                "status": state.goal.status,
-                "revision": state.goal.revision,
-                "remaining_steps": state.goal.remaining_steps,
-                "outcome": state.goal.outcome,
-            },
+            "goal": goal,
             "environment_patch": environment_patch or {},
             "data": data or {},
         }
@@ -8678,7 +12421,8 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
 
     @staticmethod
     def _validate_resume_context(state: LoopState, session_id: Optional[str], document: str,
-                                 creation_brief: Optional[dict[str, Any]] = None) -> None:
+                                 creation_brief: Optional[dict[str, Any]] = None,
+                                 work_context: Optional[dict[str, Any]] = None) -> None:
         if session_id and state.session_id != session_id:
             raise OperationError("CREATION_RESUME_MISSING", "恢复状态不属于当前会话")
         # An explicit empty brief was historically omitted from fresh state.
@@ -8686,7 +12430,25 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
         # material input change and must invalidate its cached sources/plan.
         saved_brief = state.environment.get("creation_brief") or {}
         if creation_brief is not None and saved_brief != creation_brief:
-            raise OperationError("CREATION_BASE_CHANGED", "创作简报已修改，请按当前简报重新开始本轮")
+            additive_gap = (state.creation_mode == "brainstorm"
+                and isinstance(saved_brief, dict)
+                and isinstance(creation_brief, dict)
+                and "content_source_gap" not in saved_brief
+                and isinstance(creation_brief.get("content_source_gap"), dict)
+                and creation_brief["content_source_gap"].get("schema_version") ==
+                    "brainstorm.content-source-gap.v1"
+                and {key: value for key, value in creation_brief.items()
+                     if key != "content_source_gap"} == saved_brief)
+            if not additive_gap:
+                raise OperationError("CREATION_BASE_CHANGED", "创作简报已修改，请按当前简报重新开始本轮")
+            state.environment["creation_brief"] = creation_brief
+            state.environment.pop("creation_brief_context", None)
+        saved_work = state.environment.get("work_context") or state.options.get("work_context")
+        live_work = work_context or ((creation_brief or {}).get("work_context"))
+        if live_work is not None:
+            from .work_quality import normalize_work_context
+            if normalize_work_context(saved_work) != normalize_work_context(live_work):
+                raise OperationError("CREATION_BASE_CHANGED", "工作文档设置已修改，请按当前设置重新开始本轮")
         allowed = {state.current_document}
         for key in ("revision_base_document", "input_base_document", "document"):
             if isinstance(state.environment.get(key), str):
@@ -8709,6 +12471,12 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
         # audience provenance. This also repairs checkpoints without this field.
         audience = str(state.options.get("audience") or "").strip()
         user_options = {"audience": audience} if audience else {}
+        raw_work = state.environment.get("work_context") or state.options.get("work_context")
+        if raw_work:
+            from .work_quality import normalize_work_context
+            from .work_integration import work_fact_options
+            state.environment["work_context"] = normalize_work_context(raw_work)
+            user_options["work_context"] = work_fact_options(raw_work)
         existing = state.environment.get("input_context")
         if isinstance(existing, dict) and existing.get("schema_version") == "creation.input-context.v1":
             existing["user_options"] = user_options
@@ -8734,8 +12502,92 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
         if state.creation_mode == "brainstorm" and isinstance(brief, dict):
             # The rendered brief can quote earlier sessions saying "confirmed".
             # It is a writing reference, never an authority for current criteria.
-            return self._brainstorm_prompt_context(brief, include_reference_brief=False)
+            text = self._brainstorm_prompt_context(brief, include_reference_brief=False)
+            scope = self._input_context(state).get("chapter_delivery_scope")
+            if scope is not None:
+                text += "\n\nchapter_delivery_scope：" + json.dumps(scope, ensure_ascii=False)
+            return text
         return self._input_context(state)["creation_brief"]
+
+    @staticmethod
+    def _skill_relevance_brief_context(state: LoopState) -> str:
+        """Give Skill fit review only authoritative choices, not the writing brief.
+
+        The full brief carries historical memory, evidence gaps and prose about
+        delivery. Those are needed for writing but can make a small reviewer
+        mistake missing final assembly for a Skill mismatch. Chapter Skill fit
+        needs the effective user request, edits and confirmed decisions only.
+        """
+        brief = state.environment.get("creation_brief")
+        if not isinstance(brief, dict):
+            return ""
+        raw_decisions = brief.get("decisions")
+        if not isinstance(raw_decisions, list):
+            raw_decisions = []
+        decisions = [
+            {"dimension": item.get("dimension"), "summary": item.get("summary")}
+            for item in raw_decisions
+            if isinstance(item, dict) and item.get("source") in {"user", "user_excluded"}
+        ]
+        return json.dumps({
+            "root_request": brief.get("root_request", state.root_request),
+            "brief_edits": brief.get("brief_edits") or {},
+            "confirmed_decisions": decisions,
+            "chapter_title": (brief.get("chapter_context") or {}).get("title")
+                if isinstance(brief.get("chapter_context"), dict) else "",
+        }, ensure_ascii=False)
+
+    def _recover_invalid_chapter_candidate(self, state: LoopState) -> bool:
+        """Re-enter ordinary writing/review after upgrading an unpassed chapter.
+
+        Completed resources and the original operation remain frozen. Rejected
+        candidates are archived in the checkpoint; only the active addition can
+        be regenerated. The protected, durable base is never rewritten.
+        """
+        from .brainstorm_chapters import chapter_context, validate_chapter_document
+        chapter = chapter_context(state.environment.get("creation_brief"))
+        rebound = state.environment.pop("brainstorm_contract_rebound", False)
+        if chapter is None:
+            return False
+        base = str(state.environment.get("chapter_base_document",
+                   state.environment.get("input_base_document", "")) or "")
+        candidate = state.current_document
+        if candidate.strip() == base.strip():
+            return False
+        invalid = False
+        try:
+            validate_chapter_document(candidate, base, chapter, completed=True)
+        except OperationError:
+            invalid = True
+        if not invalid and not rebound:
+            return False
+        remaining = [step for step in state.plan[state.cursor:]
+                     if not step.get("delivery_repair") and step.get("action") != "delivery_check"]
+        if invalid:
+            attempts = int(state.environment.get("chapter_candidate_recoveries", 0))
+            if attempts >= 2:
+                raise OperationError("CREATION_DOCUMENT_INVALID", "本章候选连续未满足章节边界，请调整本章设计后重试")
+            state.environment.setdefault("chapter_rejected_candidates", []).append({
+                "document": candidate, "reason": "chapter_boundary_contract", "run_id": state.run_id})
+            state.environment["chapter_candidate_recoveries"] = attempts + 1
+            state.current_document = base
+            state.environment["document"] = base
+            state.environment["chapter_published_document"] = base
+            # The normal writer receives all retained resources and the current
+            # input contract, then follows exactly the usual delivery gate.
+            remaining.insert(0, {**self._agent_plan_step("document_writer_agent"),
+                "decision_source": "chapter_boundary_recovery",
+                "reason": "按当前章节边界重新生成未通过的本章，保留此前正文"})
+        remaining.append({"kind": "agent", "id": "delivery_validation", "name": "核对本轮交付条件",
+            "action": "delivery_check", "decision_source": "acceptance_contract",
+            "reason": "按当前有效条件核对本章，旧生成规则的结论不作为本轮修正依据"})
+        state.plan[state.cursor:] = remaining
+        state.pending_model_step = None
+        for key in ("delivery_review", "delivery_pending_review", "delivery_last_revise",
+                    "delivery_repair_result", "delivery_repair_stalled", "delivery_checked_hash"):
+            state.environment.pop(key, None)
+        self._update_goal(state)
+        return True
 
     async def _refresh_brainstorm_acceptance(self, state: LoopState) -> None:
         old = state.environment.get("input_contract")
@@ -8743,8 +12595,11 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
         decision_ids = {item.get("id") for item in
             (state.environment.get("input_context") or {}).get("brainstorm_decisions", [])
             if item.get("source") == "user"}
-        current_acceptance = (state.environment.get("brainstorm_acceptance_version") == 7
+        from .work_quality import work_acceptance_checks
+        work_ids = {item["id"] for item in work_acceptance_checks(state.environment["work_context"])} if state.environment.get("work_context") else set()
+        current_acceptance = (state.environment.get("brainstorm_acceptance_version") == 9
             and decision_ids.issubset(acceptance_ids)
+            and work_ids.issubset(acceptance_ids)
             and (not self._brainstorm_open_flags(state) or "brainstorm_open_flags" in acceptance_ids))
         if (state.creation_mode != "brainstorm" or not isinstance(old, dict)
             or current_acceptance
@@ -8768,10 +12623,13 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
         rebound = with_brainstorm_open_flag_safety(rebound,
             self._brainstorm_open_flags(state), "generate", state.user_message)
         rebound = with_bare_working_definition_safety(rebound, state.user_message)
+        if state.environment.get("work_context"):
+            from .work_integration import bind_work_acceptance
+            rebound = bind_work_acceptance(rebound, state.environment["work_context"])
         # Preserve completed resource work and the repair budget. Only obsolete
         # acceptance criteria are regenerated from authoritative current inputs.
         state.environment["input_contract"] = {**old, "acceptance": rebound["acceptance"]}
-        state.environment["brainstorm_acceptance_version"] = 7
+        state.environment["brainstorm_acceptance_version"] = 9
         state.environment.pop("delivery_checked_hash", None)
 
     def _bind_brainstorm_input(self, state: LoopState, context: dict[str, Any]) -> None:
@@ -8784,18 +12642,27 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
                                         with_brainstorm_coverage,
                                         with_brainstorm_open_flag_safety,
                                         with_brainstorm_transform_delta_coverage)
-        if context.get("brainstorm_context_version") != 4:
+        if context.get("brainstorm_context_version") != 6:
             context["creation_brief"] = self._brainstorm_prompt_context(brief)
             context["brainstorm_decisions"] = effective_brief_decisions(brief)
-            context["brainstorm_context_version"] = 4
+            context["brainstorm_context_version"] = 6
             state.environment["creation_brief_context"] = context["creation_brief"]
             state.environment.pop("delivery_checked_hash", None)
+        from .brainstorm_chapters import chapter_context, chapter_decisions, chapter_goal, chapter_delivery_scope
+        chapter = chapter_context(brief)
+        chapter_metrics_changed = chapter is not None and context.get("chapter_metrics_scope_version") != 1
+        if chapter is not None:
+            context["chapter_metrics_scope_version"] = 1
+            context["root_request"] = chapter_goal(chapter)
+            context["brainstorm_decisions"] = chapter_decisions(brief)
+            context["chapter_delivery_scope"] = chapter_delivery_scope(brief,
+                str(state.environment.get("chapter_base_document", state.environment.get("input_base_document", "")) or ""))
         contract = state.environment.get("input_contract")
         if isinstance(contract, dict):
             old_acceptance_version = state.environment.get("brainstorm_acceptance_version")
             operation = state.environment.get("operation") or state.environment.get("routing_decision", {}).get("operation", {})
             rebound = with_brainstorm_coverage(contract, context.get("brainstorm_decisions", []),
-                operation.get("kind", ""), context.get("root_request", ""))
+                "generate" if chapter is not None else operation.get("kind", ""), context.get("root_request", ""))
             if operation.get("kind") == "transform":
                 rebound = with_brainstorm_transform_delta_coverage(
                     rebound,
@@ -8808,14 +12675,16 @@ workflow_role=support 的 Skill 只提供当前步骤所引用的能力，其 ex
                 rebound, open_flags, operation.get("kind", ""), state.user_message)
             state.environment["input_contract"] = with_bare_working_definition_safety(
                 rebound, state.user_message)
-            if old_acceptance_version != 7:
+            if old_acceptance_version != 9 or chapter_metrics_changed:
+                state.environment["brainstorm_contract_rebound"] = True
                 # Earlier contracts could retain flags from a generated question
                 # that merely restated an already confirmed choice.  Both the
                 # stale failures and their consumed repair budget are invalid
-                # after rebinding to the converged decision set.
+                # after rebinding to the converged decision set. Older chapter
+                # reviews also compared the cumulative body with a chapter limit.
                 state.environment["delivery_repair_count"] = 0
                 for key in ("delivery_review", "delivery_pending_review", "delivery_last_revise",
                             "delivery_repair_result", "delivery_repair_stalled"):
                     state.environment.pop(key, None)
                 state.environment.pop("delivery_checked_hash", None)
-            state.environment["brainstorm_acceptance_version"] = 7
+            state.environment["brainstorm_acceptance_version"] = 9

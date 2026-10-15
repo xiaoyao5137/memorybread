@@ -52,3 +52,19 @@ def test_runtime_status_writes_remain_atomic_across_threads(tmp_path, monkeypatc
     assert payload["critical_checks_passed"] is True
     assert isinstance(payload["updated_at_ms"], int)
     assert not status_file.with_suffix(".json.tmp").exists()
+
+
+def test_packaged_model_api_starts_supervisor_before_serving(monkeypatch):
+    from types import SimpleNamespace
+    events = []
+    server = SimpleNamespace(
+        initialization_manager=SimpleNamespace(start_runtime_supervisor=lambda: events.append("supervisor")),
+        _idle_diary_backfill_worker=SimpleNamespace(start=lambda: None),
+        get_rag_pipeline=lambda: None,
+        logger=SimpleNamespace(info=lambda *_: None),
+        app=SimpleNamespace(run=lambda **_: events.append("serve")),
+    )
+    monkeypatch.setitem(sys.modules, "model_api_server", server)
+    monkeypatch.setattr(packaged_entry.threading, "Thread", lambda **_: SimpleNamespace(start=lambda: None))
+    packaged_entry.run_model_api()
+    assert events == ["supervisor", "serve"]

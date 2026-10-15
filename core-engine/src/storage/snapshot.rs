@@ -562,6 +562,14 @@ impl StorageManager {
         };
 
         report.tables = merge_database_snapshot(self, &database_bytes, dry_run)?;
+        if !dry_run
+            && report
+                .tables
+                .iter()
+                .any(|table| table.name == "app_blacklist" && table.inserted > 0)
+        {
+            self.notify_blacklist_changed();
+        }
 
         if dry_run {
             report.local_files.unchanged = decoded_files.len();
@@ -799,6 +807,16 @@ fn merge_database_snapshot(
             };
 
             for mut row in rows {
+                // A legacy source may have stored an omitted Bundle ID as an
+                // empty string. The current schema represents that rule with
+                // NULL, which also keeps the name-only identity unambiguous.
+                if table.name == "app_blacklist"
+                    && json_string(&row, "bundle_id")
+                        .as_deref()
+                        .is_some_and(str::is_empty)
+                {
+                    row.insert("bundle_id".to_string(), Value::Null);
+                }
                 // Remember the source identity before remapping an owner key.
                 let original_source_id = table.primary_key.as_deref()
                     .and_then(|column| json_i64(&row, column));
@@ -1045,21 +1063,30 @@ fn unique_keys(conn: &Connection, table: &str) -> Result<Vec<Vec<String>>, Stora
     let mut stmt = conn.prepare(&format!("PRAGMA index_list({})", quote_identifier(table)))?;
     let indexes = stmt
         .query_map([], |row| {
-            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(4)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut keys = Vec::new();
-    for (index, is_unique) in indexes {
-        if is_unique == 0 {
+    for (index, is_unique, is_partial) in indexes {
+        // A partial index is not a business key for rows outside its WHERE
+        // clause. In particular, the name-only app index must not identify
+        // two distinct apps that have real Bundle IDs but share a name.
+        if is_unique == 0 || is_partial != 0 {
             continue;
         }
         let mut index_stmt =
             conn.prepare(&format!("PRAGMA index_info({})", quote_identifier(&index)))?;
         let columns = index_stmt
-            .query_map([], |row| row.get::<_, String>(2))?
+            .query_map([], |row| row.get::<_, Option<String>>(2))?
             .collect::<Result<Vec<_>, _>>()?;
-        if !columns.is_empty() {
-            keys.push(columns);
+        // Expression indexes report a NULL column name through index_info.
+        // Their predicate cannot be replayed as a simple column comparison.
+        if !columns.is_empty() && columns.iter().all(Option::is_some) {
+            keys.push(columns.into_iter().flatten().collect());
         }
     }
     Ok(keys)
@@ -1240,6 +1267,32 @@ fn find_existing_merge_row(
     row: &JsonRow,
     columns: &[String],
 ) -> Result<Option<Option<i64>>, StorageError> {
+    if table.name == "app_blacklist"
+        && json_string(row, "bundle_id")
+            .as_deref()
+            .map_or(true, str::is_empty)
+    {
+        if let Some(app_name) = json_string(row, "app_name")
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            // A name-only rule may have locally edited enabled/reason fields.
+            // Keep that rule during repeat imports, but never conflate it with
+            // a same-named app that has its own real Bundle ID.
+            return conn
+                .query_row(
+                    "SELECT id FROM app_blacklist
+                     WHERE (bundle_id IS NULL OR bundle_id = '')
+                       AND LOWER(TRIM(app_name)) = LOWER(?1)
+                     LIMIT 1",
+                    [app_name],
+                    |result| result.get::<_, Option<i64>>(0),
+                )
+                .optional()
+                .map_err(StorageError::Sqlite);
+        }
+    }
     // A primary key that also references its owner cannot be allocated anew.
     // Preserve the local row even when mutable queue/status fields differ.
     if let Some(primary_key) = table.primary_key.as_ref() {
@@ -2797,6 +2850,108 @@ mod tests {
             assert!(c.query_row("PRAGMA foreign_key_check",[],|r|r.get::<_,String>(0)).optional()?.is_none());
             Ok(())
         }).unwrap();
+    }
+
+    #[test]
+    fn complete_snapshot_reimports_name_only_blacklist_without_overwriting_local_rule() {
+        let source = StorageManager::open_in_memory().unwrap();
+        source
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO app_blacklist (bundle_id, app_name, enabled, reason)
+                     VALUES (NULL, '钉钉', 1, 'source name-only')",
+                    [],
+                )?;
+                for bundle_id in ["com.example.dingtalk.one", "com.example.dingtalk.two"] {
+                    conn.execute(
+                        "INSERT INTO app_blacklist (bundle_id, app_name, enabled, reason)
+                         VALUES (?1, '钉钉', 1, 'source bundle')",
+                        [bundle_id],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let snapshot = source.export_asset_snapshot().unwrap();
+        let target = StorageManager::open_in_memory().unwrap();
+        let checker = crate::capture::blacklist::BlacklistChecker::new(target.clone());
+        assert!(!checker.is_blacklisted_by_bundle_or_name(
+            Some("com.example.dingtalk.observed"),
+            Some("钉钉"),
+        ));
+
+        target.import_asset_snapshot(&snapshot, false).unwrap();
+        assert!(checker.is_blacklisted_by_bundle_or_name(
+            Some("com.example.dingtalk.observed"),
+            Some("钉钉"),
+        ));
+        target
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE app_blacklist SET enabled = 0, reason = 'local decision'
+                     WHERE bundle_id IS NULL AND app_name = '钉钉'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        target.import_asset_snapshot(&snapshot, false).unwrap();
+
+        target
+            .with_conn(|conn| {
+                let rows: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM app_blacklist WHERE app_name = '钉钉'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(rows, 3);
+                let (enabled, reason): (i64, String) = conn.query_row(
+                    "SELECT enabled, reason FROM app_blacklist
+                     WHERE bundle_id IS NULL AND app_name = '钉钉'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                assert_eq!(enabled, 0);
+                assert_eq!(reason, "local decision");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn complete_snapshot_keeps_distinct_whitespace_bundle_ids() {
+        let source = StorageManager::open_in_memory().unwrap();
+        source
+            .with_conn(|conn| {
+                for bundle_id in [" ", "  "] {
+                    conn.execute(
+                        "INSERT INTO app_blacklist (bundle_id, app_name, enabled, reason)
+                         VALUES (?1, 'legacy same name', 1, 'legacy identifier')",
+                        [bundle_id],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let snapshot = source.export_asset_snapshot().unwrap();
+        let target = StorageManager::open_in_memory().unwrap();
+
+        target.import_asset_snapshot(&snapshot, false).unwrap();
+        target.import_asset_snapshot(&snapshot, false).unwrap();
+
+        target
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT bundle_id FROM app_blacklist
+                     WHERE app_name = 'legacy same name' ORDER BY LENGTH(bundle_id)",
+                )?;
+                let bundle_ids = stmt
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                assert_eq!(bundle_ids, vec![" ".to_string(), "  ".to_string()]);
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]

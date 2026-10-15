@@ -7,7 +7,7 @@ import { getLocalServiceBaseUrl } from './localServices'
 
 const INSTALLATION_ID_KEY = 'memory-bread_customer-log-installation-id'
 const MAX_ARCHIVE_BYTES = 10 * 1024 * 1024
-const MAX_LOG_FILES = 8
+const MAX_LOG_FILES = 12
 const DEFAULT_CORE_API = getLocalServiceBaseUrl('core')
 const DEFAULT_SIDECAR_API = getLocalServiceBaseUrl('model_api')
 
@@ -56,6 +56,7 @@ export const getCustomerLogInstallationId = (): string => {
 export const scrubDiagnosticLog = (content: string): string => content
   .replace(/\b(?:sk|ak)-[A-Za-z0-9_-]{12,}\b/gi, '[REDACTED_TOKEN]')
   .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [REDACTED]')
+  .replace(/\b([A-Z][A-Z0-9_]*_(?:API_KEY|TOKEN|PASSWORD|SECRET))\s*[:=]\s*([^\s,;\]]+)/g, '$1=[REDACTED]')
   .replace(/\b(api[_-]?key|token|access[_-]?token|refresh[_-]?token|password|secret)\b\s*[:=]\s*([^\s,;]+)/gi, '$1=[REDACTED]')
   .replace(/[A-Z]:\\Users\\[^\\\s]+/gi, '[USER_HOME]')
   .replace(/\/Users\/[^/\s]+/g, '[USER_HOME]')

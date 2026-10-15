@@ -24,6 +24,7 @@ def run_model_api() -> None:
     import model_api_server as server
 
     logging.basicConfig(level=logging.INFO)
+    server.initialization_manager.start_runtime_supervisor()
 
     def warmup_rag_pipeline() -> None:
         try:

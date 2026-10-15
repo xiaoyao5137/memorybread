@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { invoke } from '@tauri-apps/api/core'
+import { unzipSync, strFromU8 } from 'fflate'
 import type { AppMetadata } from '../utils/appMetadata'
 import {
   getCustomerLogInstallationId,
@@ -41,6 +42,7 @@ describe('customer log privacy', () => {
       'api_key=sk-secretvalue123456789',
       'email=alice@example.com phone=13800138000',
       'password=hunter2',
+      'env=map[OLLAMA_API_KEY:custom-engine-credential APP_ACCESS_TOKEN:custom-session-credential]',
       'url=https://example.com/private?token=secret',
       'local=http://127.0.0.1:7071/status?token=local-secret',
       'temp=/private/tmp/alice/trace.log hostname=alice-mac',
@@ -53,6 +55,8 @@ describe('customer log privacy', () => {
     expect(result).not.toContain('example.com')
     expect(result).not.toContain('13800138000')
     expect(result).not.toContain('hunter2')
+    expect(result).not.toContain('custom-engine-credential')
+    expect(result).not.toContain('custom-session-credential')
     expect(result).not.toContain('eyJhbGci')
     expect(result).not.toContain('example.com')
     expect(result).not.toContain('alice-mac')
@@ -61,6 +65,42 @@ describe('customer log privacy', () => {
     expect(result).toContain('[USER_HOME]')
     expect(result).toContain('[REDACTED_EMAIL]')
     expect(result).toContain('[REDACTED_PHONE]')
+  })
+
+  it.each([false, true])('includes scrubbed engine rotations in ZIP, fallback=%s', async (fallback) => {
+    ;(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {}
+    vi.mocked(invoke).mockResolvedValue(undefined)
+    const keys = ['core', 'sidecar', 'model_api', 'creation', 'bake_extract_errors', 'ui',
+      'inference_engine', 'inference_engine_previous_1', 'inference_engine_previous_2', 'inference_launcher']
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (fallback && url.startsWith('http://127.0.0.1:7070')) throw new Error('Core unavailable')
+      if (url.endsWith('/api/debug/log-files')) {
+        return jsonResponse({ items: keys.map((key) => ({ key, label: key, exists: true, size_bytes: 64 })) })
+      }
+      if (url.includes('/api/debug/log-files/')) {
+        return jsonResponse({ content: 'engine exit=1 api_key=sk-secretvalue123456789 /Users/alice/private/model',
+          truncated: true, total_size_bytes: 200000, returned_bytes: 64 })
+      }
+      if (url.endsWith('/upload-url')) {
+        return jsonResponse({ data: { upload_id: 'upload', oss_object_key: 'report.zip',
+          upload_url: 'https://memory-bread.oss-cn-beijing.aliyuncs.com/report.zip', required_headers: {} } })
+      }
+      return jsonResponse({ data: { log_id: 'receipt', received_at: '2026-10-10T00:00:00Z', duplicate: false } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await reportCustomerLogs({ adminApiBaseUrl: 'https://memorybread.cn',
+      localApiBaseUrls: ['http://127.0.0.1:7070', 'http://127.0.0.1:7071'], metadata })
+    const upload = vi.mocked(invoke).mock.calls.find(([command]) => command === 'upload_customer_log_archive')!
+    const args = upload[1] as { contentBase64: string }
+    const archive = unzipSync(Uint8Array.from(atob(args.contentBase64), (char) => char.charCodeAt(0)))
+    const manifest = JSON.parse(strFromU8(archive['manifest.json']))
+    expect(manifest.logs.map((log: { key: string }) => log.key)).toEqual(keys)
+    const engine = strFromU8(archive['07-inference_engine.log'])
+    expect(engine).toContain('engine exit=1')
+    expect(engine).not.toContain('secretvalue')
+    expect(engine).not.toContain('alice')
+    expect(Object.keys(archive)).toHaveLength(11)
   })
 
   it('keeps a stable anonymous installation identifier', () => {

@@ -350,7 +350,7 @@ pub struct NewRagSession {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppBlacklistRecord {
     pub id: i64,
-    pub bundle_id: String,
+    pub bundle_id: Option<String>,
     pub app_name: String,
     pub enabled: bool,
     pub reason: Option<String>,
@@ -360,7 +360,7 @@ pub struct AppBlacklistRecord {
 
 #[derive(Debug, Clone)]
 pub struct NewAppBlacklist {
-    pub bundle_id: String,
+    pub bundle_id: Option<String>,
     pub app_name: String,
     pub enabled: bool,
     pub reason: Option<String>,

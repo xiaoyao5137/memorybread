@@ -14,7 +14,8 @@ from creation.service import CreationOptions
 from creation.skill_governance import (
     admit_skills, apply_title, copied_skill_name, document_heading, fingerprint,
     generated_title_leaks_skill, intent_contract_problem, reads_from_instruction,
-    recover_identity, review_skill, skill_review_problem, task_intent, validate_identity,
+    recover_identity, repair_copied_generated_title, review_skill, skill_review_problem,
+    task_intent, validate_identity,
 )
 from tests.test_creation_agent_loop import FakeCreationService
 
@@ -111,6 +112,104 @@ def test_ungrounded_alias_is_still_rejected():
     # 指令没提到该主题时，别名相同的标题仍是技能名泄露。
     assert generated_title_leaks_skill("GPU成本优化周报", "写一份项目复盘", [WEEKLY_SKILL])
     assert not generated_title_leaks_skill("项目复盘报告", "写一份项目复盘", [WEEKLY_SKILL])
+
+
+def test_skill_mention_alone_cannot_ground_its_alias_as_document_title():
+    request = "请用GPU成本优化周报模板写一份项目复盘"
+    assert generated_title_leaks_skill("GPU成本优化周报", request, [WEEKLY_SKILL])
+    with pytest.raises(OperationError, match="不能复制"):
+        repair_copied_generated_title(
+            {"title": WEEKLY_SKILL["title"], "source": "generated", "evidence": request},
+            request, "", [WEEKLY_SKILL])
+
+
+@pytest.mark.parametrize("copied", [WEEKLY_SKILL["title"],
+    "GPU成本优化周报创作法 · 虚构主题示例"])
+def test_copied_skill_or_example_title_repairs_to_independently_requested_topic(copied):
+    identity = repair_copied_generated_title(
+        {"title": copied, "source": "generated", "evidence": WEEKLY_REQUEST},
+        WEEKLY_REQUEST, "", [WEEKLY_SKILL])
+    assert identity == {"title": "GPU成本优化周报", "source": "generated",
+                        "evidence": WEEKLY_REQUEST}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation_kind", ["generate", "execute_skill"])
+async def test_chapter_identity_uses_effective_root_request_instead_of_system_instruction(operation_kind):
+    class Service(FakeCreationService):
+        pass
+
+    loop = CreationAgentLoop(Service())
+    chapter = {"id": "chapter-1", "title": "创作正文", "goal": "完成正文", "index": 1, "total": 1,
+               "outline": [{"id": "chapter-1", "title": "创作正文", "goal": "完成正文"}],
+               "confirmed_decisions": []}
+    brief = {"root_request": WEEKLY_REQUEST, "chapter_context": chapter, "decisions": []}
+    state = loop._new_state(
+        user_message="撰写第 1 章《创作正文》，按当前需求、简报和所选技能创作完整正文。",
+        root_request=WEEKLY_REQUEST, current_document="", conversation=[],
+        selected_skills=[WEEKLY_SKILL], options=CreationOptions(enabled_tools=()),
+        model_mode="local", session_id="chapter-title-regression", run_id="run-title-regression",
+        creation_mode="brainstorm", creation_brief=brief)
+    requirement = await loop._routing_requirement(state)
+    assert requirement["title_request"] == WEEKLY_REQUEST
+    assert requirement["topic"] == WEEKLY_REQUEST
+    assert state.environment["retrieval_query"] == WEEKLY_REQUEST
+    route = next(step for step in state.plan if step["action"] == "route")
+    operation = {"kind": operation_kind, "document_identity": {
+        "title": WEEKLY_SKILL["title"], "source": "generated", "evidence": WEEKLY_REQUEST}}
+    if operation_kind == "execute_skill":
+        operation["skill_ids"] = [WEEKLY_SKILL["id"]]
+        operation["skill_assessments"] = [{
+            "skill_id": WEEKLY_SKILL["id"], "metadata_consistent": True,
+            "applicable": True, "request_evidence": "GPU成本优化",
+            "conflicts": [], "missing_inputs": []}]
+    decision = {"source": "model", "tools": [], "agents": [], "operation": {
+        **operation}}
+    events = [event async for event in loop._apply_routing_decision(state, route, decision)]
+    assert any(event["type"] == "document.identity" for event in events)
+    assert state.environment["document_identity"]["title"] == "GPU成本优化周报"
+    if operation_kind == "execute_skill":
+        assert state.environment["skill_admission"][0]["admitted"] is True
+        assert state.environment["operation"]["kind"] == "execute_skill"
+
+    state.environment["creation_brief"]["brief_edits"] = {"root_request": "请写一份项目复盘"}
+    assert loop._title_instruction(state) == "请写一份项目复盘"
+    edited_requirement = await loop._routing_requirement(state)
+    assert edited_requirement["title_request"] == "请写一份项目复盘"
+    with pytest.raises(OperationError, match="不能复制"):
+        repair_copied_generated_title(
+            {"title": WEEKLY_SKILL["title"], "source": "generated",
+             "evidence": WEEKLY_REQUEST}, loop._title_instruction(state), "", [WEEKLY_SKILL])
+    state.environment["creation_brief"]["brief_edits"]["root_request"] = ""
+    assert loop._title_instruction(state) == ""
+
+
+@pytest.mark.asyncio
+async def test_chapter_checkpoint_recovers_title_from_effective_root_request():
+    prompts = []
+
+    class Service(FakeCreationService):
+        async def _stream_direct_completion(self, **kwargs):
+            prompts.append(kwargs["user_prompt"])
+            yield json.dumps({"title": WEEKLY_SKILL["title"], "source": "generated",
+                              "evidence": WEEKLY_REQUEST}, ensure_ascii=False)
+
+    loop = CreationAgentLoop(Service())
+    chapter = {"id": "chapter-1", "title": "创作正文", "goal": "完成正文", "index": 1, "total": 1,
+               "outline": [{"id": "chapter-1", "title": "创作正文", "goal": "完成正文"}],
+               "confirmed_decisions": []}
+    state = loop._new_state(
+        user_message="撰写第 1 章《创作正文》，按当前需求创作。",
+        root_request=WEEKLY_REQUEST, current_document="", conversation=[],
+        selected_skills=[WEEKLY_SKILL], options=CreationOptions(enabled_tools=()),
+        model_mode="local", session_id="chapter-title-resume", run_id="run-title-resume",
+        creation_mode="brainstorm", creation_brief={
+            "root_request": WEEKLY_REQUEST, "chapter_context": chapter, "decisions": []})
+    state.environment["operation"] = {"kind": "generate"}
+    await loop._recover_document_identity(state)
+    assert len(prompts) == 1
+    assert json.loads(prompts[0])["instruction"] == WEEKLY_REQUEST
+    assert state.environment["document_identity"]["title"] == "GPU成本优化周报"
 
 
 @pytest.mark.asyncio

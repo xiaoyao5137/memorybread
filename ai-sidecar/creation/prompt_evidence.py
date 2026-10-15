@@ -198,7 +198,9 @@ class CreationEvidencePrompts:
                     item["history"] = cls._compact_prompt_value(history[:3])
             candidate_size = len(str(item))
             if compacted and used_chars + candidate_size > cls.data_char_budget:
-                break
+                # One large candidate must not hide every later source. The
+                # retrieval order is only a ranking, not a completeness rule.
+                continue
             compacted.append(item)
             used_chars += candidate_size
         return compacted

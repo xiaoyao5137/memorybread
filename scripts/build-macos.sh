@@ -352,6 +352,8 @@ prepare_python_helper() {
       --additional-hooks-dir "$SIDECAR_DIR/pyinstaller-hooks" \
       --add-data "$SIDECAR_DIR/migrations:migrations" \
       --add-data "$SIDECAR_DIR/Modelfile:." \
+      --add-data "$PROJECT_ROOT/shared/creation-work-quality:creation_work_quality" \
+      --add-data "$PROJECT_ROOT/shared/creation-brainstorm:creation_brainstorm" \
       "${signing_args[@]}" \
       "${hidden_args[@]}" \
       "$SIDECAR_DIR/packaged_entry.py"

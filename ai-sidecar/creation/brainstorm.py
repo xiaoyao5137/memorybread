@@ -1221,6 +1221,7 @@ class BrainstormCoordinator:
         system_prompt: Optional[str] = None,
         output_tokens: Optional[int] = None,
         json_schema: Optional[dict[str, Any]] = None,
+        temperature: float = 0.15,
     ) -> str:
         chunks: list[str] = []
         try:
@@ -1231,7 +1232,7 @@ class BrainstormCoordinator:
                 creation_api_key=creation_api_key,
                 creation_base_url=creation_base_url,
                 num_predict=output_tokens or (self.QUESTION_OUTPUT_TOKENS if system_prompt is None else self.MEMORY_OUTPUT_TOKENS),
-                temperature=0.15,
+                temperature=temperature,
                 disable_thinking=True,
                 json_mode=True,
                 json_schema=json_schema,
@@ -1908,6 +1909,24 @@ class BrainstormCoordinator:
             directions[0]["recommended"] = True
         return directions
 
+    @staticmethod
+    def _prompt_repeated_option_labels(prompt: Any, options: Any) -> set[str]:
+        """Return the distinct full option labels repeated in a question.
+
+        Shared by validation and bounded copy repair; the original minimum
+        label length and whitespace/case folding remain the same.
+        """
+        if not isinstance(prompt, str) or not isinstance(options, list):
+            return set()
+        compact_prompt = re.sub(r"\s+", "", prompt).casefold()
+        labels = [str(option.get("label") or "") for option in options if isinstance(option, dict)]
+        return {
+            re.sub(r"\s+", "", label).casefold()
+            for label in labels
+            if len(re.sub(r"\s+", "", label)) >= 4
+            and re.sub(r"\s+", "", label).casefold() in compact_prompt
+        }
+
     @classmethod
     def _normalize_question(
         cls,
@@ -1998,14 +2017,7 @@ class BrainstormCoordinator:
             options[0]["recommended"] = True
         # Reject clear duplication and let the existing repair loop rewrite the
         # question, rather than deleting text that may carry essential context.
-        compact_prompt = re.sub(r"\s+", "", prompt).casefold()
-        repeated_labels = {
-            re.sub(r"\s+", "", option["label"]).casefold()
-            for option in options
-            if len(re.sub(r"\s+", "", option["label"])) >= 4
-            and re.sub(r"\s+", "", option["label"]).casefold() in compact_prompt
-        }
-        if len(repeated_labels) >= 2:
+        if len(cls._prompt_repeated_option_labels(prompt, options)) >= 2:
             raise BrainstormGenerationError(
                 "题干重复列举多个选项；prompt 只保留核心问题和必要背景，"
                 "候选答案只放在 options，补充作答提示放在 answer_template"

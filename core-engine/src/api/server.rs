@@ -88,7 +88,7 @@ use super::{
         },
         creation::{
             cancel_creation_inline_edit, generate_document, get_history,
-            get_inline_edit_capabilities, list_history, preview_references, run_creation_agent,
+            get_inline_edit_capabilities, list_history, preview_references, preview_work_document, run_creation_agent,
             run_creation_brainstorm_turn, run_creation_inline_edit, save_history,
             save_manual_document, start_history,
             undo_creation_inline_edit, undo_creation_operation, update_history_progress,
@@ -211,6 +211,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/pii/scrub", post(pii_scrub))
         .route("/api/creation/generate", post(generate_document))
         .route("/api/creation/agent/run", post(run_creation_agent))
+        .route("/api/creation/work-quality/preview", post(preview_work_document))
         .route("/api/creation/operations/undo", post(undo_creation_operation))
         .route(
             "/api/creation/inline-edit/capabilities",

@@ -1,7 +1,8 @@
 """脑暴候选的自主记忆采纳规则；不改变资料访问权限或历史事实校验。"""
 
 import re
-from typing import Any, Dict
+from itertools import combinations
+from typing import Any, Dict, List
 
 
 MEMORY_OPTION_GUIDANCE = """候选思路的记忆采纳规则：
@@ -17,6 +18,47 @@ ORIGINAL_OPTION_DETAILS = "本项未附历史记忆引用，可结合当前需�
 def memory_mode_schema() -> Dict[str, Any]:
     """新生成须说明采纳模式；旧模型省略时仍由解析层兼容。"""
     return {"type": "string", "enum": ["original", "reference"]}
+
+
+def bounded_memory_choices(memory_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Encode adoption and up to two real sources as one compact grammar enum.
+
+    Array limits greater than one are removed by the local grammar compactor.
+    A finite selection also rules out reference-without-source at decoding time.
+    The translated fields still pass the existing source and quote validators.
+    """
+    choices = {"original": {"memory_mode": "original", "memory_ids": []}}
+    for size in (1, 2):
+        for selected in combinations(dict.fromkeys(memory_ids), size):
+            choices["reference:" + "+".join(selected)] = {
+                "memory_mode": "reference", "memory_ids": list(selected),
+            }
+    return choices
+
+
+def expand_memory_choice(option: Dict[str, Any], memory_ids: List[str]) -> None:
+    """Translate only valid selections; contradictory legacy evidence is an error."""
+    if "memory_choice" not in option:
+        return  # Compatible with valid responses from older remote models.
+    choice = option["memory_choice"]
+    selected = bounded_memory_choices(memory_ids).get(choice) if isinstance(choice, str) else None
+    if selected is None:
+        raise ValueError("memory_choice 必须选择本轮真实来源的有界引用或 original")
+    for field in ("memory_mode", "memory_ids"):
+        if field in option and option[field] != selected[field]:
+            raise ValueError("memory_choice 与旧引用字段矛盾")
+    evidence = option.get("memory_evidence", [])
+    if evidence:
+        if not isinstance(evidence, list) or len(evidence) > 2 or any(
+            not isinstance(item, dict) or item.get("memory_id") not in selected["memory_ids"]
+            for item in evidence
+        ):
+            raise ValueError("memory_choice 与引文来源矛盾")
+        evidence_ids = [item["memory_id"] for item in evidence]
+        if (len(set(evidence_ids)) != len(evidence_ids)
+                or set(evidence_ids) != set(selected["memory_ids"])):
+            raise ValueError("memory_choice 与引文来源矛盾")
+    option.update(memory_mode=selected["memory_mode"], memory_ids=list(selected["memory_ids"]))
 
 
 def validate_option_memory_mode(option: Dict[str, Any]) -> None:

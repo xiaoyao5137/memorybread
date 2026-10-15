@@ -1,0 +1,353 @@
+{
+  "schema_version": 1,
+  "kind": "memorybread.brainstorm-attribute-values",
+  "capability_version": 1,
+  "renderer_id": "atomic_values_v1",
+  "axes": [
+    {
+      "axis_id": "audience",
+      "type": "multi_choice",
+      "single_choice_reason": "",
+      "prompt_body": "本次创作面向哪些阅读对象？",
+      "why_now": "确定阅读对象范围，供后续创作沿用。",
+      "answer_template": "可选择适用项，也可补充你自己的取舍。",
+      "values": [
+        {
+          "id": "audience.participants",
+          "label": "执行参与者",
+          "description": "承担相关执行工作、直接参与事情推进的读者。"
+        },
+        {
+          "id": "audience.decision_makers",
+          "label": "管理决策者",
+          "description": "负责相关管理、资源安排或决策的读者。"
+        },
+        {
+          "id": "audience.collaborators",
+          "label": "协作相关方",
+          "description": "参与相关协作、需要了解共同事项的读者。"
+        },
+        {
+          "id": "audience.specialists",
+          "label": "领域专业读者",
+          "description": "具备相关领域专业背景的读者。"
+        },
+        {
+          "id": "audience.general_readers",
+          "label": "非专业读者",
+          "description": "没有相关领域专业背景的读者。"
+        }
+      ]
+    },
+    {
+      "axis_id": "purpose",
+      "type": "multi_choice",
+      "single_choice_reason": "",
+      "prompt_body": "本次创作希望达到哪些表达目的？",
+      "why_now": "确定希望读者获得的理解或产生的反应。",
+      "answer_template": "可选择适用项，也可补充你自己的取舍。",
+      "values": [
+        {
+          "id": "purpose.understand_state",
+          "label": "了解现状",
+          "description": "帮助读者了解所述对象当前的情况。"
+        },
+        {
+          "id": "purpose.understand_causes",
+          "label": "理解原因",
+          "description": "帮助读者理解所述情况形成的原因。"
+        },
+        {
+          "id": "purpose.form_judgement",
+          "label": "形成判断",
+          "description": "帮助读者基于完整信息形成自己的判断。"
+        },
+        {
+          "id": "purpose.reach_consensus",
+          "label": "形成共识",
+          "description": "帮助相关读者就所述事项形成共同理解。"
+        },
+        {
+          "id": "purpose.encourage_action",
+          "label": "促进行动",
+          "description": "帮助读者理解为何需要采取既定目标内的行动。"
+        }
+      ]
+    },
+    {
+      "axis_id": "content_focus",
+      "type": "multi_choice",
+      "single_choice_reason": "",
+      "prompt_body": "保留全部必需内容时，哪些内容需要更突出？",
+      "why_now": "确定表达侧重，保留原有必需内容。",
+      "answer_template": "可选择适用项，也可补充你自己的取舍。",
+      "values": [
+        {
+          "id": "content_focus.central_ideas",
+          "label": "核心观点",
+          "description": "完整保留必需内容，在表达中更突出主要观点。"
+        },
+        {
+          "id": "content_focus.key_results",
+          "label": "关键结果",
+          "description": "完整保留必需内容，在表达中更突出已有结果。"
+        },
+        {
+          "id": "content_focus.development_process",
+          "label": "形成过程",
+          "description": "完整保留必需内容，在表达中更突出事情如何发展。"
+        },
+        {
+          "id": "content_focus.impact",
+          "label": "影响意义",
+          "description": "完整保留必需内容，在表达中更突出已有信息支持的影响。"
+        },
+        {
+          "id": "content_focus.limitations",
+          "label": "限制条件",
+          "description": "完整保留必需内容，在表达中更突出已有条件与局限。"
+        }
+      ]
+    },
+    {
+      "axis_id": "information_granularity",
+      "type": "multi_choice",
+      "single_choice_reason": "",
+      "prompt_body": "完整必需信息需要在哪些层次展开？",
+      "why_now": "确定信息呈现层次，保留必需字段、关系与计算规则。",
+      "answer_template": "可选择适用项，也可补充你自己的取舍。",
+      "values": [
+        {
+          "id": "information_granularity.whole",
+          "label": "整体层次",
+          "description": "在完整信息中呈现整体情况及其相互关系。"
+        },
+        {
+          "id": "information_granularity.object",
+          "label": "对象层次",
+          "description": "在完整信息中分别呈现相关对象的情况。"
+        },
+        {
+          "id": "information_granularity.local",
+          "label": "局部层次",
+          "description": "在完整信息中展开相关对象内部的具体部分。"
+        }
+      ]
+    },
+    {
+      "axis_id": "concept_explanation_depth",
+      "type": "multi_choice",
+      "single_choice_reason": "",
+      "prompt_body": "补充概念解释时，需要展开哪些深度的说明？",
+      "why_now": "确定补充概念解释的展开深度，保留全部必需说明。",
+      "answer_template": "可选择适用项，也可补充不同部分的具体安排。",
+      "values": [
+        {
+          "id": "concept_explanation_depth.definition",
+          "label": "简要释义",
+          "description": "补充概念的含义与必要定义。"
+        },
+        {
+          "id": "concept_explanation_depth.basic",
+          "label": "基础解释",
+          "description": "补充含义，并说明基本机制或使用条件。"
+        },
+        {
+          "id": "concept_explanation_depth.detailed",
+          "label": "深入解释",
+          "description": "补充含义、机制以及相关条件和边界。"
+        },
+        {
+          "id": "concept_explanation_depth.derivation",
+          "label": "完整推导",
+          "description": "从必要前提展开原理或推导过程。"
+        }
+      ]
+    },
+    {
+      "axis_id": "evidence_presentation",
+      "type": "multi_choice",
+      "single_choice_reason": "",
+      "prompt_body": "保留必需论据与来源时，采用哪些呈现方式？",
+      "why_now": "确定论据怎样支持表达，保留必需论据与来源。",
+      "answer_template": "可选择适用项，也可补充你自己的取舍。",
+      "values": [
+        {
+          "id": "evidence_presentation.direct",
+          "label": "直接对应",
+          "description": "把已有论据与它所支持的判断直接对应。"
+        },
+        {
+          "id": "evidence_presentation.corroboration",
+          "label": "多处互证",
+          "description": "在已有来源确能互证时，呈现其相互支持的关系。"
+        },
+        {
+          "id": "evidence_presentation.itemized",
+          "label": "分项说明",
+          "description": "分别说明已有论据所支持的判断。"
+        },
+        {
+          "id": "evidence_presentation.consolidated",
+          "label": "集中归纳",
+          "description": "在保留完整论据与出处的前提下，归纳它们共同支持的判断。"
+        }
+      ]
+    },
+    {
+      "axis_id": "narrative_perspective",
+      "type": "multi_choice",
+      "single_choice_reason": "",
+      "prompt_body": "本次创作采用哪些叙述视角？",
+      "why_now": "确定叙述的观察位置，保留既定对象、目的与事实。",
+      "answer_template": "可选择适用项，也可补充你自己的取舍。",
+      "values": [
+        {
+          "id": "narrative_perspective.observer",
+          "label": "观察者视角",
+          "description": "从观察事情的外部位置展开叙述。"
+        },
+        {
+          "id": "narrative_perspective.participant",
+          "label": "参与者视角",
+          "description": "适用时从参与者的观察位置展开，不虚构参与经历。"
+        },
+        {
+          "id": "narrative_perspective.subject",
+          "label": "对象视角",
+          "description": "适用时围绕被叙述对象的处境展开，不虚构其经历。"
+        }
+      ]
+    },
+    {
+      "axis_id": "structural_order",
+      "type": "multi_choice",
+      "single_choice_reason": "",
+      "prompt_body": "新增表达单元采用哪些组织次序？",
+      "why_now": "确定新增单元的组织次序，保留全部既定顺序与数据关系。",
+      "answer_template": "可选择适用项，也可补充不同部分的具体安排。",
+      "values": [
+        {
+          "id": "structural_order.chronological",
+          "label": "时间推进",
+          "description": "在未固定次序的单元中，按时间先后组织。"
+        },
+        {
+          "id": "structural_order.causal",
+          "label": "因果推进",
+          "description": "在未固定次序的单元中，按已有依据支持的因果关系组织。"
+        },
+        {
+          "id": "structural_order.importance",
+          "label": "重要性递减",
+          "description": "在未固定次序的单元中，先呈现更重要的内容。"
+        },
+        {
+          "id": "structural_order.goal_to_action",
+          "label": "目标到行动",
+          "description": "在未固定次序的单元中，先呈现目标，再展开相关行动。"
+        },
+        {
+          "id": "structural_order.whole_to_part",
+          "label": "整体到局部",
+          "description": "在未固定次序的单元中，先呈现整体，再展开具体部分。"
+        }
+      ]
+    },
+    {
+      "axis_id": "rhythm",
+      "type": "multi_choice",
+      "single_choice_reason": "",
+      "prompt_body": "新增表达采用哪些展开节奏？",
+      "why_now": "确定展开与收束的节奏，保留既定内容和单元次序。",
+      "answer_template": "可选择适用项，也可补充不同部分的具体安排。",
+      "values": [
+        {
+          "id": "rhythm.steady",
+          "label": "平稳节奏",
+          "description": "在展开过程中保持相近的推进速度。"
+        },
+        {
+          "id": "rhythm.accelerating",
+          "label": "加速节奏",
+          "description": "从较缓的展开逐步转向较快的推进。"
+        },
+        {
+          "id": "rhythm.decelerating",
+          "label": "减速节奏",
+          "description": "从较快的推进逐步转向较缓的展开与收束。"
+        },
+        {
+          "id": "rhythm.alternating",
+          "label": "张弛节奏",
+          "description": "以相互交替的舒缓与紧凑段落推进。"
+        }
+      ]
+    },
+    {
+      "axis_id": "tone",
+      "type": "multi_choice",
+      "single_choice_reason": "",
+      "prompt_body": "本次创作采用哪些表达语气？",
+      "why_now": "确定用词与表达态度，保留既定受众、目的和事实。",
+      "answer_template": "可选择适用项，也可补充你自己的取舍。",
+      "values": [
+        {
+          "id": "tone.objective",
+          "label": "客观",
+          "description": "以陈述为主，减少评价性措辞。"
+        },
+        {
+          "id": "tone.direct",
+          "label": "直接",
+          "description": "明确说出要表达的观点与关系。"
+        },
+        {
+          "id": "tone.careful",
+          "label": "审慎",
+          "description": "以留有分寸的措辞表达判断。"
+        },
+        {
+          "id": "tone.formal",
+          "label": "正式",
+          "description": "采用规范、端正的措辞。"
+        },
+        {
+          "id": "tone.approachable",
+          "label": "亲和",
+          "description": "采用平易、便于接近的措辞。"
+        }
+      ]
+    },
+    {
+      "axis_id": "action_plan",
+      "type": "multi_choice",
+      "single_choice_reason": "",
+      "prompt_body": "既定行动采用哪些实施方式？",
+      "why_now": "确定实施方式，保留既定目标、动作及资源约束。",
+      "answer_template": "可选择适用项，也可补充不同部分的具体安排。",
+      "values": [
+        {
+          "id": "action_plan.stepwise",
+          "label": "分步推进",
+          "description": "在既定条件内，按步骤逐项推进行动。"
+        },
+        {
+          "id": "action_plan.pilot_then_expand",
+          "label": "先试后扩",
+          "description": "在既定条件允许时，先小范围尝试，再据结果扩展。"
+        },
+        {
+          "id": "action_plan.parallel",
+          "label": "并行协作",
+          "description": "在既定条件允许时，让可独立推进的行动并行开展。"
+        },
+        {
+          "id": "action_plan.concentrated",
+          "label": "集中推进",
+          "description": "在既定条件内，将相关行动集中于同一推进过程。"
+        }
+      ]
+    }
+  ]
+}

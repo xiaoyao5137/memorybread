@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import sqlite3
 import time
@@ -10,6 +11,7 @@ import httpx
 import pytest
 
 from creation.service import CreationOptions, CreationService, ReferenceDocument
+from creation.prompt_evidence import CreationEvidencePrompts
 
 
 def document_408() -> dict:
@@ -123,6 +125,82 @@ def test_reference_period_evidence_uses_document_date_not_refresh_time():
     }
     service = CreationService.__new__(CreationService)
     assert service._infer_doc_type("获取本周会议纪要并总结") == "会议纪要"
+
+
+def _compact_date_reference(content: str) -> ReferenceDocument:
+    return ReferenceDocument(
+        id=582,
+        title="项目周报",
+        doc_type="周报",
+        summary="基建进展",
+        full_content=content,
+        sections_json="[]",
+        style_phrases="[]",
+        prompt_hint="",
+        usage_count=0,
+        review_status="auto_created",
+        updated_at=1_790_601_600_000,
+        source_url="https://docs.example/project-weekly",
+        relevance_score=0.9,
+        quality_score=1.0,
+        completeness_score=0.7,
+        usage_score=0.0,
+        format_score=0.6,
+        freshness_score=0.7,
+        final_weight=1.0,
+        reason="主题相关",
+        refresh_status="fresh_partial",
+        refresh_completeness="partial",
+        refresh_collected_at=1_790_601_600_000,
+    )
+
+
+def test_compact_weekly_section_date_matches_only_its_actual_week():
+    reference = _compact_date_reference(
+        "# 项目周报\n\n20260922\n\n基建进展\n- 模型白屏化部署进展已记录。"
+    )
+    previous_week = CreationService.reference_period_evidence(
+        reference, {"period_start": "2026-09-21", "period_end": "2026-09-27"}
+    )
+    current_week = CreationService.reference_period_evidence(
+        reference, {"period_start": "2026-09-28", "period_end": "2026-10-04"}
+    )
+
+    assert previous_week["explicit_dates"] == ["2026-09-22"]
+    assert previous_week["matched_dates"] == ["2026-09-22"]
+    assert previous_week["match_status"] == "matched"
+    assert current_week["explicit_dates"] == ["2026-09-22"]
+    assert current_week["matched_dates"] == []
+    assert current_week["match_status"] == "outside"
+
+    prompt_reference = CreationEvidencePrompts._prompt_references([{
+        "id": reference.id,
+        "source_id": reference.id,
+        "source_type": "document",
+        "title": reference.title,
+        "content": reference.full_content,
+        "period_evidence": previous_week,
+        "refresh_status": reference.refresh_status,
+        "refresh_completeness": reference.refresh_completeness,
+    }])[0]
+    assert "20260922" in prompt_reference["content"]
+    assert prompt_reference["period_evidence"]["matched_dates"] == ["2026-09-22"]
+
+
+def test_compact_date_does_not_treat_identifiers_or_invalid_calendar_as_evidence():
+    reference = _compact_date_reference(
+        "任务编号：20260922\n订单X20260922\n20260922001\n"
+        "文档链接：https://docs.example/archive/20260922\n"
+        "20260922-01\n20260922.pdf\n20260230\n"
+        "截至2026-09-24，评测仍在进行。"
+    )
+
+    evidence = CreationService.reference_period_evidence(
+        reference, {"period_start": "2026-09-21", "period_end": "2026-09-27"}
+    )
+
+    assert evidence["explicit_dates"] == ["2026-09-24"]
+    assert evidence["match_status"] == "matched"
 
 
 @pytest.mark.parametrize("source_type", ["document", "pending_document"])
@@ -597,6 +675,10 @@ def test_unified_memory_recall_includes_document_knowledge_operation_and_data(tm
     start_ms = requirement["time_context"]["period_start_ms"]
     end_ms = requirement["time_context"]["period_end_ms"]
     content = "AIGC 共建项目周报：本周完成推理性能优化并形成阶段进展。"
+    metric_statement = (
+        f"统计日期 {datetime.fromtimestamp(start_ms / 1000).date().isoformat()}，"
+        "AIGC 推理性能优化完成 1 项。"
+    )
     conn = sqlite3.connect(db_path)
     conn.execute(
         "INSERT INTO bake_documents VALUES (?, ?, ?, ?, ?, '[]', '[]', '', 0, "
@@ -616,8 +698,11 @@ def test_unified_memory_recall_includes_document_knowledge_operation_and_data(tm
         (214, "AIGC 推理性能看板", "https://bi.example/aigc"),
     )
     conn.execute(
-        "INSERT INTO data_snapshots VALUES (?, ?, ?, ?, ?, '{}', 'success', ?, ?)",
-        (1, 214, now_ms, now_ms, content, start_ms, end_ms),
+        "INSERT INTO data_snapshots VALUES (?, ?, ?, ?, ?, ?, 'success', ?, ?)",
+        (1, 214, now_ms, now_ms, metric_statement,
+         json.dumps({"metric_rows": [{"metric": "完成项目数", "value": "1",
+                                     "statement": metric_statement}]}),
+         start_ms, end_ms),
     )
     conn.commit()
     conn.close()
@@ -916,6 +1001,90 @@ async def test_document_refresh_consumes_verified_snapshot_without_replacing_bak
     }
     expected_stats[expected_stat] = 1
     assert stats == expected_stats
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_status", ["failed", "updated"])
+async def test_failed_refresh_keeps_complete_historical_source_coverage(
+    monkeypatch, response_status
+):
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, json):
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", url),
+                json={"status": response_status, "source_snapshot": {}},
+            )
+
+    monkeypatch.setattr(
+        "creation.service.httpx.AsyncClient", lambda **_kwargs: FakeAsyncClient()
+    )
+    reference = _compact_date_reference("已完整采集的历史架构正文")
+    reference.source_id = 582
+    reference.source_snapshot_id = 61
+    reference.refresh_status = "historical_only"
+    reference.refresh_completeness = "complete"
+    service = CreationService.__new__(CreationService)
+
+    stats = await service.refresh_recalled_documents([reference], "架构")
+
+    assert stats["failed"] == 1
+    assert reference.full_content == "已完整采集的历史架构正文"
+    assert reference.source_snapshot_id == 61
+    assert reference.refresh_status == "historical_only"
+    assert reference.refresh_completeness == "complete"
+
+
+@pytest.mark.asyncio
+async def test_partial_refresh_does_not_replace_complete_historical_original(monkeypatch):
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, json):
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", url),
+                json={"status": "updated", "source_snapshot": {
+                    "id": 179, "page_title": "局部刷新标题",
+                    "content_text": "只读取到首页与业务数据，没有架构关系。",
+                    "completeness_status": "partial", "identity_match": True,
+                    "collected_at": 1_790_620_000_000,
+                }},
+            )
+
+    monkeypatch.setattr(
+        "creation.service.httpx.AsyncClient", lambda **_kwargs: FakeAsyncClient()
+    )
+    old_body = "灵机的自由对话 Agent 实现图生视频和智能商详。"
+    reference = _compact_date_reference(old_body)
+    reference.source_id = 582
+    reference.title = "已核验原文标题"
+    reference.source_snapshot_id = 55
+    reference.source_body_hash = hashlib.sha256(old_body.encode("utf-8")).hexdigest()
+    reference.refresh_status = "historical_only"
+    reference.refresh_completeness = "complete"
+    service = CreationService.__new__(CreationService)
+
+    stats = await service.refresh_recalled_documents([reference], "灵机架构")
+
+    assert stats["partial"] == stats["updated"] == 1
+    assert reference.full_content == old_body
+    assert reference.title == "已核验原文标题"
+    assert reference.source_snapshot_id == 55
+    assert reference.source_body_hash == hashlib.sha256(old_body.encode("utf-8")).hexdigest()
+    assert reference.refresh_status == "historical_only"
+    assert reference.refresh_completeness == "complete"
+    assert "保留完整历史原文" in reference.reason
 
 
 @pytest.mark.asyncio
@@ -1538,6 +1707,394 @@ def test_extract_keywords_drops_sliding_ngrams_and_contained_tokens():
     assert "结果指标" not in keywords
     assert "列表展示" not in keywords
     assert not any("尽可能" in keyword for keyword in keywords)
+
+
+def test_diagram_retrieval_keeps_cross_script_subject_without_quantity_fragments(tmp_path):
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO bake_documents VALUES "
+            "(1,'短视频AIGC技术日会','技术记录','',"
+            "'短视频AIGC的输入、编排和生成链路。','[]','[]','',0,"
+            "'auto_created',1,NULL,NULL,'enabled')"
+        )
+        conn.execute(
+            "INSERT INTO bake_documents VALUES "
+            "(2,'快手电商短视频技术记录','技术记录','',"
+            "'讨论电商短视频生成链路。','[]','[]','',0,"
+            "'auto_created',1,NULL,NULL,'enabled')"
+        )
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+    query = "生成一张快手电商短视频AIGC引擎的技术架构图"
+    requirement = service.analyze_requirement(query, CreationOptions())
+    plan = requirement["retrieval_plan"]
+
+    assert "一张快手电商短视频" not in requirement["keywords"]
+    assert "短视频AIGC" in requirement["keywords"]
+    assert plan["primary_target"] == "短视频AIGC"
+    assert not any(term.startswith("张快手") for term in plan["candidate_terms"])
+    assert plan["term_weights"].get("手电商短", 0) <= 0.35
+
+
+def test_complete_unbound_snapshot_is_recalled_only_as_historical_evidence(tmp_path):
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    old = 1_780_000_000_000
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE bake_document_source_heads(document_id INTEGER PRIMARY KEY,
+                snapshot_id INTEGER NOT NULL);
+            CREATE TABLE bake_document_source_snapshots(id INTEGER PRIMARY KEY,
+                document_id INTEGER,source_url TEXT,page_title TEXT,content_text TEXT,
+                identity_match INTEGER,completeness_status TEXT,collected_at INTEGER);
+        """)
+        for identifier, url in (
+            (1, "https://docs.example/source-1"),
+            (2, "https://docs.example/source-2"),
+            (3, "https://docs.example/source-3"),
+        ):
+            conn.execute(
+                "INSERT INTO bake_documents VALUES (?,?,?,'',?,'[]','[]','',0,"
+                "'auto_created',?,?,NULL,'enabled')",
+                (identifier, "短视频AIGC技术日会", "技术记录", "旧的提炼摘要。", old, url),
+            )
+        conn.executemany(
+            "INSERT INTO bake_document_source_snapshots VALUES (?,?,?,?,?,?,?,?)",
+            [
+                (11, 1, "https://docs.example/source-1", "短视频AIGC技术日会",
+                 "短视频AIGC链路：商品素材输入，脚本编排，视频生成与审核。",
+                 1, "complete", old + 10),
+                (12, 1, "https://docs.example/source-1", "短视频AIGC技术日会",
+                 "只读取到首页，没有架构正文。", 1, "partial", old + 20),
+                (21, 2, "https://docs.example/other-source", "短视频AIGC技术日会",
+                 "短视频AIGC链路：不能跨来源使用。", 1, "complete", old + 10),
+                (31, 3, "https://docs.example/source-3", "短视频AIGC技术日会",
+                 "短视频AIGC链路：该文档已有 source head。", 1, "complete", old + 10),
+            ],
+        )
+        conn.execute("INSERT INTO bake_document_source_heads VALUES (3,31)")
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+    service.enable_vector_recall = False
+    service._embedding_model = None
+    query = "短视频AIGC链路"
+    options = CreationOptions(max_references=5)
+    requirement = {"keywords": ["短视频AIGC"]}
+
+    rows = service._query_historical_document_rows(query, requirement, options)
+    assert [(item["id"], item["source_snapshot_id"]) for item in rows] == [(1, 11)]
+    references = service.retrieve_references(query, requirement, options)
+    historical = next(item for item in references if item.source_id == 1)
+    assert historical.source_snapshot_id == 11
+    assert historical.refresh_status == "historical_only"
+    assert historical.refresh_completeness == "complete"
+    assert historical.refresh_collected_at == old + 10
+    assert "历史原文快照" in historical.reason
+    assert "仅证明采集时内容" in historical.reason
+    assert "只读取到首页" not in historical.full_content
+
+
+def test_historical_source_bridge_requires_named_original_and_local_relation(tmp_path):
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE bake_document_source_heads(document_id INTEGER PRIMARY KEY,
+                snapshot_id INTEGER NOT NULL);
+            CREATE TABLE bake_document_source_snapshots(id INTEGER PRIMARY KEY,
+                document_id INTEGER,source_url TEXT,page_title TEXT,content_text TEXT,
+                identity_match INTEGER,completeness_status TEXT,collected_at INTEGER);
+        """)
+        sources = [
+            (1, "短视频AIGC技术日会",
+             "短视频AIGC链路：灵机AIGC通过工作流模板复用脚本库。"),
+            (2, "灵机专项会",
+             "灵机方案：工作流模板复用脚本库，Agent接入生成链路。"),
+            (3, "无关日报",
+             "日均AIGC指标与模型服务。"),
+            (4, "灵机旁题",
+             "灵机方案。" + "其他业务资料。" * 300 + "脚本库和工作流模板。"),
+            (5, "灵机术语清单",
+             "灵机、工作流模板、脚本库、Agent、模型。"),
+            (6, "灵机未核验来源",
+             "灵机方案通过工作流模板复用脚本库。"),
+        ]
+        for identifier, title, body in sources:
+            url = "https://docs.example/source-{}".format(identifier)
+            conn.execute(
+                "INSERT INTO bake_documents VALUES (?,?,?,'',?,'[]','[]','',0,"
+                "'auto_created',?,?,NULL,'enabled')",
+                (identifier, title, "技术记录", "旧的提炼摘要。", 1_780_000_000_000, url),
+            )
+            conn.execute(
+                "INSERT INTO bake_document_source_snapshots VALUES (?,?,?,?,?,?,?,?)",
+                (identifier + 10, identifier, url, title, body,
+                 0 if identifier == 6 else 1,
+                 "complete", 1_780_000_000_000),
+            )
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+    query = "快手电商短视频AIGC引擎"
+    requirement = {"keywords": ["短视频AIGC"]}
+
+    rows = service._query_historical_document_rows(
+        query, requirement, CreationOptions(max_references=10)
+    )
+    assert [row["id"] for row in rows] == [1, 2]
+    assert rows[1]["historical_bridge_entity"] == "灵机"
+    assert rows[1]["historical_bridge_snapshot_id"] == 11
+
+
+def test_historical_bridge_keeps_substantive_title_and_citation_sources(tmp_path):
+    db_path = tmp_path / "memory-bread.db"
+    _create_unified_memory_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE bake_document_source_heads(document_id INTEGER PRIMARY KEY,
+                snapshot_id INTEGER NOT NULL);
+            CREATE TABLE bake_document_source_snapshots(id INTEGER PRIMARY KEY,
+                document_id INTEGER,source_url TEXT,page_title TEXT,content_text TEXT,
+                identity_match INTEGER,completeness_status TEXT,collected_at INTEGER);
+        """)
+        sources = [
+            (1, "短视频AIGC技术日会",
+             "短视频AIGC链路：灵机AIGC通过工作流模板复用脚本库，"
+             "自由对话Agent生成视频，视频复刻走生产链路。"),
+            (2, "灵机专项会",
+             "灵机方案通过工作流模板复用脚本库，Agent接入生成链路。"),
+            (3, "灵机OKR",
+             "Q3目标：以Multi-Agent + Workflow为核心架构，"
+             "上线短视频、商品和直播三类内容。"),
+            (4, "剧本Agent与复刻Tool功能",
+             "本文被以下文档引用：短视频AIGC技术日会。"
+             "当前主要功能：剧本Agent把原创剧本上传个人资产库，"
+             "走爆款复刻的视频生成链路生成视频。"),
+            (5, "行业竞品索引",
+             "目录 灵机Loop形态设计 行业调研：竞品通过剧本库和"
+             "工作流建设视频生成链路。"),
+            (6, "引用目录",
+             "短视频AIGC技术日会。目录 Agent 链路 模型。"),
+            (7, "他项架构",
+             "短视频AIGC技术日会在参考资料中。"
+             "另一项目的 Agent 通过生产链路生成视频。"),
+        ]
+        for identifier, title, body in sources:
+            url = "https://docs.example/source-{}".format(identifier)
+            conn.execute(
+                "INSERT INTO bake_documents VALUES (?,?,?,'',?,'[]','[]','',0,"
+                "'auto_created',?,?,NULL,'enabled')",
+                (identifier, title, "技术记录", "旧的提炼摘要。", 1_780_000_000_000, url),
+            )
+            conn.execute(
+                "INSERT INTO bake_document_source_snapshots VALUES (?,?,?,?,?,?,?,?)",
+                (identifier + 10, identifier, url, title, body,
+                 1, "complete", 1_780_000_000_000),
+            )
+    service = CreationService.__new__(CreationService)
+    service.db_path = str(db_path)
+    service.enable_vector_recall = False
+    service._embedding_model = None
+    query = "请画短视频AIGC技术架构图"
+    requirement = {"keywords": ["短视频AIGC"]}
+    options = CreationOptions(max_references=10)
+
+    rows = service._query_historical_document_rows(query, requirement, options)
+    by_id = {int(row["id"]): row for row in rows}
+    assert by_id[3]["historical_bridge_kind"] == "entity_title"
+    assert "核心架构" in by_id[3]["historical_bridge_excerpt"]
+    assert by_id[4]["historical_bridge_kind"] == "source_citation"
+    assert "个人资产库" in by_id[4]["historical_bridge_excerpt"]
+    assert "短视频AIGC技术日会" in by_id[4]["historical_bridge_link_excerpt"]
+    assert 5 not in by_id
+    assert 6 not in by_id or not by_id[6].get("historical_bridge_score")
+    assert 7 not in by_id or not by_id[7].get("historical_bridge_score")
+
+    references = service.retrieve_references(query, requirement, options)
+    bridged = {
+        ref.source_id: ref for ref in references
+        if ref.source_type == "document" and ref.bridge_evidence
+    }
+    assert {2, 3, 4}.issubset(bridged)
+    for source_id in (3, 4):
+        evidence = bridged[source_id].bridge_evidence
+        assert evidence["anchor_snapshot_id"] == 11
+        assert len(evidence["anchor_source_body_hash"]) == 64
+        assert evidence["target_snapshot_id"] == source_id + 10
+        assert evidence["target_source_body_hash"] == bridged[source_id].source_body_hash
+        assert evidence["target_excerpt"] in bridged[source_id].full_content
+        assert evidence["claim_scope"] == "target_source_only"
+        assert evidence["cross_source_edge_allowed"] is False
+        if source_id == 4:
+            assert evidence["link_excerpt"] in bridged[source_id].full_content
+            assert "不证明跨文档调用" in bridged[source_id].reason
+        assert bridged[source_id].refresh_status == "historical_only"
+
+
+def test_near_top_verified_original_can_survive_derivative_memory_crowd():
+    class Reference:
+        def __init__(self, domain, identifier, score, original=False):
+            self.source_type = domain
+            self.source_id = identifier
+            self.final_weight = score
+            self.relevance_score = 0.82
+            self.lexical_score = 0.82
+            self.source_snapshot_id = identifier if original else None
+            self.refresh_completeness = "complete" if original else "unverified"
+            self.source_url = "https://docs.example/source" if original else None
+            self.selection_reasons = ()
+
+    ranked = [
+        *[Reference("knowledge", index, 0.90 - index * 0.01) for index in range(6)],
+        *[Reference("operation", index + 10, 0.84 - index * 0.01) for index in range(4)],
+        Reference("document", 30, 0.78, original=True),
+    ]
+    selected = CreationService._select_diverse_references(ranked, 8)
+    assert any(item.source_type == "document" and item.source_id == 30 for item in selected)
+    assert "original_source_anchor" in selected[-1].selection_reasons
+
+
+def test_verified_original_family_survives_vector_result_crowd():
+    class Reference:
+        def __init__(self, source_type, source_id, score, snapshot=None,
+                     body="", bridge=None):
+            self.source_type = source_type
+            self.source_id = source_id
+            self.final_weight = score
+            self.source_snapshot_id = snapshot
+            self.source_body_hash = "a" * 64 if source_id == 1 else "b" * 64
+            self.refresh_completeness = "complete" if snapshot else "unverified"
+            self.source_url = "https://docs.example/source" if snapshot else None
+            self.full_content = body
+            self.bridge_evidence = bridge
+            self.selection_reasons = ()
+            self.relevance_score = 0.72 if source_id == 1 else 0.55
+            self.lexical_score = 0.72 if source_id == 1 else 0.0
+            self.semantic_score = 0.0
+            self.matched_keywords = ("目标架构",) if source_id == 1 else ()
+
+    anchor = Reference("document", 1, 0.52, 11, "原始架构说明")
+    connected = [
+        Reference("document", source_id, 0.50 - source_id * 0.01,
+                  source_id + 10, "局部关系原文", {
+                      "anchor_snapshot_id": 11,
+                      "anchor_source_body_hash": "a" * 64,
+                      "target_snapshot_id": source_id + 10,
+                      "target_source_body_hash": "b" * 64,
+                      "target_excerpt": "局部关系原文",
+                  })
+        for source_id in (2, 3)
+    ]
+    invalid = Reference("document", 4, 0.55, 14, "目录", {
+        "anchor_snapshot_id": 11,
+        "anchor_source_body_hash": "a" * 64,
+        "target_snapshot_id": 14,
+        "target_source_body_hash": "b" * 64,
+        "target_excerpt": "并非目标原文中的关系",
+    })
+    crowd = [
+        Reference("knowledge", 100 + index, 0.90 - index * 0.01)
+        for index in range(5)
+    ]
+    selected = CreationService._select_verified_source_family(
+        [*crowd, invalid, *connected, anchor], crowd, 5
+    )
+    assert [(item.source_type, item.source_id) for item in selected[:3]] == [
+        ("document", 1), ("document", 2), ("document", 3)
+    ]
+    assert len(selected) == 5
+    assert all(item.source_id != 4 for item in selected)
+    assert "verified_source_anchor" in selected[0].selection_reasons
+    assert "verified_source_bridge" in selected[1].selection_reasons
+
+
+def test_source_family_prefers_relevant_selected_primary_over_more_bridges():
+    class Reference:
+        def __init__(self, source_id, score, relevance, snapshot, body,
+                     bridge=None, selected_keyword=False):
+            self.source_type = "document"
+            self.source_id = source_id
+            self.final_weight = score
+            self.relevance_score = relevance
+            self.lexical_score = relevance if selected_keyword else 0.0
+            self.semantic_score = 0.0
+            self.matched_keywords = ("目标主题",) if selected_keyword else ()
+            self.source_snapshot_id = snapshot
+            self.source_body_hash = str(source_id) * 64
+            self.refresh_completeness = "complete"
+            self.source_url = "https://docs.example/{}".format(source_id)
+            self.full_content = body
+            self.bridge_evidence = bridge
+            self.selection_reasons = ()
+
+    primary = Reference(1, 0.88, 0.82, 11, "目标主题原文", selected_keyword=True)
+    linked = Reference(2, 0.81, 0.70, 12, "目标主题关系", {
+        "anchor_snapshot_id": 11,
+        "anchor_source_body_hash": "1" * 64,
+        "target_snapshot_id": 12,
+        "target_source_body_hash": "2" * 64,
+        "target_excerpt": "目标主题关系",
+    })
+    unrelated = Reference(20, 0.28, 0.22, 120, "其他主题原文",
+                          selected_keyword=True)
+    weaker_bridges = [
+        Reference(source_id, 0.40 - index * 0.01, 0.35,
+                  100 + source_id, "其他主题关系", {
+                      "anchor_snapshot_id": 120,
+                      "anchor_source_body_hash": "20" * 64,
+                      "target_snapshot_id": 100 + source_id,
+                      "target_source_body_hash": str(source_id) * 64,
+                      "target_excerpt": "其他主题关系",
+                  })
+        for index, source_id in enumerate((21, 22, 23))
+    ]
+    result = CreationService._select_verified_source_family(
+        [primary, linked, unrelated, *weaker_bridges],
+        [primary, linked, weaker_bridges[0]], 3,
+    )
+    assert [(item.source_id) for item in result] == [1, 2, 21]
+    # Even when the second family clears the admission threshold, its extra
+    # bridges must not displace the already selected, more relevant primary.
+    unrelated.final_weight = 0.60
+    unrelated.relevance_score = 0.55
+    unrelated.lexical_score = 0.55
+    assert [item.source_id for item in CreationService._select_verified_source_family(
+        [primary, linked, unrelated, *weaker_bridges],
+        [primary, linked, weaker_bridges[0]], 3,
+    )] == [1, 2, 21]
+
+
+def test_historical_bridge_rejects_competitor_and_directory_clauses():
+    bridge = {
+        "entity": "灵机", "terms": ["视频链路", "脚本库", "工作流"],
+        "specific": ["视频链路", "脚本库"], "snapshot_id": 55,
+        "anchor_hash": "a" * 64, "anchor_excerpt": "灵机AIGC",
+        "anchor_title": "短视频AIGC技术日会",
+    }
+    match = CreationService._historical_bridge_match
+    assert match(
+        "竞品甲通过脚本库建设视频链路，生成视频。",
+        bridge, "灵机专项会议",
+    ) is None
+    assert match(
+        "目录：1. 工作流架构与脚本库\n"
+        "竞品甲的工作流架构通过脚本库生成视频。",
+        bridge, "灵机方案",
+    ) is None
+    assert match(
+        "短视频AIGC技术日会只是参考资料。"
+        "另一项目通过脚本库建设视频链路，生成视频。",
+        bridge, "其他项目方案",
+    ) is None
+    assert match(
+        "脚本库通过工作流建设视频链路，生成视频。",
+        bridge, "灵机竞品调研",
+    ) is None
+    assert match(
+        "行业竞品调研\n脚本库通过工作流建设视频链路，生成视频。",
+        bridge, "灵机专项会议",
+    ) is None
 
 
 def test_meeting_note_lexical_score_not_diluted_by_noise_keywords():
@@ -2209,3 +2766,93 @@ def test_verified_source_quality_does_not_depend_on_removed_model_artifacts():
     assert service._score_completeness(dict(row, source_snapshot_id=None)) < 1.0
     assert service._score_quality(dict(row, source_completeness="partial")) < 1.0
     assert service._score_completeness(dict(row, source_completeness="partial")) < 1.0
+
+
+def test_structural_windows_preserve_independent_original_scopes():
+    from types import SimpleNamespace
+
+    bridge = "以 Multi-Agent + Workflow 为核心架构，上线短视频和商品内容。\n"
+    skill = (
+        "【B端商详】生成\n灵机平台\n一张图或一个商品id生成完整商详\n"
+        "1.工作流：\n输入商品id➡️skill1生成html商品详情骨架"
+        "➡️skill2基于骨架槽位生图➡️输出完整详情页\n"
+    )
+    feedback = "建立线上Badcase—标注—评测—模型优化—重新上线的闭环。\n"
+    body = ("历史原文\n" + bridge + "其他段落。\n" * 20
+            + skill + "独立的另一阶段。\n" * 20 + feedback)
+    body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    item = SimpleNamespace(
+        title="灵机架构与方案", full_content=body, source_type="document",
+        source_snapshot_id=42, source_body_hash=body_hash,
+        refresh_completeness="complete",
+        bridge_evidence={"target_excerpt": bridge, "entity": "灵机"},
+    )
+
+    windows = CreationService.select_structural_evidence_windows(
+        item, ["短视频AIGC", "Agent", "Skill"]
+    )
+
+    assert windows[0]["content"] == bridge
+    assert any("skill1" in window["content"] and "skill2" in window["content"]
+               for window in windows)
+    assert any("Badcase—标注—评测—模型优化—重新上线" in window["content"]
+               for window in windows)
+    assert all("skill1" not in window["content"] or
+               "Badcase—标注" not in window["content"] for window in windows)
+    for window in windows:
+        scope = window["source_scope"]
+        raw = body.encode("utf-8")[
+            scope["start_byte"]:scope["end_byte"]
+        ]
+        assert raw == window["content"].encode("utf-8")
+        assert scope["excerpt_hash"] == hashlib.sha256(raw).hexdigest()
+        assert scope["source_body_hash"] == body_hash
+        assert scope["snapshot_id"] == 42
+        assert scope["offset_unit"] == "utf8_bytes"
+        assert scope["allows_full_document_claims"] is False
+
+
+def test_structural_windows_exclude_unrelated_metrics_and_repeated_tables():
+    from types import SimpleNamespace
+
+    bridge = "灵机工作流调用剧本库，提供视频模板。\n"
+    useful = "灵机平台\n输入商品➡️skill1生成骨架➡️skill2填充图片➡️输出详情页\n"
+    unrelated = (
+        "其他业务 Agent 模型推理优化：QPS 0.24，成本提升20%，耗时增加。\n"
+        "其他业务 Agent 工作流生成视频，ROI 达到 1.2。\n"
+    )
+    body = bridge + unrelated + ("无关说明。\n" * 8) + useful
+    body += ("下期重复记录。\n" * 4) + useful
+    item = SimpleNamespace(
+        title="灵机方案记录", full_content=body, source_type="document",
+        source_snapshot_id=54,
+        source_body_hash=hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        refresh_completeness="complete",
+        bridge_evidence={"target_excerpt": bridge, "entity": "灵机"},
+    )
+
+    windows = CreationService.select_structural_evidence_windows(
+        item, ["Agent", "Skill", "AIGC"]
+    )
+
+    assert windows[0]["content"] == bridge
+    assert sum("skill1" in window["content"] for window in windows) == 1
+    assert all("QPS" not in window["content"] and "ROI" not in window["content"]
+               for window in windows)
+    assert len(windows) == 2
+
+
+def test_structural_windows_require_complete_matching_snapshot():
+    from types import SimpleNamespace
+
+    body = "工作流调用剧本库，生成视频。"
+    item = SimpleNamespace(
+        title="架构", full_content=body, source_type="document",
+        source_snapshot_id=9, source_body_hash="0" * 64,
+        refresh_completeness="complete", bridge_evidence={},
+    )
+    with pytest.raises(ValueError, match="Source body hash"):
+        CreationService.select_structural_evidence_windows(item, ["工作流"])
+    item.source_body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    item.refresh_completeness = "partial"
+    assert CreationService.select_structural_evidence_windows(item, ["工作流"]) == []

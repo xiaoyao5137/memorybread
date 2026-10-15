@@ -649,7 +649,7 @@ def validate_operation(raw: Any) -> Dict[str, Any]:
     kind = raw["kind"]
     fields = {"patch": {"patches"}, "transform": {"targets"}, "respond": {"response"},
               "resume": {"operation_id"}, "undo": {"operation_id"}, "execute_skill": {"skill_ids", "skill_assessments", "document_identity"},
-              "generate": {"document_identity"}}
+              "generate": {"document_identity", "artifact_kind"}}
     if set(raw) - ({"kind", "constraint_skill_ids", "skill_assessments"} | fields.get(kind, set())):
         raise OperationError("CREATION_OPERATION_INVALID", "本轮操作包含不支持的字段")
     if kind == "patch":
@@ -665,10 +665,12 @@ def validate_operation(raw: Any) -> Dict[str, Any]:
         raise OperationError("CREATION_RESUME_MISSING", "需要指定未完成操作")
     if kind == "execute_skill" and (not isinstance(raw.get("skill_ids"), list) or not raw["skill_ids"]):
         raise OperationError("CREATION_OPERATION_INVALID", "需要明确 Skill 标识")
+    if kind == "generate" and raw.get("artifact_kind", "document") not in ("document", "diagram"):
+        raise OperationError("CREATION_CAPABILITY_UNAVAILABLE", "当前创作操作不支持该产物类型")
     for key in ("skill_ids", "constraint_skill_ids"):
         if key in raw and (not isinstance(raw[key], list) or any(not isinstance(item, str) or not item.strip() for item in raw[key])):
             raise OperationError("CREATION_OPERATION_INVALID", "Skill 标识必须是非空字符串列表")
-    return {key: raw[key] for key in ("kind", "patches", "targets", "response", "operation_id", "skill_ids", "constraint_skill_ids", "document_identity", "skill_assessments") if key in raw}
+    return {key: raw[key] for key in ("kind", "patches", "targets", "response", "operation_id", "skill_ids", "constraint_skill_ids", "document_identity", "artifact_kind", "skill_assessments") if key in raw}
 
 
 def routing_response_schema(tool_ids: List[str], agent_ids: List[str], skill_ids: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -708,6 +710,8 @@ def routing_response_schema(tool_ids: List[str], agent_ids: List[str], skill_ids
             from .skill_governance import IDENTITY_SCHEMA, ASSESSMENT_SCHEMA
             properties["document_identity"] = IDENTITY_SCHEMA
             required = required + ["document_identity"]
+            if kind == "generate":
+                properties["artifact_kind"] = {"enum": ["document", "diagram"]}
             if kind == "execute_skill":
                 properties["skill_assessments"] = ASSESSMENT_SCHEMA
                 required = required + ["skill_assessments"]

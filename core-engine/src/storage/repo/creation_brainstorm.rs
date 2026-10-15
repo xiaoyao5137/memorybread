@@ -1,5 +1,96 @@
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Read-only workflow state for history cards. A chapter operation's terminal
+/// state and the overall writing workflow are deliberately separate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainstormStageSummary {
+    pub version: u8,
+    pub phase: String,
+    pub active_stage: String,
+    pub stage_status: String,
+    pub completed_chapters: usize,
+    pub total_chapters: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_chapter_title: Option<String>,
+}
+
+/// Project all requested sessions in one query. Question trees and candidate
+/// text remain in SQLite and are never attached to the history response.
+pub fn stage_summaries(
+    conn: &Connection,
+    session_ids: &[String],
+) -> Result<BTreeMap<String, BrainstormStageSummary>> {
+    let ids: BTreeSet<_> = session_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .collect();
+    if ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let placeholders = vec!["?"; ids.len()].join(",");
+    let mut stmt = conn.prepare(&format!(
+        "WITH sessions AS (
+            SELECT session_id, phase,
+                CASE WHEN json_valid(state_json) THEN state_json ELSE '{{}}' END AS state
+            FROM creation_brainstorm_sessions WHERE session_id IN ({placeholders})
+        )
+        SELECT session_id, phase,
+            CAST(json_extract(state,'$.stage_workflow.active_stage') AS TEXT),
+            (SELECT CAST(json_extract(CASE WHEN json_valid(value) THEN value ELSE '{{}}' END,'$.status') AS TEXT)
+             FROM json_each(state,'$.stage_workflow.stages')
+             WHERE json_extract(CASE WHEN json_valid(value) THEN value ELSE '{{}}' END,'$.id')
+                = json_extract(state,'$.stage_workflow.active_stage') LIMIT 1),
+            (SELECT COUNT(*) FROM json_each(state,'$.stage_workflow.chapters')
+             WHERE json_extract(CASE WHEN json_valid(value) THEN value ELSE '{{}}' END,'$.status')='completed'),
+            COALESCE(json_array_length(state,'$.stage_workflow.chapters'),0),
+            (SELECT CAST(json_extract(CASE WHEN json_valid(value) THEN value ELSE '{{}}' END,'$.title') AS TEXT)
+             FROM json_each(state,'$.stage_workflow.chapters')
+             WHERE json_extract(CASE WHEN json_valid(value) THEN value ELSE '{{}}' END,'$.id')
+                = json_extract(state,'$.stage_workflow.active_chapter_id') LIMIT 1)
+        FROM sessions WHERE json_extract(state,'$.stage_workflow.version')=2"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(ids), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, usize>(4)?,
+            row.get::<_, usize>(5)?,
+            row.get::<_, Option<String>>(6)?,
+        ))
+    })?;
+    let mut summaries = BTreeMap::new();
+    for row in rows {
+        let (
+            session_id,
+            phase,
+            active_stage,
+            stage_status,
+            completed_chapters,
+            total_chapters,
+            active_chapter_title,
+        ) = row?;
+        if let (Some(active_stage), Some(stage_status)) = (active_stage, stage_status) {
+            summaries.insert(
+                session_id,
+                BrainstormStageSummary {
+                    version: 2,
+                    phase,
+                    active_stage,
+                    stage_status,
+                    completed_chapters,
+                    total_chapters,
+                    active_chapter_title,
+                },
+            );
+        }
+    }
+    Ok(summaries)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreationBrainstormSession {
@@ -97,6 +188,65 @@ pub fn update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage_summaries_project_requested_v2_sessions_without_candidate_trees() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE creation_brainstorm_sessions (
+            session_id TEXT PRIMARY KEY, phase TEXT NOT NULL, state_json TEXT NOT NULL);",
+        )
+        .unwrap();
+        let current = serde_json::json!({"stage_workflow": {
+            "version":2,"active_stage":"writing","active_chapter_id":"two",
+            "stages":[{"id":"writing","status":"answering","questions":[{"prompt":"unchosen candidate must stay private"}]}],
+            "chapters":[{"id":"one","title":"开篇","status":"completed"},
+                {"id":"two","title":"结尾","status":"answering"}]}});
+        for (id, state) in [
+            ("current", current.to_string()),
+            ("other", current.to_string()),
+            ("legacy", "{}".into()),
+            ("broken", "{broken".into()),
+        ] {
+            conn.execute(
+                "INSERT INTO creation_brainstorm_sessions VALUES (?1,'exploring',?2)",
+                params![id, state],
+            )
+            .unwrap();
+        }
+        assert!(stage_summaries(&conn, &[]).unwrap().is_empty());
+        let summaries = stage_summaries(
+            &conn,
+            &[
+                "current".into(),
+                "current".into(),
+                "".into(),
+                "legacy".into(),
+                "broken".into(),
+                "missing".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(summaries.len(), 1);
+        let summary = &summaries["current"];
+        assert_eq!(summary.phase, "exploring");
+        assert_eq!(summary.active_stage, "writing");
+        assert_eq!(summary.stage_status, "answering");
+        assert_eq!((summary.completed_chapters, summary.total_chapters), (1, 2));
+        assert_eq!(summary.active_chapter_title.as_deref(), Some("结尾"));
+        let serialized = serde_json::to_string(summary).unwrap();
+        assert!(!serialized.contains("candidate"));
+        assert!(!serialized.contains("questions"));
+        assert!(serialized.len() < 300);
+        let persisted: String = conn
+            .query_row(
+                "SELECT state_json FROM creation_brainstorm_sessions WHERE session_id='current'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted, current.to_string());
+    }
 
     #[test]
     fn update_uses_optimistic_revision() {

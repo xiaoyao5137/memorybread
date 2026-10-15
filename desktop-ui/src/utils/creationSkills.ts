@@ -129,6 +129,8 @@ export interface MatchedCreationSkill {
   score: number
 }
 
+export type CreationSkillSelectionSource = 'user' | 'automatic' | 'dependency'
+
 export interface ExecutionSkillResolution {
   matches: MatchedCreationSkill[]
   source: 'mentioned' | 'model' | 'unavailable'
@@ -1116,14 +1118,20 @@ function mergeCreationSkillWritingGuidelines(primary: unknown, fallback: string[
 
 function isCompleteCreationSkillExampleDocument(value: unknown) {
   const text = String(value || '').trim()
-  if (text.length < 1000) return false
-  if ((text.match(/^#\s+\S/gm) || []).length !== 1) return false
-  if ((text.match(/^##\s+\S/gm) || []).length < 6) return false
-  const bodyBlocks = text
-    .split(/\n\s*\n/)
-    .map(block => block.trim())
-    .filter(block => block && !block.startsWith('#') && block.length >= 40)
-  return bodyBlocks.length >= 8
+  if (!text || (text.match(/^#\s+\S/gm) || []).length > 1) return false
+  if ((text.match(/^\s*(?:```|~~~)/gm) || []).length % 2) return false
+  const prose = text.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, '')
+  const headings = Array.from(prose.matchAll(/^(#{1,6})\s+[^\n]+\n?/gm))
+  const sections = headings.length ? [prose.slice(0, headings[0].index)] : [prose]
+  for (const [index, heading] of headings.entries()) {
+    const body = prose.slice((heading.index || 0) + heading[0].length, headings[index + 1]?.index ?? prose.length).trim()
+    if (!body && (!headings[index + 1] || headings[index + 1][1].length <= heading[1].length)) return false
+    sections.push(body)
+  }
+  const bodies = sections.map(section => section.trim()).filter(Boolean)
+  if (!bodies.length) return false
+  if (bodies.some(body => /^(?:内容很短|内容不足|这是一份过短示例|继续说明|正文|示例正文|待补充|待完善|TODO|TBD)[。.!！]?$/i.test(body))) return false
+  return bodies.some(body => /[。！？!?.]|^\s*[-*|]/m.test(body))
 }
 
 const creationSkillAnalysisRequest = (source: CreationSkillSource): RequestInit => ({
@@ -2014,7 +2022,7 @@ export function buildClientCreationSkillFallback(
       diagramStyle: [clientDiagramExample(diagramStyle)],
       writingGuidelines: phraseExamples,
     },
-    exampleDocument: clientFallbackExampleDocument(rawHeadings),
+    exampleDocument: clientFallbackExampleDocument(rawHeadings, styleContent),
     suggestedCategoryKeywords: categoryKeywords,
     analysisMode: 'client_heuristic_fallback',
     fallbackReason,
@@ -2189,7 +2197,7 @@ function clientDistinctiveSections(content: string): CreationSkillDistinctiveSec
   return sections
 }
 
-function clientFallbackExampleDocument(sourceHeadings: string[]) {
+function clientFallbackExampleDocument(sourceHeadings: string[], sourceContent = '') {
   const joined = sourceHeadings.join('\n')
   let document = DEFAULT_CREATION_SKILL_EXAMPLE_DOCUMENT
   if (/从.{1,12}(?:视角|角度|层面).{0,4}看/.test(joined)) {
@@ -2209,7 +2217,6 @@ function clientFallbackExampleDocument(sourceHeadings: string[]) {
       ['## 结论与后续：把临时协调变成稳定机制', '## 最终要形成什么结果'],
     ]
     for (const [from, to] of questions) document = document.replace(from, to)
-    return document
   }
   if (!/[：:]/.test(joined)) {
     document = document
@@ -2218,7 +2225,31 @@ function clientFallbackExampleDocument(sourceHeadings: string[]) {
         : '# 共享评审空间预约流程优化方案')
       .replace(/^## ([^：\n]+)：.*$/gm, '## $1')
   }
-  return document
+  if (!sourceContent.trim()) return document
+  const mainTitle = document.split('\n')[0]
+  const entries = Array.from(document.matchAll(/^##\s+(.+)$/gm))
+  const blocks = entries.map((entry, index) => ({ title: entry[1], content: document.slice(entry.index!, entries[index + 1]?.index ?? document.length).trim() }))
+  const sourceTitles = [...new Set(sourceHeadings)]
+  const used = new Set<string>()
+  const roles: Array<[RegExp, RegExp]> = [
+    [/摘要|summary/i, /摘要/], [/背景|问题|为何|为什么/, /背景|问题|为什么/], [/目标|范围|边界/, /目标|范围|解决/],
+    [/方案|策略|设计|方法|落地/, /方案/], [/流程|步骤|路径/, /流程|预约如何/], [/风险|异常|保障/, /风险|异常/],
+    [/验证|验收|复盘|评测/, /验证|复盘|有效/], [/结论|后续|建议/, /结论|后续|结果/],
+  ]
+  const sourceParagraphs = sourceContent.split(/\n\s*\n/).filter(part => part.trim() && !part.trim().startsWith('#'))
+  const budget = Math.max(1, Math.min(2, Math.ceil(sourceParagraphs.length / Math.max(1, sourceTitles.length))))
+  const selected = sourceTitles.flatMap(title => {
+    const role = roles.find(([pattern]) => pattern.test(title))
+    const block = (role && blocks.find(block => role[1].test(block.title) && !used.has(block.title)))
+      || blocks.find(block => !/摘要/.test(block.title) && !used.has(block.title))
+    if (!block) return []
+    used.add(block.title)
+    const body = block.content.slice(block.content.indexOf('\n') + 1).trim().split(/\n\s*\n/).slice(0, budget).join('\n\n')
+    return [`## ${block.title}\n\n${body}`]
+  })
+  if (!selected.length) selected.push('这是一个完全虚构的协作场景。建议把申请、接手与释放放在同一份记录中，让相关角色看到当前状态和下一步动作。',
+    '先验证正常流转和异常处理是否都有明确的接手角色，再依据记录调整边界。本示例只演示表达，不代表真实项目的安排或效果。')
+  return [mainTitle, ...selected].join('\n\n')
 }
 
 function describeClientWritingFlow(structure: string[], content: string) {

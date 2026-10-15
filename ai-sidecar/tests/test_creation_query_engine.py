@@ -6,6 +6,7 @@ from creation.query_engine import (
     QUERY_PLAN_VERSION,
     QueryPlanError,
     execute_query_plan,
+    explicit_ranked_row_plans,
     parse_query_plan,
     relation_catalog,
     validate_query_plan,
@@ -65,6 +66,33 @@ def test_ranked_query_merges_pages_sorts_numerically_and_preserves_rows():
     assert result["rows"][0]["cells"][note_field]["raw"] == "乙说明"
     assert all(len(row["source_row_ids"]) == 1 for row in result["rows"])
     assert result["validation"]["status"] == "verified"
+
+
+def test_explicit_ranked_subtask_is_executed_even_alongside_unavailable_period_prose():
+    header = ["项目名称", "领域", "卡数", "年内成本（万元）", "年化成本（万元）", "年化收益（万元）", "ROI"]
+    rows = [["项目{}".format(index), "领域", str(index), "—", "{}万元".format(index), "—", "—"]
+            for index in range(1, 103)]
+    data = table_result([[header, *rows[:50]], [header, *rows[50:]]])
+    objective = ("先筛选页面日期，只有目标周期内的值才采用；"
+                 "项目表保持原始行列关联，按年化成本的数值降序选择前10个项目行；"
+                 "表格列沿用页面已有的项目名称、领域、卡数、年内成本、年化成本、年化收益、ROI。")
+    plans = explicit_ranked_row_plans(objective, relation_catalog([data]))
+
+    assert len(plans) == 1
+    result = execute_query_plan(plans[0], [data])
+    assert result["validation"]["status"] == "verified"
+    assert [field["display_name"] for field in result["schema"]] == header
+    assert [row["cells"][result["schema"][0]["field_id"]]["raw"] for row in result["rows"]] == [
+        "项目{}".format(index) for index in range(102, 92, -1)]
+    assert all(len(row["source_row_ids"]) == 1 for row in result["rows"])
+
+
+def test_explicit_ranking_fails_closed_when_numeric_field_is_ambiguous():
+    first = table_result([[['对象', '金额'], ['甲', '9']]])
+    second = {**table_result([[['对象', '金额'], ['乙', '12']]]), "source_id": 42}
+    with pytest.raises(QueryPlanError) as error:
+        explicit_ranked_row_plans("按金额降序取前1行", relation_catalog([first, second]))
+    assert error.value.code == "RANKING_BINDING_AMBIGUOUS"
 
 
 def test_group_aggregate_and_order_use_only_generic_operators():

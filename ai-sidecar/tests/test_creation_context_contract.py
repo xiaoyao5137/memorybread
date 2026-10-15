@@ -70,7 +70,7 @@ async def test_agent_checkpoints_the_exact_context_used_by_assessment():
     assert events[-1]["type"] == "run.completed"
     snapshot = service.checked[0]["input_context"]
     assert {key: snapshot[key] for key in service.context_at_assessment} == service.context_at_assessment
-    assert snapshot["brainstorm_context_version"] == 4
+    assert snapshot["brainstorm_context_version"] == 6
     assert snapshot["brainstorm_decisions"][0]["value"] == "预算上限3000元。"
     assert "3000" in snapshot["creation_brief"]
     assert snapshot["conversation"] == args["conversation"]

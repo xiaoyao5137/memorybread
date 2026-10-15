@@ -2537,6 +2537,7 @@ def _get_hardware() -> dict:
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
+    initialization_manager.start_runtime_supervisor()
 
     # 异步预热 RAG pipeline，避免阻塞启动；失败自动重试，
     # 防止瞬时故障（如断网）导致前端永久停在启动画面。

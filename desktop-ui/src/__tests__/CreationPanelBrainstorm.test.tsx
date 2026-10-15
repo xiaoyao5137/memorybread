@@ -365,7 +365,7 @@ describe('创作页脑暴模式', () => {
     fireEvent.change(input, { target: { value: '保留这条创作需求' } })
     fireEvent.click(screen.getByRole('button', { name: '开始梳理' }))
     await waitFor(() => expect(stream).toBeDefined())
-    expect(screen.getByRole('status', { name: '正在准备第一条脑暴问题' })).toBeInTheDocument()
+    expect(screen.getByRole('status', { name: '正在准备创作方向脑暴' })).toBeInTheDocument()
     expect(useAppStore.getState().creationDraft.brainstormState).toBeNull()
     await act(async () => { stream.close() })
     expect(await screen.findByText('脑暴连接中断，已保留当前输入和进度，请重试')).toBeInTheDocument()
@@ -428,9 +428,9 @@ describe('创作页脑暴模式', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: '开始梳理' }))
 
-    const thinkingState = await screen.findByRole('status', { name: '正在准备第一条脑暴问题' })
-    expect(thinkingState).toHaveTextContent('正在生成第一条脑暴问题')
-    expect(thinkingState).toHaveTextContent('正在等待模型返回第一条问题')
+    const thinkingState = await screen.findByRole('status', { name: '正在准备创作方向脑暴' })
+    expect(thinkingState).toHaveTextContent('正在启动创作方向阶段思考')
+    expect(thinkingState).toHaveTextContent('正在获取后台生成进度')
     expect(thinkingState).toHaveTextContent('已等待 0 秒')
     expect(screen.getByRole('button', { name: '正在梳理' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '开启新会话' })).toBeDisabled()
@@ -452,7 +452,7 @@ describe('创作页脑暴模式', () => {
     expect(await screen.findByText('这次创作最需要推动什么结果？')).toBeInTheDocument()
     expect(screen.queryByText(internalOrchestrationHint)).not.toBeInTheDocument()
     await waitFor(() => {
-      expect(screen.queryByRole('status', { name: '正在准备第一条脑暴问题' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('status', { name: '正在准备创作方向脑暴' })).not.toBeInTheDocument()
     })
     expect(screen.getByRole('button', { name: '请回答上方问题' })).toBeDisabled()
   })
@@ -482,7 +482,7 @@ describe('创作页脑暴模式', () => {
     await screen.findByRole('option', { name: /微服务模块技术方案文档/ })
     fireEvent.change(input, { target: { value: '设计广告诊断接口方案' } })
     fireEvent.click(screen.getByRole('button', { name: '开始梳理' }))
-    const status = await screen.findByRole('status', { name: '正在准备第一条脑暴问题' })
+    const status = await screen.findByRole('status', { name: '正在准备创作方向脑暴' })
     expect(status).toHaveTextContent('正在匹配创作技能')
     expect(status).toHaveTextContent('已等待 0 秒')
     const now = Date.now()
@@ -493,13 +493,13 @@ describe('创作页脑暴模式', () => {
     expect(status).toHaveTextContent('正在保存创作会话')
     expect(status).toHaveTextContent('已等待 31 秒')
     await act(async () => { finishHistory(Response.json({ id: 1 })) })
-    expect(status).toHaveTextContent('正在生成第一条脑暴问题')
+    expect(status).toHaveTextContent('正在启动创作方向阶段思考')
     expect(requestSignals).toHaveLength(3)
     expect(requestSignals[0]).toBeInstanceOf(AbortSignal)
     expect(requestSignals.every(signal => signal === requestSignals[0])).toBe(true)
     await act(async () => { finishQuestion(Response.json({ message: '脑暴服务暂时不可用' }, { status: 503 })) })
     expect(await screen.findByRole('alert')).toHaveTextContent('脑暴服务暂时不可用')
-    expect(screen.queryByRole('status', { name: '正在准备第一条脑暴问题' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('status', { name: '正在准备创作方向脑暴' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '开始梳理' })).toBeEnabled()
   })
 
@@ -538,7 +538,7 @@ describe('创作页脑暴模式', () => {
     expect(oldSignal?.aborted).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: '终止当前会话' }))
     expect(oldSignal?.aborted).toBe(true)
-    expect(screen.queryByRole('status', { name: '正在准备第一条脑暴问题' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('status', { name: '正在准备创作方向脑暴' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '开启新会话' }))
     startingNewSession = true
     fireEvent.click(screen.getByRole('button', { name: '选择创作模式' }))
@@ -557,7 +557,7 @@ describe('创作页脑暴模式', () => {
     })
     expect(requests).toHaveLength(requestCount)
     expect(useAppStore.getState().creationDraft).toMatchObject({ sessionId: newSessionId, rootRequest: '新的创作要求', brainstormState: null })
-    expect(screen.getByRole('status', { name: '正在准备第一条脑暴问题' })).toHaveTextContent('正在匹配创作技能')
+    expect(screen.getByRole('status', { name: '正在准备创作方向脑暴' })).toHaveTextContent('正在匹配创作技能')
     expect(screen.getByRole('button', { name: '正在梳理' })).toBeDisabled()
     expect(screen.queryByText('不应出现的旧问题')).not.toBeInTheDocument()
   })
@@ -620,8 +620,8 @@ describe('创作页脑暴模式', () => {
     const newSessionId = useAppStore.getState().creationDraft.sessionId
     await act(async () => { finishRestore(Response.json(brainstormState(0, question('old.question', '旧目标', '不应出现的恢复问题')))) })
     expect(useAppStore.getState().creationDraft).toMatchObject({ sessionId: newSessionId, rootRequest: '新的创作目标', brainstormState: null })
-    const newStatus = screen.getByRole('status', { name: '正在准备第一条脑暴问题' })
-    expect(newStatus).toHaveTextContent('正在生成第一条脑暴问题')
+    const newStatus = screen.getByRole('status', { name: '正在准备创作方向脑暴' })
+    expect(newStatus).toHaveTextContent('正在启动创作方向阶段思考')
     expect(newStatus).toHaveTextContent('已等待 0 秒')
     expect(screen.getByRole('button', { name: '正在梳理' })).toBeDisabled()
     expect(screen.queryByText('不应出现的恢复问题')).not.toBeInTheDocument()
@@ -709,7 +709,7 @@ describe('创作页脑暴模式', () => {
     expect(modeSelect).toHaveTextContent('直出模式')
     fireEvent.click(modeSelect)
     expect(screen.getByRole('option', { name: /直出模式.*适合方向明确的需求/ })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('option', { name: /脑暴模式.*形成创作简报后再生成/ }))
+    fireEvent.click(screen.getByRole('option', { name: /脑暴模式.*逐章看到创作结果/ }))
     expect(modeSelect).toHaveTextContent('脑暴模式')
     const input = screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/)
     fireEvent.change(input, { target: { value: '设计数据治理平台建设方案' } })
@@ -1024,12 +1024,25 @@ describe('创作页脑暴模式', () => {
     ])))
   })
 
-  it('启动脑暴时把显式选择的 Skill 业务规则一并发送', async () => {
+  it('启动脑暴时冻结显式选择与依赖 Skill 的完整规则和来源', async () => {
     let startPayload: any = null
+    const primarySkill = {
+      ...installedBrainstormSkill,
+      execution_steps: installedBrainstormSkill.execution_steps.map((step, index) => index === 0
+        ? { ...step, skills: ['evidence-support'] }
+        : step),
+    }
+    const supportSkill = {
+      ...installedBrainstormSkill,
+      id: 68,
+      client_skill_key: 'evidence-support',
+      title: '证据核验技能',
+      execution_steps: [],
+    }
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input))
       if (url.pathname === '/api/browser-integration/status') return new Response('{}', { status: 404 })
-      if (url.pathname === '/api/creation/skills') return Response.json([installedBrainstormSkill])
+      if (url.pathname === '/api/creation/skills') return Response.json([primarySkill, supportSkill])
       if (url.pathname === '/api/creation/history' && (!init?.method || init.method === 'GET')) {
         return Response.json({ items: [], total: 0, limit: 20, offset: 0 })
       }
@@ -1061,8 +1074,19 @@ describe('创作页脑暴模式', () => {
       title: '微服务模块技术方案文档',
       summary: '覆盖业务流程、数据所有权、组织保障和上线验收。',
       workflowRole: 'primary',
+      selectionSource: 'user',
+      strictStructure: true,
+      skillInstructions: expect.stringContaining('微服务模块技术方案文档'),
+      exampleDocumentAvailable: false,
     })
     expect(startPayload.selected_skills[0].executionSteps[0].objective).toContain('业务目标')
+    expect(startPayload.selected_skills[0]).toHaveProperty('fieldExamples')
+    expect(startPayload.selected_skills[0]).not.toHaveProperty('exampleDocument')
+    expect(startPayload.selected_skills[1]).toMatchObject({
+      id: 'evidence-support',
+      workflowRole: 'support',
+      selectionSource: 'dependency',
+    })
   })
 
   it('非显式 @ 的脑暴也先完成执行 Skill 路由再建立章节覆盖上下文', async () => {
@@ -1112,6 +1136,8 @@ describe('创作页脑暴模式', () => {
     expect(startPayload.selected_skills[0]).toMatchObject({
       id: 'microservice-solution',
       title: '微服务模块技术方案文档',
+      workflowRole: 'primary',
+      selectionSource: 'automatic',
     })
     expect(startPayload.selected_skills[0].executionSteps.map((step: any) => step.title)).toEqual([
       '需求背景与范围',
