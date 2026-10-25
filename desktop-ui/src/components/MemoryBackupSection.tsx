@@ -353,7 +353,7 @@ export const MemoryBackupCard: React.FC<MemoryBackupCardProps> = ({
             <div className="bake-memory-package-cloud">
               <div className="bake-memory-package-privacy-note">
                 <ShieldCheck size={16} aria-hidden />
-                <span>记忆包会先在本机加密再上传，备份与恢复无需设置密钥。</span>
+                <span>记忆包直接上传至当前账户，备份与恢复无需设置密钥；换机后登录同一账户即可恢复。</span>
               </div>
 
               <div className="bake-memory-package-fields">
@@ -655,10 +655,10 @@ const MemoryBackupSection: React.FC = () => {
       setCloudSnapshotsStatus('ready')
       setCloudSnapshotsError(null)
       setStatusMessage(`云端备份完成：${formatBytes(result.encrypted_size)}，校验值 ${result.checksum_sha256.slice(0, 12)}...`)
-      finishActivity(activityId, 'success', `${formatBytes(result.encrypted_size)}，已加密上传`, [
+      finishActivity(activityId, 'success', `${formatBytes(result.encrypted_size)}，已上传`, [
         { label: '云端备份编号', value: result.snapshot.id },
-        { label: '本机加密包', value: result.local_encrypted_path },
-        { label: '加密包大小', value: formatBytes(result.encrypted_size) },
+        { label: '本机记忆包', value: result.local_encrypted_path },
+        { label: '记忆包大小', value: formatBytes(result.encrypted_size) },
         { label: 'SHA-256', value: result.checksum_sha256 },
       ])
     } catch (error) {
@@ -703,9 +703,9 @@ const MemoryBackupSection: React.FC = () => {
         ? `输入 ${counts.incoming} 行，去重 ${counts.deduplicated} 行，实际导入 ${counts.imported} 行`
         : '云端记忆包已下载', [
         { label: '下载目录', value: parentPath(result.local_decrypted_path) },
-        { label: '解密记忆包', value: result.local_decrypted_path },
-        { label: '本机加密包', value: result.local_encrypted_path },
-        { label: '加密包大小', value: formatBytes(result.encrypted_size) },
+        { label: '恢复记忆包', value: result.local_decrypted_path },
+        { label: '本机记忆包', value: result.local_encrypted_path },
+        { label: '记忆包大小', value: formatBytes(result.encrypted_size) },
         ...(result.import_report ? importActivityDetails(result.import_report) : []),
       ])
       setBakeMemoryOffset(0)

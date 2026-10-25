@@ -363,6 +363,7 @@ export const SparkLine: React.FC<{
   xDomain?: { start: number; end: number }
   bucketMs?: number
   fillMissingWithZero?: boolean
+  hideZeroHoverDetails?: boolean
   detailFormatter?: (point: LinePoint) => string
 }> = ({
   data,
@@ -374,6 +375,7 @@ export const SparkLine: React.FC<{
   xDomain,
   bucketMs,
   fillMissingWithZero = false,
+  hideZeroHoverDetails = false,
   detailFormatter,
 }) => {
   const [hoverX, setHoverX] = useState<number | null>(null)
@@ -534,17 +536,19 @@ export const SparkLine: React.FC<{
           ? (() => {
               const singleData = normalizedSeries[0].data
               const singleHoverPoint = hoverPoints[0] ?? null
+              if (hideZeroHoverDetails && singleHoverPoint?.value === 0) return fmtTs(singleHoverPoint.ts)
               return singleHoverPoint
                 ? (detailFormatter ? detailFormatter(singleHoverPoint) : `${fmtTs(singleHoverPoint.ts)} · ${valueFormatter(singleHoverPoint.value)}`)
                 : (detailFormatter
                     ? detailFormatter(singleData[singleData.length - 1])
                     : `最近: ${fmtTs(singleData[singleData.length - 1].ts)} · ${valueFormatter(singleData[singleData.length - 1].value)}`)
             })()
-          : `${hoverTargetX !== null ? fmtTs(hoverAxisTs) : `最近: ${fmtTs(hoverAxisTs)}`} · ${normalizedSeries.map((item, index) => {
+          : [hoverTargetX !== null ? fmtTs(hoverAxisTs) : `最近: ${fmtTs(hoverAxisTs)}`, ...normalizedSeries.flatMap((item, index) => {
               const point = (hoverTargetX !== null ? hoverPoints[index] : latestPoints[index]) ?? item.data[item.data.length - 1]
+              if (hideZeroHoverDetails && hoverTargetX !== null && point.value === 0) return []
               const formatter = item.valueFormatter || valueFormatter
-              return `${item.label} ${formatter(point.value)}`
-            }).join(' · ')}`}
+              return [`${item.label} ${formatter(point.value)}`]
+            })].join(' · ')}
       </div>
     </div>
   )
@@ -1463,6 +1467,7 @@ const OverviewContent: React.FC<{
             }))} />
             <SparkLine
               series={tokenTrendSeries}
+              hideZeroHoverDetails
               height={50}
               valueFormatter={(value) => `${fmt(value)} tokens`}
               axisFormatter={(ts) => fmtOverviewAxisTs(ts, range)}

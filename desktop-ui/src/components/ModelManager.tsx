@@ -501,7 +501,7 @@ const ModelCard: React.FC<{
               <button onClick={onActivate} style={btn('#34C759', 'white', 11)}>启用</button>
             )}
             {/* 体验入口：LLM 模型已可用时显示 */}
-            {(isActive || (isApi && isInstalled)) && !isInferenceEngine && onChat && (
+            {model.category === 'llm' && isInstalled && !isDownloading && !isLoading && onChat && (
               <button onClick={onChat} style={btn('#AF52DE18', '#AF52DE', 11)}>体验</button>
             )}
             {isLoading && (
@@ -953,7 +953,7 @@ const ModelManager: React.FC = () => {
                 onDelete={() => handleDelete(m)}
                 onConfigure={() => setConfiguringModel(m)}
                 onUpgrade={m.category === 'inference_engine' ? handleUpgrade : undefined}
-                onChat={m.category === 'llm' && (m.status === 'active' || (m.requires_api_key && (m.status as string === 'installed' || m.status as string === 'active'))) ? () => setChattingModel(m) : undefined}
+                onChat={m.category === 'llm' ? () => setChattingModel(m) : undefined}
               />
             ))}
             {category === 'llm' && <div ref={setAnalysisSelectionHost} />}
@@ -1014,7 +1014,7 @@ const ModelSection: React.FC<{
         onActivate={() => onActivate(m)}
         onDelete={() => onDelete(m)}
         onConfigure={() => onConfigure(m)}
-        onChat={m.category === 'llm' && (m.status === 'active' || (m.requires_api_key && (m.status as string === 'installed' || m.status as string === 'active'))) ? () => onChat(m) : undefined}
+        onChat={m.category === 'llm' ? () => onChat(m) : undefined}
       />
     ))}
   </div>

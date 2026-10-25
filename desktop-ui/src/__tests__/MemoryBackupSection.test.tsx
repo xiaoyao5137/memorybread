@@ -213,7 +213,7 @@ describe('MemoryBackupSection', () => {
     await screen.findByRole('combobox', { name: '云端备份' })
 
     fireEvent.click(screen.getByRole('button', { name: '备份到云端' }))
-    const backupSummary = await screen.findByText('4.0 KB，已加密上传')
+    const backupSummary = await screen.findByText('4.0 KB，已上传')
     fireEvent.click(backupSummary.closest('summary')!)
     expect(screen.getByText('/tmp/memorybread-test/backups/cloud.mbmemory.enc.json')).toBeInTheDocument()
 

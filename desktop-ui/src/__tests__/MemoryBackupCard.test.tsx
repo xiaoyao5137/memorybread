@@ -93,7 +93,8 @@ describe('MemoryBackupCard', () => {
     })
 
     expect(screen.queryByLabelText('恢复密钥')).not.toBeInTheDocument()
-    expect(screen.getByText(/备份与恢复无需设置密钥/)).toBeInTheDocument()
+    expect(screen.getByText(/换机后登录同一账户即可恢复/)).toBeInTheDocument()
+    expect(screen.queryByText(/先在本机加密/)).not.toBeInTheDocument()
     expect(screen.getByRole('status')).toHaveTextContent('正在读取云端备份')
     expect(screen.getByRole('button', { name: '正在读取...' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '备份到云端' })).toBeEnabled()

@@ -45,7 +45,7 @@
 | 任务 | 创建定时任务或使用模板，并把成功结果推送到本机配置的消息渠道。 |
 | 日记 | 查看和编辑系统生成的日记、周记与月记。 |
 | 集成 | 导入外部知识、导出上下文包，连接 Obsidian、WorkBuddy、Codex、Claude Code 与自定义 Skill。 |
-| 备份 | 导出或导入完整用户内容包；以及客户端加密的云端快照。 |
+| 备份 | 导出或导入完整用户内容包；以及无需密钥、支持换机恢复的云端快照。 |
 
 ## 本地优先与隐私边界
 
@@ -140,3 +140,11 @@ npm run build
 网关预设位于 `shared/model-gateways/providers.json`，前后端共用。地址以服务端可信预设为准，忽略客户端传入的网关地址。采集提炼复用 `KnowledgeExtractorV2` 的设备模型调用路径。
 
 接入依据：[百炼](https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope)、[MiniMax](https://platform.minimax.cn/docs/api-reference/text-openai-api)、[智谱](https://docs.bigmodel.cn/cn/guide/develop/openai/introduction)、[Kimi](https://platform.kimi.com/docs/get-api-key)、[DeepSeek](https://api-docs.deepseek.com/)。
+
+### 云端备份与换机恢复验证
+
+新备份上传普通记忆包（`encryption_version: 0`），使用账户鉴权和短期 OSS 签名 URL，不依赖原机器的公私钥或服务端快照根密钥。恢复前检查对象大小和 SHA-256，再执行现有的判重合并导入。为兼容接口，`encrypted_size`、`local_encrypted_path` 等历史字段名保留，但新备份中的含义分别为对象大小和记忆包路径。
+
+先发布 mb-admin API，再发布桌面客户端。已有 v2 服务端加密快照仍可恢复，须保留服务端原来的 `MB_SNAPSHOT_KEY_SECRET`；v1 手动密钥快照仍须用原密钥和旧客户端恢复后重新备份，丢失密钥无法通过本次修改解密。
+
+在 `core-engine` 执行 `cargo test --lib snapshot`，覆盖真实 SQLite 导出/导入和本地 HTTP 云端替身：上传、登记、下载、删除旧机器目录后恢复到新目录、偏好/Skill/界面状态、只预览不写入、重复导入去重、保留本机数据、大小/校验值异常拒绝，以及旧版 v2 解密恢复。HTTP 替身不连接真实 OSS 或云端数据库，生产环境连通性需要部署后另行验证。

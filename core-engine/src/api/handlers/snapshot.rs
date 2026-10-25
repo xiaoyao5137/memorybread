@@ -3,9 +3,11 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use aes_gcm::{
-    aead::{rand_core::RngCore, Aead, OsRng},
+    aead::Aead,
     Aes256Gcm, KeyInit, Nonce,
 };
+#[cfg(test)]
+use aes_gcm::aead::{rand_core::RngCore, OsRng};
 use axum::{extract::{Path, State}, Json};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
@@ -48,6 +50,7 @@ pub struct CloudBackupRequest {
 
 #[derive(Debug, Serialize)]
 pub struct CloudBackupResponse {
+    /// Historical wire name: for version 0 this is the ordinary memory package.
     pub local_encrypted_path: String,
     pub oss_object_key: String,
     pub checksum_sha256: String,
@@ -115,7 +118,7 @@ fn cloud_backup_error_message(error: &ApiError) -> String {
     match error {
         ApiError::Upstream { code, .. } => match *code {
             "CLOUD_PREPARE_UPLOAD_FAILED" => "云端备份准备失败，请检查账户和存储空间".to_string(),
-            "OSS_UPLOAD_FAILED" => "加密包上传失败，请检查网络后重试".to_string(),
+            "OSS_UPLOAD_FAILED" => "记忆包上传失败，请检查网络后重试".to_string(),
             "CLOUD_COMPLETE_SNAPSHOT_FAILED" => "云端备份登记失败，请刷新列表后重试".to_string(),
             _ => "云端服务暂时不可用，请稍后重试".to_string(),
         },
@@ -141,6 +144,7 @@ pub struct CloudRestoreRequest {
 
 #[derive(Debug, Serialize)]
 pub struct CloudRestoreResponse {
+    /// Historical wire name: for version 0 this is the ordinary memory package.
     pub local_encrypted_path: String,
     pub local_decrypted_path: String,
     pub checksum_sha256: String,
@@ -169,7 +173,6 @@ struct CloudEnvelope<T> {
 #[derive(Debug, Deserialize)]
 struct PreparedUploadData {
     oss_object_key: String,
-    encryption_key_base64: String,
     upload_url: String,
     required_headers: BTreeMap<String, String>,
 }
@@ -179,7 +182,10 @@ struct DownloadUrlData {
     oss_object_key: String,
     encrypted_size: i64,
     checksum_sha256: Option<String>,
-    encryption_key_base64: String,
+    #[serde(default = "legacy_encryption_version")]
+    encryption_version: i32,
+    #[serde(default)]
+    encryption_key_base64: Option<String>,
     download_url: String,
 }
 
@@ -245,18 +251,21 @@ async fn run_cloud_backup(
     let output_path = body
         .output_path
         .map(PathBuf::from)
-        .unwrap_or_else(default_cloud_encrypted_path);
+        .unwrap_or_else(default_cloud_package_path);
 
     let storage = state.storage.clone();
     let client_state = body.client_state;
-    let plaintext = tokio::task::spawn_blocking(move || {
+    let package_bytes = tokio::task::spawn_blocking(move || {
         let snapshot = storage.export_asset_snapshot_with_client_state(client_state)?;
         serde_json::to_vec_pretty(&snapshot).map_err(crate::storage::StorageError::from)
     })
     .await
     .map_err(|error| ApiError::Internal(error.to_string()))??;
     let client = reqwest::Client::new();
-    let encrypted_size = encrypted_snapshot_size(plaintext.len())?;
+    // Keep historical wire field names for compatibility; version 0 is an unencrypted package.
+    let encrypted_size = i64::try_from(package_bytes.len())
+        .map_err(|_| ApiError::BadRequest("备份包过大".to_string()))?;
+    let checksum_sha256 = sha256_hex(&package_bytes);
     let prepare: CloudEnvelope<PreparedUploadData> = send_json(
         client
             .post(format!("{admin_base_url}/v1/snapshots/upload-url"))
@@ -265,25 +274,22 @@ async fn run_cloud_backup(
             .json(&json!({
                 "device_id": device_id,
                 "encrypted_size": encrypted_size,
-                "checksum_sha256": null,
+                "checksum_sha256": checksum_sha256,
                 "format_version": crate::storage::snapshot::ASSET_SNAPSHOT_FORMAT_VERSION,
                 "schema_version": crate::storage::snapshot::ASSET_SNAPSHOT_SCHEMA_VERSION,
-                "encryption_version": 2,
+                "encryption_version": 0,
                 "content_type": "application/octet-stream"
             })),
         "CLOUD_PREPARE_UPLOAD_FAILED",
     )
     .await?;
-    let key = parse_encryption_key(&prepare.data.encryption_key_base64)?;
-    let encrypted = encrypt_snapshot_bytes(&plaintext, &key)?;
-    let checksum_sha256 = sha256_hex(&encrypted);
 
     if let Some(parent) = output_path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|error| ApiError::Internal(error.to_string()))?;
     }
-    tokio::fs::write(&output_path, &encrypted)
+    tokio::fs::write(&output_path, &package_bytes)
         .await
         .map_err(|error| ApiError::Internal(error.to_string()))?;
 
@@ -292,7 +298,7 @@ async fn run_cloud_backup(
         put = put.header(name, value);
     }
     let put_response = put
-        .body(encrypted)
+        .body(package_bytes)
         .send()
         .await
         .map_err(|error| ApiError::Internal(error.to_string()))?;
@@ -310,7 +316,7 @@ async fn run_cloud_backup(
                 "checksum_sha256": checksum_sha256,
                 "format_version": crate::storage::snapshot::ASSET_SNAPSHOT_FORMAT_VERSION,
                 "schema_version": crate::storage::snapshot::ASSET_SNAPSHOT_SCHEMA_VERSION,
-                "encryption_version": 2
+                "encryption_version": 0
             })),
         "CLOUD_COMPLETE_SNAPSHOT_FAILED",
     )
@@ -336,11 +342,11 @@ pub async fn restore_asset_snapshot_from_cloud(
     let encrypted_output_path = body
         .encrypted_output_path
         .map(PathBuf::from)
-        .unwrap_or_else(default_restored_encrypted_path);
+        .unwrap_or_else(default_downloaded_package_path);
     let decrypted_output_path = body
         .decrypted_output_path
         .map(PathBuf::from)
-        .unwrap_or_else(default_restored_decrypted_path);
+        .unwrap_or_else(default_restored_package_path);
 
     let client = reqwest::Client::new();
     let download: CloudEnvelope<DownloadUrlData> = send_json(
@@ -353,7 +359,6 @@ pub async fn restore_asset_snapshot_from_cloud(
         "CLOUD_PREPARE_DOWNLOAD_FAILED",
     )
     .await?;
-    let key = parse_encryption_key(&download.data.encryption_key_base64)?;
 
     let response = client
         .get(&download.data.download_url)
@@ -372,6 +377,9 @@ pub async fn restore_asset_snapshot_from_cloud(
             "下载对象大小与数据库登记不一致".to_string(),
         ));
     }
+    if download.data.encryption_version == 0 && download.data.checksum_sha256.is_none() {
+        return Err(ApiError::BadRequest("云端记忆包缺少校验值".to_string()));
+    }
     if let Some(expected_checksum) = download.data.checksum_sha256.as_deref() {
         if expected_checksum != checksum_sha256 {
             return Err(ApiError::BadRequest(
@@ -389,7 +397,15 @@ pub async fn restore_asset_snapshot_from_cloud(
         .await
         .map_err(|error| ApiError::Internal(error.to_string()))?;
 
-    let plaintext = decrypt_snapshot_bytes(&encrypted, &key)?;
+    let plaintext = match download.data.encryption_version {
+        0 => encrypted.clone(),
+        2 => {
+            let key = parse_encryption_key(download.data.encryption_key_base64.as_deref()
+                .ok_or_else(|| ApiError::BadRequest("旧版备份缺少解密材料".to_string()))?)?;
+            decrypt_snapshot_bytes(&encrypted, &key)?
+        }
+        _ => return Err(ApiError::BadRequest("不支持的云端备份版本".to_string())),
+    };
     if let Some(parent) = decrypted_output_path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -432,29 +448,29 @@ fn default_asset_snapshot_path() -> PathBuf {
         .join(format!("memory-package-{}.mbmemory.json", current_ts_ms()))
 }
 
-fn default_cloud_encrypted_path() -> PathBuf {
+fn default_cloud_package_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
         .join(".memory-bread")
         .join("backups")
         .join(format!(
-            "cloud-memory-package-{}.mbmemory.enc.json",
+            "cloud-memory-package-{}.mbmemory.json",
             current_ts_ms()
         ))
 }
 
-fn default_restored_encrypted_path() -> PathBuf {
+fn default_downloaded_package_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
         .join(".memory-bread")
         .join("backups")
         .join(format!(
-            "restored-memory-package-{}.mbmemory.enc.json",
+            "downloaded-memory-package-{}.mbmemory.json",
             current_ts_ms()
         ))
 }
 
-fn default_restored_decrypted_path() -> PathBuf {
+fn default_restored_package_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
         .join(".memory-bread")
@@ -493,6 +509,9 @@ fn clean_required(value: &str, field: &str) -> Result<String, ApiError> {
     Ok(trimmed.to_string())
 }
 
+// Older servers omitted the version and always returned service-managed encryption.
+fn legacy_encryption_version() -> i32 { 2 }
+
 fn parse_encryption_key(value: &str) -> Result<[u8; 32], ApiError> {
     let decoded = BASE64
         .decode(value.trim())
@@ -507,6 +526,7 @@ fn parse_encryption_key(value: &str) -> Result<[u8; 32], ApiError> {
     Ok(key)
 }
 
+#[cfg(test)]
 fn encrypt_snapshot_bytes(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, ApiError> {
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|_| ApiError::Internal("初始化快照加密器失败".to_string()))?;
@@ -527,32 +547,6 @@ fn encrypt_snapshot_bytes(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, A
     };
     serde_json::to_vec_pretty(&envelope)
         .map_err(|error| ApiError::Internal(format!("序列化加密快照失败: {error}")))
-}
-
-fn encrypted_snapshot_size(plaintext_size: usize) -> Result<i64, ApiError> {
-    let ciphertext_size = plaintext_size
-        .checked_add(16)
-        .ok_or_else(|| ApiError::BadRequest("备份包过大".to_string()))?;
-    let encoded_size = ciphertext_size
-        .checked_add(2)
-        .and_then(|size| size.checked_div(3))
-        .and_then(|size| size.checked_mul(4))
-        .ok_or_else(|| ApiError::BadRequest("备份包过大".to_string()))?;
-    let envelope = EncryptedAssetSnapshotEnvelope {
-        magic: "MemoryBreadAssetSnapshotEncrypted".to_string(),
-        format_version: 1,
-        encryption_version: 2,
-        algorithm: "AES-256-GCM".to_string(),
-        nonce_base64: BASE64.encode([0u8; 12]),
-        ciphertext_base64: String::new(),
-        plaintext_sha256: "0".repeat(64),
-        plaintext_size: plaintext_size as u64,
-    };
-    let overhead = serde_json::to_vec_pretty(&envelope)
-        .map_err(|error| ApiError::Internal(error.to_string()))?
-        .len();
-    i64::try_from(overhead.saturating_add(encoded_size))
-        .map_err(|_| ApiError::BadRequest("备份包过大".to_string()))
 }
 
 fn decrypt_snapshot_bytes(encrypted: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, ApiError> {
@@ -672,12 +666,152 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        decrypt_snapshot_bytes, encrypt_snapshot_bytes, encrypted_snapshot_size,
+        decrypt_snapshot_bytes, encrypt_snapshot_bytes,
         normalize_service_environment, send_json_retry_transient, transient_snapshot_error,
     };
     use crate::api::error::ApiError;
     use axum::http::StatusCode;
     use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+
+    /// Real HTTP upload/download plus real SQLite export/import, with isolated machine directories.
+    #[tokio::test]
+    async fn cloud_round_trip_restores_on_new_machine_without_keys() {
+        use super::*;
+        use crate::storage::StorageManager;
+        use axum::{body::Bytes, http::HeaderMap, routing::{get, post, put}, Router};
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Cloud { bytes: Vec<u8>, metadata: Value, corrupt: bool, wrong_size: bool, missing_checksum: bool, version: i32 }
+        let cloud = Arc::new(Mutex::new(Cloud::default()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let upload_url = format!("{base}/object");
+        let download_url = upload_url.clone();
+        let upload_cloud = cloud.clone();
+        let complete_cloud = cloud.clone();
+        let download_cloud = cloud.clone();
+        let object_cloud = cloud.clone();
+        let app = Router::new()
+            .route("/v1/snapshots/upload-url", post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                let url = upload_url.clone();
+                async move {
+                    assert_eq!(headers["authorization"], "Bearer same-account");
+                    assert_eq!(headers["x-memorybread-environment"], "staging");
+                    assert_eq!(body["encryption_version"], 0);
+                    assert_eq!(body["checksum_sha256"].as_str().unwrap().len(), 64);
+                    Json(json!({"data": {"oss_object_key": "snapshots/account/old-device/package", "upload_url": url,
+                        "required_headers": {"content-type": "application/octet-stream"}}}))
+                }
+            }))
+            .route("/object", put(move |headers: HeaderMap, bytes: Bytes| {
+                let cloud = upload_cloud.clone();
+                async move {
+                    assert_eq!(headers["content-type"], "application/octet-stream");
+                    let package: Value = serde_json::from_slice(&bytes).unwrap();
+                    assert!(package.get("manifest").is_some());
+                    assert!(package.get("ciphertext_base64").is_none());
+                    cloud.lock().unwrap().bytes = bytes.to_vec();
+                    StatusCode::OK
+                }
+            }).get(move || {
+                let cloud = object_cloud.clone();
+                async move {
+                    let cloud = cloud.lock().unwrap();
+                    let mut bytes = cloud.bytes.clone();
+                    if cloud.corrupt { bytes[0] ^= 1; }
+                    bytes
+                }
+            }))
+            .route("/v1/snapshots", post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                let cloud = complete_cloud.clone();
+                async move {
+                    assert_eq!(headers["authorization"], "Bearer same-account");
+                    let mut cloud = cloud.lock().unwrap();
+                    assert_eq!(body["encrypted_size"], cloud.bytes.len() as i64);
+                    assert_eq!(body["checksum_sha256"], sha256_hex(&cloud.bytes));
+                    assert_eq!(body["encryption_version"], 0);
+                    cloud.metadata = body;
+                    Json(json!({"data": {"id": "snapshot-1", "status": "committed"}}))
+                }
+            }))
+            .route("/v1/snapshots/snapshot-1/download-url", get(move |headers: HeaderMap| {
+                let cloud = download_cloud.clone();
+                let url = download_url.clone();
+                async move {
+                    assert_eq!(headers["authorization"], "Bearer same-account");
+                    let cloud = cloud.lock().unwrap();
+                    Json(json!({"data": {"oss_object_key": cloud.metadata["oss_object_key"],
+                        "encryption_version": cloud.version,
+                        "encryption_key_base64": if cloud.version == 2 { Some(BASE64.encode([7u8; 32])) } else { None },
+                        "encrypted_size": cloud.bytes.len() + usize::from(cloud.wrong_size),
+                        "checksum_sha256": if cloud.missing_checksum { Value::Null } else { cloud.metadata["checksum_sha256"].clone() },
+                        "download_url": url}}))
+                }
+            }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let temp = tempfile::tempdir().unwrap();
+        let old_root = temp.path().join("old-machine");
+        let new_root = temp.path().join("new-machine");
+        let old = StorageManager::open(&old_root.join("memory-bread.db")).unwrap();
+        old.upsert_preference("cloud.fixture", "跨机器恢复", "user", 1.0).unwrap();
+        std::fs::create_dir_all(old_root.join("skills/example")).unwrap();
+        std::fs::write(old_root.join("skills/example/SKILL.md"), "fixture skill").unwrap();
+        let old_state = AppState::with_service_urls(old, String::new(), String::new(), vec![]);
+        let result = run_cloud_backup(old_state.clone(), CloudBackupRequest {
+            admin_base_url: base.clone(), service_environment: "staging".into(), access_token: "same-account".into(),
+            device_id: "old-device".into(), output_path: Some(temp.path().join("upload.json").display().to_string()),
+            client_state: BTreeMap::from([("memory-bread_theme".into(), "dark".into())]),
+        }).await.unwrap();
+        assert_eq!(result.snapshot["id"], "snapshot-1");
+        drop(old_state);
+        std::fs::remove_dir_all(&old_root).unwrap();
+        let new = StorageManager::open(&new_root.join("memory-bread.db")).unwrap();
+        new.upsert_preference("local.only", "preserve", "user", 1.0).unwrap();
+        let state = AppState::with_service_urls(new, String::new(), String::new(), vec![]);
+        let request = |dry_run| CloudRestoreRequest {
+            admin_base_url: base.clone(), service_environment: "staging".into(), access_token: "same-account".into(),
+            snapshot_id: "snapshot-1".into(),
+            encrypted_output_path: Some(temp.path().join("download.json").display().to_string()),
+            decrypted_output_path: Some(temp.path().join("restore.json").display().to_string()),
+            import_to_local: Some(true), dry_run,
+        };
+        let preview = restore_asset_snapshot_from_cloud(State(state.clone()), Json(request(None))).await.unwrap().0;
+        assert!(preview.import_report.unwrap().dry_run);
+        assert!(state.storage.get_preference_value("cloud.fixture").unwrap().is_none());
+        assert!(!new_root.join("skills/example/SKILL.md").exists());
+        let restored = restore_asset_snapshot_from_cloud(State(state.clone()), Json(request(Some(false)))).await.unwrap().0;
+        assert_eq!(restored.checksum_sha256, result.checksum_sha256);
+        assert_eq!(restored.import_report.unwrap().client_state["memory-bread_theme"], "dark");
+        assert_eq!(state.storage.get_preference_value("cloud.fixture").unwrap().as_deref(), Some("跨机器恢复"));
+        assert_eq!(state.storage.get_preference_value("local.only").unwrap().as_deref(), Some("preserve"));
+        assert_eq!(std::fs::read_to_string(new_root.join("skills/example/SKILL.md")).unwrap(), "fixture skill");
+        let repeated = restore_asset_snapshot_from_cloud(State(state.clone()), Json(request(Some(false)))).await.unwrap().0;
+        assert!(repeated.import_report.unwrap().tables.iter().all(|t| t.inserted == 0));
+        // Fail before touching the destination database for every integrity failure.
+        for mode in 0..3 {
+            {
+                let mut cloud = cloud.lock().unwrap();
+                cloud.corrupt = mode == 0;
+                cloud.wrong_size = mode == 1;
+                cloud.missing_checksum = mode == 2;
+            }
+            let error = restore_asset_snapshot_from_cloud(State(state.clone()), Json(request(Some(false)))).await.unwrap_err();
+            assert!(matches!(error, ApiError::BadRequest(_)));
+            assert_eq!(state.storage.get_preference_value("local.only").unwrap().as_deref(), Some("preserve"));
+        }
+        // Existing service-managed encrypted snapshots still restore through the same handler.
+        {
+            let mut cloud = cloud.lock().unwrap();
+            cloud.missing_checksum = false;
+            cloud.bytes = encrypt_snapshot_bytes(&cloud.bytes, &[7u8; 32]).unwrap();
+            cloud.metadata["checksum_sha256"] = json!(sha256_hex(&cloud.bytes));
+            cloud.version = 2;
+        }
+        let legacy = restore_asset_snapshot_from_cloud(State(state.clone()), Json(request(Some(false)))).await.unwrap().0;
+        assert!(legacy.import_report.unwrap().tables.iter().all(|t| t.inserted == 0));
+        server.abort();
+    }
 
     #[tokio::test]
     async fn completion_retry_uses_the_same_request_after_a_server_error() {
@@ -729,15 +863,6 @@ mod tests {
 
         let decrypted = decrypt_snapshot_bytes(&encrypted, &key).unwrap();
         assert_eq!(decrypted, plaintext);
-    }
-
-    #[test]
-    fn encrypted_size_preflight_matches_real_envelope() {
-        for size in [0, 1, 2, 3, 1024, 100_001] {
-            let plaintext = vec![b'x'; size];
-            let encrypted = encrypt_snapshot_bytes(&plaintext, &[7u8; 32]).unwrap();
-            assert_eq!(encrypted_snapshot_size(size).unwrap(), encrypted.len() as i64);
-        }
     }
 
     #[test]

@@ -103,4 +103,40 @@ describe('模型管理', () => {
     expect(screen.getAllByText('MBEM v1.0').length).toBeGreaterThan(0)
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
+
+  it('采集分析中已安装的本地模型无需启用即可体验', async () => {
+    const fetchMock = vi.mocked(fetch)
+    const original = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.endsWith('/api/models')) {
+        const data = await (await original(input, init)).json()
+        data.models[0].status = 'installed'
+        data.models[0].is_active = false
+        return response(data)
+      }
+      if (url.endsWith('/api/models/mbem-v1-local/chat')) {
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('data: {"content":"本地模型回复"}\n\ndata: {"done":true}\n\n'))
+            controller.close()
+          },
+        }))
+      }
+      return original(input, init)
+    })
+
+    render(<ModelManager />)
+    await screen.findAllByText('MBEM v1.0')
+    fireEvent.click(screen.getByRole('button', { name: '体验' }))
+    fireEvent.change(screen.getByPlaceholderText('输入消息...'), { target: { value: '你好' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+
+    expect(await screen.findByText('本地模型回复')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/api/models/mbem-v1-local/chat'), expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ messages: [{ role: 'user', content: '你好' }] }),
+    }))
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/activate'))).toBe(false)
+  })
 })
