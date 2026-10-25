@@ -838,6 +838,22 @@ async fn creation_brainstorm_hydrates_skill_context_for_legacy_session_on_next_t
         }),
     )
     .await;
+    // New sessions freeze their skill binding even when no skill is selected.
+    // Model an actual legacy record, which predates the binding-version field.
+    let storage = StorageManager::open(&tmp.path().join("test.db")).unwrap();
+    storage.with_conn(|conn| {
+        let raw: String = conn.query_row(
+            "SELECT state_json FROM creation_brainstorm_sessions WHERE session_id = ?1",
+            ["session-brainstorm-legacy-skill"], |row| row.get(0),
+        )?;
+        let mut legacy: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        legacy.as_object_mut().unwrap().remove("skill_binding_version");
+        conn.execute(
+            "UPDATE creation_brainstorm_sessions SET state_json = ?1 WHERE session_id = ?2",
+            [legacy.to_string(), "session-brainstorm-legacy-skill".to_string()],
+        )?;
+        Ok(())
+    }).unwrap();
     let (status, answered) = brainstorm_turn(
         router,
         serde_json::json!({
@@ -871,6 +887,7 @@ async fn creation_brainstorm_hydrates_skill_context_for_legacy_session_on_next_t
         })
         .unwrap();
     let stored: serde_json::Value = serde_json::from_str(&state_json).unwrap();
+    assert_eq!(stored["skill_binding_version"], 1);
     assert_eq!(stored["selected_skills"][0]["id"], "product-solution");
     assert_eq!(
         stored["selected_skills"][0]["executionSteps"][0]["title"],
