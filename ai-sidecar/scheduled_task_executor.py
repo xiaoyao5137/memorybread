@@ -1724,6 +1724,52 @@ class TaskExecutor:
 
         return user_verified_score + strength_score + importance_score + recency_score
 
+    def _creation_model_config(self):
+        """Read persisted creation selection per report, independently of analysis."""
+        with sqlite3.connect(self.db_path) as conn:
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_preferences'"
+            ).fetchone():
+                return None
+            row = conn.execute(
+                "SELECT value FROM user_preferences WHERE key='creation.models'"
+            ).fetchone()
+        if not row:
+            return None
+        configs = json.loads(row[0])
+        if not isinstance(configs, list):
+            raise ValueError("创作模型配置无效，请重新选择创作模型")
+        return next((item for item in configs if isinstance(item, dict)
+                     and item.get("enabled") is True), None)
+
+    def _creation_chat(self, config, messages, options):
+        """Reuse creation's device/API transport with queue cancellation intact."""
+        from inference_transport import run_preemptible_async
+        from user_models import chat_profile, chat_configuration
+
+        async def collect():
+            model = config["id"]
+            if model.startswith("user-"):
+                stream = chat_profile(model, messages, max_tokens=options["num_predict"])
+            else:
+                # Legacy API-backed creation settings use the same protocols as
+                # device profiles. A missing credential must not select Ollama.
+                key = config.get("apiKey")
+                if not key:
+                    raise ValueError("所选创作模型缺少调用凭据，无法生成日记，请检查创作模型设置")
+                model = {"mbcd-plus-v1": "claude-opus-4-8"}.get(model, model)
+                base_url = config.get("baseUrl") or ""
+                anthropic = "claude" in model or "anthropic.com" in base_url
+                if not base_url:
+                    base_url = "https://api.anthropic.com" if anthropic else "https://api.openai.com/v1"
+                stream = chat_configuration({
+                    "protocol": "anthropic" if anthropic else "openai",
+                    "model": model, "api_key": key, "base_url": base_url,
+                }, messages, max_tokens=options["num_predict"])
+            return {"message": {"content": "".join([part async for part in stream])}}
+
+        return run_preemptible_async(collect)
+
     def _llm_generate(
         self,
         user_instruction: str,
@@ -1779,12 +1825,16 @@ class TaskExecutor:
             f"{weekly_rules}{language_rules}"
         )
         user_prompt = f"## 工作记录\n\n{context}\n\n---\n\n## 用户指令\n\n{user_instruction}"
-        # 使用全局统一的 Ollama 模型名，避免与 RAG 查询使用不同模型导致 Ollama swap
-        from model_registry_global import get_active_ollama_model
-        model = get_active_ollama_model()
+        config = self._creation_model_config()
+        selected = (config or {}).get("id")
+        use_local = selected in (None, "", "mbcd-std-v1", "mbem-v1-local")
+        if use_local:
+            from model_registry_global import get_active_ollama_model
+            model = get_active_ollama_model()
+        else:
+            model = selected
 
         def _chat() -> dict:
-            client = self._get_llm_client()
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -1792,7 +1842,9 @@ class TaskExecutor:
             def preemptible_chat(chat_messages: list[dict], options: dict) -> dict:
                 # The transport owns an async request from connect through stream
                 # teardown; cancelling an SDK generator cannot interrupt prefill.
-                return client.chat(
+                if not use_local:
+                    return self._creation_chat(config, chat_messages, options)
+                return self._get_llm_client().chat(
                     model=model,
                     messages=chat_messages,
                     think=False,

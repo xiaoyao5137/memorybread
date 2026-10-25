@@ -55,6 +55,14 @@ fn debug_log_specs_for_home(home: PathBuf) -> Vec<DebugLogSpec> {
 
     vec![
         DebugLogSpec::new(
+            "initialization_diagnostics", "启动与初始化 · 诊断记录",
+            log_dir.clone(), "initialization-diagnostics.jsonl",
+        ),
+        DebugLogSpec::new(
+            "initialization_diagnostics_previous", "启动与初始化 · 上次诊断记录",
+            log_dir.clone(), "initialization-diagnostics.jsonl.1",
+        ),
+        DebugLogSpec::new(
             "core",
             "core.log · Core Engine",
             log_dir.clone(),
@@ -290,6 +298,8 @@ mod diagnostic_log_spec_tests {
         let home = PathBuf::from("/test/home");
         let specs = debug_log_specs_for_home(home.clone());
         for (key, relative_path) in [
+            ("initialization_diagnostics", "logs/initialization-diagnostics.jsonl"),
+            ("initialization_diagnostics_previous", "logs/initialization-diagnostics.jsonl.1"),
             ("inference_engine", "initialization/logs/local-ai-engine.log"),
             ("inference_engine_previous_1", "initialization/logs/local-ai-engine.log.1"),
             ("inference_engine_previous_2", "initialization/logs/local-ai-engine.log.2"),

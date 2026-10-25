@@ -34,6 +34,7 @@ from database_readiness import DatabaseFailure, MESSAGES as DATABASE_MESSAGES, v
 
 from runtime_download import DownloadFailure, RuntimeDownloader, failure_code, sha256
 from runtime_endpoints import service_base_url, service_port
+from initialization_diagnostics import exception_evidence, failure_copy, safe_evidence, write_event
 
 logger = logging.getLogger(__name__)
 
@@ -185,14 +186,30 @@ class InitializationManager:
         self._processes: dict[str, subprocess.Popen] = {}
         self._invalid_since: dict[str, Optional[float]] = {}
         self._runtime_supervisor = None
+        self._runtime_probes: dict[str, dict[str, Any]] = {}
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self._mark_interrupted_runs()
+        write_event(self.base_dir, "initialization_service_started", self._load_state("normal"))
 
     # ── public lifecycle ──────────────────────────────────────────────────
 
     def get_status(self) -> dict[str, Any]:
         with self._lock:
             state = self._refresh_completed_state(self._load_active_state())
+            # A late engine startup must not leave a persisted failure blocking
+            # the UI forever. Run the remaining checks through the normal worker;
+            # engine health alone is not evidence that initialization passed.
+            if (
+                state.get("mode") == "normal"
+                and state.get("state") == "failed"
+                and state.get("error_code") == "RUNTIME_START_FAILED"
+                and not (self._thread and self._thread.is_alive())
+                and not self._external_backend_start_in_progress()
+                and self._ollama_healthy(self._ollama_base_url("normal"))
+                and self._managed_ollama_process_owned("normal")
+            ):
+                logger.info("local AI engine recovered; resuming initialization checks")
+                state = self.start("normal")
             state["test_mode_enabled"] = self._test_mode_enabled()
             return self._public_state(state)
 
@@ -256,12 +273,15 @@ class InitializationManager:
             if state.get("state") == "completed" and state.get("quality_gate", {}).get("passed"):
                 return self._public_state(state)
 
+            previous_run_id = state.get("run_id")
             state = self._new_state(requested_mode)
+            state["previous_run_id"] = previous_run_id
             if requested_mode == "sandbox":
                 cold_start = self._sandbox_artifacts_absent()
                 state["sandbox_cold_start"] = cold_start
                 state["sandbox_isolation"] = self._sandbox_isolation_status(cold_start)
             self._save_state(state)
+            write_event(self.base_dir, "run_started", state)
             logger.info(
                 "initialization_started run_id=%s mode=%s",
                 state["run_id"],
@@ -346,6 +366,8 @@ class InitializationManager:
         """生成严格白名单诊断包，不包含日志正文、路径、主机名或用户内容。"""
         with self._lock:
             state = self._load_active_state()
+            write_event(self.base_dir, "diagnostic_exported", state,
+                        evidence=state.get("failure_evidence") or {})
             installation_id = self._installation_id()
             environment = state.get("environment") or self._environment_snapshot()
             stages = state.get("stages", [])
@@ -472,6 +494,7 @@ class InitializationManager:
             )
             state["quality_gate"]["passed"] = True
             self._save_state(state)
+            write_event(self.base_dir, "run_completed", state)
             logger.info(
                 "initialization_finished run_id=%s mode=%s result=completed",
                 run_id,
@@ -483,7 +506,10 @@ class InitializationManager:
             with self._lock:
                 state = self._load_state(mode)
                 stage_id = state.get("current_stage")
-                public_message = self._redact_internal_terms(str(exc))
+                title, public_message, suggestion = failure_copy(exc.code, stage_id, exc.evidence)
+                # Database failures already have curated, actionable messages.
+                if exc.code.startswith("DATABASE_"):
+                    public_message = DATABASE_MESSAGES.get(exc.code, public_message)
                 state["database_diagnostics"] = exc.evidence if exc.code.startswith("DATABASE_") else {}
                 if exc.code.startswith("DATABASE_"):
                     logger.warning("database_initialization_failed code=%s evidence=%s", exc.code, exc.evidence)
@@ -501,15 +527,19 @@ class InitializationManager:
                 state.update(
                     {
                         "state": "failed",
+                        "failure_title": title,
+                        "diagnostic_id": state.get("run_id"),
+                        "failure_evidence": safe_evidence(exc.evidence),
                         "message": public_message,
                         "error_code": exc.code,
-                        "suggestion": ERROR_SUGGESTIONS.get(exc.code, "请重试或上报诊断。"),
+                        "suggestion": suggestion or ERROR_SUGGESTIONS.get(exc.code, "请重试或上报诊断。"),
                         "can_retry": True,
                         "can_report": True,
                         "finished_at": _utc_now(),
                     }
                 )
                 self._save_state(state)
+                write_event(self.base_dir, "run_failed", state, evidence=exc.evidence, error=exc)
                 logger.warning(
                     "initialization_finished run_id=%s mode=%s result=failed stage_id=%s error_code=%s",
                     run_id,
@@ -547,6 +577,8 @@ class InitializationManager:
                     self._default_error_code(stage_id),
                     str(error),
                 )
+                write_event(self.base_dir, "stage_attempt_failed", dict(state, error_code=exc.code),
+                            evidence=exc.evidence, error=error, attempt=attempt + 1)
                 if (
                     attempt > 0
                     or exc.code not in AUTO_REPAIRABLE_STAGE_ERRORS
@@ -650,6 +682,7 @@ class InitializationManager:
             if stage.get("id") == state.get("current_stage"):
                 stage["detail"] = message
         self._save_state(state)
+        write_event(self.base_dir, "recovery_" + status, state, attempt=attempt)
 
     def _begin_stage(self, state: dict[str, Any], stage_id: str, progress: int) -> None:
         with self._lock:
@@ -669,6 +702,7 @@ class InitializationManager:
                         }
                     )
             self._save_state(state)
+            write_event(self.base_dir, "stage_started", state)
 
     def _finish_stage(
         self,
@@ -694,6 +728,7 @@ class InitializationManager:
                         }
                     )
             self._save_state(state)
+            write_event(self.base_dir, "stage_" + status, state)
             logger.info(
                 "initialization_stage_finished run_id=%s stage_id=%s result=%s duration_ms=%s",
                 state.get("run_id"),
@@ -745,24 +780,14 @@ class InitializationManager:
                 while self._port_in_use(self._ollama_port(mode)) and time.monotonic() < deadline:
                     time.sleep(0.25)
                 if self._port_in_use(self._ollama_port(mode)):
-                    raise InitializationFailure(
-                        "RUNTIME_START_FAILED",
-                        "旧本地 AI 引擎未能退出，请关闭后重试",
-                    )
+                    raise self._runtime_failure(mode, "legacy_exit_timeout")
                 self._start_ollama(mode, executable)
-                deadline = time.monotonic() + 25
-                while time.monotonic() < deadline:
-                    if self._ollama_healthy(base_url):
-                        state["legacy_runtime_migrated"] = True
-                        self._save_state(state)
-                        return False, "本地 AI 引擎已切换为无界面后台运行"
-                    time.sleep(0.5)
-                raise InitializationFailure("RUNTIME_START_FAILED", "本地 AI 引擎启动超时")
+                self._wait_for_ollama(mode)
+                state["legacy_runtime_migrated"] = True
+                self._save_state(state)
+                return False, "本地 AI 引擎已切换为无界面后台运行"
             if mode == "normal" and not self._managed_ollama_process_owned(mode):
-                raise InitializationFailure(
-                    "RUNTIME_START_FAILED",
-                    "本地 AI 服务端口被非记忆面包托管的进程占用，请关闭后重试",
-                )
+                raise self._runtime_failure(mode, "port_conflict")
             state["runtime_reused"] = True
             self._save_state(state)
             detail = (
@@ -776,12 +801,46 @@ class InitializationManager:
         if executable is None:
             executable = self._install_managed_ollama(mode)
         self._start_ollama(mode, executable)
-        deadline = time.monotonic() + 25
+        self._wait_for_ollama(mode)
+        return False, "本地 AI 引擎已安装并启动"
+
+    def _wait_for_ollama(self, mode: str, timeout: float = 25) -> None:
+        started = time.monotonic()
+        deadline = started + timeout
+        attempts = 0
         while time.monotonic() < deadline:
-            if self._ollama_healthy(base_url):
-                return False, "本地 AI 引擎已安装并启动"
+            attempts += 1
+            if self._ollama_healthy(self._ollama_base_url(mode)):
+                write_event(self.base_dir, "runtime_ready", self._load_state(mode), evidence={
+                    "port": self._ollama_port(mode), "probe_attempts": attempts,
+                    "wait_ms": int((time.monotonic() - started) * 1000), "response_valid": True,
+                })
+                return
+            process = self._processes.get(f"ollama:{mode}")
+            if process is not None and process.poll() is not None:
+                raise self._runtime_failure(mode, "process_exited", attempts, started)
             time.sleep(0.5)
-        raise InitializationFailure("RUNTIME_START_FAILED", "本地 AI 引擎启动超时")
+        raise self._runtime_failure(mode, "health_timeout", attempts, started)
+
+    def _runtime_failure(self, mode: str, reason: str, attempts: int = 0,
+                         started: Optional[float] = None) -> InitializationFailure:
+        evidence = dict(self._runtime_probes.get(self._ollama_base_url(mode), {}))
+        evidence.update(reason=reason, engine_version=MANAGED_OLLAMA_VERSION, port=self._ollama_port(mode),
+                        tcp_reachable=self._port_in_use(self._ollama_port(mode)),
+                        managed_process_owned=self._managed_ollama_marker_valid(mode),
+                        probe_attempts=attempts,
+                        wait_ms=int((time.monotonic() - started) * 1000) if started is not None else 0)
+        try:
+            evidence["proxy_configured"] = bool(urllib.request.getproxies())
+        except Exception:
+            pass
+        process = self._processes.get(f"ollama:{mode}")
+        if process is not None:
+            evidence.update(pid=process.pid, exit_code=process.poll())
+        failure = InitializationFailure("RUNTIME_START_FAILED", failure_copy(
+            "RUNTIME_START_FAILED", "inference_engine", evidence)[1])
+        failure.evidence = safe_evidence(evidence)
+        return failure
 
     def _stage_capture_model(self, mode: str, _state: dict[str, Any]) -> tuple[bool, str]:
         base_url = self._ollama_base_url(mode)
@@ -1222,8 +1281,10 @@ class InitializationManager:
                 and self._sandbox_process_owned("ollama")
             ):
                 return
-            code = "SANDBOX_ISOLATION_FAILED" if mode == "sandbox" else "RUNTIME_START_FAILED"
-            raise InitializationFailure(code, f"本地端口 {port} 已被其他服务占用")
+            if mode == "normal":
+                reason = "engine_unresponsive" if self._managed_ollama_marker_valid(mode) else "port_conflict"
+                raise self._runtime_failure(mode, reason)
+            raise InitializationFailure("SANDBOX_ISOLATION_FAILED", f"本地端口 {port} 已被其他服务占用")
         models_dir = self._models_root(mode)
         models_dir.mkdir(parents=True, exist_ok=True)
         log_path = self._workspace_root(mode) / "logs" / "local-ai-engine.log"
@@ -1245,7 +1306,9 @@ class InitializationManager:
                 log_path=log_path,
             )
         except Exception as exc:
-            raise InitializationFailure("RUNTIME_START_FAILED", f"本地 AI 引擎启动失败: {exc}") from exc
+            failure = self._runtime_failure(mode, "spawn_failed")
+            failure.evidence.update(exception_evidence(exc))
+            raise failure from exc
         self._processes[f"ollama:{mode}"] = process
         self._write_process_marker(
             mode,
@@ -1254,6 +1317,9 @@ class InitializationManager:
             executable,
             {"port": port, "models_root": str(models_dir.resolve())},
         )
+        write_event(self.base_dir, "runtime_process_started", self._load_state(mode), evidence={
+            "pid": process.pid, "port": port, "engine_version": MANAGED_OLLAMA_VERSION,
+        })
 
     def _ensure_model(self, mode: str, model_name: str, label: str) -> tuple[bool, str]:
         """Compatibility entry point backed only by the pinned artifact installer."""
@@ -1745,6 +1811,8 @@ class InitializationManager:
             "test_mode_enabled",
             "sandbox_isolation",
             "recovery",
+            "failure_title",
+            "diagnostic_id",
         }
         return {key: copy.deepcopy(value) for key, value in state.items() if key in allowed}
 
@@ -2110,8 +2178,18 @@ class InitializationManager:
     def _ollama_healthy(self, base_url: str) -> bool:
         try:
             data = self._http_json(f"{base_url}/api/tags", timeout=2)
-            return isinstance(data.get("models", []), list)
-        except Exception:
+            valid = isinstance(data, dict) and isinstance(data.get("models"), list)
+            self._runtime_probes[base_url] = {"response_valid": valid, "proxy_bypassed": True}
+            self._last_engine_probe_error = None
+            return valid
+        except Exception as exc:
+            evidence = exception_evidence(exc)
+            evidence.update(proxy_bypassed=True)
+            self._runtime_probes[base_url] = evidence
+            error = (base_url, tuple(sorted(evidence.items())))
+            if getattr(self, "_last_engine_probe_error", None) != error:
+                logger.warning("local AI health probe failed url=%s evidence=%s", base_url, evidence)
+                self._last_engine_probe_error = error
             return False
 
     def _installed_model_names(self, base_url: str) -> list[str]:
@@ -2133,13 +2211,18 @@ class InitializationManager:
             data=payload,
             headers={"Content-Type": "application/json"} if payload is not None else {},
         )
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        # These requests only address our loopback services. The global opener
+        # caches macOS/system proxy settings, which can outlive a VPN session.
+        # Never send local health checks or model requests through that proxy.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
 
     @staticmethod
     def _http_ok(url: str) -> bool:
         try:
-            with urllib.request.urlopen(url, timeout=2) as response:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(url, timeout=2) as response:
                 return response.status == 200
         except Exception:
             return False
@@ -2252,7 +2335,10 @@ class InitializationManager:
         size = output.tell()
         try:
             while True:
-                chunk = stream.read(64 * 1024)
+                # BufferedReader.read(n) may wait until n bytes or process exit.
+                # Persist sparse startup errors as they arrive instead.
+                read = getattr(stream, "read1", stream.read)
+                chunk = read(64 * 1024)
                 if not chunk:
                     return
                 if size + len(chunk) > MAX_PROCESS_LOG_BYTES:
@@ -2444,6 +2530,10 @@ class InitializationManager:
 
     def _diagnostic_summary(self, state: dict[str, Any]) -> Optional[str]:
         summary = self._safe_summary(state.get("message")) or ""
+        if state.get("error_code") == "RUNTIME_START_FAILED":
+            evidence = safe_evidence(state.get("failure_evidence") or {})
+            parts = [f"{key}={value}" for key, value in sorted(evidence.items())]
+            return (summary[:120] + ("; " + "; ".join(parts) if parts else ""))[:500] or None
         if state.get("current_stage") == "database":
             evidence = state.get("database_diagnostics") or {}
             parts = []

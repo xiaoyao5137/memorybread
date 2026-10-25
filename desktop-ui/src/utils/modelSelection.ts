@@ -37,8 +37,9 @@ export function canUseRemoteCreationModel(currentUser: unknown, balance: CloudBa
   return Boolean(currentUser) && hasUsableCloudBalance(balance)
 }
 
-export function getModelDisplayName(modelId?: string | null): string {
+export function getModelDisplayName(modelId?: string | null, configs: CreationModelConfig[] = []): string {
   if (!modelId) return 'MBEM v1.0'
+  if (modelId.startsWith('user-')) return configs.find(c => c.id === modelId)?.name || '自定义模型'
   if (modelId === REMOTE_CREATION_MODEL_ID || modelId.includes('plus') || modelId.includes('opus')) {
     return 'MBCD Plus v1.0'
   }
@@ -48,8 +49,9 @@ export function getModelDisplayName(modelId?: string | null): string {
 export function getEffectiveCreationModelId(
   configs: CreationModelConfig[],
   remoteAllowed: boolean,
-): CreationModelId {
+): string {
   const active = configs.find(config => config.enabled)?.id
+  if (active?.startsWith('user-')) return active
   if (active === REMOTE_CREATION_MODEL_ID && remoteAllowed) return REMOTE_CREATION_MODEL_ID
   return LOCAL_CREATION_MODEL_ID
 }

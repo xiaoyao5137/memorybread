@@ -745,7 +745,7 @@ const RagPanel: React.FC<RagPanelProps> = ({ className = '' }) => {
           <ModelSelect
             label="模型"
             value={activeModelId}
-            options={CREATION_MODEL_DEFS}
+            options={[...CREATION_MODEL_DEFS, ...creationModelConfigs.filter(c => c.id.startsWith('user-')).map(c => ({ id: c.id, name: c.name || '自定义模型', shortName: c.name || '自定义', description: '使用自己的模型配置', remote: false }))]}
             disabled={ragLoading}
             remoteAllowed={remoteModelAllowed}
             onChange={handleSelectModel}

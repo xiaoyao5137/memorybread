@@ -43,6 +43,9 @@ class CloudChatBackend(LlmBackend):
         return bool(self._model and self._api_key)
 
     def complete(self, prompt: str, system: str = "", **kwargs) -> LlmResponse:
+        if self._model.startswith('user-'):
+            from user_models import complete_profile
+            return LlmResponse(text=complete_profile(self._model, prompt, system), model=self._model)
         if "claude" in self._model.lower() or "anthropic.com" in self._base_url:
             return self._complete_anthropic(prompt, system, **kwargs)
         return self._complete_openai_compatible(prompt, system, **kwargs)
@@ -54,6 +57,11 @@ class CloudChatBackend(LlmBackend):
         on_delta: Optional[Callable[[str], None]] = None,
         **kwargs,
     ) -> LlmResponse:
+        if self._model.startswith('user-'):
+            from user_models import complete_profile
+            response = LlmResponse(text=complete_profile(self._model, prompt, system), model=self._model)
+            if on_delta: on_delta(response.text)
+            return response
         if "claude" in self._model.lower() or "anthropic.com" in self._base_url:
             return self._stream_anthropic(prompt, system, on_delta=on_delta, **kwargs)
         return self._stream_openai_compatible(prompt, system, on_delta=on_delta, **kwargs)

@@ -21,6 +21,9 @@ from rag.llm.ollama import OllamaBackend
 
 
 def _isolate_locks(directory):
+    from pathlib import Path
+    import user_models
+    user_models.profile_path = lambda: Path(directory) / "test-profiles.json"
     for name, suffix in (
         ("_GLOBAL_SLOT_PREFIX", "slot"),
         ("_INTERACTIVE_DEMAND_LOCK_FILE", "interactive.lock"),
@@ -33,6 +36,8 @@ def _isolate_locks(directory):
 
 @pytest.fixture(autouse=True)
 def isolated_locks(tmp_path, monkeypatch):
+    import user_models
+    monkeypatch.setattr(user_models, "profile_path", lambda: tmp_path / "test-profiles.json")
     names = [name for name in vars(queue_module) if name.startswith("_") and (
         "LOCK_FILE" in name or name in {"_GLOBAL_SLOT_PREFIX", "_RAG_LOCK_OWNER_FILE"}
     )]

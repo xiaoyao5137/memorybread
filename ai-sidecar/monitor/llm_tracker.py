@@ -20,6 +20,18 @@ DB_PATH = str(Path.home() / ".memory-bread" / "memory-bread.db")
 SQLITE_MAX_INTEGER = 2**63 - 1
 
 
+def _private_error_code(error):
+    from user_models import ModelInvocationError
+    allowed = {"CLIENT_NOT_FOUND", "CODEX_CONFIG_INVALID", "CODEX_NETWORK_FAILED",
+               "CODEX_AUTH_FAILED", "CODEX_RATE_LIMITED", "CODEX_CONTEXT_LIMIT",
+               "CODEX_MODEL_UNAVAILABLE", "CODEX_INFERENCE_FAILED", "CODEX_EMPTY_RESPONSE"}
+    if isinstance(error, ModelInvocationError) and error.code in allowed:
+        return error.code
+    if isinstance(error, TimeoutError):
+        return "INFERENCE_TIMEOUT"
+    return "INFERENCE_FAILED"
+
+
 def _usage_integer(value, fallback=0):
     """Usage columns accept bounded integers, never arbitrary model metadata."""
     return value if type(value) is int and 0 <= value <= SQLITE_MAX_INTEGER else fallback
@@ -194,7 +206,7 @@ class LLMCallTracker:
         latency_ms = int(time.time() * 1000) - self._start_ms
         if exc_type is not None:
             self._status = "failed"
-            self._error_msg = str(exc_val) if self.capture_content else "INFERENCE_FAILED"
+            self._error_msg = str(exc_val) if self.capture_content else _private_error_code(exc_val)
         log_llm_usage(
             caller=self.caller,
             model_name=self.model_name,

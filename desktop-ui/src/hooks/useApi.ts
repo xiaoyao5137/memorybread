@@ -130,6 +130,7 @@ interface RagStreamEvent {
 
 export const getActiveCreationModelPayload = (configs: CreationModelConfig[], remoteAllowed = false) => {
   const effectiveId = getEffectiveCreationModelId(configs, remoteAllowed)
+  if (effectiveId.startsWith('user-')) return { creation_model: effectiveId, creation_api_key: 'device-profile' }
   if (effectiveId !== LOCAL_CREATION_MODEL_ID) return {}
   const active = configs.find(config => config.id === LOCAL_CREATION_MODEL_ID)
   if (!active) return {}

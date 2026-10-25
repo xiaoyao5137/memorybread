@@ -240,7 +240,7 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
   const report = async () => {
     const confirmed = pendingReport || await confirmDestructive({
       title: '确认上报诊断信息？',
-      description: '将上报应用与系统版本、硬件档位、失败阶段、稳定错误码，以及固定白名单服务日志的脱敏尾部。日志会限量并移除凭据、联系方式、外部网址和文件路径；不会上报截图、数据库、知识内容、提示词或回答。',
+      description: '将上报应用与系统版本、失败步骤、连接检查结果、程序退出状态、自动修复记录，以及服务日志的脱敏片段，帮助我们定位原因。不会上报截图、记忆库、提示词或回答，日志中的凭据和个人路径会被移除。',
       confirmLabel: '确认上报',
       danger: false,
     })
@@ -368,7 +368,7 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
               {running
                 ? (repairing ? '正在自动修复' : '面包烘焙中')
                 : failed
-                  ? '有一项准备没有完成'
+                  ? status?.failure_title || (status?.error_code === 'RUNTIME_START_FAILED' ? '本地 AI 暂时无法使用' : '有一项准备没有完成')
                   : status?.state === 'completed'
                     ? '面包烘焙完成'
                     : '烤面包'}
@@ -455,9 +455,20 @@ const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onStatusValidated }
               <p className="initialization-copy" role="status">{status.suggestion}</p>
             )}
             {failed && status?.error_code && (
-              <p className="initialization-error-code">
-                错误码 <code>{status.error_code}</code>
-              </p>
+              <details className="initialization-diagnostic-details">
+                <summary>诊断详情（供问题反馈使用）</summary>
+                <dl>
+                  <div><dt>未完成的步骤</dt><dd>{currentStage?.label || '初始化检查'}</dd></div>
+                  <div><dt>错误码</dt><dd><code>{status.error_code}</code></dd></div>
+                  {(status.diagnostic_id || status.run_id) && (
+                    <div><dt>诊断编号</dt><dd><code>{status.diagnostic_id || status.run_id}</code></dd></div>
+                  )}
+                  {status.finished_at && (
+                    <div><dt>发生时间</dt><dd>{new Date(status.finished_at).toLocaleString('zh-CN')}</dd></div>
+                  )}
+                </dl>
+                <p>上报后，我们可通过诊断编号关联当时的检查结果和修复记录。</p>
+              </details>
             )}
             {pendingReport && <p role="status">诊断已提交，日志待补传，编号 {pendingReport.reportId}</p>}
             {pendingReport && !failed && <button type="button" disabled={reporting} onClick={() => void report()}>补传诊断日志</button>}

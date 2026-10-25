@@ -91,6 +91,7 @@ const normalizedArchitecture = (architecture: string): string => {
 const collectArchiveFromSource = async (
   localApiBaseUrl: string,
   metadata: AppMetadata,
+  initializationReportId?: string | null,
 ): Promise<Uint8Array> => {
   const source = localApiBaseUrl.replace(/\/+$/, '')
   const response = await fetch(`${source}/api/debug/log-files`)
@@ -106,16 +107,27 @@ const collectArchiveFromSource = async (
     client_version: metadata.version,
     platform: metadata.platform,
     architecture: normalizedArchitecture(metadata.architecture),
+    initialization_report_id: initializationReportId || null,
     diagnostic_source: source === DEFAULT_SIDECAR_API ? 'sidecar-fallback' : 'core',
     privacy: {
       scrubbed: true,
       excluded: ['screenshots', 'database', 'captures', 'memories', 'prompts', 'answers'],
     },
-    logs: [] as Array<{ key: string; label: string; truncated: boolean; original_size_bytes: number }>,
+    logs: [] as Array<{ key: string; label: string; truncated: boolean; original_size_bytes: number; modified_at: number | null }>,
+    unavailable_logs: files.filter(file => !file.exists).map(file => ({ key: file.key, reason: 'not_found' })),
   }
   for (const [index, file] of available.entries()) {
-    const logResponse = await fetch(`${source}/api/debug/log-files/${encodeURIComponent(file.key)}`)
-    if (!logResponse.ok) continue
+    let logResponse: Response
+    try {
+      logResponse = await fetch(`${source}/api/debug/log-files/${encodeURIComponent(file.key)}`)
+    } catch {
+      manifest.unavailable_logs.push({ key: file.key, reason: 'read_failed' })
+      continue
+    }
+    if (!logResponse.ok) {
+      manifest.unavailable_logs.push({ key: file.key, reason: `http_${logResponse.status}` })
+      continue
+    }
     const log = await logResponse.json() as DebugLogContent
     archiveFiles[safeFileName(file.key, index)] = strToU8(scrubDiagnosticLog(log.content))
     manifest.logs.push({
@@ -123,6 +135,7 @@ const collectArchiveFromSource = async (
       label: file.label,
       truncated: log.truncated,
       original_size_bytes: log.total_size_bytes,
+      modified_at: log.modified_at ?? null,
     })
   }
   if (manifest.logs.length === 0) throw new Error('本机诊断日志读取失败')
@@ -135,11 +148,12 @@ const collectArchiveFromSource = async (
 const collectArchive = async (
   localApiBaseUrls: string[],
   metadata: AppMetadata,
+  initializationReportId?: string | null,
 ): Promise<Uint8Array> => {
   let lastError: unknown = null
   for (const source of [...new Set(localApiBaseUrls.map((value) => value.replace(/\/+$/, '')).filter(Boolean))]) {
     try {
-      return await collectArchiveFromSource(source, metadata)
+      return await collectArchiveFromSource(source, metadata, initializationReportId)
     } catch (error) {
       lastError = error
     }
@@ -220,11 +234,6 @@ export const reportCustomerLogs = async ({
   installationId?: string
   initializationReportId?: string
 }): Promise<CustomerLogReceipt> => {
-  const archive = await collectArchive(
-    localApiBaseUrls || [localApiBaseUrl || DEFAULT_CORE_API, DEFAULT_SIDECAR_API],
-    metadata,
-  )
-  const checksum = await sha256Hex(archive)
   const pendingKey = `memorybread.pending-initialization-log:${useAppStore.getState().serviceEnvironment}:${adminApiBaseUrl}`
   let pending: { reportId: string; installationId: string } | null = null
   try {
@@ -233,6 +242,13 @@ export const reportCustomerLogs = async ({
   } catch { /* Storage is optional. */ }
   const resolvedReportId = initializationReportId || pending?.reportId || null
   const resolvedInstallationId = installationId || pending?.installationId || getCustomerLogInstallationId()
+  // The initializer owns the structured evidence; prefer its whitelist even
+  // when an older Core is still running and does not know the new log keys.
+  const sources = localApiBaseUrls || (resolvedReportId
+    ? [DEFAULT_SIDECAR_API, localApiBaseUrl || DEFAULT_CORE_API]
+    : [localApiBaseUrl || DEFAULT_CORE_API, DEFAULT_SIDECAR_API])
+  const archive = await collectArchive(sources, metadata, resolvedReportId)
+  const checksum = await sha256Hex(archive)
   const fileName = `memorybread-diagnostics-${new Date().toISOString().slice(0, 10)}.zip`
   const safeDescription = description?.trim()
     ? scrubDiagnosticLog(description.trim()).slice(0, 500)

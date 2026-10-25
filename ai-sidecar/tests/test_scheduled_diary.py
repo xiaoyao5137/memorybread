@@ -629,3 +629,55 @@ def test_diary_task_defers_on_battery_without_creating_execution(tmp_path):
     conn.close()
     assert execution_count == 0
     assert task_row == (0, None)
+
+
+def test_diary_uses_creation_selection_and_rereads_switches(tmp_path, monkeypatch):
+    import user_models
+    import inference_queue
+    from monitor import llm_tracker
+    db = tmp_path / 'diary.db'
+    with sqlite3.connect(db) as conn:
+        conn.execute('CREATE TABLE user_preferences(key TEXT PRIMARY KEY,value TEXT)')
+        conn.execute('INSERT INTO user_preferences VALUES (?,?)', ('creation.models', json.dumps([
+            {'id': 'user-inactive', 'enabled': False}, {'id': 'user-creation', 'enabled': True}])))
+    calls, usage = [], []
+    async def chat(model, messages, **kwargs):
+        calls.append((model, messages, kwargs))
+        yield '## 今日产出\n- 完成配置修复与验证'
+    monkeypatch.setattr(user_models, 'chat_profile', chat)
+    monkeypatch.setattr(user_models, 'get_analysis_model', lambda: 'user-analysis')
+    monkeypatch.setattr(llm_tracker, 'log_llm_usage', lambda **kw: usage.append(kw))
+    monkeypatch.setattr(inference_queue, 'get_global_queue', lambda: SimpleNamespace(
+        submit_sync=lambda priority, fn, **kw: fn()))
+    executor = TaskExecutor(str(db))
+    monkeypatch.setattr(executor, '_get_llm_client', lambda: (_ for _ in ()).throw(AssertionError('Ollama must not run')))
+    for selected in ('user-creation', 'user-switched'):
+        with sqlite3.connect(db) as conn:
+            conn.execute('UPDATE user_preferences SET value=?', (json.dumps([{'id': selected, 'enabled': True}]),))
+        result = executor._llm_generate('生成日记', '完成修复', output_language='zh-CN', concise=True)
+        assert '完成配置修复' in result
+        assert calls[-1][0] == selected
+        assert calls[-1][2]['max_tokens'] == 768
+        assert usage[-1]['model_name'] == selected
+        assert usage[-1]['completion_tokens'] > 0
+
+
+def test_diary_failed_creation_does_not_fall_back_to_ollama(tmp_path, monkeypatch):
+    import pytest
+    import user_models
+    import inference_queue
+    from monitor import llm_tracker
+    executor = TaskExecutor(str(tmp_path / 'diary.db'))
+    monkeypatch.setattr(executor, '_creation_model_config', lambda: {'id': 'user-broken', 'enabled': True})
+    monkeypatch.setattr(executor, '_get_llm_client', lambda: (_ for _ in ()).throw(AssertionError('unexpected fallback')))
+    async def fail(*args, **kwargs):
+        raise user_models.ModelInvocationError('missing', 'CLIENT_NOT_FOUND')
+        yield
+    monkeypatch.setattr(user_models, 'chat_profile', fail)
+    monkeypatch.setattr(inference_queue, 'get_global_queue', lambda: SimpleNamespace(submit_sync=lambda priority, fn, **kw: fn()))
+    records = []
+    monkeypatch.setattr(llm_tracker, 'log_llm_usage', lambda **kw: records.append(kw))
+    with pytest.raises(user_models.ModelInvocationError):
+        executor._llm_generate('生成日记', '记录')
+    assert records[-1]['status'] == 'failed'
+    assert records[-1]['model_name'] == 'user-broken'

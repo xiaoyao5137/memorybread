@@ -1,3 +1,4 @@
+import UserModelsPanel from './UserModelsPanel'
 import React, { useEffect, useRef, useState } from 'react'
 import type { ModelEntry } from '../types'
 import { CREATION_MODEL_PREFERENCE_KEY, serviceEnvironmentHeaders, useAppStore } from '../store/useAppStore'
@@ -546,6 +547,11 @@ const ModelManager: React.FC = () => {
     creationModelConfigs: s.creationModelConfigs,
     setCreationModelConfig: s.setCreationModelConfig,
   }))
+  const [analysisModelName, setAnalysisModelName] = useState<string | null>(null)
+  const [modelActionsHost, setModelActionsHost] = useState<HTMLDivElement | null>(null)
+  const [modelRefreshVersion, setModelRefreshVersion] = useState(0)
+  const [analysisSelectionHost, setAnalysisSelectionHost] = useState<HTMLDivElement | null>(null)
+  const [analysisRevision, setAnalysisRevision] = useState(0)
   const remoteModelAllowed = canUseRemoteCreationModel(currentUser, cloudBalance)
 
   const persistCreationModelConfigs = async () => {
@@ -713,7 +719,12 @@ const ModelManager: React.FC = () => {
   const handleActivate = async (model: ModelEntry) => {
     setActivatingIds(prev => new Set(prev).add(model.id))
     try {
-      await fetch(`${SIDECAR}/api/models/${model.id}/activate`, { method: 'POST' })
+      const response = await fetch(`${SIDECAR}/api/models/${model.id}/activate`, { method: 'POST' })
+      if (!response.ok) throw new Error('模型启用失败')
+      if (model.category === 'llm') {
+        setAnalysisModelName(null)
+        setAnalysisRevision(value => value + 1)
+      }
       await loadModels()
     } catch { }
     setActivatingIds(prev => {
@@ -803,7 +814,7 @@ const ModelManager: React.FC = () => {
       {/* 顶部激活状态 */}
       <div style={{ padding: '10px 14px 0', display: 'flex', gap: 8 }}>
         {[
-          { label: '采集分析模型', model: activeLlm },
+          { label: '采集分析模型', model: analysisModelName ? { name: analysisModelName } : activeLlm },
           { label: '向量模型', model: activeEmb },
         ].map(({ label, model }) => (
           <div key={label} style={{
@@ -833,8 +844,8 @@ const ModelManager: React.FC = () => {
             fontWeight: tab === t.key ? 600 : 400,
           }}>{t.label}</button>
         ))}
-        <button onClick={loadModels} style={{
-          marginLeft: 'auto', fontSize: 11, padding: '5px 10px', borderRadius: 8,
+        <div className="model-manager__actions" ref={setModelActionsHost} />
+        <button onClick={() => { void loadModels(); setModelRefreshVersion(value => value + 1) }} style={{ fontSize: 11, padding: '5px 10px', borderRadius: 8,
           border: '1px solid var(--mb-border-strong)', background: 'var(--mb-bg-input)', color: 'var(--mb-text-secondary)', cursor: 'pointer',
         }}>刷新</button>
       </div>
@@ -844,6 +855,8 @@ const ModelManager: React.FC = () => {
         {tab === 'creation' ? (
           <>
             <CreationModelPanel
+              actionsHost={modelActionsHost}
+              refreshVersion={modelRefreshVersion}
               configs={creationModelConfigs}
               remoteAllowed={remoteModelAllowed}
               availableCredit={cloudBalance?.available ?? null}
@@ -932,7 +945,7 @@ const ModelManager: React.FC = () => {
 
             {items.filter(m => m.category !== 'inference_engine').map(m => (
               <ModelCard
-                key={m.id} model={m}
+                key={m.id} model={analysisModelName && m.category === 'llm' ? { ...m, status: m.status === 'active' ? 'installed' : m.status, is_active: false } : m}
                 downloading={downloadingIds.has(m.id)}
                 activating={activatingIds.has(m.id)}
                 onDownload={() => handleDownload(m)}
@@ -943,9 +956,11 @@ const ModelManager: React.FC = () => {
                 onChat={m.category === 'llm' && (m.status === 'active' || (m.requires_api_key && (m.status as string === 'installed' || m.status as string === 'active'))) ? () => setChattingModel(m) : undefined}
               />
             ))}
+            {category === 'llm' && <div ref={setAnalysisSelectionHost} />}
           </div>
         ))}
 
+        <UserModelsPanel key={analysisRevision} scope="analysis" actionsHost={modelActionsHost} refreshVersion={modelRefreshVersion} selectionHost={analysisSelectionHost} onAnalysisChange={setAnalysisModelName} />
         {!loading && !modelLoadError && filtered.length === 0 && (
           <div style={{ textAlign: 'center', color: 'var(--mb-text-faint)', fontSize: 13, padding: 40 }}>
             暂无模型
@@ -1156,18 +1171,21 @@ const CreationModelChatDialog: React.FC<{ entry: CreationChatEntry; onClose: () 
 }
 
 const CreationModelPanel: React.FC<{
+  actionsHost: HTMLElement | null
+  refreshVersion: number
   configs: import('../store/useAppStore').CreationModelConfig[]
   remoteAllowed: boolean
   availableCredit: string | null
   openId: string | null
   onToggleOpen: (id: string | null) => void
   onChange: (id: string, patch: Partial<import('../store/useAppStore').CreationModelConfig>) => void
-}> = ({ configs, remoteAllowed, availableCredit, openId, onToggleOpen, onChange }) => {
+}> = ({ actionsHost, refreshVersion, configs, remoteAllowed, availableCredit, openId, onToggleOpen, onChange }) => {
   const [testState, setTestState] = React.useState<Record<string, { loading: boolean; result?: string; error?: string }>>({})
   const [chattingModel, setChattingModel] = React.useState<CreationChatEntry | null>(null)
+  const [selectionHost, setSelectionHost] = useState<HTMLDivElement | null>(null)
   const activeConfig = configs.find(config => config.enabled && (remoteAllowed || config.id !== REMOTE_CREATION_MODEL_ID))
   const activeDef = CREATION_MODEL_DEFS.find(def => def.id === activeConfig?.id)
-  const activeModelName = activeDef?.name || 'MBEM v1.0'
+  const activeModelName = activeConfig?.name || activeDef?.name || 'MBEM v1.0'
 
   const handleTest = async (def: typeof CREATION_MODEL_DEFS[number], cfg: { id: string; enabled: boolean; apiKey: string; baseUrl?: string }) => {
     if (!cfg.apiKey) return
@@ -1246,6 +1264,8 @@ const CreationModelPanel: React.FC<{
           </div>
         )
       })}
+      <div ref={setSelectionHost} />
+      <UserModelsPanel actionsHost={actionsHost} refreshVersion={refreshVersion} selectionHost={selectionHost} />
       {chattingModel && <CreationModelChatDialog entry={chattingModel} onClose={() => setChattingModel(null)} />}
     </div>
   )

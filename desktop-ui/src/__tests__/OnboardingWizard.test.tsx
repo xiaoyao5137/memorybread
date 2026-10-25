@@ -108,6 +108,29 @@ describe('首次启动一键初始化', () => {
     expect(screen.getByText(/采集、提炼、咨询和创作测试/)).toBeInTheDocument()
   })
 
+  it('用中文说明启动失败，并将可关联日志的编号收进诊断详情', async () => {
+    const failed = initialization('failed', {
+      current_stage: 'inference_engine',
+      error_code: 'RUNTIME_START_FAILED',
+      failure_title: '本地 AI 暂时无法使用',
+      message: '本地 AI 程序启动后意外退出，暂时无法使用提炼、咨询和创作功能。',
+      suggestion: '请点击“重试失败阶段”。若仍未恢复，请上报诊断。',
+      diagnostic_id: 'diagnostic-run-123',
+      finished_at: '2026-10-18T03:42:25Z',
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => response({ status: 'ok', initialization: failed })))
+    render(<OnboardingWizard />)
+    expect(await screen.findByRole('heading', { name: '本地 AI 暂时无法使用' })).toBeInTheDocument()
+    expect(screen.getByText(/本地 AI 程序启动后意外退出/)).toBeInTheDocument()
+    expect(screen.getByText(/请点击“重试失败阶段”/)).toBeInTheDocument()
+    const details = screen.getByText('诊断详情（供问题反馈使用）').closest('details')!
+    expect(details).not.toHaveAttribute('open')
+    expect(within(details).getByText('diagnostic-run-123')).toBeInTheDocument()
+    expect(within(details).getByText('RUNTIME_START_FAILED')).toBeInTheDocument()
+    expect(within(details).getByText('准备本地 AI 引擎')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '上报诊断' })).toBeEnabled()
+  })
+
   it('旧版 sidecar 缺少初始化路由时立即提示重启，而不是显示通用 404', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => response({}, false, 404)))
 

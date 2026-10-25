@@ -1155,6 +1155,8 @@ def activate_model(model_id: str):
             # 同步更新全局 Ollama 模型名，确保后续所有调用使用新模型
             active_llm = MANAGER_MODELS.get(model_id)
             if active_llm and active_llm.provider == 'ollama':
+                from user_models import set_analysis_model
+                set_analysis_model(None)
                 from model_registry_global import set_active_ollama_model, reset_shared_embedding
                 set_active_ollama_model(active_llm.model_id)
                 # 切换模型时重置共享 Embedding（embedding 模型切换时才需要）

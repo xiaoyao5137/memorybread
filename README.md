@@ -117,3 +117,26 @@ npm run build
 ## 反馈
 提交问题时请附上客户端版本、Mac 芯片类型、复现步骤和经过脱敏的错误信息。不要在公开 Issue 中上传真实工作内容、截图、验证码、密钥或记忆包。
 反馈地址：xianjiaqi5137@gmail.com
+
+## 自定义模型与本地客户端
+
+在模型页的采集分析模型或创作模型中，点击右上角“添加模型”打开配置弹窗；填写后可先“测试连接”，再保存。测试不会保存草稿或切换当前模型。已有用户模型在上方列表中编辑、验证、体验、启用或删除。右上角“刷新”统一更新本机配置与推荐目录。两类用途共用本机配置列表，但分别保存启用项：采集分析用于时间线分析与知识提炼，创作用于创作 Agent、咨询和悬浮咨询。不要求 MemoryBread Credit；供应商费用由用户自己的 API/客户端账户承担。
+
+支持 OpenAI Chat Completions 兼容 API、Anthropic Messages API，以及本地 Codex、Claude Code、Kimi 和用户指定的 MiniMax、GLM 等客户端。客户端必须先安装并登录。添加模型时选择本地客户端及类型，会自动定位可执行文件，并从本机配置或已保存的接入配置中读取模型和调用参数，均可手动覆盖；未发现客户端或显式模型时会提示补充。探测不调用模型，也不安装软件或改写客户端配置。Codex 使用只读沙箱，Claude Code 禁用工具，当前 Kimi Code 使用 `--prompt` 和无工具的临时 Agent 文件。旧版 Kimi CLI 可以在参数中指定 `['--print','--output-format','text']` 的 JSON 数组形式（实际填写时使用双引号）。MiniMax、GLM 和其他客户端按安装版本配置可执行文件和参数，默认以 stdin/stdout 传递文本；参数内的 `{prompt}` 可替换提示词。
+
+自定义模型密钥只存于本机 `~/.memory-bread/user_models.json`（0600、原子更新）；前端和本地偏好只保存模型引用，不回传密钥。CLI 无 shell 执行，在独立临时目录运行，限制 300 秒和 4 MB 输出，取消/超时会清理子进程。自定义 API 与 CLI 当前以完整文本返回，服务接口通过 SSE 包装；目录的 vision/tools 标签表示供应商能力，当前配置体验只发送文本。
+
+运营目录来自 `GET /v1/model-catalog`，支持分页、手动刷新和按服务环境隔离的离线缓存。目录不可用时可继续手动配置并使用已保存模型。目录更新不会覆盖用户自己的配置；需要切换到新版本时重新从目录添加或编辑实际模型 ID。
+
+相关自测：`cd desktop-ui && npm test -- --run src/__tests__/UserModelsPanel.test.tsx src/__tests__/ModelManager.test.tsx src/__tests__/CreationPanelAgentLoop.test.tsx`；`cd ai-sidecar && .venv/bin/python -m pytest tests/test_user_models.py tests/test_creation_cloud.py tests/test_cloud_llm.py -q`。
+
+
+### 国内平台模型网关
+
+在「模型 → 添加模型 → 调用方式」中选择阿里云百炼、MiniMax、智谱、Kimi 或 DeepSeek 模型网关。平台预设会自动填写模型 ID 并解析官方调用地址；只需填写该平台的 API Key，即可测试连接、保存并启用为采集分析模型。模型 ID 可以修改为账号已开通的其他文本模型。普通开放平台密钥与 Coding/Token Plan 套餐密钥不可混用。
+
+百炼使用模型平台 API Key，不使用 RAM AccessKey。选择密钥对应地域；北京和新加坡可以只填密钥，也可填写业务空间 ID 使用专属网关；美国和日本地域必须填写业务空间 ID。已有密钥编辑时留空保留，切换平台、地域或业务空间需要重新填写。密钥保存在本机权限为 0600 的 `~/.memory-bread/user_models.json`，不进入模型列表响应或远端偏好设置。
+
+网关预设位于 `shared/model-gateways/providers.json`，前后端共用。地址以服务端可信预设为准，忽略客户端传入的网关地址。采集提炼复用 `KnowledgeExtractorV2` 的设备模型调用路径。
+
+接入依据：[百炼](https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope)、[MiniMax](https://platform.minimax.cn/docs/api-reference/text-openai-api)、[智谱](https://docs.bigmodel.cn/cn/guide/develop/openai/introduction)、[Kimi](https://platform.kimi.com/docs/get-api-key)、[DeepSeek](https://api-docs.deepseek.com/)。

@@ -1,0 +1,7 @@
+[
+  {"id":"aliyun","name":"阿里云百炼","model":"qwen-plus","base_url":"https://dashscope.aliyuncs.com/compatible-mode/v1","key_url":"https://bailian.console.aliyun.com/cn-beijing/model/settings/api-key","description":"百炼 API Key，无需 RAM AccessKey"},
+  {"id":"minimax","name":"MiniMax","model":"MiniMax-M3.1-Flash","base_url":"https://api.minimax.cn/v1","key_url":"https://platform.minimax.cn","description":"MiniMax 开放平台 API Key"},
+  {"id":"zhipu","name":"智谱","model":"glm-5.3","base_url":"https://open.bigmodel.cn/api/paas/v4","key_url":"https://bigmodel.cn","description":"智谱开放平台 API Key"},
+  {"id":"kimi","name":"Kimi","model":"kimi-k3.1-pro","base_url":"https://api.moonshot.cn/v1","key_url":"https://platform.kimi.com","description":"Kimi 开放平台 API Key"},
+  {"id":"deepseek","name":"DeepSeek","model":"deepseek-flash","base_url":"https://api.deepseek.com","key_url":"https://platform.deepseek.com","description":"DeepSeek 开放平台 API Key"}
+]

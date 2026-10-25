@@ -400,6 +400,10 @@ creation_service_sources_changed() {
     # 服务，正在进行的 /creation/agent/run 随即表现为空响应 502。
     python_sources_newer_than \
         "$CREATION_PID_FILE" \
+        "$PROJECT_ROOT/ai-sidecar/user_models.py" \
+        "$PROJECT_ROOT/ai-sidecar/model_gateways.py" \
+        "$PROJECT_ROOT/ai-sidecar/client_detection.py" \
+        "$PROJECT_ROOT/ai-sidecar/cli_network.py" \
         "$PROJECT_ROOT/ai-sidecar/creation" \
         "$PROJECT_ROOT/ai-sidecar/embedding" \
         "$PROJECT_ROOT/ai-sidecar/monitor" \
@@ -457,6 +461,10 @@ source_reload_allowed() {
 sidecar_sources_changed() {
     python_sources_newer_than \
         "$SIDECAR_PID_FILE" \
+        "$PROJECT_ROOT/ai-sidecar/user_models.py" \
+        "$PROJECT_ROOT/ai-sidecar/model_gateways.py" \
+        "$PROJECT_ROOT/ai-sidecar/client_detection.py" \
+        "$PROJECT_ROOT/ai-sidecar/cli_network.py" \
         "$PROJECT_ROOT/ai-sidecar/main.py" \
         "$PROJECT_ROOT/ai-sidecar/background_processor.py" \
         "$PROJECT_ROOT/ai-sidecar/energy_policy.py" \
@@ -477,6 +485,10 @@ sidecar_sources_changed() {
 model_api_sources_changed() {
     python_sources_newer_than \
         "$MODEL_API_PID_FILE" \
+        "$PROJECT_ROOT/ai-sidecar/user_models.py" \
+        "$PROJECT_ROOT/ai-sidecar/model_gateways.py" \
+        "$PROJECT_ROOT/ai-sidecar/client_detection.py" \
+        "$PROJECT_ROOT/ai-sidecar/cli_network.py" \
         "$PROJECT_ROOT/ai-sidecar/model_api_server.py" \
         "$PROJECT_ROOT/ai-sidecar/model_schema.py" \
         "$PROJECT_ROOT/ai-sidecar/initialization_manager.py" \

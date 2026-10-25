@@ -349,7 +349,8 @@ def test_normal_initialization_rejects_unmanaged_cli_runtime(monkeypatch, tmp_pa
         manager._stage_inference_engine("normal", manager._new_state("normal"))
 
     assert caught.value.code == "RUNTIME_START_FAILED"
-    assert "非记忆面包托管" in str(caught.value)
+    assert "其他程序占用" in str(caught.value)
+    assert caught.value.evidence['reason'] == 'port_conflict'
 
 
 def test_normal_initialization_migrates_gui_runtime_to_managed_cli(monkeypatch, tmp_path):
@@ -658,3 +659,70 @@ def test_capture_download_attempts_are_included_without_source_urls(tmp_path):
     report = manager.get_report_bundle()
     assert 'blob_2.runtime.source_2.attempt_1:RUNTIME_DOWNLOAD_TIMEOUT' in report['summary']
     assert 'private.example' not in json.dumps(report)
+
+
+def test_local_probes_bypass_environment_and_cached_system_proxy(monkeypatch):
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"models": []}')
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    # Emulate a long-running helper retaining yesterday's now-dead VPN proxy.
+    monkeypatch.setenv('http_proxy', 'http://127.0.0.1:1')
+    monkeypatch.setenv('no_proxy', '')
+    monkeypatch.setattr(urllib.request, '_opener', urllib.request.build_opener(
+        urllib.request.ProxyHandler({'http': 'http://127.0.0.1:1'})))
+    url = 'http://127.0.0.1:{}'.format(server.server_port)
+    try:
+        assert InitializationManager._http_json(url) == {'models': []}
+        assert InitializationManager._http_ok(url)
+    finally:
+        server.shutdown()
+        worker.join(2)
+        server.server_close()
+
+
+def test_late_owned_engine_recovery_reruns_quality_checks(monkeypatch, tmp_path):
+    manager = InitializationManager(tmp_path)
+    _stub_successful_stages(monkeypatch, manager)
+    failed = manager._new_state('normal')
+    failed.update(state='failed', error_code='RUNTIME_START_FAILED')
+    manager._save_state(failed)
+    monkeypatch.setattr(manager, '_ollama_healthy', lambda _: True)
+    monkeypatch.setattr(manager, '_managed_ollama_process_owned', lambda _: True)
+    checked = []
+    monkeypatch.setattr(manager, '_stage_quality_gate',
+                        lambda *_: (checked.append(True) or False, 'checked'))
+    assert manager.get_status()['state'] == 'running'
+    assert _wait_for_terminal(manager)['state'] == 'completed'
+    assert checked == [True]
+
+
+@pytest.mark.parametrize('healthy,owned,external,code', [
+    (False, True, False, 'RUNTIME_START_FAILED'),
+    (True, False, False, 'RUNTIME_START_FAILED'),
+    (True, True, True, 'RUNTIME_START_FAILED'),
+    (True, True, False, 'MODEL_DOWNLOAD_FAILED'),
+])
+def test_failed_runtime_does_not_resume_without_safe_recovery(
+    monkeypatch, tmp_path, healthy, owned, external, code
+):
+    manager = InitializationManager(tmp_path)
+    failed = manager._new_state('normal')
+    failed.update(state='failed', error_code=code)
+    manager._save_state(failed)
+    monkeypatch.setattr(manager, '_ollama_healthy', lambda _: healthy)
+    monkeypatch.setattr(manager, '_managed_ollama_process_owned', lambda _: owned)
+    monkeypatch.setattr(manager, '_external_backend_start_in_progress', lambda: external)
+    assert manager.get_status()['state'] == 'failed'
+    assert manager._thread is None

@@ -3063,13 +3063,15 @@ class KnowledgeExtractorV2:
         # 必须 ≥ model_api_server 的 300s 长输入预算；Core 外层当前为 310s。
         self.timeout = 1200
 
-        # 测试 Ollama 是否可用
+        # A device profile does not depend on the bundled Ollama service.
+        from user_models import get_analysis_model
         try:
-            with self._ollama_session() as session:
-                r = session.get(f"{self.ollama_base_url}/api/tags", timeout=5)
-            if r.status_code >= 400:
-                raise BakeModelRequestError(r.status_code, r.text)
-            logger.info(f"✅ Ollama 服务连接成功，模型: {model}")
+            if not get_analysis_model():
+                with self._ollama_session() as session:
+                    r = session.get(f"{self.ollama_base_url}/api/tags", timeout=5)
+                if r.status_code >= 400:
+                    raise BakeModelRequestError(r.status_code, r.text)
+                logger.info(f"✅ Ollama 服务连接成功，模型: {model}")
         except BakeModelRequestError:
             raise
         except requests.RequestException as exc:
@@ -3096,6 +3098,7 @@ class KnowledgeExtractorV2:
     def _ollama_chat(
         self, messages, format=None, options=None, *,
         output_guard: Optional[Callable[[str], bool]] = None,
+        usage_tracker=None,
     ):
         """使用可取消 HTTP 流，覆盖连接、等待响应头和模型预填充阶段。"""
         import httpx
@@ -3106,6 +3109,39 @@ class KnowledgeExtractorV2:
         )
 
         raise_if_preempted()
+        from user_models import get_analysis_model, chat_profile
+        selected_model = get_analysis_model()
+        # Bind usage to the same selection as this request, including failures.
+        # self.model remains the bundled Ollama model for local requests.
+        if usage_tracker is not None:
+            usage_tracker.model_name = selected_model or self.model
+        if selected_model:
+            from inference_transport import run_preemptible_async
+            profile_messages = list(messages)
+            if format:
+                schema = json.dumps(_ollama_compatible_format(format), ensure_ascii=False)
+                profile_messages = [{
+                    "role": "system",
+                    "content": "只返回合法 JSON，不要 Markdown 代码围栏。输出结构要求：" + schema,
+                }, *profile_messages]
+
+            async def infer():
+                parts = []
+                async for part in chat_profile(
+                    selected_model, profile_messages,
+                    max_tokens=max(1, int((options or {}).get("num_predict", 8192))),
+                ):
+                    parts.append(part)
+                return "".join(parts)
+
+            content = run_preemptible_async(infer)
+            if output_guard is not None and output_guard(content):
+                raise BakeOutputTruncatedError(
+                    "数据补提炼输出无法回证，已中止", partial_content=content,
+                    stop_reason="ungrounded",
+                )
+            return {"model": selected_model, "message": {"content": content, "thinking": ""},
+                    "done": True, "done_reason": "stop"}
         payload = {
             "model": self.model,
             "messages": messages,
@@ -3282,6 +3318,7 @@ class KnowledgeExtractorV2:
             ) as tracker:
                 try:
                     response = self._ollama_chat(
+                        usage_tracker=tracker,
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": retry_prompt},
@@ -4145,6 +4182,7 @@ class KnowledgeExtractorV2:
         ) as tracker:
             try:
                 response = self._ollama_chat(
+                    usage_tracker=tracker,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
@@ -5523,6 +5561,7 @@ class KnowledgeExtractorV2:
                 capture_content=False,
             ) as tracker:
                 response = self._ollama_chat(
+                    usage_tracker=tracker,
                     messages=[
                         {"role": "system", "content": SYSTEM_PROMPT + DATA_FACT_PROMPT + DATA_PAGE_PROMPT},
                         {"role": "user", "content": prompt + "\n\n" + JSON_OUTPUT_RULES}
@@ -5903,6 +5942,7 @@ class KnowledgeExtractorV2:
                     + JSON_OUTPUT_RULES
                 )
                 response = self._ollama_chat(
+                    usage_tracker=tracker,
                     messages=[
                         {"role": "system", "content": _sys_prompt},
                         {"role": "user", "content": enhanced_user_prompt},

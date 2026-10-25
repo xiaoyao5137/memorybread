@@ -654,6 +654,21 @@
   font-family: ui-monospace, "SFMono-Regular", monospace;
 }
 
+.initialization-diagnostic-details {
+  margin-top: 20px;
+  max-width: 560px;
+  color: var(--init-brown);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.initialization-diagnostic-details summary { cursor: pointer; }
+.initialization-diagnostic-details dl { margin: 12px 0; }
+.initialization-diagnostic-details dl > div { margin: 8px 0; }
+.initialization-diagnostic-details dt { font-weight: 600; }
+.initialization-diagnostic-details dd { margin: 0; overflow-wrap: anywhere; }
+.initialization-diagnostic-details code { user-select: text; }
+
 .report-success { color: var(--init-sage); }
 .action-error { color: var(--init-danger); }
 

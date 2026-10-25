@@ -372,20 +372,50 @@ fn system_bucket_ms(range: &str) -> i64 {
 }
 
 fn public_llm_model_name(model: &str) -> String {
-    let normalized = model.trim().to_ascii_lowercase();
-    if normalized == "unavailable" {
-        return normalized;
+    if model.starts_with("user-") {
+        let profiles = std::env::var_os("HOME")
+            .and_then(|home| std::fs::read(std::path::PathBuf::from(home)
+                .join(".memory-bread/user_models.json")).ok())
+            .and_then(|data| serde_json::from_slice::<HashMap<String, UserModelDisplay>>(&data).ok())
+            .unwrap_or_default();
+        return user_model_display_name(model, &profiles);
     }
-    if normalized.contains("plus") || normalized.contains("opus") {
-        return "MBCD Plus v1.0".to_string();
+    // Only known bundled models and their legacy IDs receive product names.
+    match model.trim().to_ascii_lowercase().as_str() {
+        "mbcd-plus-v1" | "claude-opus-4-8" => "MBCD Plus v1.0".to_string(),
+        "mbem-v1-local" | "mbcd-std-v1"
+        | "qwen3.5-4b" | "qwen3.5:4b"
+        | "qwen2.5-3b" | "qwen2.5:3b" | "qwen2.5-7b" | "qwen2.5:7b"
+        | "deepseek-r1-7b" | "deepseek-r1:7b"
+        | "gemma4-e4b" | "gemma4:e4b" => "MBEM v1.0".to_string(),
+        _ => model.to_string(),
     }
-    "MBEM v1.0".to_string()
+}
+
+#[derive(Deserialize)]
+struct UserModelDisplay {
+    name: String,
+}
+
+fn user_model_display_name(model: &str, profiles: &HashMap<String, UserModelDisplay>) -> String {
+    profiles.get(model)
+        .filter(|profile| !profile.name.trim().is_empty())
+        .map(|profile| profile.name.clone())
+        // Deleted or unreadable profiles must never be relabeled as an official model.
+        .unwrap_or_else(|| model.to_string())
 }
 
 fn public_model_event_name(model_type: &str, model_name: &str) -> String {
+    if model_name.starts_with("user-") {
+        return public_llm_model_name(model_name);
+    }
     match model_type {
         "llm" => public_llm_model_name(model_name),
-        "embedding" => "MBEMB V1.0".to_string(),
+        "embedding" => match model_name {
+            "bge-small-zh" | "bge-small-zh-v1.5" | "mbemb-v2-local"
+            | "bge-m3" | "nomic-embed-text" | "text-embedding-3-small" => "MBEMB V1.0".to_string(),
+            _ => model_name.to_string(),
+        },
         _ => model_name.to_string(),
     }
 }
@@ -1984,7 +2014,7 @@ fn sidecar_model_type_label(model_type: &str, model_name: &str) -> String {
     }
     match model_type {
         "ocr" => format!("OCR · {model_name}"),
-        "embedding" => "Embedding · MBEMB V1.0".to_string(),
+        "embedding" => format!("Embedding · {}", public_model_event_name(model_type, model_name)),
         "asr" => format!("ASR · {model_name}"),
         "vlm" => format!("VLM · {model_name}"),
         "llm" => format!("LLM · {}", public_llm_model_name(model_name)),
@@ -3697,15 +3727,32 @@ mod tests {
     }
 
     #[test]
-    fn provider_model_names_are_branded_before_monitor_serialization() {
-        assert_eq!(public_llm_model_name("provider-local-model"), "MBEM v1.0");
+    fn only_official_model_names_are_branded_before_monitor_serialization() {
+        assert_eq!(public_llm_model_name("qwen3.5:4b"), "MBEM v1.0");
         assert_eq!(
-            public_llm_model_name("provider-plus-model"),
+            public_llm_model_name("mbcd-plus-v1"),
             "MBCD Plus v1.0"
         );
+        for name in ["gpt-6.1-sol", "My Opus Plus", "provider-local-model", "mock-model"] {
+            assert_eq!(public_llm_model_name(name), name);
+        }
         assert_eq!(
-            public_model_event_name("embedding", "provider-vector-model"),
+            public_model_event_name("embedding", "bge-small-zh-v1.5"),
             "MBEMB V1.0"
         );
+        assert_eq!(public_model_event_name("embedding", "My Embedding"), "My Embedding");
+    }
+
+    #[test]
+    fn user_model_names_are_preserved_and_missing_profiles_keep_their_id() {
+        let profiles = serde_json::from_str::<HashMap<String, UserModelDisplay>>(r#"{
+            "user-gpt": {"name": "Codex GPT-6.1 Sol", "model": "gpt-6.1-sol"},
+            "user-opus": {"name": "我的 Opus Plus Embedding"},
+            "user-empty": {"name": " "}
+        }"#).unwrap();
+        assert_eq!(user_model_display_name("user-gpt", &profiles), "Codex GPT-6.1 Sol");
+        assert_eq!(user_model_display_name("user-opus", &profiles), "我的 Opus Plus Embedding");
+        assert_eq!(user_model_display_name("user-deleted", &profiles), "user-deleted");
+        assert_eq!(user_model_display_name("user-empty", &profiles), "user-empty");
     }
 }

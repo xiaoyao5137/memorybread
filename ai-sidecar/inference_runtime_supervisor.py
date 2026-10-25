@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from runtime_lock import SidecarAlreadyRunningError, SidecarInstanceLock
+from initialization_diagnostics import exception_evidence, write_event
 
 logger = logging.getLogger(__name__)
 
@@ -91,11 +92,17 @@ class InferenceRuntimeSupervisor:
         if now < state.get("next_probe", 0):
             return
         previous_status = state.get("status")
+        recovery_error = None
+        recovery_evidence = {}
         state["updated_at_ms"] = int(now * 1000)
         state["max_attempts"] = policy.max_attempts
         state["next_probe"] = now + policy.probe_interval
         try:
-            if manager._ollama_healthy(manager._ollama_base_url("normal")):
+            base_url = manager._ollama_base_url("normal")
+            healthy = manager._ollama_healthy(base_url)
+            recovery_evidence.update(manager._runtime_probes.get(base_url, {}))
+            recovery_evidence["port"] = manager._ollama_port("normal")
+            if healthy:
                 state["failures"] = 0
                 state.setdefault("healthy_since", now)
                 state["status"] = "healthy"
@@ -141,14 +148,23 @@ class InferenceRuntimeSupervisor:
             manager._write_json_atomic(self.state_path, state)
             try:
                 if owned and not manager._stop_owned_ollama_for_repair("normal"):
+                    recovery_evidence["reason"] = "identity_unverified"
                     raise RuntimeError("managed process identity could not be verified for restart")
                 manager._start_ollama("normal", executable)
                 logger.warning("local inference recovery started (attempt %s/%s)",
                                state["attempts"], policy.max_attempts)
             except Exception as exc:
+                recovery_error = exc
+                recovery_evidence.update(getattr(exc, "evidence", {}))
+                recovery_evidence.update(exception_evidence(exc))
                 state.update(status="restart_failed", last_error=str(exc))
                 logger.warning("local inference recovery failed; retry scheduled: %s", exc)
         finally:
+            if state.get("status") != previous_status:
+                recovery_evidence.setdefault("reason", state.get("status"))
+                write_event(manager.base_dir, "runtime_" + state.get("status", "unknown"),
+                            manager._load_state("normal"), evidence=recovery_evidence,
+                            error=recovery_error, attempt=state.get("attempts", 0))
             if state.get("status") != previous_status and state.get("status") in {
                 "component_missing", "port_conflict"
             }:

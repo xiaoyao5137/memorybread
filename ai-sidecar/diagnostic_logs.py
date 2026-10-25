@@ -11,6 +11,8 @@ from typing import Dict, List, Optional, Tuple
 
 MAX_LOG_BYTES = 128 * 1024
 LOG_SPECS: Tuple[Tuple[str, str, str], ...] = (
+    ("initialization_diagnostics", "启动与初始化 · 诊断记录", "initialization-diagnostics.jsonl"),
+    ("initialization_diagnostics_previous", "启动与初始化 · 上次诊断记录", "initialization-diagnostics.jsonl.1"),
     ("core", "core.log · Core Engine", "core.log"),
     ("sidecar", "sidecar.log · AI Sidecar", "sidecar.log"),
     ("model_api", "model_api.log · Model API", "model_api.log"),

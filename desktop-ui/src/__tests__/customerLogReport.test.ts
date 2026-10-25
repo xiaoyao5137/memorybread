@@ -103,6 +103,47 @@ describe('customer log privacy', () => {
     expect(Object.keys(archive)).toHaveLength(11)
   })
 
+  it('prefers initializer evidence, links the ZIP receipt and records partially missing logs', async () => {
+    ;(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {}
+    vi.mocked(invoke).mockResolvedValue(undefined)
+    const diagnostic = JSON.stringify({ event: 'run_failed', diagnostic_id: 'run-123',
+      evidence: { cause_type: 'ConnectionRefusedError', errno: 61, exit_code: 7 },
+    })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/debug/log-files')) return jsonResponse({ items: [
+        { key: 'initialization_diagnostics', label: '诊断记录', exists: true },
+        { key: 'initialization_diagnostics_previous', label: '上次诊断记录', exists: true },
+        { key: 'core', label: 'core', exists: true },
+        { key: 'ui', label: 'ui', exists: false },
+      ] })
+      if (url.endsWith('/api/debug/log-files/core')) throw new Error('file disappeared')
+      if (url.includes('/api/debug/log-files/')) return jsonResponse({ content: diagnostic,
+        truncated: false, total_size_bytes: diagnostic.length, modified_at: 123 })
+      if (url.endsWith('/upload-url')) return jsonResponse({ data: {
+        upload_id: 'upload', oss_object_key: 'report.zip',
+        upload_url: 'https://memory-bread.oss-cn-beijing.aliyuncs.com/report.zip', required_headers: {},
+      } })
+      return jsonResponse({ data: { log_id: 'receipt', received_at: '2026-10-18T00:00:00Z' } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await reportCustomerLogs({ adminApiBaseUrl: 'https://memorybread.cn', metadata,
+      initializationReportId: 'report-123' })
+    expect(fetchMock.mock.calls[0][0]).toBe('http://127.0.0.1:7071/api/debug/log-files')
+    const args = vi.mocked(invoke).mock.calls[0][1] as { contentBase64: string }
+    const archive = unzipSync(Uint8Array.from(atob(args.contentBase64), char => char.charCodeAt(0)))
+    const manifest = JSON.parse(strFromU8(archive['manifest.json']))
+    expect(manifest.initialization_report_id).toBe('report-123')
+    expect(manifest.logs).toHaveLength(2)
+    expect(manifest.logs[0].modified_at).toBe(123)
+    expect(manifest.unavailable_logs).toEqual(expect.arrayContaining([
+      { key: 'core', reason: 'read_failed' }, { key: 'ui', reason: 'not_found' },
+    ]))
+    expect(JSON.parse(strFromU8(archive['01-initialization_diagnostics.log']))).toMatchObject({
+      diagnostic_id: 'run-123', evidence: { errno: 61, exit_code: 7 },
+    })
+  })
+
   it('keeps a stable anonymous installation identifier', () => {
     const first = getCustomerLogInstallationId()
     const second = getCustomerLogInstallationId()
@@ -226,6 +267,7 @@ describe('customer log privacy', () => {
       metadata,
       installationId: '018f0000-0000-7000-8000-000000000010',
       initializationReportId: '018f0000-0000-7000-8000-000000000011',
+      localApiBaseUrls: ['http://127.0.0.1:7070', 'http://127.0.0.1:7071'],
     })
 
     expect(fetchMock.mock.calls[1][0]).toBe('http://127.0.0.1:7071/api/debug/log-files')

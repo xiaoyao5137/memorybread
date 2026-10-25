@@ -175,3 +175,18 @@ def test_recovery_metadata_is_fresh_and_exposes_configured_budget(runtime):
     state = json.loads(supervisor.state_path.read_text())
     assert state['updated_at_ms'] == int(clock[0] * 1000)
     assert state['max_attempts'] == supervisor.policy.max_attempts
+
+
+def test_runtime_outage_journal_keeps_probe_cause_before_restart(runtime):
+    manager, supervisor, engine, _ = runtime
+    engine.owned = True
+    manager._runtime_probes[manager._ollama_base_url('normal')] = {
+        'exception_type': 'URLError', 'cause_type': 'ConnectionRefusedError', 'errno': 61,
+    }
+    supervisor.check()
+    journal = manager.base_dir / 'logs' / 'initialization-diagnostics.jsonl'
+    events = [json.loads(line) for line in journal.read_text().splitlines()]
+    outage = next(item for item in events if item['event'] == 'runtime_unavailable')
+    assert outage['evidence']['errno'] == 61
+    assert outage['evidence']['cause_type'] == 'ConnectionRefusedError'
+    assert engine.starts == []

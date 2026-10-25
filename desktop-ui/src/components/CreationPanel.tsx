@@ -3111,7 +3111,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
   }, [creationModelConfigs, remoteModelAllowed, setCreationModelConfig])
 
   const buildPayload = (message = prompt) => {
-    const activeModel = creationModelConfigs.find(c => c.id === LOCAL_CREATION_MODEL_ID)
+    const activeModel = creationModelConfigs.find(c => c.id === activeCreationModelId)
     return {
       user_prompt: `${messageWithAttachments(message)}${buildCreationSkillInstruction(matchedSkills)}`,
       design_templates: [],
@@ -3138,8 +3138,9 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
       max_references: toolResultLimits.memorySearch,
       data_search_limit: toolResultLimits.dataSearch,
       attachments: buildAttachmentMetadata(attachments),
-      ...(activeCreationModelId === LOCAL_CREATION_MODEL_ID && activeModel ? {
-        creation_model: LOCAL_CREATION_MODEL_ID,
+      ...(activeCreationModelId !== REMOTE_CREATION_MODEL_ID && activeModel ? {
+        creation_model: activeCreationModelId,
+        creation_api_key: activeCreationModelId.startsWith('user-') ? 'device-profile' : undefined,
         creation_base_url: activeModel.baseUrl || undefined,
       } : {}),
     }
@@ -3807,8 +3808,6 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
   ) => {
     const payload = buildPayload(message)
     const liveDraft = useAppStore.getState().creationDraft
-    delete payload.creation_model
-    delete payload.creation_base_url
     return {
       ...payload,
       user_prompt: messageWithAttachments(message),
@@ -5223,7 +5222,6 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
       const data = await postGatewayCreation(referencesForHistory, userMessage, controller.signal)
       content = sanitizeGeneratedContent(String(data.content || ''))
     } else {
-      usedModelId = LOCAL_CREATION_MODEL_ID
       content = await postLocalCreation(userMessage, controller.signal, assertActive)
     }
     assertActive()
@@ -6647,7 +6645,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                             background: 'rgba(88,86,214,0.1)', color: '#5856D6',
                           }}>定时任务</span>
                         )}
-                        完整会话 · {item.timestamp} · 模型：{getModelDisplayName(item.model)} · 推理耗时：{formatInferenceLatency(item.latencyMs)}
+                        完整会话 · {item.timestamp} · 模型：{getModelDisplayName(item.model, creationModelConfigs)} · 推理耗时：{formatInferenceLatency(item.latencyMs)}
                       </span>
                       {stageStatus?.detail && <span className="creation-history__meta">{stageStatus.detail}</span>}
                       {hasUnverifiedDraft && (
@@ -7922,7 +7920,7 @@ const CreationPanel: React.FC<CreationPanelProps> = ({ className = '', active = 
                 </div>
                 <ModelSelect
                   value={activeCreationModelId}
-                  options={CREATION_MODEL_DEFS}
+                  options={[...CREATION_MODEL_DEFS, ...creationModelConfigs.filter(c => c.id.startsWith('user-')).map(c => ({ id: c.id, name: c.name || '自定义模型', shortName: c.name || '自定义', description: '使用自己的模型配置', remote: false }))]}
                   disabled={isGenerating}
                   remoteAllowed={remoteModelAllowed}
                   onChange={handleSelectModel}

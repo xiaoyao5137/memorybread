@@ -109,3 +109,17 @@ def test_model_api_reads_engine_logs_when_core_is_unavailable(tmp_path, monkeypa
     response = client.get('/api/debug/log-files/inference_engine')
     assert response.status_code == 200
     assert response.get_json()['content'] == 'engine failed to bind\n'
+
+
+def test_initialization_journal_and_previous_run_are_available_for_upload(tmp_path):
+    from initialization_diagnostics import write_event
+
+    write_event(tmp_path, 'run_failed', {'run_id': 'failed-run', 'state': 'failed'},
+                evidence={'reason': 'process_exited', 'exit_code': 7})
+    directory = tmp_path / 'logs'
+    (directory / 'initialization-diagnostics.jsonl.1').write_text('{"run_id":"previous-run"}\n')
+    items = {item['key']: item for item in list_diagnostic_logs(directory)}
+    assert items['initialization_diagnostics']['exists']
+    assert items['initialization_diagnostics_previous']['exists']
+    assert 'process_exited' in read_diagnostic_log('initialization_diagnostics', directory)['content']
+    assert 'previous-run' in read_diagnostic_log('initialization_diagnostics_previous', directory)['content']

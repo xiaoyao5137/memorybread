@@ -1955,11 +1955,15 @@ pub async fn run_creation_agent(
         req.model_mode,
         req.generation.user_prompt.chars().count()
     );
-    // Local uses the sidecar's active model; external uses model.request via the
-    // brand gateway. Legacy BYOK preferences must never override either mode.
-    req.generation.creation_model = None;
-    req.generation.creation_api_key = None;
-    req.generation.creation_base_url = None;
+    // Gateway requests never inherit device credentials. Device profiles resolve
+    // locally in the sidecar and may also be selected via persisted preferences.
+    if req.model_mode == "external" {
+        req.generation.creation_model = None;
+        req.generation.creation_api_key = None;
+        req.generation.creation_base_url = None;
+    } else {
+        enrich_creation_model_from_preferences(&state, &mut req.generation);
+    }
 
     if req.generation.work_context.is_none() {
         req.generation.work_context = req

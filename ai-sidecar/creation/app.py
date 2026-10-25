@@ -385,6 +385,9 @@ class BrainstormStageBatchRequest(BrainstormNextRequest):
     content_mode: bool = False
 
 
+from .user_model_routes import router as user_model_router
+app.include_router(user_model_router)
+
 @app.post("/creation/brainstorm/stage/batch")
 async def brainstorm_stage_batch(request: BrainstormStageBatchRequest, http_request: Request = None):
     """Generate one complete batch; Core persists it before scheduling the next."""

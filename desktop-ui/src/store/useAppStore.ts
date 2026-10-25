@@ -24,6 +24,7 @@ export interface BakeNavigationTarget {
 type CaptureBackTarget = BakeNavigationTarget
 
 export interface CreationModelConfig {
+  name?: string
   id: string
   enabled: boolean
   apiKey: string
@@ -596,12 +597,15 @@ export function normalizeCreationModels(models: CreationModelConfig[]): Creation
   const byId = new Map<string, CreationModelConfig>()
   for (const model of models) {
     const id = aliases[model.id] || model.id
-    if (!DEFAULT_CREATION_MODELS.some(defaultModel => defaultModel.id === id)) continue
+    if (!DEFAULT_CREATION_MODELS.some(defaultModel => defaultModel.id === id) && !/^user-[a-zA-Z0-9-]+$/.test(id)) continue
     byId.set(id, { ...model, id })
   }
+  const selectedId = Array.from(byId.values()).find(model => model.enabled)?.id
   let hasEnabled = false
-  const normalized = DEFAULT_CREATION_MODELS.map(defaultModel => {
+  const allModels = [...DEFAULT_CREATION_MODELS, ...Array.from(byId.values()).filter(m => m.id.startsWith('user-'))]
+  const normalized = allModels.map(defaultModel => {
     const model = { ...defaultModel, ...byId.get(defaultModel.id) }
+    if (selectedId && model.id !== selectedId) return { ...model, enabled: false }
     if (!model.enabled) return model
     if (hasEnabled) return { ...model, enabled: false }
     hasEnabled = true

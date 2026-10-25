@@ -3929,7 +3929,10 @@ class CreationService:
             web_results=web_results,
         )
 
-        local_model = creation_model or self.model
+        local_model = (
+            self.model if creation_model in (None, "", "mbcd-std-v1", "mbem-v1-local")
+            else creation_model
+        )
         logger.info("使用模型: %s", local_model)
         logger.info("创作开始: 参考资料=%s", len(references))
 
@@ -4826,7 +4829,10 @@ class CreationService:
                 yield chunk
             return
 
-        local_model = creation_model or self.model
+        local_model = (
+            self.model if creation_model in (None, "", "mbcd-std-v1", "mbem-v1-local")
+            else creation_model
+        )
         is_qwen35 = "qwen3.5" in local_model.lower()
         if is_qwen35:
             payload = {
@@ -6743,6 +6749,14 @@ flowchart LR
         base_url: str,
     ):
         """流式调用云模型；仅在尚未产出内容时恢复瞬时传输故障。"""
+        if model.startswith('user-'):
+            from user_models import chat_profile
+            async for chunk in chat_profile(model, [
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': user_message},
+            ]):
+                yield chunk
+            return
         for attempt in range(1, CLOUD_MODEL_MAX_ATTEMPTS + 1):
             emitted_content = False
             try:
@@ -6849,6 +6863,11 @@ flowchart LR
 
     async def _chat_cloud(self, messages: list, model: str, api_key: str, base_url: str):
         """多轮对话，供体验功能使用。"""
+        if model.startswith('user-'):
+            from user_models import chat_profile
+            async for chunk in chat_profile(model, messages):
+                yield chunk
+            return
         is_claude = "claude" in model.lower() or "anthropic.com" in base_url
         if is_claude:
             url = self._anthropic_messages_url(base_url)

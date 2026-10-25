@@ -19,6 +19,9 @@ beforeEach(() => {
   })
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
+    if (url.endsWith('/creation/user-models')) return response({ models: [], analysis_model_id: null })
+    if (url.includes('/v1/model-catalog')) return response({ data: { schema_version: 1, models: [], next_offset: null } })
+    if (url.includes('/preferences/')) return response({})
     if (url.endsWith('/api/models')) {
       return response({
         status: 'ok',
@@ -59,11 +62,14 @@ afterEach(() => {
 })
 
 describe('模型管理', () => {
-  it('采集分析模型只展示一个使用中状态', async () => {
+  it('采集分析模型只展示一个使用中状态并允许添加自定义模型', async () => {
     render(<ModelManager />)
 
     await waitFor(() => {
       expect(screen.getAllByText('使用中')).toHaveLength(1)
+      const add = screen.getByRole('button', { name: '添加模型' })
+      expect(add.closest('.model-manager__actions')?.nextElementSibling).toHaveTextContent('刷新')
+      expect(screen.queryByRole('button', { name: '刷新模型列表' })).not.toBeInTheDocument()
     })
   })
 
@@ -81,7 +87,12 @@ describe('模型管理', () => {
   it('Model API 短暂未就绪时自动重试并恢复模型列表', async () => {
     vi.useFakeTimers()
     const fetchMock = vi.mocked(fetch)
-    fetchMock.mockRejectedValueOnce(new TypeError('Load failed'))
+    const original = fetchMock.getMockImplementation()!
+    let failed = false
+    fetchMock.mockImplementation(async (input, init) => {
+      if (String(input).endsWith('/api/models') && !failed) { failed = true; throw new TypeError('Load failed') }
+      return original(input, init)
+    })
 
     render(<ModelManager />)
     await act(async () => {

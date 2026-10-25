@@ -124,6 +124,30 @@ describe('创作 Agent 多轮 Loop', () => {
     vi.unstubAllGlobals()
   })
 
+  it('自定义模型进入实际 Agent 请求且不要求账户 Credit', async () => {
+    useAppStore.getState().setCreationModelConfigs([{ id: 'user-inference', name: '自己的客户端', enabled: true, apiKey: 'device-profile' }])
+    const payloads: Record<string, any>[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname
+      if (path === '/api/creation/skills') return Response.json([])
+      if (path === '/api/creation/agent/run') {
+        payloads.push(JSON.parse(String(init?.body)))
+        return sse([event('run.completed', 1, '完成', undefined, { document: '自己的模型生成的内容', response: '已完成' })])
+      }
+      if (path === '/api/creation/history/start') return Response.json({ id: 96, progress_epoch: 1 })
+      if (path === '/api/creation/history') return Response.json({ items: [], total: 0 })
+      return Response.json({})
+    }))
+    render(<CreationPanel />)
+    const input = screen.getByPlaceholderText(/输入 @ 可选择已安装的技能/)
+    fireEvent.change(input, { target: { value: '写一份方案' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(payloads).toHaveLength(1))
+    expect(payloads[0].creation_model).toBe('user-inference')
+    expect(payloads[0].creation_api_key).toBe('device-profile')
+    expect(payloads[0].model_mode).toBe('local')
+  })
+
   it('普通指令携带稳定身份，按恢复操作续跑且不提前执行 Skill 匹配', async () => {
     useAppStore.getState().setCreationDraft({ sessionId: 'session-agent-test', creationMode: 'direct',
       generatedContent: '## 原文\n保留内容。', rootRequest: '最初的方案需求' })

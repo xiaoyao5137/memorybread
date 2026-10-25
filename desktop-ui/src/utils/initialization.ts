@@ -34,6 +34,8 @@ export interface InitializationStatus {
   message: string
   suggestion?: string | null
   error_code?: string | null
+  failure_title?: string | null
+  diagnostic_id?: string | null
   stages: InitializationStage[]
   quality_gate: {
     passed: boolean

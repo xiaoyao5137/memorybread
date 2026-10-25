@@ -151,11 +151,10 @@ const EVENT_LABEL: Record<string, string> = {
 }
 
 function formatLlmModelName(model?: string | null): string {
-  const name = (model || '').trim()
-  if (!name || name === 'unavailable') return '模型状态待确认'
-  if (/embed|bge|vector/i.test(name)) return 'MBEMB V1.0'
-  if (/plus|opus/i.test(name)) return 'MBCD Plus v1.0'
-  return 'MBEM v1.0'
+  if (!model?.trim() || model === 'unavailable') return '模型状态待确认'
+  // The API resolves official aliases and user profile names. Preserve that name
+  // verbatim, including user names containing "Plus", "Opus", or "Embedding".
+  return model
 }
 
 function fmt(n: number): string {
