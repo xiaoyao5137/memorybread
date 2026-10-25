@@ -26,6 +26,8 @@ ENV/
 # Rust
 target/
 Cargo.lock
+!/core-engine/Cargo.lock
+!/desktop-ui/src-tauri/Cargo.lock
 **/*.rs.bk
 
 # IDE
