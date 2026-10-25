@@ -88,7 +88,7 @@ def test_cli_timeout_reaps_process(tmp_path):
     p = profile(
         protocol="cli", command=sys.executable, client="minimax", args=["-c", code]
     )
-    with pytest.raises(TimeoutError):
+    with pytest.raises(asyncio.TimeoutError):
         asyncio.run(models.cli_complete(models.get_profile(p["id"]), [], timeout=0.3))
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid.read_text()), 0)
@@ -361,7 +361,7 @@ def test_cli_timeout_cleans_children_after_parent_exits(tmp_path):
     p = profile(
         protocol="cli", command=sys.executable, client="custom", args=["-c", parent]
     )
-    with pytest.raises(TimeoutError):
+    with pytest.raises(asyncio.TimeoutError):
         asyncio.run(models.cli_complete(models.get_profile(p["id"]), [], timeout=0.5))
     import subprocess
 

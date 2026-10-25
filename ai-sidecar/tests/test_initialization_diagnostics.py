@@ -53,7 +53,7 @@ def test_journal_survives_new_writer_and_rotates_with_failure_intact(tmp_path, m
     (urllib.error.HTTPError('http://127.0.0.1:11434/api/tags', 503, 'private', {}, None),
      {'exception_type': 'HTTPError', 'http_status': 503}),
     (urllib.error.URLError(TimeoutError('private')), {'exception_type': 'URLError', 'cause_type': 'TimeoutError'}),
-])
+], ids=['http-error', 'socket-timeout'])
 def test_probe_failure_captures_http_or_socket_cause(tmp_path, monkeypatch, error, expected):
     manager = InitializationManager(tmp_path)
     def fail(*args, **kwargs):

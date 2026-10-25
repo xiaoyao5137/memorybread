@@ -29,6 +29,8 @@ class ModelStream(httpx.AsyncByteStream):
 
 @pytest.fixture
 def transport(monkeypatch):
+    # Exercise bundled Ollama transport independently of the user's saved model.
+    monkeypatch.setattr("user_models.get_analysis_model", lambda: None)
     real_client = httpx.AsyncClient
 
     def build(chunks, model="qwen3.5:4b", base_url="http://127.0.0.1:11434"):
