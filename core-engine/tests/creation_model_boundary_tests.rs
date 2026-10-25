@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn creation_agent_modes_ignore_legacy_cloud_preferences_and_request_credentials() {
+async fn creation_agent_resolves_device_models_but_never_forwards_credentials_to_gateway() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -38,9 +38,9 @@ async fn creation_agent_modes_ignore_legacy_cloud_preferences_and_request_creden
                 let mut payload = json!({"user_prompt":"生成测试文档", "model_mode":mode,
                     "creation_mode":creation_mode, "enable_rag":false});
                 if explicit_credentials {
-                    payload["creation_model"] = json!("legacy-cloud");
-                    payload["creation_api_key"] = json!("test-secret");
-                    payload["creation_base_url"] = json!("https://invalid.example");
+                    payload["creation_model"] = json!("explicit-device-model");
+                    payload["creation_api_key"] = json!("explicit-test-secret");
+                    payload["creation_base_url"] = json!("https://explicit.invalid.example");
                 }
                 let response = router
                     .clone()
@@ -61,11 +61,20 @@ async fn creation_agent_modes_ignore_legacy_cloud_preferences_and_request_creden
                 assert_eq!(forwarded["model_mode"], mode);
                 assert_eq!(forwarded["creation_mode"], creation_mode);
                 assert_eq!(forwarded["execution_origin"], "interactive");
-                for field in ["creation_model", "creation_api_key", "creation_base_url"] {
-                    assert!(
-                        forwarded[field].is_null(),
-                        "unexpected {field}: {forwarded}"
-                    );
+                if mode == "external" {
+                    for field in ["creation_model", "creation_api_key", "creation_base_url"] {
+                        assert!(forwarded[field].is_null(), "gateway received {field}");
+                    }
+                } else {
+                    let expected = if explicit_credentials {
+                        ["explicit-device-model", "explicit-test-secret", "https://explicit.invalid.example"]
+                    } else {
+                        ["legacy-cloud", "test-secret", "https://invalid.example"]
+                    };
+                    for (field, value) in ["creation_model", "creation_api_key", "creation_base_url"]
+                        .into_iter().zip(expected) {
+                        assert_eq!(forwarded[field], value, "device model field: {field}");
+                    }
                 }
             }
         }
