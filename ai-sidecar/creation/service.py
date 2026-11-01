@@ -9620,10 +9620,13 @@ flowchart LR
 
         引擎按顺序降级：Bing（境内外均可直连）-> DuckDuckGo HTML，
         可通过 MEMORYBREAD_WEB_SEARCH_ENGINES 调整顺序（逗号分隔）。
-        任一引擎可用即返回，全部失败静默降级为空结果，不阻塞创作。
+        只有包含目标实体的候选才停止重试；全部失败返回空结果，由调用方
+        结合本地证据决定是否继续，不能把偏题页面当作事实来源。
         """
         engines = self._web_search_engines()
         queries = self._build_search_queries(user_prompt, parsed_requirement)
+        from .retrieval_evidence import local_entity_leads, web_result_matches
+        anchors = local_entity_leads(parsed_requirement, user_prompt)
         results: list[WebSearchResult] = []
         for query in queries[:3]:
             for engine in engines:
@@ -9635,9 +9638,12 @@ flowchart LR
                 except Exception as exc:
                     logger.warning("互联网检索失败 engine=%s code=WEB_SEARCH_FAILED", engine)
                     continue
-                if found:
-                    results.extend(found)
+                relevant = [item for item in found if web_result_matches(item, anchors)]
+                if relevant:
+                    results.extend(relevant)
                     break
+            if results:
+                break
 
         deduped: list[WebSearchResult] = []
         seen: set[str] = set()
@@ -10524,16 +10530,22 @@ flowchart LR
         return dot / (norm1 * norm2)
 
     def _build_search_queries(self, user_prompt: str, parsed_requirement: dict) -> list[str]:
-        # 调用方可能传入原始指令，检索词只描述业务主题。
-        topic = strip_capability_mentions(parsed_requirement.get("topic") or user_prompt)
-        doc_type = parsed_requirement.get("doc_type") or ""
-        keywords = " ".join((parsed_requirement.get("keywords") or [])[:4])
-        base = " ".join(part for part in [topic, doc_type, keywords] if part)
-        return [
-            f"{base} 最新政策 标准",
-            f"{base} 行业方案 案例",
-            f"{base} 技术架构 最佳实践",
-        ]
+        # The step query is authoritative; root-topic metadata must not replace
+        # it or introduce unrelated policy/architecture search objectives.
+        query = strip_capability_mentions(user_prompt).strip()
+        if not query:
+            query = strip_capability_mentions(parsed_requirement.get("topic") or "").strip()
+        from .retrieval_evidence import local_entity_leads
+        anchors = local_entity_leads(parsed_requirement, query)
+        queries = [query] if query else []
+        if anchors:
+            # One bounded focused retry, only using terms from this step.
+            keywords = [str(term).strip() for term in parsed_requirement.get("keywords", [])
+                        if str(term).strip() and str(term).casefold() in query.casefold()]
+            focused = " ".join(dict.fromkeys([*anchors, *keywords]))
+            if focused and focused != query:
+                queries.append(focused)
+        return queries
 
     @staticmethod
     def _web_search_engines() -> list[str]:

@@ -360,7 +360,7 @@ const DiaryContentView: React.FC<{ diary: DiaryEntry }> = ({ diary }) => {
             {content.timeline.map((item, index) => (
               <article className="diary-timeline__item" key={`${item.timeline_id || index}-${item.time || ''}`}>
                 <div className="diary-timeline__meta">
-                  {item.time || '未知时间'}{item.duration_minutes ? ` · ${item.duration_minutes} 分钟` : ''}{item.category ? ` · ${item.category}` : ''}
+                  {item.timeline_id ? `[T${item.timeline_id}] · ` : ''}{item.time || '未知时间'}{item.duration_minutes ? ` · ${item.duration_minutes} 分钟` : ''}{item.category ? ` · ${item.category}` : ''}
                 </div>
                 <div className="diary-timeline__summary">{item.summary}</div>
               </article>

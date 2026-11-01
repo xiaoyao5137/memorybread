@@ -40,8 +40,8 @@ BUILTIN_TEMPLATES = [
         "user_instruction": (
             "请根据昨天的工作记录，生成高度浓缩的工作日记。要求：\n"
             "默认使用简体中文；即使原始记录主要为英文，也使用中文叙述，产品名和代码标识符可保留原文。\n"
-            "1. 【今日产出】最多 4 条，只写真正完成的成果、修复、决策或交付，每条不超过 45 个中文字符。\n"
-            "2. 【问题与解决】最多 2 条，仅记录已解决问题或明确结论；没有则写「无」。\n"
+            "1. 【今日产出】最多 6 条，只写真正完成的成果、修复、决策或交付，保留具体对象、结果和证据，不机械截断。\n"
+            "2. 【问题与解决】最多 4 条，仅记录已解决问题或明确结论；没有则写「无」。\n"
             "3. 不要生成明日计划、后续计划、待办或建议，只记录当天已经发生并有依据的事实。\n"
             "过滤掉：浏览、阅读、搜索、应用切换、会议过程、配置环境、失败尝试等流水账。"
         ),
@@ -200,7 +200,7 @@ DAILY_DIARY_CATCHUP_DAYS = 1
 IDLE_DIARY_BACKFILL_LOOKBACK_DAYS = int(os.getenv("DIARY_BACKFILL_LOOKBACK_DAYS", "30"))
 DAILY_DIARY_CONTEXT_MAX_ITEMS = int(os.getenv("DAILY_DIARY_CONTEXT_MAX_ITEMS", "24"))
 DAILY_DIARY_TIMELINE_MAX_ITEMS = int(os.getenv("DAILY_DIARY_TIMELINE_MAX_ITEMS", "12"))
-DIARY_ITEM_SUMMARY_MAX_CHARS = 120
+DIARY_ITEM_SUMMARY_MAX_CHARS = 1200
 DIARY_DEFAULT_LANGUAGE = "zh-CN"
 DIARY_LANGUAGE_LABELS = {
     "zh-CN": "简体中文",
@@ -541,12 +541,40 @@ class TaskExecutor:
         source_items: Optional[list[dict]] = None,
     ) -> dict:
         source_items = source_items if source_items is not None else self._query_timelines_for_date(conn, diary_date)
+        source_items = [item for item in source_items if self._compact_diary_item_text(item)]
         output_language = self._resolve_diary_output_language(task.get("user_instruction") or "")
         context_text, token_estimate = self._build_daily_diary_context(
             source_items,
             output_language=output_language,
         )
         source_timeline_ids = [int(item["id"]) for item in source_items if item.get("id") is not None]
+        if not context_text:
+            # Never ask a model to invent a day from an empty context.
+            message = "当天暂无可用时间线，无法生成有依据的日记；来源补齐后会自动更新。"
+            if output_language == "en":
+                message = "No source records are available. This diary will update when sources arrive."
+            content = self._build_diary_content(
+                "daily", diary_date, diary_date, diary_date, message, [], output_language,
+            )
+            content["source_status"] = "waiting_sources"
+            self._upsert_diary(
+                conn, "daily", diary_date, diary_date, diary_date, content, [], [],
+                generation_status="waiting_sources",
+            )
+            return {"result_text": message, "source_count": 0, "token_estimate": 0}
+        if all(self._is_low_value_diary_item(item) for item in source_items):
+            message = "现有来源仅包含浏览、应用界面或操作片段，未记录到可确认的工作成果。"
+            if output_language == "en":
+                message = "Available sources only contain browsing or interface activity; no work outcomes are confirmed."
+            headings = self._daily_diary_section_rules(output_language)
+            result_text = f"## {headings[0][0]}\n- {message}\n\n## {headings[1][0]}\n- {'None recorded' if output_language == 'en' else '暂无有依据的问题处理结论'}"
+            content = self._build_diary_content(
+                "daily", diary_date, diary_date, diary_date, result_text, source_items, output_language,
+            )
+            content["source_status"] = "insufficient_evidence"
+            self._upsert_diary(conn, "daily", diary_date, diary_date, diary_date,
+                               content, source_timeline_ids, [])
+            return {"result_text": result_text, "source_count": len(source_items), "token_estimate": 0}
         result_text = self._llm_generate(
             user_instruction=self._daily_diary_instruction(
                 diary_date,
@@ -797,7 +825,7 @@ class TaskExecutor:
         lookback_days: int = IDLE_DIARY_BACKFILL_LOOKBACK_DAYS,
         today: Optional[date] = None,
     ) -> Optional[dict]:
-        """返回最近一个有时间线但缺 daily 日记的历史日期。"""
+        """补齐缺失日记或来源后来增加的系统日记；不覆盖用户编辑。"""
         today = today or date.today()
         day_count = max(1, int(lookback_days))
         start_day = today - timedelta(days=day_count)
@@ -831,7 +859,15 @@ class TaskExecutor:
                 LEFT JOIN diaries d
                   ON d.period_type = 'daily'
                  AND d.diary_date = td.diary_date
-                WHERE d.id IS NULL
+                WHERE d.id IS NULL OR (
+                    d.is_system_generated = 1 AND (
+                        d.generation_status = 'waiting_sources'
+                        OR (SELECT COUNT(*) FROM json_each(
+                            CASE WHEN json_valid(d.source_timeline_ids)
+                                 THEN d.source_timeline_ids ELSE '[]' END
+                        )) < MIN(td.source_count, 1000)
+                    )
+                )
                 ORDER BY td.diary_date DESC
                 LIMIT 1
                 """,
@@ -1031,8 +1067,11 @@ class TaskExecutor:
             f"必须使用{language_label}输出；即使时间线、应用名或技术术语主要为英文，也要用{language_label}叙述，产品名和代码标识符可保留原文。\n"
             f"输出 Markdown，只包含：{'、'.join(f'## {title}' for title in section_titles)}。\n"
             "写作约束：\n"
-            f"- 【{section_titles[0]}】最多 4 条，每条不超过 45 个字符，必须是结果，不写过程。\n"
-            f"- 【{section_titles[1]}】最多 2 条，只写已解决问题或明确结论；没有则写「- 无」。\n"
+            f"- 【{section_titles[0]}】最多 6 条，写明具体项目、发生的变化与结果，保留必要的原因、数字和验证依据。\n"
+            f"- 【{section_titles[1]}】最多 4 条，保留问题、处理方式和实际状态；未解决不能写成已解决。\n"
+            "- 只能使用来源中的事实和数字；不得虚构项目名、完成状态、收益或百分比。没有明确成果则说明未记录到明确成果。\n"
+            "- 区分用户本人完成、他人汇报和阅读材料；阅读设计建议不能写成已经实现，不确定归属时写成记录显示。\n"
+            "- 每条事实附对应来源编号 [T时间线ID]，不得使用不存在的编号。\n"
             "- 不要生成明日计划、后续计划、待办或建议，不要推测未来事项。\n"
             "- 删除浏览、阅读、搜索、应用切换、会议过程、配置环境、失败尝试等流水账。"
         )
@@ -1053,7 +1092,7 @@ class TaskExecutor:
         title = f"{diary_date} {title_suffix}" if period_start == period_end else f"{period_start} 至 {period_end} {title_suffix}"
 
         content = {
-            "schema_version": "diary.v1",
+            "schema_version": "diary.v2",
             "period_type": period_type,
             "title": title,
             "period_start": period_start,
@@ -1085,7 +1124,7 @@ class TaskExecutor:
                 }
                 for item in self._select_daily_diary_items(
                     source_items,
-                    limit=DAILY_DIARY_TIMELINE_MAX_ITEMS,
+                    limit=max(DAILY_DIARY_TIMELINE_MAX_ITEMS, DAILY_DIARY_CONTEXT_MAX_ITEMS),
                 )
             ]
         else:
@@ -1110,7 +1149,7 @@ class TaskExecutor:
             importance = item.get("importance") or 0
             text = self._compact_diary_item_text(item)
             if text:
-                blocks.append(f"[{ts}{duration}][{category}][重要性{importance}] {text}")
+                blocks.append(f"[T{item.get('id')}][{ts}{duration}][{category}][重要性{importance}] {text}")
 
         if len(source_items) > len(picked):
             blocks.append(f"已从 {len(source_items)} 条时间线中筛选 {len(picked)} 条高价值线索，其余低价值流水不展开。")
@@ -1213,12 +1252,12 @@ class TaskExecutor:
     def _daily_diary_section_rules(cls, output_language: str) -> tuple:
         if output_language == "en":
             return (
-                ("Today's Outcomes", ("Today's Outcomes", "Work Outputs", "今日产出", "工作产出"), 4, 45),
-                ("Problems & Resolutions", ("Problems & Resolutions", "Problems and Resolutions", "问题与解决"), 2, 45),
+                ("Today's Outcomes", ("Today's Outcomes", "Work Outputs", "今日产出", "工作产出"), 6, None),
+                ("Problems & Resolutions", ("Problems & Resolutions", "Problems and Resolutions", "问题与解决"), 4, None),
             )
         return (
-            ("今日产出", ("今日产出", "工作产出", "核心产出", "主要成果"), 4, 45),
-            ("问题与解决", ("问题与解决", "风险/阻塞", "效率亮点与问题"), 2, 45),
+            ("今日产出", ("今日产出", "工作产出", "核心产出", "主要成果"), 6, None),
+            ("问题与解决", ("问题与解决", "风险/阻塞", "效率亮点与问题"), 4, None),
         )
 
     @classmethod
@@ -1237,7 +1276,7 @@ class TaskExecutor:
                 text = re.sub(r"\s+", " ", item).strip()
                 if not text or text in seen:
                     continue
-                if len(text) > char_limit:
+                if char_limit and len(text) > char_limit:
                     text = text[: char_limit - 1].rstrip("，,。；; ") + "…"
                 seen.add(text)
                 compacted.append(text)
@@ -1283,6 +1322,13 @@ class TaskExecutor:
         category = str(item.get("category") or "").lower()
         activity = str(item.get("activity_type") or "").lower()
 
+        # Empty UI shells may contain incidental words such as "成功启动" or
+        # "未完成"; they are not evidence of a work outcome.
+        empty_context_tokens = ("无有效业务内容", "无业务上下文", "无其他UI元素",
+                                "无其他可操作内容", "或任何业务上下文", "未进行具体", "未涉及具体", "无有效工作内容")
+        if int(item.get("importance") or 0) < 4 and any(token in re.sub(r"\s+", "", text) for token in empty_context_tokens):
+            return True
+
         result_tokens = (
             "完成", "修复", "确定", "交付", "上线", "发布", "实现", "新增", "优化", "解决",
             "通过", "验证", "沉淀", "设计", "决策", "整理出", "形成了", "关闭", "delivered",
@@ -1324,7 +1370,7 @@ class TaskExecutor:
             if in_section and re.match(r"^(?:[-*]|\d+[.)、])\s*", line):
                 item = re.sub(r"^(?:[-*]|\d+[.)、])\s*", "", line).strip()
                 if item:
-                    items.append(item[:240])
+                    items.append(item)
         return items[:12]
 
     @staticmethod
@@ -1395,6 +1441,7 @@ class TaskExecutor:
         content: dict,
         source_timeline_ids: list[int],
         source_diary_ids: list[int],
+        generation_status: str = "ready",
     ) -> None:
         conn.execute(
             """
@@ -1402,16 +1449,17 @@ class TaskExecutor:
                 period_type, period_start, period_end, diary_date, content,
                 source_timeline_ids, source_diary_ids, generation_status, is_system_generated
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', 1)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
             ON CONFLICT(period_type, diary_date) DO UPDATE SET
                 period_start = excluded.period_start,
                 period_end = excluded.period_end,
                 content = excluded.content,
                 source_timeline_ids = excluded.source_timeline_ids,
                 source_diary_ids = excluded.source_diary_ids,
-                generation_status = 'ready',
+                generation_status = excluded.generation_status,
                 is_system_generated = 1,
                 updated_at = datetime('now')
+            WHERE diaries.is_system_generated = 1
             """,
             (
                 period_type,
@@ -1421,6 +1469,7 @@ class TaskExecutor:
                 json.dumps(content, ensure_ascii=False),
                 json.dumps(source_timeline_ids, ensure_ascii=False),
                 json.dumps(source_diary_ids, ensure_ascii=False),
+                generation_status,
             ),
         )
         conn.commit()
@@ -1819,7 +1868,7 @@ class TaskExecutor:
             "3. 以「产出」为中心，而非「活动」。每一条内容必须体现可见的价值或结果。\n"
             "4. 以下类型的活动禁止直接写入报告：纯阅读/查看文档、安装配置环境、无结论的调研、中间态的失败尝试。"
             "若这些活动产生了明确结论或结果，则以结论为主语来描述。\n"
-            "5. 凡有可量化数据（测试通过率、性能指标、完成模块数等），必须写出具体数字。\n"
+            "5. 数字、项目名称和完成状态必须来自工作记录；没有证据时不得编造或用示例项目填充。\n"
             "6. 每条工作项须能回答「这件事带来了什么价值？」，否则删除该条。\n"
             "7. 【格式规范】所有章节标题必须使用 ## 二级标题格式（如 ## 开发、## 阅读、## 今日小结），章节内的列表项必须统一使用无序列表格式（以 - 或 * 开头，无额外缩进）。"
             f"{weekly_rules}{language_rules}"
@@ -1853,7 +1902,7 @@ class TaskExecutor:
 
             response = preemptible_chat(
                 messages,
-                {"temperature": 0.2 if concise else 0.5, "num_predict": 768 if concise else 2048},
+                {"temperature": 0.2 if concise else 0.5, "num_predict": 2048},
             )
             content = self._llm_message_content(response)
             if self._requires_chinese_output(output_language) and not self._is_chinese_diary_output(content):
@@ -1869,7 +1918,7 @@ class TaskExecutor:
                             ),
                         },
                     ],
-                    {"temperature": 0.1, "num_predict": 768 if concise else 2048},
+                    {"temperature": 0.1, "num_predict": 2048},
                 )
                 content = self._llm_message_content(response)
                 if not self._is_chinese_diary_output(content):

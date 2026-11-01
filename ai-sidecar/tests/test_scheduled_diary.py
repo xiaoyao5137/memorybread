@@ -302,7 +302,7 @@ def test_idle_diary_backfill_creates_default_daily_task_when_missing(tmp_path):
     assert task_row == ("daily_journal", "生成昨日工作日记", 1, 0, 1, "success")
 
 
-def test_idle_diary_backfill_skips_existing_diaries(tmp_path):
+def test_idle_diary_backfill_preserves_user_edited_diaries(tmp_path):
     db_path = tmp_path / "memory-bread.db"
     conn = sqlite3.connect(db_path)
     _create_common_tables(conn)
@@ -317,7 +317,7 @@ def test_idle_diary_backfill_skips_existing_diaries(tmp_path):
         """
         INSERT INTO diaries
             (period_type, period_start, period_end, diary_date, content, is_system_generated)
-        VALUES ('daily', '2026-07-08', '2026-07-08', '2026-07-08', ?, 1)
+        VALUES ('daily', '2026-07-08', '2026-07-08', '2026-07-08', ?, 0)
         """,
         (json.dumps({"markdown": "已有系统日记"}, ensure_ascii=False),),
     )
@@ -436,9 +436,9 @@ def test_daily_diary_markdown_is_compacted_to_fixed_sections_and_limits():
     assert "额外总结" not in compacted
     assert "明日计划" not in compacted
     assert "验证中文输出" not in compacted
-    assert len(outputs) == 4
-    assert len(outputs[0]) <= 45
-    assert len(problems) == 2
+    assert len(outputs) == 5
+    assert outputs[0] == long_item
+    assert len(problems) == 3
 
 
 def test_daily_diary_instruction_excludes_future_plans():
@@ -562,7 +562,7 @@ def test_llm_generate_rewrites_english_diary_once(monkeypatch):
     assert len(client.calls) == 2
     assert "必须使用简体中文" in client.calls[0]["messages"][0]["content"]
     assert client.calls[0]["think"] is False
-    assert client.calls[0]["options"]["num_predict"] == 768
+    assert client.calls[0]["options"]["num_predict"] == 2048
     assert "严格改写为简体中文" in client.calls[1]["messages"][-1]["content"]
     assert client.calls[1]["think"] is False
 
@@ -657,7 +657,7 @@ def test_diary_uses_creation_selection_and_rereads_switches(tmp_path, monkeypatc
         result = executor._llm_generate('生成日记', '完成修复', output_language='zh-CN', concise=True)
         assert '完成配置修复' in result
         assert calls[-1][0] == selected
-        assert calls[-1][2]['max_tokens'] == 768
+        assert calls[-1][2]['max_tokens'] == 2048
         assert usage[-1]['model_name'] == selected
         assert usage[-1]['completion_tokens'] > 0
 
@@ -681,3 +681,66 @@ def test_diary_failed_creation_does_not_fall_back_to_ollama(tmp_path, monkeypatc
         executor._llm_generate('生成日记', '记录')
     assert records[-1]['status'] == 'failed'
     assert records[-1]['model_name'] == 'user-broken'
+
+
+def test_empty_diary_never_calls_model_and_repairs_when_sources_arrive(tmp_path):
+    conn = sqlite3.connect(tmp_path / "diary.db")
+    _create_common_tables(conn)
+    executor = TaskExecutor(db_path=str(tmp_path / "diary.db"))
+    executor._ensure_diaries_table(conn)
+    def forbidden(**kwargs):
+        raise AssertionError("Empty sources must never reach the model")
+    executor._llm_generate = forbidden
+    executor._execute_single_daily_diary(conn, {"id": 1}, "2026-07-08", [])
+    status, content = conn.execute("SELECT generation_status, content FROM diaries").fetchone()
+    assert status == "waiting_sources"
+    assert json.loads(content)["source_count"] == 0
+    assert executor._find_idle_diary_backfill_candidate(conn, today=date(2026, 7, 10)) is None
+    _insert_timeline_for_day(conn, "2026-07-08")
+    candidate = executor._find_idle_diary_backfill_candidate(conn, today=date(2026, 7, 10))
+    assert candidate["diary_date"] == "2026-07-08"
+    executor._llm_generate = _fake_llm
+    executor._execute_single_daily_diary(conn, {"id": 1}, candidate["diary_date"], candidate["source_items"])
+    assert conn.execute("SELECT generation_status FROM diaries").fetchone()[0] == "ready"
+    assert executor._find_idle_diary_backfill_candidate(conn, today=date(2026, 7, 10)) is None
+    _insert_timeline_for_day(conn, "2026-07-08", "修复延迟处理")
+    assert executor._find_idle_diary_backfill_candidate(conn, today=date(2026, 7, 10))["source_count"] == 2
+
+
+def test_upsert_cannot_overwrite_user_edit_during_generation(tmp_path):
+    conn = sqlite3.connect(tmp_path / "diary.db")
+    executor = TaskExecutor(db_path=str(tmp_path / "diary.db"))
+    executor._ensure_diaries_table(conn)
+    args = (conn, "daily", "2026-07-08", "2026-07-08", "2026-07-08")
+    executor._upsert_diary(*args, {"markdown": "用户内容"}, [], [])
+    conn.execute("UPDATE diaries SET is_system_generated=0")
+    executor._upsert_diary(*args, {"markdown": "自动生成"}, [], [])
+    assert json.loads(conn.execute("SELECT content FROM diaries").fetchone()[0])["markdown"] == "用户内容"
+
+
+def test_context_keeps_evidence_beyond_old_120_character_limit():
+    executor = TaskExecutor(db_path=":memory:")
+    detail = "具体技术背景" * 30 + "验证结果：重试恢复，仍需观察。"
+    context, _ = executor._build_daily_diary_context([
+        {"id": 123, "overview": "修复时间线处理", "details": detail, "importance": 4}
+    ])
+    assert detail in context
+    assert "[T123]" in context
+
+
+def test_empty_ui_sources_do_not_become_work_achievements(tmp_path):
+    conn = sqlite3.connect(tmp_path / "diary.db")
+    _create_common_tables(conn)
+    executor = TaskExecutor(db_path=str(tmp_path / "diary.db"))
+    executor._ensure_diaries_table(conn)
+    def forbidden(**kwargs):
+        raise AssertionError("UI shells must not be inflated into achievements")
+    executor._llm_generate = forbidden
+    result = executor._execute_single_daily_diary(conn, {"id": 1}, "2026-07-08", [
+        {"id": 1, "overview": "成功启动 Chrome", "details": "OCR 仅识别出 Chrome，无法确定正在访问的网站或任何业务上下文", "importance": 1}
+    ])
+    assert result["source_count"] == 1
+    content = json.loads(conn.execute("SELECT content FROM diaries").fetchone()[0])
+    assert content["source_status"] == "insufficient_evidence"
+    assert content["timeline"][0]["timeline_id"] == 1
+    assert "未记录到可确认" in content["markdown"]

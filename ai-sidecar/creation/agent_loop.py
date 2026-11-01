@@ -2032,6 +2032,14 @@ class CreationAgentLoop(CreationEvidencePrompts):
             if operation_kind in {"generate", "execute_skill"} or chapter is not None:
                 from .work_integration import bind_work_acceptance
                 contract = bind_work_acceptance(contract, state.environment.get("work_context")) if state.environment.get("work_context") else contract
+            from .retrieval_evidence import bind_local_evidence_leads
+            contract = bind_local_evidence_leads(
+                contract, state.environment.get("requirement") or {}, state.user_message,
+                allowed=bool(state.options.get("enable_rag", True))
+                and not state.environment.get("strict_skill_workflow")
+                and MEMORY_SEARCH_TOOL_ID in normalize_creation_tool_ids(state.options.get("enabled_tools")),
+                operation=operation_kind,
+            )
             state.environment["input_contract"] = contract
             state.environment["brainstorm_acceptance_version"] = 9
             state.environment["input_base_document"] = state.current_document
@@ -4352,10 +4360,21 @@ class CreationAgentLoop(CreationEvidencePrompts):
             return
 
         if action == "internet_search":
+            query = self._step_context_query(state, step)
             results = await self.service.collect_web_context(
-                self._step_context_query(state, step),
+                query,
                 state.environment["requirement"],
             )
+            from .retrieval_evidence import local_entity_leads
+            anchors = local_entity_leads(state.environment["requirement"], query)
+            if not results and anchors and not state.environment.get("references"):
+                # Stop before the writer turns a failed search into a document.
+                # Local recall, when authorized, was scheduled before web search.
+                raise OperationError(
+                    "CREATION_EVIDENCE_UNAVAILABLE",
+                    "相关资料检索未获得有效证据，已保留断点；请补充资料或重试检索。",
+                    retryable=True,
+                )
             state.environment["web_results"] = [asdict(item) for item in results]
             state.environment.setdefault("tool_results", []).append(
                 {
@@ -4384,7 +4403,9 @@ class CreationAgentLoop(CreationEvidencePrompts):
                         {"title": item.title, "url": item.url} for item in results
                     ]
                 },
-                data={"result_count": len(results)},
+                data={"result_count": len(results), "query": query,
+                      "evidence_status": "relevant_candidates" if results else "empty",
+                      "local_reference_count": len(state.environment.get("references") or [])},
             )
             return
 
