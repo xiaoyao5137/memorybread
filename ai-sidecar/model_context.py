@@ -6,6 +6,7 @@ import json
 import time
 from functools import lru_cache
 from pathlib import Path
+from typing import Optional
 from urllib.parse import quote
 
 import httpx
@@ -14,13 +15,13 @@ MIN_CONTEXT_WINDOW = 4096
 MAX_CONTEXT_WINDOW = 2_000_000
 
 
-def context_window_value(value: object) -> int | None:
+def context_window_value(value: object) -> Optional[int]:
     if type(value) is int and MIN_CONTEXT_WINDOW <= value <= MAX_CONTEXT_WINDOW:
         return value
     return None
 
 
-def consultation_context_window(profile: dict) -> int | None:
+def consultation_context_window(profile: dict) -> Optional[int]:
     manual = context_window_value(profile.get("context_window_tokens"))
     if manual:
         return manual
@@ -35,7 +36,7 @@ def consultation_context_window(profile: dict) -> int | None:
     )
 
 
-def _codex_window(profile: dict) -> int | None:
+def _codex_window(profile: dict) -> Optional[int]:
     from client_detection import codex_settings, read_settings
     from user_models import DEFAULT_CLIENT_ARGS, codex_home
 
@@ -88,7 +89,7 @@ def _codex_window(profile: dict) -> int | None:
     return context_window_value(min(window, maximum or window) * percent // 100)
 
 
-def _metadata_window(item: dict) -> int | None:
+def _metadata_window(item: dict) -> Optional[int]:
     top_provider = item.get("top_provider")
     fields = (
         item.get("context_window_tokens"), item.get("context_window"),
@@ -100,7 +101,7 @@ def _metadata_window(item: dict) -> int | None:
 
 
 @lru_cache(maxsize=32)
-def _api_window(protocol: str, base_url: str, model: str, api_key: str, _interval: int) -> int | None:
+def _api_window(protocol: str, base_url: str, model: str, api_key: str, _interval: int) -> Optional[int]:
     if not model or not base_url:
         return None
     base_url = base_url.rstrip("/")
