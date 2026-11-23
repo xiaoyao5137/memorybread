@@ -39,7 +39,8 @@ fail() {
 
 INFO_PLIST="$APP_PATH/Contents/Info.plist"
 MAIN_BIN="$APP_PATH/Contents/MacOS/memory-bread-desktop"
-CORE_BIN="$APP_PATH/Contents/MacOS/memory-bread-core"
+CORE_APP="$APP_PATH/Contents/Helpers/memory-bread-core.app"
+CORE_BIN="$CORE_APP/Contents/MacOS/memory-bread-core"
 BROWSER_BRIDGE_BIN="$APP_PATH/Contents/MacOS/memorybread-browser-bridge"
 AI_APP="$APP_PATH/Contents/Helpers/memory-bread-ai.app"
 AI_BIN="$AI_APP/Contents/MacOS/memory-bread-ai"
@@ -47,6 +48,21 @@ AI_BIN="$AI_APP/Contents/MacOS/memory-bread-ai"
 for path in "$INFO_PLIST" "$MAIN_BIN" "$CORE_BIN" "$BROWSER_BRIDGE_BIN" "$AI_APP" "$AI_BIN"; do
   [ -e "$path" ] || fail "App Bundle 缺少: $path"
 done
+
+verify_core_helper() {
+  local core_app="$1"
+  local core_plist="$core_app/Contents/Info.plist"
+  [ -x "$core_app/Contents/MacOS/memory-bread-core" ] \
+    || fail "Core helper 缺少可执行文件: $core_app"
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$core_plist")" = memory-bread-core ] \
+    || fail "Core helper 的 Bundle 可执行文件配置错误: $core_app"
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$core_plist")" = true ] \
+    || fail "Core helper 必须以后台代理身份运行: $core_app"
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$core_plist")" = com.memory-bread.app.core-helper ] \
+    || fail "Core helper 缺少独立的 Bundle ID: $core_app"
+}
+
+verify_core_helper "$CORE_APP"
 
 AI_LINK_COUNT="$(find "$AI_APP" -type l | wc -l | xargs)"
 [ "$AI_LINK_COUNT" -gt 0 ] || fail "AI helper 中未找到 PyInstaller 符号链接"
@@ -134,6 +150,7 @@ if [ "$MODE" = "dmg" ] && [ -n "$DMG_PATH" ]; then
   [ -d "$DMG_APP" ] || fail "DMG 内缺少 $(basename "$APP_PATH")"
   [ -L "$DMG_MOUNT_POINT/Applications" ] \
     || fail "DMG 内缺少 Applications 拖拽安装快捷方式"
+  verify_core_helper "$DMG_APP/Contents/Helpers/memory-bread-core.app"
   DMG_APP_ICON="$DMG_APP/Contents/Resources/$ICON_FILE"
   [ -f "$DMG_APP_ICON" ] || fail "DMG 内的 App 缺少品牌图标"
   cmp -s "$EXPECTED_ICON" "$DMG_APP_ICON" \

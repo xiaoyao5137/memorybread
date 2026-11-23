@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>memory-bread-core</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.memory-bread.app.core-helper</string>
+    <key>CFBundleName</key>
+    <string>memory-bread-core</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>记忆面包需要在你授权后读取应用窗口与网页文字，用于构建本机工作记忆。</string>
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>

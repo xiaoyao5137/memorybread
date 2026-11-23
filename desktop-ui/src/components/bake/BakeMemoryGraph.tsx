@@ -385,7 +385,7 @@ const BakeMemoryGraph: React.FC<{
   const endGesture = (event: React.PointerEvent<SVGSVGElement>) => {
     if (gestureRef.current?.pointerId !== event.pointerId) return
     gestureRef.current = null
-    if (svgRef.current?.hasPointerCapture(event.pointerId)) svgRef.current.releasePointerCapture(event.pointerId)
+    // 指针在松开或取消后自动释放捕获。
   }
 
   // 缩放改用画布容器上的原生非 passive wheel 监听（见下方 useEffect），
@@ -640,7 +640,8 @@ const BakeMemoryGraph: React.FC<{
                     aria-label={`${meta.label}：${node.label}。按 Enter 打开`}
                     onPointerDown={(event) => {
                       event.stopPropagation()
-                      svgRef.current?.setPointerCapture(event.pointerId)
+                      // 让松开后产生的 click 仍落在节点上，避免被当成点击画布空白处。
+                      event.currentTarget.setPointerCapture(event.pointerId)
                       gestureRef.current = {
                         kind: 'node',
                         pointerId: event.pointerId,

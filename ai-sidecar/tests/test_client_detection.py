@@ -9,7 +9,7 @@ import user_models
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(user_models, "profile_path", lambda: tmp_path / "profiles.json")
-    for env in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "KIMI_CODE_HOME"):
+    for env in ("CODEX_HOME", "MEMORY_BREAD_USER_HOME", "CLAUDE_CONFIG_DIR", "KIMI_CODE_HOME"):
         monkeypatch.delenv(env, raising=False)
     monkeypatch.setattr(
         detection,
@@ -148,3 +148,20 @@ def test_mcode_headless_flags_are_verified_from_exec_help(isolated, monkeypatch)
     assert calls == [['/bin/mcode', 'exec', '--help']]
     assert result['args'] == ['exec', '--input', '-', '--output-format', 'text',
                               '--permission', 'off', '--max-steps', '1']
+
+
+def test_codex_discovery_uses_desktop_user_home_and_respects_explicit_override(
+    isolated, monkeypatch
+):
+    user_home = isolated / "desktop-user"
+    default_config = user_home / ".codex" / "config.toml"
+    default_config.parent.mkdir(parents=True)
+    default_config.write_text('model="desktop-model"\n')
+    monkeypatch.setenv("MEMORY_BREAD_USER_HOME", str(user_home))
+    assert detection.detect_client("codex")["model"] == "desktop-model"
+
+    override = isolated / "custom-codex"
+    override.mkdir()
+    (override / "config.toml").write_text('model="custom-model"\n')
+    monkeypatch.setenv("CODEX_HOME", str(override))
+    assert detection.detect_client("codex")["model"] == "custom-model"

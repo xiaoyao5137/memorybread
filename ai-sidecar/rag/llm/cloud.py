@@ -11,6 +11,7 @@ import ssl
 import time
 import urllib.error
 import urllib.request
+from functools import cached_property
 from typing import Callable, Optional
 
 from .base import LlmBackend, LlmResponse
@@ -42,10 +43,28 @@ class CloudChatBackend(LlmBackend):
     def is_available(self) -> bool:
         return bool(self._model and self._api_key)
 
+    @cached_property
+    def _profile(self) -> Optional[dict]:
+        from user_models import PREFIX, get_profile
+
+        return get_profile(self._model) if self._model.startswith(PREFIX) else None
+
+    @cached_property
+    def context_window_tokens(self) -> Optional[int]:
+        if self._profile is None:
+            return None
+        from model_context import consultation_context_window
+
+        return consultation_context_window(self._profile)
+
     def complete(self, prompt: str, system: str = "", **kwargs) -> LlmResponse:
-        if self._model.startswith('user-'):
+        if self._profile is not None:
             from user_models import complete_profile
-            return LlmResponse(text=complete_profile(self._model, prompt, system), model=self._model)
+            text = complete_profile(
+                self._model, prompt, system, configuration=self._profile,
+                max_tokens=kwargs.get("num_predict"),
+            )
+            return LlmResponse(text=text, model=self._model)
         if "claude" in self._model.lower() or "anthropic.com" in self._base_url:
             return self._complete_anthropic(prompt, system, **kwargs)
         return self._complete_openai_compatible(prompt, system, **kwargs)
@@ -57,11 +76,8 @@ class CloudChatBackend(LlmBackend):
         on_delta: Optional[Callable[[str], None]] = None,
         **kwargs,
     ) -> LlmResponse:
-        if self._model.startswith('user-'):
-            from user_models import complete_profile
-            response = LlmResponse(text=complete_profile(self._model, prompt, system), model=self._model)
-            if on_delta: on_delta(response.text)
-            return response
+        if self._profile is not None:
+            return super().complete_stream(prompt, system=system, on_delta=on_delta, **kwargs)
         if "claude" in self._model.lower() or "anthropic.com" in self._base_url:
             return self._stream_anthropic(prompt, system, on_delta=on_delta, **kwargs)
         return self._stream_openai_compatible(prompt, system, on_delta=on_delta, **kwargs)

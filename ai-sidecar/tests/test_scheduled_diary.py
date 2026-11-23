@@ -744,3 +744,81 @@ def test_empty_ui_sources_do_not_become_work_achievements(tmp_path):
     assert content["source_status"] == "insufficient_evidence"
     assert content["timeline"][0]["timeline_id"] == 1
     assert "未记录到可确认" in content["markdown"]
+
+
+def test_daily_diary_retries_empty_output_and_preserves_previous_diary(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    executor = TaskExecutor(db_path=":memory:")
+    executor._ensure_diaries_table(conn)
+    sources = [{"id": 1, "overview": "完成修复并验证", "importance": 4}]
+    empty = "## 今日产出\n- 无\n\n## 问题与解决\n- 无"
+    replies = iter([empty, _fake_llm(), "无法解析", empty])
+    calls = []
+
+    def generate(**kwargs):
+        calls.append(kwargs)
+        return next(replies)
+
+    monkeypatch.setattr(executor, "_llm_generate", generate)
+    args = (conn, {"id": 1}, "2026-11-16", sources)
+    executor._execute_single_daily_diary(*args)
+    saved = conn.execute("SELECT content FROM diaries").fetchone()
+    assert json.loads(saved[0])["work_outputs"] == ["完成了日记生成链路"]
+    assert calls[0]["context"] == calls[1]["context"]
+    assert "重新阅读工作记录" in calls[1]["user_instruction"]
+
+    import pytest
+    with pytest.raises(RuntimeError, match="重试后仍缺少有效正文"):
+        executor._execute_single_daily_diary(*args)
+    assert conn.execute("SELECT content FROM diaries").fetchone() == saved
+
+
+def test_daily_diary_scans_every_batch_and_keeps_cited_sources(monkeypatch):
+    monkeypatch.setattr("scheduled_task_executor.DAILY_DIARY_CONTEXT_MAX_ITEMS", 2)
+    monkeypatch.setattr("scheduled_task_executor.DAILY_DIARY_TIMELINE_MAX_ITEMS", 1)
+    executor = TaskExecutor(db_path=":memory:")
+    conn = sqlite3.connect(":memory:")
+    executor._ensure_diaries_table(conn)
+    sources = [
+        {"id": 1, "overview": "完成发布验证", "importance": 5},
+        {"id": 2, "overview": "重复浏览发布文档", "importance": 4},
+        {"id": 3, "overview": "编写了组织关系图草稿，渲染仍有错误", "importance": 1},
+    ]
+    calls = []
+    replies = iter([
+        "发布｜完成本机验证 [T1]",
+        "无有效事项",
+        "## 今日产出\n- 完成本机验证 [T1]\n## 问题与解决\n- 无",
+        "## 今日产出\n- 完成本机验证 [T1]\n- 提交关系图草稿 [T3]\n"
+        "## 问题与解决\n- 完成本机验证。 [T1]\n- 关系图渲染仍有错误 [T3]",
+    ])
+
+    def generate(**kwargs):
+        calls.append(kwargs)
+        return next(replies)
+
+    monkeypatch.setattr(executor, "_llm_generate", generate)
+    executor._execute_single_daily_diary(conn, {"id": 1}, "2026-11-16", sources)
+    assert "[T2]" in calls[0]["context"]
+    assert "[T3]" in calls[1]["context"]
+    assert "发布｜完成本机验证" in calls[2]["context"]
+    assert "[T3] 编写了组织关系图草稿" in calls[2]["context"]
+    assert "关键交付遗漏" in calls[3]["user_instruction"]
+    content = json.loads(conn.execute("SELECT content FROM diaries").fetchone()[0])
+    assert content["source_count"] == 3
+    assert content["problems_solved"] == ["关系图渲染仍有错误 [T3]"]
+    assert {item["timeline_id"] for item in content["timeline"]} == {1, 3}
+
+
+def test_diary_inventory_retains_evidence_when_batch_output_is_invalid(monkeypatch):
+    monkeypatch.setattr("scheduled_task_executor.DAILY_DIARY_CONTEXT_MAX_ITEMS", 1)
+    executor = TaskExecutor(db_path=":memory:")
+    replies = iter(["项目 A [T99]", "项目 A [T99]", "项目 B 已交付 [T2]"])
+    monkeypatch.setattr(executor, "_llm_generate", lambda **_: next(replies))
+    result = executor._build_daily_diary_inventory([
+        {"id": 1, "overview": "完成项目 A 验证"},
+        {"id": 2, "overview": "项目 B 已交付"},
+    ], 1, "zh-CN")
+    assert "完成项目 A 验证" in result
+    assert "项目 B 已交付 [T2]" in result
+    assert "[T99]" not in result

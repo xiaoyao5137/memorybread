@@ -8,7 +8,7 @@ import { useAppStore, CREATION_MODEL_PREFERENCE_KEY } from '../store/useAppStore
 import { getLocalServiceBaseUrl } from '../utils/localServices'
 
 const service = getLocalServiceBaseUrl('creation')
-type Profile = { provider?: string; region?: string; workspace_id?: string; id: string; name: string; protocol: string; model: string; base_url: string; command: string; client: string; args?: string[]; has_api_key?: boolean }
+type Profile = { provider?: string; region?: string; workspace_id?: string; id: string; name: string; protocol: string; model: string; base_url: string; command: string; client: string; args?: string[]; has_api_key?: boolean; context_window_tokens?: number | null }
 type Template = { id: string; name: string; model: string; protocol: string; base_url: string; capabilities: string[] }
 const blank: Profile = { id: '', name: '', protocol: 'openai', model: '', base_url: '', command: '', client: 'codex' }
 const validTemplates = (value: unknown): Template[] => Array.isArray(value) ? value.filter((t): t is Template => !!t && typeof t.id === 'string' && typeof t.name === 'string' && typeof t.model === 'string' && ['openai', 'anthropic'].includes(t.protocol) && typeof t.base_url === 'string' && Array.isArray(t.capabilities) && t.capabilities.every((c: unknown) => typeof c === 'string')) : []
@@ -155,12 +155,15 @@ export default function UserModelsPanel({ scope = 'creation', onAnalysisChange, 
     finally { setBusy(false) }
   }
   function edit(p: Profile) { setDraft(p); setKey(''); setError(''); setConnectionResult(''); setArgs(JSON.stringify(p.args || [])) }
-  function draftBody() { return { ...draft, id: draft?.id || undefined, api_key: key || undefined, args: JSON.parse(args) } }
+  function draftBody() { return { ...draft, id: draft?.id || undefined, api_key: key || undefined, args: JSON.parse(args), context_window_tokens: draft?.context_window_tokens ?? null } }
   async function testConnection() {
     if (!dialogRef.current?.querySelector<HTMLFormElement>('form')?.reportValidity()) return
     setConnectionResult('')
     const result = await request(`${service}/creation/user-models/test-connection`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(draftBody()) })
-    setConnectionResult(result.message || '连接成功')
+    const window = result.consultation_context_window_tokens
+    const capacity = typeof window === 'number' ? `，咨询上下文 ${window.toLocaleString()} token`
+      : window === null ? '，未读取到窗口额度，咨询将使用默认额度' : ''
+    setConnectionResult((result.message || '连接成功') + capacity)
   }
   function closeDialog() { setDraft(null); setKey(''); setConnectionResult(''); setError('') }
   async function save() {
@@ -320,6 +323,12 @@ export default function UserModelsPanel({ scope = 'creation', onAnalysisChange, 
         <label>API Key <input required={draft.protocol === 'gateway' && !draft.has_api_key} type="password" autoComplete="new-password" value={key} placeholder={draft.has_api_key ? '已保存，留空保留' : draft.protocol === 'gateway' ? '填写该平台的 API Key' : '填写自己的 API Key；本地服务可留空'} onChange={e => setKey(e.target.value)} /></label>
       </>}
       <label>实际模型 ID {draft.protocol === 'cli' && '（可留空使用客户端默认模型）'} <input required={draft.protocol !== 'cli'} value={draft.model} onChange={e => setDraft({ ...draft, model: e.target.value })} /></label>
+      <label>咨询上下文窗口（token，可选）
+        <input type="number" min={4096} max={2000000} step={1} value={draft.context_window_tokens ?? ''}
+          placeholder="留空自动识别" aria-describedby="consultation-context-hint"
+          onChange={e => setDraft({ ...draft, context_window_tokens: e.target.value === '' ? null : e.target.valueAsNumber })} />
+      </label>
+      <p id="consultation-context-hint">留空时从服务端或本机客户端读取。需要覆盖时，可填写实际支持的额度。</p>
       {error && <p role="alert">{error}</p>}
       {connectionResult && <p className="user-models__success" role="status">{connectionResult}</p>}
       <div className="user-models__dialog-actions"><button type="button" disabled={busy || detecting} onClick={() => void mutate(testConnection)}>{busy ? '处理中…' : '测试连接'}</button><span /><button type="button" disabled={busy} onClick={closeDialog}>取消</button><button type="submit" disabled={busy || detecting}>保存模型</button></div>

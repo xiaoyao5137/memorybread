@@ -403,16 +403,34 @@ prepare_core_helper() {
   local browser_bridge_binary="$PROJECT_ROOT/core-engine/target/$TARGET/release/memorybread-browser-bridge"
   [ -x "$core_binary" ] || fail "未生成 core-engine: $core_binary"
   [ -x "$browser_bridge_binary" ] || fail "未生成 Chrome browser bridge: $browser_bridge_binary"
-  cp "$core_binary" "$STAGING_DIR/memory-bread-core-$TARGET"
+  local core_app="$STAGING_DIR/memory-bread-core.app"
+  local core_contents="$core_app/Contents"
+  mkdir -p "$core_contents/MacOS"
+  cp "$TAURI_DIR/CoreHelper.Info.plist" "$core_contents/Info.plist"
+  plutil -insert CFBundleVersion -string "$MEMORY_BREAD_BUILD_NUMBER" "$core_contents/Info.plist"
+  plutil -insert CFBundleShortVersionString -string "$APP_VERSION" "$core_contents/Info.plist"
+  install -m 755 "$core_binary" "$core_contents/MacOS/memory-bread-core"
+
+  # Tauri copies custom files as-is. Sign the nested App before it signs the parent.
+  if [ "$MODE" = appstore ]; then
+    codesign --force --options runtime --timestamp \
+      --entitlements "$TAURI_DIR/Entitlements.child.plist" \
+      --sign "$APPLE_APP_SIGNING_IDENTITY" "$core_app"
+  elif [ "${APPLE_SIGNING_IDENTITY:--}" = - ]; then
+    codesign --force --sign - "$core_app"
+  else
+    codesign --force --options runtime --timestamp \
+      --sign "$APPLE_SIGNING_IDENTITY" "$core_app"
+  fi
+
   cp "$browser_bridge_binary" "$STAGING_DIR/memorybread-browser-bridge-$TARGET"
-  chmod +x "$STAGING_DIR/memory-bread-core-$TARGET"
   chmod +x "$STAGING_DIR/memorybread-browser-bridge-$TARGET"
 }
 
 verify_staged_helpers() {
   local helper
   for helper in \
-    "$STAGING_DIR/memory-bread-core-$TARGET" \
+    "$STAGING_DIR/memory-bread-core.app/Contents/MacOS/memory-bread-core" \
     "$STAGING_DIR/memorybread-browser-bridge-$TARGET" \
     "$STAGING_DIR/memory-bread-ai.app/Contents/MacOS/memory-bread-ai"; do
     file "$helper" | grep -q 'Mach-O' || fail "helper 不是 Mach-O: $helper"
@@ -454,11 +472,6 @@ sign_appstore_bundle() {
   codesign --force --deep --options runtime --timestamp \
     --entitlements "$TAURI_DIR/Entitlements.child.plist" \
     --sign "$APPLE_APP_SIGNING_IDENTITY" "$ai_helper"
-  codesign --force --options runtime --timestamp \
-    --entitlements "$TAURI_DIR/Entitlements.child.plist" \
-    --sign "$APPLE_APP_SIGNING_IDENTITY" \
-    "$app_path/Contents/MacOS/memory-bread-core"
-
   codesign --force --options runtime --timestamp \
     --entitlements "$TAURI_DIR/Entitlements.appstore.generated.plist" \
     --sign "$APPLE_APP_SIGNING_IDENTITY" "$app_path"

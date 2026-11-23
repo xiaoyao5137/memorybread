@@ -50,6 +50,69 @@ from rag.retriever   import (
 from rag.reranker    import reciprocal_rank_fusion
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_consultation_uses_deep_document_section_and_original_citation(tmp_path, stream):
+    db = tmp_path / "memory.db"
+    source = "https://docs.example.test/handbook"
+    address = "https://release.example.test/#/dashboard/index"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE bake_documents (id INTEGER, full_content TEXT, deleted_at INTEGER)")
+        conn.execute(
+            "INSERT INTO bake_documents VALUES (1, ?, NULL)",
+            ("## 开发机\nhttps://jump.example.test/\n" + "安装开发工具。" * 300
+             + "\n### 发布平台：Bedrock\n\n" + address
+             + "\n\n需要联系平台值班号申请权限。\n\n"
+             + "故障入口 https://alerts.example.test/\n",),
+        )
+    recalled = RetrievedChunk(0, "新手手册的开头", source="document", metadata={
+        "source_type": "document", "document_id": 1, "title": "新手手册", "source_url": source,
+    })
+    llm = MockLlmBackend(f"发布平台是 Bedrock，地址是 {address}。[M1]")
+    result = _make_pipeline(db_path=str(db)).query(
+        "minimax的部署发布平台的地址", supplied_contexts=[recalled],
+        llm=llm, on_delta=(lambda delta: None) if stream else None,
+    )
+
+    assert "发布平台：Bedrock" in llm.last_prompt
+    assert address in llm.last_prompt
+    assert "jump.example.test" not in llm.last_prompt
+    assert "alerts.example.test" not in llm.last_prompt
+    assert result.context_text in llm.last_prompt
+    assert result.contexts == result.cited_contexts == [recalled]
+    assert f"[记忆1]({source})" in result.answer
+
+
+def test_custom_consultation_window_expands_evidence_and_reserves_material():
+    from rag.material_retrieval import ConsultationQuery
+    from rag.pipeline import _estimate_context_tokens
+
+    pipeline = _make_pipeline()
+    instruction = "请解释这些操作"
+    query = ConsultationQuery(
+        instruction + "\n本次材料\n" + "现场记录。\n" * 180,
+        instruction, instruction, requires_material_grounding=True,
+    )
+    chunks = [RetrievedChunk(i, "相关操作的细节。\n" * 1600, source="capture") for i in range(1, 4)]
+    small = MockLlmBackend()
+    small.context_window_tokens = 4096
+    large = MockLlmBackend()
+    large.context_window_tokens = 32768
+    small_result = pipeline.query(query, supplied_contexts=chunks, llm=small)
+    large_result = pipeline.query(query, supplied_contexts=chunks, llm=large)
+
+    assert small_result.context_text
+    assert len(large_result.context_text) > max(1200, len(small_result.context_text))
+    for llm in (small, large):
+        assert query in llm.last_prompt
+        assert (_estimate_context_tokens(llm.last_system + llm.last_prompt)
+                + llm.last_kwargs["num_predict"] + llm.context_window_tokens // 10
+                <= llm.context_window_tokens)
+
+    with pytest.raises(ValueError, match="上下文额度"):
+        pipeline.query(query * 10, supplied_contexts=chunks, llm=small)
+    assert small.call_count == 1
+
+
 # ── Mock 工具 ─────────────────────────────────────────────────────────────────
 
 class MockEmbeddingBackend(EmbeddingBackend):
@@ -213,6 +276,7 @@ def _make_pipeline(
     llm_response: str = "测试回答",
     embed_raise: Optional[Exception] = None,
     top_k: int = 3,
+    db_path: Optional[str] = None,
 ) -> RagPipeline:
     return RagPipeline(
         embedding_model=EmbeddingModel(backend=MockEmbeddingBackend(should_raise=embed_raise)),
@@ -221,6 +285,7 @@ def _make_pipeline(
         knowledge_retriever=MockFts5Retriever(chunks=knowledge_chunks),  # type: ignore[arg-type]
         llm=MockLlmBackend(response=llm_response),
         top_k=top_k,
+        db_path=db_path,
     )
 
 

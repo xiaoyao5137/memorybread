@@ -126,6 +126,7 @@ def test_codex_reconnection_can_recover_without_leaking_commentary():
 @pytest.mark.parametrize("message,code", [
     ("workspace routing discovery failed", "CODEX_NETWORK_FAILED"),
     ("401 unauthorized", "CODEX_AUTH_FAILED"),
+    ("connection failed during workspace routing: not logged in", "CODEX_AUTH_FAILED"),
     ("usage limit reached", "CODEX_RATE_LIMITED"),
     ("context window exceeded", "CODEX_CONTEXT_LIMIT"),
     ("too many tokens", "CODEX_CONTEXT_LIMIT"),

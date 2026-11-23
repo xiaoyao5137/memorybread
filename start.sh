@@ -284,6 +284,7 @@ pid_belongs_to_packaged_app() {
     case "$executable" in
         */记忆面包.app/Contents/MacOS/memory-bread-desktop|\
         */记忆面包.app/Contents/MacOS/memory-bread-core|\
+        */记忆面包.app/Contents/Helpers/memory-bread-core.app/Contents/MacOS/memory-bread-core|\
         */记忆面包.app/Contents/Helpers/memory-bread-ai.app/Contents/MacOS/memory-bread-ai)
             return 0
             ;;

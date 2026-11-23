@@ -36,6 +36,9 @@ process_executable() {
         105)
             printf '%s\n' "/Applications/记忆面包.app/Contents/MacOS/memory-bread-core"
             ;;
+        108)
+            printf '%s\n' "/Applications/记忆面包.app/Contents/Helpers/memory-bread-core.app/Contents/MacOS/memory-bread-core"
+            ;;
         106)
             printf '%s\n' "/Users/test/Library/Application Support/com.memory-bread.app/runtime/.memory-bread/initialization/runtime/ollama/v0.30.8/runtime/ollama"
             ;;
@@ -51,6 +54,7 @@ process_executable() {
 pid_belongs_to_packaged_app 101
 pid_is_desktop_app 102
 pid_belongs_to_packaged_app 105
+pid_belongs_to_packaged_app 108
 pid_belongs_to_managed_ollama 106
 pid_belongs_to_ollama_gui 107
 pid_belongs_to_memorybread 103
@@ -66,11 +70,11 @@ if pid_belongs_to_memorybread 104; then
 fi
 
 pgrep() {
-    printf '%s\n' 101 102 104 105
+    printf '%s\n' 101 102 104 105 108
 }
 
 PACKAGED_BACKEND_PIDS=$(find_packaged_backend_pids)
-if [ "$PACKAGED_BACKEND_PIDS" != $'101\n105' ]; then
+if [ "$PACKAGED_BACKEND_PIDS" != $'101\n105\n108' ]; then
     echo "packaged backend discovery returned unexpected PIDs: $PACKAGED_BACKEND_PIDS" >&2
     exit 1
 fi

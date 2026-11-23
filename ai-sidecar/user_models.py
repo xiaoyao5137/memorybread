@@ -78,6 +78,13 @@ def prepare_profile(data):
             raise ValueError("配置字段必须是文本，且不能超过 1000 字符")
         if not profile["name"].strip():
             raise ValueError("请填写模型名称")
+        window = data.get("context_window_tokens", profiles.get(model_id, {}).get("context_window_tokens"))
+        if window is not None:
+            from model_context import context_window_value
+
+            if context_window_value(window) is None:
+                raise ValueError("上下文窗口必须是 4096 到 2000000 之间的整数 token 数")
+            profile["context_window_tokens"] = window
         if protocol == "gateway":
             from model_gateways import PROVIDER_MAP, resolve_gateway
             provider = data.get("provider", "")
@@ -174,6 +181,14 @@ DEFAULT_CLIENT_ARGS = {
 }
 
 
+def codex_home():
+    configured = os.environ.get("CODEX_HOME")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    user_home = os.environ.get("MEMORY_BREAD_USER_HOME")
+    return (Path(user_home) if user_home else Path.home()) / ".codex"
+
+
 def _codex_inference_args(args):
     """Keep provider/auth settings, but isolate text inference from personal tools."""
     if not args or args[0] != "exec":
@@ -219,16 +234,18 @@ def _codex_output(output, returncode, stderr=""):
         details = " ".join(errors) + " " + stderr.lower()
         if any(s in details for s in ("error loading config", "invalid transport", "unexpected argument", "invalid value")):
             raise ModelInvocationError("Codex 配置或启动参数无效，请检查客户端配置（CODEX_CONFIG_INVALID）", "CODEX_CONFIG_INVALID")
-        if any(s in details for s in ("workspace routing", "connection", "stream disconnected", "network", "timed out")):
-            raise ModelInvocationError("Codex 网络连接失败，请检查网络或代理设置（CODEX_NETWORK_FAILED）", "CODEX_NETWORK_FAILED")
-        if any(s in details for s in ("unauthorized", "401", "token expired", "invalid token", "refresh token", "login", "authentication")):
-            raise ModelInvocationError("Codex 登录已失效，请重新登录客户端（CODEX_AUTH_FAILED）", "CODEX_AUTH_FAILED")
+        if any(s in details for s in ("unauthorized", "401", "token expired", "invalid token",
+                                      "refresh token", "not logged in", "login", "authentication",
+                                      "missing api key")):
+            raise ModelInvocationError("Codex 未登录或凭据已失效，请在 Codex CLI 中登录后重试（CODEX_AUTH_FAILED）", "CODEX_AUTH_FAILED")
         if any(s in details for s in ("rate limit", "quota", "usage limit", "429")):
             raise ModelInvocationError("Codex 当前额度不足或请求受限，请稍后重试（CODEX_RATE_LIMITED）", "CODEX_RATE_LIMITED")
         if any(s in details for s in ("context length", "context window", "too many tokens")):
             raise ModelInvocationError("Codex 输入超过模型上下文限制，请缩小提炼批次（CODEX_CONTEXT_LIMIT）", "CODEX_CONTEXT_LIMIT")
         if any(s in details for s in ("model_not_found", "model is not supported", "unsupported model")):
             raise ModelInvocationError("Codex 模型不可用，请检查模型 ID 和账号权限（CODEX_MODEL_UNAVAILABLE）", "CODEX_MODEL_UNAVAILABLE")
+        if any(s in details for s in ("workspace routing", "connection", "stream disconnected", "network", "timed out")):
+            raise ModelInvocationError("Codex 网络连接失败，请检查网络或代理设置（CODEX_NETWORK_FAILED）", "CODEX_NETWORK_FAILED")
         raise ModelInvocationError(f"Codex 推理失败（退出码 {returncode}，CODEX_INFERENCE_FAILED）", "CODEX_INFERENCE_FAILED")
     result = "\n".join(parts).strip()
     if not result:
@@ -308,6 +325,7 @@ async def cli_complete(profile, messages, timeout=300):
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
     if client == "codex":
+        env["CODEX_HOME"] = str(codex_home())
         for name in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_TOOL_CALL_ID",
                      "CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "CODEX_APP_TOOLS_PIPE_PATH",
                      "CODEX_PERMISSION_PROFILE"):
@@ -460,22 +478,20 @@ async def chat_configuration(p, messages, *, max_tokens=8192):
     yield text
 
 
-def complete_profile(model, prompt, system=""):
+def complete_profile(model, prompt, system="", *, configuration=None, max_tokens=None):
     """Bridge synchronous RAG backends, including callers already on an event loop."""
 
     async def collect():
-        return "".join(
-            [
-                part
-                async for part in chat_profile(
-                    model,
-                    [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": prompt},
-                    ],
-                )
-            ]
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ]
+        options = {} if max_tokens is None else {"max_tokens": max_tokens}
+        parts = (
+            chat_profile(model, messages, **options) if configuration is None
+            else chat_configuration(configuration, messages, **options)
         )
+        return "".join([part async for part in parts])
 
     try:
         asyncio.get_running_loop()

@@ -329,6 +329,10 @@
   line-height: 1.4;
 }
 
+summary.diary-content-section__title {
+  cursor: pointer;
+}
+
 .diary-content-list {
   display: grid;
   gap: 8px;

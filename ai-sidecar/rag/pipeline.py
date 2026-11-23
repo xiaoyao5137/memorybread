@@ -16,8 +16,11 @@ from dataclasses import dataclass, field
 from datetime import date as _date
 from typing import Callable, Optional
 
+from embedding.document_chunks import estimate_tokens as estimate_document_tokens
 from embedding.model import EmbeddingModel
+from monitor.llm_tracker import estimate_tokens
 
+from .document_evidence import fit_prefix, load_document_sections, select_document_text
 from .llm.base import LlmBackend
 from .material_retrieval import ConsultationQuery
 from .reranker import reciprocal_rank_fusion
@@ -121,7 +124,13 @@ def _extract_core_retrieval_query(user_query: str) -> str:
             return manual_instruction
     return text
 
-_MAX_CHUNK_LEN = 800   # 单个上下文片段最大字符数
+_DEFAULT_EXCERPT_CHARS = 800
+
+
+def _estimate_context_tokens(text: str) -> int:
+    return max(estimate_tokens(text), estimate_document_tokens(text))
+
+
 _KEYWORD_RRF_WEIGHT = 0.45
 _PENDING_DOCUMENT_RRF_WEIGHT = 0.7
 _VECTOR_RRF_WEIGHT = 1.0
@@ -150,6 +159,7 @@ class RagResult:
     done_reason: Optional[str] = None
     output_truncated: bool = False
     cited_contexts: list[RetrievedChunk] = field(default_factory=list)
+    context_text: str = ""
 
 
 def _is_output_truncated(done_reason: Optional[str]) -> bool:
@@ -582,10 +592,9 @@ class RagPipeline:
 
     def _answer_with_contexts(self, user_query, selected_contexts, intent,
                               llm=None, references_only=False, on_contexts=None, on_delta=None):
-        if on_contexts:
-            on_contexts(selected_contexts)
-
         if references_only:
+            if on_contexts:
+                on_contexts(selected_contexts)
             return RagResult(
                 answer="",
                 contexts=selected_contexts,
@@ -594,29 +603,24 @@ class RagPipeline:
 
         from rag.memory_evidence import MEMORY_RULES, CitationStream, cited_memories, render_citations
 
-        context_text = self._build_context(selected_contexts)
-
+        retrieval_query = _extract_core_retrieval_query(user_query)
         link_rule = (
             "用户正在询问地址/链接/网址。只提供与当前需求相符且实际采用的资料链接，并标注记忆编号。\n"
-            if _is_link_query(user_query) else ""
+            if _is_link_query(retrieval_query) else ""
         )
         is_floating_assist_query = (
             ("核心问题：" in user_query and "检索问题：" in user_query)
             or ("## 用户问题理解" in user_query and "## 回答" in user_query)
         )
-        floating_format_rule = ""
         time_clause = _build_relative_time_clause(intent)
-        history_section = (
-            "候选历史记忆（宽松召回，可能无关，请自行判断是否采用，可全部忽略）：\n"
-            + context_text
-        )
+        history_label = "候选历史记忆（宽松召回，可能无关，请自行判断是否采用，可全部忽略）：\n"
         if isinstance(user_query, ConsultationQuery) and user_query.requires_material_grounding:
             # Put the requested evidence closest to generation. Long historical
             # matches must not displace the current material or its comparison
             # baseline simply because they share a technology/object name.
-            prompt = (
-                f"{link_rule}{time_clause}{history_section}\n\n"
-                f"用户原始需求与本次材料：\n{user_query}\n\n"
+            before_context = f"{link_rule}{time_clause}{history_label}"
+            after_context = (
+                f"\n\n用户原始需求与本次材料：\n{user_query}\n\n"
                 "材料解读要求：逐份说明材料能支持的结论，再在对应关系明确时综合。"
                 "材料已足够回答时，直接回答，不加入历史背景段落。"
                 "技术名或关键词相同不代表同一次试验或同一事件；"
@@ -632,7 +636,8 @@ class RagPipeline:
                 f"请仅回答用户原始问题：{user_query.instruction}"
             )
         else:
-            prompt = f"{link_rule}{floating_format_rule}{time_clause}用户原始需求与本次材料：\n{user_query}\n\n{history_section}\n\n请仅回答原始问题：{_extract_core_retrieval_query(user_query)}。不需要展示候选筛选过程，也不需要为了列依据而扩写问题。"
+            before_context = f"{link_rule}{time_clause}用户原始需求与本次材料：\n{user_query}\n\n{history_label}"
+            after_context = f"\n\n请仅回答原始问题：{retrieval_query}。不需要展示候选筛选过程，也不需要为了列依据而扩写问题。"
 
         # 注入用户身份说明（通用能力，不依赖任务类型）
         user_identity = self._read_user_identity()
@@ -645,12 +650,32 @@ class RagPipeline:
             llm_kwargs["temperature"] = 0.2
             llm_kwargs["top_p"] = 0.8
         primary_llm = llm or self._llm
+        context_budget = None
+        window = getattr(primary_llm, "context_window_tokens", None)
+        if isinstance(window, int) and window > 0:
+            # Include all fixed input, including attached material and the
+            # question. Allow for chat framing and tokenizer estimation error.
+            input_tokens = _estimate_context_tokens(system + before_context + after_context)
+            headroom = max(256, window // 10)
+            available = window - input_tokens - headroom
+            if available < 256:
+                raise ValueError("本次咨询材料超出所选模型的上下文额度。请减少材料或调整模型设置中的上下文窗口。")
+            output_tokens = min(llm_kwargs.get("num_predict", 1536), window // 4, available)
+            llm_kwargs["num_predict"] = output_tokens
+            context_budget = available - output_tokens
+
+        packed_contexts, context_text = self._prepare_contexts(
+            selected_contexts, retrieval_query, context_budget,
+        )
+        prompt = before_context + context_text + after_context
+        if on_contexts:
+            on_contexts(selected_contexts)
 
         # A general conclusion over an explicitly bound comparison table has
         # checkable values and directions. Keep those authoritative in the final
         # rendering, instead of allowing free-form generation to change them.
         material_summary = getattr(user_query, "material_comparison_summary", "")
-        citation_stream = CitationStream(on_delta, selected_contexts) if on_delta and not material_summary else None
+        citation_stream = CitationStream(on_delta, packed_contexts) if on_delta and not material_summary else None
         try:
             if on_delta:
                 llm_resp = primary_llm.complete_stream(
@@ -673,13 +698,13 @@ class RagPipeline:
 
         if citation_stream:
             citation_stream.finish()
-        citation_contexts = [] if material_summary else selected_contexts
+        citation_contexts = [] if material_summary else packed_contexts
         cited = cited_memories(answer, citation_contexts)
         answer = render_citations(answer, citation_contexts)
         # 模型漏标注 [M编号] 时，答案里提到的文档仍需可核对的真实链接，
         # 否则用户无法区分「基于记忆作答」与「模型自行推理」。
         if not material_summary:
-            answer = _attach_document_links(answer, selected_contexts, self._db_path)
+            answer = _attach_document_links(answer, packed_contexts, self._db_path)
         if not answer.strip():
             raise RuntimeError("模型未返回可用答案。")
         if on_delta and material_summary:
@@ -693,45 +718,94 @@ class RagPipeline:
             tokens=llm_resp.tokens,
             done_reason=llm_resp.done_reason,
             output_truncated=_is_output_truncated(llm_resp.done_reason),
+            context_text=context_text,
         )
+
+    def _prepare_contexts(
+        self, chunks: list[RetrievedChunk], query: str, budget: Optional[int],
+    ) -> tuple[list[RetrievedChunk], str]:
+        if budget == 0:
+            return [], ""
+        sections = load_document_sections(self._db_path, chunks) if self._db_path else {}
+        terms = _extract_query_terms(query) if sections else []
+        link_query = _is_link_query(query)
+        packed: list[RetrievedChunk] = []
+        parts: list[str] = []
+        remaining = budget
+        for index, chunk in enumerate(chunks, 1):
+            if remaining is None:
+                def fits(text: str) -> bool:
+                    return len(text) <= _DEFAULT_EXCERPT_CHARS
+            else:
+                if remaining <= 0:
+                    break
+                prefix = self._format_context_entry(index, chunk, "")
+                # Let later sources participate, even if the first document
+                # could consume the entire window.
+                allowance = min(remaining, max(512, remaining // (len(chunks) - index + 1)))
+
+                def fits(text: str) -> bool:
+                    return _estimate_context_tokens(prefix + text) + 2 <= allowance
+
+            document_sections = sections.get(chunk.metadata.get("document_id"), [])
+            text = ""
+            if (document_sections and not chunk.metadata.get("source_snapshot_id")
+                    and (chunk.metadata.get("source_type") or chunk.source) == "document"):
+                text = select_document_text(chunk, document_sections, terms, link_query, fits)
+            if not text:
+                text = fit_prefix(chunk.text, fits)
+            if not text and remaining is not None:
+                break
+            packed.append(chunk)
+            rendered = self._format_context_entry(index, chunk, text)
+            parts.append(rendered)
+            if remaining is not None:
+                remaining -= _estimate_context_tokens(rendered) + 2
+
+        if parts or chunks:
+            return packed, "\n\n".join(parts)
+        empty_context = self._build_context([])
+        return [], empty_context if budget is None or _estimate_context_tokens(empty_context) <= budget else ""
 
     @staticmethod
     def _build_context(chunks: list[RetrievedChunk]) -> str:
         if not chunks:
             return "（本次没有召回到候选历史记忆；请依据用户问题、本次材料以及你自己的通用知识直接回答，不要因缺少记忆而拒答）"
-        parts = []
-        for i, chunk in enumerate(chunks, 1):
-            source = chunk.metadata.get("source_type") or chunk.source
-            observed_at = chunk.metadata.get("observed_at")
-            event_start = chunk.metadata.get("event_time_start")
-            event_end = chunk.metadata.get("event_time_end")
-            history_view = chunk.metadata.get("history_view")
-            activity_type = chunk.metadata.get("activity_type")
-            content_origin = chunk.metadata.get("content_origin")
-            importance = chunk.metadata.get("importance")
-            record_time = chunk.metadata.get("updated_at") or chunk.metadata.get("time")
-            text = chunk.text[:_MAX_CHUNK_LEN]
-            prefix: list[str] = [f"[M{i}][{source}]"]
-            if observed_at:
-                prefix.append(f"看到时间={_format_ts(observed_at)}")
-            if event_start or event_end:
-                if event_start and event_end and event_start != event_end:
-                    prefix.append(f"事件时间={_format_ts(event_start)}~{_format_ts(event_end)}")
-                else:
-                    prefix.append(f"事件时间={_format_ts(event_start or event_end)}")
-            if history_view:
-                prefix.append("历史回看")
-            if activity_type:
-                prefix.append(f"活动={activity_type}")
-            if content_origin:
-                prefix.append(f"来源={content_origin}")
-            # 烘焙产物与待烘焙采集没有看到/事件时间，用创建或更新时间佐证周期归属
-            if record_time and source in {"document", "bake_knowledge", "operation", "data", "pending_document"}:
-                time_label = "采集时间" if source == "pending_document" else "创建/更新时间"
-                prefix.append(f"{time_label}={_format_ts(record_time)}")
-            # importance 仅作内部排序依据，不放入上下文文本（避免 LLM 在输出中暴露元数据）
-            parts.append(f"{' '.join(prefix)} {text}")
-        return "\n\n".join(parts)
+        return "\n\n".join(
+            RagPipeline._format_context_entry(i, chunk, chunk.text)
+            for i, chunk in enumerate(chunks, 1)
+        )
+
+    @staticmethod
+    def _format_context_entry(i: int, chunk: RetrievedChunk, text: str) -> str:
+        source = chunk.metadata.get("source_type") or chunk.source
+        observed_at = chunk.metadata.get("observed_at")
+        event_start = chunk.metadata.get("event_time_start")
+        event_end = chunk.metadata.get("event_time_end")
+        history_view = chunk.metadata.get("history_view")
+        activity_type = chunk.metadata.get("activity_type")
+        content_origin = chunk.metadata.get("content_origin")
+        record_time = chunk.metadata.get("updated_at") or chunk.metadata.get("time")
+        prefix: list[str] = [f"[M{i}][{source}]"]
+        if observed_at:
+            prefix.append(f"看到时间={_format_ts(observed_at)}")
+        if event_start or event_end:
+            if event_start and event_end and event_start != event_end:
+                prefix.append(f"事件时间={_format_ts(event_start)}~{_format_ts(event_end)}")
+            else:
+                prefix.append(f"事件时间={_format_ts(event_start or event_end)}")
+        if history_view:
+            prefix.append("历史回看")
+        if activity_type:
+            prefix.append(f"活动={activity_type}")
+        if content_origin:
+            prefix.append(f"来源={content_origin}")
+        # 烘焙产物与待烘焙采集没有看到/事件时间，用创建或更新时间佐证周期归属
+        if record_time and source in {"document", "bake_knowledge", "operation", "data", "pending_document"}:
+            time_label = "采集时间" if source == "pending_document" else "创建/更新时间"
+            prefix.append(f"{time_label}={_format_ts(record_time)}")
+        # importance 仅作内部排序依据，不放入上下文文本（避免 LLM 在输出中暴露元数据）
+        return f"{' '.join(prefix)} {text}"
 
     def _lexical_priority_terms(self, retrieval_query: str) -> list[tuple[str, float]]:
         """用与关键词通道一致的选词标准，提取补位排序优先词。

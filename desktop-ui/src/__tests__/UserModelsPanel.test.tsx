@@ -80,9 +80,10 @@ it('adds a catalog model, keeps secrets out of preferences, selects and deletes 
   fireEvent.click(await screen.findByRole('button', { name: '运营模型目录' }))
   fireEvent.click(screen.getByRole('option', { name: /My Kimi/ }))
   fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'my-private-key' } })
+  fireEvent.change(screen.getByLabelText(/咨询上下文窗口/), { target: { value: '32768' } })
   fireEvent.click(screen.getByText('保存模型'))
   await screen.findByRole('button', { name: '编辑 My Kimi' })
-  expect(saved?.api_key).toBe('my-private-key')
+  expect(saved).toMatchObject({ api_key: 'my-private-key', context_window_tokens: 32768 })
   expect(JSON.stringify(useAppStore.getState().creationModelConfigs)).not.toContain('my-private-key')
   fireEvent.click(screen.getByRole('button', { name: '启用 My Kimi' }))
   await waitFor(() => expect(getEffectiveCreationModelId(useAppStore.getState().creationModelConfigs, false)).toBe('user-test'))
@@ -165,7 +166,8 @@ it('tests an unsaved dialog configuration without saving it and reports the resu
   let tested: Record<string, unknown> | undefined
   vi.mocked(fetch).mockImplementation(async (url, init) => {
     if (String(url).endsWith('/test-connection')) {
-      tested = JSON.parse(String(init?.body)); return Response.json({ status: 'ok', message: '连接成功' })
+      tested = JSON.parse(String(init?.body))
+      return Response.json({ status: 'ok', message: '连接成功', consultation_context_window_tokens: 475000 })
     }
     return original(url, init)
   })
@@ -178,8 +180,9 @@ it('tests an unsaved dialog configuration without saving it and reports the resu
   fireEvent.change(screen.getByLabelText('实际模型 ID'), { target: { value: 'new-model' } })
   fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'secret' } })
   fireEvent.click(screen.getByRole('button', { name: '测试连接' }))
-  await screen.findByText('连接成功')
+  await screen.findByText(/连接成功，咨询上下文 .* token/)
   expect(tested?.model).toBe('new-model')
+  expect(tested?.context_window_tokens).toBeNull()
   expect(tested?.api_key).toBe('secret')
   expect(saved).toBeUndefined()
   expect(dialog).toBeInTheDocument()

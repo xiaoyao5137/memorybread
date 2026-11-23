@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 from user_models import (
     DEFAULT_CLIENT_ARGS,
+    codex_home,
     list_profiles,
     get_analysis_model,
     resolve_client_command,
@@ -42,17 +43,19 @@ def read_settings(path):
                 try:
                     import tomli as tomllib
                 except ImportError:
-                    # Python 3.9 installations can still read root string settings.
+                    # Python 3.9 installations can still read these root settings.
                     data = {}
                     for line in text.splitlines():
                         if line.lstrip().startswith("["):
                             break
                         match = re.fullmatch(
-                            r'\s*(model|default_model|model_reasoning_effort|profile)\s*=\s*("(?:[^"\\]|\\.)*")\s*(?:#.*)?',
+                            r'\s*(model|default_model|model_reasoning_effort|profile|model_provider|model_catalog_json|model_context_window)'
+                            r'\s*=\s*("(?:[^"\\]|\\.)*"|[1-9][0-9_]*)\s*(?:#.*)?',
                             line,
                         )
                         if match:
-                            data[match[1]] = json.loads(match[2])
+                            raw = match[2]
+                            data[match[1]] = json.loads(raw) if raw.startswith('"') else int(raw)
                     return data
             data = tomllib.loads(text)
         return data if isinstance(data, dict) else {}
@@ -63,9 +66,7 @@ def read_settings(path):
 def config_paths(client):
     home = Path.home()
     roots = {
-        "codex": [
-            Path(os.environ.get("CODEX_HOME", str(home / ".codex"))) / "config.toml"
-        ],
+        "codex": [codex_home() / "config.toml"],
         "claude-code": [
             Path(os.environ.get("CLAUDE_CONFIG_DIR", str(home / ".claude")))
             / "settings.json"
@@ -107,6 +108,20 @@ def _model(settings):
     )
 
 
+def codex_settings(path, selected_profile=None):
+    settings = read_settings(path)
+    profile = selected_profile if selected_profile is not None else settings.get("profile")
+    if isinstance(profile, str) and re.fullmatch(r"[\w-]+", profile):
+        profiles = settings.get("profiles", {})
+        legacy = profiles.get(profile, {}) if isinstance(profiles, dict) else {}
+        return {
+            **settings,
+            **(legacy if isinstance(legacy, dict) else {}),
+            **read_settings(path.parent / (profile + ".config.toml")),
+        }
+    return settings
+
+
 def detect_client(client):
     if client not in CLIENT_COMMANDS:
         raise ValueError("不支持自动探测的客户端类型")
@@ -135,21 +150,7 @@ def detect_client(client):
     model = ""
     source = "default"
     for path in config_paths(client):
-        settings = read_settings(path)
-        if client == "codex":
-            profile = settings.get("profile")
-            if isinstance(profile, str) and re.fullmatch(r"[\w-]+", profile):
-                profiles_config = settings.get("profiles", {})
-                legacy = (
-                    profiles_config.get(profile, {})
-                    if isinstance(profiles_config, dict)
-                    else {}
-                )
-                settings = {
-                    **settings,
-                    **(legacy if isinstance(legacy, dict) else {}),
-                    **read_settings(path.parent / (profile + ".config.toml")),
-                }
+        settings = codex_settings(path) if client == "codex" else read_settings(path)
         if not model and _model(settings):
             model = _model(settings)
             source = "local_config"

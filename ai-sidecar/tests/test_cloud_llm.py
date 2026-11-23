@@ -6,6 +6,39 @@ import urllib.error
 from rag.llm.cloud import CloudChatBackend
 
 
+def test_configured_consultation_budget_reaches_custom_api(tmp_path, monkeypatch):
+    import httpx
+    import model_context
+    import user_models
+
+    monkeypatch.setattr(user_models, "profile_path", lambda: tmp_path / "models.json")
+    saved = user_models.save_profile({
+        "name": "Custom consultation",
+        "model": "custom-chat",
+        "base_url": "https://api.example.test/v1",
+        "context_window_tokens": 32768,
+    })
+    assert saved["context_window_tokens"] == 32768
+    backend = CloudChatBackend(saved["id"], "device-profile")
+    assert backend.context_window_tokens == 32768
+    requests = []
+
+    async def post(self, url, *, headers, json):
+        requests.append(json)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "回答"}}]})
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    deltas = []
+    backend.complete_stream("材料", system="答题要求", num_predict=1536, on_delta=deltas.append)
+    assert deltas == ["回答"]
+    assert requests[0]["max_tokens"] == 1536
+
+    legacy = user_models.save_profile({**saved, "context_window_tokens": None})
+    assert "context_window_tokens" not in legacy
+    monkeypatch.setattr(model_context, "_api_window", lambda *args: 64000)
+    assert CloudChatBackend(saved["id"], "device-profile").context_window_tokens == 64000
+
+
 class _JsonResponse:
     def __init__(self, body: bytes) -> None:
         self._body = body

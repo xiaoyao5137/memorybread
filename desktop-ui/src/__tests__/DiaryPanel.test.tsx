@@ -136,3 +136,28 @@ describe('DiaryPanel', () => {
     })
   })
 })
+
+it('refreshes the selected diary and shows the source coverage', async () => {
+  render(<DiaryPanel />)
+  await screen.findByText('完成了日记 API')
+  vi.mocked(fetch).mockResolvedValueOnce({
+    ok: true,
+    json: async () => [{
+      ...diaryResponse[0],
+      content: {
+        ...diaryResponse[0].content,
+        work_outputs: ['重新生成后的产出'],
+        timeline: [{ timeline_id: 10, summary: '可核对的来源' }],
+        source_count: 120,
+        source_time_range: ['11-16 19:29', '11-16 23:48'],
+      },
+    }],
+  } as Response)
+
+  fireEvent.click(screen.getByRole('button', { name: '刷新' }))
+  await screen.findByText('重新生成后的产出')
+  expect(screen.queryByText('完成了日记 API')).not.toBeInTheDocument()
+  expect(screen.getByText(/120 条时间线.*19:29.*23:48/)).toBeInTheDocument()
+  const sourceDetails = screen.getByText('来源线索').closest('details')
+  expect(sourceDetails).not.toHaveAttribute('open')
+})

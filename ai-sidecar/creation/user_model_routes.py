@@ -44,6 +44,7 @@ async def select_analysis_model(data: dict):
 async def test_connection(data: dict):
     """Validate an unsaved draft; never mutate the selected or saved profiles."""
     import asyncio
+    from model_context import consultation_context_window
 
     try:
         profile = user_models.prepare_profile(data)
@@ -61,7 +62,11 @@ async def test_connection(data: dict):
             )
 
         reply = await asyncio.wait_for(infer(), timeout=60)
-        return {"status": "ok", "message": "连接成功", "reply": reply[:300]}
+        window = await asyncio.to_thread(consultation_context_window, profile)
+        return {
+            "status": "ok", "message": "连接成功", "reply": reply[:300],
+            "consultation_context_window_tokens": window,
+        }
     except TimeoutError as exc:
         raise HTTPException(408, "连接测试超时，请检查服务或客户端状态") from exc
     except ValueError as exc:

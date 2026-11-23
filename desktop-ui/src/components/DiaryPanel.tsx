@@ -21,6 +21,8 @@ interface DiaryContent {
     category?: string
   }>
   source_dates?: string[]
+  source_count?: number
+  source_time_range?: [string, string]
 }
 
 interface DiaryEntry {
@@ -87,8 +89,7 @@ const DiaryPanel: React.FC = () => {
     setDiaries(data)
     setSelectedDiary(current => {
       if (data.length === 0) return null
-      if (current && data.some(item => item.id === current.id)) return current
-      return data[0]
+      return data.find(item => item.id === current?.id) ?? data[0]
     })
   }
 
@@ -354,8 +355,13 @@ const DiaryContentView: React.FC<{ diary: DiaryEntry }> = ({ diary }) => {
         <SectionList title="后续计划" items={content.next_plan || []} />
       )}
       {content.timeline && content.timeline.length > 0 && (
-        <section className="diary-content-section">
-          <h3 className="diary-content-section__title">来源线索</h3>
+        <details className="diary-content-section">
+          <summary className="diary-content-section__title">
+            来源线索
+            {content.source_time_range && content.source_count != null && (
+              <span> · {content.source_count} 条时间线 · {content.source_time_range.join(' 至 ')}</span>
+            )}
+          </summary>
           <div className="diary-timeline">
             {content.timeline.map((item, index) => (
               <article className="diary-timeline__item" key={`${item.timeline_id || index}-${item.time || ''}`}>
@@ -366,7 +372,7 @@ const DiaryContentView: React.FC<{ diary: DiaryEntry }> = ({ diary }) => {
               </article>
             ))}
           </div>
-        </section>
+        </details>
       )}
     </div>
   )

@@ -358,7 +358,7 @@ UPDATER_PATH="/绝对路径/实际生成的记忆面包.app.tar.gz"
 
 ```bash
 file "$APP_PATH/Contents/MacOS/memory-bread-desktop"
-file "$APP_PATH/Contents/MacOS/memory-bread-core"
+file "$APP_PATH/Contents/Helpers/memory-bread-core.app/Contents/MacOS/memory-bread-core"
 file "$APP_PATH/Contents/Helpers/memory-bread-ai.app/Contents/MacOS/memory-bread-ai"
 ```
 

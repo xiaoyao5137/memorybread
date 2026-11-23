@@ -864,7 +864,8 @@ def _build_rag_llm_override(data: dict, timeout: int = 360, num_predict: int = 1
         return None
 
     # 有 API Key 的模型按创作页云端模型处理；本地品牌模型只在 sidecar 内解析运行时名称。
-    if api_key:
+    from user_models import PREFIX
+    if api_key or model.startswith(PREFIX):
         from rag.llm.cloud import CloudChatBackend
         return CloudChatBackend(model=model, api_key=api_key, base_url=base_url, timeout=timeout)
 
@@ -1715,6 +1716,8 @@ def _rag_stream_event(event_type: str, **payload) -> str:
 
 def _public_rag_stream_error(error_text: str) -> str:
     lowered = error_text.lower()
+    if error_text.startswith("本次咨询材料超出所选模型的上下文额度"):
+        return error_text
     if 'busy' in lowered or 'service unavailable' in lowered or '初始化失败' in error_text:
         return 'AI 正在处理其他任务，请稍候再试'
     if 'ollama' in lowered:
@@ -1844,7 +1847,7 @@ def rag_query_stream():
                 response_contexts = _serialize_rag_evidence(result)
                 emit('references', contexts=response_contexts)
                 saved_contexts = _with_floating_assist_context(response_contexts, metadata)
-                prompt_used = pipeline._build_context(result.contexts)
+                prompt_used = result.context_text
                 elapsed_ms = int(time.time() * 1000) - started_ms
                 inference_elapsed_ms = (
                     int(time.time() * 1000) - answer_started_ms
@@ -2069,7 +2072,7 @@ def rag_query():
 
         response_contexts = contexts
         saved_contexts = _with_floating_assist_context(contexts, data)
-        prompt_used = pipeline._build_context(result.contexts)
+        prompt_used = result.context_text
         latency_ms = int(time.time() * 1000) - start_ms
         saved_query_text = data.get('rag_query_text') or rag_query_text
         session_id = _save_rag_session(saved_query_text, prompt_used, result.answer, saved_contexts, latency_ms, data, result.model)
@@ -2110,6 +2113,8 @@ def rag_query():
         logger.error(f"RAG 查询失败: {e}", exc_info=True)
 
         lowered = error_text.lower()
+        if error_text.startswith("本次咨询材料超出所选模型的上下文额度"):
+            return jsonify({'error': error_text}), 400
         if (
             'ollama' in lowered
             or 'bad gateway' in lowered

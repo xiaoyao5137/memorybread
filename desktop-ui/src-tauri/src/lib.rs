@@ -1079,6 +1079,10 @@ fn bundled_helper_path(name: &str) -> Result<PathBuf, String> {
             .ok_or_else(|| {
                 format!("未找到 {name}，尝试了 Contents/Helpers 和 Contents/Resources/binaries")
             })?
+    } else if cfg!(target_os = "macos") && name == "memory-bread-core" {
+        contents_dir
+            .join("Helpers/memory-bread-core.app/Contents/MacOS")
+            .join(name)
     } else {
         directory.join(name)
     };

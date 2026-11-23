@@ -6,14 +6,12 @@
     "category": "Productivity",
     "createUpdaterArtifacts": false,
     "targets": ["app"],
-    "externalBin": [
-      "binaries/memory-bread-core"
-    ],
     "macOS": {
       "minimumSystemVersion": "12.0",
       "entitlements": "./Entitlements.appstore.generated.plist",
       "files": {
         "embedded.provisionprofile": "./embedded.provisionprofile",
+        "Helpers/memory-bread-core.app": "binaries/memory-bread-core.app",
         "Helpers/memory-bread-ai.app": "binaries/memory-bread-ai.app"
       }
     }
