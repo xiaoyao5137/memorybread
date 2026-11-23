@@ -159,20 +159,25 @@ def test_queue_preemption_does_not_count_as_timeline_content_failure(
 ) -> None:
     import inference_queue
 
+    submissions = 0
+
     class PreemptedQueue:
         def submit_sync(self, *args, **kwargs):
+            nonlocal submissions
             assert kwargs["queue_timeout"] == 600.0
             assert kwargs["timeout"] == 600.0
+            submissions += 1
             raise getattr(inference_queue, error_name)("waiting for model slot")
 
     processor = BackgroundProcessor(db_path=str(tmp_path / "captures.db"))
-    processor._knowledge_extractor = object()
+    monkeypatch.setattr(processor, "_get_knowledge_extractor", object)
     monkeypatch.setattr("inference_queue.get_global_queue", lambda: PreemptedQueue())
     group = [{"id": 1, "ts": 1000}, {"id": 2, "ts": 2000}]
     for _ in range(3):
         operation = (processor._process_capture_group(group) if grouped
                      else processor._process_knowledge_extraction(group[0]))
         assert asyncio.run(operation) is False
+    assert submissions == 3
     assert processor._timeline_retry_state == {}
 
 
